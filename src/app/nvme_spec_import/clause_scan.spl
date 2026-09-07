@@ -1,0 +1,254 @@
+"""
+clause_scan — extract normative-requirement CLAUSE RECORDS from the
+PDF-extracted text of an NVM Express specification.
+
+LICENSING, and why this file looks the way it does. NVM Express specifications
+are freely downloadable but NOT redistributable. Therefore:
+
+  * No extracted sentence is ever stored in a record, returned to a caller, or
+    printed. The scanner reads a paragraph, CLASSIFIES it, and discards it.
+  * A record carries only: an identifier, the section number, the requirement
+    kind, controlled-vocabulary subject terms this app itself defines
+    (`feature_map.spl`), a paraphrase composed from a fixed template plus those
+    terms, and a line number into the local source text.
+  * `needs_human_review` records carry the LINE NUMBER so a human can open the
+    local copy. They deliberately do NOT carry the text, because "include the
+    sentence so a reviewer can see it" is exactly how spec prose ends up
+    committed.
+
+WHAT IS AND IS NOT CLAIMED. This is a keyword-and-shape scanner over messy
+extracted text, not a specification parser. Section attribution depends on
+heading lines surviving PDF extraction; requirement detection depends on the
+`shall`/`should`/`may` keyword surviving unhyphenated. Both fail on some input.
+The scanner counts its own misses and `extract_report()` publishes them.
+"""
+
+use text_norm.*
+use feature_map.*
+
+struct ClauseRecord:
+    id:          text
+    section:     text
+    source_line: i64    # 1-based line in the LOCAL extracted text file
+    kind:        text   # shall | should | may
+    feature:     text   # feature_map id, or "" when unmapped
+    terms:       text   # matched controlled-vocabulary terms, comma separated
+    paraphrase:  text   # composed here from a template; never spec prose
+    review:      bool   # needs_human_review
+    review_why:  text
+
+struct ScanStats:
+    lines:            i64
+    toc_entries:      i64
+    headings:         i64
+    paragraphs:       i64
+    shall_occurrences: i64
+    should_occurrences: i64
+    may_occurrences:  i64
+    req_paragraphs:   i64
+    shall_captured:   i64
+    mapped:           i64
+    unmapped:         i64
+    unattributed:     i64
+    review:           i64
+
+struct ScanResult:
+    records: [ClauseRecord]
+    stats:   ScanStats
+
+val PROVENANCE: text = "NVM Express Base Specification, Revision 2.3 (2025-08-01, Ratified) - local copy only, not redistributed"
+
+"""Section numbers named by the table of contents (its dot-leader rows)."""
+fn toc_sections(lines: [text]) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    var i: i64 = 0
+    while i < lines.len():
+        val ln: text = lines[i]
+        if is_toc_line(ln):
+            val num: text = leading_section_number(ln)
+            if num.len() > 0:
+                out[num] = true
+        i = i + 1
+    out
+
+"""True when `ln` looks like a numbered body section heading.
+
+MEASURED LIMITATION, and why there is no table-of-contents cross-check here.
+The intended design was to take the section index from the document's own table
+of contents and accept a body line as a heading only when the TOC names that
+number, which would reject numeric prose (version numbers, figure cross
+references). That is not possible on this extraction: the TOC survived with its
+SECTION-NUMBER COLUMN MISSING - its rows are bare titles plus a dot leader, so
+only 2 of ~1,185 rows carry a number at all. `toc_sections()` still runs and its
+count is published in the report precisely so this limitation is visible rather
+than assumed away.
+
+Detection is therefore shape-only, and it is the weakest part of this scanner:
+it finds far fewer headings than the document has sections, so most clauses end
+up attributed to an ancestor section or to none. `extract_report()` publishes
+that miss rate.
+"""
+fn is_heading(ln: text, toc: Dict<text, bool>) -> bool:
+    if is_toc_line(ln):
+        return false
+    if ln.len() < 3 or ln.len() > 110:
+        return false
+    val num: text = leading_section_number(ln)
+    if num.len() == 0:
+        return false
+    if not num.contains("."):
+        return false
+    val rest: text = after_section_number(ln, num)
+    if rest.len() < 3:
+        return false
+    if not is_upper_ch(rest[0]):
+        return false
+    if toc.contains_key(num):
+        return true
+    # A heading is a title, not a sentence: no terminal period, no requirement
+    # keyword, and no figure/table cross reference.
+    if rest[rest.len() - 1] == ".":
+        return false
+    val low: text = rest.to_lower()
+    if has_word_loose(low, "shall") or has_word_loose(low, "should") or has_word_loose(low, "may"):
+        return false
+    not (low.contains("refer to") or low.contains("figure "))
+
+"""Requirement kind of a normalized paragraph, or "" when it states none."""
+fn requirement_kind(p: text) -> text:
+    val low: text = p.to_lower()
+    if has_word_loose(low, "shall"):
+        return "shall"
+    if has_word_loose(low, "should"):
+        return "should"
+    if has_word_loose(low, "may"):
+        return "may"
+    ""
+
+"""Compose a paraphrase. Template plus this app's own vocabulary terms only."""
+fn compose_paraphrase(kind: text, section: text, feature_title: text, terms: [text]) -> text:
+    var subject: text = ""
+    var i: i64 = 0
+    while i < terms.len():
+        if i > 0:
+            subject = subject + ", "
+        subject = subject + terms[i]
+        i = i + 1
+    if subject.len() == 0:
+        subject = "no controlled-vocabulary subject matched"
+    var strength: text = "states a MANDATORY requirement"
+    if kind == "should":
+        strength = "states a RECOMMENDED behaviour"
+    elif kind == "may":
+        strength = "states an OPTIONAL allowance"
+    var where: text = "an unattributed region"
+    if section.len() > 0:
+        where = "clause " + section
+    var about: text = ""
+    if feature_title.len() > 0:
+        about = " It bears on the mandatory feature: " + feature_title + "."
+    "Paraphrase (generated, not spec text): " + where + " " + strength + " concerning " + subject + "." + about + " Consult the local specification copy for the normative wording."
+
+"""Scan the whole extracted text. `emit_unmapped` keeps records with no feature.
+
+Unmapped records are counted always; they are only EMITTED when asked, because
+2,000-odd template paraphrases with no feature binding are noise in a ledger.
+"""
+fn scan_clauses(raw: text, emit_unmapped: bool) -> ScanResult:
+    val raw_lines = raw.split("\n")
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < raw_lines.len():
+        lines.push(norm_line(raw_lines[i]))
+        i = i + 1
+
+    val toc = toc_sections(lines)
+
+    var st = ScanStats(lines: lines.len(), toc_entries: toc.len(), headings: 0, paragraphs: 0, shall_occurrences: 0, should_occurrences: 0, may_occurrences: 0, req_paragraphs: 0, shall_captured: 0, mapped: 0, unmapped: 0, unattributed: 0, review: 0)
+
+    # Denominator for the honesty report: raw `shall` occurrences over the file.
+    var w: i64 = 0
+    while w < lines.len():
+        val low_line: text = lines[w].to_lower()
+        st.shall_occurrences = st.shall_occurrences + count_occurrences(low_line, "shall")
+        st.should_occurrences = st.should_occurrences + count_occurrences(low_line, "should")
+        st.may_occurrences = st.may_occurrences + count_occurrences(low_line, "may")
+        w = w + 1
+
+    var records: [ClauseRecord] = []
+    var section: text = ""
+    var section_line: i64 = 0
+    var para: text = ""
+    var para_line: i64 = 0
+    var seq: i64 = 0
+
+    var j: i64 = 0
+    while j <= lines.len():
+        var ln: text = ""
+        if j < lines.len():
+            ln = lines[j]
+        val boundary: bool = (j == lines.len()) or ln.len() == 0 or is_heading(ln, toc)
+
+        if boundary and para.len() > 0:
+            st.paragraphs = st.paragraphs + 1
+            val kind: text = requirement_kind(para)
+            if kind.len() > 0:
+                st.req_paragraphs = st.req_paragraphs + 1
+                val low: text = para.to_lower()
+                st.shall_captured = st.shall_captured + count_occurrences(low, "shall")
+                val fid: text = map_feature(low)
+                var terms: [text] = []
+                var title: text = ""
+                if fid.len() > 0:
+                    terms = matched_terms(fid, low)
+                    title = feature_by_id(fid).title
+                    st.mapped = st.mapped + 1
+                else:
+                    st.unmapped = st.unmapped + 1
+                var review: bool = false
+                var why: text = ""
+                if section.len() == 0:
+                    st.unattributed = st.unattributed + 1
+                    review = true
+                    why = "no section heading could be attributed (PDF heading line did not survive extraction)"
+                elif section_line > 0 and para_line - section_line > 200:
+                    review = true
+                    why = "section attributed to a preceding heading {para_line - section_line} lines earlier - the true deeper subsection heading did not survive PDF extraction"
+                elif para.len() < 40:
+                    review = true
+                    why = "paragraph shorter than 40 characters after normalization - likely a shredded table cell, not a sentence"
+                if review:
+                    st.review = st.review + 1
+                if fid.len() > 0 or emit_unmapped:
+                    seq = seq + 1
+                    var sec_key: text = section
+                    if sec_key.len() == 0:
+                        sec_key = "unattributed"
+                    var csv: text = ""
+                    var t: i64 = 0
+                    while t < terms.len():
+                        if t > 0:
+                            csv = csv + ","
+                        csv = csv + terms[t]
+                        t = t + 1
+                    records.push(ClauseRecord(id: "NVME-2.3-" + sec_key + "-" + "{seq}", section: sec_key, source_line: para_line, kind: kind, feature: fid, terms: csv, paraphrase: compose_paraphrase(kind, section, title, terms), review: review, review_why: why))
+            para = ""
+            para_line = 0
+
+        if j < lines.len():
+            if is_heading(ln, toc):
+                section = leading_section_number(ln)
+                section_line = j + 1
+                st.headings = st.headings + 1
+            elif ln.len() > 0:
+                if para.len() == 0:
+                    para_line = j + 1
+                    para = ln
+                else:
+                    para = para + " " + ln
+        j = j + 1
+
+    ScanResult(records: records, stats: st)
+
+export ClauseRecord, ScanStats, ScanResult, PROVENANCE
+export scan_clauses, toc_sections, is_heading, requirement_kind, compose_paraphrase

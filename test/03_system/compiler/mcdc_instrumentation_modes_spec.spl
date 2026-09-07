@@ -1,3 +1,35 @@
+"""
+## Purpose and audience
+Purpose: prove the MC/DC instrumentation mode matrix and the fail-closed admission of its external performance evidence.
+Audience: maintainers of the MC/DC HAL runtime hardening gate and reviewers of its instrumentation policy.
+
+## Operator workflow
+
+Run the spec through the runner's `run` command. The first three scenarios
+exercise `McdcPolicy` mode predicates directly; the last three invoke
+`scripts/check/check-mcdc-performance-gate.shs` and assert on its exit code
+and diagnostic rows.
+
+## Compatibility and limitations
+
+The gate scenarios run the real check script, so they depend on `sh` and the
+script's fail-closed behavior when `MCDC_*` binaries are unset or the sample
+count is below the floor. Only the exact diagnostic substrings and exit code 2
+are pinned, not full gate output.
+
+## Verification guidance and troubleshooting
+
+A failed mode-predicate scenario means `McdcPolicy` no longer selects the
+documented instrumentation surface. A failed gate scenario means the
+performance gate admitted evidence it should have rejected — treat that as
+fail-open; never soften the fixture or the threshold substrings.
+"""
+
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+
 # codex-system-test
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-001 REQ-002 REQ-006 REQ-007 REQ-008 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-009
@@ -7,8 +39,12 @@ use std.spec.*
 use std.io_runtime.{file_read_text, shell}
 use compiler.common.config.{McdcPolicy}
 
+# @manual_section: MC/DC instrumentation modes and evidence admission
+
 describe "MC/DC instrumentation modes and external evidence admission":
     it "should keep static-off free of manifests probes patchpoints and payload links":
+        # @req: REQ-001
+        # @capture(bit_table): McdcPolicy StaticOff mode-predicate truth table
         step("Build the controlled fixture")
         val policy = McdcPolicy.StaticOff
         expect(policy.emits_manifest()).to_be(false)
@@ -17,6 +53,9 @@ describe "MC/DC instrumentation modes and external evidence admission":
         expect(policy.links_static_payload()).to_be(false)
 
     it "should select direct bounded probes only for static-on":
+        # @req: REQ-002
+        # @capture(bit_table): McdcPolicy StaticOn mode-predicate truth table
+        step("Build the controlled fixture")
         val policy = McdcPolicy.StaticOn
         expect(policy.emits_manifest()).to_be(true)
         expect(policy.emits_direct_probes()).to_be(true)
@@ -24,6 +63,9 @@ describe "MC/DC instrumentation modes and external evidence admission":
         expect(policy.links_static_payload()).to_be(true)
 
     it "should select disarmable patchpoints without static payload linkage":
+        # @req: REQ-006
+        # @capture(bit_table): McdcPolicy Dynamic mode-predicate truth table
+        step("Build the controlled fixture")
         val policy = McdcPolicy.Dynamic
         expect(policy.emits_manifest()).to_be(true)
         expect(policy.emits_direct_probes()).to_be(false)
@@ -31,14 +73,18 @@ describe "MC/DC instrumentation modes and external evidence admission":
         expect(policy.links_static_payload()).to_be(false)
 
     it "should fail closed when controlled binaries or compiler identity are absent":
+        # @req: REQ-007
+        # @capture(protocol_json): gate diagnostic rows for the unset-binary fail-closed rejection
         step("Capture the durable receipt")
         val result = shell("env -u MCDC_CONTROL_BIN -u MCDC_STATIC_OFF_BIN -u MCDC_STATIC_ON_BIN -u MCDC_DYNAMIC_IDLE_BIN -u MCDC_DYNAMIC_ARMED_BIN -u MCDC_COMPILER_BIN sh scripts/check/check-mcdc-performance-gate.shs 2>&1")
         step("Verify fail-closed evidence")
-        expect(result.exit_code).to_equal(2)
+        expect(result.exit_code).to_equal(2)  # oracle: exit 2 is the gate's reserved nothing-checked status, never a measurement result
         expect(result.stdout).to_contain("ERROR nothing-checked")
         expect(result.stdout).to_contain("compiler-binary-not-set")
 
     it "should retain every latency RSS allocation log and section threshold in the canonical gate":
+        # @req: REQ-008
+        # @capture(protocol_binary): canonical gate script bytes carrying every bounded threshold
         step("Compare the bounded oracle")
         val gate = file_read_text("scripts/check/check-mcdc-performance-gate.shs")
         expect(gate).to_contain("static-off-hot-text-differs")
@@ -56,7 +102,10 @@ describe "MC/DC instrumentation modes and external evidence admission":
         expect(gate).to_contain("within dynamic_armed peak_rss_increase_bp 500")
 
     it "should reject insufficient samples before accepting performance evidence":
+        # @req: REQ-007
+        # @capture(protocol_json): gate diagnostic rows for the below-floor sample rejection
+        step("Run the gate with fewer than the 30-sample floor")
         val result = shell("MCDC_PERF_SAMPLES=29 sh scripts/check/check-mcdc-performance-gate.shs 2>&1")
-        expect(result.exit_code).to_equal(2)
+        expect(result.exit_code).to_equal(2)  # oracle: exit 2 is the gate's reserved nothing-checked status, never a measurement result
         expect(result.stdout).to_contain("ERROR nothing-checked")
         expect(result.stdout).to_contain("samples-less-than-30")

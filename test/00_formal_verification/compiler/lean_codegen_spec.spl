@@ -1,15 +1,56 @@
+"""
+## Purpose and audience
+Executable contract for Lean code generation: LeanCodegenOptions defaults and
+builders, the structured artifact builders (LeanStructure, LeanInductive,
+LeanFunction, LeanTheorem), proof-clean emit for explicit proofs, and the
+fail-closed rejection of detached syntax-only contract theorem generation.
+Owned by the compiler verification team; anyone changing the gen-lean emitter
+reads this first.
+
+## Operator workflow
+Run this spec after touching the Lean codegen module or any build_* helper:
+`bin/simple test test/00_formal_verification/compiler/lean_codegen_spec.spl`.
+A failure names the emitter invariant that broke.
+
+## Compatibility and limitations
+All scenarios emit to strings; nothing writes files or invokes the Lean
+toolchain. The proof-clean scenario currently fails against the live emitter:
+build_enum_with_deriving lowercases the inductive type name, so the emitted
+text reads `inductive mode where` where the frozen contract requires
+`inductive Mode where` (scenario kept RED by design).
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A missing namespace or structure line
+means the emitter's section layout changed; a sorry leak means with_stubs(false)
+stopped suppressing stub theorems; the LEGACY-CONTRACT-UNSUPPORTED rejection is
+the fail-closed guard for contract theorems without a syntax tree and must
+never be relaxed to silent acceptance.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/cert/formal_codegen_semantics_plan.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
 use verification.models.contracts.{FunctionContract}
 use verification.lean.codegen.{LeanCodegenOptions, LeanStructure, LeanInductive, LeanFunction, LeanTheorem, LeanCodegen, build_class, build_enum_with_deriving, build_function, build_theorem}
+use std.spec.step
 
+# @manual_section: lean-codegen
 describe "Lean Code Generation":
     context "LeanCodegenOptions":
         it "creates with defaults":
+            # @req REQ-LEAN-CG-001
+            # @capture(protocol_json): default module name, stub flag, and output dir
+            step("Read the emitter's default options")
             val opts = LeanCodegenOptions.new()
             expect(opts.module_name).to_equal("Main")
             expect(opts.generate_stubs).to_equal(true)
             expect(opts.output_dir).to_equal("build/lean")
 
         it "updates module and output configuration":
+            # @req REQ-LEAN-CG-002
+            # @capture(protocol_json): options after each with_* builder override
+            step("Override module, output dir, and stub flag")
             var opts = LeanCodegenOptions.new()
             opts = opts.with_module_name("TestModule")
             opts = opts.with_output_dir("build/test-lean")
@@ -20,6 +61,9 @@ describe "Lean Code Generation":
 
     context "LeanStructure / LeanInductive / LeanFunction / LeanTheorem":
         it "builds structured artifacts":
+            # @req REQ-LEAN-CG-003
+            # @capture(protocol_json): field/constructor/param/proof counts across four artifact builders
+            step("Build a structure, an inductive, a function, and a theorem")
             var structure = LeanStructure.new("Point")
             structure = structure.add_field("x", "Int")
             structure = structure.add_field("y", "Int")
@@ -39,13 +83,19 @@ describe "Lean Code Generation":
             theorem = theorem.with_proof("rfl")
 
             expect(structure.name).to_equal("Point")
-            expect(structure.fields.len()).to_equal(2)
-            expect(inductive.constructors.len()).to_equal(2)
-            expect(func.params.len()).to_equal(1)
+            expect(structure.fields.len()).to_equal(2)  # oracle: x and y were both added
+            expect(inductive.constructors.len()).to_equal(2)  # oracle: Online and Offline were both added
+            expect(func.params.len()).to_equal(1)  # oracle: identity takes the single param x
             expect(theorem.proof).to_equal(Some("rfl"))
 
     context "LeanCodegen output":
         it "emits proof-clean Lean for explicit proofs":
+            # @req REQ-LEAN-CG-004
+            # @capture(protocol_json): full emitted Lean for a structure, inductive, function, and theorem
+            # NOTE: legitimately RED — build_enum_with_deriving lowercases the inductive type
+            # name, emitting `inductive mode where` where this frozen contract requires
+            # `inductive Mode where` (Lean type names must keep their declared case).
+            step("Emit a module with stubs disabled and explicit proofs")
             var opts = LeanCodegenOptions.new()
             opts = opts.with_module_name("Demo")
             opts = opts.with_output_dir("build/lean-test")
@@ -66,6 +116,9 @@ describe "Lean Code Generation":
             expect(output.contains("sorry")).to_equal(false)
 
         it "rejects detached syntax-only contract theorem generation":
+            # @req REQ-LEAN-CG-005
+            # @capture(protocol_json): Err message from generating theorems for a bare contract
+            step("Attempt contract theorem generation without a syntax tree")
             val cgen = LeanCodegen.create("DetachedContract")
             match cgen.generate_contract_theorems("increment",
                     FunctionContract.new()):

@@ -1,3 +1,30 @@
+"""
+## Purpose and audience
+Locks the generated CLI help surface to its three canonical inputs for compiler
+developers touching `src/app/cli/`: the whole-source consistency check, the
+independent dispatch/help/table extractors, and the structured-registry signing
+gate in `src/app/cli/help_surface_codegen.spl`.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/01_unit/app/cli/help_surface_codegen_spec.spl`
+from the repo root; all four scenarios must pass before relanding any CLI
+command registry edit.
+## Compatibility and limitations
+The extractors parse the current source grammar only; a drift scenario proves
+independent extractors still disagree on fabricated input rather than
+guaranteeing every historical registry shape. The signing scenario is a
+source-contract check on shipped source text, not a runtime API probe.
+## Verification guidance and troubleshooting
+A failure in the first scenario means generated help is stale — regenerate via
+the codegen check, never hand-edit. Extractor-scenario failures indicate parser
+regressions in `cli_surface_codegen_extract_*_v1`; a signing failure means the
+validation gate or canonical input constant was renamed or dropped.
+"""
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/versioned_codegen_backend_plugin.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/pure_simple_cli_completeness.md
+# @manual_section: help-surface-codegen
+
 use std.spec
 use app.cli.help_surface_codegen.{
     cli_surface_codegen_check_v1,
@@ -9,11 +36,17 @@ use std.io_runtime.{file_read}
 
 describe "CLI help surface generated data":
     it "is current with all three canonical source inputs":
+        # @req REQ-CLI-HELP-001
+        # @capture(statistics): consistency-check verdict and detail text
+        step("Run the whole-surface consistency check over the three canonical inputs")
         val checked = cli_surface_codegen_check_v1()
         expect(checked.ok).to_equal(true)
         expect(checked.detail).to_equal("current")
 
     it "NEGATIVE control: dispatch-only drift is detected by independent extractors":
+        # @req REQ-CLI-HELP-002
+        # @capture(protocol_json): dispatch and help extractor outputs on drifted input
+        step("Extract dispatch names and help entries from deliberately divergent sources")
         val dispatch_source = "elif str_eq(first, \"provider\"):\n    return 0\n"
         val help_source = "print \"  simple compile <src>  Compile\"\n"
         val dispatch = cli_surface_codegen_extract_dispatch_v1(dispatch_source)
@@ -23,18 +56,27 @@ describe "CLI help surface generated data":
         expect(dispatch == help).to_equal(false)
 
     it "NEGATIVE control: table extraction does not fabricate provider":
+        # @req REQ-CLI-HELP-003
+        # @capture(protocol_json): table extractor output for a provider-free entry
+        step("Extract a command table from a registry entry that names no provider")
         val table = cli_surface_codegen_extract_table_v1(
             "CommandEntry(\n  name: \"compile\",\n  app_path: \"src/app/compile/main.spl\"\n)\n")
         expect(table).to_equal(["compile"])
         expect(table.contains("provider")).to_equal(false)
 
     it "signs only validated structured registry inputs":
+        # @req REQ-CLI-HELP-004
+        # @capture(bit_table): source-contract tokens for the signing gate
+        step("Read the shipped codegen source and verify the signing gate contract")
         val source = file_read("src/app/cli/help_surface_codegen.spl")
-        expect(source).to_contain(
+        val gates_on_validated_inputs = source.contains(
             "fn _codegen_validate_canonical_inputs_v1")
-        expect(source).to_contain(
+        val signs_only_after_validation = source.contains(
             "val validated = _codegen_validate_canonical_inputs_v1")
-        expect(source).to_contain(
+        val pins_canonical_help_input = source.contains(
             "CLI_SURFACE_HELP_SOURCE_V1: text = \"src/app/cli/command_registry.spl\"")
-        expect(source.contains("cli_help_legacy_migration_oracle_v1"))
-            .to_equal(false)
+        val legacy_oracle_retired = source.contains("cli_help_legacy_migration_oracle_v1")
+        expect(gates_on_validated_inputs).to_equal(true)
+        expect(signs_only_after_validation).to_equal(true)
+        expect(pins_canonical_help_input).to_equal(true)
+        expect(legacy_oracle_retired).to_equal(false)

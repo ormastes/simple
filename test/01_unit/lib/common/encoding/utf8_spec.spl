@@ -1,11 +1,45 @@
-# UTF-8 Encoding / Decoding Tests
-#
-# Tests for src/lib/common/encoding/utf8.spl
-# Covers: utf8_seq_len, utf8_decode_one, utf8_encode_one,
-#         utf8_codepoint_byte_len, utf8_count_codepoints,
-#         utf8_decode_all, utf8_encode_all, utf8_is_valid,
-#         text_byte_len, text_codepoint_len, text_codepoints,
-#         text_from_codepoints, char_from_codepoint
+"""
+## Purpose and audience
+Executable specification for the UTF-8 codec in
+src/lib/common/encoding/utf8.spl: sequence-length sniffing,
+single-scalar encode/decode with full malformed-input replacement,
+bulk roundtrips across scripts, byte/codepoint length helpers, text
+construction, and the char_from_code parity contract with
+std.string_core. Audience: maintainers of the text encoding stack and
+anyone wiring UTF-8 input (TUI, file, network) that must agree with
+this module's validation and replacement policy.
+
+## Operator workflow
+Run the spec from the repo root with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/encoding/utf8_spec.spl
+Read the trailing SPEC FILE VERDICT line; every scenario prints its
+retained bit_table/statistics evidence as a capture comment that
+spipe-docgen folds into the mirrored manual under doc/06_spec.
+
+## Compatibility and limitations
+Sequences are validated strictly: continuation bytes alone, truncated
+tails, overlong encodings, surrogate payloads and values above
+U+10FFFF all decode to U+FFFD (encoded as EF BF BD) with the reported
+consumed width pinning where the resync happens. Out-of-bounds or
+negative decode offsets return the (-1, 0) error pair. char_from_code
+encodes invalid input as U+FFFD while std.string_core's
+char_from_code_inline returns empty text — that policy difference is
+pinned, not papered over (see the bug-reproduction block at the end).
+
+## Verification guidance and troubleshooting
+Each scenario stamps the exact bytes it observed, so a failing word
+pins the offending encode/decode step directly. A U+FFFD where a real
+scalar was expected means the input crossed a surrogate, overlong or
+range boundary; compare the stamped bit_table against the scenario's
+input literals before touching the codec. A cursor/length bug in a TUI
+usually means byte length was used where codepoint count was needed —
+the text_byte_len vs text_codepoints scenarios pin the distinction.
+"""
+
+# Lifecycle: doc/01_research/language/types/simple_primitive_analysis.md ;
+# doc/03_plan/design/interpreter_shared_text_refactor.md ;
+# doc/04_architecture/lib/text_i18n/utf8_internationalized_text_architecture.md ;
+# doc/05_design/lib/text_i18n/text_encoding_engine.md
 
 use std.common.encoding.utf8.{
     utf8_seq_len, utf8_decode_one, utf8_encode_one,
@@ -15,216 +49,306 @@ use std.common.encoding.utf8.{
     text_from_codepoints, char_from_codepoint
 }
 
-# ============================================================================
-# utf8_seq_len
-# ============================================================================
+# @manual_section: seq-len
 
 describe "utf8_seq_len":
     it "returns 1 for ASCII bytes":
-        expect(utf8_seq_len(0x00)).to_equal(1)
-        expect(utf8_seq_len(0x41)).to_equal(1)  # 'A'
-        expect(utf8_seq_len(0x7F)).to_equal(1)
+        # @req REQ-UTF8-SEQ-001
+        step("Sniff the length of one ASCII byte at each band edge")
+        # @capture(bit_table): sniffed sequence length per lead byte
+        expect(utf8_seq_len(0x00)).to_equal(1)  # oracle: U+0000 is a 1-byte ASCII encoding
+        expect(utf8_seq_len(0x41)).to_equal(1)  # oracle: 'A' is an ASCII character encoding in one byte
+        expect(utf8_seq_len(0x7F)).to_equal(1)  # oracle: U+007F is the last 1-byte ASCII encoding
 
     it "returns 0 for continuation bytes":
-        expect(utf8_seq_len(0x80)).to_equal(0)
-        expect(utf8_seq_len(0xBF)).to_equal(0)
+        # @req REQ-UTF8-SEQ-002
+        step("Sniff the length of a leading and a trailing continuation byte")
+        # @capture(bit_table): sniffed sequence length per continuation byte
+        expect(utf8_seq_len(0x80)).to_equal(0)  # oracle: 0x80 opens the continuation range and is never a lead byte
+        expect(utf8_seq_len(0xBF)).to_equal(0)  # oracle: 0xBF closes the continuation range and is never a lead byte
 
     it "returns 2 for 2-byte lead":
-        expect(utf8_seq_len(0xC0)).to_equal(2)
-        expect(utf8_seq_len(0xDF)).to_equal(2)
+        # @req REQ-UTF8-SEQ-003
+        step("Sniff the length of both 2-byte lead band edges")
+        # @capture(bit_table): sniffed sequence length per 2-byte lead
+        expect(utf8_seq_len(0xC0)).to_equal(2)  # oracle: 0xC0 opens the 2-byte lead range
+        expect(utf8_seq_len(0xDF)).to_equal(2)  # oracle: 0xDF closes the 2-byte lead range
 
     it "returns 3 for 3-byte lead":
-        expect(utf8_seq_len(0xE0)).to_equal(3)
-        expect(utf8_seq_len(0xEF)).to_equal(3)
+        # @req REQ-UTF8-SEQ-004
+        step("Sniff the length of both 3-byte lead band edges")
+        # @capture(bit_table): sniffed sequence length per 3-byte lead
+        expect(utf8_seq_len(0xE0)).to_equal(3)  # oracle: 0xE0 opens the 3-byte lead range
+        expect(utf8_seq_len(0xEF)).to_equal(3)  # oracle: 0xEF closes the 3-byte lead range
 
     it "returns 4 for 4-byte lead":
-        expect(utf8_seq_len(0xF0)).to_equal(4)
-        expect(utf8_seq_len(0xF7)).to_equal(4)
+        # @req REQ-UTF8-SEQ-005
+        step("Sniff the length of both 4-byte lead band edges")
+        # @capture(bit_table): sniffed sequence length per 4-byte lead
+        expect(utf8_seq_len(0xF0)).to_equal(4)  # oracle: 0xF0 opens the 4-byte lead range
+        expect(utf8_seq_len(0xF7)).to_equal(4)  # oracle: 0xF7 closes the valid 4-byte lead range
 
     it "returns 0 for invalid lead bytes":
-        expect(utf8_seq_len(0xF8)).to_equal(0)
-        expect(utf8_seq_len(0xFF)).to_equal(0)
-        expect(utf8_seq_len(-1)).to_equal(0)
+        # @req REQ-UTF8-SEQ-006
+        step("Sniff the length of invalid leads and a negative byte")
+        # @capture(bit_table): sniffed sequence length per invalid byte
+        expect(utf8_seq_len(0xF8)).to_equal(0)  # oracle: 0xF8 opens the never-valid lead range above 4-byte sequences
+        expect(utf8_seq_len(0xFF)).to_equal(0)  # oracle: 0xFF is never a valid UTF-8 byte
+        expect(utf8_seq_len(-1)).to_equal(0)  # oracle: a negative byte is outside the UTF-8 byte range
 
-# ============================================================================
-# utf8_encode_one
-# ============================================================================
+# @manual_section: encode-one
 
 describe "utf8_encode_one":
     it "encodes ASCII codepoints as single byte":
+        # @req REQ-UTF8-ENC1-001
+        step("Encode one scalar from each ASCII band edge")
+        # @capture(bit_table): the emitted byte list per ASCII scalar
         expect(utf8_encode_one(0x41)).to_equal([0x41])  # 'A'
-        expect(utf8_encode_one(0x00)).to_equal([0x00])
-        expect(utf8_encode_one(0x7F)).to_equal([0x7F])
+        expect(utf8_encode_one(0x00)).to_equal([0x00])  # oracle: U+0000 encodes as the single zero byte
+        expect(utf8_encode_one(0x7F)).to_equal([0x7F])  # oracle: U+007F encodes as its own single byte
 
     it "encodes 2-byte codepoints":
+        # @req REQ-UTF8-ENC1-002
+        step("Encode U+00E9 and inspect its two emitted bytes")
+        # @capture(bit_table): the two emitted bytes for U+00E9
         # U+00E9 = e-acute = 0xC3 0xA9
         val encoded = utf8_encode_one(0xE9)
-        expect(encoded.len()).to_equal(2)
-        expect(encoded[0]).to_equal(0xC3)
-        expect(encoded[1]).to_equal(0xA9)
+        expect(encoded.len()).to_equal(2)  # oracle: U+00E9 needs a two-byte UTF-8 sequence
+        expect(encoded[0]).to_equal(0xC3)  # oracle: 0xC3 is the 2-byte lead byte for the U+00E9 band
+        expect(encoded[1]).to_equal(0xA9)  # oracle: 0xA9 is the continuation byte carrying the low payload bits
 
     it "encodes 3-byte codepoints":
+        # @req REQ-UTF8-ENC1-003
+        step("Encode U+AC00 and inspect its three emitted bytes")
+        # @capture(bit_table): the three emitted bytes for U+AC00
         # U+AC00 = first Hangul syllable 가 = 0xEA 0xB0 0x80
         val encoded = utf8_encode_one(0xAC00)
-        expect(encoded.len()).to_equal(3)
-        expect(encoded[0]).to_equal(0xEA)
-        expect(encoded[1]).to_equal(0xB0)
-        expect(encoded[2]).to_equal(0x80)
+        expect(encoded.len()).to_equal(3)  # oracle: U+AC00 needs a three-byte UTF-8 sequence
+        expect(encoded[0]).to_equal(0xEA)  # oracle: 0xEA is the 3-byte lead byte for the U+AC00 band
+        expect(encoded[1]).to_equal(0xB0)  # oracle: 0xB0 is the first continuation byte of U+AC00
+        expect(encoded[2]).to_equal(0x80)  # oracle: 0x80 is the second continuation byte of U+AC00
 
     it "encodes 4-byte codepoints":
+        # @req REQ-UTF8-ENC1-004
+        step("Encode U+1F600 and inspect its four emitted bytes")
+        # @capture(bit_table): the four emitted bytes for U+1F600
         # U+1F600 = grinning face emoji = 0xF0 0x9F 0x98 0x80
         val encoded = utf8_encode_one(0x1F600)
-        expect(encoded.len()).to_equal(4)
-        expect(encoded[0]).to_equal(0xF0)
-        expect(encoded[1]).to_equal(0x9F)
-        expect(encoded[2]).to_equal(0x98)
-        expect(encoded[3]).to_equal(0x80)
+        expect(encoded.len()).to_equal(4)  # oracle: U+1F600 needs a four-byte UTF-8 sequence
+        expect(encoded[0]).to_equal(0xF0)  # oracle: 0xF0 is the 4-byte lead byte for the U+1F600 band
+        expect(encoded[1]).to_equal(0x9F)  # oracle: 0x9F is the first continuation byte of U+1F600
+        expect(encoded[2]).to_equal(0x98)  # oracle: 0x98 is the second continuation byte of U+1F600
+        expect(encoded[3]).to_equal(0x80)  # oracle: 0x80 is the third continuation byte of U+1F600
 
     it "replaces surrogates with U+FFFD":
+        # @req REQ-UTF8-ENC1-005
+        step("Encode the high-surrogate boundary value")
+        # @capture(bit_table): the U+FFFD byte triple for a surrogate input
         val encoded = utf8_encode_one(0xD800)
-        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])  # oracle: U+FFFD encodes as EF BF BD
 
     it "replaces out-of-range with U+FFFD":
+        # @req REQ-UTF8-ENC1-006
+        step("Encode one value past the scalar maximum")
+        # @capture(bit_table): the U+FFFD byte triple for an out-of-range input
         val encoded = utf8_encode_one(0x110000)
-        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])  # oracle: U+110000 is one past the scalar maximum, replaced by U+FFFD = EF BF BD
 
     it "replaces negative with U+FFFD":
+        # @req REQ-UTF8-ENC1-007
+        step("Encode a negative scalar value")
+        # @capture(bit_table): the U+FFFD byte triple for a negative input
         val encoded = utf8_encode_one(-1)
-        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])  # oracle: negative values are outside the scalar range, replaced by U+FFFD = EF BF BD
 
-# ============================================================================
-# utf8_decode_one
-# ============================================================================
+# @manual_section: decode-one
 
 describe "utf8_decode_one":
     it "decodes ASCII byte":
+        # @req REQ-UTF8-DEC1-001
+        step("Decode a single ASCII byte and check the scalar and consumed width")
+        # @capture(bit_table): the decoded scalar and consumed-width pair
         val result = utf8_decode_one([0x41], 0)
-        expect(result[0]).to_equal(0x41)
-        expect(result[1]).to_equal(1)
+        expect(result[0]).to_equal(0x41)  # oracle: byte 0x41 decodes to the scalar U+0041
+        expect(result[1]).to_equal(1)  # oracle: one ASCII byte is consumed
 
     it "decodes 2-byte sequence":
+        # @req REQ-UTF8-DEC1-002
+        step("Decode the U+00E9 sequence and check the scalar and consumed width")
+        # @capture(bit_table): the decoded scalar and consumed-width pair
         # U+00E9 = 0xC3 0xA9
         val result = utf8_decode_one([0xC3, 0xA9], 0)
-        expect(result[0]).to_equal(0xE9)
-        expect(result[1]).to_equal(2)
+        expect(result[0]).to_equal(0xE9)  # oracle: the bytes reassemble to the original e-acute scalar
+        expect(result[1]).to_equal(2)  # oracle: both bytes of the sequence are consumed
 
     it "decodes 3-byte sequence for Korean":
+        # @req REQ-UTF8-DEC1-003
+        step("Decode the U+AC00 sequence and check the scalar and consumed width")
+        # @capture(bit_table): the decoded scalar and consumed-width pair
         # U+AC00 가 = 0xEA 0xB0 0x80
         val result = utf8_decode_one([0xEA, 0xB0, 0x80], 0)
-        expect(result[0]).to_equal(0xAC00)
-        expect(result[1]).to_equal(3)
+        expect(result[0]).to_equal(0xAC00)  # oracle: the bytes reassemble to the original Hangul scalar
+        expect(result[1]).to_equal(3)  # oracle: all three bytes of the sequence are consumed
 
     it "decodes 4-byte sequence for emoji":
+        # @req REQ-UTF8-DEC1-004
+        step("Decode the U+1F600 sequence and check the scalar and consumed width")
+        # @capture(bit_table): the decoded scalar and consumed-width pair
         # U+1F600 = 0xF0 0x9F 0x98 0x80
         val result = utf8_decode_one([0xF0, 0x9F, 0x98, 0x80], 0)
-        expect(result[0]).to_equal(0x1F600)
-        expect(result[1]).to_equal(4)
+        expect(result[0]).to_equal(0x1F600)  # oracle: the bytes reassemble to the original emoji scalar
+        expect(result[1]).to_equal(4)  # oracle: all four bytes of the sequence are consumed
 
     it "returns replacement for continuation byte":
+        # @req REQ-UTF8-DEC1-005
+        step("Decode a lone continuation byte and check the replacement and resync width")
+        # @capture(bit_table): the replacement scalar and resync width
         val result = utf8_decode_one([0x80], 0)
-        expect(result[0]).to_equal(0xFFFD)
-        expect(result[1]).to_equal(1)
+        expect(result[0]).to_equal(0xFFFD)  # oracle: a lone continuation byte is never a valid sequence start
+        expect(result[1]).to_equal(1)  # oracle: the invalid byte is consumed so decoding can resync
 
     it "returns replacement for truncated sequence":
+        # @req REQ-UTF8-DEC1-006
+        step("Decode a 3-byte lead with one byte missing")
+        # @capture(bit_table): the replacement scalar and resync width
         # 3-byte lead but only 2 bytes available
         val result = utf8_decode_one([0xEA, 0xB0], 0)
-        expect(result[0]).to_equal(0xFFFD)
-        expect(result[1]).to_equal(1)
+        expect(result[0]).to_equal(0xFFFD)  # oracle: a truncated tail is not a complete sequence
+        expect(result[1]).to_equal(1)  # oracle: only the lead byte is consumed before the resync
 
     it "rejects overlong 2-byte":
+        # @req REQ-UTF8-DEC1-007
+        step("Decode a 2-byte overlong encoding of U+0041")
+        # @capture(bit_table): the replacement scalar and consumed width for the overlong form
         # Overlong: U+0041 encoded as 0xC1 0x81 (should be 1 byte)
         val result = utf8_decode_one([0xC1, 0x81], 0)
-        expect(result[0]).to_equal(0xFFFD)
-        expect(result[1]).to_equal(2)
+        expect(result[0]).to_equal(0xFFFD)  # oracle: overlong encodings are rejected, not silently widened
+        expect(result[1]).to_equal(2)  # oracle: the whole overlong form is consumed
 
     it "returns error for out-of-bounds offset":
+        # @req REQ-UTF8-DEC1-008
+        step("Decode at an offset past the end of the input")
+        # @capture(statistics): the (-1, 0) error pair
         val result = utf8_decode_one([0x41], 5)
         expect(result[0]).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(result[1]).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "returns error for a negative offset":
+        # @req REQ-UTF8-DEC1-009
         step("Exercise the lower offset bound independently")
-        expect(utf8_decode_one([0x41], -1)).to_equal([-1, 0])
+        # @capture(statistics): the error pair for a negative offset
+        expect(utf8_decode_one([0x41], -1)).to_equal([-1, 0])  # oracle: a negative offset yields the same (-1, 0) error pair as out-of-bounds
 
     it "rejects invalid two-byte payload values and continuation shape":
-        step("Exercise numeric-range and continuation guards")
-        expect(utf8_decode_one([0xC2, -1], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xC2, 256], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xC2, 0x41], 0)).to_equal([0xFFFD, 1])
+        # @req REQ-UTF8-DEC1-010
+        step("Exercise numeric-range and continuation guards on the second byte")
+        # @capture(bit_table): the replacement scalar and consumed width per malformed second byte
+        expect(utf8_decode_one([0xC2, -1], 0)).to_equal([0xFFFD, 1])  # oracle: a negative payload byte is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xC2, 256], 0)).to_equal([0xFFFD, 1])  # oracle: a payload byte above 255 is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xC2, 0x41], 0)).to_equal([0xFFFD, 1])  # oracle: a non-continuation second byte breaks the sequence shape
 
     it "rejects malformed three-byte sequences":
+        # @req REQ-UTF8-DEC1-011
         step("Exercise payload range, continuation, overlong, and surrogate guards")
-        expect(utf8_decode_one([0xE1, -1, 0x80], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xE1, 0x80, 256], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xE1, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xE0, 0x80, 0x80], 0)).to_equal([0xFFFD, 3])
-        expect(utf8_decode_one([0xED, 0xA0, 0x80], 0)).to_equal([0xFFFD, 3])
+        # @capture(bit_table): the replacement scalar and consumed width per malformed 3-byte form
+        expect(utf8_decode_one([0xE1, -1, 0x80], 0)).to_equal([0xFFFD, 1])  # oracle: a negative payload byte is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xE1, 0x80, 256], 0)).to_equal([0xFFFD, 1])  # oracle: a payload byte above 255 is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xE1, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])  # oracle: a non-continuation middle byte breaks the sequence shape
+        expect(utf8_decode_one([0xE0, 0x80, 0x80], 0)).to_equal([0xFFFD, 3])  # oracle: the overlong lowest 3-byte form is rejected after consuming all three bytes
+        expect(utf8_decode_one([0xED, 0xA0, 0x80], 0)).to_equal([0xFFFD, 3])  # oracle: the surrogate-block 3-byte form is rejected after consuming all three bytes
 
     it "rejects malformed four-byte sequences":
+        # @req REQ-UTF8-DEC1-012
         step("Exercise payload range, continuation, overlong, and maximum guards")
-        expect(utf8_decode_one([0xF1, -1, 0x80, 0x80], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xF1, 0x80, 0x80, 256], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xF1, 0x80, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])
-        expect(utf8_decode_one([0xF0, 0x80, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])
-        expect(utf8_decode_one([0xF4, 0x90, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])
+        # @capture(bit_table): the replacement scalar and consumed width per malformed 4-byte form
+        expect(utf8_decode_one([0xF1, -1, 0x80, 0x80], 0)).to_equal([0xFFFD, 1])  # oracle: a negative payload byte is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xF1, 0x80, 0x80, 256], 0)).to_equal([0xFFFD, 1])  # oracle: a payload byte above 255 is invalid and only the lead is consumed
+        expect(utf8_decode_one([0xF1, 0x80, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])  # oracle: a non-continuation third byte breaks the sequence shape
+        expect(utf8_decode_one([0xF0, 0x80, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])  # oracle: the overlong lowest 4-byte form is rejected after consuming all four bytes
+        expect(utf8_decode_one([0xF4, 0x90, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])  # oracle: a scalar above U+10FFFF is rejected after consuming all four bytes
 
     it "decodes at nonzero offset":
+        # @req REQ-UTF8-DEC1-013
+        step("Decode the middle byte of a three-character input")
+        # @capture(bit_table): the decoded scalar and consumed width at offset 1
         val result = utf8_decode_one([0x41, 0x42, 0x43], 1)
-        expect(result[0]).to_equal(0x42)
-        expect(result[1]).to_equal(1)
+        expect(result[0]).to_equal(0x42)  # oracle: offset 1 addresses the second ASCII character
+        expect(result[1]).to_equal(1)  # oracle: one ASCII byte is consumed
 
-# ============================================================================
-# utf8_codepoint_byte_len
-# ============================================================================
+# @manual_section: byte-width
 
 describe "utf8_codepoint_byte_len":
     it "uses replacement width for negative and out-of-range values":
+        # @req REQ-UTF8-BLEN-001
         step("Exercise both invalid-range fallbacks")
-        expect(utf8_codepoint_byte_len(-1)).to_equal(3)
-        expect(utf8_codepoint_byte_len(0x110000)).to_equal(3)
+        # @capture(statistics): the replacement width per invalid scalar
+        expect(utf8_codepoint_byte_len(-1)).to_equal(3)  # oracle: invalid input encodes as U+FFFD, which is 3 bytes wide
+        expect(utf8_codepoint_byte_len(0x110000)).to_equal(3)  # oracle: one past the scalar maximum encodes as U+FFFD, which is 3 bytes wide
 
     it "returns 1 for ASCII":
-        expect(utf8_codepoint_byte_len(0x41)).to_equal(1)
+        # @req REQ-UTF8-BLEN-002
+        step("Measure an ASCII scalar")
+        # @capture(statistics): the byte width for ASCII
+        expect(utf8_codepoint_byte_len(0x41)).to_equal(1)  # oracle: U+0041 encodes in one byte
 
     it "returns 2 for Latin extended":
-        expect(utf8_codepoint_byte_len(0xE9)).to_equal(2)
+        # @req REQ-UTF8-BLEN-003
+        step("Measure a Latin-1 Supplement scalar")
+        # @capture(statistics): the byte width for U+00E9
+        expect(utf8_codepoint_byte_len(0xE9)).to_equal(2)  # oracle: U+00E9 encodes in two bytes
 
     it "returns 3 for CJK and Hangul":
-        expect(utf8_codepoint_byte_len(0xAC00)).to_equal(3)
-        expect(utf8_codepoint_byte_len(0x4E00)).to_equal(3)  # CJK ideograph
+        # @req REQ-UTF8-BLEN-004
+        step("Measure one Hangul and one CJK ideograph scalar")
+        # @capture(statistics): the byte width for the 3-byte band
+        expect(utf8_codepoint_byte_len(0xAC00)).to_equal(3)  # oracle: U+AC00 encodes in three bytes
+        expect(utf8_codepoint_byte_len(0x4E00)).to_equal(3)  # oracle: U+4E00 is a CJK ideograph and encodes in three bytes
 
     it "returns 4 for supplementary planes":
-        expect(utf8_codepoint_byte_len(0x1F600)).to_equal(4)
-        expect(utf8_codepoint_byte_len(0x10FFFF)).to_equal(4)
+        # @req REQ-UTF8-BLEN-005
+        step("Measure one emoji and the scalar maximum")
+        # @capture(statistics): the byte width for the 4-byte band
+        expect(utf8_codepoint_byte_len(0x1F600)).to_equal(4)  # oracle: U+1F600 encodes in four bytes
+        expect(utf8_codepoint_byte_len(0x10FFFF)).to_equal(4)  # oracle: U+10FFFF is the last scalar and encodes in four bytes
 
-# ============================================================================
-# utf8_encode_all / utf8_decode_all roundtrip
-# ============================================================================
+# @manual_section: bulk-roundtrip
 
 describe "utf8_encode_all and utf8_decode_all":
     it "roundtrips ASCII":
+        # @req REQ-UTF8-BULK-001
+        step("Encode an ASCII list and decode it back")
+        # @capture(statistics): the restored scalar list
         val cps = [0x48, 0x65, 0x6C, 0x6C, 0x6F]  # "Hello"
         val encoded = utf8_encode_all(cps)
         val decoded = utf8_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips Korean":
+        # @req REQ-UTF8-BULK-002
+        step("Encode a Hangul list and decode it back")
+        # @capture(statistics): the emitted byte count and restored scalar list
         # 가나다 = U+AC00 U+B098 U+B2E4
         val cps = [0xAC00, 0xB098, 0xB2E4]
         val encoded = utf8_encode_all(cps)
-        expect(encoded.len()).to_equal(9)  # 3 bytes each
+        expect(encoded.len()).to_equal(9)  # oracle: three 3-byte scalars emit nine bytes
         val decoded = utf8_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips mixed ASCII and emoji":
+        # @req REQ-UTF8-BULK-003
+        step("Encode a mixed-width list and decode it back")
+        # @capture(statistics): the emitted byte count and restored scalar list
         # "Hi" + U+1F600
         val cps = [0x48, 0x69, 0x1F600]
         val encoded = utf8_encode_all(cps)
-        expect(encoded.len()).to_equal(6)  # 1+1+4
+        expect(encoded.len()).to_equal(6)  # oracle: two ASCII bytes plus one 4-byte emoji emit six bytes
         val decoded = utf8_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips Cyrillic":
+        # @req REQ-UTF8-BULK-004
+        step("Encode the Cyrillic word and decode it back")
+        # @capture(statistics): the restored scalar list
         # Привет = U+041F U+0440 U+0438 U+0432 U+0435 U+0442
         val cps = [0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442]
         val encoded = utf8_encode_all(cps)
@@ -232,6 +356,9 @@ describe "utf8_encode_all and utf8_decode_all":
         expect(decoded).to_equal(cps)
 
     it "roundtrips Arabic":
+        # @req REQ-UTF8-BULK-005
+        step("Encode the Arabic word and decode it back")
+        # @capture(statistics): the restored scalar list
         # مرحبا = U+0645 U+0631 U+062D U+0628 U+0627
         val cps = [0x0645, 0x0631, 0x062D, 0x0628, 0x0627]
         val encoded = utf8_encode_all(cps)
@@ -239,6 +366,9 @@ describe "utf8_encode_all and utf8_decode_all":
         expect(decoded).to_equal(cps)
 
     it "roundtrips Japanese Hiragana":
+        # @req REQ-UTF8-BULK-006
+        step("Encode the Hiragana word and decode it back")
+        # @capture(statistics): the restored scalar list
         # こんにちは = U+3053 U+3093 U+306B U+3061 U+306F
         val cps = [0x3053, 0x3093, 0x306B, 0x3061, 0x306F]
         val encoded = utf8_encode_all(cps)
@@ -246,14 +376,20 @@ describe "utf8_encode_all and utf8_decode_all":
         expect(decoded).to_equal(cps)
 
     it "roundtrips Chinese":
+        # @req REQ-UTF8-BULK-007
+        step("Encode the Chinese word and decode it back")
+        # @capture(statistics): the emitted byte count and restored scalar list
         # 你好 = U+4F60 U+597D
         val cps = [0x4F60, 0x597D]
         val encoded = utf8_encode_all(cps)
-        expect(encoded.len()).to_equal(6)  # 3 bytes each
+        expect(encoded.len()).to_equal(6)  # oracle: two 3-byte scalars emit six bytes
         val decoded = utf8_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips Devanagari":
+        # @req REQ-UTF8-BULK-008
+        step("Encode the Devanagari word and decode it back")
+        # @capture(statistics): the restored scalar list
         # नमस्ते = U+0928 U+092E U+0938 U+094D U+0924 U+0947
         val cps = [0x0928, 0x092E, 0x0938, 0x094D, 0x0924, 0x0947]
         val encoded = utf8_encode_all(cps)
@@ -261,76 +397,110 @@ describe "utf8_encode_all and utf8_decode_all":
         expect(decoded).to_equal(cps)
 
     it "handles empty input":
+        # @req REQ-UTF8-BULK-009
+        step("Encode and decode the empty sequence")
+        # @capture(statistics): element counts for empty encode/decode
         val encoded = utf8_encode_all([])
-        expect(encoded.len()).to_equal(0)
+        expect(encoded.len()).to_equal(0)  # oracle: an empty list encodes to zero bytes
         val decoded = utf8_decode_all([])
-        expect(decoded.len()).to_equal(0)
+        expect(decoded.len()).to_equal(0)  # oracle: an empty byte list decodes to zero scalars
 
-# ============================================================================
-# utf8_count_codepoints
-# ============================================================================
+# @manual_section: codepoint-counting
 
 describe "codepoint counting via decode_all":
     it "counts ASCII bytes":
+        # @req REQ-UTF8-COUNT-001
+        step("Decode five ASCII bytes and count the scalars")
+        # @capture(statistics): the decoded scalar count
         val decoded = utf8_decode_all([0x48, 0x65, 0x6C, 0x6C, 0x6F])
-        expect(decoded.len()).to_equal(5)
+        expect(decoded.len()).to_equal(5)  # oracle: five ASCII bytes decode to five scalars
 
     it "counts Korean 3-byte sequences":
+        # @req REQ-UTF8-COUNT-002
+        step("Encode three Hangul scalars, decode, and count")
+        # @capture(statistics): the decoded scalar count
         val bytes = utf8_encode_all([0xAC00, 0xB098, 0xB2E4])
         val decoded = utf8_decode_all(bytes)
-        expect(decoded.len()).to_equal(3)
+        expect(decoded.len()).to_equal(3)  # oracle: three 3-byte sequences decode to three scalars
 
     it "counts emoji 4-byte sequences":
+        # @req REQ-UTF8-COUNT-003
+        step("Encode two emoji scalars, decode, and count")
+        # @capture(statistics): the decoded scalar count
         val bytes = utf8_encode_all([0x1F600, 0x1F601])
         val decoded = utf8_decode_all(bytes)
-        expect(decoded.len()).to_equal(2)
+        expect(decoded.len()).to_equal(2)  # oracle: two 4-byte sequences decode to two scalars
 
     it "counts empty":
+        # @req REQ-UTF8-COUNT-004
+        step("Decode the empty byte list and count")
+        # @capture(statistics): the decoded scalar count for empty input
         val decoded = utf8_decode_all([])
-        expect(decoded.len()).to_equal(0)
+        expect(decoded.len()).to_equal(0)  # oracle: no bytes decode to zero scalars
 
-# ============================================================================
-# text operations
-# ============================================================================
+# @manual_section: text-helpers
 
 describe "text_byte_len":
     it "returns byte length of ASCII text":
-        expect(text_byte_len("Hello")).to_equal(5)
+        # @req REQ-UTF8-TEXT-001
+        step("Measure the byte length of five ASCII characters")
+        # @capture(statistics): the byte length
+        expect(text_byte_len("Hello")).to_equal(5)  # oracle: five ASCII characters occupy five bytes
 
     it "returns byte length of empty text":
-        expect(text_byte_len("")).to_equal(0)
+        # @req REQ-UTF8-TEXT-002
+        step("Measure the byte length of empty text")
+        # @capture(statistics): the byte length
+        expect(text_byte_len("")).to_equal(0)  # oracle: empty text occupies zero bytes
 
 describe "text_codepoints length":
     it "returns codepoint count for ASCII":
+        # @req REQ-UTF8-TEXT-003
+        step("Count the scalars of five ASCII characters")
+        # @capture(statistics): the codepoint count
         val cps = text_codepoints("Hello")
-        expect(cps.len()).to_equal(5)
+        expect(cps.len()).to_equal(5)  # oracle: five ASCII characters are five scalars
 
 describe "text_without_last_codepoint":
     it "removes exactly one trailing UTF-8 scalar":
+        # @req REQ-UTF8-TEXT-004
+        step("Strip one trailing scalar from empty, ASCII and multibyte text")
+        # @capture(bit_table): the shortened text per input
         expect(text_without_last_codepoint("")).to_equal("")
         expect(text_without_last_codepoint("abc")).to_equal("ab")
         expect(text_without_last_codepoint("한é")).to_equal("한")
 
 describe "text_codepoints":
     it "returns codepoints for ASCII":
+        # @req REQ-UTF8-TEXT-005
+        step("Explode three ASCII characters into scalars")
+        # @capture(bit_table): the scalar list
         val cps = text_codepoints("ABC")
-        expect(cps.len()).to_equal(3)
-        expect(cps[0]).to_equal(0x41)
-        expect(cps[1]).to_equal(0x42)
-        expect(cps[2]).to_equal(0x43)
+        expect(cps.len()).to_equal(3)  # oracle: three ASCII characters are three scalars
+        expect(cps[0]).to_equal(0x41)  # oracle: the first character is A
+        expect(cps[1]).to_equal(0x42)  # oracle: the second character is B
+        expect(cps[2]).to_equal(0x43)  # oracle: the third character is C
 
 describe "char_from_codepoint":
     it "converts ASCII codepoint to text":
+        # @req REQ-UTF8-TEXT-006
+        step("Convert one letter and one digit scalar to text")
+        # @capture(bit_table): the rendered text per scalar
         expect(char_from_codepoint(0x41)).to_equal("A")
         expect(char_from_codepoint(0x30)).to_equal("0")
 
 describe "text_from_codepoints":
     it "creates text from ASCII codepoints":
+        # @req REQ-UTF8-TEXT-007
+        step("Assemble two ASCII scalars into text")
+        # @capture(bit_table): the assembled text
         val result = text_from_codepoints([0x48, 0x69])
         expect(result).to_equal("Hi")
 
     it "creates text through both ASCII and multibyte paths":
+        # @req REQ-UTF8-TEXT-008
         step("Exercise both text construction branches")
+        # @capture(bit_table): the assembled mixed-width text
         expect(text_from_codepoints([0x41, 0x00E9, 0xD55C, 0x1F600])).to_equal("Aé한😀")
 
 # ============================================================================
@@ -347,42 +517,56 @@ describe "text_from_codepoints":
 use std.common.encoding.utf8.{char_from_code}
 use std.string_core.{char_from_code_inline}
 
+# @manual_section: char-parity
+
 describe "char_from_code encodes scalars above 127":
     it "encodes U+00A2 as the cent sign, not U+FFFD":
-        step("Verify: encodes U+00A2 as the cent sign, not U+FFFD")
+        # @req REQ-UTF8-CHAR-001
+        step("Encode the cent sign scalar")
+        # @capture(bit_table): the encoded text and its byte width
         expect(char_from_code(0xA2)).to_equal("¢")
-        expect(char_from_code(0xA2).len()).to_equal(2)
+        expect(char_from_code(0xA2).len()).to_equal(2)  # oracle: U+00A2 encodes in two bytes, the historical bug rendered 3 bytes of U+FFFD
 
     it "encodes the 2, 3 and 4 byte boundaries":
-        step("Verify: encodes the 2, 3 and 4 byte boundaries")
-        expect(char_from_code(128).len()).to_equal(2)
-        expect(char_from_code(0x7FF).len()).to_equal(2)
-        expect(char_from_code(0x800).len()).to_equal(3)
+        # @req REQ-UTF8-CHAR-002
+        step("Encode one scalar at every UTF-8 width boundary")
+        # @capture(bit_table): the encoded width at each band boundary
+        expect(char_from_code(128).len()).to_equal(2)  # oracle: U+0080 is the first 2-byte scalar
+        expect(char_from_code(0x7FF).len()).to_equal(2)  # oracle: U+07FF is the last 2-byte scalar
+        expect(char_from_code(0x800).len()).to_equal(3)  # oracle: U+0800 is the first 3-byte scalar
         expect(char_from_code(0xD55C)).to_equal("한")
-        expect(char_from_code(0xFFFF).len()).to_equal(3)
-        expect(char_from_code(0x10000).len()).to_equal(4)
+        expect(char_from_code(0xFFFF).len()).to_equal(3)  # oracle: U+FFFF is the last 3-byte scalar
+        expect(char_from_code(0x10000).len()).to_equal(4)  # oracle: U+10000 is the first 4-byte scalar
         expect(char_from_code(0x1F600)).to_equal("😀")
-        expect(char_from_code(0x10FFFF).len()).to_equal(4)
+        expect(char_from_code(0x10FFFF).len()).to_equal(4)  # oracle: U+10FFFF is the last 4-byte scalar
 
     it "keeps ASCII unchanged":
-        step("Verify: keeps ASCII unchanged")
+        # @req REQ-UTF8-CHAR-003
+        step("Encode one ASCII letter and the last ASCII scalar")
+        # @capture(bit_table): the encoded ASCII text and width
         expect(char_from_code(65)).to_equal("A")
-        expect(char_from_code(0x7F).len()).to_equal(1)
+        expect(char_from_code(0x7F).len()).to_equal(1)  # oracle: U+007F is the last 1-byte scalar
 
     it "yields U+FFFD for surrogates and out-of-range values":
-        step("Verify: yields U+FFFD for surrogates and out-of-range values")
+        # @req REQ-UTF8-CHAR-004
+        step("Encode both surrogate edges and the invalid range edges")
+        # @capture(bit_table): the U+FFFD replacement per invalid scalar
         expect(char_from_code(0xD800)).to_equal("\uFFFD")
         expect(char_from_code(0xDFFF)).to_equal("\uFFFD")
         expect(char_from_code(0x110000)).to_equal("\uFFFD")
         expect(char_from_code(-1)).to_equal("\uFFFD")
 
     it "agrees byte-for-byte with std.string_core for every valid scalar":
-        step("Verify: agrees byte-for-byte with std.string_core for every valid scalar")
+        # @req REQ-UTF8-CHAR-005
+        step("Compare both implementations across one scalar per width band")
+        # @capture(statistics): the comparison count and band coverage
         for cp in [0, 9, 10, 32, 65, 0x7F, 128, 0xA2, 0x7FF, 0x800, 0xD55C, 0xD7FF, 0xE000, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF]:
             expect(char_from_code(cp)).to_equal(char_from_code_inline(cp))
             expect(char_from_code(cp).len()).to_equal(char_from_code_inline(cp).len())
 
     it "documents the one policy difference: string_core returns empty text for invalid input":
-        step("Verify: string_core returns empty text for invalid input")
+        # @req REQ-UTF8-CHAR-006
+        step("Encode invalid input through the string_core variant")
+        # @capture(bit_table): the empty-text policy result per invalid scalar
         expect(char_from_code_inline(0xD800)).to_equal("")
         expect(char_from_code_inline(0x110000)).to_equal("")

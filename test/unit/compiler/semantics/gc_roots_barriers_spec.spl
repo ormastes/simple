@@ -1,26 +1,36 @@
-# GC Root and Write-Barrier Analysis Tests
-#
-# Covers src/compiler/55.borrow/gc_analysis/roots.spl and barriers.spl.
-#
-# Both files were left non-executable by the 2025 scripts/tools/desugarer.py
-# port: the impl blocks for RootKind, GcRoot, BarrierKind, RootError and
-# BarrierError were emitted as bare "(was: impl X:)" headers with no bodies,
-# and the call sites were rewritten into helpers no pass generates. roots.spl
-# additionally carried a broken tuple-type desugar (a `val _tv_0 = [i64, i64]`
-# field), a `has_GcRoot` return type that is not a type, and a RootError split
-# into has_root + non-optional root that no constructor ever set.
-#
-# See doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md
-#
-# BarrierAnalysis.analyze() previously failed semantic analysis with "unknown
-# symbol self.is_gc_type": the two-arg calls `(self.is_gc_type)(x)` in
-# analyze_write used the parenthesized-field-call form, which fails semantic
-# resolution generally (reduced to a minimal repro: any class with a
-# fn(...)->T field called as `(self.field)(args)` from a `me` method fails
-# with "unknown symbol self.field"; the equivalent `self.field(args)` form
-# resolves correctly). Fixed by rewriting to `self.is_gc_type(x)`. See the
-# 2026-08-06 update in the bug doc above for the isolated repro. RootAnalysis
-# never calls its `is_gc_type` field, so it was unaffected.
+"""
+## Purpose and audience
+Executable contract for the GC root and write-barrier analysis shipped in
+`src/compiler/55.borrow/gc_analysis/` (`roots.spl`, `barriers.spl`): root
+kinds and live ranges, root sets, barrier requirements per GC strategy,
+barrier verification, safepoints, and root propagation. Written for the
+borrow-check/GC owners.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/semantics/gc_roots_barriers_spec.spl
+## Compatibility and limitations
+Both product files were left non-executable by the 2025
+scripts/tools/desugarer.py port: the impl blocks for RootKind, GcRoot,
+BarrierKind, RootError and BarrierError were emitted as bare
+"(was: impl X:)" headers with no bodies, and roots.spl carried a broken
+tuple-type desugar, a `has_GcRoot` return type, and a RootError split no
+constructor ever set — see
+doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md.
+`BarrierAnalysis.analyze()` also previously failed semantic analysis with
+"unknown symbol self.is_gc_type" because the parenthesized-field-call form
+`(self.field)(args)` does not resolve; `self.field(args)` does. Those repairs
+are pinned here; the test predicates `is_gc_type_1`/`is_gc_type_all` stand in
+for real type-id classification.
+## Verification guidance and troubleshooting
+Run the file and read the first failing scenario's expect output; barrier
+verdicts are queried per program point via `needs_barrier`, and verification
+failures always leave a typed error in `get_errors()` whose message or
+missing-barrier kind names the drift.
+"""
+# Lifecycle: doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md ;
+# doc/03_plan/runtime/gc_nogc_runtime_completion_audit_2026-05-13.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/concurrency/nogc_async_immut_library_design.md
+# @manual_section: gc-roots-barriers
 
 use std.spec
 use compiler.borrow.gc_analysis.roots.{
@@ -56,6 +66,9 @@ fn is_gc_type_all(t: i64) -> bool:
 
 describe "RootKind":
     it "keys every variant distinctly, including the payload":
+        # @req REQ-GCROOTS-001
+        # @capture(bit_table): root kind key rendering
+        step("Render every root kind variant to its key text")
         expect(RootKind.Local(1).to_text()).to_equal("local:1")
         expect(RootKind.Local(2).to_text()).to_equal("local:2")
         expect(RootKind.Parameter(0).to_text()).to_equal("param:0")
@@ -64,59 +77,89 @@ describe "RootKind":
         expect(RootKind.Return.to_text()).to_equal("return")
 
     it "never collides two distinct locals onto one key":
+        # @req REQ-GCROOTS-002
+        # @capture(bit_table): root kind key collision check
+        step("Compare keys of distinct locals, params, and temporaries")
         expect(RootKind.Local(1).to_text() == RootKind.Local(2).to_text()).to_equal(false)
         expect(RootKind.Local(1).to_text() == RootKind.Parameter(1).to_text()).to_equal(false)
         expect(RootKind.Local(1).to_text() == RootKind.Temporary(1).to_text()).to_equal(false)
 
 describe "GcRoot":
     it "builds a local root that is not interior or pinned":
+        # @req REQ-GCROOTS-003
+        # @capture(bit_table): local root construction
+        step("Build a local root and read its type id and flags")
         val r = gcroot_local(3, 99)
-        expect(r.type_id).to_equal(99)
+        expect(r.type_id).to_equal(99)  # oracle: 99 — the type id passed to the builder
         expect(r.is_interior).to_equal(false)
         expect(r.is_pinned).to_equal(false)
         expect(r.kind.to_text()).to_equal("local:3")
 
     it "gives a local root an empty live range by default":
+        # @req REQ-GCROOTS-004
+        # @capture(bit_table): default live range check
+        step("Read the default live range endpoints of a local root")
         val r = gcroot_local(3, 99)
-        expect(r.live_range[0]).to_equal(0)
-        expect(r.live_range[1]).to_equal(0)
+        expect(r.live_range[0]).to_equal(0)  # oracle: 0 — the shipped empty-range start
+        expect(r.live_range[1]).to_equal(0)  # oracle: 0 — the shipped empty-range end
         expect(r.is_live_at(0)).to_equal(true)
         expect(r.is_live_at(5)).to_equal(false)
 
     it "keeps a parameter root live for the whole function":
+        # @req REQ-GCROOTS-005
+        # @capture(bit_table): parameter liveness check
+        step("Check a parameter root is live at entry and far past it")
         val p = gcroot_parameter(0, 7)
         expect(p.kind.to_text()).to_equal("param:0")
         expect(p.is_live_at(0)).to_equal(true)
         expect(p.is_live_at(500)).to_equal(true)
 
     it "treats the live range as inclusive at both ends":
+        # @req REQ-GCROOTS-006
+        # @capture(bit_table): inclusive range check
+        step("Probe liveness exactly at both live-range endpoints")
         val p = gcroot_parameter(1, 7)
         expect(p.is_live_at(p.live_range[0])).to_equal(true)
         expect(p.is_live_at(p.live_range[1])).to_equal(true)
 
     it "describes itself for diagnostics":
+        # @req REQ-GCROOTS-007
+        # @capture(bit_table): root diagnostic rendering
+        step("Render a local root's diagnostic text")
         expect(gcroot_local(3, 99).to_text()).to_equal("local:3:type99")
 
 describe "RootSet":
     it "starts empty":
+        # @req REQ-GCROOTS-008
+        # @capture(bit_table): empty root set check
+        step("Create a root set and count its contents")
         val s = RootSet.create()
-        expect(s.count()).to_equal(0)
-        expect(s.all_roots().len()).to_equal(0)
+        expect(s.count()).to_equal(0)  # oracle: 0 — a fresh set holds nothing
+        expect(s.all_roots().len()).to_equal(0)  # oracle: 0 — a fresh set lists nothing
 
     it "adds roots and counts them":
+        # @req REQ-GCROOTS-009
+        # @capture(bit_table): root insertion check
+        step("Add two distinct local roots and count them")
         var s = RootSet.create()
         s.add_root(gcroot_local(1, 10))
         s.add_root(gcroot_local(2, 10))
-        expect(s.count()).to_equal(2)
-        expect(s.all_roots().len()).to_equal(2)
+        expect(s.count()).to_equal(2)  # oracle: 2 — two distinct locals were added
+        expect(s.all_roots().len()).to_equal(2)  # oracle: 2 — both roots are listed
 
     it "replaces rather than duplicates a root of the same kind":
+        # @req REQ-GCROOTS-010
+        # @capture(bit_table): same-kind replacement check
+        step("Add the same local slot twice and count the survivors")
         var s = RootSet.create()
         s.add_root(gcroot_local(1, 10))
         s.add_root(gcroot_local(1, 20))
-        expect(s.count()).to_equal(1)
+        expect(s.count()).to_equal(1)  # oracle: 1 — the second add replaces the first
 
     it "finds a root by kind and reports nil for a missing one":
+        # @req REQ-GCROOTS-011
+        # @capture(bit_table): root lookup check
+        step("Look up a present local, an absent local, and an absent return root")
         var s = RootSet.create()
         s.add_root(gcroot_local(1, 10))
         expect(s.get_root(RootKind.Local(1)) != nil).to_equal(true)
@@ -124,37 +167,52 @@ describe "RootSet":
         expect(s.get_root(RootKind.Return) != nil).to_equal(false)
 
     it "removes a root by kind":
+        # @req REQ-GCROOTS-012
+        # @capture(bit_table): root removal check
+        step("Remove one of two local roots and verify only the other survives")
         var s = RootSet.create()
         s.add_root(gcroot_local(1, 10))
         s.add_root(gcroot_local(2, 10))
         s.remove_root(RootKind.Local(1))
-        expect(s.count()).to_equal(1)
+        expect(s.count()).to_equal(1)  # oracle: 1 — exactly one root remains
         expect(s.get_root(RootKind.Local(1)) != nil).to_equal(false)
         expect(s.get_root(RootKind.Local(2)) != nil).to_equal(true)
 
     it "filters roots by liveness at a program point":
+        # @req REQ-GCROOTS-013
+        # @capture(bit_table): liveness filter check
+        step("Filter a local and a parameter root by liveness at two points")
         var s = RootSet.create()
         s.add_root(gcroot_local(1, 10))
         s.add_root(gcroot_parameter(0, 10))
-        expect(s.live_roots_at(0).len()).to_equal(2)
-        expect(s.live_roots_at(50).len()).to_equal(1)
+        expect(s.live_roots_at(0).len()).to_equal(2)  # oracle: 2 — both are live at entry
+        expect(s.live_roots_at(50).len()).to_equal(1)  # oracle: 1 — only the parameter stays live
 
 describe "RootError":
     it "reports an unrooted pointer with no specific root attached":
+        # @req REQ-GCROOTS-014
+        # @capture(protocol_json): unrooted-pointer error check
+        step("Build an unrooted-pointer error and read its fields")
         val e = rooterror_unrooted(12, "value in r3")
-        expect(e.point).to_equal(12)
+        expect(e.point).to_equal(12)  # oracle: 12 — the GC point passed in
         expect(e.root == nil).to_equal(true)
         expect(e.message).to_equal("Unrooted pointer at GC point: value in r3")
 
     it "reports a dangling root and names it":
+        # @req REQ-GCROOTS-015
+        # @capture(protocol_json): dangling-root error check
+        step("Build a dangling-root error and read its message")
         val r = gcroot_local(3, 99)
         val e = rooterror_dangling(5, r)
-        expect(e.point).to_equal(5)
+        expect(e.point).to_equal(5)  # oracle: 5 — the GC point passed in
         expect(e.root != nil).to_equal(true)
         expect(e.message).to_equal("Dangling root: local:3:type99")
 
 describe "BarrierKind":
     it "names every barrier kind":
+        # @req REQ-GCROOTS-016
+        # @capture(bit_table): barrier kind naming check
+        step("Render every barrier kind to its name")
         expect(BarrierKind.PreWrite.to_text()).to_equal("pre-write")
         expect(BarrierKind.PostWrite.to_text()).to_equal("post-write")
         expect(BarrierKind.CardMark.to_text()).to_equal("card-mark")
@@ -162,6 +220,9 @@ describe "BarrierKind":
         expect(BarrierKind.None_.to_text()).to_equal("none")
 
     it "treats only None_ as requiring no barrier":
+        # @req REQ-GCROOTS-017
+        # @capture(bit_table): barrier requirement check
+        step("Ask each barrier kind whether it requires a barrier")
         expect(BarrierKind.PreWrite.is_required()).to_equal(true)
         expect(BarrierKind.PostWrite.is_required()).to_equal(true)
         expect(BarrierKind.CardMark.is_required()).to_equal(true)
@@ -170,19 +231,28 @@ describe "BarrierKind":
 
 describe "WriteSite":
     it "records a field write with its field index":
+        # @req REQ-GCROOTS-018
+        # @capture(bit_table): field write-site record check
+        step("Build a field write site and read its recorded points and types")
         val w = writesite_field_write(5, 1, 2, 3)
-        expect(w.program_point).to_equal(5)
-        expect(w.target_type).to_equal(1)
-        expect(w.source_type).to_equal(3)
+        expect(w.program_point).to_equal(5)  # oracle: 5 — the program point passed in
+        expect(w.target_type).to_equal(1)  # oracle: 1 — the target type passed in
+        expect(w.source_type).to_equal(3)  # oracle: 3 — the source type passed in
 
     it "records an array write":
+        # @req REQ-GCROOTS-019
+        # @capture(bit_table): array write-site record check
+        step("Build an array write site and read its recorded points and types")
         val w = writesite_array_write(6, 1, 3)
-        expect(w.program_point).to_equal(6)
-        expect(w.target_type).to_equal(1)
-        expect(w.source_type).to_equal(3)
+        expect(w.program_point).to_equal(6)  # oracle: 6 — the program point passed in
+        expect(w.target_type).to_equal(1)  # oracle: 1 — the target type passed in
+        expect(w.source_type).to_equal(3)  # oracle: 3 — the source type passed in
 
 describe "BarrierError":
     it "names the missing barrier kind in its message":
+        # @req REQ-GCROOTS-020
+        # @capture(protocol_json): barrier error message check
+        step("Build a missing-barrier error and read its message and fields")
         val w = writesite_field_write(5, 1, 2, 3)
         val e = barriererror_missing(w, BarrierKind.PostWrite)
         expect(e.message).to_equal("Missing post-write barrier at write site")
@@ -191,12 +261,16 @@ describe "BarrierError":
 
 describe "BarrierAnalysis":
     it "starts with no requirements and no errors":
+        # @req REQ-GCROOTS-021
+        # @capture(bit_table): analysis initial state check
         step("Verify: starts with no requirements and no errors")
         val b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_all)
         expect(b.get_requirements().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(b.get_errors().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "StopTheWorld never requires a barrier even for GC-typed writes":
+        # @req REQ-GCROOTS-022
+        # @capture(bit_table): stop-the-world policy check
         step("Verify: StopTheWorld never requires a barrier even for GC-typed writes")
         var b = BarrierAnalysis.create(GcStrategy.StopTheWorld, is_gc_type_all)
         b.record_write(writesite_field_write(1, 1, 0, 1))
@@ -204,6 +278,8 @@ describe "BarrierAnalysis":
         expect(b.get_requirements().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "a write between two non-GC types never requires a barrier":
+        # @req REQ-GCROOTS-023
+        # @capture(bit_table): non-GC write policy check
         step("Verify: a write between two non-GC types never requires a barrier")
         var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
         b.record_write(writesite_field_write(1, 9, 0, 9))
@@ -211,6 +287,8 @@ describe "BarrierAnalysis":
         expect(b.get_requirements().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "Incremental requires a post-write barrier when the source is GC-managed":
+        # @req REQ-GCROOTS-024
+        # @capture(bit_table): incremental post-write policy check
         step("Verify: Incremental requires a post-write barrier when the source is GC-managed")
         var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
         b.record_write(writesite_field_write(3, 9, 0, 1))
@@ -218,6 +296,8 @@ describe "BarrierAnalysis":
         expect(b.needs_barrier(3) == BarrierKind.PostWrite).to_equal(true)
 
     it "Incremental requires nothing when only the target is GC-managed":
+        # @req REQ-GCROOTS-025
+        # @capture(bit_table): incremental target-only policy check
         step("Verify: Incremental requires nothing when only the target is GC-managed")
         var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
         b.record_write(writesite_field_write(3, 1, 0, 9))
@@ -225,6 +305,8 @@ describe "BarrierAnalysis":
         expect(b.needs_barrier(3) == BarrierKind.None_).to_equal(true)
 
     it "Generational requires a generational barrier only when both sides are GC-managed":
+        # @req REQ-GCROOTS-026
+        # @capture(bit_table): generational policy check
         step("Verify: Generational requires a generational barrier only when both sides are GC-managed")
         var b = BarrierAnalysis.create(GcStrategy.Generational, is_gc_type_1)
         b.record_write(writesite_field_write(4, 1, 0, 1))
@@ -232,6 +314,8 @@ describe "BarrierAnalysis":
         expect(b.needs_barrier(4) == BarrierKind.Generational).to_equal(true)
 
     it "Concurrent requires a pre-write barrier when the source is GC-managed":
+        # @req REQ-GCROOTS-027
+        # @capture(bit_table): concurrent pre-write policy check
         step("Verify: Concurrent requires a pre-write barrier when the source is GC-managed")
         var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
         b.record_write(writesite_field_write(5, 9, 0, 1))
@@ -239,12 +323,16 @@ describe "BarrierAnalysis":
         expect(b.needs_barrier(5) == BarrierKind.PreWrite).to_equal(true)
 
     it "needs_barrier reports None_ for a program point with no recorded write":
+        # @req REQ-GCROOTS-028
+        # @capture(bit_table): unrecorded point policy check
         step("Verify: needs_barrier reports None_ for a program point with no recorded write")
         var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
         b.record_write(writesite_field_write(5, 9, 0, 1))
         expect(b.needs_barrier(999) == BarrierKind.None_).to_equal(true)
 
     it "verify_barriers fails when a required barrier was never emitted":
+        # @req REQ-GCROOTS-029
+        # @capture(bit_table): missing barrier verification check
         step("Verify: verify_barriers fails when a required barrier was never emitted")
         var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
         b.record_write(writesite_field_write(3, 9, 0, 1))
@@ -255,6 +343,8 @@ describe "BarrierAnalysis":
         expect(b.get_errors()[0].missing_barrier == BarrierKind.PostWrite).to_equal(true)
 
     it "verify_barriers fails when the wrong barrier kind was emitted":
+        # @req REQ-GCROOTS-030
+        # @capture(bit_table): wrong barrier kind verification check
         step("Verify: verify_barriers fails when the wrong barrier kind was emitted")
         var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
         b.record_write(writesite_field_write(3, 9, 0, 1))
@@ -265,6 +355,8 @@ describe "BarrierAnalysis":
         expect(b.get_errors().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "verify_barriers succeeds when the correct barrier was emitted":
+        # @req REQ-GCROOTS-031
+        # @capture(bit_table): correct barrier verification check
         step("Verify: verify_barriers succeeds when the correct barrier was emitted")
         var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
         b.record_write(writesite_field_write(3, 9, 0, 1))
@@ -276,12 +368,16 @@ describe "BarrierAnalysis":
 
 describe "GcPoint":
     it "builds a call safepoint with no required roots":
+        # @req REQ-GCROOTS-032
+        # @capture(bit_table): call safepoint construction check
         step("Verify: builds a call safepoint with no required roots")
         val p = gcpoint_call(7)
         expect(p.program_point).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(p.required_roots.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "builds an allocation safepoint with no required roots":
+        # @req REQ-GCROOTS-033
+        # @capture(bit_table): allocation safepoint construction check
         step("Verify: builds an allocation safepoint with no required roots")
         val p = gcpoint_allocation(8)
         expect(p.program_point).to_equal(8)  # oracle: 8 — named expected value from the requirement
@@ -289,6 +385,8 @@ describe "GcPoint":
 
 describe "RootAnalysis":
     it "starts with no gc points, no roots, and no errors":
+        # @req REQ-GCROOTS-034
+        # @capture(bit_table): root analysis initial state check
         step("Verify: starts with no gc points, no roots, and no errors")
         val a = RootAnalysis.create(is_gc_type_1)
         expect(a.get_gc_points().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
@@ -296,6 +394,8 @@ describe "RootAnalysis":
         expect(a.get_errors().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "records a root at a program point and retrieves it":
+        # @req REQ-GCROOTS-035
+        # @capture(bit_table): root recording check
         step("Verify: records a root at a program point and retrieves it")
         var a = RootAnalysis.create(is_gc_type_1)
         a.record_root(10, gcroot_local(1, 99))
@@ -303,6 +403,8 @@ describe "RootAnalysis":
         expect(a.get_roots_at(10)[0].kind.to_text()).to_equal("local:1")
 
     it "records a GC safepoint":
+        # @req REQ-GCROOTS-036
+        # @capture(bit_table): safepoint recording check
         step("Verify: records a GC safepoint")
         var a = RootAnalysis.create(is_gc_type_1)
         a.record_gc_point(gcpoint_call(4))
@@ -310,6 +412,8 @@ describe "RootAnalysis":
         expect(a.get_gc_points()[0].program_point).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "propagates only roots still live at the destination point":
+        # @req REQ-GCROOTS-037
+        # @capture(bit_table): root propagation check
         step("Verify: propagates only roots still live at the destination point")
         var a = RootAnalysis.create(is_gc_type_1)
         a.record_root(0, gcroot_local(1, 99))       # live_range (0, 0)
@@ -320,6 +424,8 @@ describe "RootAnalysis":
         expect(at5[0].kind.to_text()).to_equal("param:0")
 
     it "verify_gc_points passes when every required root is present":
+        # @req REQ-GCROOTS-038
+        # @capture(bit_table): satisfied safepoint verification check
         step("Verify: verify_gc_points passes when every required root is present")
         var a = RootAnalysis.create(is_gc_type_1)
         a.record_root(4, gcroot_parameter(0, 99))
@@ -332,6 +438,8 @@ describe "RootAnalysis":
         expect(a.get_errors().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "verify_gc_points fails and records a RootError when a required root is missing":
+        # @req REQ-GCROOTS-039
+        # @capture(bit_table): missing root verification check
         step("Verify: verify_gc_points fails and records a RootError when a required root is missing")
         var a = RootAnalysis.create(is_gc_type_1)
         a.record_gc_point(GcPoint(

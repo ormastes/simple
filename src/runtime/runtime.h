@@ -234,6 +234,11 @@ bool     rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursiv
 bool     rt_dir_create_cpath(const char* path, bool recursive);
 bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
+int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                            const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* 1=published, 0=destination exists, -1=operational failure. */
+int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
+                                   const uint8_t* destination_ptr, uint64_t destination_len);
 /* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1888. */
 int64_t  rt_dir_list(const uint8_t* path_ptr, uint64_t path_len);
 /* (path_ptr, path_len, recursive) -> bool; recursive=false is a plain rmdir. */
@@ -393,6 +398,13 @@ int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 int8_t rt_transient_heap_promote(int64_t value);
+/* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
+ * registry; an alternate rt_alloc provider must register through this API. */
+int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
+int8_t rt_transient_raw_owner_register_state(void* ptr, uint64_t bytes, int8_t owned);
+int8_t rt_transient_raw_owner_query(void* ptr, uint64_t* bytes, int8_t* owned);
+void rt_transient_raw_owner_unregister(void* ptr);
+int8_t rt_transient_raw_owner_thread_allows(void);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_nanos(int64_t ns);
@@ -682,8 +694,8 @@ int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
 /* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs: 1 only for a heap-tagged pointer outside the zero page. This is a
- * FORMATION check, not liveness -- see runtime_native.c. */
+ * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
+ * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
@@ -997,6 +1009,10 @@ int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
+/* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
+   fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
+   handle and answers false. See runtime_process.c for the full contract. */
+bool     rt_pty_is_running(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);
@@ -1145,6 +1161,9 @@ void        rt_set_args_wide(int argc, const wchar_t** argv);
 #endif
 int32_t     rt_get_argc(void);
 SplArray*   rt_get_args(void);
+bool        rt_math_is_nan(double value);
+bool        rt_math_is_inf(double value);
+bool        rt_math_is_finite(double value);
 
 /* ===== File Prefetch (CLI keyword support) ===== */
 
@@ -1214,6 +1233,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_names, int64_t hir_symbols,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
+int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
 int         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
@@ -1606,6 +1626,22 @@ int64_t  rt_sdl2_get_display_usable_w(int64_t index);
 int64_t  rt_sdl2_get_display_usable_h(int64_t index);
 
 /* ===== Panic / Abort ===== */
+
+/* SPL_WEAK: portable spelling of `__attribute__((weak))`.
+ *
+ * cl.exe (MSVC proper) has no `__attribute__` syntax at all -- it is a hard
+ * parse error (C2143/C2059), which is what blocked the embedded runtime-compile
+ * path on the Windows MSVC lane. MSVC has no weak-symbol concept either, so the
+ * only portable expansion there is nothing: the definition becomes strong.
+ *
+ * CROSS-PLATFORM: gated on `_MSC_VER && !__clang__`, so clang-cl (which DOES
+ * accept the attribute, and whose weak-external lowering the SPL_CLI_ARGS_WEAK
+ * note below depends on) is byte-identical, as are Linux, macOS and FreeBSD. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define SPL_WEAK
+#else
+#  define SPL_WEAK __attribute__((weak))
+#endif
 
 #ifdef _MSC_VER
 __declspec(noreturn) void spl_panic(const char* msg);

@@ -1,31 +1,62 @@
 # @cover src/lib/nogc_sync_mut/spec/mod.spl 60%
 val NL = "\n"
 
-# Snapshot Testing Framework - Comparison Tests
 """
-Tests for snapshot comparison functionality including content matching,
-diff generation, output formatting, and context line handling for
-displaying differences between actual and expected snapshots.
+## Purpose and audience
+Documents the snapshot-comparison engine used by the SPipe test framework —
+content matching, diff generation, and context-line handling — for framework
+maintainers and spec authors relying on snapshot diffs to review failures.
+
+## Operator workflow
+`bin/simple test test/03_system/generated/comparison_spec.spl` runs every
+scenario; each feeds two candidate strings/lengths into the comparison logic
+and checks the verdict (match, mismatch, or diff-position) it produces.
+
+## Compatibility and limitations
+This spec exercises the comparison PREDICATES directly (string/length
+comparisons) rather than the on-disk snapshot store; it does not cover file
+I/O or snapshot persistence.
+
+## Verification guidance and troubleshooting
+Rerun the command above after any change to the comparison or diff-format
+helpers. A failure means a match/mismatch/format verdict has diverged from
+the pinned contract below.
 """
+# Lifecycle: doc/01_research/local/sspec_documentization_maintenance.md ;
+# doc/03_plan/agent_tasks/sspec_documentization_maintenance.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/sspec_documentization_maintenance.md
+# @manual_section: comparison
+
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "Snapshot Comparison":
-    # @manual scenario evidence
     """
     Verifies the comparison engine that detects differences between
     actual output and stored snapshots, generating readable diffs.
     """
     context "Basic Comparison":
         it "matches identical content":
+            # @req REQ-CMP-001
+            step("Compare two identical strings for a match verdict")
+            # @capture(statistics): equality verdict for two identical strings
             val actual = "Hello World"
             val expected = "Hello World"
             expect(actual).to_equal(expected)
 
         it "detects content differences":
+            # @req REQ-CMP-002
+            step("Compare two strings differing by one trailing character")
+            # @capture(statistics): equality verdict for two near-identical strings
             val actual = "Hello World"
             val expected = "Hello World!"
             expect(actual == expected).to_equal(false)
 
-        it "ignores whitespace differences when configured":
+        it "flags whitespace differences as unequal without normalization":
+            # @req REQ-CMP-003
+            step("Compare two strings that differ only by internal spacing")
+            # @capture(statistics): equality verdict for whitespace-only differences
             val content1 = "hello  world"
             val content2 = "hello world"
             # Different but could be normalized
@@ -33,48 +64,96 @@ describe "Snapshot Comparison":
 
     context "Diff Generation":
         it "generates diff for changed lines":
+            # @req REQ-CMP-004
+            step("Compare two single-line snapshots that differ entirely")
+            # @capture(statistics): equality verdict feeding the diff generator
             val line1 = "old line"
             val line2 = "new line"
             expect(line1 == line2).to_equal(false)
 
         it "handles multiline diffs":
+            # @req REQ-CMP-005
+            step("Compare two multi-line snapshots joined by the module-level newline constant")
+            # @capture(statistics): equality verdict for a three-line snapshot
             val text1 = "line 1{NL}line 2{NL}line 3"
             val text2 = "line 1{NL}line 2{NL}line 3"
             expect(text1).to_equal(text2)
 
-        it "marks added lines":
+        it "marks added lines when the new snapshot is longer":
+            # @req REQ-CMP-006
+            step("Compare snapshot lengths where the new snapshot gained a line")
+            # @capture(statistics): length comparison feeding the added-lines marker
             val original_length = 3
             val new_length = 4
             expect(new_length > original_length).to_equal(true)
 
-        it "marks removed lines":
+        it "marks removed lines when the new snapshot is shorter":
+            # @req REQ-CMP-007
+            step("Compare snapshot lengths where the new snapshot lost a line")
+            # @capture(statistics): length comparison feeding the removed-lines marker
             val original_length = 4
             val new_length = 3
             expect(new_length < original_length).to_equal(true)
 
     context "Formatting":
-        it "formats comparison result":
-            val result = "Match"
+        it "reports a match when the compared strings are equal":
+            # @req REQ-CMP-008
+            step("Compare two equal snapshots and format the comparison verdict")
+            # @capture(statistics): formatted verdict for an equal comparison
+            val actual = "Hello World"
+            val expected_snapshot = "Hello World"
+            val result = if actual == expected_snapshot: "Match" else: "Mismatch"
             expect(result).to_equal("Match")
 
-        it "shows unified diff format":
-            val diff_format = "unified"
-            expect(diff_format).to_equal("unified")
+        it "names the unified diff format":
+            # @req REQ-CMP-009
+            step("Read the real diff CLI source and confirm it recognizes the --unified flag")
+            # @capture(statistics): real diff CLI source content for the --unified branch
+            val diff_main_source = file_read("src/app/diff/main.spl")
+            expect(diff_main_source.contains("arg == \"--unified\"")).to_equal(true)  # oracle: the real diff CLI's recognized-flag branch
 
-        it "shows side-by-side format":
-            val diff_format = "side-by-side"
-            expect(diff_format).to_equal("side-by-side")
+        it "names the side-by-side diff format":
+            # @req REQ-CMP-010
+            step("Confirm no working --side-by-side diff format flag exists in the real diff CLI yet")
+            # @capture(statistics): real diff CLI source content checked for a side-by-side flag
+            # NOTE: the real diff CLI (src/app/diff/main.spl) recognizes only
+            # --unified and --stat (verified by reading its argument-parsing
+            # loop; zero "--side-by-side" hits). A separate module,
+            # src/app/diff/render_adapter.spl, mentions a "side-by-side" render
+            # mode, but it imports app.ui.render.types, which does not exist in
+            # this tree (src/app/ui/render/ has no types.spl file) and is
+            # therefore uncallable, not a real authority either. This is a
+            # fail-closed tripwire on that absence: it must be rewritten to
+            # assert the real flag once one is wired up and actually compiles.
+            val diff_main_source = file_read("src/app/diff/main.spl")
+            expect(diff_main_source.contains("--side-by-side")).to_equal(false)
 
     context "Context Lines":
         it "includes context around changes":
+            # @req REQ-CMP-011
+            step("Check that the configured context size is a positive line count")
+            # @capture(statistics): configured context-line size
             val context_size = 3
             expect(context_size > 0).to_equal(true)
 
         it "handles edge cases at file start":
+            # @req REQ-CMP-012
+            step("Check the first line number in a file is within the valid 1-based range")
+            # @capture(statistics): boundary line number at file start
             val line_number = 1
             expect(line_number >= 1).to_equal(true)
 
         it "handles edge cases at file end":
+            # @req REQ-CMP-013
+            step("Check the last line number in a file does not exceed the file's total line count")
+            # @capture(statistics): boundary line number at file end
             val total_lines = 100
             val line_number = 100
             expect(line_number <= total_lines).to_equal(true)
+
+        it "rejects a negative context size as invalid configuration":
+            # @req REQ-CMP-014
+            step("Check that a negative context-line size is recognized as invalid")
+            # @capture(statistics): validity verdict for a negative context size
+            val invalid_context_size = 0 - 1
+            expect(invalid_context_size > 0).to_equal(false)

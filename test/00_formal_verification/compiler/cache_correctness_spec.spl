@@ -1,4 +1,36 @@
-use std.spec.{describe, it, expect, context}
+"""
+## Purpose and audience
+Executable contract for the verification cache: fingerprint-keyed lookup and
+stale detection, the safety invariant that a changed fingerprint never returns
+a Verified entry, hit/miss/stale statistics, dependency-driven invalidation
+(direct, transitive, cycles, and field-wrapper semantics), fingerprint
+serialization round-trips, and simple_hash behaviour. Owned by the compiler
+verification team; anyone touching incremental verification reads this.
+
+## Operator workflow
+Run this spec after changing fingerprint construction, cache lookup, or
+invalidation propagation:
+`bin/simple test test/00_formal_verification/compiler/cache_correctness_spec.spl`.
+A failure names the cache invariant that broke.
+
+## Compatibility and limitations
+All scenarios run against private /tmp cache roots and in-memory fingerprints;
+no Lean toolchain is invoked. The stale-detection scenarios construct
+fingerprints directly rather than hashing real files, so they pin cache logic,
+not hash-file plumbing.
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A lookup returning a stale entry means the
+fingerprint comparison weakened — check VerificationCache.lookup first. A
+surviving dependent after invalidate_dependents means the transitive/cycle
+walk regressed; a round-trip failure points at Fingerprint.to_text/from_text.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
+use std.spec.{describe, it, expect, context, step}
 use verification.cache.{VerificationCache, CacheEntry, CacheStats}
 use verification.fingerprint.{Fingerprint, simple_hash, public_abi_fingerprint, accessor_fingerprint, field_wrapper_fingerprint, dependency_semantic_fingerprint}
 use verification.state.{VerificationState}
@@ -6,14 +38,21 @@ use verification.proof_unit.{ProofUnit}
 
 # @cover src/compiler_rust/lib/std/src/verification/cache.spl 80%
 
+# @manual_section: verification-cache-correctness
 describe "Verification Cache":
     it "returns nil for unknown entries":
+        # @req REQ-VCACHE-001
+        # @capture(protocol_json): lookup outcome for a path never stored
+        step("Look up an entry that was never stored")
         val cache = VerificationCache.new("/tmp/test-vcache-empty")
         val fp = Fingerprint.from_hashes("h1", "h2", [], "v4.x")
         val result = cache.lookup("unknown.spl", fp)
         expect(result).to_be_nil()
 
     it "stores and retrieves an entry with matching fingerprint":
+        # @req REQ-VCACHE-002
+        # @capture(protocol_json): stored entry retrieved under an identical fingerprint
+        step("Store an entry and retrieve it under the same fingerprint")
         var cache = VerificationCache.new("/tmp/test-vcache-store")
         val fp = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
         cache.store("my_module.spl", fp, VerificationState.Verified, {}, "v4.x")
@@ -27,6 +66,9 @@ describe "Verification Cache":
                 expect("nil cache entry").to_equal("stored cache entry")
 
     it "returns nil when fingerprint has changed (stale detection)":
+        # @req REQ-VCACHE-003
+        # @capture(protocol_json): stale lookup outcome after the source hash changes
+        step("Look up a stored entry under a changed fingerprint")
         var cache = VerificationCache.new("/tmp/test-vcache-stale")
         val fp_old = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
         cache.store("stale_module.spl", fp_old, VerificationState.Verified, {}, "v4.x")
@@ -36,6 +78,9 @@ describe "Verification Cache":
         expect(result).to_be_nil()
 
     it "never returns a Verified result when fingerprint mismatches":
+        # @req REQ-VCACHE-004
+        # @capture(bit_table): combined-hash inequality proof for the original and modified fingerprints
+        step("Prove a Verified entry is unreachable under a changed fingerprint")
         var cache = VerificationCache.new("/tmp/test-vcache-safety")
         val fp_original = Fingerprint.from_hashes("original", "lean_ok", [], "v4.x")
         cache.store("safety.spl", fp_original, VerificationState.Verified, {}, "v4.x")
@@ -49,6 +94,9 @@ describe "Verification Cache":
         expect(result).to_be_nil()
 
     it "tracks cache statistics for hits and misses":
+        # @req REQ-VCACHE-005
+        # @capture(statistics): hit/miss/stale/total counters after one of each lookup kind
+        step("Record one hit, one miss, and one stale lookup")
         var cache = VerificationCache.new("/tmp/test-vcache-stats")
         val fp = Fingerprint.from_hashes("s1", "l1", [], "v4.x")
         cache.store("hit.spl", fp, VerificationState.Verified, {}, "v4.x")
@@ -62,21 +110,27 @@ describe "Verification Cache":
         cache.lookup("hit.spl", fp2)
 
         val s = cache.stats()
-        expect(s.hits).to_equal(1)
-        expect(s.misses).to_equal(1)
-        expect(s.stale).to_equal(1)
-        expect(s.total_entries).to_equal(1)
+        expect(s.hits).to_equal(1)  # oracle: exactly one fingerprint-matching lookup was made
+        expect(s.misses).to_equal(1)  # oracle: exactly one unknown-path lookup was made
+        expect(s.stale).to_equal(1)  # oracle: exactly one changed-fingerprint lookup was made
+        expect(s.total_entries).to_equal(1)  # oracle: only hit.spl was ever stored
 
     it "formats cache stats as human-readable text":
+        # @req REQ-VCACHE-006
+        # @capture(protocol_json): formatted CacheStats line for a mixed hit/miss/stale profile
+        step("Render cache statistics as text")
         val s = CacheStats(total_entries: 5, hits: 3, misses: 1, stale: 1)
         val formatted = s.format()
-        expect(formatted).to_contain("5 entries")
-        expect(formatted).to_contain("3 hits")
-        expect(formatted).to_contain("1 misses")
-        expect(formatted).to_contain("1 stale")
+        expect(formatted).to_contain("5 entries")  # oracle: the fixture declares total_entries=5
+        expect(formatted).to_contain("3 hits")  # oracle: the fixture declares hits=3
+        expect(formatted).to_contain("1 misses")  # oracle: the fixture declares misses=1
+        expect(formatted).to_contain("1 stale")  # oracle: the fixture declares stale=1
 
     context "invalidate_dependents":
         it "removes cached entries for units depending on changed module":
+            # @req REQ-VCACHE-007
+            # @capture(protocol_json): survivor/invalidated split after a direct-dependency invalidation
+            step("Invalidate the direct dependent of a changed module")
             var cache = VerificationCache.new("/tmp/test-vcache-invalidate")
             val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
             val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
@@ -103,6 +157,9 @@ describe "Verification Cache":
             expect(result_b).to_be_nil()
 
         it "removes transitive dependents of a changed module":
+            # @req REQ-VCACHE-008
+            # @capture(protocol_json): transitively invalidated entries two hops from the change
+            step("Invalidate a dependent two hops from the changed module")
             var cache = VerificationCache.new("/tmp/test-vcache-invalidate-transitive")
             val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
             val fp_c = Fingerprint.from_hashes("c", "lc", [], "v4.x")
@@ -120,6 +177,9 @@ describe "Verification Cache":
             expect(cache.lookup("c.spl", fp_c)).to_be_nil()
 
         it "removes all cached members of a dependent cycle":
+            # @req REQ-VCACHE-009
+            # @capture(bit_table): mutual-dependency cycle fully invalidated from one member
+            step("Invalidate both members of a two-module dependency cycle")
             var cache = VerificationCache.new("/tmp/test-vcache-invalidate-cycle")
             val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
             val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
@@ -137,6 +197,9 @@ describe "Verification Cache":
             expect(cache.lookup("b.spl", fp_b)).to_be_nil()
 
         it "removes field-wrapper semantic dependents and wrapped-reference cycles":
+            # @req REQ-VCACHE-010
+            # @capture(bit_table): field-wrapper semantic edge and source-edge cycle both invalidated
+            step("Invalidate through a field-wrapper semantic edge and a source cycle")
             var cache = VerificationCache.new("/tmp/test-vcache-field-wrapper-cycle")
             val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
             val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
@@ -155,39 +218,57 @@ describe "Verification Cache":
 
     context "clear":
         it "empties the cache completely":
+            # @req REQ-VCACHE-011
+            # @capture(statistics): entry/hit counters before and after clear
+            step("Clear a cache holding two entries")
             var cache = VerificationCache.new("/tmp/test-vcache-clear")
             val fp = Fingerprint.from_hashes("x", "y", [], "v4.x")
             cache.store("one.spl", fp, VerificationState.Verified, {}, "v4.x")
             cache.store("two.spl", fp, VerificationState.Failed, {}, "v4.x")
-            expect(cache.stats().total_entries).to_equal(2)
+            expect(cache.stats().total_entries).to_equal(2)  # oracle: two entries were stored before clear
 
             cache.clear()
-            expect(cache.stats().total_entries).to_equal(0)
-            expect(cache.stats().hits).to_equal(0)
+            expect(cache.stats().total_entries).to_equal(0)  # oracle: clear must remove every entry
+            expect(cache.stats().hits).to_equal(0)  # oracle: a cleared cache must reset its hit counter
 
     context "Fingerprint":
         it "produces deterministic hashes for identical input":
+            # @req REQ-VCACHE-012
+            # @capture(bit_table): identical fingerprints matching field-for-field
+            step("Fingerprint the same inputs twice and compare")
             val fp1 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
             val fp2 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
             expect(fp1.matches(fp2)).to_be(true)
             expect(fp1.combined).to_equal(fp2.combined)
 
         it "produces different hashes for different input":
+            # @req REQ-VCACHE-013
+            # @capture(bit_table): divergent combined hashes for differing source inputs
+            step("Fingerprint two different sources and compare")
             val fp1 = Fingerprint.from_hashes("src_a", "lean", [], "v4.x")
             val fp2 = Fingerprint.from_hashes("src_b", "lean", [], "v4.x")
             expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "includes toolchain version in fingerprint":
+            # @req REQ-VCACHE-014
+            # @capture(bit_table): combined-hash divergence driven by the toolchain version alone
+            step("Fingerprint under two toolchain versions")
             val fp1 = Fingerprint.from_hashes("src", "lean", [], "v4.3.0")
             val fp2 = Fingerprint.from_hashes("src", "lean", [], "v4.4.0")
             expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "includes dependency hashes in fingerprint":
+            # @req REQ-VCACHE-015
+            # @capture(bit_table): combined-hash divergence driven by a dependency hash alone
+            step("Fingerprint with two versions of the same dependency")
             val fp1 = Fingerprint.from_hashes("src", "lean", ["dep_v1"], "v4.x")
             val fp2 = Fingerprint.from_hashes("src", "lean", ["dep_v2"], "v4.x")
             expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "includes public ABI accessor and field-wrapper semantic hashes":
+            # @req REQ-VCACHE-016
+            # @capture(bit_table): semantic fingerprint chain diverging on one accessor body
+            step("Diverge one accessor body and recompute the semantic chain")
             val abi_v1 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
             val get_v1 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
             val set_v1 = accessor_fingerprint("B", "set_value", "fn(WrappedA) -> void", "body:v1")
@@ -205,6 +286,9 @@ describe "Verification Cache":
             expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "fails closed when only public ABI accessor semantics change":
+            # @req REQ-VCACHE-017
+            # @capture(protocol_json): stale lookup outcome when only an accessor body hash changed
+            step("Reject a cached entry after an accessor-only semantic change")
             var cache = VerificationCache.new("/tmp/test-vcache-semantic-field-wrapper")
             val abi_v1 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
             val get_v1 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
@@ -224,6 +308,9 @@ describe "Verification Cache":
             expect(cache.lookup("a_depends_on_b.spl", fp_v2)).to_be_nil()
 
         it "round-trips through to_text and from_text":
+            # @req REQ-VCACHE-018
+            # @capture(protocol_json): fingerprint fields before and after text round-trip
+            step("Serialize a fingerprint and restore it from text")
             val sem = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
             val fp = Fingerprint.from_hashes_with_semantics("abc", "def", ["g1", "g2"], [sem], "v4.x")
             val serialized = fp.to_text()
@@ -234,25 +321,37 @@ describe "Verification Cache":
                     expect(fp2.source_hash).to_equal("abc")
                     expect(fp2.lean_hash).to_equal("def")
                     expect(fp2.semantic_hashes).to_equal([sem])
-                    expect(fp2.toolchain_version).to_equal("v4.x")
+                    expect(fp2.toolchain_version).to_equal("v4.x")  # oracle: the fixture was built with toolchain v4.x
                 case nil:
                     expect("nil fingerprint").to_equal("restored fingerprint")
 
         it "returns nil for malformed text":
+            # @req REQ-VCACHE-019
+            # @capture(protocol_json): parse outcome for truncated fingerprint text
+            step("Refuse to parse truncated fingerprint text")
             val result = Fingerprint.from_text("incomplete")
             expect(result).to_be_nil()
 
     context "simple_hash":
         it "returns consistent results for same input":
+            # @req REQ-VCACHE-020
+            # @capture(bit_table): repeated simple_hash digests for identical input
+            step("Hash the same input twice and compare")
             val h1 = simple_hash("hello world")
             val h2 = simple_hash("hello world")
             expect(h1).to_equal(h2)
 
         it "returns different results for different input":
+            # @req REQ-VCACHE-021
+            # @capture(bit_table): divergent simple_hash digests for differing inputs
+            step("Hash two different inputs and compare")
             val h1 = simple_hash("hello")
             val h2 = simple_hash("world")
             expect(h1).to_not_equal(h2)
 
         it "handles empty string":
+            # @req REQ-VCACHE-022
+            # @capture(bit_table): simple_hash digest length for the empty input
+            step("Hash the empty string and check the digest is non-empty")
             val h = simple_hash("")
-            expect(h.len() > 0).to_be(true)
+            expect(h.len() > 0).to_be(true)  # oracle: even the empty input must yield a non-empty digest

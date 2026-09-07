@@ -1,0 +1,150 @@
+#!/bin/sh
+# Runs the CI "Code Idiom & Structural Ratchet Gates" job LOCALLY, before push.
+#
+# WHY THIS EXISTS
+#
+# That job is the required check on every PR, and it is the one that gates
+# landing: measured 2026-09-06, 22 open PRs sat BLOCKED on it at once with 41
+# workflow runs queued. Every one of its steps is an ordinary
+# scripts/check/*.shs that runs fine on this machine, so discovering a failure
+# from CI is a round trip we never had to take -- push, wait in a shared queue,
+# read a red check, fix, push again. Worse, the repo ruleset sets
+# strict_required_status_checks_policy=true, so every merge invalidates every
+# other PR's check and the queue is re-run: a failure found remotely costs the
+# whole queue, not just one PR.
+#
+# THE GATE LIST IS DERIVED, NOT COPIED
+#
+# The steps are extracted from .github/workflows/repo-hygiene.yml at runtime.
+# A hardcoded copy would drift the moment someone edits the workflow, and a
+# local gate that silently checks a DIFFERENT set than CI is worse than no
+# local gate -- it manufactures false confidence. Deriving means the two cannot
+# disagree; if the workflow gains a step, this picks it up on the next run.
+#
+# Verdict is the last line of stdout, same convention as scripts/check/*:
+#   PASS  -- <n> gate(s) ran, 0 failed                      exit 0
+#   FAIL  -- <n> gate(s) ran, <k> failed: <names>            exit 1
+#   ERROR -- nothing was checked (<reason>)                  exit 2
+#
+# Non-vacuity is absolute: extracting 0 gates is ERROR, never a pass -- a
+# parse that silently matches nothing is exactly how this would rot into a
+# green no-op.
+#
+# Usage:
+#   sh scripts/check/check-code-idiom-local.shs            # run every gate
+#   sh scripts/check/check-code-idiom-local.shs --list      # print the gate list only
+#   GATE_TIMEOUT=120 sh scripts/check/check-code-idiom-local.shs
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+cd "$ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+WORKFLOW=$ROOT/.github/workflows/repo-hygiene.yml
+GATE_TIMEOUT=${GATE_TIMEOUT:-300}
+MODE=run
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --list) MODE=list; shift ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-code-idiom-local.shs [--list]"
+            echo "  Runs the CI Code Idiom job's gates locally. GATE_TIMEOUT caps each gate."
+            exit 0 ;;
+        *) echo "ERROR -- nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+[ -f "$WORKFLOW" ] || { echo "ERROR -- nothing was checked (missing $WORKFLOW)"; exit 2; }
+
+# Extract the Code Idiom job's script invocations.
+#
+# Anchored on the JOB KEY (`  code-idiom-gates:`), not on the display name, and
+# terminated by the next top-level job key at the same indent. Getting this
+# range wrong is not a cosmetic bug: a range that runs past the job's end sweeps
+# in the SEPARATE `advisory-gates:` job, whose 16 gates are deliberately
+# "honestly RED, not yet blocking" and are NOT a required check. Measured
+# 2026-09-06 a sloppier pattern reported 44 gates where the required job has 29,
+# which would have made this gate fail on advisory debt and be routed around.
+JOB_KEY=$(awk '/name: Code Idiom/{print NR; exit}' "$WORKFLOW")
+[ -n "$JOB_KEY" ] || { echo "ERROR -- nothing was checked (no 'Code Idiom' job in $WORKFLOW)"; exit 2; }
+GATES=$(awk -v start="$JOB_KEY" '
+        NR >= start {
+            if (NR > start && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/) exit
+            print
+        }' "$WORKFLOW" \
+    | grep -oE "sh scripts/[a-zA-Z0-9_./-]+\.shs.*$" \
+    | sed -e 's/^sh //' -e 's/[[:space:]]*$//' | sort -u)
+
+n_total=$(printf '%s\n' "$GATES" | grep -c '[^[:space:]]')
+[ "$n_total" -gt 0 ] || { echo "ERROR -- nothing was checked (extracted 0 gates from $WORKFLOW)"; exit 2; }
+
+if [ "$MODE" = list ]; then
+    printf '%s\n' "$GATES"
+    echo "PASS -- $n_total gate(s) listed, 0 failed"
+    exit 0
+fi
+
+# Entries are full command lines (script + arguments), so everything below is
+# line-oriented: `for g in $GATES` would word-split "foo.shs --self-test" into
+# two bogus gates.
+missing=0
+printf '%s\n' "$GATES" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    script=${line%% *}
+    [ -f "$ROOT/$script" ] || echo "missing script: $script"
+done > "${TMPDIR:-/tmp}/code-idiom-missing.$$" 2>/dev/null
+missing=$(grep -c . "${TMPDIR:-/tmp}/code-idiom-missing.$$" 2>/dev/null || echo 0)
+if [ "$missing" -gt 0 ]; then cat "${TMPDIR:-/tmp}/code-idiom-missing.$$" >&2; fi
+rm -f "${TMPDIR:-/tmp}/code-idiom-missing.$$"
+if [ "$missing" -gt 0 ]; then
+    echo "ERROR -- nothing was checked ($missing gate script(s) named by the workflow are absent)"
+    exit 2
+fi
+
+GATE_OUT=$(mktemp "${TMPDIR:-/tmp}/code-idiom-gate.XXXXXX") || {
+    echo "ERROR -- nothing was checked (cannot create temp file)"; exit 2; }
+trap 'rm -f "$GATE_OUT"' EXIT INT TERM
+
+ran=0
+failed=0
+failed_names=""
+GATE_LIST=$(mktemp "${TMPDIR:-/tmp}/code-idiom-list.XXXXXX") || {
+    echo "ERROR -- nothing was checked (cannot create temp file)"; exit 2; }
+printf '%s\n' "$GATES" > "$GATE_LIST"
+
+while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    # Gate output goes to a FILE, never to `out=$(...)` command substitution.
+    # Measured 2026-09-06: with command substitution this loop hung forever on
+    # the first gate despite GATE_TIMEOUT -- `timeout` kills its direct child,
+    # but the gate's surviving grandchildren keep the substitution's stdout pipe
+    # open, and the shell blocks until every writer closes it. The timeout looks
+    # armed and is not. -k sends SIGKILL after a grace period so a gate that
+    # ignores SIGTERM still dies.
+    #
+    # Status is read directly into a variable on the line after the command,
+    # never through a pipe: a pipeline's $? is the last stage's status and has
+    # produced false greens in this repo before.
+    timeout -k 5 "$GATE_TIMEOUT" sh -c "cd \"$ROOT\" && sh $g" > "$GATE_OUT" 2>&1 < /dev/null
+    rc=$?
+    out=$(cat "$GATE_OUT" 2>/dev/null)
+    ran=$((ran + 1))
+    verdict=$(printf '%s\n' "$out" | tail -1 | cut -c1-100)
+    if [ "$rc" -eq 0 ]; then
+        echo "ok   $g"
+    elif [ "$rc" -eq 124 ]; then
+        echo "TIME $g (exceeded GATE_TIMEOUT=${GATE_TIMEOUT}s)"
+        failed=$((failed + 1)); failed_names="$failed_names $g"
+    else
+        echo "FAIL $g (exit $rc) :: $verdict"
+        failed=$((failed + 1)); failed_names="$failed_names $g"
+    fi
+done < "$GATE_LIST"
+rm -f "$GATE_LIST"
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL -- $ran gate(s) ran,$failed failed:$failed_names"
+    exit 1
+fi
+echo "PASS -- $ran gate(s) ran, 0 failed"
+exit 0

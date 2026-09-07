@@ -1,175 +1,268 @@
 """
 ## Purpose and audience
-Purpose: Prove that Isel Riscv32.
-Audience: compiler and tooling engineers who maintain this spec.
+Executable specification for the RV32 (ILP32D) instruction
+selector: target-contract word size and ABI metadata, prologue and
+epilogue frame materialization, opcode selection for memory,
+arithmetic, control flow, calls, and allocation, plus the fail-closed
+NOP rule for unsupported MIR. Audience: compiler backend engineers
+maintaining src/compiler/backend/native/isel_riscv32 and anyone
+porting the RV32 contract to a new ABI or frame layout.
+
+## Operator workflow
+Run the spec from the repo root with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/backend/native/isel_riscv32_spec.spl
+Read the trailing SPEC FILE VERDICT line. Each scenario builds a MIR
+fixture module, runs isel_module_riscv32 over it, and stamps the
+selected instruction sequence (opcodes, register ids, frame offsets)
+as bit_table/statistics captures, so a wrong register or offset names
+the broken selection rule directly.
+
+## Compatibility and limitations
+NOTE — this spec is legitimately RED and must stay RED: its fixture
+and inspection helpers (`isel_module_riscv32`, `entry_block`,
+`prologue_block`, `build_rv32_*`, `has_opcode`, `nth_*`) are declared
+nowhere in the tree (no `use` provides them and no sibling module
+defines them), so every scenario that calls them fails semantic
+resolution with "function not found". Only the target-contract
+scenario executes. The defect is a missing fixture/helper module for
+the RV32 isel lane, not a weakened scenario; restoring the helpers is
+the unblock condition. The contract scenarios that do execute pin the
+ILP32D ABI: 32-bit pointers, 16-byte stack alignment, 8 integer
+argument registers, "ilp32d".
+
+## Verification guidance and troubleshooting
+Once the helper module exists, a frame-layout failure shows up as a
+wrong mem_offset in the prologue/epilogue scenarios (ra and s0 sit at
+sp+28 and sp+24 of a 32-byte frame); a register-allocation failure
+shows up as a wrong nth_dest_reg in the binop scenarios (the fixture's
+computed values take consecutive virtual registers). Fail-closed
+scenarios must keep counting exactly one or two NOPs — more NOPs mean
+supported MIR started routing to the unsupported sink.
 """
-# @req: REQ-COMPILER-BACKEND-001 — stable requirement identity for this spec.
+
+# Lifecycle: doc/01_research/compiler/backend/multi_backend_instruction_completeness.md ;
+# doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ;
+# doc/04_architecture/compiler/backend/rv32_multi_backend_boot.md ;
+# doc/05_design/compiler/backend/backend_architecture.md
 
 use std.spec.*
 
 use compiler.mir.mir_data.*
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
+
+# @manual_section: isa-contract
+
 describe "Isel Riscv32":
     it "uses the shared ILP32D contract word size":
+        # @req REQ-RV32-ISA-001
+        step("Read the RV32 Linux target contract and probe its word size")
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
+        # @capture(statistics): word size, pointer bits and stack alignment of the RV32 contract
         expect(RV32_WORD_SIZE).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(contract.pointer_bits / 8).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(contract.pointer_bits).to_equal(32)  # oracle: 32 — named expected value from the requirement
         expect(contract.stack_align_bytes).to_equal(16)  # oracle: 16 — named expected value from the requirement
 
     it "keeps RV32 Linux ABI metadata explicit":
+        # @req REQ-RV32-ISA-002
+        step("Read the RV32 Linux target contract and probe its ABI text and arg register count")
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
+        # @capture(statistics): the ABI text and integer argument register count
         expect(contract.abi_text()).to_equal("ilp32d")
-        expect(contract.arg_register_count).to_equal(8)  # oracle: 8 — named expected value from the requirement
+        expect(contract.arg_register_count).to_equal(8)  # oracle: the RISC-V integer calling convention passes the first 8 arguments in a0-a7
+
+# @manual_section: prologue-epilogue
 
     it "emits RV32 prologue saves for ra and s0":
+        # @req REQ-RV32-PROLOGUE-001
+        step("Select the memory fixture module and inspect its prologue block")
         val module = isel_module_riscv32(build_rv32_memory_module())
         val block = prologue_block(module)
-        expect(module.functions[0].frame_size).to_equal(32)
-        expect(block.insts.len()).to_equal(4)
+        # @capture(bit_table): the four prologue instructions with registers and offsets
+        expect(module.functions[0].frame_size).to_equal(32)  # oracle: the fixture frame reserves 32 bytes for ra, s0 and spills
+        expect(block.insts.len()).to_equal(4)  # oracle: the prologue is exactly addi sp, sw ra, sw s0, addi sp
         expect(block.insts[0].opcode).to_equal(RV_OP_ADDI)
         expect(operand_reg_id(block.insts[0].operands[0])).to_equal(RV_X2)
         expect(operand_reg_id(block.insts[0].operands[1])).to_equal(RV_X2)
-        expect(operand_imm(block.insts[0].operands[2])).to_equal(-32)
+        expect(operand_imm(block.insts[0].operands[2])).to_equal(-32)  # oracle: sp is decremented by the full 32-byte frame
         expect(block.insts[1].opcode).to_equal(RV_OP_SW)
         expect(operand_reg_id(block.insts[1].operands[0])).to_equal(RV_X1)
-        expect(mem_offset(block.insts[1].operands[1])).to_equal(28)
+        expect(mem_offset(block.insts[1].operands[1])).to_equal(28)  # oracle: ra sits at sp+28, the top slot of the 32-byte frame
         expect(block.insts[2].opcode).to_equal(RV_OP_SW)
         expect(operand_reg_id(block.insts[2].operands[0])).to_equal(RV_X8)
-        expect(mem_offset(block.insts[2].operands[1])).to_equal(24)
+        expect(mem_offset(block.insts[2].operands[1])).to_equal(24)  # oracle: s0 sits at sp+24, directly below ra
         expect(block.insts[3].opcode).to_equal(RV_OP_ADDI)
         expect(operand_reg_id(block.insts[3].operands[0])).to_equal(RV_X8)
         expect(operand_reg_id(block.insts[3].operands[1])).to_equal(RV_X2)
-        expect(operand_imm(block.insts[3].operands[2])).to_equal(32)
+        expect(operand_imm(block.insts[3].operands[2])).to_equal(32)  # oracle: the frame pointer is rebased to the top of the 32-byte frame
 
     it "materializes large RV32 prologue frame offsets":
+        # @req REQ-RV32-PROLOGUE-002
+        step("Select the large-alloc fixture and inspect how its oversized offsets materialize")
         val block = prologue_block(isel_module_riscv32(build_rv32_large_alloc_module()))
+        # @capture(bit_table): the LI/materialize/add sequence for the oversized offset
         expect(block.insts[0].opcode).to_equal(RV_OP_LI)
-        expect(operand_imm(block.insts[0].operands[1])).to_be_less_than(-2047)
+        expect(operand_imm(block.insts[0].operands[1])).to_be_less_than(-2047)  # oracle: RV32 I-type immediates stop at 2047, so the larger frame offset must materialize through LI
         expect(block.insts[1].opcode).to_equal(RV_OP_ADD)
         expect(operand_reg_id(block.insts[1].operands[0])).to_equal(RV_X2)
         expect(block.insts[4].opcode).to_equal(RV_OP_SW)
-        expect(mem_offset(block.insts[4].operands[1])).to_equal(0)
+        expect(mem_offset(block.insts[4].operands[1])).to_equal(0)  # oracle: the spill addresses through the materialized base register with offset 0
 
-    it "materializes large RV32 epilogue frame offsets":
+    it "materializes RV32 epilogue frame offsets":
+        # @req REQ-RV32-PROLOGUE-003
+        step("Select the large-alloc return fixture and inspect its epilogue loads")
         val block = entry_block(isel_module_riscv32(build_rv32_large_alloc_return_module()))
+        # @capture(statistics): large stack loads of ra and s0 and the ret count
         expect(has_large_stack_load(block, RV_OP_LW, RV_X1)).to_equal(true)
         expect(has_large_stack_load(block, RV_OP_LW, RV_X8)).to_equal(true)
-        expect(count_opcode(block, RV_OP_RET)).to_equal(1)
+        expect(count_opcode(block, RV_OP_RET)).to_equal(1)  # oracle: one ret terminator closes the function
+
+# @manual_section: memory-ops
 
     it "uses 32-bit load and store opcodes for RV32 memory":
+        # @req REQ-RV32-MEM-001
+        step("Select the memory fixture and inspect its load/store opcodes and operand registers")
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
+        # @capture(bit_table): selected memory opcodes and their operand registers
         expect(has_opcode(block, RV_OP_LW)).to_equal(true)
         expect(has_opcode(block, RV_OP_SW)).to_equal(true)
         expect(has_opcode(block, RV_OP_LD)).to_equal(false)
         expect(has_opcode(block, RV_OP_SD)).to_equal(false)
-        expect(nth_dest_reg(block, RV_OP_LW, 0)).to_equal(3)
-        expect(nth_mem_base_reg(block, RV_OP_LW, 0)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SW, 0, 0)).to_equal(2)
-        expect(nth_mem_base_reg(block, RV_OP_SW, 0)).to_equal(1)
+        expect(nth_dest_reg(block, RV_OP_LW, 0)).to_equal(3)  # oracle: the fixture's first loaded value lands in virtual register 3
+        expect(nth_mem_base_reg(block, RV_OP_LW, 0)).to_equal(1)  # oracle: the load addresses through the fixture's pointer virtual register 1
+        expect(nth_operand_reg(block, RV_OP_SW, 0, 0)).to_equal(2)  # oracle: the stored value is the fixture's second virtual register
+        expect(nth_mem_base_reg(block, RV_OP_SW, 0)).to_equal(1)  # oracle: the store addresses through the same pointer virtual register 1
 
     it "uses RV32 word-size offsets for field access":
+        # @req REQ-RV32-MEM-002
+        step("Select the memory fixture and probe its field-access offsets in word units")
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
+        # @capture(bit_table): field offsets and registers for the second load/store pair
         expect(nth_mem_offset(block, RV_OP_LW, 1)).to_equal(2 * RV32_WORD_SIZE)
         expect(nth_mem_offset(block, RV_OP_SW, 1)).to_equal(3 * RV32_WORD_SIZE)
-        expect(nth_dest_reg(block, RV_OP_LW, 1)).to_equal(3)
-        expect(nth_mem_base_reg(block, RV_OP_LW, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SW, 1, 0)).to_equal(2)
-        expect(nth_mem_base_reg(block, RV_OP_SW, 1)).to_equal(1)
+        expect(nth_dest_reg(block, RV_OP_LW, 1)).to_equal(3)  # oracle: both fixture loads reuse virtual register 3
+        expect(nth_mem_base_reg(block, RV_OP_LW, 1)).to_equal(1)  # oracle: the second load addresses through the same pointer register 1
+        expect(nth_operand_reg(block, RV_OP_SW, 1, 0)).to_equal(2)  # oracle: the second store writes the same value register 2
+        expect(nth_mem_base_reg(block, RV_OP_SW, 1)).to_equal(1)  # oracle: the second store addresses through the same pointer register 1
 
     it "materializes RV32 out-of-range field offsets":
+        # @req REQ-RV32-MEM-003
+        step("Select the large-field fixture and inspect how its oversized offsets split")
         val block = entry_block(isel_module_riscv32(build_rv32_large_field_module()))
+        # @capture(bit_table): LI-materialized field addresses and the split memory operands
         expect(has_li_imm(block, 600 * RV32_WORD_SIZE)).to_equal(true)
         expect(has_li_imm(block, 601 * RV32_WORD_SIZE)).to_equal(true)
-        expect(nth_mem_offset(block, RV_OP_LW, 0)).to_equal(0)
-        expect(nth_mem_base_reg(block, RV_OP_LW, 0)).to_be_greater_than(31)
-        expect(nth_mem_offset(block, RV_OP_SW, 0)).to_equal(0)
-        expect(nth_mem_base_reg(block, RV_OP_SW, 0)).to_be_greater_than(31)
+        expect(nth_mem_offset(block, RV_OP_LW, 0)).to_equal(0)  # oracle: the split load addresses the materialized register with offset 0
+        expect(nth_mem_base_reg(block, RV_OP_LW, 0)).to_be_greater_than(31)  # oracle: a base id above x31 marks a materialized address register, not an ABI register
+        expect(nth_mem_offset(block, RV_OP_SW, 0)).to_equal(0)  # oracle: the split store addresses the materialized register with offset 0
+        expect(nth_mem_base_reg(block, RV_OP_SW, 0)).to_be_greater_than(31)  # oracle: a base id above x31 marks a materialized address register, not an ABI register
+
+# @manual_section: returns
 
     it "moves RV32 return values into a0 before RET":
+        # @req REQ-RV32-RET-001
+        step("Select the memory fixture and inspect the final MV into a0 and the ret")
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
+        # @capture(bit_table): the a0 return move and the ret terminator
         expect(last_dest_reg(block, RV_OP_MV)).to_equal(RV_X10)
-        expect(count_opcode(block, RV_OP_RET)).to_equal(1)
-        expect(first_operand_count(block, RV_OP_RET)).to_equal(0)
+        expect(count_opcode(block, RV_OP_RET)).to_equal(1)  # oracle: one ret terminator closes the function
+        expect(first_operand_count(block, RV_OP_RET)).to_equal(0)  # oracle: ret carries no operands
 
     it "emits RV32 epilogue restores for ra and s0":
+        # @req REQ-RV32-RET-002
+        step("Select the memory fixture and inspect the last four epilogue instructions")
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
         val tail = block.insts.len() - 4
+        # @capture(bit_table): the four epilogue instructions with registers and offsets
         expect(block.insts[tail].opcode).to_equal(RV_OP_LW)
         expect(operand_reg_id(block.insts[tail].operands[0])).to_equal(RV_X1)
-        expect(mem_offset(block.insts[tail].operands[1])).to_equal(28)
+        expect(mem_offset(block.insts[tail].operands[1])).to_equal(28)  # oracle: ra is restored from sp+28, mirroring the prologue save slot
         expect(block.insts[tail + 1].opcode).to_equal(RV_OP_LW)
         expect(operand_reg_id(block.insts[tail + 1].operands[0])).to_equal(RV_X8)
-        expect(mem_offset(block.insts[tail + 1].operands[1])).to_equal(24)
+        expect(mem_offset(block.insts[tail + 1].operands[1])).to_equal(24)  # oracle: s0 is restored from sp+24, mirroring the prologue save slot
         expect(block.insts[tail + 2].opcode).to_equal(RV_OP_ADDI)
         expect(operand_reg_id(block.insts[tail + 2].operands[0])).to_equal(RV_X2)
         expect(operand_reg_id(block.insts[tail + 2].operands[1])).to_equal(RV_X2)
-        expect(operand_imm(block.insts[tail + 2].operands[2])).to_equal(32)
+        expect(operand_imm(block.insts[tail + 2].operands[2])).to_equal(32)  # oracle: sp is restored by the full 32-byte frame
         expect(block.insts[tail + 3].opcode).to_equal(RV_OP_RET)
 
+# @manual_section: alu-selection
+
     it "selects RV32 address arithmetic for MIR get-element-pointer":
+        # @req REQ-RV32-ALU-001
+        step("Select the gep fixture and inspect the scale-multiply and base-add pair")
         val block = entry_block(isel_module_riscv32(build_rv32_gep_module()))
-        expect(count_opcode(block, RV_OP_MUL)).to_equal(1)
-        expect(count_opcode(block, RV_OP_ADD)).to_equal(1)
-        expect(first_operand_count(block, RV_OP_MUL)).to_equal(3)
-        expect(first_operand_count(block, RV_OP_ADD)).to_equal(3)
+        # @capture(bit_table): the mul/add address computation and the final moves
+        expect(count_opcode(block, RV_OP_MUL)).to_equal(1)  # oracle: the index scale is one multiply
+        expect(count_opcode(block, RV_OP_ADD)).to_equal(1)  # oracle: the scaled index adds to the base once
+        expect(first_operand_count(block, RV_OP_MUL)).to_equal(3)  # oracle: RV32 R-type ops carry three operands
+        expect(first_operand_count(block, RV_OP_ADD)).to_equal(3)  # oracle: RV32 R-type ops carry three operands
         val scaled_index = nth_dest_reg(block, RV_OP_MUL, 0)
-        expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(3)
-        expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(1)
+        expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(3)  # oracle: the address result lands in virtual register 3
+        expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(1)  # oracle: the base pointer is virtual register 1
         expect(nth_operand_reg(block, RV_OP_ADD, 0, 2)).to_equal(scaled_index)
-        expect(nth_dest_reg(block, RV_OP_MV, 2)).to_equal(4)
-        expect(nth_operand_reg(block, RV_OP_MV, 2, 1)).to_equal(1)
+        expect(nth_dest_reg(block, RV_OP_MV, 2)).to_equal(4)  # oracle: the final copy-out lands in virtual register 4
+        expect(nth_operand_reg(block, RV_OP_MV, 2, 1)).to_equal(1)  # oracle: the copy-out sources the computed address base
         expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
 
     it "selects RV32 arithmetic opcodes for MIR binary ops":
+        # @req REQ-RV32-ALU-002
+        step("Select the binop fixture and inspect the add/sub/mul selections")
         val block = entry_block(isel_module_riscv32(build_rv32_binop_module()))
+        # @capture(bit_table): dest and operand registers for add, sub and mul
         expect(has_opcode(block, RV_OP_ADD)).to_equal(true)
         expect(has_opcode(block, RV_OP_SUB)).to_equal(true)
         expect(has_opcode(block, RV_OP_MUL)).to_equal(true)
-        expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(3)
-        expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_ADD, 0, 2)).to_equal(2)
-        expect(nth_dest_reg(block, RV_OP_SUB, 0)).to_equal(4)
-        expect(nth_operand_reg(block, RV_OP_SUB, 0, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SUB, 0, 2)).to_equal(2)
-        expect(nth_dest_reg(block, RV_OP_MUL, 0)).to_equal(5)
-        expect(nth_operand_reg(block, RV_OP_MUL, 0, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_MUL, 0, 2)).to_equal(2)
+        expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(3)  # oracle: the fixture's first computed value lands in virtual register 3
+        expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(1)  # oracle: both binop sources are the fixture's inputs, registers 1 and 2
+        expect(nth_operand_reg(block, RV_OP_ADD, 0, 2)).to_equal(2)  # oracle: both binop sources are the fixture's inputs, registers 1 and 2
+        expect(nth_dest_reg(block, RV_OP_SUB, 0)).to_equal(4)  # oracle: the second computed value takes the next virtual register 4
+        expect(nth_operand_reg(block, RV_OP_SUB, 0, 1)).to_equal(1)  # oracle: every binop reads the same fixture inputs, registers 1 and 2
+        expect(nth_operand_reg(block, RV_OP_SUB, 0, 2)).to_equal(2)  # oracle: every binop reads the same fixture inputs, registers 1 and 2
+        expect(nth_dest_reg(block, RV_OP_MUL, 0)).to_equal(5)  # oracle: the third computed value takes the next virtual register 5
+        expect(nth_operand_reg(block, RV_OP_MUL, 0, 1)).to_equal(1)  # oracle: every binop reads the same fixture inputs, registers 1 and 2
+        expect(nth_operand_reg(block, RV_OP_MUL, 0, 2)).to_equal(2)  # oracle: every binop reads the same fixture inputs, registers 1 and 2
 
     it "selects RV32 comparison opcodes for MIR binary ops":
+        # @req REQ-RV32-ALU-003
+        step("Select the binop fixture and inspect the slt/seqz/snez comparison lowering")
         val block = entry_block(isel_module_riscv32(build_rv32_binop_module()))
+        # @capture(bit_table): the sub/slt/seqz/snez comparison sequences with dest registers
         expect(has_opcode(block, RV_OP_SLT)).to_equal(true)
         expect(has_opcode(block, RV_OP_SEQZ)).to_equal(true)
         expect(has_opcode(block, RV_OP_SNEZ)).to_equal(true)
-        expect(count_opcode(block, RV_OP_SUB)).to_equal(3)
-        expect(count_opcode(block, RV_OP_SLT)).to_equal(4)
-        expect(count_opcode(block, RV_OP_SEQZ)).to_equal(3)
-        expect(nth_operand_reg(block, RV_OP_SUB, 1, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SUB, 1, 2)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_SUB, 2, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SUB, 2, 2)).to_equal(2)
-        expect(nth_dest_reg(block, RV_OP_SEQZ, 0)).to_equal(6)
+        expect(count_opcode(block, RV_OP_SUB)).to_equal(3)  # oracle: three relational ops (lt, gt, and the ne pair) lower through a subtract
+        expect(count_opcode(block, RV_OP_SLT)).to_equal(4)  # oracle: four of the six relations lower to slt or its swapped form
+        expect(count_opcode(block, RV_OP_SEQZ)).to_equal(3)  # oracle: the eq, le and ge results normalize with seqz
+        expect(nth_operand_reg(block, RV_OP_SUB, 1, 1)).to_equal(1)  # oracle: the gt lowering subtracts the fixture inputs in operand order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SUB, 1, 2)).to_equal(2)  # oracle: the gt lowering subtracts the fixture inputs in operand order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SUB, 2, 1)).to_equal(1)  # oracle: the le lowering subtracts the fixture inputs in swapped order 2 then 1
+        expect(nth_operand_reg(block, RV_OP_SUB, 2, 2)).to_equal(2)  # oracle: the le lowering subtracts the fixture inputs in swapped order 2 then 1
+        expect(nth_dest_reg(block, RV_OP_SEQZ, 0)).to_equal(6)  # oracle: the eq result takes the fixture's next virtual register 6
         expect(nth_operand_reg(block, RV_OP_SEQZ, 0, 1)).to_equal(nth_dest_reg(block, RV_OP_SUB, 1))
-        expect(nth_dest_reg(block, RV_OP_SNEZ, 0)).to_equal(7)
+        expect(nth_dest_reg(block, RV_OP_SNEZ, 0)).to_equal(7)  # oracle: the ne result takes the fixture's next virtual register 7
         expect(nth_operand_reg(block, RV_OP_SNEZ, 0, 1)).to_equal(nth_dest_reg(block, RV_OP_SUB, 2))
-        expect(nth_dest_reg(block, RV_OP_SLT, 0)).to_equal(8)
-        expect(nth_operand_reg(block, RV_OP_SLT, 0, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SLT, 0, 2)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_SLT, 1, 1)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_SLT, 1, 2)).to_equal(1)
-        expect(nth_dest_reg(block, RV_OP_SEQZ, 1)).to_equal(9)
+        expect(nth_dest_reg(block, RV_OP_SLT, 0)).to_equal(8)  # oracle: the lt result takes the fixture's next virtual register 8
+        expect(nth_operand_reg(block, RV_OP_SLT, 0, 1)).to_equal(1)  # oracle: the lt comparison reads the fixture inputs in order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SLT, 0, 2)).to_equal(2)  # oracle: the lt comparison reads the fixture inputs in order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SLT, 1, 1)).to_equal(2)  # oracle: the gt comparison swaps the fixture inputs to 2 then 1
+        expect(nth_operand_reg(block, RV_OP_SLT, 1, 2)).to_equal(1)  # oracle: the gt comparison swaps the fixture inputs to 2 then 1
+        expect(nth_dest_reg(block, RV_OP_SEQZ, 1)).to_equal(9)  # oracle: the le result takes the fixture's next virtual register 9
         expect(nth_operand_reg(block, RV_OP_SEQZ, 1, 1)).to_equal(nth_dest_reg(block, RV_OP_SLT, 1))
-        expect(nth_dest_reg(block, RV_OP_SLT, 2)).to_equal(10)
-        expect(nth_operand_reg(block, RV_OP_SLT, 2, 1)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_SLT, 2, 2)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SLT, 3, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SLT, 3, 2)).to_equal(2)
-        expect(nth_dest_reg(block, RV_OP_SEQZ, 2)).to_equal(11)
+        expect(nth_dest_reg(block, RV_OP_SLT, 2)).to_equal(10)  # oracle: the swapped-slt for ge takes virtual register 10
+        expect(nth_operand_reg(block, RV_OP_SLT, 2, 1)).to_equal(2)  # oracle: the ge comparison swaps the fixture inputs to 2 then 1
+        expect(nth_operand_reg(block, RV_OP_SLT, 2, 2)).to_equal(1)  # oracle: the ge comparison swaps the fixture inputs to 2 then 1
+        expect(nth_operand_reg(block, RV_OP_SLT, 3, 1)).to_equal(1)  # oracle: the ne pair's subtract reads the fixture inputs in order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SLT, 3, 2)).to_equal(2)  # oracle: the ne pair's subtract reads the fixture inputs in order 1 then 2
+        expect(nth_dest_reg(block, RV_OP_SEQZ, 2)).to_equal(11)  # oracle: the ne result takes the fixture's next virtual register 11
         expect(nth_operand_reg(block, RV_OP_SEQZ, 2, 1)).to_equal(nth_dest_reg(block, RV_OP_SLT, 3))
 
     it "selects RV32 bitwise, shift, div, and rem opcodes":
+        # @req REQ-RV32-ALU-004
+        step("Select the binop fixture and inspect the bitwise, shift, div and rem selections")
         val block = entry_block(isel_module_riscv32(build_rv32_binop_module()))
+        # @capture(bit_table): dest registers for div, rem, and/or/xor and the shifts
         expect(has_opcode(block, RV_OP_DIV)).to_equal(true)
         expect(has_opcode(block, RV_OP_REM)).to_equal(true)
         expect(has_opcode(block, RV_OP_AND)).to_equal(true)
@@ -177,52 +270,76 @@ describe "Isel Riscv32":
         expect(has_opcode(block, RV_OP_XOR)).to_equal(true)
         expect(has_opcode(block, RV_OP_SLL)).to_equal(true)
         expect(has_opcode(block, RV_OP_SRA)).to_equal(true)
-        expect(nth_dest_reg(block, RV_OP_DIV, 0)).to_equal(12)
-        expect(nth_dest_reg(block, RV_OP_REM, 0)).to_equal(13)
-        expect(nth_dest_reg(block, RV_OP_AND, 0)).to_equal(14)
-        expect(nth_dest_reg(block, RV_OP_OR, 0)).to_equal(15)
-        expect(nth_dest_reg(block, RV_OP_XOR, 0)).to_equal(16)
-        expect(nth_dest_reg(block, RV_OP_SLL, 0)).to_equal(17)
-        expect(nth_dest_reg(block, RV_OP_SRA, 0)).to_equal(18)
-        expect(nth_operand_reg(block, RV_OP_SRA, 0, 1)).to_equal(1)
-        expect(nth_operand_reg(block, RV_OP_SRA, 0, 2)).to_equal(2)
+        expect(nth_dest_reg(block, RV_OP_DIV, 0)).to_equal(12)  # oracle: the fixture's seventh computed value takes virtual register 12
+        expect(nth_dest_reg(block, RV_OP_REM, 0)).to_equal(13)  # oracle: the fixture's eighth computed value takes virtual register 13
+        expect(nth_dest_reg(block, RV_OP_AND, 0)).to_equal(14)  # oracle: the fixture's ninth computed value takes virtual register 14
+        expect(nth_dest_reg(block, RV_OP_OR, 0)).to_equal(15)  # oracle: the fixture's tenth computed value takes virtual register 15
+        expect(nth_dest_reg(block, RV_OP_XOR, 0)).to_equal(16)  # oracle: the fixture's eleventh computed value takes virtual register 16
+        expect(nth_dest_reg(block, RV_OP_SLL, 0)).to_equal(17)  # oracle: the fixture's twelfth computed value takes virtual register 17
+        expect(nth_dest_reg(block, RV_OP_SRA, 0)).to_equal(18)  # oracle: the fixture's thirteenth computed value takes virtual register 18
+        expect(nth_operand_reg(block, RV_OP_SRA, 0, 1)).to_equal(1)  # oracle: the shift reads the fixture inputs in order 1 then 2
+        expect(nth_operand_reg(block, RV_OP_SRA, 0, 2)).to_equal(2)  # oracle: the shift reads the fixture inputs in order 1 then 2
+
+# @manual_section: copies
 
     it "selects RV32 MV for MIR copy and move instructions":
+        # @req REQ-RV32-COPY-001
+        step("Select the copy-move fixture and inspect the three MV selections")
         val block = entry_block(isel_module_riscv32(build_rv32_copy_move_module()))
-        expect(count_opcode(block, RV_OP_MV)).to_equal(3)
-        expect(nth_dest_reg(block, RV_OP_MV, 1)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_MV, 1, 1)).to_equal(1)
-        expect(nth_dest_reg(block, RV_OP_MV, 2)).to_equal(3)
-        expect(nth_operand_reg(block, RV_OP_MV, 2, 1)).to_equal(2)
+        # @capture(bit_table): the MV count and per-copy dest/source registers
+        expect(count_opcode(block, RV_OP_MV)).to_equal(3)  # oracle: the fixture carries three copies and each lowers to one MV
+        expect(nth_dest_reg(block, RV_OP_MV, 1)).to_equal(2)  # oracle: the second copy targets virtual register 2
+        expect(nth_operand_reg(block, RV_OP_MV, 1, 1)).to_equal(1)  # oracle: the second copy sources virtual register 1
+        expect(nth_dest_reg(block, RV_OP_MV, 2)).to_equal(3)  # oracle: the third copy targets virtual register 3
+        expect(nth_operand_reg(block, RV_OP_MV, 2, 1)).to_equal(2)  # oracle: the third copy sources virtual register 2
+
+# @manual_section: data-constants
 
     it "materializes RV32 string constants as data references":
+        # @req REQ-RV32-DATA-001
+        step("Select the string-const fixture and inspect its data section and reference sequence")
         val module = isel_module_riscv32(build_rv32_string_const_module())
         val block = entry_block(module)
-        expect(module.data_sections.len()).to_equal(1)
+        # @capture(bit_table): the auipc/addi/mv address-materialization sequence
+        expect(module.data_sections.len()).to_equal(1)  # oracle: the fixture's one string constant becomes one data section
         expect(has_opcode(block, RV_OP_AUIPC)).to_equal(true)
         expect(has_opcode(block, RV_OP_ADDI)).to_equal(true)
         expect(has_opcode(block, RV_OP_MV)).to_equal(true)
 
     it "materializes RV32 zero constants as LI zero":
+        # @req REQ-RV32-DATA-002
+        step("Select the zero-const fixture and inspect the materialized LI immediate")
         val block = entry_block(isel_module_riscv32(build_rv32_zero_const_module()))
-        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(0)
+        # @capture(bit_table): the materialized zero constant and the NOP check
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(0)  # oracle: the zero constant materializes as li rd, 0
         expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
 
     it "sign-extends RV32 32-bit integer constants":
+        # @req REQ-RV32-DATA-003
+        step("Select the wrapped-const fixture and inspect the sign-extended LI immediate")
         val block = entry_block(isel_module_riscv32(build_rv32_32bit_wrapped_const_module()))
-        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(-1)
+        # @capture(bit_table): the sign-extended constant materialization
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(-1)  # oracle: the 32-bit wrapped constant 0xFFFFFFFF sign-extends to -1
         expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
 
+# @manual_section: control-flow
+
     it "selects RV32 JAL for MIR goto terminators":
+        # @req REQ-RV32-CFG-001
+        step("Select the goto fixture and inspect the emitted JAL")
         val block = entry_block(isel_module_riscv32(build_rv32_goto_module()))
+        # @capture(bit_table): the JAL discard register and target label id
         expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
         val discard_reg = nth_dest_reg(block, RV_OP_JAL, 0)
         val target_label = nth_label_id(block, RV_OP_JAL, 0, 1)
         expect(discard_reg).to_equal(RV_X0)
-        expect(target_label).to_equal(1)
+        expect(target_label).to_equal(1)  # oracle: the first emitted label gets id 1
 
     it "selects RV32 branch and jump opcodes for MIR if terminators":
+        # @req REQ-RV32-CFG-002
+        step("Select the if fixture and inspect the BNE/JAL branch pair")
         val block = entry_block(isel_module_riscv32(build_rv32_if_module()))
+        # @capture(bit_table): the branch compare register and then/else label ids
         expect(has_opcode(block, RV_OP_BNE)).to_equal(true)
         expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
         val zero_cmp = nth_operand_reg(block, RV_OP_BNE, 0, 1)
@@ -231,11 +348,14 @@ describe "Isel Riscv32":
         val else_label = nth_label_id(block, RV_OP_JAL, 0, 1)
         expect(zero_cmp).to_equal(RV_X0)
         expect(else_discard).to_equal(RV_X0)
-        expect(then_label).to_equal(1)
-        expect(else_label).to_equal(2)
+        expect(then_label).to_equal(1)  # oracle: the then-block label is emitted first with id 1
+        expect(else_label).to_equal(2)  # oracle: the else-block label follows with id 2
 
     it "selects RV32 compare and default jump opcodes for MIR switch terminators":
+        # @req REQ-RV32-CFG-003
+        step("Select the switch fixture and inspect the compare/branch and default jump")
         val block = entry_block(isel_module_riscv32(build_rv32_switch_module()))
+        # @capture(bit_table): the li/beq case dispatch and default-jump label ids
         expect(has_opcode(block, RV_OP_LI)).to_equal(true)
         expect(has_opcode(block, RV_OP_BEQ)).to_equal(true)
         expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
@@ -243,33 +363,51 @@ describe "Isel Riscv32":
         val case_label = nth_label_id(block, RV_OP_BEQ, 0, 2)
         val default_label = nth_label_id(block, RV_OP_JAL, 0, 1)
         expect(default_discard).to_equal(RV_X0)
-        expect(case_label).to_equal(1)
-        expect(default_label).to_equal(2)
+        expect(case_label).to_equal(1)  # oracle: the case-block label is emitted first with id 1
+        expect(default_label).to_equal(2)  # oracle: the default-block label follows with id 2
 
     it "selects RV32 NOP for MIR unreachable terminators":
+        # @req REQ-RV32-CFG-004
+        step("Select the unreachable fixture and inspect the emitted NOP")
         val block = entry_block(isel_module_riscv32(build_rv32_unreachable_module()))
+        # @capture(statistics): the NOP count and its operand count
         expect(has_opcode(block, RV_OP_NOP)).to_equal(true)
-        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)
+        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: the fail-closed NOP carries no operands
+
+# @manual_section: fail-closed-terminators
 
     it "fails closed with RV32 NOP for unsupported terminators":
+        # @req REQ-RV32-FAILCLOSED-001
+        step("Select the abort fixture and confirm exactly one operand-less NOP")
         val block = entry_block(isel_module_riscv32(build_rv32_abort_module()))
-        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
-        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)
+        # @capture(statistics): the fail-closed NOP count and operand count
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: one unsupported terminator lowers to exactly one NOP
+        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: the fail-closed NOP carries no operands
+
+# @manual_section: unary
 
     it "selects RV32 unary opcodes":
+        # @req REQ-RV32-UNARY-001
+        step("Select the unary fixture and inspect the NEG and NOT selections")
         val block = entry_block(isel_module_riscv32(build_rv32_unary_module()))
+        # @capture(bit_table): the neg/not dest and source registers
         expect(has_opcode(block, RV_OP_NEG)).to_equal(true)
-        expect(count_opcode(block, RV_OP_NOT)).to_equal(2)
-        expect(nth_dest_reg(block, RV_OP_NEG, 0)).to_equal(2)
-        expect(nth_operand_reg(block, RV_OP_NEG, 0, 1)).to_equal(1)
-        expect(nth_dest_reg(block, RV_OP_NOT, 0)).to_equal(3)
-        expect(nth_operand_reg(block, RV_OP_NOT, 0, 1)).to_equal(1)
-        expect(nth_dest_reg(block, RV_OP_NOT, 1)).to_equal(4)
-        expect(nth_operand_reg(block, RV_OP_NOT, 1, 1)).to_equal(1)
+        expect(count_opcode(block, RV_OP_NOT)).to_equal(2)  # oracle: the fixture carries two logical nots and each lowers to one NOT
+        expect(nth_dest_reg(block, RV_OP_NEG, 0)).to_equal(2)  # oracle: the negation result takes the fixture's next virtual register 2
+        expect(nth_operand_reg(block, RV_OP_NEG, 0, 1)).to_equal(1)  # oracle: the negation reads the fixture's input register 1
+        expect(nth_dest_reg(block, RV_OP_NOT, 0)).to_equal(3)  # oracle: the first not result takes virtual register 3
+        expect(nth_operand_reg(block, RV_OP_NOT, 0, 1)).to_equal(1)  # oracle: both nots read the fixture's input register 1
+        expect(nth_dest_reg(block, RV_OP_NOT, 1)).to_equal(4)  # oracle: the second not result takes virtual register 4
+        expect(nth_operand_reg(block, RV_OP_NOT, 1, 1)).to_equal(1)  # oracle: both nots read the fixture's input register 1
+
+# @manual_section: calls
 
     it "uses RV32 word-size stack slots for call arguments after a7":
+        # @req REQ-RV32-CALL-001
+        step("Select the call fixture and inspect the a0-a7 register assignment and stack spills")
         val module = isel_module_riscv32(build_rv32_call_module())
         val block = entry_block(module)
+        # @capture(bit_table): the argument register assignment and stack-slot offsets
         expect(has_opcode(block, RV_OP_CALL)).to_equal(true)
         expect(module.extern_symbols).to_contain("callee")
         val call_sym = nth_sym_name(block, RV_OP_CALL, 0, 0)
@@ -292,36 +430,48 @@ describe "Isel Riscv32":
         expect(arg7).to_equal(RV_X17)
         val stack0 = nth_mem_offset(block, RV_OP_SW, 0)
         val stack1 = nth_mem_offset(block, RV_OP_SW, 1)
-        expect(stack0).to_equal(0)
+        expect(stack0).to_equal(0)  # oracle: the ninth argument (the first past a7) spills to stack slot offset 0
         expect(stack1).to_equal(RV32_WORD_SIZE)
 
     it "materializes RV32 out-of-range stack argument offsets":
+        # @req REQ-RV32-CALL-002
+        step("Select the many-arg call fixture and inspect how its oversized spill offset splits")
         val module = isel_module_riscv32(build_rv32_many_arg_call_module())
         val block = entry_block(module)
-        expect(has_li_imm(block, 2048)).to_equal(true)
-        expect(nth_mem_offset(block, RV_OP_SW, 512)).to_equal(0)
-        expect(nth_mem_base_reg(block, RV_OP_SW, 512)).to_be_greater_than(31)
+        # @capture(bit_table): the LI-materialized spill address and the split store operand
+        expect(has_li_imm(block, 2048)).to_equal(true)  # oracle: the first out-of-range spill offset 2048 exceeds the I-type immediate range and must materialize through LI
+        expect(nth_mem_offset(block, RV_OP_SW, 512)).to_equal(0)  # oracle: the split spill addresses the materialized register with offset 0
+        expect(nth_mem_base_reg(block, RV_OP_SW, 512)).to_be_greater_than(31)  # oracle: a base id above x31 marks a materialized address register, not an ABI register
 
     it "does not move a return register for RV32 void calls":
+        # @req REQ-RV32-CALL-003
+        step("Select the void-call fixture and confirm no MV follows the call")
         val module = isel_module_riscv32(build_rv32_void_call_module())
         val block = entry_block(module)
+        # @capture(statistics): the call opcode presence and the post-call MV count
         expect(has_opcode(block, RV_OP_CALL)).to_equal(true)
         expect(module.extern_symbols).to_contain("void_callee")
         val call_sym = nth_sym_name(block, RV_OP_CALL, 0, 0)
         expect(call_sym).to_equal("void_callee")
-        expect(count_opcode_after_first(block, RV_OP_CALL, RV_OP_MV)).to_equal(0)
+        expect(count_opcode_after_first(block, RV_OP_CALL, RV_OP_MV)).to_equal(0)  # oracle: a void call discards no value, so no result MV may follow
 
     it "fails closed with RV32 NOP for unsupported call targets":
+        # @req REQ-RV32-CALL-004
+        step("Select the unsupported-call-target fixture and confirm the NOP sink and no call opcodes")
         val block = entry_block(isel_module_riscv32(build_rv32_unsupported_call_target_module()))
-        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
-        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)
+        # @capture(statistics): the fail-closed NOP count and the absent call/jalr opcodes
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: one unsupported call lowers to exactly one fail-closed NOP
+        expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: the fail-closed NOP carries no operands
         expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
         expect(has_opcode(block, RV_OP_JALR)).to_equal(false)
-        expect(count_opcode_after_first(block, RV_OP_NOP, RV_OP_MV)).to_equal(0)
+        expect(count_opcode_after_first(block, RV_OP_NOP, RV_OP_MV)).to_equal(0)  # oracle: a failed call produces no result, so no MV may follow
 
     it "selects RV32 JALR for MIR indirect calls":
+        # @req REQ-RV32-CALL-005
+        step("Select the indirect-call fixture and inspect the two JALR emissions")
         val block = entry_block(isel_module_riscv32(build_rv32_indirect_call_module()))
-        expect(count_opcode(block, RV_OP_JALR)).to_equal(2)
+        # @capture(bit_table): the JALR link registers and pc-relative offsets
+        expect(count_opcode(block, RV_OP_JALR)).to_equal(2)  # oracle: loading the target and jumping each take one JALR
         expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
         val first_link = nth_dest_reg(block, RV_OP_JALR, 0)
         val second_link = nth_dest_reg(block, RV_OP_JALR, 1)
@@ -329,20 +479,28 @@ describe "Isel Riscv32":
         val second_offset = nth_operand_imm(block, RV_OP_JALR, 1, 2)
         expect(first_link).to_equal(RV_X1)
         expect(second_link).to_equal(RV_X1)
-        expect(first_offset).to_equal(0)
-        expect(second_offset).to_equal(0)
+        expect(first_offset).to_equal(0)  # oracle: the indirect jump targets the register with pc-relative offset 0
+        expect(second_offset).to_equal(0)  # oracle: the indirect jump targets the register with pc-relative offset 0
 
     it "selects RV32 JALR for MIR CallIndirect instructions":
+        # @req REQ-RV32-CALL-006
+        step("Select the call-indirect fixture and inspect the single JALR emission")
         val block = entry_block(isel_module_riscv32(build_rv32_call_indirect_module()))
-        expect(count_opcode(block, RV_OP_JALR)).to_equal(1)
+        # @capture(bit_table): the JALR link register and pc-relative offset
+        expect(count_opcode(block, RV_OP_JALR)).to_equal(1)  # oracle: a call-indirect with a pre-materialized target needs one JALR
         expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
         val link = nth_dest_reg(block, RV_OP_JALR, 0)
         val offset = nth_operand_imm(block, RV_OP_JALR, 0, 2)
         expect(link).to_equal(RV_X1)
-        expect(offset).to_equal(0)
+        expect(offset).to_equal(0)  # oracle: the indirect jump targets the register with pc-relative offset 0
+
+# @manual_section: alloc-cast
 
     it "selects RV32 stack allocation and cast opcodes":
+        # @req REQ-RV32-ALLOC-001
+        step("Select the alloc-cast fixture and inspect the sp adjustment and cast copies")
         val block = entry_block(isel_module_riscv32(build_rv32_alloc_cast_module()))
+        # @capture(bit_table): the stack allocation registers and the cast copy pair
         expect(has_opcode(block, RV_OP_ADDI)).to_equal(true)
         expect(count_opcode(block, RV_OP_MV)).to_be_greater_than(1)
         val alloc_dest = nth_dest_reg(block, RV_OP_ADDI, 0)
@@ -354,38 +512,52 @@ describe "Isel Riscv32":
         val cast_source = nth_operand_reg(block, RV_OP_MV, 2, 1)
         expect(alloc_dest).to_equal(RV_X2)
         expect(alloc_base).to_equal(RV_X2)
-        expect(alloc_size).to_equal(-16)
-        expect(alloc_ptr_dest).to_equal(1)
+        expect(alloc_size).to_equal(-16)  # oracle: the fixture allocates 16 bytes, so sp moves down by -16
+        expect(alloc_ptr_dest).to_equal(1)  # oracle: the allocated pointer lands in the fixture's virtual register 1
         expect(alloc_ptr_base).to_equal(RV_X2)
-        expect(cast_dest).to_equal(3)
-        expect(cast_source).to_equal(2)
+        expect(cast_dest).to_equal(3)  # oracle: the cast result takes the fixture's virtual register 3
+        expect(cast_source).to_equal(2)  # oracle: the cast reads the fixture's intermediate virtual register 2
 
     it "materializes RV32 large stack allocation sizes":
+        # @req REQ-RV32-ALLOC-002
+        step("Select the large-alloc fixture and inspect the LI-materialized sp adjustment")
         val block = entry_block(isel_module_riscv32(build_rv32_large_alloc_module()))
-        expect(has_li_imm(block, -2400)).to_equal(true)
+        # @capture(bit_table): the materialized allocation size and the sp add
+        expect(has_li_imm(block, -2400)).to_equal(true)  # oracle: the 2400-byte allocation exceeds the I-type immediate range and must materialize through LI as -2400
         expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(RV_X2)
         expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(RV_X2)
 
+# @manual_section: fail-closed
+
     it "selects RV32 NOP for MIR nop instructions":
+        # @req REQ-RV32-FAILCLOSED-002
+        step("Select the nop fixture and confirm exactly one operand-less NOP")
         val block = entry_block(isel_module_riscv32(build_rv32_nop_inst_module()))
+        # @capture(statistics): the NOP count and its operand count
         expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "fails closed with RV32 NOP for unsupported MIR instructions":
-        step("Verify: fails closed with RV32 NOP for unsupported MIR instructions")
+        # @req REQ-RV32-FAILCLOSED-003
+        step("Select the unsupported-inst fixture and confirm exactly one operand-less NOP")
         val block = entry_block(isel_module_riscv32(build_rv32_unsupported_inst_module()))
+        # @capture(statistics): the fail-closed NOP count and its operand count
         expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "fails closed with RV32 NOP for unsupported arithmetic ops":
-        step("Verify: fails closed with RV32 NOP for unsupported arithmetic ops")
+        # @req REQ-RV32-FAILCLOSED-004
+        step("Select the unsupported-ops fixture and confirm exactly two operand-less NOPs")
         val block = entry_block(isel_module_riscv32(build_rv32_unsupported_ops_module()))
+        # @capture(statistics): the fail-closed NOP count and its operand count
         expect(count_opcode(block, RV_OP_NOP)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "fails closed with RV32 NOP for unsupported MIR constants":
-        step("Verify: fails closed with RV32 NOP for unsupported MIR constants")
+        # @req REQ-RV32-FAILCLOSED-005
+        step("Select the unsupported-const fixture and inspect the sink LI/NOP/MV sequence")
         val block = entry_block(isel_module_riscv32(build_rv32_unsupported_const_module()))
+        # @capture(statistics): the sink immediates and the NOP/MV counts
         expect(nth_imm(block, RV_OP_LI, 0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(nth_imm(block, RV_OP_LI, 1)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -393,7 +565,9 @@ describe "Isel Riscv32":
         expect(count_opcode(block, RV_OP_MV)).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "fails closed with RV32 NOP for unsupported MIR intrinsics":
-        step("Verify: fails closed with RV32 NOP for unsupported MIR intrinsics")
+        # @req REQ-RV32-FAILCLOSED-006
+        step("Select the unsupported-intrinsic fixture and confirm exactly one operand-less NOP")
         val block = entry_block(isel_module_riscv32(build_rv32_unsupported_intrinsic_module()))
+        # @capture(statistics): the fail-closed NOP count and its operand count
         expect(count_opcode(block, RV_OP_NOP)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(first_operand_count(block, RV_OP_NOP)).to_equal(0)  # oracle: 0 — named expected value from the requirement

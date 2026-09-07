@@ -1,28 +1,69 @@
+"""
+## Purpose and audience
+Pins the Stage4 test-runner generated-documentation writes on their concrete
+IO owners for test-runner maintainers: document creation must go through
+`ensure_generated_doc_dir` / `write_generated_doc`, those owners must import
+`file_atomic_write` and `dir_create_all` from the typed
+`std.nogc_sync_mut.io` modules (never the legacy `std.io` facade), and
+replacement must never retain stale content.
+## Operator workflow
+Run `simple run test/01_unit/app/test_runner_doc_generator_owner_spec.spl`
+after touching `src/lib/nogc_sync_mut/test_runner/doc_generator.spl` or the
+`std.nogc_sync_mut.io` owner modules it imports.
+## Compatibility and limitations
+The owner-contract scenario reads the owning module as shipped source and
+asserts its import contract; the directory/atomicity scenarios exercise the
+real product functions against a pid-scoped `/tmp` root and clean up after
+themselves.
+## Verification guidance and troubleshooting
+An owner-contract failure means a legacy `std.io` facade import returned; an
+atomicity failure means `write_generated_doc` left stale bytes after a
+replacement. Rerun this single spec to reproduce, then inspect the named
+module; leftover `/tmp/simple-doc-generator-*` roots from a crashed run are
+safe to delete.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sys_test/test_runner_debug_tui_sgtti.md ;
+# doc/04_architecture/test/test_runner_daemon_resource_governor.md ;
+# doc/05_design/release_process_hardening.md
+# @manual_section: test-runner doc generator IO owners
+
 use std.test_runner.doc_generator.{ensure_generated_doc_dir, write_generated_doc}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.spec.{step}
 
 describe "test runner documentation IO owners":
     it "keeps Stage4 document writes on concrete file and directory owners":
-        val source = file_read("src/lib/nogc_sync_mut/test_runner/doc_generator.spl")
-        expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_atomic_write}")
-        expect(source).to_contain("use std.nogc_sync_mut.io.dir_ops.{dir_create_all}")
-        expect(source.contains("use std.io.{file_atomic_write}")).to_equal(false)
-        expect(source.contains("use std.io.{dir_create_all}")).to_equal(false)
+        # @req REQ-TESTRUNNER-DOCGEN-001
+        # @capture(bit_table): owner-import contract hits over the shipped doc_generator source
+        step("Read the shipped doc_generator module and check its IO import owners")
+        val stage4_doc_generator_owner_source = file_read("src/lib/nogc_sync_mut/test_runner/doc_generator.spl")
+        expect(stage4_doc_generator_owner_source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_atomic_write}")
+        expect(stage4_doc_generator_owner_source).to_contain("use std.nogc_sync_mut.io.dir_ops.{dir_create_all}")
+        expect(stage4_doc_generator_owner_source.contains("use std.io.{file_atomic_write}")).to_equal(false)
+        expect(stage4_doc_generator_owner_source.contains("use std.io.{dir_create_all}")).to_equal(false)
 
     it "creates a nested report directory and atomically writes its document":
+        # @req REQ-TESTRUNNER-DOCGEN-002
+        # @capture(statistics): created-directory and first-write round-trip verdict
+        step("Create a nested report root through the product directory owner")
         val root = "/tmp/simple-doc-generator-owner-{getpid()}"
         val nested = root + "/nested"
         val path = nested + "/report.md"
         dir_remove_all(root)
         expect(ensure_generated_doc_dir(nested)).to_equal(true)
         expect(is_dir(nested)).to_equal(true)
+        step("Write the document through the atomic file owner and read it back")
         expect(write_generated_doc(path, "first")).to_equal(true)
         expect(file_read(path)).to_equal("first")
         dir_remove_all(root)
 
     it "prevents an atomic replacement from retaining stale content":
+        # @req REQ-TESTRUNNER-DOCGEN-003
+        # @capture(statistics): stale-content round-trip verdict after atomic replacement
+        step("Replace an existing document through the atomic owner and read it back")
         val root = "/tmp/simple-doc-generator-replace-{getpid()}"
         val path = root + "/report.md"
         dir_remove_all(root)

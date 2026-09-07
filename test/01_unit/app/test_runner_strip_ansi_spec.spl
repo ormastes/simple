@@ -1,4 +1,6 @@
+use std.io.{file_write, file_exists, file_delete, dir_create_all}
 use std.test_runner.test_runner_files.{strip_ansi}
+use std.nogc_sync_mut.test_runner.test_runner_files.{is_symlink_placeholder}
 
 # Regression coverage for `strip_ansi`
 # (src/lib/nogc_sync_mut/test_runner/test_runner_files.spl).
@@ -85,3 +87,29 @@ describe "strip_ansi":
         # @req REQ-SSPEC-UNIT
         step("handles an escape sequence immediately followed by more plain text with no separator")
         expect(strip_ansi("\x1b[31mFAIL\x1b[0m: assertion mismatch")).to_equal("FAIL: assertion mismatch")
+
+# Regression coverage for the degraded git-symlink detector in the same module
+# (src/lib/nogc_sync_mut/test_runner/test_runner_files.spl).
+#
+# doc/08_tracking/bug/windows_dir_mode_test_run_broken_by_unmaterialized_git_symlink_2026-09-01.md:
+# on a Windows checkout with `core.symlinks=false`, `test/`'s 23 tracked
+# symlinks materialize as plain text files holding the target path. The six
+# DIRECTORY aliases inside the trees dir-mode walks stop being directories, so
+# `dir_walk` silently skips whole aliased subtrees and the run under-collects
+# with no error. `discover_test_files_slow` now refuses such a tree instead.
+describe "is_symlink_placeholder":
+    # @manual scenario evidence
+    it "flags a degraded symlink placeholder and never a real source file":
+        # @req REQ-SSPEC-UNIT
+        step("write a placeholder shaped exactly like a core.symlinks=false checkout")
+        val root = "build/test-symlink-placeholder-detect"
+        dir_create_all(root)
+        val fake = root + "/compiler"
+        file_write(fake, "../../lib/nogc_sync_mut/compiler")
+        expect(is_symlink_placeholder(fake)).to_equal(true)
+
+        step("real Simple source in the same walk is never mistaken for one")
+        val real_source = "src/lib/nogc_sync_mut/test_runner/test_runner_files.spl"
+        expect(file_exists(real_source)).to_equal(true)
+        expect(is_symlink_placeholder(real_source)).to_equal(false)
+        file_delete(fake)

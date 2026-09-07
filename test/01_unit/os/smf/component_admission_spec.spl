@@ -1,7 +1,39 @@
 # @cover src/os/smf/component_admission.spl 100%
-"""OS/SMF admits only dynamic locators tagged as precompiled SMF artifacts."""
+"""
+## Purpose and audience
+Pins the OS/SMF dynamic-artifact admission boundary: only dynamic component
+locators whose source kind is `smf_artifact` may cross into the SMF loader.
+Static candidates, non-SMF dynamic source kinds, and upstream common-resolver
+failures are each rejected with a distinct verdict string. Audience: OS
+component-loader and security-boundary maintainers.
 
-use std.spec.{describe, it, assert_eq}
+## Operator workflow
+Run the file with the self-hosted runner from the repo root:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/smf/component_admission_spec.spl`.
+Each scenario resolves one request through `smf_component_admission_verdict`
+against a purpose-built catalog fixture.
+
+## Compatibility and limitations
+Fixtures are built in-memory; nothing on disk or in a component store is
+read. Under the bare `run` lane the stdlib import
+`std.common.structural.component.resolver` currently fails project-root
+resolution (executed=0 until that lane defect is fixed); the unit lane
+resolves it normally.
+
+## Verification guidance and troubleshooting
+A failure names the admission branch whose verdict string drifted. Compare
+the produced verdict against the fixture kind pushed into the catalog
+(smf_artifact, native_library, remote, static candidate, or empty catalog)
+and inspect src/os/smf/component_admission.spl for that branch before
+touching the fixtures.
+"""
+# Lifecycle: doc/01_research/ui/perf/smf_default_ui_caching_research.md ;
+# doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md ;
+# doc/04_architecture/os/security/ocap_privilege_architecture.md ;
+# doc/05_design/os/exec/x86_32_cpl3_lifecycle_contract.md
+# @manual_section: smf-component-admission
+
+use std.spec.{describe, it, expect}
 use std.common.structural.component.resolver.{
     ComponentResolverCatalog,
     component_resolver_catalog_default,
@@ -18,20 +50,32 @@ fn admission_catalog(source_kind: text) -> ComponentResolverCatalog:
 
 describe "SMF component admission":
     it "admits a resolved dynamic smf_artifact locator":
+        # @req REQ-OS-SMF-001
+        # @capture(protocol_json): the admission verdict string for an smf_artifact dynamic locator
+        step("Resolve a dynamic smf_artifact locator through the OS admission boundary")
         val req = component_resolve_request("optimizer.basic", "optimizer.run", 1, "linux-x86_64", "release")
-        assert_eq(smf_component_admission_verdict(admission_catalog("smf_artifact"), req), "ok:optimizer.basic:optimizer.dynamic:build/components/optimizer.smf")
+        expect(smf_component_admission_verdict(admission_catalog("smf_artifact"), req)).to_equal("ok:optimizer.basic:optimizer.dynamic:build/components/optimizer.smf")
 
     it "rejects every non-SMF dynamic source kind":
+        # @req REQ-OS-SMF-002
+        # @capture(protocol_json): the two rejection verdict strings for non-SMF source kinds
+        step("Resolve the same request against native_library and remote dynamic locators")
         val req = component_resolve_request("optimizer.basic", "optimizer.run", 1, "linux-x86_64", "release")
-        assert_eq(smf_component_admission_verdict(admission_catalog("native_library"), req), "err:unsupported_source_kind:native_library")
-        assert_eq(smf_component_admission_verdict(admission_catalog("remote"), req), "err:unsupported_source_kind:remote")
+        expect(smf_component_admission_verdict(admission_catalog("native_library"), req)).to_equal("err:unsupported_source_kind:native_library")
+        expect(smf_component_admission_verdict(admission_catalog("remote"), req)).to_equal("err:unsupported_source_kind:remote")
 
     it "rejects a static resolution at the OS dynamic-artifact boundary":
+        # @req REQ-OS-SMF-003
+        # @capture(protocol_json): the not_dynamic rejection verdict for a static candidate
+        step("Resolve a request that only a static candidate can satisfy")
         var catalog = component_resolver_catalog_default()
         catalog.static_candidates.push(static_component_candidate("compiler.frontend", "frontend.parse", "frontend.static", "1", "sha-front", 1, ["linux-x86_64"], ["release"] ))
         val req = component_resolve_request("compiler.frontend", "frontend.parse", 1, "linux-x86_64", "release")
-        assert_eq(smf_component_admission_verdict(catalog, req), "err:not_dynamic")
+        expect(smf_component_admission_verdict(catalog, req)).to_equal("err:not_dynamic")
 
     it "propagates common resolver failure distinctly":
+        # @req REQ-OS-SMF-004
+        # @capture(protocol_json): the upstream resolve-failure verdict passed through unchanged
+        step("Resolve a request whose interface no catalog entry provides")
         val req = component_resolve_request("missing", "iface", 0, "linux-x86_64", "release")
-        assert_eq(smf_component_admission_verdict(component_resolver_catalog_default(), req), "err:resolve:component_interface_not_found")
+        expect(smf_component_admission_verdict(component_resolver_catalog_default(), req)).to_equal("err:resolve:component_interface_not_found")

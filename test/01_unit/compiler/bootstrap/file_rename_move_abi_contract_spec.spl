@@ -1,39 +1,100 @@
+"""
+## Purpose and audience
+ABI-contract evidence for `rt_file_rename`/`rt_file_move`: both native
+codegen lanes (LLVM backend text emission, LLVM lib-translate C-API calls)
+must declare the four-word `(ptr, i64, ptr, i64)` signature, the SFFI
+generator specs and Rust native-binary stubs must stay honest about which
+runtime function is real vs. a stub, and the C runtime's cross-device move
+must publish via a durable temp-file-then-rename sequence without deleting
+the caller's destination on failure. Audience: the compiler backend/runtime
+engineer maintaining the file-rename/move ABI across all four lanes.
+
+## Operator workflow
+bin/simple test test/01_unit/compiler/bootstrap/file_rename_move_abi_contract_spec.spl
+
+## Compatibility and limitations
+Reads committed source text of the exact lanes under contract (LLVM backend,
+LLVM lib-translate, SFFI generator specs, Rust native-binary stubs, and both
+C runtime implementations) — this is a cross-file generated-code/ABI
+consistency check, not a black-box behavior probe. Unsupported: it does not
+compile or execute the emitted LLVM IR; it only proves the emitted textual
+contract stays consistent across lanes.
+
+## Verification guidance and troubleshooting
+As of 2026-09-06 this spec is genuinely RED against `origin/main` — real
+drift exists between the asserted four-word ABI contract and the committed
+lanes (see the `# NOTE:` markers below and
+`doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md`).
+Per `.claude/rules/testing.md` this is a legitimate failing artifact and must
+not be weakened to pass; fix the drifted lane instead.
+"""
+# research: doc/01_research/local/sffi_v2_hardening.md ; plan: doc/03_plan/compiler/bootstrap/stage4_stub_symbol_plan_2026-07-11.md ; architecture: doc/04_architecture/platform/sffi_v2_hardening.md ; design: doc/05_design/platform/platform_sffi_optional_features.md
+# @manual_section: file-rename-move-abi-contract
+
 extern fn rt_file_read_text(path: text) -> text
 
 use std.spec.{describe, it, expect}
 
 describe "file rename and move runtime ABI":
     it "keeps both LLVM lanes on the four-word text ABI":
+        # @req REQ-FILE-RENAME-ABI-001
+        step("Read both LLVM codegen lanes that declare the runtime move/rename externs")
         val backend = rt_file_read_text("src/compiler/70.backend/backend/llvm_backend.spl") ?? ""
         val library = rt_file_read_text("src/compiler/70.backend/backend/llvm_lib_translate.spl") ?? ""
 
+        # @capture(statistics): four-word ABI declaration presence per LLVM lane
+        step("Verify the LLVM IR text-emission lane declares the four-word signatures")
         expect(backend).to_contain("declare i1 @rt_file_rename(ptr, i64, ptr, i64)")
         expect(backend).to_contain("declare i1 @rt_file_move(ptr, i64, ptr, i64)")
         expect(backend.contains("declare i1 @rt_file_rename(ptr, ptr)")).to_equal(false)
         expect(backend.contains("declare i1 @rt_file_move(ptr, ptr)")).to_equal(false)
+        step("Verify the LLVM C-API translate lane declares the same four-word signatures")
+        # NOTE: rt_file_rename is not yet declared in llvm_lib_translate.spl at all
+        # (only rt_file_move is, at line 306) — real ABI-lane drift, filed:
+        # doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md
         expect(library).to_contain("declare_fn(mod_, \"rt_file_rename\", llvm_function_type(i1_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false))")
         expect(library).to_contain("declare_fn(mod_, \"rt_file_move\", llvm_function_type(i1_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false))")
         expect(library.contains("declare_fn(mod_, \"rt_file_rename\", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))")).to_equal(false)
         expect(library.contains("declare_fn(mod_, \"rt_file_move\", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))")).to_equal(false)
 
     it "keeps generated bindings and native fallback honest":
+        # @req REQ-FILE-RENAME-ABI-002
+        step("Read the SFFI generator specs and the Rust native-binary stub table")
         val compiler_spec = rt_file_read_text("src/compiler/90.tools/sffi_gen/specs/file_io.spl") ?? ""
         val app_spec = rt_file_read_text("src/app/ffi_gen.specs/file_io.spl") ?? ""
         val stubs = rt_file_read_text("src/compiler_rust/compiler/src/linker/native_binary/stubs.rs") ?? ""
 
+        # @capture(statistics): generated-binding return type and stub-table membership
+        step("Verify both SFFI generator specs declare rt_file_rename as a bool-returning runtime fn")
+        # NOTE: both specs currently declare return_type: "void" for rt_file_rename
+        # (compiler spec line 152, app spec line 136) — real drift from the bool
+        # ABI, filed: doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md
         expect(compiler_spec).to_contain("return_type: \"bool\", runtime_fn: \"rt_file_rename\"")
         expect(app_spec).to_contain("return_type: \"bool\", runtime_fn: \"rt_file_rename\"")
+        step("Verify the Rust native-binary stub table no longer carries a fake rt_file_rename")
+        # NOTE: stubs.rs:313 still lists "rt_file_rename" and :680 still defines a
+        # no-op 2-arg stub — the real backing has not superseded the stub, filed:
+        # doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md
         expect(stubs.contains("    \"rt_file_rename\",")).to_equal(false)
         expect(stubs.contains("bool rt_file_rename(const char*")).to_equal(false)
 
     it "publishes cross-device moves without deleting caller destinations":
+        # @req REQ-FILE-RENAME-ABI-003
+        step("Read both C runtime implementations of the cross-device move path")
         val legacy = rt_file_read_text("src/runtime/runtime.c") ?? ""
         val native = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
-        for source in [legacy, native]:
-            expect(source).to_contain("errno == EXDEV")
-            expect(source).to_contain("O_WRONLY | O_CREAT | O_EXCL")
-            expect(source).to_contain("if (ok) ok = fsync(fd) == 0")
-            expect(source).to_contain("published = rename(temp_path, dst) == 0")
-            expect(source).to_contain("if (created && !published) remove(temp_path)")
-            expect(source).to_contain("if (published) ok = remove(src) == 0")
-            expect(source.contains("if (!ok) remove(dst)")).to_equal(false)
+        # @capture(statistics): temp-file-then-rename publish sequence per runtime lane
+        step("Verify each runtime lane publishes via a durable temp-file-then-rename sequence")
+        for runtime_impl in [legacy, native]:
+            # NOTE: runtime.c has no EXDEV/rename-publish sequence at all, and
+            # runtime_native.c names its success flag "ok" rather than "published"
+            # (see runtime_native.c around line 10767-10782) — real drift from the
+            # asserted variable-name contract, filed:
+            # doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md
+            expect(runtime_impl).to_contain("errno == EXDEV")
+            expect(runtime_impl).to_contain("O_WRONLY | O_CREAT | O_EXCL")
+            expect(runtime_impl).to_contain("if (ok) ok = fsync(fd) == 0")
+            expect(runtime_impl).to_contain("published = rename(temp_path, dst) == 0")
+            expect(runtime_impl).to_contain("if (created && !published) remove(temp_path)")
+            expect(runtime_impl).to_contain("if (published) ok = remove(src) == 0")
+            expect(runtime_impl.contains("if (!ok) remove(dst)")).to_equal(false)

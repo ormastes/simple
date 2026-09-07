@@ -132,6 +132,8 @@ expect(poll_multi_caret_manager(mixed).status).to_equal("exited")
 
 #### leaves a manager that is not running untouched by a poll
 
+- Poll an admission failure that never owned a process
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -142,6 +144,30 @@ Reproduction: this block contains the complete executable scenario source.
 val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
     "", "", "", "", "")
 expect(poll_multi_caret_manager(idle).status).to_equal("not_started")
+```
+
+</details>
+
+#### continues polling a degraded manager until its children are terminal
+
+- Represent a previously degraded team whose last child has exited
+- Poll again and publish the fully terminal state
+   - Expected: terminal.status equals `exited`
+   - Expected: terminal.reason equals `processes_polled`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val team = summarize_agent_team("m-degraded", [
+    AgentProcess(agent_id: "former-survivor", status: "not_running",
+        reason: "process_exited", pid: -1)])
+val degraded = MultiCaretManager(manager_id: "m-degraded",
+    status: "degraded", reason: "processes_polled", capacity: 2,
+    team: team, terminal_view: build_agent_tmux_embed(team, []))
+val terminal = poll_multi_caret_manager(degraded)
+expect(terminal.status).to_equal("exited")
+expect(terminal.reason).to_equal("processes_polled")
 ```
 
 </details>
@@ -169,7 +195,7 @@ expect(stop_multi_caret_manager(idle).reason).to_equal("no_processes")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/multi_caret_manager_spec.spl` |
-| Updated | 2026-08-24 |
+| Updated | 2026-09-02 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -181,8 +207,8 @@ Tests covering LLM Caret multi-process manager reports process truth.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

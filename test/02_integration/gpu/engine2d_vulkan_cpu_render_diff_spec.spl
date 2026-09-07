@@ -1,3 +1,35 @@
+"""
+## Purpose and audience
+Cross-backend pixel contract for Engine2D, for the engineers who own
+`src/lib/gc_async_mut/gpu/engine2d/` (engine.spl, backend_software.spl). One
+multi-op scene — background clear, two overlapping filled rects, a filled
+circle, a thick line — is rendered twice through the SAME Engine2D draw API,
+once via the strict "vulkan" backend and once via the strict "software" CPU
+backend, and the readbacks are compared per pixel.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/02_integration/gpu/engine2d_vulkan_cpu_render_diff_spec.spl
+Read the trailing `[probe-gpu] RUN VERDICT` lines: only a `vulkan: GPU-PROVEN`
+line constitutes GPU evidence; a PASS with `GPU BRANCH SKIPPED` asserts the
+CPU render alone and means the device was unavailable.
+## Compatibility and limitations
+The CPU lane is a pure scalar rasterizer that owes no device and is asserted
+unconditionally on every host. The vulkan strict create is attempted
+unconditionally; on failure (no device, missing runtime extern such as
+rt_vulkan_selected_device_index, fd exhaustion) the diff example proves
+NOTHING about the GPU path and never silently passes GPU assertions. The
+vulkan-vs-cpu diff currently carries a MEASURED tolerance of 6 mismatched
+pixels from the thick-line row coverage divergence (see the inline tracking
+note) — do not widen it.
+## Verification guidance and troubleshooting
+The software-vs-oracle lane must always diff 0/1024; if it does not, the
+scene or the scalar rasterizer changed, and every downstream diff reading is
+void. A vulkan failure names the strict-create reason verbatim.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: engine2d-render-diff
 # @tag: gpu, rendering, engine2d, vulkan, render-diff
 # @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 10%
@@ -124,6 +156,9 @@ fn strict_scene_pixels(name: text) -> [u32]:
 describe "Engine2D render diff — CPU/software lane (unconditional)":
 
     it "software strict engine renders the scene identically to the SoftwareBackend oracle":
+        # @req REQ-GPU-RENDER-DIFF-001
+        # @capture(statistics): software-vs-oracle per-pixel mismatch count
+        step("Render the scene through the strict software engine and diff it against the oracle")
         val px = strict_scene_pixels("software")
         assert_true(px.len() > 0)
         val oracle = oracle_pixels()
@@ -131,23 +166,26 @@ describe "Engine2D render diff — CPU/software lane (unconditional)":
         expect(px.len() as i64).to_equal(total)
         val mism = count_mismatches(px, oracle, total, "software-vs-oracle")
         print("[render-diff] software vs oracle: {mism}/{total} mismatched")
-        expect(mism).to_equal(0)
+        expect(mism).to_equal(0)  # oracle: the strict software lane and the oracle share the same scalar rasterizer, so every pixel must match
 
     it "oracle scene is non-trivial — background, rect overlap, circle and line all present":
+        # @req REQ-GPU-RENDER-DIFF-002
+        # @capture(bit_table): sampled oracle pixel colors per scene op
+        step("Sample one oracle pixel per scene op — background, rect, overlap, circle, line")
         val oracle = oracle_pixels()
         val w = 32 as i64
         # background corner untouched by any op
-        expect(color_b(oracle[0])).to_equal(40)
+        expect(color_b(oracle[0])).to_equal(40)  # oracle: the clear color rgb(16,24,40) leaves blue=40 in the untouched corner
         # inside first rect only -> red
-        expect(color_r(oracle[6 * w + 6])).to_equal(255)
-        expect(color_g(oracle[6 * w + 6])).to_equal(0)
+        expect(color_r(oracle[6 * w + 6])).to_equal(255)  # oracle: rgb(255,0,0) fills the first rect
+        expect(color_g(oracle[6 * w + 6])).to_equal(0)  # oracle: the first rect's fill has no green channel
         # overlap region: second rect drawn later wins -> green
-        expect(color_g(oracle[14 * w + 14])).to_equal(200)
+        expect(color_g(oracle[14 * w + 14])).to_equal(200)  # oracle: the later rgb(0,200,80) rect wins the overlap region
         # circle center -> blue
-        expect(color_b(oracle[22 * w + 22])).to_equal(255)
+        expect(color_b(oracle[22 * w + 22])).to_equal(255)  # oracle: rgb(40,90,255) fills the circle centered on this pixel
         # on the line -> yellow
-        expect(color_r(oracle[29 * w + 15])).to_equal(255)
-        expect(color_g(oracle[29 * w + 15])).to_equal(255)
+        expect(color_r(oracle[29 * w + 15])).to_equal(255)  # oracle: the yellow rgb(255,255,0) line covers row 29
+        expect(color_g(oracle[29 * w + 15])).to_equal(255)  # oracle: yellow's green channel is 255 on the covered row
 
 # ---------------------------------------------------------------------------
 # 2. Vulkan lane — attempted unconditionally, honest about the outcome.
@@ -156,6 +194,9 @@ describe "Engine2D render diff — CPU/software lane (unconditional)":
 describe "Engine2D render diff — vulkan vs cpu":
 
     it "vulkan-rendered scene matches the cpu render pixel-for-pixel (or the skip is disclosed)":
+        # @req REQ-GPU-RENDER-DIFF-003
+        # @capture(statistics): vulkan-vs-cpu mismatch count, or the disclosed cpu re-assertion on skip
+        step("Render the same scene through the strict vulkan engine and diff against the cpu oracle")
         val vk = strict_scene_pixels("vulkan")
         val total = (32 * 32) as i64
         if vk.len() > 0:
@@ -185,9 +226,12 @@ describe "Engine2D render diff — vulkan vs cpu":
             val px = strict_scene_pixels("cpu")
             assert_true(px.len() > 0)
             val cpu_mism = count_mismatches(px, oracle_pixels(), total, "cpu-vs-oracle-on-vk-skip")
-            expect(cpu_mism).to_equal(0)
+            expect(cpu_mism).to_equal(0)  # oracle: the re-asserted cpu render keeps the skip branch non-vacuous
 
     it "closes with the reading rule for this run's GPU evidence":
+        # @req REQ-GPU-RENDER-DIFF-004
+        # @capture(protocol_json): the RUN VERDICT disclosure lines this run prints
+        step("Print the reading rule that qualifies this run's GPU evidence")
         print("[probe-gpu] RUN VERDICT: this run's GPU evidence is exactly the '[probe-gpu] vulkan: GPU-PROVEN' line above, if present.")
         print("[probe-gpu] RUN VERDICT: a PASS with a 'GPU BRANCH SKIPPED' vulkan line asserts only the CPU render — read it as 'device unavailable', not as 'vulkan diff verified'.")
         assert_true(true)

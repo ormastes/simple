@@ -1,0 +1,209 @@
+#!/bin/sh
+# check-decl-index-lookup-not-empty-text-compare.shs
+#
+# Pins the fix for
+# doc/08_tracking/bug/riscv64_freestanding_toplevel_decl_walk_names_both_functions_add_2026-09-01.md
+# whose measured root cause is filed as
+# doc/08_tracking/bug/riscv64_freestanding_text_neq_empty_literal_true_for_zero_length_2026-09-01.md
+#
+# THE DEFECT
+# ----------
+# `module_decl_at` decides between its environment mirror and its slot array
+# with `if env_value != "":`. On riscv64 freestanding that comparison is TRUE
+# for a ZERO-LENGTH text -- measured in-guest under real OpenSBI fw_payload:
+#
+#     trace=900   entered the env-first tail with index 0
+#     trace=800   env_value.len() == 0        the text IS empty
+#     trace=700   the `!= ""` arm was taken ANYWAY
+#
+# So every call returned ast_parse_i64("") == 0: module_decl_at answered
+# declaration 0 for EVERY index, and the top-level walk converted decl 0 N
+# times. A module with `add` and `main` produced `add` twice, `main` never
+# existed downstream, and the in-guest build-and-run row failed with "module
+# has no main function" -- while BOTH lowering stages reported zero errors.
+# The loss is completely silent, which is why it cost four boots and three
+# prior sessions.
+#
+# WHY A STATIC SCAN IS THE RIGHT SHAPE HERE
+# -----------------------------------------
+# The defect is invisible to every runtime gate that does not build a
+# multi-declaration module in-guest, and reproducing it needs a 12-minute
+# OpenSBI boot. But the REGRESSION is a one-line source edit: changing that
+# length test back to a comparison against an empty literal. This guard is
+# therefore cheap and exact -- it reads the decision site and fails if it is
+# expressed as an empty-literal (in)equality again, on ANY of the accessors
+# that pick a declaration index out of the env mirror.
+#
+# It deliberately does NOT ban `!= ""` tree-wide. That comparison is used in
+# thousands of places, most of them not on a freestanding target, and a
+# tree-wide ban would be unlandable noise. It fences the sites where a wrong
+# answer silently DROPS DECLARATIONS.
+#
+# VERDICT (last line of stdout, always):
+#   PASS  — <n> decision site(s) checked, none compares against an empty literal
+#   FAIL  — ...naming every offending site                              exit 1
+#   ERROR — nothing was checked                                         exit 2
+# A run that checked 0 sites is an ERROR, never a pass.
+#
+# --selftest runs before every scan and is FATAL.
+
+set -u
+
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+TARGET="src/compiler/10.frontend/core/_Ast/module_state.spl"
+FN="module_decl_at"
+
+# Extract the body of `fn <name>(` up to the next top-level `fn ` in $1.
+extract_fn() {
+    awk -v fn="$2" '
+        $0 ~ "^fn " fn "\\(" { inside = 1; next }
+        inside && /^fn / { inside = 0 }
+        inside { print }
+    ' "$1"
+}
+
+# Scan one file; echoes offending lines, sets EV_CHECKED/EV_BAD via a temp file.
+scan_file() {
+    _f=$1
+    _body=$(extract_fn "$_f" "$FN")
+    if [ -z "$_body" ]; then
+        return 3
+    fi
+    # A decision site is any line that both mentions the env value and compares
+    # it against a bare empty string literal with == or !=.
+    _bad=$(printf '%s\n' "$_body" \
+        | grep -nE '(if|elif|while).*env_value[[:space:]]*(!=|==)[[:space:]]*""' \
+        || true)
+    printf '%s' "$_bad"
+    return 0
+}
+
+selftest() {
+    _tmp=$(mktemp -d) || { echo "check-decl-index-lookup: ERROR — mktemp failed"; exit 2; }
+    _fail=0
+
+    # Fixture 1 (must PASS): the fixed shape, a length test.
+    cat > "$_tmp/good.spl" <<'EOS'
+fn module_decl_at(index: i64) -> i64:
+    val env_value = rt_env_get("K" + int_to_str(index)) ?? ""
+    if env_value.len() > 0:
+        return ast_parse_i64(env_value)
+    ast_module_decl_slot_get(index)
+
+fn unrelated() -> i64:
+    0
+EOS
+    _r=$(scan_file "$_tmp/good.spl"); _rc=$?
+    if [ "$_rc" -ne 0 ] || [ -n "$_r" ]; then
+        echo "  [selftest] FAIL fixture 1: the fixed shape was flagged: $_r"
+        _fail=1
+    fi
+
+    # Fixture 2 (MUST FAIL): the incident shape, verbatim.
+    cat > "$_tmp/bad.spl" <<'EOS'
+fn module_decl_at(index: i64) -> i64:
+    val env_value = rt_env_get("K" + int_to_str(index)) ?? ""
+    if env_value != "":
+        return ast_parse_i64(env_value)
+    ast_module_decl_slot_get(index)
+EOS
+    _r=$(scan_file "$_tmp/bad.spl"); _rc=$?
+    if [ "$_rc" -ne 0 ] || [ -z "$_r" ]; then
+        echo "  [selftest] FAIL fixture 2: the incident shape was NOT flagged"
+        _fail=1
+    fi
+
+    # Fixture 3 (MUST FAIL): the equality spelling of the same mistake.
+    cat > "$_tmp/bad2.spl" <<'EOS'
+fn module_decl_at(index: i64) -> i64:
+    val env_value = rt_env_get("K") ?? ""
+    if env_value == "":
+        return ast_module_decl_slot_get(index)
+    ast_parse_i64(env_value)
+EOS
+    _r=$(scan_file "$_tmp/bad2.spl"); _rc=$?
+    if [ "$_rc" -ne 0 ] || [ -z "$_r" ]; then
+        echo "  [selftest] FAIL fixture 3: the == spelling was NOT flagged"
+        _fail=1
+    fi
+
+    # Fixture 4: a file WITHOUT the function must report "nothing to check",
+    # so the caller is forced to ERROR rather than reading a vacuous pass.
+    cat > "$_tmp/none.spl" <<'EOS'
+fn something_else() -> i64:
+    0
+EOS
+    scan_file "$_tmp/none.spl" >/dev/null 2>&1; _rc=$?
+    if [ "$_rc" -ne 3 ]; then
+        echo "  [selftest] FAIL fixture 4: a missing function did not report 'nothing checked' (rc=$_rc)"
+        _fail=1
+    fi
+
+    # Fixture 5: an empty-literal comparison in a DIFFERENT function must NOT
+    # be flagged -- this guard fences the decision site, it is not a tree ban.
+    cat > "$_tmp/other.spl" <<'EOS'
+fn module_decl_at(index: i64) -> i64:
+    val env_value = rt_env_get("K") ?? ""
+    if env_value.len() > 0:
+        return ast_parse_i64(env_value)
+    ast_module_decl_slot_get(index)
+
+fn elsewhere(env_value: text) -> i64:
+    if env_value != "":
+        return 1
+    0
+EOS
+    _r=$(scan_file "$_tmp/other.spl"); _rc=$?
+    if [ "$_rc" -ne 0 ] || [ -n "$_r" ]; then
+        echo "  [selftest] FAIL fixture 5: an unrelated function was flagged: $_r"
+        _fail=1
+    fi
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-decl-index-lookup: ERROR — selftest failed, scan not run"
+        exit 2
+    fi
+    echo "check-decl-index-lookup: selftest OK (5 fixtures)"
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && exit 0
+
+FILE="$ROOT/$TARGET"
+if [ ! -f "$FILE" ]; then
+    echo "check-decl-index-lookup: ERROR — nothing was checked: $TARGET not found"
+    exit 2
+fi
+
+OFFENDERS=$(scan_file "$FILE")
+RC=$?
+if [ "$RC" -eq 3 ]; then
+    echo "check-decl-index-lookup: ERROR — nothing was checked: fn $FN not found in $TARGET"
+    exit 2
+fi
+
+CHECKED=$(extract_fn "$FILE" "$FN" | grep -cE 'env_value' || true)
+if [ -z "$CHECKED" ] || [ "$CHECKED" -eq 0 ]; then
+    echo "check-decl-index-lookup: ERROR — nothing was checked: no env_value site in $FN"
+    exit 2
+fi
+
+if [ -n "$OFFENDERS" ]; then
+    echo "$OFFENDERS" | while IFS= read -r line; do
+        echo "offender=$TARGET:$FN: $line"
+    done
+    echo ""
+    echo "module_decl_at must not decide between the env mirror and the slot"
+    echo "array by comparing against an empty text literal: on riscv64"
+    echo "freestanding that comparison is TRUE for a zero-length text, so the"
+    echo "function returns ast_parse_i64(\"\") == 0 for EVERY index and the"
+    echo "top-level walk converts declaration 0 N times. Ask the length"
+    echo "instead (env_value.len() > 0), which is measured correct on that"
+    echo "target. See the two bug records named in this file's header."
+    echo "check-decl-index-lookup: FAIL — $CHECKED site(s) checked, empty-literal comparison at the declaration-index decision"
+    exit 1
+fi
+
+echo "check-decl-index-lookup: PASS — $CHECKED site(s) checked, none compares against an empty literal"
+exit 0

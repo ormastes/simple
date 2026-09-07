@@ -1,79 +1,109 @@
 """
-# CLI Args Help Text Specification
+## Purpose and audience
+Purpose: pins the auto-generated --help text (program description, flag/option
+names, short names, defaults) produced by the real cli_parser generate_help()
+function that backs the `cli:` keyword, replacing hand-typed strings that only
+pretended to be its output.
+Audience: language/CLI engineers who maintain the `cli` keyword's help
+generation path (std.nogc_sync_mut.cli.cli_parser).
 
-**Feature ID:** #CLI-004
-**Category:** Language | CLI
-**Status:** Draft
+## Operator workflow
+bin/simple test test/03_system/feature/usage/cli_args_help_spec.spl
 
-## Overview
+## Compatibility and limitations
+Exercises generate_help() directly against a CliSpec built with the real
+builder functions (cli_spec/cli_spec_program/cli_spec_flag/cli_spec_option);
+does not compile a `cli:` block end-to-end through the parser front-end.
 
-Tests automatic help text generation from docstrings and option metadata.
-The cli keyword generates --help output including program description,
-option names with types, defaults, and short names.
-
-## Syntax
-
-```simple
-# My awesome tool
-# Processes files with various options.
-cli:
-    verbose: false      # Enable verbose output
-    output: "out.txt"   # Output file path
-    count: 1            # Number of iterations
-```
-
+## Verification guidance and troubleshooting
+A failing expectation names the exact help-text fragment that changed; compare
+it against generate_help()'s formatting rules in
+src/lib/nogc_sync_mut/cli/cli_parser.spl.
 """
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/app/tools/cli_args_design.md
 
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.cli.cli_parser.{
+    cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, generate_help
+}
 
-
-# ============================================================================
-# CLI Args Help Text
-# ============================================================================
+# @manual_section: CLI args help text generation
 
 describe "CLI Args Help Text":
-    # @manual scenario evidence
-    # ## Help Text Generation
-    #
-    # Tests that help text is correctly generated from the cli block
-    # and associated docstrings.
 
     context "help flag":
-        it "responds to --help flag":
-            # cli:
-            #     verbose: false
-            # Running with --help should produce help text, not parse args
-            val help_requested = true
-            expect(help_requested).to_equal(true)
+        it "help text is built by the real generator, not a placeholder":
+            # @req REQ-CLI-HELP-001
+            step("Build a spec with one flag and one option")
+            var spec = cli_spec()
+            spec = cli_spec_flag(spec, "verbose", "v", "Enable verbose output")
+            step("Generate help text from the spec")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_generation") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the generator actually ran (non-placeholder output)")
+            expect(help_text).to_contain("Usage:")
 
-        it "responds to -h short flag":
-            # -h should be reserved for help and auto-mapped
-            val short_help = "h"
-            expect(short_help).to_equal("h")
+        it "short flag name is auto-mapped alongside the long name":
+            # @req REQ-CLI-HELP-002
+            step("Build a spec with a flag that declares a short name")
+            var spec = cli_spec()
+            spec = cli_spec_flag(spec, "verbose", "v", "Enable verbose output")
+            step("Generate help text and inspect the flags section")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_short_flag") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the short flag appears next to the long flag")
+            expect(help_text).to_contain("--verbose")
+            expect(help_text).to_contain("-v")
 
     context "help content":
-        it "includes option names in help":
-            # Help output should list all defined options
-            val help_text = "--verbose  Enable verbose output (default: false)"
+        it "includes option names in generated help":
+            # @req REQ-CLI-HELP-003
+            step("Build a spec with a boolean-style option and its default")
+            var spec = cli_spec()
+            spec = cli_spec_option(spec, "verbose", "", "Enable verbose output", "false", [])
+            step("Generate help text")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_option_names") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the option name and its default both appear")
             expect(help_text).to_contain("--verbose")
             expect(help_text).to_contain("false")
 
-        it "includes short names in help":
-            # Help output should show short names alongside long names
-            val help_line = "-v, --verbose  Enable verbose output (default: false)"
-            expect(help_line).to_start_with("-v")
-            expect(help_line).to_contain("--verbose")
+        it "includes short names alongside long names in generated help":
+            # @req REQ-CLI-HELP-004
+            step("Build a spec with an option carrying both long and short names")
+            var spec = cli_spec()
+            spec = cli_spec_option(spec, "verbose", "v", "Enable verbose output", "false", [])
+            step("Generate help text")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_short_option") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the short name is rendered next to the long name")
+            expect(help_text).to_contain("-v")
+            expect(help_text).to_contain("--verbose")
 
-        it "includes type information in help":
-            # Help output should show the expected type for each option
-            val help_line = "--count <i64>  Number of iterations (default: 1)"
-            expect(help_line).to_contain("i64")
-            expect(help_line).to_contain("1")
+        it "includes the declared default value for a numeric option":
+            # @req REQ-CLI-HELP-005
+            step("Build a spec with a count option defaulting to 1")
+            var spec = cli_spec()
+            spec = cli_spec_option(spec, "count", "c", "Number of iterations", "1", [])
+            step("Generate help text")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_default_value") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the option name and its default 1 both appear")
+            expect(help_text).to_contain("--count")
+            expect(help_text).to_contain("(default: 1)")
 
-        it "includes program description from docstring":
-            # The file-level docstring becomes the program description
-            # # My awesome tool
-            # # Processes files with various options.
-            val description = "My awesome tool"
-            val detail = "Processes files with various options."
-            expect(description).to_equal("My awesome tool")
-            expect(detail).to_contain("Processes files")
+        it "includes the program description from the spec metadata":
+            # @req REQ-CLI-HELP-006
+            step("Build a spec carrying a program name and description")
+            var spec = cli_spec()
+            spec = cli_spec_program(spec, "mytool", "My awesome tool")
+            step("Generate help text")
+            val help_text = generate_help(spec)
+            # @capture: evidence_manifest("cli_help_program_description") -> cli_args_help_generation_spec.evidence.sdn
+            step("Verify the description leads the help text and the program name appears in Usage")
+            expect(help_text).to_start_with("My awesome tool")
+            expect(help_text).to_contain("mytool")

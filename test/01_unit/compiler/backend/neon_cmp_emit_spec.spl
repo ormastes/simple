@@ -1,10 +1,33 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+NEON comparison and select emit functions — CMEQ, CMGT, CMGE, CMHI, FCMEQ,
+FCMGT, FCMGE, BSL (REQ-COMPILER-BACKEND-NATIVE-NEON-CMP). Audience: the ARM64
+backend engineer who must verify each emitted 4-byte compare/select
+instruction matches the ARMv8 ARM opcode layout bit-for-bit before trusting
+the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_cmp_emit_spec.spl
+
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode. Only
+the 8 listed integer/float compare and BSL variants are covered; other NEON
+comparison forms (scalar, immediate-zero) live in sibling spec files.
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+compare/select instruction as a bit_table. A mismatch names the offending
+byte; cross-reference ARMv8 ARM §C7.2.27 (CMEQ), §C7.2.33 (CMGT), §C7.2.30
+(CMGE), §C7.2.36 (CMHI), §C7.2.79 (FCMEQ), §C7.2.85 (FCMGT), §C7.2.82
+(FCMGE), §C7.2.22 (BSL), and the per-scenario derivation comment
+(`base | (Rm << 16) | (Rn << 5) | Rd`) to locate which register field
+produced the wrong byte.
+"""
+# research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+# @manual_section: neon-cmp-emit-encoding
 
 # test/unit/compiler/backend/neon_cmp_emit_spec.spl
 #
@@ -23,11 +46,6 @@
 #
 # All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
 # Encoding: base | (Rm << 16) | (Rn << 5) | Rd
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.encode_aarch64_neon_cmp.{emit_cmeq_4s, emit_cmgt_4s, emit_cmge_4s, emit_cmhi_4s, emit_fcmeq_4s, emit_fcmgt_4s, emit_fcmge_4s, emit_bsl_16b}
 
@@ -36,237 +54,317 @@ use compiler.backend.native.encode_aarch64_neon_cmp.{emit_cmeq_4s, emit_cmgt_4s,
 # V0,V0,V0 => LE: 0x00, 0x8C, 0xA0, 0x6E
 # ============================================================================
 
+# @manual_section: neon-cmeq-golden
 describe "emit_cmeq_4s — compare equal 4x32-bit lanes":
     it "CMEQ V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMEQ V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmeq_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x8C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): CMEQ little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: CMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x8C)  # oracle: byte1 = base opcode bits for the CMEQ integer-compare family
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying unsigned CMEQ (U=1,Q=1)
 
     it "CMEQ V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMEQ V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x6EA08C00 | (3 << 16) | (2 << 5) | 1
         #      = 0x6EA08C00 | 0x30000 | 0x40 | 1
         #      = 0x6EA38C41
         # LE: 0x41, 0x8C, 0xA3, 0x6E
         var b = emit_cmeq_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x8C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): CMEQ little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: CMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0x8C)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_cmeq_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMEQ V4.4S, V5.4S, V6.4S and verify the fixed instruction width")
         var b = emit_cmeq_4s(4, 5, 6)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMEQ emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every CMEQ encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # CMGT V.4S — base 0x4EA03400
 # V0,V0,V0 => LE: 0x00, 0x34, 0xA0, 0x4E
 # ============================================================================
 
+# @manual_section: neon-cmgt-golden
 describe "emit_cmgt_4s — compare signed greater-than 4x32-bit lanes":
     it "CMGT V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGT V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmgt_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): CMGT little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: CMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 = base opcode bits for the CMGT signed-compare family
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte identifying signed CMGT (U=0,Q=1)
 
     it "CMGT V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGT V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x4EA03400 | (3 << 16) | (2 << 5) | 1
         #      = 0x4EA03400 | 0x30000 | 0x40 | 1
         #      = 0x4EA33441
         # LE: 0x41, 0x34, 0xA3, 0x4E
         var b = emit_cmgt_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): CMGT little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: CMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_cmgt_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGT V7.4S, V8.4S, V9.4S and verify the fixed instruction width")
         var b = emit_cmgt_4s(7, 8, 9)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMGT emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every CMGT encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # CMGE V.4S — base 0x4EA03C00
 # V0,V0,V0 => LE: 0x00, 0x3C, 0xA0, 0x4E
 # ============================================================================
 
+# @manual_section: neon-cmge-golden
 describe "emit_cmge_4s — compare signed greater-than-or-equal 4x32-bit lanes":
     it "CMGE V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGE V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmge_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x3C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): CMGE little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: CMGE is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x3C)  # oracle: byte1 = base opcode bits for the CMGE signed-compare family
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte identifying signed CMGE (U=0,Q=1)
 
     it "CMGE V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGE V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x4EA03C00 | (3 << 16) | (2 << 5) | 1
         #      = 0x4EA03C00 | 0x30000 | 0x40 | 1
         #      = 0x4EA33C41
         # LE: 0x41, 0x3C, 0xA3, 0x4E
         var b = emit_cmge_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x3C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): CMGE little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: CMGE is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0x3C)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_cmge_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMGE V10.4S, V11.4S, V12.4S and verify the fixed instruction width")
         var b = emit_cmge_4s(10, 11, 12)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMGE emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every CMGE encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # CMHI V.4S — base 0x6EA03400
 # V0,V0,V0 => LE: 0x00, 0x34, 0xA0, 0x6E
 # ============================================================================
 
+# @manual_section: neon-cmhi-golden
 describe "emit_cmhi_4s — compare unsigned higher 4x32-bit lanes":
     it "CMHI V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMHI V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmhi_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): CMHI little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: CMHI is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 = base opcode bits for the CMHI unsigned-compare family
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying unsigned CMHI (U=1,Q=1)
 
     it "CMHI V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMHI V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x6EA03400 | (3 << 16) | (2 << 5) | 1
         #      = 0x6EA03400 | 0x30000 | 0x40 | 1
         #      = 0x6EA33441
         # LE: 0x41, 0x34, 0xA3, 0x6E
         var b = emit_cmhi_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): CMHI little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: CMHI is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_cmhi_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode CMHI V13.4S, V14.4S, V15.4S and verify the fixed instruction width")
         var b = emit_cmhi_4s(13, 14, 15)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMHI emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every CMHI encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # FCMEQ V.4S — base 0x4E20E400
 # V0,V0,V0 => LE: 0x00, 0xE4, 0x20, 0x4E
 # ============================================================================
 
+# @manual_section: neon-fcmeq-golden
 describe "emit_fcmeq_4s — fp compare equal 4x32-bit lanes":
     it "FCMEQ V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMEQ V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_fcmeq_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): FCMEQ little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: FCMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 = base opcode bits for the FCMEQ float-compare family
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte identifying FCMEQ (U=0,Q=1)
 
     it "FCMEQ V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMEQ V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x4E20E400 | (3 << 16) | (2 << 5) | 1
         #      = 0x4E20E400 | 0x30000 | 0x40 | 1
         #      = 0x4E23E441
         # LE: 0x41, 0xE4, 0x23, 0x4E
         var b = emit_fcmeq_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0x23)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): FCMEQ little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: FCMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0x23)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_fcmeq_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMEQ V16.4S, V17.4S, V18.4S and verify the fixed instruction width")
         var b = emit_fcmeq_4s(16, 17, 18)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCMEQ emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every FCMEQ encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # FCMGT V.4S — base 0x6EA0E400
 # V0,V0,V0 => LE: 0x00, 0xE4, 0xA0, 0x6E
 # ============================================================================
 
+# @manual_section: neon-cmp-fcmgt-golden
 describe "emit_fcmgt_4s — fp compare greater-than 4x32-bit lanes":
     it "FCMGT V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGT V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_fcmgt_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): FCMGT little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: FCMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 = base opcode bits for the FCMGT float-compare family
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying FCMGT (U=1,Q=1)
 
     it "FCMGT V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGT V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x6EA0E400 | (3 << 16) | (2 << 5) | 1
         #      = 0x6EA0E400 | 0x30000 | 0x40 | 1
         #      = 0x6EA3E441
         # LE: 0x41, 0xE4, 0xA3, 0x6E
         var b = emit_fcmgt_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): FCMGT little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: FCMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_fcmgt_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGT V19.4S, V20.4S, V21.4S and verify the fixed instruction width")
         var b = emit_fcmgt_4s(19, 20, 21)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCMGT emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every FCMGT encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # FCMGE V.4S — base 0x6E20E400
 # V0,V0,V0 => LE: 0x00, 0xE4, 0x20, 0x6E
 # ============================================================================
 
+# @manual_section: neon-cmp-fcmge-golden
 describe "emit_fcmge_4s — fp compare greater-than-or-equal 4x32-bit lanes":
     it "FCMGE V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGE V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_fcmge_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): FCMGE little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: FCMGE is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 = base opcode bits for the FCMGE float-compare family
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying FCMGE (U=1,Q=1)
 
     it "FCMGE V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGE V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x6E20E400 | (3 << 16) | (2 << 5) | 1
         #      = 0x6E20E400 | 0x30000 | 0x40 | 1
         #      = 0x6E23E441
         # LE: 0x41, 0xE4, 0x23, 0x6E
         var b = emit_fcmge_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0xE4)
-        expect(b[2]).to_equal(0x23)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): FCMGE little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: FCMGE is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0xE4)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0x23)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_fcmge_4s always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode FCMGE V22.4S, V23.4S, V24.4S and verify the fixed instruction width")
         var b = emit_fcmge_4s(22, 23, 24)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCMGE emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every FCMGE encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # BSL V.16B — base 0x6E601C00
 # V0,V0,V0 => LE: 0x00, 0x1C, 0x60, 0x6E
 # ============================================================================
 
+# @manual_section: neon-bsl-golden
 describe "emit_bsl_16b — bitwise select 128-bit":
     it "BSL V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode BSL V0.16B, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_bsl_16b(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x60)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): BSL little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: BSL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 = base opcode bits for the BSL bitwise-select family
+        expect(b[2]).to_equal(0x60)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm<<16 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying BSL (U=1,Q=1)
 
     it "BSL V1.16B, V2.16B, V3.16B encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode BSL V1.16B, V2.16B, V3.16B (Rd=1, Rn=2, Rm=3)")
         # word = 0x6E601C00 | (3 << 16) | (2 << 5) | 1
         #      = 0x6E601C00 | 0x30000 | 0x40 | 1
         #      = 0x6E631C41
         # LE: 0x41, 0x1C, 0x63, 0x6E
         var b = emit_bsl_16b(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x63)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): BSL little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: BSL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn<<5(0x40) folded into the low byte
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 unaffected — Rn<<5 stayed within byte0's carry
+        expect(b[2]).to_equal(0x63)  # oracle: byte2 = base byte + Rm(3) from the Rm<<16 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_bsl_16b always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-CMP
+        step("Encode BSL V25.16B, V26.16B, V27.16B and verify the fixed instruction width")
         var b = emit_bsl_16b(25, 26, 27)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): BSL emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every BSL encoding is a fixed 4-byte AArch64 instruction

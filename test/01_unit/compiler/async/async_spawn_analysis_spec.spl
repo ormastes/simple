@@ -1,21 +1,34 @@
 #!/usr/bin/env simple
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Executable contract for the compile-time spawn boundedness analysis used by
+the baremetal async lanes (`compiler.desugar.spawn_analysis`), owned by the
+compiler async team. It pins the utility lookups, init-phase reachability,
+instance and group-capacity limits, combined diagnostics, data structures,
+and operator-facing formatting.
+## Operator workflow
+Run `simple run test/01_unit/compiler/async/async_spawn_analysis_spec.spl`
+after touching `src/compiler/10.frontend/desugar/spawn_analysis.spl` or the
+`Span` definition it consumes.
+## Compatibility and limitations
+Scenarios operate at the data-structure level, not AST walking: analyses are
+built by the fixtures because ExprKind enum constructors fail in interpreter
+mode; AST walking is covered by integration tests.
+## Verification guidance and troubleshooting
+A diagnostics failure means a boundedness check (outside init, after await,
+instance limit, group cap) regressed or its message text drifted — the
+scenarios match on the operator-facing message substrings. A formatting
+failure means the report drifted. Rerun this single spec to reproduce.
+"""
+# Lifecycle: doc/01_research/domain/simple_ring_async_base.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/simple_ring_async_base.md ;
+# doc/05_design/simple_ring_async_base.md
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Spawn Boundedness Analysis Tests — Pass B
-#
-# Tests the compile-time spawn boundedness analysis for baremetal async.
-# Covers: utility functions, data structure construction, init phase
-# validation, instance limits, group capacity, combined checks, and formatting.
-#
-# NOTE: Tests operate at the data structure level (not AST walking) since
-# ExprKind enum constructors fail in interpreter mode. AST walking is
-# tested via integration tests.
+# Spawn Boundedness Analysis — Pass B. The fixture spans use the canonical
+# Span fields from src/compiler/00.common/diagnostics/span.spl (the spec
+# previously built Span with a nonexistent `end_pos` field, which failed 13
+# scenarios with `class Span has no field named end_pos` — fixed 2026-09-06).
 
 use compiler.desugar.spawn_analysis.{
     SpawnSite,
@@ -38,13 +51,15 @@ use compiler.desugar.spawn_analysis.{
     format_spawn_verify_result
 }
 use compiler.core.lexer_types.{Span}
+use std.spec.{step}
 
 # ================================================================
 # Test Helpers
 # ================================================================
 
 fn dummy_span() -> Span:
-    Span(start: 0, end_pos: 0, line: 1, col: 1)
+    # Canonical Span layout: file empty, length tracks end - start (0).
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
 
 fn make_spawn_site(task: text, caller: text, after_await: bool) -> SpawnSite:
     SpawnSite(
@@ -120,13 +135,23 @@ fn make_analysis_with_after_await() -> SpawnAnalysis:
 # ================================================================
 
 describe "is_in_list utility":
+    # @manual_section: spawn analysis utilities
     it "finds existing name":
+        # @req REQ-COMPILER-ASYNC-SPAWN-001
+        # @capture(bit_table): membership lookup over a three-name list
+        step("Look up a name that is present in the list")
         expect(is_in_list("main", ["main", "setup", "init"])).to_equal(true)
 
     it "returns false for missing name":
+        # @req REQ-COMPILER-ASYNC-SPAWN-002
+        # @capture(bit_table): membership miss verdict
+        step("Look up a name that is absent from the list")
         expect(is_in_list("handler", ["main", "setup"])).to_equal(false)
 
     it "returns false for empty list":
+        # @req REQ-COMPILER-ASYNC-SPAWN-003
+        # @capture(bit_table): membership lookup over an empty list
+        step("Look up any name in an empty list")
         expect(is_in_list("main", [])).to_equal(false)
 
 # ================================================================
@@ -134,32 +159,49 @@ describe "is_in_list utility":
 # ================================================================
 
 describe "get_boot_spawn_count lookup":
+    # @manual_section: spawn analysis utilities
     it "returns count for existing task":
+        # @req REQ-COMPILER-ASYNC-SPAWN-004
+        # @capture(bit_table): boot spawn counts for two known tasks
+        step("Look up boot spawn counts for both fixture tasks")
         val names = ["uart_rx", "spi_tx"]
         val counts = [3, 2]
-        expect(get_boot_spawn_count("uart_rx", names, counts)).to_equal(3)
-        expect(get_boot_spawn_count("spi_tx", names, counts)).to_equal(2)
+        expect(get_boot_spawn_count("uart_rx", names, counts)).to_equal(3)  # oracle: the fixture records 3 boot spawns of uart_rx
+        expect(get_boot_spawn_count("spi_tx", names, counts)).to_equal(2)  # oracle: the fixture records 2 boot spawns of spi_tx
 
     it "returns zero for unknown task":
+        # @req REQ-COMPILER-ASYNC-SPAWN-005
+        # @capture(bit_table): boot spawn count miss verdict
+        step("Look up a boot spawn count for a task that never spawned")
         val names = ["uart_rx"]
         val counts = [3]
-        expect(get_boot_spawn_count("unknown", names, counts)).to_equal(0)
+        expect(get_boot_spawn_count("unknown", names, counts)).to_equal(0)  # oracle: a task absent from the boot spawn list spawned zero times
 
     it "returns zero for empty arrays":
-        expect(get_boot_spawn_count("any", [], [])).to_equal(0)
+        # @req REQ-COMPILER-ASYNC-SPAWN-006
+        # @capture(bit_table): boot spawn lookup over empty arrays
+        step("Look up any boot spawn count with no recorded tasks")
+        expect(get_boot_spawn_count("any", [], [])).to_equal(0)  # oracle: empty parallel arrays mean no boot spawns were recorded at all
 
 # ================================================================
 # Tests: Init phase validation
 # ================================================================
 
 describe "Init phase validation":
+    # @manual_section: spawn analysis init-phase checks
     it "passes when all spawns in init-reachable":
+        # @req REQ-COMPILER-ASYNC-SPAWN-007
+        # @capture(statistics): clean-analysis spawn counters
+        step("Verify an analysis whose spawns all sit in init-reachable functions")
         val sa = make_clean_analysis()
         val result = verify_spawn_bounds(sa)
         expect(result.has_errors).to_equal(false)
-        expect(result.total_spawns).to_equal(2)
+        expect(result.total_spawns).to_equal(2)  # oracle: the clean fixture carries exactly two spawn sites
 
     it "errors when spawn outside init-reachable":
+        # @req REQ-COMPILER-ASYNC-SPAWN-008
+        # @capture(statistics): outside-init diagnostic presence
+        step("Verify an analysis with a spawn in a non-init-reachable function")
         val sa = make_analysis_with_outside_spawn()
         val result = verify_spawn_bounds(sa)
         expect(result.has_errors).to_equal(true)
@@ -170,6 +212,9 @@ describe "Init phase validation":
         expect(found_outside).to_equal(true)
 
     it "errors when spawn after await":
+        # @req REQ-COMPILER-ASYNC-SPAWN-009
+        # @capture(statistics): after-await diagnostic presence
+        step("Verify an analysis whose init spawn follows an await")
         val sa = make_analysis_with_after_await()
         val result = verify_spawn_bounds(sa)
         expect(result.has_errors).to_equal(true)
@@ -184,7 +229,11 @@ describe "Init phase validation":
 # ================================================================
 
 describe "Instance limits":
+    # @manual_section: spawn analysis instance limits
     it "passes when spawns within instance count":
+        # @req REQ-COMPILER-ASYNC-SPAWN-010
+        # @capture(statistics): boot count under declared instances
+        step("Verify a task whose boot spawns stay under its declared instances")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -198,6 +247,9 @@ describe "Instance limits":
         expect(result.has_errors).to_equal(false)
 
     it "passes when spawns equal instance count":
+        # @req REQ-COMPILER-ASYNC-SPAWN-011
+        # @capture(statistics): boot count exactly at declared instances
+        step("Verify a task whose boot spawns land exactly on its declared instances")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -211,6 +263,9 @@ describe "Instance limits":
         expect(result.has_errors).to_equal(false)
 
     it "errors when spawns exceed instance count":
+        # @req REQ-COMPILER-ASYNC-SPAWN-012
+        # @capture(statistics): instance-limit diagnostic with spawned/instances counts
+        step("Verify a task whose boot spawns exceed its declared instances")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -233,7 +288,11 @@ describe "Instance limits":
 # ================================================================
 
 describe "Group capacity":
+    # @manual_section: spawn analysis group capacity
     it "passes when group total within cap":
+        # @req REQ-COMPILER-ASYNC-SPAWN-013
+        # @capture(statistics): grouped-task totals under the group cap
+        step("Verify two grouped tasks whose combined spawns stay under the group cap")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -255,6 +314,9 @@ describe "Group capacity":
         expect(result.has_errors).to_equal(false)
 
     it "errors when group total exceeds cap":
+        # @req REQ-COMPILER-ASYNC-SPAWN-014
+        # @capture(statistics): group-cap diagnostic with total and cap
+        step("Verify grouped tasks whose combined spawns exceed the group cap")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -283,7 +345,11 @@ describe "Group capacity":
 # ================================================================
 
 describe "Combined checks":
+    # @manual_section: spawn analysis combined checks
     it "reports multiple errors at once":
+        # @req REQ-COMPILER-ASYNC-SPAWN-015
+        # @capture(statistics): diagnostic multiplicity for stacked violations
+        step("Verify an analysis that violates both the after-await and outside-init rules")
         val sa = SpawnAnalysis(
             init_functions: ["main"],
             init_reachable: ["main"],
@@ -305,54 +371,77 @@ describe "Combined checks":
         expect(result.diagnostics.len()).to_be_greater_than(1)
 
     it "passes clean module with no issues":
+        # @req REQ-COMPILER-ASYNC-SPAWN-016
+        # @capture(statistics): zero-diagnostic verdict for the clean analysis
+        step("Re-verify the clean analysis and require an empty diagnostic list")
         val sa = make_clean_analysis()
         val result = verify_spawn_bounds(sa)
         expect(result.has_errors).to_equal(false)
-        expect(result.diagnostics.len()).to_equal(0)
-        expect(result.total_spawns).to_equal(2)
+        expect(result.diagnostics.len()).to_equal(0)  # oracle: a clean analysis must produce zero diagnostics, not merely no errors
+        expect(result.total_spawns).to_equal(2)  # oracle: the clean fixture carries exactly two spawn sites
 
 # ================================================================
 # Tests: Data structure construction
 # ================================================================
 
 describe "Data structure construction":
+    # @manual_section: spawn analysis data structures
     it "creates SpawnSite correctly":
+        # @req REQ-COMPILER-ASYNC-SPAWN-017
+        # @capture(statistics): SpawnSite field round-trip
+        step("Construct a SpawnSite and read its fields back")
         val site = make_spawn_site("uart_rx", "main", false)
         expect(site.task_name).to_equal("uart_rx")
         expect(site.caller_name).to_equal("main")
         expect(site.is_after_await).to_equal(false)
 
     it "creates TaskInfo correctly":
+        # @req REQ-COMPILER-ASYNC-SPAWN-018
+        # @capture(statistics): TaskInfo field round-trip
+        step("Construct an ungrouped TaskInfo and read its fields back")
         val info = make_task_info("uart_rx", 4)
         expect(info.name).to_equal("uart_rx")
-        expect(info.instances).to_equal(4)
+        expect(info.instances).to_equal(4)  # oracle: the fixture declares 4 instances, the limit every instance-limit scenario compares against
         expect(info.group).to_be_nil()
 
     it "creates TaskGroupInfo correctly":
+        # @req REQ-COMPILER-ASYNC-SPAWN-019
+        # @capture(statistics): TaskGroupInfo field round-trip
+        step("Construct a TaskGroupInfo and read its fields back")
         val group = make_group("io_pool", 8, ["uart_rx", "spi_tx"])
         expect(group.name).to_equal("io_pool")
-        expect(group.cap).to_equal(8)
-        expect(group.members.len()).to_equal(2)
+        expect(group.cap).to_equal(8)  # oracle: the fixture cap 8 is the group limit the capacity scenarios compare totals against
+        expect(group.members.len()).to_equal(2)  # oracle: the fixture group lists exactly two member tasks
 
     it "creates SpawnAnalysis correctly":
+        # @req REQ-COMPILER-ASYNC-SPAWN-020
+        # @capture(statistics): SpawnAnalysis array round-trip
+        step("Construct the clean analysis and check every parallel array length")
         val sa = make_clean_analysis()
-        expect(sa.init_functions.len()).to_equal(1)
-        expect(sa.init_reachable.len()).to_equal(2)
-        expect(sa.spawn_sites.len()).to_equal(2)
-        expect(sa.task_infos.len()).to_equal(2)
-        expect(sa.boot_spawn_names.len()).to_equal(2)
-        expect(sa.boot_spawn_counts.len()).to_equal(2)
+        expect(sa.init_functions.len()).to_equal(1)  # oracle: the fixture declares one init function, main
+        expect(sa.init_reachable.len()).to_equal(2)  # oracle: the fixture marks main and setup as init-reachable
+        expect(sa.spawn_sites.len()).to_equal(2)  # oracle: the fixture carries two spawn sites
+        expect(sa.task_infos.len()).to_equal(2)  # oracle: one TaskInfo per spawned task, two tasks
+        expect(sa.boot_spawn_names.len()).to_equal(2)  # oracle: both tasks boot-spawn, so the names array has two entries
+        expect(sa.boot_spawn_counts.len()).to_equal(2)  # oracle: boot_spawn_counts is parallel to boot_spawn_names
 
 # ================================================================
 # Tests: compute_init_reachable
 # ================================================================
 
 describe "compute_init_reachable":
+    # @manual_section: spawn analysis reachability
     it "includes init functions themselves":
+        # @req REQ-COMPILER-ASYNC-SPAWN-021
+        # @capture(bit_table): reachability set seeded by init functions
+        step("Compute reachability with no call edges and check the init seed")
         val reachable = compute_init_reachable(["main"], [], [])
         expect(is_in_list("main", reachable)).to_equal(true)
 
     it "follows direct calls":
+        # @req REQ-COMPILER-ASYNC-SPAWN-022
+        # @capture(bit_table): one-hop reachable set from main
+        step("Compute reachability across one direct call edge per callee")
         val callers = ["main", "main"]
         val callees = ["setup", "init_hw"]
         val reachable = compute_init_reachable(["main"], callers, callees)
@@ -361,12 +450,18 @@ describe "compute_init_reachable":
         expect(is_in_list("init_hw", reachable)).to_equal(true)
 
     it "follows transitive calls":
+        # @req REQ-COMPILER-ASYNC-SPAWN-023
+        # @capture(bit_table): two-hop reachable set from main
+        step("Compute reachability across a transitive call chain")
         val callers = ["main", "setup"]
         val callees = ["setup", "init_hw"]
         val reachable = compute_init_reachable(["main"], callers, callees)
         expect(is_in_list("init_hw", reachable)).to_equal(true)
 
     it "excludes unreachable functions":
+        # @req REQ-COMPILER-ASYNC-SPAWN-024
+        # @capture(bit_table): functions excluded from the init-reachable set
+        step("Compute reachability and require non-init call trees to stay excluded")
         val callers = ["main", "handler"]
         val callees = ["setup", "process"]
         val reachable = compute_init_reachable(["main"], callers, callees)
@@ -379,7 +474,11 @@ describe "compute_init_reachable":
 # ================================================================
 
 describe "Spawn analysis formatting":
+    # @manual_section: spawn analysis report formatting
     it "produces non-empty report":
+        # @req REQ-COMPILER-ASYNC-SPAWN-025
+        # @capture(protocol_json): operator-facing spawn analysis report sections
+        step("Format the clean analysis into its operator-facing report")
         val sa = make_clean_analysis()
         val report = format_spawn_analysis(sa)
         expect(report.len()).to_be_greater_than(0)
@@ -388,6 +487,9 @@ describe "Spawn analysis formatting":
         expect(report).to_contain("Spawn sites:")
 
     it "formats verification result":
+        # @req REQ-COMPILER-ASYNC-SPAWN-026
+        # @capture(protocol_json): operator-facing verification summary
+        step("Format the clean verification result for the operator summary")
         val sa = make_clean_analysis()
         val result = verify_spawn_bounds(sa)
         val output = format_spawn_verify_result(result)

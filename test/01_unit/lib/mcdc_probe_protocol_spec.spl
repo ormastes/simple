@@ -1,4 +1,43 @@
-"""Focused coverage for bounded static/dynamic MC/DC probe accumulation."""
+"""Focused coverage for bounded static/dynamic MC/DC probe accumulation.
+
+## Purpose and audience
+
+Pins the bounded MC/DC probe protocol end to end: cold static registration,
+dynamic capsule publication and pinned unloads, reader-pin synchronization,
+and compiler-derived condition masking for short-circuit decisions.
+Audience: MC/DC coverage-instrumentation owners.
+
+## Operator workflow
+
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/mcdc_probe_protocol_spec.spl`.
+Every scenario drives the real probe registry and dynamic aspect modules.
+
+## Compatibility and limitations
+
+Scenarios mutate process-global probe state; they are written for a fresh
+runner process per file, not for ad-hoc reuse inside a longer session.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above in a clean process. A failure in a publication or
+unload scenario means the controller lifecycle regressed; a failure in a
+masking scenario means compiler-derived condition masks no longer match the
+observed evaluation order.
+"""
+# Lifecycle: doc/01_research/local/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/app/coverage/MCDC_COVERAGE_DESIGN.md
+# @manual_section: mcdc-probe-protocol
+
+# NOTE (2026-09-05, pre-existing RED on this host): 7 of 9 scenarios fail
+# under the bootstrap seed runner — the TLS/worker scenarios hit
+# "unknown extern function: rt_current_task_id" (missing runtime extern on
+# this hosted build), and the short-circuit masking scenario observes
+# "expected 0 to equal 1" (mask not applied on this lane). Scenarios are
+# kept unchanged; not filed here.
+
 # @req: REQ-MCDC-SHORT-CIRCUIT-002
 # @req: REQ-MCDC-DYNAMIC-007
 
@@ -13,27 +52,35 @@ use std.nogc_sync_mut.mcdc.static_probe.{mcdc_static_probe_abort, mcdc_static_pr
 
 describe "MC/DC pinned probe protocol":
     it "keeps the static registry cold until final policy configuration":
-        expect(mcdc_static_probe_begin(1)).to_equal(0)
+        # @req REQ-MCDC-SHORT-CIRCUIT-002
+        # @capture(statistics): session token of a cold static registry
+        step("Begin a static probe session before any policy configuration")
+        expect(mcdc_static_probe_begin(1)).to_equal(0)  # oracle: a cold registry begins a session at token 0
 
     it "cold-registers a real static worker before user probes and then uses TLS":
+        # @req REQ-MCDC-SHORT-CIRCUIT-002
+        # @capture(statistics): owner roster and worker token across the TLS handoff
+        step("Configure three static owners, fire the spawn hook, and begin a worker session")
         val policy = mcdc_default_policy(McdcMode.StaticOn)
         val current_owner = mcdc_probe_current_owner_id()
         expect(mcdc_static_probe_configure_for_owners(
             policy, [current_owner, current_owner + 10, current_owner + 20])).to_equal(true)
-        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)
+        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)  # oracle: the scenario configures exactly three static owners
         expect(mcdc_static_probe_worker_spawn_hook()).to_equal(true)
-        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)
+        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)  # oracle: the spawn hook must not add a fourth static owner
         val worker_token = mcdc_static_probe_begin(1)
         expect(worker_token).to_be_greater_than(0)
         mcdc_static_probe_abort(worker_token)
 
     it "publishes a configured dynamic capsule and restores publication after a failed unload":
+        # @req REQ-MCDC-DYNAMIC-007
+        # @capture(statistics): publication state across load, pinned unload, and retry
         step("Verify: activation installs and binds the first owner; failed withdrawal retries safely")
-        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)  # oracle: an unpublished controller begins activation at token 0
         val policy = mcdc_default_policy(McdcMode.DynamicAspect)
         expect(mcdc_dynamic_probe_configure(policy.global_bytes, policy.owner_bytes)).to_equal(true)
         expect(mcdc_dynamic_probe_is_published()).to_equal(false)
-        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)  # oracle: activation is idempotent at token 0 until the builtin owner loads
         expect(mcdc_dynamic_probe_controller_load_builtin_current_owner()).to_equal(true)
         expect(mcdc_dynamic_probe_is_published()).to_equal(true)
         val pinned = mcdc_dynamic_probe_begin(1)
@@ -43,9 +90,11 @@ describe "MC/DC pinned probe protocol":
         mcdc_dynamic_probe_abort(pinned)
         expect(mcdc_dynamic_probe_controller_unload_current_owner()).to_equal(true)
         expect(mcdc_dynamic_probe_is_published()).to_equal(false)
-        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)  # oracle: after a full unload the controller accepts a fresh activation at token 0
 
     it "records only conditions actually observed before decision end":
+        # @req REQ-MCDC-SHORT-CIRCUIT-002
+        # @capture(statistics): recorded condition count for a short-circuited decision
         step("Verify: fixed masks preserve a skipped short-circuit RHS")
         var aspect = McdcDynamicAspect.create_direct_static(
             3, mcdc_default_policy(McdcMode.StaticOn)
@@ -54,9 +103,12 @@ describe "MC/DC pinned probe protocol":
         expect(token).to_be_greater_than(0)
         expect(aspect.observe_condition(3, token, 0, false)).to_equal(true)
         expect(aspect.finish_evaluation(3, token, false)).to_equal(true)
-        expect(aspect.recorded_count()).to_equal(1)
+        expect(aspect.recorded_count()).to_equal(1)  # oracle: the skipped short-circuit RHS is never observed, so exactly one condition records
 
     it "tracks unload reader pins atomically around an owner evaluation":
+        # @req REQ-MCDC-DYNAMIC-007
+        # @capture(statistics): reader-pin state around an owner evaluation
+        step("Acquire a reader pin on an installed owner, evaluate, then release it")
         val policy = mcdc_default_policy(McdcMode.StaticOn)
         var registry = McdcProbeRegistry.create(policy.owner_bytes, policy.owner_bytes)
         expect(registry.install(
@@ -69,6 +121,9 @@ describe "MC/DC pinned probe protocol":
         expect(registry.all_reader_pins_zero()).to_equal(true)
 
     it "cold-registers a real dynamic worker without adding hot lookup":
+        # @req REQ-MCDC-DYNAMIC-007
+        # @capture(statistics): owner roster across aspect select, publish, and spawn hook
+        step("Select an aspect, prepare three owners, publish, and fire the dynamic spawn hook")
         val module_name = "test.mcdc.parallel.prepared"
         val current_owner = mcdc_probe_current_owner_id()
         val catalog = catalog_new()
@@ -80,15 +135,17 @@ describe "MC/DC pinned probe protocol":
         expect(mcdc_dynamic_probe_controller_prepare_owners(
             [current_owner, current_owner + 30, current_owner + 40])).to_equal(true)
         expect(mcdc_dynamic_probe_controller_publish_prepared()).to_equal(true)
-        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(2)
+        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(2)  # oracle: prepare_owners deduplicates the repeated current owner to two distinct owners
         expect(mcdc_dynamic_probe_worker_spawn_hook()).to_equal(true)
-        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(3)
+        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(3)  # oracle: the spawn hook adds exactly one dynamic worker owner
         val worker_token = mcdc_dynamic_probe_begin(2)
         expect(worker_token).to_be_greater_than(0)
         mcdc_dynamic_probe_abort(worker_token)
         expect(mcdc_dynamic_probe_controller_unload_all()).to_equal(true)
 
     it "records compiler-derived masking for evaluated irrelevant occurrences":
+        # @req REQ-MCDC-SHORT-CIRCUIT-002
+        # @capture(statistics): masked mask bits after a controlling RHS
         step("Verify: a controlling RHS masks the evaluated LHS range")
         var aspect = McdcDynamicAspect.create_direct_static(
             4, mcdc_default_policy(McdcMode.StaticOn)
@@ -98,9 +155,11 @@ describe "MC/DC pinned probe protocol":
         aspect.observe_condition(4, token, 1, true)
         expect(aspect.mark_masked_range(4, token, 0, 1, true)).to_equal(true)
         aspect.finish_evaluation(4, token, true)
-        expect(aspect.recorder.?.evaluation_at(0).masked_mask0).to_equal(1)
+        expect(aspect.recorder.?.evaluation_at(0).masked_mask0).to_equal(1)  # oracle: masking the LHS range (condition 0) sets exactly bit 0 of mask0
 
     it "keeps nested decisions in distinct preallocated slots":
+        # @req REQ-MCDC-SHORT-CIRCUIT-002
+        # @capture(statistics): recorded count for the nested decision pair
         step("Verify: inner completion does not overwrite outer masks")
         var aspect = McdcDynamicAspect.create_direct_static(
             5, mcdc_default_policy(McdcMode.StaticOn)
@@ -111,9 +170,11 @@ describe "MC/DC pinned probe protocol":
         expect(aspect.observe_condition(5, inner, 0, false)).to_equal(true)
         expect(aspect.finish_evaluation(5, inner, false)).to_equal(true)
         expect(aspect.finish_evaluation(5, outer, true)).to_equal(true)
-        expect(aspect.recorded_count()).to_equal(2)
+        expect(aspect.recorded_count()).to_equal(2)  # oracle: inner and outer decisions preallocate distinct slots, so both records survive
 
     it "maps multiple owners without sharing capsule mutation":
+        # @req REQ-MCDC-DYNAMIC-007
+        # @capture(statistics): per-owner recorded counts proving recorder isolation
         step("Verify: fixed registry keeps owner-local recorders distinct")
         val policy = mcdc_default_policy(McdcMode.StaticOn)
         var registry = McdcProbeRegistry.create(
@@ -128,5 +189,5 @@ describe "MC/DC pinned probe protocol":
         val token = first.?.begin_evaluation(11, 90)
         first.?.observe_condition(11, token, 0, true)
         first.?.finish_evaluation(11, token, true)
-        expect(first.?.recorded_count()).to_equal(1)
-        expect(second.?.recorded_count()).to_equal(0)
+        expect(first.?.recorded_count()).to_equal(1)  # oracle: the evaluation ran only on owner 11's recorder, so owner 11 records exactly one condition
+        expect(second.?.recorded_count()).to_equal(0)  # oracle: owner 12's recorder must stay untouched by owner 11's evaluation

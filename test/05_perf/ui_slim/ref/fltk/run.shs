@@ -1,0 +1,75 @@
+#!/bin/sh
+# A09 reference fixture runner — FLTK, category visible-window.
+#
+# STATUS ON THIS HOST: unsupported. FLTK is not installed and the A09 brief
+# forbids installing anything. This script therefore PROBES for FLTK and, when
+# it is absent, exits 2 with `ERROR — nothing was checked (...)` naming every
+# probe that was run.
+#
+# There is deliberately no main.cpp in this directory. Writing an unbuilt,
+# unrun C++ fixture would be dead code, and shipping any headless or drawn-
+# rectangle stand-in would be a substitute for the thing this lane exists to
+# measure: a REAL native window. The FLTK row in
+# doc/07_guide/ui/ui_slim_gui_references.md stays `unsupported` with the reason,
+# never a fabricated number.
+#
+# When FLTK is installed this script must be extended (not replaced) with:
+#   - main.cpp: Fl_Window + Fl_Box carrying the greeting + Fl_Button,
+#     `--auto-quit-ms 500` closing the window deterministically after the first
+#     draw via Fl::add_timeout, and an in-process first-draw timestamp taken
+#     from process start with CLOCK_MONOTONIC. That number is an IN-PROCESS
+#     FIRST-DRAW time, NOT an external presentation timestamp: FLTK's draw()
+#     returning is not proof the compositor has put pixels on a display.
+#   - the same verdict contract and the same greeting sabotage selftest used by
+#     the microui/nuklear runners, asserting the greeting via the window title
+#     and the box label.
+#
+# Verdict is ALWAYS the last line of stdout: PASS (0) / FAIL (1) / ERROR (2).
+set -u
+
+CATEGORY=visible-window
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --runs) shift 2 ;;
+    --selftest) shift ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+done
+
+probes=""
+found=0
+
+if command -v fltk-config >/dev/null 2>&1; then
+  found=1
+  probes="$probes fltk-config=$(fltk-config --version 2>&1)"
+else
+  probes="$probes fltk-config=absent"
+fi
+
+if command -v brew >/dev/null 2>&1; then
+  if brew list --formula 2>/dev/null | grep -qx fltk; then
+    found=1
+    probes="$probes brew-formula=present"
+  else
+    probes="$probes brew-formula=absent"
+  fi
+else
+  probes="$probes brew=absent"
+fi
+
+for d in /opt/homebrew/include/FL /usr/local/include/FL /usr/include/FL; do
+  if [ -d "$d" ]; then found=1; probes="$probes headers=$d"; fi
+done
+case "$probes" in *headers=*) ;; *) probes="$probes headers=absent" ;; esac
+
+echo "category: $CATEGORY"
+echo "probes:$probes"
+
+if [ "$found" -eq 0 ]; then
+  echo "ERROR — nothing was checked (FLTK is not installed on this host and A09 forbids installing it; probes:$probes)"
+  exit 2
+fi
+
+echo "ERROR — nothing was checked (FLTK was detected but this lane has no fixture yet; probes:$probes — implement main.cpp per the header comment before claiming a number)"
+exit 2

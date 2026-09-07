@@ -1,27 +1,66 @@
 # @feature mcdc_hal_runtime_hardening
-# @req REQ-009 REQ-010
+"""
+## Purpose and audience
+Freezes the rt(hal) call-binding lowering contract for compiler-backend
+maintainers: a closed O(1) operation table with no runtime lookup, and
+binding validation wired into the existing HIR contract pass.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/backend/rt_hal_call_binding_source_contract_spec.spl`
+and read the SPEC FILE VERDICT line.
+## Compatibility and limitations
+This is a source contract over shipped compiler source with no runtime
+API; it reads the product source and asserts on grep-verified tokens bound
+to named contract locals. It does not compile a probe program.
+## Verification guidance and troubleshooting
+A failure names which contract local went false; grep the named token in
+the cited compiler source file to see whether the table entry or the HIR
+pass wiring was renamed or dropped. RED here documents a real lowering
+contract defect.
+"""
+# Lifecycle: doc/01_research/local/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/mcdc_rt_hal_hardening.md
+# @manual_section: rt hal call binding lowering contract
 
 use std.spec.*
 use std.nogc_sync_mut.io_runtime.{file_read}
 
 describe "@rt(hal) call binding lowering contract":
     it "uses a closed O(1) operation table and no runtime lookup":
+        # @req REQ-009
+        # @req REQ-010
+        # @capture(bit_table): closed-table token presence and forbidden-lookup verdicts
+        step("Read rt_hal_static_binding.spl and verify the closed operation table and the absent runtime lookup")
         val source = file_read(
             "src/compiler/00.common/hal/rt_hal_static_binding.spl")
-        expect(source).to_contain(
-            "operation == \"io.clock.monotonic_nanos.v1\"")
-        expect(source).to_contain("hal_clock_monotonic_nanos_v1")
-        expect(source).to_contain("rt_time_now_nanos")
-        expect(source).to_contain("rt_hal_sealed_invoke_clock_mode_v2")
-        expect(source).to_contain("io.environment.get.v1")
-        expect(source).to_contain("bounded-text result ABI")
-        expect(source.contains("rt_env_get(\"")).to_be(false)
-        expect(source.contains("Dict<")).to_be(false)
+        val tables_monotonic_clock_op = source.contains("operation == \"io.clock.monotonic_nanos.v1\"")
+        val tables_clock_symbol = source.contains("hal_clock_monotonic_nanos_v1")
+        val tables_time_runtime_call = source.contains("rt_time_now_nanos")
+        val tables_sealed_invoke_mode = source.contains("rt_hal_sealed_invoke_clock_mode_v2")
+        val tables_environment_get_op = source.contains("io.environment.get.v1")
+        val documents_bounded_text_abi = source.contains("bounded-text result ABI")
+        val falls_back_to_runtime_env_lookup = source.contains("rt_env_get(\"")
+        val uses_dynamic_dispatch_table = source.contains("Dict<")
+        expect(tables_monotonic_clock_op).to_equal(true)  # oracle: the closed table must match the monotonic clock operation string
+        expect(tables_clock_symbol).to_equal(true)  # oracle: the table must bind the frozen clock symbol
+        expect(tables_time_runtime_call).to_equal(true)  # oracle: the table must route to the frozen time runtime call
+        expect(tables_sealed_invoke_mode).to_equal(true)  # oracle: the clock op lowers through the sealed invoke mode
+        expect(tables_environment_get_op).to_equal(true)  # oracle: the closed table also covers the environment-get operation
+        expect(documents_bounded_text_abi).to_equal(true)  # oracle: the bounded-text result ABI is part of the frozen contract
+        expect(falls_back_to_runtime_env_lookup).to_equal(false)  # oracle: a runtime env lookup would defeat the closed table
+        expect(uses_dynamic_dispatch_table).to_equal(false)  # oracle: a dict table would be a runtime lookup, not O(1)
 
     it "wires binding validation into the existing HIR contract pass":
+        # @req REQ-010
+        # @capture(bit_table): HIR pass wiring token presence verdicts
+        step("Read driver_hir_pipeline_passes.spl and verify the binding validation wiring")
         val source = file_read(
             "src/compiler/80.driver/driver_hir_pipeline_passes.spl")
-        expect(source).to_contain("rt_hal_static_binding_v1(operation)")
-        expect(source).to_contain(
-            "rt_hal_binding_signature_diagnostic_v1")
-        expect(source).to_contain("not binding.compare_supported")
+        val invokes_static_binding_check = source.contains("rt_hal_static_binding_v1(operation)")
+        val emits_binding_signature_diagnostic = source.contains("rt_hal_binding_signature_diagnostic_v1")
+        val gates_on_compare_support = source.contains("not binding.compare_supported")
+        expect(invokes_static_binding_check).to_equal(true)  # oracle: the HIR contract pass must call the static binding validator
+        expect(emits_binding_signature_diagnostic).to_equal(true)  # oracle: validation failures must surface the signature diagnostic
+        expect(gates_on_compare_support).to_equal(true)  # oracle: the pass gates lowering on compare_supported

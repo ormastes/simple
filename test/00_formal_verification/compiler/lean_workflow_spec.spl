@@ -1,3 +1,35 @@
+"""
+## Purpose and audience
+Executable contract for the Lean verification workflow core: LeanCheckResult
+and VerificationSummary aggregation, proof-obligation extraction from function
+contracts, the regeneration inventory, and the strict sorry-counting
+ProofChecker. Owned by the compiler verification team; reviewers of the
+`simple verify` toolchain read this to see which aggregation and regeneration
+invariants are pinned.
+
+## Operator workflow
+Run this spec after touching anything under the verification library:
+`bin/simple test test/00_formal_verification/compiler/lean_workflow_spec.spl`.
+Each scenario prints a VERDICT line; a failure names the aggregation,
+extraction, or regeneration invariant that broke.
+
+## Compatibility and limitations
+Regeneration scenarios write only under /tmp and never invoke the Lean
+toolchain itself, so no `lean`/`lake` installation is required. The strict
+checker and regeneration-writer scenarios shell out `rm -rf` on private /tmp
+roots for hermeticity.
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A `format()` mismatch usually means the
+human-readable summary grammar changed — update VerificationSummary.format and
+every caller together. A sorry-count failure indicates the comment- and
+string-aware scanner regressed; start at ProofChecker.check_file.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
 use std.spipe.*
 use std.nogc_sync_mut.io.{file_exists, file_read_text}
 use verification.lean.runner.{LeanCheckResult, VerificationSummary}
@@ -7,9 +39,13 @@ use verification.proofs.checker.{ProofChecker, LeanResult}
 use verification.regenerate.{regenerate_all, write_regenerated_files, validate_regeneration}
 use std.nogc_sync_mut.io.{shell}
 
+# @manual_section: lean-verification-workflow-core
 describe "Lean Verification Workflow Core":
     context "LeanCheckResult":
         it "flags unproven goals and formats them":
+            # @req REQ-LEAN-WORKFLOW-001
+            # @capture(protocol_json): LeanCheckResult flag/format verdicts for a partially proven file
+            step("Check a result with one solved and two remaining goals")
             val result = LeanCheckResult(
                 file: "src/verification/demo.lean",
                 success: true,
@@ -23,10 +59,13 @@ describe "Lean Verification Workflow Core":
             expect(result.has_unproven()).to_equal(true)
             expect(result.is_fully_proven()).to_equal(false)
             expect(result.passed()).to_equal(true)
-            expect(result.format()).to_contain("Goals remaining (sorry): 2")
+            expect(result.format()).to_contain("Goals remaining (sorry): 2")  # oracle: the fixture was built with goals_remaining=2
 
     context "VerificationSummary":
         it "aggregates pass/fail and unproven counts":
+            # @req REQ-LEAN-WORKFLOW-002
+            # @capture(statistics): VerificationSummary pass/fail/unproven counters for one ok and one failed file
+            step("Aggregate one passing and one failing LeanCheckResult")
             val ok = LeanCheckResult(
                 file: "src/verification/ok.lean",
                 success: true,
@@ -47,20 +86,23 @@ describe "Lean Verification Workflow Core":
             )
 
             val summary = VerificationSummary.from_results([ok, bad])
-            expect(summary.files_checked).to_equal(2)
-            expect(summary.files_passed).to_equal(1)
-            expect(summary.files_failed).to_equal(1)
-            expect(summary.total_theorems).to_equal(2)
-            expect(summary.proven_theorems).to_equal(1)
-            expect(summary.unproven_theorems).to_equal(1)
+            expect(summary.files_checked).to_equal(2)  # oracle: two results were aggregated
+            expect(summary.files_passed).to_equal(1)  # oracle: only `ok` succeeded
+            expect(summary.files_failed).to_equal(1)  # oracle: only `bad` failed
+            expect(summary.total_theorems).to_equal(2)  # oracle: 1 solved + 1 remaining across both files
+            expect(summary.proven_theorems).to_equal(1)  # oracle: ok solved its single goal
+            expect(summary.unproven_theorems).to_equal(1)  # oracle: bad left its single goal sorry
             expect(summary.is_success()).to_equal(false)
             expect(summary.is_fully_proven()).to_equal(false)
-            expect(summary.format()).to_contain("Files: 1/2 passed")
-            expect(summary.format()).to_contain("Theorems: 1/2 proven")
-            expect(summary.format()).to_contain("Unproven (sorry): 1")
+            expect(summary.format()).to_contain("Files: 1/2 passed")  # oracle: the summary grammar reports pass fraction
+            expect(summary.format()).to_contain("Theorems: 1/2 proven")  # oracle: the summary grammar reports proven fraction
+            expect(summary.format()).to_contain("Unproven (sorry): 1")  # oracle: the summary grammar reports the sorry count
 
     context "Proof obligations":
         it "extracts obligations with stable identifiers":
+            # @req REQ-LEAN-WORKFLOW-003
+            # @capture(protocol_json): proof-obligation ids extracted from a precondition/postcondition/invariant contract
+            step("Extract obligations from a three-clause factorial contract")
             var contract = FunctionContract.new()
             contract = contract.add_precondition(
                 ContractClause.new(
@@ -88,14 +130,17 @@ describe "Lean Verification Workflow Core":
             )
 
             val obls = extract_from_contract("factorial", "math.spl", 42, contract)
-            expect(obls.len()).to_equal(3)
+            expect(obls.len()).to_equal(3)  # oracle: one obligation per contract clause (pre, post, inv)
             expect(obls[0].id).to_equal("factorial_pre_0")
             expect(obls[1].id).to_equal("factorial_post_0")
             expect(obls[2].id).to_equal("factorial_inv_0")
             expect(obls[0].source_file).to_equal("math.spl")
-            expect(obls[0].source_line).to_equal(42)
+            expect(obls[0].source_line).to_equal(42)  # oracle: the contract was declared at line 42
 
         it "preserves proof text when marked proven":
+            # @req REQ-LEAN-WORKFLOW-004
+            # @capture(protocol_json): Lean theorem emitted from a proven obligation with its rfl proof
+            step("Mark an obligation proven and emit its Lean theorem")
             val ob = ProofObligation.create(
                 "demo_post_0",
                 "demo_postcondition_0",
@@ -114,13 +159,19 @@ describe "Lean Verification Workflow Core":
 
     context "Regeneration inventory":
         it "returns the supported file set":
+            # @req REQ-LEAN-WORKFLOW-005
+            # @capture(bit_table): regeneration inventory coverage over the 15 supported Lean artifacts
+            step("Enumerate the regeneration inventory")
             val files = regenerate_all()
-            expect(files.len()).to_equal(15)
+            expect(files.len()).to_equal(15)  # oracle: the inventory lists every supported verification artifact
             expect(files.has("src/verification/memory_capabilities/src/MemoryCapabilities.lean")).to_equal(true)
             expect(files.has("src/verification/memory_model_drf/src/MemoryModelDRF.lean")).to_equal(true)
             expect(files.has("src/verification/type_inference_compile/src/Contracts.lean")).to_equal(true)
 
         it "writes regenerated files to a temp directory":
+            # @req REQ-LEAN-WORKFLOW-006
+            # @capture(protocol_json): written regeneration paths plus the on-disk bytes they carry
+            step("Write one regenerated file into a private temp root")
             val temp_root = "/tmp/simple-lean-workflow-unit"
             # Hermetic: the fixture content carries no generated-marker header, so a
             # leftover file from a previous run makes the writer refuse to overwrite.
@@ -128,19 +179,25 @@ describe "Lean Verification Workflow Core":
             val sample = {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"}
             val written = write_regenerated_files(sample, temp_root)
 
-            expect(written.len()).to_equal(1)
+            expect(written.len()).to_equal(1)  # oracle: the sample map holds exactly one file
             expect(written[0]).to_start_with(temp_root)
             expect(file_exists(written[0])).to_equal(true)
             expect(file_read_text(written[0])).to_equal("theorem demo : True := by rfl")
 
     context "Proof status":
         it "renders admitted and pending states distinctly":
+            # @req REQ-LEAN-WORKFLOW-007
+            # @capture(protocol_json): display names of the pending/proven/admitted proof states
+            step("Render every proof status to its display name")
             expect(ProofStatus.Pending.to_string()).to_equal("pending")
             expect(ProofStatus.Proven.to_string()).to_equal("proven")
             expect(ProofStatus.Admitted.to_string()).to_equal("admitted")
 
     context "Strict checker":
         it "hard-fails on files that still contain sorry":
+            # @req REQ-LEAN-WORKFLOW-008
+            # @capture(protocol_json): strict ProofChecker verdict and sorry count for a sorry-bearing theorem
+            step("Run the strict checker over a sorry-bearing theorem file")
             val temp_root = "/tmp/simple-lean-workflow-strict"
             shell("rm -rf {temp_root}")
             val written = write_regenerated_files(
@@ -148,17 +205,20 @@ describe "Lean Verification Workflow Core":
                 temp_root
             )
 
-            expect(written.len()).to_equal(1)
+            expect(written.len()).to_equal(1)  # oracle: the fixture map holds exactly one file
 
             val proof_checker = ProofChecker.create()
             val result = proof_checker.check_file(written[0])
 
             val status_str = result.result.to_string()
             expect(status_str).to_contain("proof error")
-            expect(result.sorry_count()).to_equal(1)
+            expect(result.sorry_count()).to_equal(1)  # oracle: the fixture theorem carries exactly one sorry
             expect(result.error_message()).to_contain("sorry")
 
         it "flags missing validation targets as mismatches":
+            # @req REQ-LEAN-WORKFLOW-009
+            # @capture(protocol_json): validation verdicts when a regeneration target is absent on disk
+            step("Validate a regeneration map whose target directory is missing")
             val validation = validate_regeneration(
                 {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"},
                 "/tmp/simple-lean-workflow-missing"

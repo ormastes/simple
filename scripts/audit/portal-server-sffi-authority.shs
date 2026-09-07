@@ -1,15 +1,73 @@
 #!/bin/sh
 # Static raw-file-read elimination guard for Portal static assets.
 # This checks source shape only; it does not admit, sign, or verify a provider.
-set -eu
+set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 module="$root/src/app/portal/server.spl"
 
-test "$(grep -c '^extern fn rt_file_read_text' "$module")" -eq 0
-test "$(grep -c '^use std.io_runtime.{read_file_text_result}$' "$module")" -eq 1
-test "$(grep -c 'read_file_text_result(full_path)' "$module")" -eq 1
-test "$(grep -c 'Could not read asset: {clean_path}' "$module")" -eq 1
-test "$(grep -c '_html_ok(content, mime)' "$module")" -eq 1
+# --- verdict discipline (.claude/rules/vcs.md): verdict LAST on stdout,
+# --- PASS/FAIL/ERROR, exits 0/1/2, non-vacuity absolute. Inlined rather than
+# --- sourced: scripts/audit/ is scanned by check-guard-wiring.shs, so a shared
+# --- non-guard file in this directory would be mistaken for an unwired guard.
+CHECKED=0
+FAILURES=""
 
-echo 'Portal server SFFI authority: PASS local_raw_declarations=0 result_lifts=1 http_error_lifts=1 artifact_admission=absent'
+need_file() {
+    if [ ! -f "$1" ]; then
+        echo "ERROR — nothing was checked (missing audited file: $1)"
+        exit 2
+    fi
+}
+
+# count <label> <file> <pattern> <expected>
+count() {
+    _got=$(grep -c "$3" "$2" 2>/dev/null || true)
+    [ -n "$_got" ] || _got=0
+    CHECKED=$((CHECKED + 1))
+    if [ "$_got" -ne "$4" ]; then
+        FAILURES="${FAILURES}${FAILURES:+; }$1 in $2: expected $4, got $_got"
+    fi
+}
+
+# present: at least one match (shape must exist; multiplicity is not pinned).
+present() {
+    _got=$(grep -c "$3" "$2" 2>/dev/null || true)
+    [ -n "$_got" ] || _got=0
+    CHECKED=$((CHECKED + 1))
+    if [ "$_got" -lt 1 ]; then
+        FAILURES="${FAILURES}${FAILURES:+; }$1 in $2: expected at least 1, got $_got"
+    fi
+}
+
+absent()  { count "$1" "$2" "$3" 0; }
+
+verdict() {
+    if [ "$CHECKED" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($1: zero assertions evaluated)"
+        exit 2
+    fi
+    if [ -n "$FAILURES" ]; then
+        echo "FAIL — $1: $FAILURES"
+        exit 1
+    fi
+    echo "PASS — $CHECKED assertion(s) checked, $1"
+    exit 0
+}
+
+need_file "$module"
+
+absent 'local raw rt_file_read_text extern declaration' "$module" \
+    '^extern fn rt_file_read_text'
+absent 'any raw rt_file_read_text call site' "$module" \
+    'rt_file_read_text('
+count 'result-lifting io_runtime import' "$module" \
+    '^use std.io_runtime.{read_file_text_result}$' 1
+count 'result-lifted asset read' "$module" \
+    'read_file_text_result(full_path)' 1
+count 'HTTP 500 error lift on read failure' "$module" \
+    'Could not read asset: {clean_path}' 1
+count 'lifted content handed to the HTTP responder' "$module" \
+    '_html_ok(content, mime)' 1
+
+verdict 'portal server SFFI authority (local_raw_declarations=0 result_lifts=1 http_error_lifts=1 artifact_admission=absent)'

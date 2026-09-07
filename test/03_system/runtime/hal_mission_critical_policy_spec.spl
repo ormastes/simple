@@ -1,7 +1,36 @@
 # codex-system-test
 # @feature mcdc_hal_runtime_hardening
-# @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-019 NFR-005 NFR-006 NFR-009
 # @evidence-class source-contract
+"""
+## Purpose and audience
+Source-contract system tests for the mission-critical rt(hal) compile and
+memory policy: default assurance for unqualified declarations, explicit bounded
+configuration, rejection of lower assurance without a reason, rejection of
+obsolete fields and over-capacity storage, and the post-seal no-allocation
+guarantee. Covers requirements REQ-009, REQ-010, REQ-011, REQ-012, REQ-019 and
+NFR-005, NFR-006, NFR-009 for engineers changing compiler.common.hal.rt_hal_contract.
+## Operator workflow
+Run this spec with:
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/runtime/hal_mission_critical_policy_spec.spl`
+and read the trailing SPEC FILE VERDICT line.
+## Compatibility and limitations
+Contracts are parsed from canonical rt(hal) descriptor strings through
+parse_rt_hal_contract_v1; no real firmware image or sealed archive is built
+here. On hosts where the hal contract modules are not on the load path the
+runner reports outcome=ERROR with executed=0 — that is an environment gate,
+not a scenario failure.
+## Verification guidance and troubleshooting
+Each rejection scenario asserts the parser diagnostic text, so a failure
+message shows the offending descriptor field directly. A valid-contract
+failure means the default or explicit assurance ranking changed — compare the
+observed assurance_rank against the contract table in the rt(hal) hardening
+docs linked below before changing an expectation.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening_tldr.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: rt-hal-mission-critical-policy
 
 use std.spec.*
 use compiler.common.hal.rt_hal_contract.*
@@ -9,28 +38,39 @@ use std.common.structural.hal_provider.*
 
 describe "mission-critical rt(hal) compile and memory policy":
     it "should default an unqualified declaration to critical all-provider assurance":
-        step("Run the selected assurance mode")
+        # @req REQ-009
+        # @capture(statistics): default assurance rank and provider mask retained for review
+        step("Parse an unqualified rt(hal) descriptor and read its default assurance")
         val contract = parse_rt_hal_contract_v1("hal,operation.io.v1")
         expect(contract.valid).to_be(true)
-        expect(contract.assurance_rank).to_equal(3)
-        expect(contract.providers_mask).to_equal(7)
+        expect(contract.assurance_rank).to_equal(3)  # oracle: the contract table ranks unqualified critical assurance at 3
+        expect(contract.providers_mask).to_equal(7)  # oracle: all three providers (pure|c|rust) OR into mask 7
         expect(rt_hal_contract_requires_sealed_archive(contract)).to_be(true)
 
     it "should accept explicit bounded configuration":
+        # @req REQ-010
+        # @capture(statistics): explicit-contract assurance rank and byte budgets retained for review
+        step("Parse a fully-qualified bounded descriptor and read its assurance and budgets")
         val contract = parse_rt_hal_contract_v1(
             "hal,operation:file.read.v1,assurance:verified,providers:pure|c|rust,capabilities:15,request_bytes:256,result_bytes:512,trace_operations:16,trace_bytes:1024,diff_rows:8,report_bytes:1024,log_bytes:1024,deadline_ticks:1000,error_schema:1,environment_schema:1,preferred:pure")
         expect(contract.valid).to_be(true)
-        expect(contract.assurance_rank).to_equal(4)
-        expect(contract.trace_bytes).to_equal(1024)
-        expect(contract.log_bytes).to_equal(1024)
+        expect(contract.assurance_rank).to_equal(4)  # oracle: the contract table ranks explicit verified assurance at 4
+        expect(contract.trace_bytes).to_equal(1024)  # oracle: the descriptor declared trace_bytes:1024
+        expect(contract.log_bytes).to_equal(1024)  # oracle: the descriptor declared log_bytes:1024
 
     it "should reject lower assurance without a reason":
+        # @req REQ-011
+        # @capture(statistics): lower-assurance rejection diagnostic retained for review
+        step("Parse a strict-assurance descriptor with no justification reason")
         val contract = parse_rt_hal_contract_v1(
             "hal,operation:file.read.v1,assurance:strict")
         expect(contract.valid).to_be(false)
         expect(contract.diagnostic).to_contain("lower assurance requires")
 
     it "should reject unknown obsolete fields and over-capacity storage":
+        # @req REQ-012
+        # @capture(statistics): obsolete-field and over-capacity rejection diagnostics retained for review
+        step("Parse descriptors carrying a legacy field and an over-capacity log budget")
         val obsolete = parse_rt_hal_contract_v1(
             "hal,operation:file.read.v1,legacy_backend:c")
         val too_large = parse_rt_hal_contract_v1(
@@ -40,6 +80,9 @@ describe "mission-critical rt(hal) compile and memory policy":
         expect(too_large.valid).to_be(false)
 
     it "should reject any allocation after the initialization seal":
+        # @req REQ-019
+        # @capture(statistics): sealed-storage admission verdicts for clean and allocated states retained for review
+        step("Admit one operation into a clean sealed store and into a store with a live allocation")
         val operation = hal_operation_v1_default_critical(
             101, 7, 0, 11, 12, HalSideEffectPolicy.PlanThenCommit,
             hal_capacity_v1(128, 128, 16, 1024, 8, 1024, 1024, 2000),

@@ -1,174 +1,307 @@
-# Test Manifest — Serialization, Scanning, and Discovery Tests
-#
-# Tests verify manifest data structures and serialization round-trips.
-# Note: In interpreter mode, it blocks are closures — runtime behavior
-# is verified by file loading without errors (standard test runner behavior).
+"""
+## Purpose and audience
+Pins the test-manifest data model, on-disk serialization format, scanner
+metadata extraction, freshness contract, and the CLI flags of the pure-Simple
+test runner. Written for maintainers of src/lib/nogc_sync_mut/test_runner/
+and src/app/test_runner_new/ who need discovery regressions caught before a
+stale manifest silently reports zero tests.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/app/test_runner_new/test_manifest_spec.spl
+## Compatibility and limitations
+Runs against the product modules directly (std.test_runner.*), so the
+scenarios exercise the shipped parsers and scanners rather than string
+re-implementations. The save/load round-trip writes a scratch index under
+build/nb/, which is gitignored; no tracked file is modified.
+## Verification guidance and troubleshooting
+A failure names the manifest field, scan flag, or header line that drifted.
+The oracle comment on each expect line states the format contract or scan
+semantics the expected value comes from, so a drift can be triaged against
+src/lib/nogc_sync_mut/test_runner/ without re-deriving the format.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/app/testing/in_development_tag.md
 
+use std.test_runner.test_manifest.{
+    TestManifest, TestManifestEntry,
+    MANIFEST_TTL_MICROS, manifest_new, manifest_is_fresh,
+    manifest_save, manifest_load, manifest_find_entry,
+    parse_manifest_entry, parse_sdoctest_entry
+}
+use std.test_runner.test_manifest_scanner.{
+    is_spec_file, scan_test_file, scan_sdoctest_file,
+    count_sdoctest_blocks, extract_platform_tags
+}
+use std.test_runner.test_level_detect.{test_level_of_path}
+use std.test_runner.test_classification.{classify_test}
+use std.nogc_sync_mut.fs.{read_to_string, write_string}
+
+# Build a manifest with `n` generated entries at the pinned timestamp so the
+# header scenario can assert the entry_count line against a real save.
+fn _manifest_with_n_entries(n: i64) -> TestManifest:
+    var entries: [TestManifestEntry] = []
+    var i = 0
+    while i < n:
+        entries.push(TestManifestEntry(
+            path: "test/unit/gen{i}_spec.spl",
+            file_size: 1024,
+            file_mtime: 999000,
+            test_level: 1,
+            slow_tag: false,
+            skip_tag: true,
+            pending_tag: false,
+            tags: "parser,lexer",
+            platform_tags: "linux",
+            is_fuzz: false,
+            is_chaos: false,
+            is_deploy: false,
+            is_security: false,
+            is_baremetal: false,
+            last_duration_ms: 0
+        ))
+        i = i + 1
+    TestManifest(
+        version: 1,
+        scan_timestamp: 1234567890,
+        roots: ["test/unit"],
+        entries: entries,
+        sdoctest_entries: []
+    )
+
+# @manual_section: manifest-data-model
 describe "TestManifest Data Model":
-    # @manual scenario evidence
     it "creates empty manifest with version 1":
-        val version = 1
-        expect(version).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-001
+        # @capture(statistics): fresh manifest version and entry count
+        step("Create a fresh manifest with the shipped factory and check its version stamp and empty entry set")
+        val manifest = manifest_new()
+        expect(manifest.version).to_equal(1)  # oracle: MANIFEST_VERSION pins the index format at v1; loaders reject other majors
+        expect(manifest.entries.len()).to_equal(0)  # oracle: a fresh manifest has walked no directories, so it holds no entries
 
     it "parse entry from pipe-delimited line":
-        val line = "test/unit/x_spec.spl|500|100|1|0|1|0|tag1|linux|0|0|0|0|0"
-        val parts = line.split("|")
-        expect(parts.len()).to_equal(14)  # oracle: expected value 14 is the behavior asserted by this regression spec
-        expect(parts[0]).to_equal("test/unit/x_spec.spl")
-        expect(parts[4]).to_equal("0")
-        expect(parts[5]).to_equal("1")
+        # @req REQ-MANIFEST-002
+        # @capture(bit_table): parsed entry fields vs the 14-field wire line
+        step("Parse a full 14-field manifest line with the shipped parser and check the decoded fields")
+        val entry = parse_manifest_entry("test/unit/x_spec.spl|500|100|1|0|1|0|tag1|linux|0|0|0|0|0")
+        expect(entry.path).to_equal("test/unit/x_spec.spl")  # oracle: field 0 of the pipe format is the test file path
+        expect(entry.file_size).to_equal(500)  # oracle: field 1 of the pipe format is the file size in bytes
+        expect(entry.test_level).to_equal(1)  # oracle: field 3 of the pipe format is the level code, 1 = unit
+        expect(entry.slow_tag).to_equal(false)  # oracle: field 4 "0" decodes to a clear slow flag
+        expect(entry.skip_tag).to_equal(true)  # oracle: field 5 "1" decodes to a set skip flag
 
     it "parse sdoctest entry from pipe-delimited line":
-        val line = "doc/07_guide/intro.md|5000|888000|7"
-        val parts = line.split("|")
-        expect(parts.len()).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
-        expect(parts[0]).to_equal("doc/07_guide/intro.md")
-        expect(parts[3]).to_equal("7")
+        # @req REQ-MANIFEST-003
+        # @capture(bit_table): parsed sdoctest entry fields vs the 4-field wire line
+        step("Parse a 4-field sdoctest manifest line with the shipped parser and check the decoded fields")
+        val entry = parse_sdoctest_entry("doc/07_guide/intro.md|5000|888000|7")
+        expect(entry.path).to_equal("doc/07_guide/intro.md")  # oracle: field 0 of the sdoctest format is the markdown source path
+        expect(entry.file_size).to_equal(5000)  # oracle: field 1 of the sdoctest format is the file size in bytes
+        expect(entry.block_count).to_equal(7)  # oracle: field 3 of the sdoctest format is the registered doctest block count
 
     it "handles short/invalid line gracefully":
-        val line = "bad|data"
-        val parts = line.split("|")
-        expect(parts.len()).to_be_less_than(14)
+        # @req REQ-MANIFEST-004
+        # @capture(bit_table): short-line parse fallback vs the empty-path sentinel
+        step("Feed a 2-field line to the shipped parser and require the empty-path sentinel entry")
+        val entry = parse_manifest_entry("bad|data")
+        expect(entry.path).to_equal("")  # oracle: a line with fewer than 14 fields is rejected to the path="" sentinel so manifest_load skips it
 
+# @manual_section: manifest-serialization-format
 describe "TestManifest Serialization Format":
     it "serializes entry with correct pipe-delimited format":
-        val path = "test/unit/foo_spec.spl"
-        val size = 1024
-        val mtime = 999000
-        val level = 1
-        val slow = "0"
-        val skipped = "1"
-        val pending = "0"
-        val tags = "parser,lexer"
-        val platform = "linux"
-        val fuzz = "0"
-        val chaos = "0"
-        val deploy = "0"
-        val security = "0"
-        val bare = "0"
-        val line = "{path}|{size}|{mtime}|{level}|{slow}|{skipped}|{pending}|{tags}|{platform}|{fuzz}|{chaos}|{deploy}|{security}|{bare}"
-        expect(line).to_start_with("test/unit/foo_spec.spl|")
-        expect(line).to_contain("|1024|")
-        expect(line).to_contain("|parser,lexer|")
+        # @req REQ-MANIFEST-005
+        # @capture(bit_table): saved entry fields vs the round-tripped index line
+        step("Save a one-entry manifest with the shipped writer, reload it, and check the decoded entry plus the raw line")
+        val manifest = _manifest_with_n_entries(1)
+        val gen_entry = TestManifestEntry(
+            path: "test/unit/foo_spec.spl",
+            file_size: 1024,
+            file_mtime: 999000,
+            test_level: 1,
+            slow_tag: false,
+            skip_tag: true,
+            pending_tag: false,
+            tags: "parser,lexer",
+            platform_tags: "linux",
+            is_fuzz: false,
+            is_chaos: false,
+            is_deploy: false,
+            is_security: false,
+            is_baremetal: false,
+            last_duration_ms: 0
+        )
+        var replaced = manifest
+        replaced.entries = [gen_entry]
+        val saved = manifest_save(replaced, "build/nb/mf_entry_roundtrip.idx")
+        expect(saved).to_equal(true)  # oracle: the writer reports failure when the index file could not be written
+        val loaded = manifest_load("build/nb/mf_entry_roundtrip.idx")
+        val round_entry = manifest_find_entry(loaded, "test/unit/foo_spec.spl")
+        expect(round_entry.file_size).to_equal(1024)  # oracle: field 1 of the pipe format survives the round-trip unchanged
+        expect(round_entry.skip_tag).to_equal(true)  # oracle: field 5 "1" survives the round-trip as a set skip flag
+        expect(round_entry.tags).to_equal("parser,lexer")  # oracle: field 7 carries the comma-separated custom tags verbatim
+        val raw_opt = read_to_string("build/nb/mf_entry_roundtrip.idx")
+        val raw_index_text = raw_opt ?? ""
+        expect(raw_index_text.contains("|1024|")).to_equal(true)  # oracle: the size field is frame-delimited in the written line
+        expect(raw_index_text.contains("|parser,lexer|")).to_equal(true)  # oracle: the tags field sits between the platform-delimited frame in the written line
 
     it "serializes manifest header":
-        val version = 1
-        val timestamp = 1234567890
-        val entry_count = 5
-        val header = "# test-manifest v{version}\nscan_timestamp={timestamp}\nentry_count={entry_count}"
-        expect(header).to_start_with("# test-manifest v1")
-        expect(header).to_contain("scan_timestamp=1234567890")
-        expect(header).to_contain("entry_count=5")
+        # @req REQ-MANIFEST-006
+        # @capture(statistics): saved header lines vs the v1 header format
+        step("Save a five-entry manifest with the shipped writer and check the three header lines in the raw index text")
+        val manifest = _manifest_with_n_entries(5)
+        val saved = manifest_save(manifest, "build/nb/mf_header_roundtrip.idx")
+        expect(saved).to_equal(true)  # oracle: the writer reports failure when the index file could not be written
+        val raw_opt = read_to_string("build/nb/mf_header_roundtrip.idx")
+        val raw_index_text = raw_opt ?? ""
+        expect(raw_index_text.starts_with("# test-manifest v1")).to_equal(true)  # oracle: the format header must lead the file so loaders can version-check before parsing
+        expect(raw_index_text.contains("scan_timestamp=1234567890")).to_equal(true)  # oracle: the freshness clock is written as scan_timestamp=<unix micros>
+        expect(raw_index_text.contains("entry_count=5")).to_equal(true)  # oracle: loaders cross-check the declared count against the entries actually parsed
 
+# @manual_section: manifest-scanner-logic
 describe "TestManifest Scanner Logic":
     it "detects unit test level from path":
-        val path = "test/unit/parser/foo_spec.spl"
-        var level = 0
-        if path.contains("/unit/"):
-            level = 1
-        expect(level).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-007
+        # @capture(bit_table): unit path level code vs pinned value 1
+        step("Classify a unit-test path with the shipped level detector")
+        expect(test_level_of_path("test/unit/parser/foo_spec.spl")).to_equal(1)  # oracle: the /unit/ path segment maps to level code 1
 
     it "detects integration test level from path":
-        val path = "test/integration/bar_spec.spl"
-        var level = 0
-        if path.contains("/integration/"):
-            level = 2
-        expect(level).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-008
+        # @capture(bit_table): integration path level code vs pinned value 2
+        step("Classify an integration-test path with the shipped level detector")
+        expect(test_level_of_path("test/integration/bar_spec.spl")).to_equal(2)  # oracle: the /integration/ path segment maps to level code 2
 
     it "detects system test level from path":
-        val path = "test/system/baz_spec.spl"
-        var level = 0
-        if path.contains("/system/"):
-            level = 3
-        expect(level).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-009
+        # @capture(bit_table): system path level code vs pinned value 3
+        step("Classify a system-test path with the shipped level detector")
+        expect(test_level_of_path("test/system/baz_spec.spl")).to_equal(3)  # oracle: the /system/ path segment maps to level code 3
 
     it "detects feature as system level":
-        val path = "test/feature/qux_spec.spl"
-        var level = 0
-        if path.contains("/feature/"):
-            level = 3
-        expect(level).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-010
+        # @capture(bit_table): feature path level code vs pinned value 3
+        step("Classify a feature-test path with the shipped level detector")
+        expect(test_level_of_path("test/feature/qux_spec.spl")).to_equal(3)  # oracle: feature specs share the system tier, so /feature/ also maps to level code 3
 
     it "returns 0 for unknown test level":
-        val path = "test/misc/x_spec.spl"
-        var level = 0
-        if path.contains("/unit/"):
-            level = 1
-        if path.contains("/integration/"):
-            level = 2
-        if path.contains("/system/") or path.contains("/feature/"):
-            level = 3
-        expect(level).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-011
+        # @capture(bit_table): unknown path level code vs pinned value 0
+        step("Classify a path with no recognized level segment using the shipped level detector")
+        expect(test_level_of_path("test/misc/x_spec.spl")).to_equal(0)  # oracle: paths outside the four known segments stay unclassified at level code 0
 
     it "identifies spec files by name pattern":
-        val name1 = "foo_spec.spl"
-        val name2 = "bar_test.spl"
-        val name3 = "baz.spl"
-        expect(name1.contains("_spec.")).to_equal(true)
-        expect(name2.contains("_test.")).to_equal(true)
-        expect(name3.contains("_spec.")).to_equal(false)
+        # @req REQ-MANIFEST-012
+        # @capture(bit_table): basename patterns vs the shipped spec-file predicate
+        step("Run the shipped is_spec_file predicate over spec, test, and non-test basenames")
+        expect(is_spec_file("foo_spec.spl")).to_equal(true)  # oracle: discovery keys on the _spec. infix in the basename
+        expect(is_spec_file("bar_test.spl")).to_equal(true)  # oracle: discovery also keys on the _test. infix in the basename
+        expect(is_spec_file("baz.spl")).to_equal(false)  # oracle: a plain source file carries no test infix and must not be discovered
 
     it "counts sdoctest blocks in content":
+        # @req REQ-MANIFEST-013
+        # @capture(statistics): doctest block count vs the closed-block parser result
+        step("Count the registered doctest blocks in mixed markdown-style content with the shipped counter")
         val content = "text\n```simple:should_fail\ncode\n```\n```spl\ncode2\n```\n```simple\nunclosed"
-        expect(count_sdoctest_blocks(content)).to_equal(2)
+        expect(count_sdoctest_blocks(content)).to_equal(2)  # oracle: only closed non-empty blocks register — the two fenced pairs count, the unclosed fence does not
 
     it "registers source-comment doctests with the execution extractor":
-        val entry = scan_sdoctest_file("src/compiler/00.common/gc_config.spl")
-        expect(entry.block_count).to_be_greater_than(0)
+        # @req REQ-MANIFEST-014
+        # @capture(statistics): scanned doctest block count vs a non-zero registration
+        step("Scan a tracked source file with embedded doctest blocks using the shipped sdoctest scanner")
+        val entry = scan_sdoctest_file("src/lib/gc_async_mut/io.spl")
+        expect(entry.block_count).to_be_greater_than(0)  # oracle: a source file with fenced doctest blocks must register at least one executable block
 
     it "extracts platform tags from content":
+        # @req REQ-MANIFEST-015
+        # @capture(bit_table): extracted platform tags vs the comma-joined directive values
+        step("Extract platform directives from content with the shipped extractor and check the joined tag list")
         val content = "# @platform: linux\ncode\n# @platform: interpreter"
-        val lines = content.split("\n")
-        var tags: [text] = []
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed.starts_with("# @platform:"):
-                val tag = trimmed[12:].trim()
-                if tag != "":
-                    tags.push(tag)
-        expect(tags.len()).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(extract_platform_tags(content)).to_equal("linux,interpreter")  # oracle: each "# @platform:" directive contributes one tag, joined in file order with commas
 
     it "detects slow test markers":
-        val content = "describe \"x\":\n    slow_it \"takes time\":\n        pass"
-        expect(content.contains("slow_it ")).to_equal(true)
+        # @req REQ-MANIFEST-016
+        # @capture(bit_table): scanned slow flag vs the slow_it fixture
+        step("Write a fixture containing a slow_it scenario, then scan it with the shipped file scanner")
+        val wrote_fixture = write_string("build/nb/mf_slow_fixture_spec.spl", "describe \"x\":\n    slow_it \"takes time\":\n        pass")
+        expect(wrote_fixture).to_equal(true)  # oracle: the scan fixture must exist on disk before the scanner can read it
+        val entry = scan_test_file("build/nb/mf_slow_fixture_spec.spl")
+        expect(entry.slow_tag).to_equal(true)  # oracle: the scanner keys the slow flag on the literal slow_it scenario keyword
 
     it "detects skip tag markers":
-        val content = "tag: \"skip\"\ndescribe \"x\":"
-        val has_skip = content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
-        expect(has_skip).to_equal(true)
+        # @req REQ-MANIFEST-017
+        # @capture(bit_table): scanned skip flag vs the tag:"skip" fixture
+        step("Write a fixture carrying tag: \"skip\", then scan it with the shipped file scanner")
+        val wrote_fixture = write_string("build/nb/mf_skip_fixture_spec.spl", "tag: \"skip\"\ndescribe \"x\":")
+        expect(wrote_fixture).to_equal(true)  # oracle: the scan fixture must exist on disk before the scanner can read it
+        val entry = scan_test_file("build/nb/mf_skip_fixture_spec.spl")
+        expect(entry.skip_tag).to_equal(true)  # oracle: the scanner keys the skip flag on a quoted skip tag directive
 
     it "detects pending markers":
-        val content = "# @pending\ndescribe \"x\":"
-        val has_pending = content.contains("# @pending") or content.contains("tag: \"pending\"")
-        expect(has_pending).to_equal(true)
+        # @req REQ-MANIFEST-018
+        # @capture(bit_table): scanned pending flag vs the @pending fixture
+        step("Write a fixture carrying # @pending, then scan it with the shipped file scanner")
+        val wrote_fixture = write_string("build/nb/mf_pending_fixture_spec.spl", "# @pending\ndescribe \"x\":")
+        expect(wrote_fixture).to_equal(true)  # oracle: the scan fixture must exist on disk before the scanner can read it
+        val entry = scan_test_file("build/nb/mf_pending_fixture_spec.spl")
+        expect(entry.pending_tag).to_equal(true)  # oracle: the scanner keys the pending flag on the # @pending marker comment
 
     it "detects fuzz directory":
-        val path = "test/feature/language/fuzz/parser_fuzz_spec.spl"
-        expect(path.contains("/fuzz/")).to_equal(true)
+        # @req REQ-MANIFEST-019
+        # @capture(bit_table): scanned fuzz flag vs a tracked /fuzz/ path
+        step("Scan a tracked file living under a fuzz directory with the shipped file scanner")
+        val entry = scan_test_file("test/cert/fuzz/fuzz_gen.spl")
+        expect(entry.is_fuzz).to_equal(true)  # oracle: any file whose path crosses a /fuzz/ segment is a fuzz workload
 
     it "detects baremetal directory":
-        val path = "test/baremetal/riscv32/boot_spec.spl"
-        expect(path.contains("/baremetal/")).to_equal(true)
+        # @req REQ-MANIFEST-020
+        # @capture(bit_table): scanned baremetal flag and QEMU classification vs a tracked /baremetal/ path
+        step("Scan a tracked baremetal spec and run the shipped QEMU classifier over its path")
+        val entry = scan_test_file("test/unit/baremetal/riscv32_semihost_spec.spl")
+        expect(entry.is_baremetal).to_equal(true)  # oracle: any file whose path crosses a /baremetal/ segment targets baremetal
+        val classification = classify_test("test/unit/baremetal/riscv32_semihost_spec.spl")
+        expect(classification.needs_qemu).to_equal(true)  # oracle: baremetal paths are exactly the paths the classifier routes to QEMU sessions
 
+# @manual_section: manifest-freshness
 describe "TestManifest Freshness":
     it "zero timestamp means not fresh":
-        val timestamp = 0
-        val is_fresh = timestamp > 0
-        expect(is_fresh).to_equal(false)
+        # @req REQ-MANIFEST-021
+        # @capture(bit_table): freshness predicate vs a zero scan timestamp
+        step("Run the shipped freshness check over a never-scanned manifest")
+        val manifest = manifest_new()
+        expect(manifest.scan_timestamp).to_equal(0)  # oracle: the factory stamps scan_timestamp=0 to mean "never scanned"
+        expect(manifest_is_fresh(manifest)).to_equal(false)  # oracle: a never-scanned manifest has no clock to be fresh against, so it must force a rescan
 
     it "manifest TTL is 5 minutes in microseconds":
-        val ttl = 300000000
-        expect(ttl).to_equal(300000000)  # oracle: expected value 300000000 is the behavior asserted by this regression spec
+        # @req REQ-MANIFEST-022
+        # @capture(statistics): shipped TTL constant vs the 5-minute microsecond budget
+        step("Read the shipped freshness TTL constant and compare with the 5-minute microsecond budget")
+        expect(MANIFEST_TTL_MICROS).to_equal(300000000)  # oracle: 5 minutes is 5*60*1e6 = 300000000 microseconds, the documented freshness window
 
+# @manual_section: manifest-cli-flags
 describe "TestManifest CLI Flags":
     it "no-cache flag name":
-        val flag = "--no-cache"
-        expect(flag).to_equal("--no-cache")
+        # @req REQ-MANIFEST-023
+        # @capture(bit_table): registered --no-cache flag vs the args source contract
+        step("Read the runner argument dispatcher source and require the --no-cache flag to be registered there")
+        val args_src_opt = read_to_string("src/app/test_runner_new/test_runner_args.spl")
+        val runner_args_source = args_src_opt ?? ""
+        val registers_no_cache_flag = runner_args_source.contains("--no-cache")
+        expect(registers_no_cache_flag).to_equal(true)  # oracle: the flag only exists for operators if the shipped dispatcher registers that exact spelling
 
     it "refresh-manifest flag name":
-        val flag = "--refresh-manifest"
-        expect(flag).to_equal("--refresh-manifest")
+        # @req REQ-MANIFEST-024
+        # @capture(bit_table): registered --refresh-manifest flag vs the args source contract
+        step("Read the runner argument dispatcher source and require the --refresh-manifest flag to be registered there")
+        val args_src_opt = read_to_string("src/app/test_runner_new/test_runner_args.spl")
+        val runner_args_source = args_src_opt ?? ""
+        val registers_refresh_flag = runner_args_source.contains("--refresh-manifest")
+        expect(registers_refresh_flag).to_equal(true)  # oracle: the flag only exists for operators if the shipped dispatcher registers that exact spelling
 
     it "manifest-status flag name":
-        val flag = "--manifest-status"
-        expect(flag).to_equal("--manifest-status")
+        # @req REQ-MANIFEST-025
+        # @capture(bit_table): registered --manifest-status flag vs the args source contract
+        step("Read the runner argument dispatcher source and require the --manifest-status flag to be registered there")
+        val args_src_opt = read_to_string("src/app/test_runner_new/test_runner_args.spl")
+        val runner_args_source = args_src_opt ?? ""
+        val registers_status_flag = runner_args_source.contains("--manifest-status")
+        expect(registers_status_flag).to_equal(true)  # oracle: the flag only exists for operators if the shipped dispatcher registers that exact spelling

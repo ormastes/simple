@@ -1,13 +1,33 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+NEON load/store emit helpers (N4 wave): LD1/ST1 single-register no-offset
+forms and LD2/ST2 two-register post-index forms. Audience: the ARM64
+backend engineer verifying each emitted instruction matches the ARMv8 ARM
+opcode layout bit-for-bit before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_load_store_spec.spl
 
-# test/unit/compiler/backend/neon_load_store_spec.spl
-#
+## Compatibility and limitations
+Register indices: raw 0-31 (Vt index, NOT mach_inst ID range 64-79); base
+register raw 0-31 (Xn index). Interpreter-mode note (per
+.claude/rules/testing.md): the test runner in interpreter mode only verifies
+file loading and describe/it block reachability; assertions inside
+it-blocks execute under compiled mode. Unsupported: load/store forms outside
+the 6 listed here (not implemented by the backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+load/store instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 ARM §C7.2.219 (LD1), §C7.2.385 (ST1), §C7.2.222 (LD2),
+§C7.2.388 (ST2) and the bit-layout comment above each `describe` block
+(no-offset form vs. post-index immediate form) to locate which field
+produced the wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/simd_backend_strict_emit_goldens_detail.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-load-store-encoding
+
 # Byte-level golden tests for NEON load/store emit helpers (N4 wave).
 # Verifies emit_neon_ld1q_16b_immoff, emit_neon_st1q_16b_immoff,
 # emit_neon_ld1q_4s_immoff, emit_neon_st1q_4s_immoff,
@@ -19,11 +39,6 @@
 #            ARMv8 ARM §C7.2.222 LD2 (multiple structures, post-index)
 #            ARMv8 ARM §C7.2.388 ST2 (multiple structures, post-index)
 #            doc/04_architecture/simd_backend_strict_emit_goldens_detail.md §10.1
-#
-# Register indices: raw 0-31 (Vt index, NOT mach_inst ID range 64-79).
-#   V0=0, V1=1, V31=31
-# Base register: raw 0-31 (Xn index).
-#   X0=0, X1=1
 #
 # All instructions 4-byte fixed-width, little-endian.
 #
@@ -46,38 +61,66 @@ use compiler.backend.native.arm_neon.{emit_neon_ld1q_16b_immoff, emit_neon_st1q_
 
 describe "NEON emit_neon_ld1q_16b_immoff golden":
     it "LD1 V0.16B [X0] emits 4 bytes":
+        # @req REQ-NEON-LDST-001
+        step("Encode LD1 V0.16B, [X0] (Rt=Rn=0)")
         val result = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): LD1.16B output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "LD1 V0.16B [X0] byte0 is 0x00":
+        # @req REQ-NEON-LDST-002
+        step("Encode LD1 V0.16B, [X0] and read byte0")
         # bits[7:0]: Rt=0, Rn[2:0]=0
         val result = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): LD1.16B byte0 layout
+        step("Verify byte0 holds Rt (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rt(0) | Rn[2:0]<<5(0)
 
     it "LD1 V0.16B [X0] byte1 is 0x70":
+        # @req REQ-NEON-LDST-003
+        step("Encode LD1 V0.16B, [X0] and read byte1")
         # bits[15:8]: opcode=0111 upper in bits[15:12], size=00 in bits[11:10] → 0x70
         val result = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(result[1]).to_equal(112)
+        # @capture(bit_table): LD1.16B byte1 layout
+        step("Verify byte1 holds opcode=0111 and size=00 (byte)")
+        expect(result[1]).to_equal(112)  # oracle: bits[15:8] opcode=0111b, size=00b = 0x70
 
     it "LD1 V0.16B [X0] byte2 is 0x40":
+        # @req REQ-NEON-LDST-004
+        step("Encode LD1 V0.16B, [X0] and read byte2")
         # bits[23:16]: bit23=0 (no post), bit22=L=1, bit21=0, bits[20:16]=Rm=00000 → 0x40
         val result = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(result[2]).to_equal(64)
+        # @capture(bit_table): LD1.16B byte2 layout
+        step("Verify byte2 holds L=1 (load) with no post-index and Rm=0")
+        expect(result[2]).to_equal(64)  # oracle: bits[23:16] no-post(0), L=1, Rm(0) = 0x40
 
     it "LD1 V0.16B [X0] byte3 is 0x4C":
+        # @req REQ-NEON-LDST-005
+        step("Encode LD1 V0.16B, [X0] and read byte3")
         # bits[31:24]: bit31=0, bit30=Q=1, bits[29:24]=001100 → 0x4C
         val result = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): LD1.16B byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed 001100 group opcode")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "LD1 V1.16B [X0] byte0 encodes Rt=1":
+        # @req REQ-NEON-LDST-006
+        step("Encode LD1 V1.16B, [X0] (Rt=1) and read byte0")
         # Rt=1 in bits[4:0], Rn=0 → byte0 = 1
         val result = emit_neon_ld1q_16b_immoff(1, 0)
-        expect(result[0]).to_equal(1)
+        # @capture(bit_table): LD1.16B Rt=1 layout
+        step("Verify byte0 folds Rt=1 with Rn=0")
+        expect(result[0]).to_equal(1)  # oracle: byte0 = Rt(1), no Rn contribution
 
     it "LD1 V0.16B [X1] byte0 encodes Rn=1":
+        # @req REQ-NEON-LDST-007
+        step("Encode LD1 V0.16B, [X1] (Rn=1) and read byte0")
         # Rn=1 in bits[9:5] → byte0 = 0 + (1*32)%256 = 0x20
         val result = emit_neon_ld1q_16b_immoff(0, 1)
-        expect(result[0]).to_equal(32)
+        # @capture(bit_table): LD1.16B Rn=1 layout
+        step("Verify byte0 folds Rn=1's low bits with Rt=0")
+        expect(result[0]).to_equal(32)  # oracle: byte0 = Rt(0) + Rn(1)<<5 = 0x20
 
 # ============================================================================
 # ST1 V0.16B, [X0]
@@ -88,28 +131,48 @@ describe "NEON emit_neon_ld1q_16b_immoff golden":
 
 describe "NEON emit_neon_st1q_16b_immoff golden":
     it "ST1 V0.16B [X0] emits 4 bytes":
+        # @req REQ-NEON-LDST-008
+        step("Encode ST1 V0.16B, [X0] (Rt=Rn=0)")
         val result = emit_neon_st1q_16b_immoff(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): ST1.16B output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "ST1 V0.16B [X0] byte1 is 0x70":
+        # @req REQ-NEON-LDST-009
+        step("Encode ST1 V0.16B, [X0] and read byte1")
         # opcode/size same as LD1 16B
         val result = emit_neon_st1q_16b_immoff(0, 0)
-        expect(result[1]).to_equal(112)
+        # @capture(bit_table): ST1.16B byte1 layout
+        step("Verify byte1 holds opcode=0111 and size=00, shared with LD1")
+        expect(result[1]).to_equal(112)  # oracle: bits[15:8] opcode=0111b, size=00b = 0x70
 
     it "ST1 V0.16B [X0] byte2 is 0x00":
+        # @req REQ-NEON-LDST-010
+        step("Encode ST1 V0.16B, [X0] and read byte2")
         # L=0 (store): bits[23:16]=0x00
         val result = emit_neon_st1q_16b_immoff(0, 0)
-        expect(result[2]).to_equal(0)
+        # @capture(bit_table): ST1.16B byte2 layout
+        step("Verify byte2 holds L=0 (store) with no post-index and Rm=0")
+        expect(result[2]).to_equal(0)  # oracle: bits[23:16] L=0 (store), Rm(0) = 0x00
 
     it "ST1 V0.16B [X0] byte3 is 0x4C":
+        # @req REQ-NEON-LDST-011
+        step("Encode ST1 V0.16B, [X0] and read byte3")
         val result = emit_neon_st1q_16b_immoff(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): ST1.16B byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed group opcode, shared with LD1")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "ST1 V0.16B vs LD1 V0.16B differ only in byte2 L-bit":
+        # @req REQ-NEON-LDST-012
+        step("Encode LD1 and ST1 V0.16B, [X0] with identical operands")
         # Store clears L bit (byte2 bit6); Load sets it
         val ld = emit_neon_ld1q_16b_immoff(0, 0)
         val st = emit_neon_st1q_16b_immoff(0, 0)
-        expect(ld[2] - st[2]).to_equal(64)
+        # @capture(bit_table): LD1 vs ST1 byte2 L-bit distinction
+        step("Verify the L-bit is the only difference between load and store byte2")
+        expect(ld[2] - st[2]).to_equal(64)  # oracle: bit22 (L=1 for load) adds 0x40 over the store's byte2
 
 # ============================================================================
 # LD1 V0.4S, [X0]
@@ -120,41 +183,73 @@ describe "NEON emit_neon_st1q_16b_immoff golden":
 
 describe "NEON emit_neon_ld1q_4s_immoff golden":
     it "LD1 V0.4S [X0] emits 4 bytes":
+        # @req REQ-NEON-LDST-013
+        step("Encode LD1 V0.4S, [X0] (Rt=Rn=0)")
         val result = emit_neon_ld1q_4s_immoff(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): LD1.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "LD1 V0.4S [X0] byte0 is 0x00":
+        # @req REQ-NEON-LDST-014
+        step("Encode LD1 V0.4S, [X0] and read byte0")
         val result = emit_neon_ld1q_4s_immoff(0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): LD1.4S byte0 layout
+        step("Verify byte0 holds Rt (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rt(0) | Rn[2:0]<<5(0)
 
     it "LD1 V0.4S [X0] byte1 is 0x78":
+        # @req REQ-NEON-LDST-015
+        step("Encode LD1 V0.4S, [X0] and read byte1")
         # bits[15:8]: opcode=0111 in bits[15:12], size=10 in bits[11:10] → 0111_1000 = 0x78
         val result = emit_neon_ld1q_4s_immoff(0, 0)
-        expect(result[1]).to_equal(120)
+        # @capture(bit_table): LD1.4S byte1 layout
+        step("Verify byte1 holds opcode=0111 and size=10 (word)")
+        expect(result[1]).to_equal(120)  # oracle: bits[15:8] opcode=0111b, size=10b = 0x78
 
     it "LD1 V0.4S [X0] byte2 is 0x40":
+        # @req REQ-NEON-LDST-016
+        step("Encode LD1 V0.4S, [X0] and read byte2")
         val result = emit_neon_ld1q_4s_immoff(0, 0)
-        expect(result[2]).to_equal(64)
+        # @capture(bit_table): LD1.4S byte2 layout
+        step("Verify byte2 holds L=1 (load) with no post-index and Rm=0")
+        expect(result[2]).to_equal(64)  # oracle: bits[23:16] no-post(0), L=1, Rm(0) = 0x40
 
     it "LD1 V0.4S [X0] byte3 is 0x4C":
+        # @req REQ-NEON-LDST-017
+        step("Encode LD1 V0.4S, [X0] and read byte3")
         val result = emit_neon_ld1q_4s_immoff(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): LD1.4S byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed group opcode")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "LD1 V31.4S [X0] byte0 encodes Rt=31":
+        # @req REQ-NEON-LDST-018
+        step("Encode LD1 V31.4S, [X0] (Rt=31) and read byte0")
         # Rt=31 in bits[4:0], Rn=0 → byte0 = 31 = 0x1F
         val result = emit_neon_ld1q_4s_immoff(31, 0)
-        expect(result[0]).to_equal(31)
+        # @capture(bit_table): LD1.4S Rt=31 layout
+        step("Verify byte0 folds the max register index Rt=31")
+        expect(result[0]).to_equal(31)  # oracle: byte0 = Rt(31), no Rn contribution
 
     it "LD1 V0.4S [X1] byte0 encodes Rn=1":
+        # @req REQ-NEON-LDST-019
+        step("Encode LD1 V0.4S, [X1] (Rn=1) and read byte0")
         # Rn=1 → bits[9:5]=1 → byte0 = 0 + (1*32) = 32 = 0x20
         val result = emit_neon_ld1q_4s_immoff(0, 1)
-        expect(result[0]).to_equal(32)
+        # @capture(bit_table): LD1.4S Rn=1 layout
+        step("Verify byte0 folds Rn=1's low bits with Rt=0")
+        expect(result[0]).to_equal(32)  # oracle: byte0 = Rt(0) + Rn(1)<<5 = 0x20
 
     it "LD1 V0.4S vs LD1 V0.16B differ only in size field byte1":
+        # @req REQ-NEON-LDST-020
+        step("Encode LD1 V0.4S, [X0] and LD1 V0.16B, [X0] with identical operands")
         # .4S has size=10 (bit9=1 → byte1 bit1=1 = +8); .16B has size=00
         val ls = emit_neon_ld1q_4s_immoff(0, 0)
         val lb = emit_neon_ld1q_16b_immoff(0, 0)
-        expect(ls[1] - lb[1]).to_equal(8)
+        # @capture(bit_table): LD1.4S vs LD1.16B byte1 size-field distinction
+        step("Verify the size field is the only difference between .4S and .16B")
+        expect(ls[1] - lb[1]).to_equal(8)  # oracle: bits[11:10] size=10 (word) vs size=00 (byte) adds 8
 
 # ============================================================================
 # ST1 V0.4S, [X0]
@@ -164,26 +259,46 @@ describe "NEON emit_neon_ld1q_4s_immoff golden":
 
 describe "NEON emit_neon_st1q_4s_immoff golden":
     it "ST1 V0.4S [X0] emits 4 bytes":
+        # @req REQ-NEON-LDST-021
+        step("Encode ST1 V0.4S, [X0] (Rt=Rn=0)")
         val result = emit_neon_st1q_4s_immoff(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): ST1.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "ST1 V0.4S [X0] byte1 is 0x78":
+        # @req REQ-NEON-LDST-022
+        step("Encode ST1 V0.4S, [X0] and read byte1")
         val result = emit_neon_st1q_4s_immoff(0, 0)
-        expect(result[1]).to_equal(120)
+        # @capture(bit_table): ST1.4S byte1 layout
+        step("Verify byte1 holds opcode=0111 and size=10, shared with LD1.4S")
+        expect(result[1]).to_equal(120)  # oracle: bits[15:8] opcode=0111b, size=10b = 0x78
 
     it "ST1 V0.4S [X0] byte2 is 0x00":
+        # @req REQ-NEON-LDST-023
+        step("Encode ST1 V0.4S, [X0] and read byte2")
         # L=0 → byte2 = 0x00
         val result = emit_neon_st1q_4s_immoff(0, 0)
-        expect(result[2]).to_equal(0)
+        # @capture(bit_table): ST1.4S byte2 layout
+        step("Verify byte2 holds L=0 (store) with no post-index and Rm=0")
+        expect(result[2]).to_equal(0)  # oracle: bits[23:16] L=0 (store), Rm(0) = 0x00
 
     it "ST1 V0.4S [X0] byte3 is 0x4C":
+        # @req REQ-NEON-LDST-024
+        step("Encode ST1 V0.4S, [X0] and read byte3")
         val result = emit_neon_st1q_4s_immoff(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): ST1.4S byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed group opcode, shared with LD1")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "ST1 V0.4S vs LD1 V0.4S differ only in byte2 L-bit":
+        # @req REQ-NEON-LDST-025
+        step("Encode LD1 and ST1 V0.4S, [X0] with identical operands")
         val ld = emit_neon_ld1q_4s_immoff(0, 0)
         val st = emit_neon_st1q_4s_immoff(0, 0)
-        expect(ld[2] - st[2]).to_equal(64)
+        # @capture(bit_table): LD1.4S vs ST1.4S byte2 L-bit distinction
+        step("Verify the L-bit is the only difference between load and store byte2")
+        expect(ld[2] - st[2]).to_equal(64)  # oracle: bit22 (L=1 for load) adds 0x40 over the store's byte2
 
 # ============================================================================
 # LD2 {V0.4S, V1.4S}, [X0], #32
@@ -195,31 +310,55 @@ describe "NEON emit_neon_st1q_4s_immoff golden":
 
 describe "NEON emit_neon_ld2_4s_post golden":
     it "LD2 {V0.4S V1.4S} [X0] post32 emits 4 bytes":
+        # @req REQ-NEON-LDST-026
+        step("Encode LD2 {V0.4S, V1.4S}, [X0], #32 (Rt=Rn=0)")
         val result = emit_neon_ld2_4s_post(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): LD2.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "LD2 {V0.4S V1.4S} [X0] post32 byte0 is 0x00":
+        # @req REQ-NEON-LDST-027
+        step("Encode LD2 {V0.4S, V1.4S}, [X0], #32 and read byte0")
         val result = emit_neon_ld2_4s_post(0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): LD2.4S byte0 layout
+        step("Verify byte0 holds Rt (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rt(0) | Rn[2:0]<<5(0)
 
     it "LD2 {V0.4S V1.4S} [X0] post32 byte1 is 0x88":
+        # @req REQ-NEON-LDST-028
+        step("Encode LD2 {V0.4S, V1.4S}, [X0], #32 and read byte1")
         # bits[15:8]: opcode=1000 in bits[15:12], size=10 in bits[11:10] → 1000_1000 = 0x88
         val result = emit_neon_ld2_4s_post(0, 0)
-        expect(result[1]).to_equal(136)
+        # @capture(bit_table): LD2.4S byte1 layout
+        step("Verify byte1 holds opcode=1000 (2-reg) and size=10")
+        expect(result[1]).to_equal(136)  # oracle: bits[15:8] opcode=1000b, size=10b = 0x88
 
     it "LD2 {V0.4S V1.4S} [X0] post32 byte2 is 0xDF":
+        # @req REQ-NEON-LDST-029
+        step("Encode LD2 {V0.4S, V1.4S}, [X0], #32 and read byte2")
         # bits[23:16]: bit23=1 (post), bit22=L=1, bit21=0, bits[20:16]=Rm=11111 → 1101_1111=0xDF
         val result = emit_neon_ld2_4s_post(0, 0)
-        expect(result[2]).to_equal(223)
+        # @capture(bit_table): LD2.4S byte2 layout
+        step("Verify byte2 holds post-index=1, L=1 (load), and Rm=0x1F (immediate marker)")
+        expect(result[2]).to_equal(223)  # oracle: bits[23:16] post(1), L=1, Rm=11111b(imm marker) = 0xDF
 
     it "LD2 {V0.4S V1.4S} [X0] post32 byte3 is 0x4C":
+        # @req REQ-NEON-LDST-030
+        step("Encode LD2 {V0.4S, V1.4S}, [X0], #32 and read byte3")
         val result = emit_neon_ld2_4s_post(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): LD2.4S byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed group opcode")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "LD2 V1.4S [X0] post32 byte0 encodes Rt=1":
+        # @req REQ-NEON-LDST-031
+        step("Encode LD2 {V1.4S, V2.4S}, [X0], #32 (Rt=1) and read byte0")
         # Rt=1 in bits[4:0] → byte0=1
         val result = emit_neon_ld2_4s_post(1, 0)
-        expect(result[0]).to_equal(1)
+        # @capture(bit_table): LD2.4S Rt=1 layout
+        step("Verify byte0 folds Rt=1 with Rn=0")
+        expect(result[0]).to_equal(1)  # oracle: byte0 = Rt(1), no Rn contribution
 
 # ============================================================================
 # ST2 {V0.4S, V1.4S}, [X0], #32
@@ -231,25 +370,45 @@ describe "NEON emit_neon_ld2_4s_post golden":
 
 describe "NEON emit_neon_st2_4s_post golden":
     it "ST2 {V0.4S V1.4S} [X0] post32 emits 4 bytes":
+        # @req REQ-NEON-LDST-032
+        step("Encode ST2 {V0.4S, V1.4S}, [X0], #32 (Rt=Rn=0)")
         val result = emit_neon_st2_4s_post(0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): ST2.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "ST2 {V0.4S V1.4S} [X0] post32 byte1 is 0x88":
+        # @req REQ-NEON-LDST-033
+        step("Encode ST2 {V0.4S, V1.4S}, [X0], #32 and read byte1")
         # Same opcode+size as LD2; differs only in L-bit
         val result = emit_neon_st2_4s_post(0, 0)
-        expect(result[1]).to_equal(136)
+        # @capture(bit_table): ST2.4S byte1 layout
+        step("Verify byte1 holds opcode=1000 and size=10, shared with LD2")
+        expect(result[1]).to_equal(136)  # oracle: bits[15:8] opcode=1000b, size=10b = 0x88
 
     it "ST2 {V0.4S V1.4S} [X0] post32 byte2 is 0x9F":
+        # @req REQ-NEON-LDST-034
+        step("Encode ST2 {V0.4S, V1.4S}, [X0], #32 and read byte2")
         # bits[23:16]: 1_0_0_11111 = 0x9F (L=0 for store)
         val result = emit_neon_st2_4s_post(0, 0)
-        expect(result[2]).to_equal(159)
+        # @capture(bit_table): ST2.4S byte2 layout
+        step("Verify byte2 holds post-index=1, L=0 (store), and Rm=0x1F (immediate marker)")
+        expect(result[2]).to_equal(159)  # oracle: bits[23:16] post(1), L=0, Rm=11111b(imm marker) = 0x9F
 
     it "ST2 {V0.4S V1.4S} [X0] post32 byte3 is 0x4C":
+        # @req REQ-NEON-LDST-035
+        step("Encode ST2 {V0.4S, V1.4S}, [X0], #32 and read byte3")
         val result = emit_neon_st2_4s_post(0, 0)
-        expect(result[3]).to_equal(76)
+        # @capture(bit_table): ST2.4S byte3 layout
+        step("Verify byte3 holds Q=1 and the fixed group opcode, shared with LD2")
+        expect(result[3]).to_equal(76)  # oracle: bits[31:24] Q=1, group=001100b = 0x4C
 
     it "ST2 vs LD2 differ only in byte2 L-bit":
+        # @req REQ-NEON-LDST-036
+        step("Encode LD2 and ST2 {V0.4S, V1.4S}, [X0], #32 with identical operands")
         # LD2 byte2=0xDF=223, ST2 byte2=0x9F=159; difference = 64 (bit6 = L)
         val ld = emit_neon_ld2_4s_post(0, 0)
         val st = emit_neon_st2_4s_post(0, 0)
-        expect(ld[2] - st[2]).to_equal(64)
+        # @capture(bit_table): LD2 vs ST2 byte2 L-bit distinction
+        step("Verify the L-bit is the only difference between load and store byte2")
+        expect(ld[2] - st[2]).to_equal(64)  # oracle: bit22 (L=1 for load) adds 0x40 over the store's byte2

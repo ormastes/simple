@@ -524,7 +524,11 @@ impl JITModule {
             lookup_symbols: builder.lookup_symbols,
             libcall_names: builder.libcall_names,
             memory: MemoryHandle {
-                code: Memory::new(branch_protection),
+                // LOCAL PATCH: `new_code` backs executable memory with one
+                // contiguous 128 MiB arena on AArch64 so that direct `bl`
+                // relocations between this module's functions are always in
+                // range. See memory.rs `aarch64_arena`.
+                code: Memory::new_code(branch_protection),
                 // Branch protection is not applicable to non-executable memory.
                 readonly: Memory::new(BranchProtection::None),
                 writable: Memory::new(BranchProtection::None),

@@ -1,4 +1,50 @@
+"""
+## Purpose and audience
+Executable specification for the strict RISC-V Gen2 CSR owner graph
+(src/compiler/mir/hwir/riscv_scalar_csr_owner.spl) and its VHDL emission.
+Written for the HWIR scalar-lane owners who need proof that the CSR owner
+binds a concrete access projection, commits only on an accepted completion,
+emits the child before the owner with a bound hash, and rejects non-CSR
+profiles and instructions.
+
+## Operator workflow
+Run one file:
+`bin/simple test test/01_unit/compiler/50.mir/hwir_riscv_scalar_csr_owner_spec.spl`.
+Every scenario builds the real owner / composition graphs through the
+exported strict_* constructors and the backend VHDL compilers; no simulator
+is run.
+
+## Compatibility and limitations
+CoreConfig ships no rv64_zicsr_zifencei / rv32_zicsr_zifencei static
+constructors (types.spl:289-336 ends at the zca variants), so this spec
+carries genuinely-named module helpers building the same struct literal the
+missing ctors would. Two scenarios are LEGITIMATE REDs: the owner graph does
+not expose dispatch_identity_ok as a readable port
+(riscv_scalar_csr_owner.spl:27-55 port list), and the product composition
+errors with HWIR-E-OP-OPERAND-DIRECTION (types.spl:591). See the NOTE on
+each — do not silence them.
+
+## Verification guidance and troubleshooting
+A rule-name or guard-set failure means the CSR protocol plan changed —
+re-read riscv_scalar_csr_owner.spl before editing. An emission failure means
+the VHIL route or entity naming drifted. The two NOTE-marked REDs stay until
+the port is exposed and the operand-direction defect is fixed in the
+composition.
+"""
+
+# Lifecycle: doc/01_research/domain/riscv_gen2_atomic_extension.md
+# doc/03_plan/agent_tasks/riscv_scalar_runtime_v8_csr.md
+# doc/04_architecture/riscv_scalar_runtime_v9_im_zicsr.md
+# doc/05_design/riscv_scalar_runtime_v9_im_zicsr.md
+# @manual_section: hwir riscv scalar csr owner
+
+# @req REQ-G2-016
+# @req NFR-G2-017
+# @feature hwir_riscv_scalar_csr_owner
+# tag: unit
+
 use std.spec.*
+use std.spec.step
 use compiler.mir.hwir.types.{CoreConfig}
 use compiler.mir.hwir.riscv_scalar_csr_owner.{strict_riscv_scalar_csr_owner}
 use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
@@ -6,28 +52,52 @@ use compiler.mir.hwir.riscv_scalar_product_composition.{strict_riscv_scalar_prod
 use compiler.backend.backend.riscv_scalar_csr_owner_to_vhdl.{compile_strict_riscv_scalar_csr_owner}
 use compiler.backend.backend.riscv_scalar_product_to_vhdl.{compile_strict_riscv_scalar_product}
 
+# NOTE: CoreConfig has no rv64_zicsr_zifencei()/rv32_zicsr_zifencei() static
+# constructors (src/compiler/mir/hwir/types.spl:289-336 — the zicsr ISA
+# profiles are accepted by diagnostic() but no ctors ship). These helpers
+# build exactly the struct literal the missing ctors would; file the ctor gap
+# as the product fix, not a spec workaround.
+fn rv64_zicsr_config() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-zicsr-zifencei", isa_profile: "rv64i_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+fn rv32_zicsr_config() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-zicsr-zifencei", isa_profile: "rv32i_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
 describe "RISC-V Gen2 atomic CSR owner":
-    # @req REQ-G2-016 NFR-G2-017
     it "binds a concrete projection and freezes complete dispatch identity":
+        # @req REQ-G2-016 NFR-G2-017
+        # @capture(statistics): dispatch identity port widths from the owner graph
+        step("Build the rv64 CSR owner and read its dispatch identity ports")
+        # NOTE: LEGITIMATE RED on the dispatch_identity_ok line only. The
+        # owner graph never exposes dispatch_identity_ok as a readable port —
+        # it is an internal comb signal, absent from the ports list at
+        # src/compiler/mir/hwir/riscv_scalar_csr_owner.spl:27-55 — so
+        # readable_width returns -1. Fix is product-side (expose the port).
         val owner = strict_riscv_scalar_csr_owner("csr_owner_rv64",
-            CoreConfig.rv64_zicsr_zifencei(), 0x300092F3).unwrap()
+            rv64_zicsr_config(), 0x300092F3).unwrap()
         expect(owner.child_entity).to_equal("csr_owner_rv64_access_projection")
-        expect(owner.child_graph_sha256.len()).to_equal(64)
-        expect(owner.plan.readable_width(owner.ports, "dispatch_identity_ok")).to_equal(1)
-        expect(owner.plan.readable_width(owner.ports, "dispatch_canonical_instruction")).to_equal(32)
-        expect(owner.plan.readable_width(owner.ports, "dispatch_instruction_length_bytes")).to_equal(3)
-        expect(owner.plan.readable_width(owner.ports, "dispatch_rd")).to_equal(5)
+        expect(owner.child_graph_sha256.len()).to_equal(64)  # oracle: sha256 hex digests are exactly 64 characters — any other length means the hash pipeline changed
+        expect(owner.plan.readable_width(owner.ports, "dispatch_identity_ok")).to_equal(1)  # oracle: the completion handshake bit must be a 1-wide readable port (RED today: not exposed, see NOTE)
+        expect(owner.plan.readable_width(owner.ports, "dispatch_canonical_instruction")).to_equal(32)  # oracle: the canonical instruction field is the full 32-bit encoding
+        expect(owner.plan.readable_width(owner.ports, "dispatch_instruction_length_bytes")).to_equal(3)  # oracle: CSR instructions are 3 bytes in this compressed-free profile
+        expect(owner.plan.readable_width(owner.ports, "dispatch_rd")).to_equal(5)  # oracle: the RISC-V rd register field is 5 bits by ISA definition
         expect(owner.diagnostic()).to_equal("")
 
-    # @req REQ-G2-016 NFR-G2-017
     it "holds one completion and commits the CSR only on accepted completion":
+        # @req REQ-G2-016 NFR-G2-017
+        # @capture(bit_table): CSR commit guard table from the protocol plan
+        step("Build the rv32 CSR owner and inspect its commit guard set")
         val owner = strict_riscv_scalar_csr_owner("csr_owner_protocol",
-            CoreConfig.rv32_zicsr_zifencei(), 0x300092F3).unwrap()
+            rv32_zicsr_config(), 0x300092F3).unwrap()
         expect(owner.plan.rules[0].name).to_equal("consume")
         expect(owner.plan.rules[1].name).to_equal("identity_fault")
         expect(owner.plan.rules[2].name).to_equal("capture")
         val commit = owner.plan.outputs.filter(fn(output): output.result == "csr_commit_valid")[0]
-        expect(commit.guards.len()).to_equal(6)
+        expect(commit.guards.len()).to_equal(6)  # oracle: exactly six guard conjuncts gate a CSR commit — more would over-constrain, fewer could commit on a faulted completion
         expect(commit.guards.map(fn(guard): guard.lhs).contains("completion_ready")).to_equal(true)
         expect(commit.guards.map(fn(guard): guard.lhs).contains("csr_write_reg")).to_equal(true)
         expect(commit.guards.map(fn(guard): guard.lhs).contains("illegal_valid_reg")).to_equal(true)
@@ -38,10 +108,12 @@ describe "RISC-V Gen2 atomic CSR owner":
             fn(output): output.result == "csr_access_read_enable")[0]
         expect(access_read.source).to_equal("projected_csr_read_enable")
 
-    # @req REQ-G2-016 NFR-G2-017
     it "emits the child before the sequential owner with exact hash binding":
+        # @req REQ-G2-016 NFR-G2-017
+        # @capture(source_contract): emitted VHDL entity and assignment lines
+        step("Emit the rv64 CSR owner to VHDL and check entity ordering pins")
         val emitted = compile_strict_riscv_scalar_csr_owner("csr_owner_emit",
-            CoreConfig.rv64_zicsr_zifencei(), 0x300092F3)
+            rv64_zicsr_config(), 0x300092F3)
         expect(emitted.is_success()).to_equal(true)
         expect(emitted.route).to_equal("hwir-gen2-scalar-csr-owner-v1")
         expect(emitted.vhdl).to_contain("entity csr_owner_emit_access_projection is")
@@ -49,25 +121,33 @@ describe "RISC-V Gen2 atomic CSR owner":
         expect(emitted.vhdl).to_contain("csr_commit_valid <=")
         expect(emitted.vhdl).to_contain("dispatch_identity_ok <=")
 
-    # @req REQ-G2-016 NFR-G2-017
     it "rejects base-I profiles and non-CSR instructions":
+        # @req REQ-G2-016 NFR-G2-017
+        # @capture(bit_table): rejection table for bad profile and opcode
+        step("Build owners with a base-I profile and a non-CSR opcode")
         expect(strict_riscv_scalar_csr_owner("base_profile",
-            CoreConfig.rv64(), 0x300092F3).is_err()).to_equal(true)
+            CoreConfig.rv64(), 0x300092F3).is_err()).to_equal(true)  # oracle: base-I lacks Zicsr, so a CSR instruction must be rejected at construction
         expect(strict_riscv_scalar_csr_owner("not_csr",
-            CoreConfig.rv64_zicsr_zifencei(), 0x00000073).is_err()).to_equal(true)
+            rv64_zicsr_config(), 0x00000073).is_err()).to_equal(true)  # oracle: 0x00000073 is the ECALL/EBREAK encoding, not a CSR op, so the owner must refuse it
 
-    # @req REQ-G2-012 REQ-G2-016 NFR-G2-017
     it "composes CSR through arbitration trap and the sole retirement owner":
+        # @req REQ-G2-012 REQ-G2-016 NFR-G2-017
+        # @capture(statistics): composition provider and retirement counts
+        step("Compose the full scalar product around the CSR owner")
+        # NOTE: LEGITIMATE RED. strict_riscv_scalar_product_composition errors
+        # with HWIR-E-OP-OPERAND-DIRECTION while assembling the CSR provider
+        # (src/compiler/mir/hwir/types.spl:591), so the unwrap below fails
+        # before any assertion runs. Fix is product-side.
         val composition = strict_riscv_scalar_product_composition("csr_product",
-            CoreConfig.rv64_zicsr_zifencei(), 0x300092F3,
+            rv64_zicsr_config(), 0x300092F3,
             LsuConfig.rv64_product_default()).unwrap()
         expect(composition.provider_kind).to_equal("csr")
         expect(composition.csr_provider != nil).to_equal(true)
         expect(composition.completion_skid == nil).to_equal(true)
-        expect(composition.retirement_owner_count).to_equal(1)
+        expect(composition.retirement_owner_count).to_equal(1)  # oracle: exactly one retirement owner may commit architectural state — two would allow double-retirement
         expect(composition.binding_diagnostic()).to_equal("")
         val emitted = compile_strict_riscv_scalar_product("csr_product_emit",
-            CoreConfig.rv64_zicsr_zifencei(), 0x300092F3,
+            rv64_zicsr_config(), 0x300092F3,
             LsuConfig.rv64_product_default())
         expect(emitted.is_success()).to_equal(true)
         expect(emitted.vhdl).to_contain("csr_commit_valid")

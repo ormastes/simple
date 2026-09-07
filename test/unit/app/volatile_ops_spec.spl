@@ -1,17 +1,38 @@
-# Tests for volatile_ops SFFI module
-#
-# Covers volatile read/write API signatures, bit-operation utilities,
-# mask inversion, and read-modify-write register patterns.
-#
-# NOTE: No module imports - tests run in interpreter mode.
-# Module-level helper functions replicate the bit-ops locally so
-# while loops (which fail inside it-block closures) execute correctly.
+"""
+## Purpose and audience
+Tests for the volatile_ops SFFI module contract: volatile read/write API
+signatures, bit-operation utilities, mask inversion, read-modify-write register
+patterns, and the three distinct memory barrier kinds. Written for engineers
+changing MMIO access helpers or the rt_volatile_* runtime bindings.
+## Operator workflow
+Run this spec with:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/app/volatile_ops_spec.spl`
+and read the trailing SPEC FILE VERDICT line.
+## Compatibility and limitations
+No volatile_ops module import — tests run in interpreter mode, and module-level
+helper functions replicate the bit-ops locally so while loops (which fail
+inside it-block closures) execute correctly. The module-shape and barrier
+scenarios are source contracts over
+src/lib/nogc_sync_mut/io/volatile_ops.spl read through the io_runtime facade.
+## Verification guidance and troubleshooting
+A bit-op failure prints the computed value next to the expected one; compare
+against the 32-bit two's-complement arithmetic in the scenario comment. A
+source-contract failure means the product module no longer declares the
+expected binding or extern — check whether the volatile API was renamed before
+touching an expectation.
+"""
+# Lifecycle: doc/01_research/domain/rv32_nvme_host_axi_mmio.md ;
+# doc/03_plan/agent_tasks/rv32_nvme_host_axi_mmio.md ;
+# doc/04_architecture/rv32_nvme_host_axi_mmio.md ;
+# doc/05_design/infra/volatile_config_design.md
+# @manual_section: volatile-ops-sffi
+
+use std.spec.step
+use std.io_runtime.file_read
 
 # ============================================================================
 # Local replicas of bit-operation utilities (no import possible)
 # ============================================================================
-
-use std.spec.step
 
 fn test_bitand(a: i64, b: i64) -> i64:
     var result: i64 = 0
@@ -56,89 +77,143 @@ describe "volatile_ops SFFI module":
 
     describe "structural sanity":
         it "spec file loads without parse error":
-            expect(1).to_equal(1)
+            # @req REQ-VOLATILE-001
+            # @capture(statistics): product module declaration presence scan retained for review
+            step("Read the volatile_ops product module and confirm its read/write API is declared")
+            val source = file_read("src/lib/nogc_sync_mut/io/volatile_ops.spl")
+            val declares_volatile_read_api = source.contains("fn volatile_read_u32(addr: i64) -> i64")
+            expect(declares_volatile_read_api).to_equal(true)
+            val declares_volatile_write_api = source.contains("fn volatile_write_u32(addr: i64, value: i64)")
+            expect(declares_volatile_write_api).to_equal(true)
 
         it "module-level helpers are callable":
+            # @req REQ-VOLATILE-002
+            # @capture(bit_table): helper AND of 0xFF and 0x0F retained for review
+            step("Call the local bitand helper on 0xFF and 0x0F")
             val x = test_bitand(0xFF, 0x0F)
-            expect(x).to_equal(15)  # oracle: expected value 15 is the behavior asserted by this regression spec
+            expect(x).to_equal(15)  # oracle: 0xFF AND 0x0F keeps only the low nibble, which is 15
 
     describe "bitand_u32":
         it "returns 0 when no bits overlap":
+            # @req REQ-VOLATILE-003
+            # @capture(bit_table): AND of disjoint operands retained for review
+            step("AND the disjoint operands 0xF0 and 0x0F")
             val result = test_bitand(0xF0, 0x0F)
-            expect(result).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result).to_equal(0)  # oracle: 0xF0 and 0x0F share no bit positions
 
         it "returns common bits for partial overlap":
+            # @req REQ-VOLATILE-003
+            # @capture(bit_table): AND of overlapping operands retained for review
+            step("AND the overlapping operands 0xFF and 0x0F")
             val result = test_bitand(0xFF, 0x0F)
-            expect(result).to_equal(15)  # oracle: expected value 15 is the behavior asserted by this regression spec
+            expect(result).to_equal(15)  # oracle: the only bits set in both operands are the low nibble
 
         it "returns full value when both operands are equal":
+            # @req REQ-VOLATILE-003
+            # @capture(bit_table): AND of identical operands retained for review
+            step("AND 255 with itself")
             val result = test_bitand(255, 255)
-            expect(result).to_equal(255)  # oracle: expected value 255 is the behavior asserted by this regression spec
+            expect(result).to_equal(255)  # oracle: a value ANDed with itself is unchanged
 
         it "returns 0 when one operand is 0":
+            # @req REQ-VOLATILE-003
+            # @capture(bit_table): AND with zero operand retained for review
+            step("AND 0xABCD with zero")
             val result = test_bitand(0xABCD, 0)
-            expect(result).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result).to_equal(0)  # oracle: zero has no bits set, so the AND is empty
 
     describe "bitor_u32":
         it "combines non-overlapping bits":
+            # @req REQ-VOLATILE-004
+            # @capture(bit_table): OR of disjoint operands retained for review
+            step("OR the disjoint operands 0xF0 and 0x0F")
             val result = test_bitor(0xF0, 0x0F)
-            expect(result).to_equal(255)  # oracle: expected value 255 is the behavior asserted by this regression spec
+            expect(result).to_equal(255)  # oracle: high and low nibble together fill all eight bits
 
         it "returns same value when one operand is 0":
+            # @req REQ-VOLATILE-004
+            # @capture(bit_table): OR with zero operand retained for review
+            step("OR 0xAB with zero")
             val result = test_bitor(0xAB, 0)
-            expect(result).to_equal(171)  # oracle: expected value 171 is the behavior asserted by this regression spec
+            expect(result).to_equal(171)  # oracle: zero contributes no bits, 0xAB is 171
 
         it "is idempotent when both operands are equal":
+            # @req REQ-VOLATILE-004
+            # @capture(bit_table): OR of identical operands retained for review
+            step("OR 0xFF with itself")
             val result = test_bitor(0xFF, 0xFF)
-            expect(result).to_equal(255)  # oracle: expected value 255 is the behavior asserted by this regression spec
+            expect(result).to_equal(255)  # oracle: OR is idempotent, so 0xFF OR 0xFF stays 0xFF
 
     describe "mask_invert_u32":
         it "inverts all bits within 32-bit range":
+            # @req REQ-VOLATILE-005
+            # @capture(bit_table): inversion of the empty mask retained for review
+            step("Invert the empty mask 0")
             val result = test_mask_invert(0)
-            expect(result).to_equal(4294967295)  # oracle: expected value 4294967295 is the behavior asserted by this regression spec
+            expect(result).to_equal(4294967295)  # oracle: inverting an empty mask yields the full u32 range 2^32-1
 
         it "inverts full mask to zero":
+            # @req REQ-VOLATILE-005
+            # @capture(bit_table): inversion of the full mask retained for review
+            step("Invert the full u32 mask 4294967295")
             val result = test_mask_invert(4294967295)
-            expect(result).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result).to_equal(0)  # oracle: inverting the full u32 mask leaves no residual bits
 
         it "inverts partial mask correctly":
+            # @req REQ-VOLATILE-005
+            # @capture(bit_table): inversion of a 16-bit mask retained for review
+            step("Invert the low-16 mask 65535")
             # 0x0000FFFF inverted = 0xFFFF0000 = 4294901760
             val result = test_mask_invert(65535)
-            expect(result).to_equal(4294901760)  # oracle: expected value 4294901760 is the behavior asserted by this regression spec
+            expect(result).to_equal(4294901760)  # oracle: 0xFFFF0000 is 4294901760, the complement of the low 16 bits
 
     describe "read-modify-write pattern":
         it "clears masked bits and sets new value":
+            # @req REQ-VOLATILE-006
+            # @capture(bit_table): RMW clearing and setting the low nibble retained for review
+            step("Run the RMW pattern for initial=0xFF, mask=0x0F, value=0x05")
             # initial=0xFF, mask=0x0F (low nibble), value=0x05
             # cleared = 0xFF & ~0x0F = 0xFF & 0xF0 = 0xF0 = 240
             # updated = 0xF0 | (0x05 & 0x0F) = 0xF0 | 0x05 = 0xF5 = 245
             val result = test_rmw(255, 15, 5)
-            expect(result).to_equal(245)  # oracle: expected value 245 is the behavior asserted by this regression spec
+            expect(result).to_equal(245)  # oracle: 0xF5 = 245 is high nibble 0xF0 with the new low nibble 0x05
 
         it "leaves unmasked bits unchanged":
+            # @req REQ-VOLATILE-006
+            # @capture(bit_table): RMW preserving the unmasked high nibble retained for review
+            step("Run the RMW pattern for initial=0xAB, mask=0x0F, value=0x00")
             # initial=0xAB=171, mask=0x0F, value=0x00
             # clears low nibble: 0xA0=160
             val result = test_rmw(171, 15, 0)
-            expect(result).to_equal(160)  # oracle: expected value 160 is the behavior asserted by this regression spec
+            expect(result).to_equal(160)  # oracle: only the masked low nibble is cleared, 0xA0 = 160 survives
 
         it "sets all masked bits when value equals mask":
+            # @req REQ-VOLATILE-006
+            # @capture(bit_table): RMW setting the full masked field retained for review
+            step("Run the RMW pattern for initial=0x00, mask=0x0F, value=0x0F")
             # initial=0x00, mask=0x0F, value=0x0F → result=0x0F=15
             val result = test_rmw(0, 15, 15)
-            expect(result).to_equal(15)  # oracle: expected value 15 is the behavior asserted by this regression spec
+            expect(result).to_equal(15)  # oracle: writing mask-wide 0x0F into a cleared register sets exactly those bits
 
     describe "volatile API parameter conventions":
         it "address parameter is i64 (accommodates 64-bit pointers)":
+            # @req REQ-VOLATILE-007
+            # @capture(statistics): i64 address masked against a single-bit field retained for review
+            step("Mask a 64-bit MMIO address against a single-bit field with the local AND helper")
             # Verify the helper accepts i64 addresses without error
             val addr: i64 = 0x40020010
             val mask: i64 = 0x0001
             val combined = test_bitand(addr, mask)
-            expect(combined).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(combined).to_equal(0)  # oracle: 0x40020010 has bit 0 clear, so AND with 0x0001 is 0
 
         it "memory barrier concept: full barrier is distinct from load/store barriers":
-            # Conceptual test: three distinct barrier kinds exist
-            val full_barrier_id: i64 = 0
-            val load_barrier_id: i64 = 1
-            val store_barrier_id: i64 = 2
-            expect(full_barrier_id).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
-            expect(load_barrier_id).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-            expect(store_barrier_id).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
-            expect(full_barrier_id).to_equal(full_barrier_id)
+            # @req REQ-VOLATILE-008
+            # @capture(statistics): barrier-kind binding source contract retained for review
+            step("Read the volatile_ops module and verify three distinct barrier wrappers bind three distinct runtime externs")
+            val source = file_read("src/lib/nogc_sync_mut/io/volatile_ops.spl")
+            val full_barrier_binds_runtime_extern = source.contains("rt_memory_barrier()")
+            expect(full_barrier_binds_runtime_extern).to_equal(true)
+            val load_barrier_binds_runtime_extern = source.contains("rt_load_barrier()")
+            expect(load_barrier_binds_runtime_extern).to_equal(true)
+            val store_barrier_binds_runtime_extern = source.contains("rt_store_barrier()")
+            expect(store_barrier_binds_runtime_extern).to_equal(true)

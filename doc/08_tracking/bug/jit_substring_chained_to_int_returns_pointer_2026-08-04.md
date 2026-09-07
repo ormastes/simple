@@ -172,3 +172,24 @@ via `bin/simple run`, are the real gate.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. Fix present in current source. `src/compiler_rust/compiler/src/codegen/instr/methods.rs:150` now has the missing STRING branch: `if from_ty == TypeId::STRING && (to_is_int || F32/F64) { let helper = if to_is_int { "rt_string_to_int" } ... }`, with a comment naming this bug doc and the old behaviour ("simply handed back the string HEAP POINTER as a successful integer"). Root cause was NOT unknown receiver type -- the type was known; there are two duplicate method dispatchers and only the sibling in `closures_structs.rs::try_compile_builtin_method_call` had the STRING branch, so this one fell through to a bit-cast.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The chained form `"xx123".substring(2).to_int()` returns `123`, not a pointer,
+on both lanes:
+
+```
+SUBSTR_TO_INT=123     # interpret
+SUBSTR_TO_INT=123     # jit
+```
+
+Probe `_scratch/p_str.spl`. Not fixed by this session. Note the fix that most
+likely covers this is already in tree and cited in
+`codegen/instr/closures_structs.rs::builtin_method_result_type`, which records a
+result TYPE for chained builtins so `to_int` no longer defaults its receiver to
+I64.

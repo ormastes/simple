@@ -295,7 +295,16 @@ int main(int argc, char** argv) {
     }
 
     const u32 clear_color = 0xFF141414u;
+    // The scene is fixed, so every frame MUST fold to the same `acc`. The old
+    // accumulator was `checksum ^= acc`, which cancels itself on any even
+    // frame count and printed checksum=0 while the renderer was perfectly
+    // correct -- and 0 also reads as "blank surface". Latch the first frame's
+    // fold and COUNT later frames that disagree, so the value is independent
+    // of the frame count and a genuine mid-run divergence is still reported.
+    // Mirrors the Simple leg (vk2d_bench.spl) exactly.
     u64 checksum = 0;
+    int checksum_latched = 0;
+    u64 frame_mismatches = 0;
 
     u64 t0 = now_ns();
     for (i32 frame = 0; frame < num_frames; frame++) {
@@ -347,9 +356,33 @@ int main(int argc, char** argv) {
         if (do_readback) {
             // HOST_COHERENT: visible right after the fence. Cheap fold so the
             // readback is real work the optimizer cannot delete.
-            u64 acc = 0;
-            for (u64 i = 0; i < fb_size / 4; i += 4096) acc ^= fb_pixels[i];
-            checksum ^= acc;
+            //
+            // The stride SCALES with the surface: a fixed +4096 sampled
+            // exactly one pixel at 64x64 (n == 4096), so the checksum could
+            // not tell a rendered frame from a blank one. `n / 4096` keeps the
+            // sample count at ~4096 pixels spread across the whole surface.
+            // The fold is 32-bit FNV-1a, NOT xor: xor over N equal samples
+            // cancels for even N. `acc = ((acc ^ px) * 16777619) & M` is a
+            // bijection on acc for fixed px (16777619 is odd, hence invertible
+            // mod 2^32) and on px for fixed acc, so equal-length sequences
+            // that differ at ANY index fold to different values.
+            //
+            // THIS MUST STAY BYTE-FOR-BYTE THE SAME FOLD AS THE SIMPLE LEG
+            // (vk2d_bench.spl): same n, same stride, same seed, same prime,
+            // same 32-bit mask, same iteration order. If the two diverge the
+            // checksums stop being comparable and the gate's premise breaks.
+            // u64 + an explicit mask (not u32 wraparound) so the expression is
+            // literally the same as the Simple leg's i64 one.
+            const u64 n = fb_size / 4;
+            u64 stride = n / 4096;
+            if (stride < 1) stride = 1;
+            u64 acc = 2166136261u;
+            for (u64 i = 0; i < n; i += stride) {
+                const u64 px = (u64)fb_pixels[i] & 0xFFFFFFFFu;
+                acc = ((acc ^ px) * 16777619u) & 0xFFFFFFFFu;
+            }
+            if (!checksum_latched) { checksum = acc; checksum_latched = 1; }
+            else if (acc != checksum) { frame_mismatches++; }
         }
     }
     u64 t1 = now_ns();
@@ -383,9 +416,9 @@ int main(int argc, char** argv) {
 
     double ms = (double)(t1 - t0) / 1e6;
     double fps = (double)num_frames / (ms / 1000.0);
-    printf("c-vulkan-2d w=%d h=%d rects=%d frames=%d readback=%d ms=%.1f fps=%.1f checksum=%llu\n",
+    printf("c-vulkan-2d w=%d h=%d rects=%d frames=%d readback=%d ms=%.1f fps=%.1f checksum=%llu frame_mismatches=%llu\n",
         fb_w, fb_h, num_rects, num_frames, do_readback, ms, fps,
-        (unsigned long long)checksum);
+        (unsigned long long)checksum, (unsigned long long)frame_mismatches);
 
     free(rects);
     vkUnmapMemory(device, memory);

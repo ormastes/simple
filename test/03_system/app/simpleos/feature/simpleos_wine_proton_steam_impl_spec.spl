@@ -1,13 +1,33 @@
+"""
+## Purpose and audience
+System-level contract for the SimpleOS Wine/Proton/Steam implementation —
+one scenario per acceptance criterion (AC-1..AC-10) covering the scheduler
+PID baseline, POSIX host ABI, threading primitives, VM/container isolation,
+renderer/WM seams, guest dynamic loading, the PE loader surface, the async
+substrate, the Vulkan loader, and the Steam/Proton launcher. Audience: the
+SimpleOS kernel and compatibility-layer teams.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/03_system/app/simpleos/feature/simpleos_wine_proton_steam_impl_spec.spl
+## Compatibility and limitations
+Design-level invariants and surface-presence checks; real behavior specs
+live in the per-module specs under test/unit/os/kernel/wine/. WM and Vulkan
+scenarios exercise the in-memory conformance seams only — no display or GPU
+backend is required.
+## Verification guidance and troubleshooting
+A failure means a kernel surface broke its documented contract (PID
+allocation, fd table, TLS/threads, namespaces, WM port refusal honesty,
+PE rejection, structured loader errors, launcher plan shape). Rerun the
+per-module unit spec named in the failing AC before changing an assertion.
+"""
 # System-level spec for SimpleOS Wine/Proton/Steam Implementation.
 #
 # Covers all 10 ACs from the sstack feature wine-proton-steam-impl.
-# Each AC has at least one it-block. These are design-level invariants
-# and surface-presence checks. Real behavior specs live in the per-module
-# specs under test/unit/os/kernel/wine/.
+# Each AC has at least one it-block.
 #
-# Tests are in the red phase: implementations do not yet exist.
 # Run with:
-#   bin/simple test test/system/app/simpleos/feature/simpleos_wine_proton_steam_impl_spec.spl
+#   ./src/compiler_rust/target/bootstrap/simple run test/03_system/app/simpleos/feature/simpleos_wine_proton_steam_impl_spec.spl
+#
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ; plan doc/03_plan/sspec_modernization_plan.md ; architecture doc/04_architecture/sspec_documentization_maintenance.md ; design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 #
 # @cover src/lib/nogc_async_mut_noalloc/baremetal/process_table.spl
 # @cover src/lib/nogc_async_mut_noalloc/baremetal/vm_fault.spl
@@ -26,9 +46,10 @@
 # @cover src/lib/nogc_async_mut/fsync/fsync.spl
 # @cover src/lib/nogc_async_mut/steam/proton_launcher.spl
 
-use std.spec.step
-
 use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
 use std.nogc_async_mut_noalloc.baremetal.process_table.{
     process_table_alloc_pid,
     process_table_register,
@@ -48,6 +69,7 @@ use std.nogc_async_mut_noalloc.baremetal.kevent.{kevent_create, kevent_set, keve
 use std.nogc_async_mut_noalloc.baremetal.kfutex.{kfutex_wake}
 use std.nogc_async_mut_noalloc.baremetal.tss_syscall.{
     tss_write_rsp0,
+    tss_rsp0_current,
     msr_lstar_install,
     msr_star_install,
     msr_sfmask_install
@@ -77,27 +99,36 @@ use std.nogc_async_mut.wm.host.{wm_host_2d_reference, wm_host_2d_unavailable}
 use std.common.window_protocol.geometry.{Size}
 use std.nogc_async_mut.gpu.vulkan_loader.{vulkan_loader_init}
 use std.nogc_async_mut.esync.esync.{esync_create, esync_signal, esync_wait}
-use std.nogc_async_mut.fsync.fsync.{fsync_mutex_lock, fsync_mutex_unlock}
+use std.nogc_async_mut.fsync.fsync.{fsync_mutex_lock, fsync_mutex_unlock, fsync_mutex_is_locked}
 use std.nogc_async_mut.steam.proton_launcher.{proton_launcher_plan}
 
-use std.spec.step
+val TSS_SOURCE = "src/lib/nogc_async_mut_noalloc/baremetal/tss_syscall.spl"
 
 describe "SimpleOS Wine/Proton/Steam Implementation — System Spec":
     # @manual scenario evidence
 
     describe "AC-1: Process Baseline — scheduler-owned PIDs":
         it "AC-1: process_table_alloc_pid returns a real non-zero PID (no fallback markers)":
+            # @req REQ-WINE-AC1-001
+            # @capture(statistics): allocated PID value from the scheduler table
+            step("Allocate one scheduler-owned PID")
             val pid = process_table_alloc_pid()
-            expect(pid).to_be_greater_than(0)
+            expect(pid).to_be_greater_than(0)  # oracle: a scheduler-owned PID is always positive
 
         it "AC-1: registering a process produces a visible table entry with running state":
+            # @req REQ-WINE-AC1-002
+            # @capture(statistics): registered table entry state for the allocated PID
+            step("Register the allocated PID and read it back")
             val pid = process_table_alloc_pid()
             process_table_register(pid, 1, 1)
             val entry = process_table_lookup(pid)
             expect(entry.is_some).to_equal(true)
-            expect(entry.value.state).to_equal("running")
+            expect(entry.value.state).to_equal("running")  # oracle: a registered desktop process starts in the running state
 
         it "AC-1: five distinct PIDs can be allocated (one per desktop app)":
+            # @req REQ-WINE-AC1-003
+            # @capture(statistics): five allocated PID values checked for distinctness
+            step("Allocate five PIDs, one per desktop app")
             val pids = [
                 process_table_alloc_pid(),
                 process_table_alloc_pid(),
@@ -108,39 +139,57 @@ describe "SimpleOS Wine/Proton/Steam Implementation — System Spec":
             expect(pids[0]).to_be_greater_than(0)
             expect(pids[1]).to_be_greater_than(0)
             expect(pids[4]).to_be_greater_than(0)
-            expect(pids[0] == pids[1]).to_equal(false)
-            expect(pids[0] == pids[4]).to_equal(false)
+            expect(pids[0] == pids[1]).to_equal(false)  # oracle: the allocator must never hand the same PID to two desktop apps
+            expect(pids[0] == pids[4]).to_equal(false)  # oracle: distinctness holds across the whole allocation batch
 
     describe "AC-2: POSIX Host ABI — fd table":
         it "AC-2: fd_table_new creates a usable fd table":
+            # @req REQ-WINE-AC2-004
+            # @capture(statistics): fd table validity flag
+            step("Create a fresh fd table")
             val fdt = fd_table_new()
-            expect(fdt.is_valid).to_equal(true)
+            expect(fdt.is_valid).to_equal(true)  # oracle: a freshly constructed fd table is valid by contract
 
         it "AC-2: fd_open returns a valid file descriptor":
+            # @req REQ-WINE-AC2-005
+            # @capture(statistics): descriptor number returned for /dev/null
+            step("Open /dev/null through the host fd table")
             val fdt = fd_table_new()
             val fd = fd_open(fdt, "/dev/null", 0)
-            expect(fd).to_be_greater_than(-1)
+            expect(fd).to_be_greater_than(-1)  # oracle: a successful open returns a non-negative descriptor
 
         it "AC-2: fd_write on a valid fd returns bytes written":
+            # @req REQ-WINE-AC2-006
+            # @capture(statistics): byte count returned by the host write
+            step("Write five bytes to the opened descriptor")
             val fdt = fd_table_new()
             val fd = fd_open(fdt, "/dev/null", 1)
             val n = fd_write(fdt, fd, "hello", 5)
             expect(n).to_equal(5)  # oracle: 5 — pinned expected value for this behavior
 
         it "AC-2: fd_close releases the file descriptor":
+            # @req REQ-WINE-AC2-007
+            # @capture(statistics): close outcome for the opened descriptor
+            step("Close the opened descriptor")
             val fdt = fd_table_new()
             val fd = fd_open(fdt, "/dev/null", 0)
             val ok = fd_close(fdt, fd)
-            expect(ok).to_equal(true)
+            expect(ok).to_equal(true)  # oracle: closing an open descriptor succeeds
 
     describe "AC-3: Threads/TLS — real threading primitives":
         it "AC-3: tls_key_alloc returns a positive key":
+            # @req REQ-WINE-AC3-008
+            # @capture(statistics): allocated TLS key value
+            step("Allocate one TLS key with a no-op destructor")
             fn no_dtor(p: *void) -> void:
                 val _ = 0
             val key = tls_key_alloc(no_dtor)
-            expect(key).to_be_greater_than(0)
+            expect(key).to_be_greater_than(0)  # oracle: allocated TLS keys are positive handles
 
         it "AC-3: tls_key_set and tls_key_get are consistent":
+            # @req REQ-WINE-AC3-009
+            # @capture(statistics): TLS round-trip value for the allocated key
+            step("Store and read back a TLS slot value")
             fn no_dtor(p: *void) -> void:
                 val _ = 0
             val key = tls_key_alloc(no_dtor)
@@ -148,80 +197,130 @@ describe "SimpleOS Wine/Proton/Steam Implementation — System Spec":
             expect(tls_key_get(key)).to_equal(0xCAFE)  # oracle: 0xCAFE — pinned expected value for this behavior
 
         it "AC-3: semaphore post/wait cycle works end-to-end":
+            # @req REQ-WINE-AC3-010
+            # @capture(statistics): semaphore wait outcome after a post
+            step("Post the semaphore and wait on it")
             val h = semaphore_create(0)
             semaphore_post(h)
             val result = semaphore_wait(h, 0)
-            expect(result).to_equal("signaled")
+            expect(result).to_equal("signaled")  # oracle: a posted semaphore must report the signaled state
 
         it "AC-3: event_wait set/wait cycle works end-to-end":
+            # @req REQ-WINE-AC3-011
+            # @capture(statistics): event wait outcome after a set
+            step("Set the event and wait on it")
             val h = event_wait_create(false)
             event_wait_set(h)
             val result = event_wait_wait(h, 0)
-            expect(result).to_equal("signaled")
+            expect(result).to_equal("signaled")  # oracle: a set event must report the signaled state
 
         it "AC-3: kernel_thread_create returns a positive Tid":
+            # @req REQ-WINE-AC3-012
+            # @capture(statistics): kernel thread id returned by create
+            step("Create a kernel thread with a 4 KiB stack")
             fn noop() -> void:
                 val _ = 0
             val tid = kernel_thread_create(noop, 4096)
-            expect(tid).to_be_greater_than(0)
+            expect(tid).to_be_greater_than(0)  # oracle: created kernel threads receive positive ids
 
         it "AC-3: kevent set/wait produces signaled result":
+            # @req REQ-WINE-AC3-013
+            # @capture(statistics): kevent wait outcome after a set
+            step("Set the kevent and wait on it")
             val h = kevent_create(false)
             kevent_set(h)
             val result = kevent_wait(h, 0)
-            expect(result).to_equal("signaled")
+            expect(result).to_equal("signaled")  # oracle: a set kevent must report the signaled state
 
     describe "AC-4: VM/Containers — isolation primitives":
         it "AC-4: tss_write_rsp0 is callable with a valid kernel stack address":
+            # @req REQ-WINE-AC4-014
+            # @capture(statistics): RSP0 value read back through the TSS diagnostics getter
+            step("Write the kernel stack address into TSS.RSP0 and read it back")
             # Sentinel value — a non-zero RSP0 (actual value would be real stack PA)
             tss_write_rsp0(0x100000)
-            # No panic means success
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+            expect(tss_rsp0_current()).to_equal(0x100000)  # oracle: tss_syscall.spl stores RSP0 for inspection and tss_rsp0_current returns the last write
 
         it "AC-4: msr_lstar_install is callable (installs SYSCALL entry)":
+            # @req REQ-WINE-AC4-015
+            # @capture(bit_table): LSTAR write pin from the shipped tss_syscall source
+            step("Pin the LSTAR MSR write in the shipped tss_syscall source")
+            # No runtime getter exists for the LSTAR MSR register, so this
+            # surface is pinned as a source contract on the storing write.
+            val tss_source = file_read(TSS_SOURCE) ?? ""
+            val lstar_write_is_stored = tss_source.contains("_msr_lstar = handler_addr")
+            expect(lstar_write_is_stored).to_equal(true)  # oracle: tss_syscall.spl stores the SYSCALL entry address in the LSTAR slot
             msr_lstar_install(0x200000)
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         it "AC-4: msr_star_install encodes kernel/user CS pair":
+            # @req REQ-WINE-AC4-016
+            # @capture(bit_table): STAR selector-encoding pin from the shipped tss_syscall source
+            step("Pin the STAR MSR selector encoding in the shipped tss_syscall source")
+            # No runtime getter exists for the STAR MSR encoding, so the
+            # kernel/user selector packing is pinned as a source contract.
+            val tss_source = file_read(TSS_SOURCE) ?? ""
+            val star_encodes_both_selectors = tss_source.contains("(kernel_cs * 0x100000000) + user_cs")
+            expect(star_encodes_both_selectors).to_equal(true)  # oracle: tss_syscall.spl packs kernel CS high and user CS low in the STAR slot
             msr_star_install(0x0008, 0x0018)
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         it "AC-4: msr_sfmask_install sets interrupt flag mask":
+            # @req REQ-WINE-AC4-017
+            # @capture(bit_table): SFMASK write pin from the shipped tss_syscall source
+            step("Pin the SFMASK MSR write in the shipped tss_syscall source")
+            # No runtime getter exists for the SFMASK MSR register, so this
+            # surface is pinned as a source contract on the storing write.
+            val tss_source = file_read(TSS_SOURCE) ?? ""
+            val sfmask_write_is_stored = tss_source.contains("_msr_sfmask = sfmask_value")
+            expect(sfmask_write_is_stored).to_equal(true)  # oracle: tss_syscall.spl stores the EFLAGS clear mask in the SFMASK slot
             # SFMASK_IF = 0x200
             msr_sfmask_install(0x200)
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         it "AC-4: namespace_create produces isolation facets for all five types":
+            # @req REQ-WINE-AC4-018
+            # @capture(statistics): namespace handles created for the five facet types
+            step("Create one namespace per isolation facet")
             val pid_ns = namespace_create(NsFlags.pid)
             val fs_ns  = namespace_create(NsFlags.fs)
             val ipc_ns = namespace_create(NsFlags.ipc)
             val net_ns = namespace_create(NsFlags.net)
             val cap_ns = namespace_create(NsFlags.capability)
-            expect(pid_ns).to_be_greater_than(0)
-            expect(cap_ns).to_be_greater_than(0)
+            expect(pid_ns).to_be_greater_than(0)  # oracle: every created namespace handle is positive
+            expect(cap_ns).to_be_greater_than(0)  # oracle: the capability facet creates a positive handle too
 
         it "AC-4: namespace_clone creates an isolated child namespace":
+            # @req REQ-WINE-AC4-019
+            # @capture(statistics): child namespace handle distinct from its parent
+            step("Clone the parent namespace into an isolated child")
             val parent = namespace_create(NsFlags.pid)
             val child  = namespace_clone(parent, NsFlags.pid)
-            expect(child).to_be_greater_than(0)
-            expect(child == parent).to_equal(false)
+            expect(child).to_be_greater_than(0)  # oracle: a cloned child namespace has a positive handle
+            expect(child == parent).to_equal(false)  # oracle: isolation means the child handle differs from the parent
 
     describe "AC-5: Renderer/WM — window protocol surface":
         it "AC-5: wm_port_open refuses honestly on this host — no WM service is actually reachable":
+            # @req REQ-WINE-AC5-020
+            # @capture(statistics): port value returned for an unavailable WM host
+            step("Open a port against an unavailable 2D host")
             # Task #59 honesty fix: wm_port_open no longer fabricates a counter
             # handle. It only succeeds when handed a live WmHost2d (host.spl).
             # This system spec has no real display/WM backend on this Linux
             # host, so the honest, correct answer is refusal (0), not a
             # fabricated "valid" port.
             val port = wm_port_open(wm_host_2d_unavailable("simpleos-wine-spec", "no WM host backend wired into this system spec"))
-            expect(port).to_equal(0)
+            expect(port).to_equal(0)  # oracle: 0 is the documented refusal sentinel for wm_port_open
 
         it "AC-5: wm_window_create on a refused port also refuses — no window record is fabricated":
+            # @req REQ-WINE-AC5-021
+            # @capture(statistics): window value returned for a refused port
+            step("Create a window on the refused port")
             val port = wm_port_open(wm_host_2d_unavailable("simpleos-wine-spec", "no WM host backend wired into this system spec"))
             val win  = wm_window_create(port, "wine-test", 800, 600)
-            expect(win).to_equal(0)
+            expect(win).to_equal(0)  # oracle: 0 is the documented refusal sentinel for wm_window_create
 
         it "AC-5: wm_port_open + wm_window_create succeed once genuinely backed by a live 2D seam":
+            # @req REQ-WINE-AC5-022
+            # @capture(statistics): port and window values for the reference-backed seam
+            step("Open a port and window against the reference 2D seam")
             # Proves the seam mechanism itself still works end-to-end when a
             # real backend IS present -- the fix is honest gating, not
             # breakage. wm_host_2d_reference is the seam's own in-memory
@@ -229,65 +328,95 @@ describe "SimpleOS Wine/Proton/Steam Implementation — System Spec":
             # real platform name.
             val host = wm_host_2d_reference(Size.wh(1920, 1080), [])
             val port = wm_port_open(host)
-            expect(port).to_be_greater_than(0)
+            expect(port).to_be_greater_than(0)  # oracle: a backed port is a positive handle
             val win = wm_window_create(port, "wine-test", 800, 600)
-            expect(win).to_be_greater_than(0)
+            expect(win).to_be_greater_than(0)  # oracle: a backed window is a positive handle
 
     describe "AC-6: Dynamic Loading — dlopen/dlsym surface":
         it "AC-6: guest_dlopen with a known module path returns a non-zero handle":
+            # @req REQ-WINE-AC6-023
+            # @capture(statistics): guest module handle for kernel32.dll
+            step("Load kernel32.dll through the guest loader")
             # Interpreter-mode stub: the loader must at least return a handle record
             val h = guest_dlopen("kernel32.dll")
-            expect(h.is_some).to_equal(true)
+            expect(h.is_some).to_equal(true)  # oracle: a known module path must resolve to a handle record
 
         it "AC-6: guest_dlsym on a valid handle returns a non-zero symbol address":
+            # @req REQ-WINE-AC6-024
+            # @capture(statistics): resolved symbol address for WriteFile
+            step("Resolve WriteFile through the guest symbol table")
             val h = guest_dlopen("kernel32.dll")
             expect(h.is_some).to_equal(true)
             val sym = guest_dlsym(h.value, "WriteFile")
-            expect(sym).to_be_greater_than(0)
+            expect(sym).to_be_greater_than(0)  # oracle: a resolved export is a non-zero address
 
     describe "AC-7: Real hello.exe execution — PE loader surface":
         it "AC-7: pe_map_image on valid PE bytes returns a non-error result":
+            # @req REQ-WINE-AC7-025
+            # @capture(statistics): structured rejection for the stub PE image
+            step("Map a two-byte MZ stub through the PE loader")
             # Minimal 512-byte buffer representing a stub PE; implementation maps real sections
             val stub_bytes: [u8] = [0x4D, 0x5A]  # MZ magic
             val result = pe_map_image(stub_bytes)
             # Either ok (full impl) or error with a structured code (no crash/panic)
-            expect(result.is_ok).to_equal(false)
-            expect(result.error).to_equal("too-small")
+            expect(result.is_ok).to_equal(false)  # oracle: a two-byte image is structurally too small to map
+            expect(result.error).to_equal("too-small")  # oracle: too-small is the documented structured rejection code for undersized images
 
     describe "AC-8: Async Substrate — IoDriver surface":
         it "AC-8: fd_table supports open/write/close cycle (async fd registration path)":
+            # @req REQ-WINE-AC8-026
+            # @capture(statistics): open/write/close cycle outcomes on one fd table
+            step("Run one full open/write/close cycle")
             val fdt = fd_table_new()
             val fd = fd_open(fdt, "/dev/null", 1)
             val n = fd_write(fdt, fd, "test", 4)
             val ok = fd_close(fdt, fd)
-            expect(n).to_be_greater_than(-1)
-            expect(ok).to_equal(true)
+            expect(n).to_be_greater_than(-1)  # oracle: the write phase of the cycle must not fail
+            expect(ok).to_equal(true)  # oracle: the close phase of the cycle must succeed
 
     describe "AC-9: Vulkan/Graphics — loader surface":
         it "AC-9: vulkan_loader_init returns a loader handle or a structured error":
+            # @req REQ-WINE-AC9-027
+            # @capture(statistics): loader init outcome shape on this host
+            step("Initialize the Vulkan loader and inspect the outcome shape")
             val result = vulkan_loader_init()
             # In interpreter/stub mode: either ok or error — must not panic
             val is_structured = result.is_ok == true || result.error != ""
-            expect(is_structured).to_equal(true)
+            expect(is_structured).to_equal(true)  # oracle: the loader must return either a handle or a structured error, never silence
 
     describe "AC-10: Steam/Proton — launcher surface":
         it "AC-10: esync_create returns a valid handle":
+            # @req REQ-WINE-AC10-028
+            # @capture(statistics): esync handle value
+            step("Create one esync handle")
             val h = esync_create()
-            expect(h).to_be_greater_than(0)
+            expect(h).to_be_greater_than(0)  # oracle: created esync handles are positive
 
         it "AC-10: esync signal/wait produces signaled result":
+            # @req REQ-WINE-AC10-029
+            # @capture(statistics): esync wait outcome after a signal
+            step("Signal the esync handle and wait on it")
             val h = esync_create()
             esync_signal(h)
             val result = esync_wait(h, 0)
-            expect(result).to_equal("signaled")
+            expect(result).to_equal("signaled")  # oracle: a signaled esync must report the signaled state
 
         it "AC-10: fsync mutex lock/unlock pair completes without error":
+            # @req REQ-WINE-AC10-030
+            # @capture(statistics): fsync lock state read back after lock and unlock
+            step("Lock the fsync mutex, verify, unlock, and verify again")
             val addr: u32 = 0
             fsync_mutex_lock(addr)
+            val locked_after_acquire = fsync_mutex_is_locked(addr)
             fsync_mutex_unlock(addr)
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+            val locked_after_release = fsync_mutex_is_locked(addr)
+            expect(locked_after_acquire).to_equal(true)  # oracle: fsync.spl records the lock so is_locked reports the held state
+            expect(locked_after_release).to_equal(false)  # oracle: the unlock pair must clear the recorded lock state
 
         it "AC-10: proton_launcher_plan returns a structured plan record":
+            # @req REQ-WINE-AC10-031
+            # @capture(protocol_json): launcher plan status and app id fields
+            step("Plan a Proton launch for app 480")
             val plan = proton_launcher_plan("480", "hl2.exe", ["-novid"])
-            expect(plan.status).to_equal("planned")
-            expect(plan.app_id).to_equal("480")
+            expect(plan.status).to_equal("planned")  # oracle: the launcher surface returns a structured plan with status planned
+            expect(plan.app_id).to_equal("480")  # oracle: the plan must carry the requested Steam app id unchanged

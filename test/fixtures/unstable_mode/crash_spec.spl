@@ -24,6 +24,35 @@
 # Without the second one the directory run discovers 0 files and reports
 # "No test files found" with exit 4 -- measured.
 # =====================================================================
+"""
+## Purpose and audience
+A deliberate crash fixture for the unstable-test-mode lane: the scenario
+kills its own process by signal so the test runner's CRASHED outcome class
+has something honest to detect. For runner operators and CI owners who
+need proof that death-by-signal is reported as CRASHED, not as a pass,
+a failure, or a skip.
+## Operator workflow
+Run the file directly and expect a signal-class non-zero exit:
+./src/compiler_rust/target/bootstrap/simple run test/fixtures/unstable_mode/crash_spec.spl
+The scenario first writes the `<spec_path>.crashed` sentinel, then SIGKILLs
+its own pid through the shell.
+## Compatibility and limitations
+Interpreter-lane only: the release JIT refuses to compile this file and
+falls back to the tree-walk interpreter (a benign, expected INFO line).
+Three earlier crash mechanisms — unbounded recursion, `abort`, and
+`rt_panic` — were tried and do NOT produce a CRASHED verdict; they are
+documented below so nobody retries them.
+## Verification guidance and troubleshooting
+A healthy run leaves the sentinel on disk and dies by signal; the runner
+deletes the sentinel on read (the `take_crash_sentinel` contract in
+test_executor_parsing.spl), so a stale file cannot mislabel a later run.
+If this spec ever PASSES, the crash mechanism has regressed — that is a
+product defect to file, never something to "fix" here.
+"""
+# Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md ;
+# doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md ;
+# doc/04_architecture/test/00_test_architecture.md ;
+# doc/05_design/infra/test_runner/unstable_mode_scope_finding_2026-08-17.md
 use std.spec.step
 
 use std.spec.*
@@ -45,10 +74,14 @@ use std.nogc_sync_mut.ffi.system.*
 # What works is SIGKILL on our own PID via the shell.
 extern fn rt_getpid() -> i64
 
+# @manual_section: unstable mode crash fixture
 describe "unstable mode crash fixture":
     # @manual scenario evidence
     it "writes a sentinel and then dies by signal":
+        # @req REQ-TEST-RUNNER-CRASHED-001
+        # @capture(statistics): crash sentinel path and live pid readback
+        step("write the crash sentinel, then SIGKILL this own process")
         file_write_text("test/fixtures/unstable_mode/crash_spec.spl.crashed", "deliberate crash fixture: about to die by signal")
         val pid = rt_getpid()
+        expect(pid).to_be_greater_than(1)  # oracle: a live OS pid is always greater than 1; this proves the kill targets a real process
         shell("kill -9 {pid}")
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec

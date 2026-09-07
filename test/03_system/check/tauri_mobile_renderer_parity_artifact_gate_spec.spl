@@ -1,4 +1,3 @@
-# @req: REQ-CHECK-001
 """
 ## Purpose and audience
 Purpose: accepts complete mobile screenshot and MDI proof artifacts
@@ -44,6 +43,23 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   coherent Vulkan-backed WebView render-log source path and byte size.
 - The aggregate re-checks the coherent Android render-log source as a regular
   file artifact and rejects missing, symlinked, or byte-size-mismatched paths.
+## Operator workflow
+
+Each scenario runs the packaged validator (via `node scripts/check/...` or a
+direct process invocation) against a complete proof document or a proof mutated
+in exactly one field, and asserts the validator exit code and normalized rows.
+
+## Compatibility and limitations
+
+Artifact-gated scenarios stay RED until the parity artifacts are recaptured on device; validator-only scenarios run from a plain repo checkout.
+
+## Verification guidance and troubleshooting
+
+A RED reject scenario is the fail-closed contract working: rerun the scenario and
+inspect the cited validator command with the mutated field restored to confirm the
+regression. A RED accept scenario means the packaged proof itself regressed;
+recapture it with the scripts/check command named in the scenario before shipping.
+
 """
 
 # @tag: system, gui, tauri, mobile, ios, android, evidence
@@ -138,15 +154,22 @@ fn _run_aggregate_command(root: text, ios_proof_mode: text, android_proof_mode: 
         "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md " +
         "sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log"
 
+# Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
+# doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/gpu_renderer_processing_backends_metal.md
+# @manual_section: proof validators
+
 describe "Tauri mobile renderer parity artifact gates":
 
     it "accepts complete mobile screenshot and MDI proof artifacts":
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: accepts complete mobile screenshot and MDI proof artifacts")
         # @req: REQ-CHECK-TaurMobiRendPariArtiGate-001
         val root = "build/test-tauri-mobile-artifact-gate-pass"
         val command = _run_aggregate_command(root, "present", "present", "png", "png")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Inspect normalized mobile artifact gate rows")
@@ -259,10 +282,13 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(report).to_contain("- Android MDI capture/perf/animation detail: viewport=390x844 dpr=3 orientation=portrait perf=true delta_ms=1.25 input_to_paint_ms=2.5 animation=true frames=2 css=true")
 
     it "rejects an iOS pass claim with generic Metal text instead of WKWebView context":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-002
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects an iOS pass claim with generic Metal text instead of WKWebView context")
         val root = "build/test-tauri-mobile-artifact-gate-generic-ios-metal"
         val command = _run_aggregate_command_with_logs(root, "present", "present", "png", "png", "generic", "valid")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
@@ -272,12 +298,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass")
 
     it "rejects iOS render-log validator pass claims without coherent source artifact rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-003
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-missing-ios-coherent-source"
         val validator = root + "/fake-ios-render-validator.sh"
         val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=\\\\nios_render_log_coherent_source_size_bytes=\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm iOS render-log pass claims are bound to a coherent source artifact")
@@ -289,13 +317,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=")
 
     it "rejects iOS render-log validator pass claims with stale coherent source paths":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-004
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-stale-ios-coherent-source"
         val validator = root + "/fake-ios-render-validator.sh"
         val stale_path = root + "/artifacts/stale-ios.log"
         val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + stale_path + "\\\\nios_render_log_coherent_source_size_bytes=123\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent iOS render-log source rows are rechecked as current artifacts")
@@ -308,13 +338,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=missing")
 
     it "rejects iOS render-log validator pass claims with mismatched coherent source byte size":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-005
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-mismatch-ios-coherent-source-size"
         val validator = root + "/fake-ios-render-validator.sh"
         val coherent_path = root + "/artifacts/ios.log"
         val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=1\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent iOS render-log byte-size rows match the artifact")
@@ -328,13 +360,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=size-mismatch")
 
     it "rejects iOS render-log validator pass claims with symlinked coherent source artifacts":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-006
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-symlink-ios-coherent-source"
         val validator = root + "/fake-ios-render-validator.js"
         val coherent_path = root + "/artifacts/linked-ios.log"
         val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.symlinkSync(\"ios.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=223\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent iOS render-log source rows cannot point at symlink artifacts")
@@ -348,13 +382,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=symlink")
 
     it "rejects iOS render-log validator pass claims with hardlinked coherent source artifacts":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-007
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-hardlink-ios-coherent-source"
         val validator = root + "/fake-ios-render-validator.js"
         val coherent_path = root + "/artifacts/linked-ios.log"
         val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.linkSync(\"" + root + "/artifacts/ios.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=223\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent iOS render-log source rows cannot point at hardlinked artifacts")
@@ -368,12 +404,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=hardlink")
 
     it "rejects Android render-log validator pass claims without coherent source artifact rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-008
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-missing-android-coherent-source"
         val validator = root + "/fake-android-render-validator.js"
         val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=\\\\nandroid_render_log_coherent_source_size_bytes=\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm Android render-log pass claims are bound to a coherent source artifact")
@@ -385,13 +423,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=")
 
     it "rejects Android render-log validator pass claims with stale coherent source paths":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-009
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-stale-android-coherent-source"
         val validator = root + "/fake-android-render-validator.js"
         val stale_path = root + "/artifacts/stale-android.log"
         val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + stale_path + "\\\\nandroid_render_log_coherent_source_size_bytes=123\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent Android render-log source rows are rechecked as current artifacts")
@@ -404,13 +444,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=missing")
 
     it "rejects Android render-log validator pass claims with mismatched coherent source byte size":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-010
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-mismatch-android-coherent-source-size"
         val validator = root + "/fake-android-render-validator.js"
         val coherent_path = root + "/artifacts/android.log"
         val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + coherent_path + "\\\\nandroid_render_log_coherent_source_size_bytes=1\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent Android render-log byte-size rows match the artifact")
@@ -424,13 +466,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=size-mismatch")
 
     it "rejects Android render-log validator pass claims with symlinked coherent source artifacts":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-011
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-symlink-android-coherent-source"
         val validator = root + "/fake-android-render-validator.js"
         val coherent_path = root + "/artifacts/linked-android.log"
         val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.symlinkSync(\"android.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_hardlink_source_count=0\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + coherent_path + "\\\\nandroid_render_log_coherent_source_size_bytes=49\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent Android render-log source rows cannot point at symlink artifacts")
@@ -444,13 +488,15 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=symlink")
 
     it "rejects Android render-log validator pass claims with hardlinked coherent source artifacts":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-012
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-hardlink-android-coherent-source"
         val validator = root + "/fake-android-render-validator.js"
         val coherent_path = root + "/artifacts/linked-android.log"
         val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.linkSync(\"" + root + "/artifacts/android.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_hardlink_source_count=0\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + coherent_path + "\\\\nandroid_render_log_coherent_source_size_bytes=49\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm coherent Android render-log source rows cannot point at hardlinked artifacts")
@@ -464,11 +510,13 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=hardlink")
 
     it "rejects aliased mobile lane output env contracts before reading wrapper rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-013
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-aliased-lane-env"
         val command = _run_aggregate_command(root, "present", "present", "png", "png")
             .replace("BUILD_DIR=" + root + "/out REPORT_PATH=", "mkdir -p " + root + "/out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-ios.env && ln -s ../forged-ios.env " + root + "/out/ios.out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-android.env && ln " + root + "/forged-android.env " + root + "/out/android.out && BUILD_DIR=" + root + "/out REPORT_PATH=")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm aggregate does not read through pre-existing lane env aliases")
@@ -482,10 +530,13 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_status=fail")
 
     it "rejects an iOS pass claim with fallback GPU render-log markers":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-014
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects an iOS pass claim with fallback GPU render-log markers")
         val root = "build/test-tauri-mobile-artifact-gate-ios-fallback-gpu"
         val command = _run_aggregate_command_with_logs(root, "present", "present", "png", "png", "fallback", "valid")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
@@ -498,10 +549,13 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
 
     it "rejects an iOS pass claim with missing MDI proof JSON":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-015
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects an iOS pass claim with missing MDI proof JSON")
         val root = "build/test-tauri-mobile-artifact-gate-missing-ios-proof"
         val command = _run_aggregate_command(root, "missing", "present", "png", "png")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
@@ -509,10 +563,13 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
 
     it "rejects an Android pass claim with missing MDI proof JSON":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-016
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects an Android pass claim with missing MDI proof JSON")
         val root = "build/test-tauri-mobile-artifact-gate-missing-android-proof"
         val command = _run_aggregate_command(root, "present", "missing", "png", "png")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
@@ -521,12 +578,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=missing")
 
     it "rejects mobile pass claims with symlinked MDI proof JSON":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-017
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-symlink-mdi-proof-json"
         val ios_command = _run_aggregate_command(root + "-ios", "symlink", "present", "png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "symlink", "png", "png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -541,12 +600,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=symlink")
 
     it "rejects mobile pass claims with malformed or contract-missing MDI proof JSON":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-018
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-proof-json"
         val ios_command = _run_aggregate_command(root + "-ios", "bad-json", "present", "png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "contract-missing", "png", "png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -563,12 +624,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 
     it "rejects stale mobile MDI proof JSON that disagrees with normalized rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-019
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-stale-proof-json"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_performance_now_delta_ms=1.25", "ios_mdi_performance_now_delta_ms=1.5")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_animation_frame_count=2", "android_mdi_animation_frame_count=3")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -585,12 +648,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_count=3")
 
     it "rejects mobile pass claims with missing MDI proof source rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-020
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-missing-mdi-source"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_proof_missing_source_count=0", "ios_mdi_proof_missing_source_count=1")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_proof_source_count=1", "android_mdi_proof_source_count=0")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -603,12 +668,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=0")
 
     it "rejects mobile pass claims with missing MDI proof marker source rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-021
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-missing-mdi-marker-source"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_proof_marker_source_count=1", "ios_mdi_proof_marker_source_count=0")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_proof_marker_source_count=1", "android_mdi_proof_marker_source_count=0")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -623,12 +690,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count=0")
 
     it "rejects mobile pass claims with stale or size-mismatched MDI marker source artifacts":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-022
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-stale-mdi-marker-source"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_proof_marker_source_path=" + root + "-ios/artifacts/ios.log", "ios_mdi_proof_marker_source_path=" + root + "-ios/artifacts/stale-ios.log")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_proof_marker_source_size_bytes=49", "android_mdi_proof_marker_source_size_bytes=1")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -647,12 +716,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=size-mismatch")
 
     it "rejects MDI proof artifacts hard-linked to marker source rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-023
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-hardlinked-mdi-marker-source"
         val ios_command = _run_aggregate_command(root + "-ios", "hardlink-source", "present", "png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "hardlink-source", "png", "png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -671,12 +742,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=pass")
 
     it "rejects mobile pass claims with MDI failure markers":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-024
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-mdi-failure-marker"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_failure_marker_status=pass", "ios_mdi_failure_marker_status=fail")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_failure_marker_status=pass", "android_mdi_failure_marker_status=fail")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -691,12 +764,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 
     it "rejects malformed mobile MDI performance and animation detail rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-025
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-perf-animation"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_performance_now_delta_ms=1.25", "ios_mdi_performance_now_delta_ms=0")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_animation_frame_count=2", "android_mdi_animation_frame_count=1")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -709,12 +784,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_count=1")
 
     it "rejects malformed mobile MDI input-to-paint detail rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-026
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-input-to-paint"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_input_to_paint_ms=2.5", "ios_mdi_input_to_paint_ms=0")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_interaction_latency_status=pass", "android_mdi_interaction_latency_status=fail")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -727,12 +804,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_interaction_latency_status=fail")
 
     it "rejects malformed mobile MDI capture DPR and orientation detail rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-027
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-capture-detail"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_capture_device_pixel_ratio=3", "ios_mdi_capture_device_pixel_ratio=0")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_capture_screen_orientation=portrait", "android_mdi_capture_screen_orientation=square")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -747,12 +826,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation=square")
 
     it "rejects mobile pass claims with implausibly high timing rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-028
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-high-timing"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_performance_now_delta_ms=1.25", "ios_mdi_performance_now_delta_ms=1001")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_input_to_paint_ms=2.5", "android_mdi_input_to_paint_ms=1001")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -767,12 +848,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=1001")
 
     it "rejects mobile pass claims with incomplete routed-event detail rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-029
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-event-details"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_event_body_click_routed=true", "ios_mdi_event_body_click_routed=false")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_event_taskbar_labels_visible=true", "android_mdi_event_taskbar_labels_visible=false")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -787,10 +870,12 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=false")
 
     it "rejects mobile pass claims with incomplete desktop backend parity details":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-030
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-production-backend"
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=true", "production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=false")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm mobile aggregate pass claims require desktop backend parity details")
@@ -802,8 +887,7 @@ describe "Tauri mobile renderer parity artifact gates":
 
         val bad_checksum_command = _run_aggregate_command(root + "-checksum", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_cpu_simd_checksum=900", "production_gui_web_renderer_parity_backend_cpu_simd_checksum=901")
         val (_bad_checksum_stdout, _bad_checksum_stderr, bad_checksum_code) = process_run("/bin/sh", ["-c", bad_checksum_command])
-        expect(bad_checksum_code).to_equal(1)
-
+        expect(bad_checksum_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
         val bad_checksum = file_read(root + "-checksum/stdout.env")
         expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
@@ -812,8 +896,7 @@ describe "Tauri mobile renderer parity artifact gates":
 
         val missing_handle_command = _run_aggregate_command(root + "-handle", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_metal_command_queue_handle=42", "production_gui_web_renderer_parity_backend_metal_command_queue_handle=0")
         val (_missing_handle_stdout, _missing_handle_stderr, missing_handle_code) = process_run("/bin/sh", ["-c", missing_handle_command])
-        expect(missing_handle_code).to_equal(1)
-
+        expect(missing_handle_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
         val missing_handle = file_read(root + "-handle/stdout.env")
         expect(missing_handle).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(missing_handle).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
@@ -821,18 +904,19 @@ describe "Tauri mobile renderer parity artifact gates":
 
         val cpu_mirror_command = _run_aggregate_command(root + "-readback-source", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_readback_source=device_readback", "production_gui_web_renderer_parity_backend_readback_source=cpu_mirror")
         val (_cpu_mirror_stdout, _cpu_mirror_stderr, cpu_mirror_code) = process_run("/bin/sh", ["-c", cpu_mirror_command])
-        expect(cpu_mirror_code).to_equal(1)
-
+        expect(cpu_mirror_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
         val cpu_mirror = file_read(root + "-readback-source/stdout.env")
         expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
         expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_production_backend_readback_source=cpu_mirror")
 
     it "rejects mobile pass claims with missing desktop backend timing evidence":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-031
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-missing-production-backend-timing"
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_timing_status=pass", "production_gui_web_renderer_parity_backend_timing_status=fail")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm mobile aggregate pass claims require desktop backend timing evidence")
@@ -842,10 +926,12 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_sample_count=3")
 
     it "rejects mobile pass claims with missing desktop Metal render-log proof":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-032
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-production-metal-log"
         val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_metal_render_log_status=pass", "production_gui_web_renderer_parity_metal_render_log_status=fail")
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm mobile aggregate requires desktop Metal render-log comparator proof")
@@ -857,12 +943,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_blocked_gate_count=0")
 
     it "rejects pass claims with non-PNG mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-033
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-bad-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "bad", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "bad")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -879,12 +967,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-signature-missing")
 
     it "rejects pass claims with PNG-signature-only mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-034
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-signature-only-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "signature", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "signature")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -899,12 +989,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-ihdr-missing")
 
     it "rejects pass claims with symlinked mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-035
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-symlink-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "symlink-png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "symlink-png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -919,12 +1011,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-symlink")
 
     it "rejects pass claims with hardlinked mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-036
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-hardlink-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "hardlink-png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "hardlink-png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -939,12 +1033,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-hardlink")
 
     it "rejects pass claims with forged PNG chunk text in mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-037
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-forged-chunk-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "forged-chunks", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "forged-chunks")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -959,12 +1055,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-image-chunks-missing")
 
     it "rejects pass claims with structurally valid but undersized mobile screenshots":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-038
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-tiny-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "tiny-png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "tiny-png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -979,12 +1077,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-dimensions-too-small:1x1<390x844")
 
     it "rejects pass claims with flat placeholder mobile screenshot PNGs":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-039
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-artifact-gate-flat-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "flat-png", "png")
         val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "flat-png")
         val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val ios = file_read(root + "-ios/stdout.env")
         val android = file_read(root + "-android/stdout.env")
@@ -1005,6 +1105,9 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=fail")
 
     it "keeps aggregate source wired to mobile proof and screenshot artifact rows":
+        # @req: REQ-CHECK-TaurMobiRendPariArtiGate-040
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: keeps aggregate source wired to mobile proof and screenshot artifact rows")
         val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
         expect(script).to_contain("png_file_status")
         expect(script).to_contain("png_file_reason")

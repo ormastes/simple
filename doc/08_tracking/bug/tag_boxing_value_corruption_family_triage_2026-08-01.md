@@ -245,3 +245,26 @@ Fixture validity bit twice nearly produced a false reading: `"x={x}"` written
 into a repro is an interpolation, not a literal, and needs `\{`. A repro that
 errors is not evidence about the defect. See
 `reference_a_sweep_that_doesnt_enumerate_the_family_leaves_siblings`.
+
+## Re-probed 2026-09-06 — the headline probe is NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The title claim — `??` on a raw i64 whose value is 3 returns none under JIT via
+the `TAG_SPECIAL=0b011` collision — does not reproduce:
+
+```
+COALESCE3=3     # interpret
+COALESCE3=3     # jit
+```
+
+Probe `_scratch/p_int.spl`. This is a TRIAGE record covering a family, so this
+result retires only the headline probe, not the family. Two members of the same
+tag-confusion family WERE found live in this session and are now fixed:
+`jit_is_some_is_none_method_dispatch_gap_2026-08-17` (raw C bool handed to
+`rt_println_value`; raw `1` = `0b001` = TAG_HEAP rendered `nil`) and
+`std_math_abs_f64_returns_zero_2026-08-08` (f64 stored into an I64-typed merge
+slot, silently replaced by `iconst(I64, 0)`).

@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Pins the declarative scalar ISA plan -> HWIR decoder pipeline: frozen semantic
+opcode assignments, one deterministic fixed-RV32 graph per plan, strict
+combinational evaluation that normalizes illegal encodings to zero, exact row
+selection in every concrete product, forged-plan rejection, and a closed VHDL
+emission without runtime XLEN or textual ISA dispatch. Audience: engineers
+changing the RISC-V scalar decoder plan, HWIR lowering, or VHDL rendering.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/50.mir/hwir_riscv_scalar_decoder_spec.spl
+
+## Compatibility and limitations
+Scenarios drive the real plan -> HWIR -> evaluator/VHDL products, so a failure
+reflects a behavior change rather than a stale fixture; opcode table values
+are frozen in riscv_common and must be re-reviewed before being mirrored here.
+
+## Verification guidance and troubleshooting
+A failing expectation names the decoder output (opcode, row index, canonical
+instruction, port list, or VHDL token) that drifted; a forged-plan rejection
+failure means config validation weakened and must be restored, not re-baselined.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: declarative scalar decoder products
+
 use std.spec.*
 use compiler.mir.hwir.types.{CoreConfig}
 use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
@@ -9,16 +39,22 @@ use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan,
 
 describe "declarative scalar ISA plan HWIR decoder":
     it "keeps permanent semantic opcode assignments across provider families":
-        expect(riscv_scalar_semantic_opcode("add")).to_equal(1)
-        expect(riscv_scalar_semantic_opcode("branch_equal")).to_equal(4)
-        expect(riscv_scalar_semantic_opcode("csr_read_write")).to_equal(14)
-        expect(riscv_scalar_semantic_opcode("environment_call")).to_equal(19)
-        expect(riscv_scalar_semantic_opcode("fence")).to_equal(20)
-        expect(riscv_scalar_semantic_opcode("load_word_signed")).to_equal(29)
-        expect(riscv_scalar_semantic_opcode("multiply_low")).to_equal(35)
-        expect(riscv_scalar_semantic_opcode("unknown")).to_equal(0)
+        # @req REQ-MIR-SCALAR-DECODER-001
+        # @capture(bit_table): frozen semantic opcode assignments
+        step("Look up the frozen opcode for each semantic operation")
+        expect(riscv_scalar_semantic_opcode("add")).to_equal(1)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("branch_equal")).to_equal(4)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("csr_read_write")).to_equal(14)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("environment_call")).to_equal(19)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("fence")).to_equal(20)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("load_word_signed")).to_equal(29)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("multiply_low")).to_equal(35)  # oracle: frozen scalar ISA opcode table in riscv_common
+        expect(riscv_scalar_semantic_opcode("unknown")).to_equal(0)  # oracle: unknown operations must map to the reserved zero opcode
 
     it "generates one deterministic fixed-RV32 graph from every planned row":
+        # @req REQ-MIR-SCALAR-DECODER-002
+        # @capture(statistics): origin list shape, hashes, and port widths
+        step("Build the decoder graph twice and compare structure")
         val plan = riscv_scalar_decoder_plan("rv32i")
         expect(plan.is_ok()).to_be(true)
         if plan.is_ok():
@@ -44,42 +80,48 @@ describe "declarative scalar ISA plan HWIR decoder":
                 for entry in decoder_plan.entries:
                     expect(origin_ids.contains(
                         "scalar_decoder_rv32:decoder.row." + entry.id)).to_be(true)
-                expect(module.summary.register_count).to_equal(0)
-                expect(module.summary.memory_count).to_equal(0)
+                expect(module.summary.register_count).to_equal(0)  # oracle: the declarative decoder is pure combinational wiring with no state
+                expect(module.summary.memory_count).to_equal(0)  # oracle: the declarative decoder is pure combinational wiring with no state
                 expect(module.ports.any(_.name == "decoded_row_index" and
                     _.bit_width == 6)).to_be(true)
 
     it "decodes declared instructions and normalizes illegal inputs to zero":
+        # @req REQ-MIR-SCALAR-DECODER-003
+        # @capture(statistics): evaluated decoder outputs for legal and illegal words
+        step("Evaluate one legal ADD and one all-zero word")
         val module = strict_riscv_scalar_decoder_hwir("scalar_decoder_eval",
             CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
         val legal = evaluate_strict_comb_hwir(module,
             [HwHostInput.bits("instruction", 0x00B50533)]).unwrap()
         val illegal = evaluate_strict_comb_hwir(module,
             [HwHostInput.bits("instruction", 0)]).unwrap()
-        expect(legal.value_of("decoded_valid").unwrap()).to_equal(1)
+        expect(legal.value_of("decoded_valid").unwrap()).to_equal(1)  # oracle: 0x00B50533 is a declared rv32i ADD row and must decode
         expect(legal.value_of("decoded_row_index").unwrap()).to_be_greater_than(0)
         expect(legal.value_of("canonical_instruction").unwrap()).to_equal(0x00B50533)
-        expect(legal.value_of("decoded_execution_class").unwrap()).to_equal(1)
-        expect(legal.value_of("decoded_memory_effect").unwrap()).to_equal(0)
-        expect(legal.value_of("decoded_semantic_opcode").unwrap()).to_equal(1)
-        expect(legal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)
-        expect(legal.value_of("instruction_rd_field").unwrap()).to_equal(10)
-        expect(legal.value_of("instruction_rs1_field").unwrap()).to_equal(10)
-        expect(legal.value_of("instruction_rs2_field").unwrap()).to_equal(11)
+        expect(legal.value_of("decoded_execution_class").unwrap()).to_equal(1)  # oracle: ADD belongs to execution class 1 in the declarative plan
+        expect(legal.value_of("decoded_memory_effect").unwrap()).to_equal(0)  # oracle: ADD has no memory effect in the declarative plan
+        expect(legal.value_of("decoded_semantic_opcode").unwrap()).to_equal(1)  # oracle: ADD maps to the frozen semantic opcode 1
+        expect(legal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)  # oracle: ADD is not an operand-width-32 operation in the plan
+        expect(legal.value_of("instruction_rd_field").unwrap()).to_equal(10)  # oracle: rd=10 is the RISC-V field of 0x00B50533
+        expect(legal.value_of("instruction_rs1_field").unwrap()).to_equal(10)  # oracle: rs1=10 is the RISC-V field of 0x00B50533
+        expect(legal.value_of("instruction_rs2_field").unwrap()).to_equal(11)  # oracle: rs2=11 is the RISC-V field of 0x00B50533
         val high_mask = evaluate_strict_comb_hwir(module,
             [HwHostInput.bits("instruction", 0x40B50533)]).unwrap()
-        expect(high_mask.value_of("decoded_valid").unwrap()).to_equal(1)
+        expect(high_mask.value_of("decoded_valid").unwrap()).to_equal(1)  # oracle: the masked custom bit does not change declarative validity
         expect(high_mask.value_of("canonical_instruction").unwrap()).to_equal(0x40B50533)
-        expect(illegal.value_of("decoded_valid").unwrap()).to_equal(0)
-        expect(illegal.value_of("decoded_row_index").unwrap()).to_equal(0)
-        expect(illegal.value_of("canonical_instruction").unwrap()).to_equal(0)
-        expect(illegal.value_of("decoded_execution_class").unwrap()).to_equal(0)
-        expect(illegal.value_of("decoded_memory_effect").unwrap()).to_equal(0)
-        expect(illegal.value_of("decoded_semantic_opcode").unwrap()).to_equal(0)
-        expect(illegal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)
-        expect(illegal.value_of("instruction_rd_field").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_valid").unwrap()).to_equal(0)  # oracle: an undeclared word must fail valid and normalize every output to zero
+        expect(illegal.value_of("decoded_row_index").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the row index to zero
+        expect(illegal.value_of("canonical_instruction").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the canonical word to zero
+        expect(illegal.value_of("decoded_execution_class").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the execution class to zero
+        expect(illegal.value_of("decoded_memory_effect").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the memory effect to zero
+        expect(illegal.value_of("decoded_semantic_opcode").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the semantic opcode to zero
+        expect(illegal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)  # oracle: illegal inputs normalize the operand width flag to zero
+        expect(illegal.value_of("instruction_rd_field").unwrap()).to_equal(0)  # oracle: illegal inputs normalize every extracted field to zero
 
     it "selects every exact declarative row in both concrete decoder products":
+        # @req REQ-MIR-SCALAR-DECODER-004
+        # @capture(statistics): per-row evaluation trace across both ISA products
+        step("Evaluate every planned row of rv32i and rv64i_zicsr_zifencei")
         for item in [("rv32i", CoreConfig.rv32()),
                 ("rv64i_zicsr_zifencei", CoreConfig.rv64_zicsr_zifencei())]:
             val plan = riscv_scalar_decoder_plan(item[0]).unwrap()
@@ -90,7 +132,7 @@ describe "declarative scalar ISA plan HWIR decoder":
             for entry in plan.entries:
                 val result = prepared.evaluate([HwHostInput.bits(
                     "instruction", entry.encoding_value as i64)]).unwrap()
-                expect(result.value_of("decoded_valid").unwrap()).to_equal(1)
+                expect(result.value_of("decoded_valid").unwrap()).to_equal(1)  # oracle: every declarative row must decode its own encoding
                 expect(result.value_of("decoded_row_index").unwrap()).to_equal(index + 1)
                 expect(result.value_of("canonical_instruction").unwrap()).to_equal(
                     entry.encoding_value as i64)
@@ -102,6 +144,9 @@ describe "declarative scalar ISA plan HWIR decoder":
                 index = index + 1
 
     it "rejects cross-XLEN and profile-forged decoder plans":
+        # @req REQ-MIR-SCALAR-DECODER-005
+        # @capture(statistics): rejection diagnostics for both forged plans
+        step("Build decoders from cross-XLEN and entry-forged plans")
         val rv64_plan = riscv_scalar_decoder_plan("rv64i").unwrap()
         val wrong_xlen = strict_riscv_scalar_decoder_hwir(
             "bad_decoder", CoreConfig.rv32(), rv64_plan)
@@ -115,6 +160,9 @@ describe "declarative scalar ISA plan HWIR decoder":
         expect(forged_result.unwrap_err()).to_contain("RISCV-DECODER-E-ENTRIES")
 
     it "emits a closed decoder without runtime XLEN or textual ISA dispatch":
+        # @req REQ-MIR-SCALAR-DECODER-006
+        # @capture(bit_table): emitted port list and forbidden VHDL constructs
+        step("Render the rv64i_zicsr_zifencei decoder to VHDL")
         val module = strict_riscv_scalar_decoder_hwir("scalar_decoder_vhdl",
             CoreConfig.rv64_zicsr_zifencei(),
             riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()).unwrap()

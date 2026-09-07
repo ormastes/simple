@@ -153,3 +153,67 @@ intermittent SIGBUS under memory pressure
 (`doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`).
 The gate compares same-machine, same-device, same-workload runs, so relative
 ratio is the metric, never absolute fps.
+
+## Per-submit fence lifecycle (measured 2026-09-06, NVIDIA GB10, aarch64)
+
+The dominant fixed cost was **not** marshalling, per-draw boundary crossings, or
+GPU work. It was `vkCreateFence` + `vkDestroyFence`, paid once per queue
+submission, twice per frame.
+
+Isolated with a probe that submits an **empty** compute command buffer — begin,
+submit, fence-wait, destroy, zero dispatches:
+
+| phase | before | after |
+|---|---|---|
+| `submit_and_wait_fence` (incl. fence create) | 706 us | 45 us |
+| `wait_fence` | 0 us | 0 us |
+| `destroy_fence` | 696 us | 0 us |
+| **empty submit round trip** | **1501 us** | **45 us** |
+
+Both create and destroy cost ~700 us each on this driver. That is why the
+Engine2D frame showed an even draw/batch/present spread: `submit_batch`
+(`_flush_pending_compute`) and `present` (`_refresh_host_full` -> staging
+`copy_to_staging` -> `submit_transfer_command`) are each one submission, so each
+carried ~1.4 ms of pure fence lifecycle regardless of workload.
+
+Confirmed independent of workload before the fix: at 800x600, `batch_us` per
+frame was 3292 us with 1 rect and 3601 us with 64 rects (63 extra dispatches add
+~3 us each), and 3421 us at 200x150 versus 3601 us at 800x600 (16x fewer pixels,
+no change). Flat in both primitive count and pixel count ⇒ submission latency.
+
+**Fix:** `VulkanDevice::acquire_fence` / `release_fence` — a bounded pool of
+signalled fences on the device, reset before reuse. It sits behind the existing
+handle API, so no `.spl` caller changed. Both submission paths use it: the
+compute path (`rt_vulkan_submit_and_wait_fence` / `rt_vulkan_destroy_fence`) and
+the transfer path (`submit_transfer_command`). A fence that is not signalled is
+never pooled; the quarantine-owned no-wait fences are untouched.
+
+Bench, same invocation (`w=800 h=600 rects=64 frames=300 readback=true`), runs
+alternated back-to-back on one pinned worktree, five passes each:
+
+| | ms (5 passes) | fps~ | % of C (6774.8 fps) |
+|---|---|---|---|
+| before | 1802 / 2018 / 2033 / 2070 / 2392 | 125-166 | 1.8-2.5% |
+| after | 559 / 593 / 655 / 1000 / 1019 | 294-536 | 4.3-7.9% |
+
+`checksum=10460147` and `frame_mismatches=0` on every run, both legs — the
+pixels are unchanged.
+
+### What is still slow, and where (measured, not fixed)
+
+- **`draw_us` ≈ 29 us per primitive** to record 4 `vkCmd*` calls into an already
+  open command buffer (slope of rects=1 vs rects=64). Should be well under
+  1 us. Suspects, individually unmeasured: the four SFFI crossings per
+  primitive, the per-call `STATE.lock()`, and the Arc-clone bookkeeping that
+  `bind_pipeline` / `bind_descriptors` / `push_constants` push into
+  `ComputeCommandOwners` on every call. `_pack_rect_pc` is NOT the problem —
+  measured 0.42 us per rect.
+- **The framebuffer is `MemoryLocation::GpuOnly`** (`vulkan/buffer.rs:294`), so
+  every readback stages through a second queue submission. C allocates one
+  HOST_VISIBLE|HOST_COHERENT buffer and `vkMapMemory`s it, paying no submission
+  at all. This is the remaining structural difference and matches the
+  resolution-scaling table above.
+- **`[u32]` is a 16-byte tagged slot array**, so a 480,000-pixel frame is
+  7.68 MB of host traffic per traversal against C's 1.92 MB. The fresh
+  `[0u32; w*h]` in `read_pixels_with_source`'s non-dirty path costs 667 us/frame
+  by itself; the native slot memcpy that follows it is only 100 us.

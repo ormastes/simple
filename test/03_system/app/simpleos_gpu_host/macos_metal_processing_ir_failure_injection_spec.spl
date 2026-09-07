@@ -1,4 +1,29 @@
-"""Prepared macOS live checks for Metal ProcessingIR failure injection."""
+"""
+## Purpose and audience
+For GPU offload maintainers verifying that the live Metal ProcessingIR backend
+reports typed, distinguishable failures (unavailable, init, submit, readback,
+checksum-mismatch) when a fault is injected, and that its production default
+path is byte-exact and gate-inert when no fault is set.
+## Operator workflow
+Run `bin/simple run test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl`
+on a macOS host. Each scenario re-invokes this same file as a bounded child
+process with `--phase=<phase>` plus `SIMPLE_GPU_FAULT_INJECT`, so the fault
+gate lives in a fresh, process-isolated environment.
+## Compatibility and limitations
+The live scenarios require a macOS host with a Metal device; on any other
+platform the whole group is postponed via a single marker scenario — see
+`doc/03_plan/agent_tasks/gpu_renderer_processing_backends_metal.md` for the
+backend availability contract this depends on.
+## Verification guidance and troubleshooting
+A failing scenario prints the full `GPU_METAL_FAULT_PROBE ...` line from the
+child process; compare its `reason=`/`checksum=` fields against the expected
+values named in the assertion to locate which lifecycle phase regressed.
+"""
+# Lifecycle: doc/01_research/domain/gpu_renderer_processing_backends_metal.md ;
+# doc/03_plan/agent_tasks/gpu_renderer_processing_backends_metal.md ;
+# doc/04_architecture/gpu_renderer_processing_backends_metal.md ;
+# doc/05_design/gpu_renderer_processing_backends_metal.md
+# @manual_section: macos_metal_fault_injection
 
 use std.spec.step
 
@@ -71,6 +96,9 @@ fn _run_case(phase: text, test_gate: bool, selector: bool) -> text:
     expect(code).to_equal(0)
     out
 
+fn _skip_non_macos_host(reason: text):
+    pending(reason)
+
 fn _assert_default_gate_absent() -> text:
     val out = _run_case("none", false, false)
     expect(out).to_contain(
@@ -90,19 +118,27 @@ fn _assert_injected(phase: text, reason: text) -> text:
     out
 
 describe "prepared macOS Metal ProcessingIR failure injection" :
-    # @manual scenario evidence
     if not is_macos():
         it "requires a macOS host for the live Metal executor" :
+            # @req REQ-METAL-FAULT-000
+            # @capture(statistics): host platform check result used to postpone the live group
+            step("Check the host platform and postpone the live Metal group when it is not macOS")
             expect(is_macos()).to_equal(false)
-            pending("macOS Metal ProcessingIR live test is postponed to a macOS host")
+            _skip_non_macos_host("macOS Metal ProcessingIR live test is postponed to a macOS host")
         return
 
     it "proves the production default gate does not inject a failure" :
+        # @req REQ-METAL-FAULT-001
+        # @capture(protocol_json): child-process GPU_METAL_FAULT_PROBE line for the ungated default
+        step("Run a child process with no fault gate set and probe the Metal default")
         if _probe_mode(): return
         expect(_assert_default_gate_absent()).to_contain(
             "fault_active=false completed=true reason=ok")
 
     it "requires both fault gate variables":
+        # @req REQ-METAL-FAULT-002
+        # @capture(protocol_json): two child-process probes, each missing one of the two required gate variables
+        step("Set only the test gate, then only the selector, and confirm neither alone activates the fault")
         if _probe_mode(): return
         expect(_run_case("init", true, false)).to_contain(
             "phase=init fault_active=false")
@@ -110,6 +146,9 @@ describe "prepared macOS Metal ProcessingIR failure injection" :
             "phase=init fault_active=false")
 
     it "returns typed init, submit, readback, and mismatch failures" :
+        # @req REQ-METAL-FAULT-003
+        # @capture(protocol_json): five child-process GPU_METAL_FAULT_PROBE lines, one per injected Metal phase
+        step("Inject each Metal lifecycle phase in turn and confirm its typed failure reason")
         if _probe_mode(): return
         expect(_assert_injected("unavailable", "metal-unavailable")).to_contain(
             "reason=metal-unavailable")

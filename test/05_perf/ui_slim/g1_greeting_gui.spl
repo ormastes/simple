@@ -1,0 +1,177 @@
+# G1 presentation fixture — a REAL displayed OS window for the ui_slim lane.
+#
+# Route (existing, not reinvented): common.ui.builder tree
+#   -> widget_tree_to_draw_ir (DrawIR v2) -> draw_ir_v2_to_v3 (v3 scene)
+#   -> app.ui_showcase.hosts.host_gui.ScreenGuiHost.present_scene
+#   -> nogc_sync_mut.ui.gui_renderer.GuiRenderer (dlopen build/sffi/libspl_winit)
+# i.e. exactly what src/app/ui_showcase/hosts/main_gui.spl uses. Launch it the
+# way that route documents: scripts/gui/macos-gui-run.shs <this file> [args].
+#
+# The framebuffer written to --out is the SAME [u32] buffer handed to
+# present_argb_u32 (raster_scene_argb over the presented scene), encoded with
+# the existing raster_to_ppm_bytes. That buffer is the absolute oracle; a
+# screenshot is never accepted in its place.
+#
+# Milestones go to STDERR, one per line, with a wall-clock stamp:
+#   [ui-slim] <name> t_ns=<nanoseconds since the unix epoch>
+# The clock is CLOCK_REALTIME (time_now_unix_micros x 1000, microsecond
+# resolution) -- NOT monotonic. The checker records the same clock outside the
+# process so the two sides are comparable; see the guide.
+#
+# No window => exit 1 with `[ui-slim] no_window`. This fixture never fabricates
+# a milestone it did not reach, and never substitutes a headless counter.
+
+use std.sffi.cli.{cli_get_args}
+use std.io.{time_now_unix_micros, thread_sleep_ms}
+use std.io_runtime.{exit}
+use nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
+use nogc_sync_mut.sffi.io.{file_write_bytes}
+use common.ui.builder.{column, label, button, build_tree_with_title}
+use common.ui.widget.{UIState}
+use common.ui.widget_store_ops.{WidgetNode}
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.widget_hit.{widget_dispatch_click}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3_with_ids}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use app.ui_showcase.hosts.host_gui.{ScreenGuiHost}
+use app.ui_showcase.hosts.scene_raster.{raster_scene_argb, raster_to_ppm_bytes, RASTER_BG}
+
+val G1_PREFIX: text = "g1slim"
+val G1_GREETING: text = "Hello from Simple UI!"
+
+fn _now_ns() -> i64:
+    time_now_unix_micros() * 1000
+
+fn _emit(line: text):
+    stderr_write("[ui-slim] {line}\n")
+    stderr_flush()
+
+fn _milestone(name: text):
+    _emit("{name} t_ns={_now_ns()}")
+
+fn _hex6(c: u32) -> text:
+    val digits = "0123456789abcdef"
+    val v: i64 = c.to_i64() & 16777215
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val nib = (v >> shift) & 15
+        out = out + digits[nib:nib + 1]
+        shift = shift - 4
+    out
+
+fn _arg_value(args: [text], key: text, fallback: text) -> text:
+    var i: i64 = 0
+    while i < args.len().to_i64():
+        if args[i] == key and i + 1 < args.len().to_i64():
+            return args[i + 1]
+        i = i + 1
+    fallback
+
+fn _arg_i64(args: [text], key: text, fallback: i64) -> i64:
+    val raw = _arg_value(args, key, "").trim()
+    if raw == "":
+        return fallback
+    val parsed: i64? = raw.to_int()
+    parsed ?? fallback
+
+fn _build(greeting: text) -> UIState:
+    val root = column("{G1_PREFIX}_root", [
+        label("{G1_PREFIX}_greeting", greeting),
+        button("{G1_PREFIX}_btn", "Click me", "g1_click")
+    ])
+    UIState.new(build_tree_with_title(root, "Simple UI Slim G1", "glass_dark"))
+
+fn _scene(st: UIState, w: i32, h: i32, generation: u32) -> DrawIrV3Scene:
+    draw_ir_v2_to_v3_with_ids(
+        widget_tree_to_draw_ir(st.tree.root_node(), w, h, DRAW_IR_BACKEND_CPU),
+        7u32, generation)
+
+fn main():
+    _milestone("entry")
+    val args = cli_get_args()
+    # Small by default: an interpreted first frame at showcase size takes tens
+    # of minutes (see main_gui.spl), which would swallow the checker's timeout.
+    val w = _arg_i64(args, "--w", 240) as i32
+    val h = _arg_i64(args, "--h", 140) as i32
+    val hold_ms = _arg_i64(args, "--hold-ms", 500)
+    val out_path = _arg_value(args, "--out", "")
+
+    var st = _build(G1_GREETING)
+    val rects = compute_layout(st.tree.root_node(), 0, 0, w, h)
+    var gx: i32 = 0
+    var gy: i32 = 0
+    var gw: i32 = w
+    var gh: i32 = h
+    match find_rect(rects, "{G1_PREFIX}_greeting"):
+        case Some(r):
+            gx = r.x
+            gy = r.y
+            gw = r.w
+            gh = r.h
+        case None:
+            pass
+    var bx: i32 = 0
+    var by: i32 = 0
+    match find_rect(rects, "{G1_PREFIX}_btn"):
+        case Some(r):
+            bx = r.x + r.w / 2
+            by = r.y + r.h / 2
+        case None:
+            pass
+    _emit("probe size={w}x{h} bg={_hex6(RASTER_BG)} rect={gx},{gy},{gw},{gh} btn={bx},{by}")
+
+    val opened = ScreenGuiHost.open(w, h, "Simple UI Slim G1")
+    match opened:
+        case None:
+            # GuiRenderer has already printed the concrete reason on stdout.
+            _emit("no_window reason=gui-renderer-open-returned-nil")
+            exit(1)
+        case Some(host):
+            _milestone("window_created")
+            var gen: u32 = 1u32
+            var scene = _scene(st, w, h, gen)
+            if not host.present_scene(scene):
+                _emit("present_failed")
+                host.shutdown()
+                exit(1)
+            _milestone("first_frame_submitted")
+
+            if out_path != "":
+                val px = raster_scene_argb(scene, w, h)
+                if file_write_bytes(out_path, raster_to_ppm_bytes(px, w, h)):
+                    _emit("ppm_written path={out_path}")
+                else:
+                    _emit("ppm_write_failed path={out_path}")
+
+            _milestone("input_ready")
+            # Deterministic synthetic activation on the button's centre through
+            # the real hit-test/dispatch path -- no osascript, no fake event.
+            val hit = widget_dispatch_click(st.tree.root_node(), w, h, bx, by)
+            WidgetNode(id: "{G1_PREFIX}_greeting").set_prop(
+                "label", "{G1_GREETING} [clicked]")
+            gen = gen + 1u32
+            scene = _scene(st, w, h, gen)
+            if host.present_scene(scene):
+                _emit("input_hit={hit}")
+                _milestone("input_response")
+            else:
+                _emit("input_present_failed")
+
+            # Observation hold. macOS only composites while the window keeps
+            # being presented, so re-present (retained path, cheap) instead of
+            # sleeping on a dirty-only loop.
+            var waited: i64 = 0
+            while waited < hold_ms:
+                val ev = host.poll_input()
+                if not host.present_scene(scene):
+                    waited = hold_ms
+                else:
+                    thread_sleep_ms(25)
+                    waited = waited + 25
+            _milestone("hold_complete")
+            host.shutdown()
+            _milestone("exit_ok")
+            exit(0)

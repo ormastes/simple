@@ -437,17 +437,20 @@ sub prepare_parent_provenance {
     my $args_sha = receipt_value(procfd($fh{admission}), 'build_args_sha256');
     $args_sha =~ /\A[0-9a-f]{64}\z/ or fail('invalid Stage2 build argv hash');
     my @verify = (procfd($role_fh{dash}), '-c',
-        '. "$1"; bootstrap_stage3_verify_stage2_admission_receipt "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}"',
+        '. "$1"; bootstrap_stage3_verify_stage2_admission_receipt "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}" "${20}" "${21}" "${22}"',
         'stage23-parent-admission', procfd($role_fh{provenance_sanity}),
-        procfd($fh{admission}), procfd($fh{candidate}), procfd($fh{source}),
-        procfd($fh{runtime}), procfd($fh{tool}), $args_sha,
-        procfd($fh{sanity}), procfd($fh{receiver}),
-        "$stage2_authority_path/$relative{candidate}",
-        "$stage2_authority_path/$relative{source}",
-        "$stage2_authority_path/$relative{runtime}",
-        "$stage2_authority_path/$relative{tool}",
-        "$stage2_authority_path/$relative{sanity}",
-        "$stage2_authority_path/$relative{receiver}");
+        procfd($fh{admission}), "$stage2_authority_path/$relative{admission}",
+        procfd($fh{candidate}), "$stage2_authority_path/$relative{candidate}",
+        procfd($fh{source}), "$stage2_authority_path/$relative{source}",
+        procfd($fh{runtime}), "$stage2_authority_path/$relative{runtime}",
+        procfd($stage2_authority_fh) . "/$base/stage2-runtime-authority",
+        "$stage2_authority_path/$base/stage2-runtime-authority",
+        procfd($fh{tool}), "$stage2_authority_path/$relative{tool}", $args_sha,
+        procfd($fh{sanity}), "$stage2_authority_path/$relative{sanity}",
+        procfd($stage2_authority_fh) . "/$base", procfd($fh{receiver}),
+        "$stage2_authority_path/$relative{receiver}",
+        procfd($stage2_authority_fh) . "/$base/stage2-receiver.log",
+        "$stage2_authority_path/$base/stage2-receiver.log", $o{root});
     system(@verify);
     my $rc = $? & 127 ? 128 + ($? & 127) : $? >> 8;
     $rc == 0 or fail("Stage2 parent admission verification failed with status $rc");

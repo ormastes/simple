@@ -19,10 +19,10 @@ gc_once), never the device directly. Three absolute-oracle scenarios:
      structured overwrites of one LBA each allocate a fresh page and the latest
      version always reads back correctly; a failed (fold-collided) overwrite leaves
      the previous version intact. GC is then shown to be STRUCTURALLY UNREACHABLE
-     on this backend: because fold-collisions retire a block at its 4th page, no
+     on this backend: because fold-collisions retire a block at its 8th page, no
      block ever fills to 64 pages to reach BLK_CLOSED, so gc_once() finds no victim
      (UNMAP). This is asserted, not faked — a known limitation of running the real
-     64x64 FTL on the S1 window, recorded rather than masked.
+     64x64 FTL on the S3 window, recorded rather than masked.
 
   C. The payoff the Vt model exists for: retention drift is FTL-visible AND, after
      the L8 wiring pass, AUTO-RECOVERED. A page written 0x00, then aged one year on a
@@ -49,12 +49,17 @@ fn main():
     # ── A. round-trip across a block boundary ────────────────────────────────
     var ftl: Ftl = ftl_new_emu()
 
-    # LBAs 0..3 fill the first physical block's in-window pages; each write is a
-    # clean SC_SUCCESS and every pattern round-trips exactly (t=0, no drift).
+    # LBAs 0..7 fill the first physical block's in-window pages (S3: 8 pages per
+    # block); each write is a clean SC_SUCCESS and every pattern round-trips
+    # exactly (t=0, no drift).
     fail = fail + expect_eq(ftl.write(0, 0xA0), SC_SUCCESS, "write lba0 ok")
     fail = fail + expect_eq(ftl.write(1, 0xA1), SC_SUCCESS, "write lba1 ok")
     fail = fail + expect_eq(ftl.write(2, 0xA2), SC_SUCCESS, "write lba2 ok")
     fail = fail + expect_eq(ftl.write(3, 0xA3), SC_SUCCESS, "write lba3 ok")
+    fail = fail + expect_eq(ftl.write(4, 0xA4), SC_SUCCESS, "write lba4 ok")
+    fail = fail + expect_eq(ftl.write(5, 0xA5), SC_SUCCESS, "write lba5 ok")
+    fail = fail + expect_eq(ftl.write(6, 0xA6), SC_SUCCESS, "write lba6 ok")
+    fail = fail + expect_eq(ftl.write(7, 0xA7), SC_SUCCESS, "write lba7 ok")
     fail = fail + expect_eq(ftl.read(0), 0xA0, "read lba0 round-trips")
     fail = fail + expect_eq(ftl.read(1), 0xA1, "read lba1 round-trips")
     fail = fail + expect_eq(ftl.read(2), 0xA2, "read lba2 round-trips")
@@ -66,25 +71,25 @@ fn main():
     fail = fail + expect_eq(ftl.lba_ppn(0), 0, "lba0 -> ppn 0 (block 0)")
     fail = fail + expect_eq(blk_a, 0, "first run of writes is in physical block 0")
 
-    # The 5th page of block 0 fold-aliases onto its own page 0 (already programmed)
+    # The 9th page of block 0 fold-aliases onto its own page 0 (already programmed)
     # -> the collision surfaces as SC_INTERNAL and the LBA stays UNMAPPED (no silent
     # wrong-data write). This is the honest failure, not a masked one.
-    fail = fail + expect_eq(ftl.write(4, 0xA4), SC_INTERNAL, "fold-collision surfaces as SC_INTERNAL")
-    fail = fail + expect_eq(ftl.lba_ppn(4), UNMAP, "collided write left lba4 unmapped")
-    fail = fail + expect_eq(ftl.read(4), 0, "unmapped lba4 reads 0")
+    fail = fail + expect_eq(ftl.write(8, 0xA8), SC_INTERNAL, "fold-collision surfaces as SC_INTERNAL")
+    fail = fail + expect_eq(ftl.lba_ppn(8), UNMAP, "collided write left lba8 unmapped")
+    fail = fail + expect_eq(ftl.read(8), 0, "unmapped lba8 reads 0")
 
     # The collision retired block 0, so the allocator opens the NEXT block. LBAs
-    # 5..8 write cleanly and round-trip, now in a DIFFERENT physical block — the
+    # 9..12 write cleanly and round-trip, now in a DIFFERENT physical block — the
     # block-boundary crossing.
-    fail = fail + expect_eq(ftl.write(5, 0xB5), SC_SUCCESS, "write lba5 ok (new block)")
-    fail = fail + expect_eq(ftl.write(6, 0xB6), SC_SUCCESS, "write lba6 ok")
-    fail = fail + expect_eq(ftl.write(7, 0xB7), SC_SUCCESS, "write lba7 ok")
-    fail = fail + expect_eq(ftl.write(8, 0xB8), SC_SUCCESS, "write lba8 ok")
-    fail = fail + expect_eq(ftl.read(5), 0xB5, "read lba5 round-trips")
-    fail = fail + expect_eq(ftl.read(8), 0xB8, "read lba8 round-trips")
+    fail = fail + expect_eq(ftl.write(9, 0xB5), SC_SUCCESS, "write lba9 ok (new block)")
+    fail = fail + expect_eq(ftl.write(10, 0xB6), SC_SUCCESS, "write lba10 ok")
+    fail = fail + expect_eq(ftl.write(11, 0xB7), SC_SUCCESS, "write lba11 ok")
+    fail = fail + expect_eq(ftl.write(12, 0xB8), SC_SUCCESS, "write lba12 ok")
+    fail = fail + expect_eq(ftl.read(9), 0xB5, "read lba9 round-trips")
+    fail = fail + expect_eq(ftl.read(12), 0xB8, "read lba12 round-trips")
 
-    val blk_b: i64 = ppn_block(ftl.lba_ppn(5))
-    fail = fail + expect_eq(ftl.lba_ppn(5), 64, "lba5 -> ppn 64 (block 1)")
+    val blk_b: i64 = ppn_block(ftl.lba_ppn(9))
+    fail = fail + expect_eq(ftl.lba_ppn(9), 64, "lba9 -> ppn 64 (block 1)")
     fail = fail + expect_eq(if blk_b > blk_a: 1 else: 0, 1, "successful writes crossed a physical block boundary")
 
     # Crossing did not disturb the earlier block's live data.
@@ -99,17 +104,21 @@ fn main():
     fail = fail + expect_eq(ov.read(0), 0xC1, "ov: reads overwrite 1 (log-structured remap)")
     fail = fail + expect_eq(ov.write(0, 0xC2), SC_SUCCESS, "ov: overwrite 2 ok")
     fail = fail + expect_eq(ov.write(0, 0xC3), SC_SUCCESS, "ov: overwrite 3 ok")
-    fail = fail + expect_eq(ov.read(0), 0xC3, "ov: reads latest version")
+    fail = fail + expect_eq(ov.write(0, 0xC4), SC_SUCCESS, "ov: overwrite 4 ok")
+    fail = fail + expect_eq(ov.write(0, 0xC5), SC_SUCCESS, "ov: overwrite 5 ok")
+    fail = fail + expect_eq(ov.write(0, 0xC6), SC_SUCCESS, "ov: overwrite 6 ok")
+    fail = fail + expect_eq(ov.write(0, 0xC7), SC_SUCCESS, "ov: overwrite 7 ok")
+    fail = fail + expect_eq(ov.read(0), 0xC7, "ov: reads latest version")
 
-    # The next overwrite fold-collides (block's 5th page); it fails closed and the
+    # The next overwrite fold-collides (block's 9th page); it fails closed and the
     # PREVIOUS version stays readable (a failed program never loses committed data).
     fail = fail + expect_eq(ov.write(0, 0xCC), SC_INTERNAL, "ov: collided overwrite fails closed")
-    fail = fail + expect_eq(ov.read(0), 0xC3, "ov: last good version survives the failed overwrite")
+    fail = fail + expect_eq(ov.read(0), 0xC7, "ov: last good version survives the failed overwrite")
 
     # GC verdict: no block ever reaches BLK_CLOSED on the folded backend (collisions
-    # retire blocks at 4 pages), so gc_once() honestly finds no victim. Asserted, not
-    # faked — the structural limitation of the 64x64 FTL on the S1 window.
-    fail = fail + expect_eq(ov.gc_once(), UNMAP, "gc_once finds no victim on the S1-folded backend (documented limit)")
+    # retire blocks at 8 pages), so gc_once() honestly finds no victim. Asserted, not
+    # faked — the structural limitation of the 64x64 FTL on the S3 window.
+    fail = fail + expect_eq(ov.gc_once(), UNMAP, "gc_once finds no victim on the S3-folded backend (documented limit)")
 
     # ── C. retention drift is FTL-visible AND L8-auto-recovered (the payoff) ──
     var rt: Ftl = ftl_new_emu()

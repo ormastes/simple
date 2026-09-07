@@ -184,6 +184,11 @@ pub struct InstrContext<'a, M: Module> {
     /// returns as raw typed integers. Regular interpreter/native paths already
     /// pass a Simple RuntimeValue through rt_pool_join.
     pub tag_runtime_pool_join_result: bool,
+    /// True when compiling for a freestanding/baremetal target
+    /// (`Target::is_baremetal()`). Gates the freestanding heap-tag vocabulary
+    /// in the inline `.len()` fast path, whose tag numbers collide with hosted
+    /// `HeapObjectType` values.
+    pub baremetal: bool,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -294,6 +299,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             fn_arities,
             enum_defs,
             tag_runtime_pool_join_result: false,
+            baremetal: false,
         }
     }
 }

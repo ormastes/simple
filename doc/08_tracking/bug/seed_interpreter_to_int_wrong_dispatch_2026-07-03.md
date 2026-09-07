@@ -35,3 +35,23 @@ Worked around with a dispatch-free digit parser (`core_digits_to_i64` in
 `src/compiler/10.frontend/core/lexer.spl`). Fix belongs in the seed's
 method-dispatch order; until then avoid `.to_int()` on runtime-produced
 strings in seed-executed hot paths.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The record's own minimal repro (`"10,4".split(",")` then `parts[0].to_int()`)
+now yields `10` on BOTH lanes:
+
+```
+SPLIT_TO_INT=10     # interpret
+SPLIT_TO_INT=10     # jit
+```
+
+Probe `_scratch/p_str.spl`. Not fixed by this session — it was already correct.
+The workaround `core_digits_to_i64` in `src/compiler/10.frontend/core/lexer.spl`
+that this record installed can be revisited independently; it was NOT removed
+here, since removing a live workaround needs its own verification pass.

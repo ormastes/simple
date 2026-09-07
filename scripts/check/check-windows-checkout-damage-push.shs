@@ -89,10 +89,17 @@ blob_has_crlf() {
     git cat-file blob "$1" > "$SCRATCH/blob" 2>/dev/null
     _rc=$?
     [ "$_rc" -eq 0 ] || return 2
-    if LC_ALL=C grep -q "$(printf '\r')$" "$SCRATCH/blob" 2>/dev/null; then
-        return 0
-    fi
-    return 1
+    # MSYS/Git-Bash `grep` opens its input in TEXT mode and strips the CR
+    # before matching, so `grep '\r$'` NEVER fires on Windows — the one
+    # platform this guard exists to protect (verified 2026-09-06). Detect the
+    # CR-LF pair byte-wise with `tr`, which is binary-clean on both platforms:
+    # map every other byte to 'x' (this also removes NUL, so grep cannot then
+    # declare the stream binary), squeeze runs, and translate CR to a printable
+    # 'R'. A CRLF becomes "R\n"; a lone CR keeps a following 'x', so `R$` is
+    # true iff some CR is immediately followed by LF.
+    LC_ALL=C tr -c '\r\n' 'x' < "$SCRATCH/blob" \
+        | LC_ALL=C tr -s 'x\r' 'xR' \
+        | LC_ALL=C grep -q 'R$'
 }
 
 # ---------------------------------------------------------------------------

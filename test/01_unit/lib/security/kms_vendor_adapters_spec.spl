@@ -1,9 +1,46 @@
+"""
+## Purpose and audience
+Pins the KMS vendor transport adapters: the request shapes each vendor gateway
+expects (AWS KMS SigV4 Sign/Verify, GCP KMS asymmetricSign, Azure Key Vault
+sign/verify, PKCS#11 HSM gateway), the credential-store-backed builder variants
+(static, temporary-session, bearer) that keep credentials opaque, and the rule
+that no raw signing-key material ever enters a request body or the adapter
+source. Written for engineers extending vendor adapters in
+`src/lib/nogc_sync_mut/security/kms_vendor_adapters.spl` or the credential store.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/security/kms_vendor_adapters_spec.spl`
+and read the `SPEC FILE VERDICT` line. Request-builder scenarios call the
+product builders directly; the credential-opaque scenarios read shipped source
+and assert on grep-verified tokens, so no network or HSM is needed.
+## Compatibility and limitations
+Covers request construction and source-level credential hygiene only; it does
+not perform a live signature or reach any vendor endpoint. Source-contract
+scenarios prove shipped source carries (or omits) named tokens, not runtime
+signing behaviour.
+## Verification guidance and troubleshooting
+A failing method/header/body expectation means a request-builder contract
+changed; a failing `*_present` source token means a credential-backed builder
+was renamed or removed; a failing `*_absent` token means raw key material or a
+hard-coded credential env var was reintroduced. Rerun after any edit to the
+adapters or credential store and compare per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/lib/crypto/chacha_poly_tag_bug_2026-04-17.md ;
+# doc/03_plan/infra/security/security_convention_first_architecture.md ;
+# doc/04_architecture/infra/security/security_convention_first_architecture.md ;
+# doc/05_design/infra/security_convention_first_architecture.md
+# @manual_section: kms-vendor-transport-adapters
+
 use std.security.kms_vendor_adapters.{aws_kms_sign_request, aws_kms_verify_request, gcp_kms_asymmetric_sign_request, azure_key_vault_sign_request, azure_key_vault_verify_request, pkcs11_hsm_sign_request, pkcs11_hsm_verify_request}
 use std.io_runtime.{file_read}
+use std.spec.{step}
 
 
 describe "KMS vendor transport adapters":
     it "builds AWS KMS Sign and Verify JSON RPC requests":
+        # @req REQ-KMS-ADAPTERS-001
+        # @capture(protocol_json): AWS KMS Sign and Verify request method, target header and body
+        step("Build AWS KMS Sign and Verify requests through the product builders")
         val sign = aws_kms_sign_request("https://kms.us-east-1.amazonaws.com", "arn:aws:kms:us-east-1:111122223333:key/key-1", "payload", "RSASSA_PSS_SHA_256", "AWS4-HMAC-SHA256 signed", 3000, "system")
         val verify = aws_kms_verify_request("https://kms.us-east-1.amazonaws.com", "arn:aws:kms:us-east-1:111122223333:key/key-1", "payload", "sig", "RSASSA_PSS_SHA_256", "AWS4-HMAC-SHA256 signed", 3000, "system")
 
@@ -15,41 +52,74 @@ describe "KMS vendor transport adapters":
         expect(verify.body).to_contain("sig")
 
     it "contains AWS KMS SigV4 builders backed by opaque credential store":
+        # @req REQ-KMS-ADAPTERS-002
+        # @capture(protocol_json): grep-verified credential-backed SigV4 builder and authorization tokens
+        step("Read the adapter and credential-store sources and verify the SigV4 builder bindings")
         val source = file_read("src/lib/nogc_sync_mut/security/kms_vendor_adapters.spl")
         val credential_source = file_read("src/lib/nogc_sync_mut/security/auth/credential_store.spl")
 
-        expect(source).to_contain("aws_kms_sigv4_sign_request_from_credentials")
-        expect(source).to_contain("aws_kms_sigv4_verify_request_from_credentials")
-        expect(source).to_contain("aws_kms_sigv4_sign_request_from_temporary_credentials")
-        expect(source).to_contain("x-amz-security-token")
-        expect(source).to_contain("credential_store_aws_sigv4_authorization")
-        expect(source).to_contain("credential_store_aws_sigv4_authorization_with_session_token")
-        expect(credential_source).to_contain("fn credential_store_aws_sigv4_authorization")
-        expect(credential_source).to_contain("fn credential_store_aws_sigv4_authorization_with_session_token")
-        expect(credential_source).to_contain("sigv4_authorization_header")
+        val exposes_sigv4_sign_builder = source.contains("aws_kms_sigv4_sign_request_from_credentials")
+        val exposes_sigv4_verify_builder = source.contains("aws_kms_sigv4_verify_request_from_credentials")
+        val exposes_temporary_sign_builder = source.contains("aws_kms_sigv4_sign_request_from_temporary_credentials")
+        val sets_session_token_header = source.contains("x-amz-security-token")
+        val routes_signing_through_store = source.contains("credential_store_aws_sigv4_authorization")
+        val routes_session_signing_through_store = source.contains("credential_store_aws_sigv4_authorization_with_session_token")
+        val store_defines_sigv4_authorization = credential_source.contains("fn credential_store_aws_sigv4_authorization")
+        val store_defines_session_authorization = credential_source.contains("fn credential_store_aws_sigv4_authorization_with_session_token")
+        val store_builds_authorization_header = credential_source.contains("sigv4_authorization_header")
+        expect(exposes_sigv4_sign_builder).to_equal(true)
+        expect(exposes_sigv4_verify_builder).to_equal(true)
+        expect(exposes_temporary_sign_builder).to_equal(true)
+        expect(sets_session_token_header).to_equal(true)
+        expect(routes_signing_through_store).to_equal(true)
+        expect(routes_session_signing_through_store).to_equal(true)
+        expect(store_defines_sigv4_authorization).to_equal(true)
+        expect(store_defines_session_authorization).to_equal(true)
+        expect(store_builds_authorization_header).to_equal(true)
 
     it "contains AWS temporary credential signing with the session token header":
+        # @req REQ-KMS-ADAPTERS-003
+        # @capture(protocol_json): grep-verified temporary-credential builder and session-token header tokens
+        step("Read the adapter source and verify the temporary-credential signing path")
         val source = file_read("src/lib/nogc_sync_mut/security/kms_vendor_adapters.spl")
 
-        expect(source).to_contain("aws_kms_sigv4_sign_request_with_session_token")
-        expect(source).to_contain("aws_kms_sigv4_headers_with_session_token")
-        expect(source).to_contain("SigV4Header(name: \"x-amz-security-token\"")
-        expect(source).to_contain("\"x-amz-security-token\": session_token")
+        val exposes_session_token_builder = source.contains("aws_kms_sigv4_sign_request_with_session_token")
+        val exposes_session_token_headers = source.contains("aws_kms_sigv4_headers_with_session_token")
+        val declares_session_token_header = source.contains("SigV4Header(name: \"x-amz-security-token\"")
+        val threads_session_token_into_headers = source.contains("\"x-amz-security-token\": session_token")
+        expect(exposes_session_token_builder).to_equal(true)
+        expect(exposes_session_token_headers).to_equal(true)
+        expect(declares_session_token_header).to_equal(true)
+        expect(threads_session_token_into_headers).to_equal(true)
 
     it "contains bearer credential-backed builders for GCP Azure and HSM":
+        # @req REQ-KMS-ADAPTERS-004
+        # @capture(protocol_json): grep-verified bearer-backed builder tokens across the three vendors
+        step("Read the adapter and credential-store sources and verify the bearer-backed builders")
         val source = file_read("src/lib/nogc_sync_mut/security/kms_vendor_adapters.spl")
         val credential_source = file_read("src/lib/nogc_sync_mut/security/auth/credential_store.spl")
 
-        expect(source).to_contain("gcp_kms_asymmetric_sign_request_from_credentials")
-        expect(source).to_contain("azure_key_vault_sign_request_from_credentials")
-        expect(source).to_contain("azure_key_vault_verify_request_from_credentials")
-        expect(source).to_contain("pkcs11_hsm_sign_request_from_credentials")
-        expect(source).to_contain("pkcs11_hsm_verify_request_from_credentials")
-        expect(source).to_contain("credential_store_bearer_authorization")
-        expect(credential_source).to_contain("fn credential_store_bearer_authorization")
-        expect(credential_source.contains("fn _credential_value")).to_equal(false)
+        val exposes_gcp_bearer_builder = source.contains("gcp_kms_asymmetric_sign_request_from_credentials")
+        val exposes_azure_sign_bearer_builder = source.contains("azure_key_vault_sign_request_from_credentials")
+        val exposes_azure_verify_bearer_builder = source.contains("azure_key_vault_verify_request_from_credentials")
+        val exposes_hsm_sign_bearer_builder = source.contains("pkcs11_hsm_sign_request_from_credentials")
+        val exposes_hsm_verify_bearer_builder = source.contains("pkcs11_hsm_verify_request_from_credentials")
+        val routes_bearer_through_store = source.contains("credential_store_bearer_authorization")
+        val store_defines_bearer_authorization = credential_source.contains("fn credential_store_bearer_authorization")
+        val hides_private_credential_helper = credential_source.contains("fn _credential_value")
+        expect(exposes_gcp_bearer_builder).to_equal(true)
+        expect(exposes_azure_sign_bearer_builder).to_equal(true)
+        expect(exposes_azure_verify_bearer_builder).to_equal(true)
+        expect(exposes_hsm_sign_bearer_builder).to_equal(true)
+        expect(exposes_hsm_verify_bearer_builder).to_equal(true)
+        expect(routes_bearer_through_store).to_equal(true)
+        expect(store_defines_bearer_authorization).to_equal(true)
+        expect(hides_private_credential_helper).to_equal(false)
 
     it "builds Google Cloud KMS asymmetricSign requests":
+        # @req REQ-KMS-ADAPTERS-005
+        # @capture(protocol_json): GCP KMS asymmetricSign request method, URL, authorization and body
+        step("Build a Google Cloud KMS asymmetricSign request through the product builder")
         val request = gcp_kms_asymmetric_sign_request("https://cloudkms.googleapis.com", "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", "sha256-digest", "oauth-token", 3000, "system")
 
         expect(request.method).to_equal("POST")
@@ -58,6 +128,9 @@ describe "KMS vendor transport adapters":
         expect(request.body).to_contain("sha256-digest")
 
     it "builds Azure Key Vault sign and verify requests":
+        # @req REQ-KMS-ADAPTERS-006
+        # @capture(protocol_json): Azure Key Vault sign and verify request methods, URLs and bodies
+        step("Build Azure Key Vault sign and verify requests through the product builders")
         val sign = azure_key_vault_sign_request("https://vault.vault.azure.net", "token-key/version-1", "digest-b64u", "PS256", "aad-token", 3000, "system")
         val verify = azure_key_vault_verify_request("https://vault.vault.azure.net", "token-key/version-1", "digest-b64u", "sig-b64u", "PS256", "aad-token", 3000, "system")
 
@@ -70,6 +143,9 @@ describe "KMS vendor transport adapters":
         expect(verify.headers["authorization"]).to_equal("Bearer aad-token")
 
     it "builds PKCS11 HSM gateway requests":
+        # @req REQ-KMS-ADAPTERS-007
+        # @capture(protocol_json): PKCS#11 HSM gateway request methods, TLS profile and bodies
+        step("Build PKCS11 HSM gateway sign and verify requests through the product builders")
         val sign = pkcs11_hsm_sign_request("https://hsm.internal", "slot-0", "hsm://slot-0/key-1", "payload", "CKM_ECDSA_SHA256", "Bearer hsm-token", 3000, "mtls:hsm")
         val verify = pkcs11_hsm_verify_request("https://hsm.internal", "slot-0", "hsm://slot-0/key-1", "payload", "sig", "CKM_ECDSA_SHA256", "Bearer hsm-token", 3000, "mtls:hsm")
 
@@ -81,11 +157,16 @@ describe "KMS vendor transport adapters":
         expect(verify.headers["authorization"]).to_equal("Bearer hsm-token")
 
     it "does not include raw signing key fields":
+        # @req REQ-KMS-ADAPTERS-008
+        # @capture(protocol_json): key-material-absence checks on the request body and adapter source
+        step("Build an AWS KMS request and scan body and adapter source for key material")
         val request = aws_kms_sign_request("https://kms.us-east-1.amazonaws.com", "alias/simple-token", "payload", "RSASSA_PKCS1_V1_5_SHA_256", "", 3000, "system")
 
         expect(request.body.index_of("signing_key") < 0).to_equal(true)
         expect(request.body.index_of("private_key") < 0).to_equal(true)
         expect(request.body.index_of("secret") < 0).to_equal(true)
         val source = file_read("src/lib/nogc_sync_mut/security/kms_vendor_adapters.spl")
-        expect(source.contains("GCP_ACCESS_TOKEN")).to_equal(false)
-        expect(source.contains("AZURE_ACCESS_TOKEN")).to_equal(false)
+        val hardcodes_gcp_access_token = source.contains("GCP_ACCESS_TOKEN")
+        val hardcodes_azure_access_token = source.contains("AZURE_ACCESS_TOKEN")
+        expect(hardcodes_gcp_access_token).to_equal(false)
+        expect(hardcodes_azure_access_token).to_equal(false)

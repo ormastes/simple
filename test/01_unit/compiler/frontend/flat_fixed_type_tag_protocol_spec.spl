@@ -1,3 +1,34 @@
+"""
+## Purpose and audience
+Pins the compiled flat fixed type tag protocol for maintainers of the
+frontend parser bridge: fixed scalar and array return tags stay distinct from
+rich type kinds, expression arena access stays behind the literal tag hole,
+and parameter/return conversion routes through stable Type locals instead of
+inline aggregate selection. Read this before changing flat tag numbering or
+the _FlatAstBridge converters.
+## Operator workflow
+Run the spec with the seed runner
+(`src/compiler_rust/target/bootstrap/simple run <this-file>`); scenarios
+either parse small module sources through parse_and_build_module and assert
+the resulting tag/type kinds, or read the bridge source and assert the
+guarded contract lines.
+## Compatibility and limitations
+Compiled-only lane (@tag only-compiled): the raw tag probes read the running
+module's own declaration table, so interpreter-only hosts cannot execute
+scenario one. Source-contract scenarios assert shipped bridge source that
+has no runtime API.
+## Verification guidance and troubleshooting
+A failure on a raw tag expectation means flat tag numbering drifted — update
+the bridge and the oracle together, never the oracle alone. A failure on a
+contains check means a guarded bridge contract line was rewritten; re-read
+the scenario name for which converter regressed.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_mdsoc_design.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/bootstrap_compiler_backend_stage_split.md
+# @manual_section: flat-fixed-type-tag-protocol
+
 # @cover src/compiler/10.frontend/core/parser.spl 5%
 # @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 5%
 # @tag: unit, compiler, bootstrap, only-compiled
@@ -32,15 +63,16 @@ fn type_kind_is_infer(kind: TypeKind) -> bool:
 describe "compiled flat fixed type tag protocol":
     it "keeps parser tags and rich return types distinct":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the fixed return-tag numbers for bool, text, [i64], [text] and the first rich kind
         step("keeps parser tags and rich return types distinct")
         val source = "fn flag() -> bool:\n    true\n\nfn word() -> text:\n    \"ok\"\n\nfn ints() -> [i64]:\n    [2, 3]\n\nfn words() -> [text]:\n    [\"o\", \"k\"]\n\nfn u8_value() -> u8:\n    1\n\nfn u16_value() -> u16:\n    2\n\nfn u32_value() -> u32:\n    3\n\nfn u64_value() -> u64:\n    4\n\nfn i8_value() -> i8:\n    5\n\nfn i16_value() -> i16:\n    6\n\nfn i32_value() -> i32:\n    7\n"
         val module = parse_and_build_module(source, "flat_fixed_type_tag_protocol.spl")
 
-        expect(raw_return_tag("flag")).to_equal(1)
-        expect(raw_return_tag("word")).to_equal(4)
-        expect(raw_return_tag("ints")).to_equal(5)
-        expect(raw_return_tag("words")).to_equal(6)
-        expect(raw_return_tag("signed")).to_equal(32)
+        expect(raw_return_tag("flag")).to_equal(1)  # oracle: flat tag 1 is the compiled bool return tag in the fixed protocol
+        expect(raw_return_tag("word")).to_equal(4)  # oracle: flat tag 4 is the text return tag
+        expect(raw_return_tag("ints")).to_equal(5)  # oracle: flat tag 5 is the [i64] array return tag
+        expect(raw_return_tag("words")).to_equal(6)  # oracle: flat tag 6 is the [text] array return tag
+        expect(raw_return_tag("signed")).to_equal(32)  # oracle: tag 32 is the first rich (non-fixed) kind above the fixed holes
 
         val flag = module.functions["flag"] ?? panic("missing flag")
         val word = module.functions["word"] ?? panic("missing word")
@@ -55,12 +87,14 @@ describe "compiled flat fixed type tag protocol":
 
     it "guards expression arena access behind the literal tag hole":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the guarded tag-range condition retained as the arena-hole contract
         step("guards expression arena access behind the literal tag hole")
         val source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         expect(source).to_contain("if type_expr_idx < 34 or type_expr_idx >= 500 or type_expr_idx >= expr_count():")
 
     it "converts typed extern and ordinary parameters through stable Type locals":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the converted parameter type names for extern and default-valued locals
         step("converts typed extern and ordinary parameters through stable Type locals")
         val source = "extern fn bridge_probe(path: text, args: [text]) -> bool\n\nfn local_probe(value: text = \"ok\") -> text:\n    value\n"
         val module = parse_and_build_module(source, "flat_param_type_transport.spl")
@@ -73,19 +107,25 @@ describe "compiled flat fixed type tag protocol":
 
     it "forbids inline rich aggregate selection in Param constructors":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the required stable-local declaration lines and the forbidden inline-selection forms
         step("forbids inline rich aggregate selection in Param constructors")
         val source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         expect(source).to_contain("var param_type: Type = Type(kind: TypeKind.Infer, span: span)")
         expect(source).to_contain("var param_default: Expr = Expr(kind: ExprKind.NilLit, span: span)")
         expect(source).to_contain("var inferred_ret: Type = Type(kind: TypeKind.Infer, span: span)")
         expect(source).to_contain("var extern_inferred_ret: Type = Type(kind: TypeKind.Infer, span: span)")
-        expect(source.contains("type_: if has_t:")).to_be(false)
-        expect(source.contains("default: if p_has_default:")).to_be(false)
-        expect(source.contains("if has_ret: convert_flat_type(ret) else:")).to_be(false)
-        expect(source.contains("if extern_has_ret: convert_flat_type(ret) else:")).to_be(false)
+        val no_inline_type_selection = source.contains("type_: if has_t:")
+        expect(no_inline_type_selection).to_be(false)
+        val no_inline_default_selection = source.contains("default: if p_has_default:")
+        expect(no_inline_default_selection).to_be(false)
+        val no_conditional_ret_convert = source.contains("if has_ret: convert_flat_type(ret) else:")
+        expect(no_conditional_ret_convert).to_be(false)
+        val no_conditional_extern_ret_convert = source.contains("if extern_has_ret: convert_flat_type(ret) else:")
+        expect(no_conditional_extern_ret_convert).to_be(false)
 
     it "rebuilds enum spans after declaration-walk safepoints":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the span-rebuilding declaration lines retained as the safepoint contract
         step("rebuilds enum spans after declaration-walk safepoints")
         val source = file_read("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
         expect(source).to_contain("var e_discriminant = Expr(kind: ExprKind.NilLit, span: make_span())")
@@ -93,6 +133,7 @@ describe "compiled flat fixed type tag protocol":
 
     it "converts standalone flat block expressions":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the block-conversion route lines retained as the standalone-block contract
         step("converts standalone flat block expressions")
         val source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         expect(source).to_contain("if tag == EXPR_BLOCK:")
@@ -102,6 +143,7 @@ describe "compiled flat fixed type tag protocol":
 
     it "re-roots resolved field types before HIR aggregate construction":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): the live-field-type re-rooting lines retained as the HIR contract
         step("re-roots resolved field types before HIR aggregate construction")
         val source = file_read("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl")
         expect(source).to_contain("val live_field_type = HirType(")

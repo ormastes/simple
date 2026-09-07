@@ -1,13 +1,39 @@
-"""SIMD Kernels Specification
+"""
+## Purpose and audience
+Verifies SIMD-accelerated engine2d pixel kernels (fill, copy, blend, blit,
+scroll) with runtime CPU feature detection, the F6 dispatch/scalar parity
+contract, and the honest-gate runtime-evidence predicate. Covers AC-6: CPU
+acceleration via SSE4.2/AVX2/NEON with a scalar fallback that must stay
+bit-exact. Audience: engine2d backend and codegen maintainers.
 
 @tag: gpu, engine2d, simd, cpu, acceleration
 @cover src/lib/gc_async_mut/gpu/engine2d/simd_kernels.spl 80%
 
-Verifies SIMD-accelerated pixel operations with runtime CPU feature
-detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
-"""
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` from the repo root; every
+scenario calls the real kernel entry points on the live host CPU.
 
-use std.spec.{describe, context, it, expect}
+## Compatibility and limitations
+Detection-dependent scenarios assert parity between dispatch and scalar paths
+rather than absolute pixels, so they pass on any host ISA. The span-bridge
+scenario reads shipped source across runtime, backend, interpreter-extern,
+LLVM declaration, and MIR lowering files; it is a wiring contract, not a
+pixel oracle.
+
+## Verification guidance and troubleshooting
+A red parity scenario means dispatch and scalar disagree — dump both buffers
+and diff at the first mismatching index. A red evidence-gate scenario names
+the predicate that rejected the crafted CpuSimdRuntimeEvidence; check that
+field first.
+"""
+# Lifecycle: doc/01_research/domain/engine2d_four_backend_capture.md ;
+# doc/03_plan/agent_tasks/engine2d_four_backend_capture.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/engine2d_four_backend_capture.md
+# @manual_section: engine2d-simd-kernels
+
+use std.spec.{describe, context, it, expect, step}
 use std.io_runtime.{file_read}
 use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, CpuSimdRuntimeEvidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32, simd_blend_row, simd_blit_row, _scalar_blend_row, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv, active_arch_text, active_feature_text, simd_config_mode, blit_rect, _scalar_blit_rect, scroll_region, _scalar_scroll_region}
 use std.env.variables.{env_set, env_unset}
@@ -18,22 +44,37 @@ use std.env.variables.{env_set, env_unset}
 
 describe "SimdLevel":
     it "AC-6: has None variant for scalar fallback":
+        # @req REQ-GPU-SIMD-001
+        # @capture(statistics): SimdLevel None rendering retained for review
+        step("render the None SIMD level")
         val level = SimdLevel.None_
         expect(level.to_text()).to_equal("None")
 
     it "AC-6: has Sse42 variant":
+        # @req REQ-GPU-SIMD-002
+        # @capture(statistics): SimdLevel Sse42 rendering retained for review
+        step("render the SSE4.2 SIMD level")
         val level = SimdLevel.Sse42
         expect(level.to_text()).to_equal("SSE4.2")
 
     it "AC-6: has Avx2 variant":
+        # @req REQ-GPU-SIMD-003
+        # @capture(statistics): SimdLevel Avx2 rendering retained for review
+        step("render the AVX2 SIMD level")
         val level = SimdLevel.Avx2
         expect(level.to_text()).to_equal("AVX2")
 
     it "AC-6: has Avx512 variant":
+        # @req REQ-GPU-SIMD-004
+        # @capture(statistics): SimdLevel Avx512 rendering retained for review
+        step("render the AVX-512 SIMD level")
         val level = SimdLevel.Avx512
         expect(level.to_text()).to_equal("AVX-512")
 
     it "AC-6: has Neon variant":
+        # @req REQ-GPU-SIMD-005
+        # @capture(statistics): SimdLevel Neon rendering retained for review
+        step("render the NEON SIMD level")
         val level = SimdLevel.Neon
         expect(level.to_text()).to_equal("NEON")
 
@@ -43,17 +84,26 @@ describe "SimdLevel":
 
 describe "detect_simd_level":
     it "AC-6: returns a valid SimdLevel on any platform":
+        # @req REQ-GPU-SIMD-006
+        # @capture(statistics): live detected level name retained for review
+        step("detect the SIMD level on the live host")
         val level = detect_simd_level()
         val name = level.to_text()
         val valid = name == "None" or name == "SSE4.2" or name == "AVX2" or name == "AVX-512" or name == "NEON"
         expect(valid).to_equal(true)
 
     it "AC-6: detection is consistent across calls":
+        # @req REQ-GPU-SIMD-007
+        # @capture(statistics): two consecutive detection verdicts retained for review
+        step("detect the SIMD level twice and compare")
         val level1 = detect_simd_level()
         val level2 = detect_simd_level()
         expect(level1.to_text()).to_equal(level2.to_text())
 
     it "AC-6: records runtime execution evidence for fill copy alpha and scroll":
+        # @req REQ-GPU-SIMD-008
+        # @capture(statistics): live runtime evidence flags, checksum, and diagnostic text retained for review
+        step("collect the live host runtime evidence and read its diagnostic")
         val evidence = cpu_simd_runtime_evidence()
         expect(evidence.executed_fill).to_equal(true)
         expect(evidence.executed_copy).to_equal(true)
@@ -71,20 +121,29 @@ describe "detect_simd_level":
 
 describe "simd_fill_row":
     it "allocates and fills a complete owned framebuffer":
+        # @req REQ-GPU-SIMD-009
+        # @capture(bit_table): owned-buffer fill first/last pixels and zero-size verdict retained for review
+        step("fill a 17-pixel owned framebuffer with a packed color")
         val buf = engine2d_simd_fill_buffer_u32(17, 0xFF102030u32)
-        expect(buf.len()).to_equal(17)
+        expect(buf.len()).to_equal(17)  # oracle: the requested allocation is exactly 17 pixels
         expect(buf[0]).to_equal(0xFF102030u32)
         expect(buf[16]).to_equal(0xFF102030u32)
-        expect(engine2d_simd_fill_buffer_u32(0, 0u32).len()).to_equal(0)
+        expect(engine2d_simd_fill_buffer_u32(0, 0u32).len()).to_equal(0)  # oracle: a zero-pixel request must allocate nothing
 
     it "fills bounded row chunks without changing packed color":
+        # @req REQ-GPU-SIMD-010
+        # @capture(bit_table): row-chunk fill extents and boundary pixels retained for review
+        step("fill 13 rows of 37 pixels with a packed color")
         val buf = engine2d_simd_fill_rows_u32(13, 37, 0x80102030u32, 8)
-        expect(buf.len()).to_equal(481)
+        expect(buf.len()).to_equal(481)  # oracle: 13 rows x 37 pixels = 481 total pixels
         expect(buf[0]).to_equal(0x80102030u32)
         expect(buf[480]).to_equal(0x80102030u32)
-        expect(engine2d_simd_fill_rows_u32(0, 37, 0u32, 8).len()).to_equal(0)
+        expect(engine2d_simd_fill_rows_u32(0, 37, 0u32, 8).len()).to_equal(0)  # oracle: zero rows must produce an empty buffer
 
     it "AC-6: fills row with solid color":
+        # @req REQ-GPU-SIMD-011
+        # @capture(bit_table): full-row fill boundary pixels retained for review
+        step("fill a whole 16-pixel row with solid red")
         var buf: [u32] = [0u32; 16]
         val color: u32 = 0xFFFF0000
         simd_fill_row(buf, 0, 16, color)
@@ -92,20 +151,29 @@ describe "simd_fill_row":
         expect(buf[15]).to_equal(0xFFFF0000)
 
     it "AC-6: fills partial row with offset":
+        # @req REQ-GPU-SIMD-012
+        # @capture(bit_table): offset fill span and untouched neighbours retained for review
+        step("fill pixels 4..11 of a 16-pixel row with green")
         var buf: [u32] = [0u32; 16]
         val color: u32 = 0xFF00FF00
         simd_fill_row(buf, 4, 8, color)
-        expect(buf[0]).to_equal(0)
+        expect(buf[0]).to_equal(0)  # oracle: the fill starts at offset 4, so pixel 0 must stay untouched zero
         expect(buf[4]).to_equal(0xFF00FF00)
         expect(buf[11]).to_equal(0xFF00FF00)
-        expect(buf[12]).to_equal(0)
+        expect(buf[12]).to_equal(0)  # oracle: the fill ends before pixel 12, so it must stay untouched zero
 
     it "AC-6: handles zero-length fill":
+        # @req REQ-GPU-SIMD-013
+        # @capture(bit_table): zero-count fill no-op verdict retained for review
+        step("issue a zero-length fill over a sentinel-filled row")
         var buf: [u32] = [0xFFFFFFFF; 4]
         simd_fill_row(buf, 0, 0, 0)
         expect(buf[0]).to_equal(0xFFFFFFFF)
 
     it "uses the cross-mode return-array span bridge for backend fills":
+        # @req REQ-GPU-SIMD-014
+        # @capture(bit_table): cross-mode span bridge wiring tokens and scalar/loop pixel parity retained for review
+        step("verify the span bridge wiring across runtime, backend, engine, and codegen sources")
         val source = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl")
         val backend_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
         val engine_source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
@@ -152,6 +220,9 @@ describe "simd_fill_row":
         expect(mir_source).to_contain("name == \"rt_engine2d_simd_copy_span_u32\"")
 
     it "fills a bounded span without changing adjacent pixels":
+        # @req REQ-GPU-SIMD-015
+        # @capture(bit_table): span fill interior and adjacent sentinel pixels retained for review
+        step("fill pixels 2..5 of an 8-pixel span and inspect the neighbours")
         var buf: [u32] = [0 as u32; 8]
         buf = rt_engine2d_simd_fill_span_u32(buf, 2, 4, 0xFF102030u32)
         expect(buf[1]).to_equal(0u32)
@@ -162,6 +233,9 @@ describe "simd_fill_row":
         expect(buf[0]).to_equal(0u32)
 
     it "clips fill spans at the destination end and preserves zero-count rows":
+        # @req REQ-GPU-SIMD-016
+        # @capture(bit_table): clipped span fill and zero-count verdicts retained for review
+        step("fill past the buffer end and clip at the destination boundary")
         var buf: [u32] = [0x01020304u32; 8]
         buf = rt_engine2d_simd_fill_span_u32(buf, 6, 8, 0xFFFFFFFFu32)
         expect(buf[5]).to_equal(0x01020304u32)
@@ -178,18 +252,27 @@ describe "simd_fill_row":
 
 describe "simd_blend_row":
     it "AC-6: blends opaque source over destination":
+        # @req REQ-GPU-SIMD-017
+        # @capture(bit_table): opaque src-over blend result retained for review
+        step("blend an opaque red source over an opaque blue destination")
         var dst: [u32] = [0xFF0000FF; 4]
         var src: [u32] = [0xFFFF0000; 4]
         simd_blend_row(dst, src, 0, 4)
         expect(dst[0]).to_equal(0xFFFF0000)
 
     it "AC-6: transparent source leaves destination unchanged":
+        # @req REQ-GPU-SIMD-018
+        # @capture(bit_table): transparent-source no-op verdict retained for review
+        step("blend a fully transparent source over an opaque destination")
         var dst: [u32] = [0xFF0000FF; 4]
         var src: [u32] = [0x00000000; 4]
         simd_blend_row(dst, src, 0, 4)
         expect(dst[0]).to_equal(0xFF0000FF)
 
     it "AC-6: 50% alpha blends correctly":
+        # @req REQ-GPU-SIMD-019
+        # @capture(bit_table): half-alpha blend channel value retained for review
+        step("blend a half-alpha red source over an opaque black destination")
         var dst: [u32] = [0xFF000000; 4]
         var src: [u32] = [0x80FF0000; 4]
         simd_blend_row(dst, src, 0, 4)
@@ -198,12 +281,18 @@ describe "simd_blend_row":
         expect(r).to_be_less_than(200)
 
     it "translucent source over transparent destination preserves src exactly":
+        # @req REQ-GPU-SIMD-020
+        # @capture(bit_table): translucent-over-transparent result retained for review
+        step("blend a translucent source over a fully transparent destination")
         var dst: [u32] = [0x00000000; 4]
         var src: [u32] = [0x80FF0000; 4]
         simd_blend_row(dst, src, 0, 4)
         expect(dst[0]).to_equal(0x80FF0000u32)
 
     it "native and scalar rows match for transparent and translucent destinations":
+        # @req REQ-GPU-SIMD-021
+        # @capture(bit_table): native vs scalar blend parity and known bit-exact outputs retained for review
+        step("blend the same four-pixel fixture through native and scalar paths")
         val native_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
         var scalar_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
         val src: [u32] = [0x80FFFFFFu32, 0x80FF0000u32, 0x00000000u32, 0xFFFFFFFFu32]
@@ -216,9 +305,12 @@ describe "simd_blend_row":
         expect(native[3]).to_equal(0xFFFFFFFFu32)
 
     it "native blend handles empty and one-pixel rows":
-        expect(engine2d_simd_blend_row_u32([], []).len()).to_equal(0)
+        # @req REQ-GPU-SIMD-022
+        # @capture(bit_table): empty and single-pixel blend results retained for review
+        step("blend empty and one-pixel rows through the native path")
+        expect(engine2d_simd_blend_row_u32([], []).len()).to_equal(0)  # oracle: blending zero pixels must return a zero-length row
         val one = engine2d_simd_blend_row_u32([0x00000000u32], [0x80FFFFFFu32])
-        expect(one.len()).to_equal(1)
+        expect(one.len()).to_equal(1)  # oracle: a one-pixel row stays one pixel after blending
         expect(one[0]).to_equal(0x80FFFFFFu32)
 
 # ============================================================================
@@ -227,6 +319,9 @@ describe "simd_blend_row":
 
 describe "simd_blit_row":
     it "AC-6: copies pixels from source to destination":
+        # @req REQ-GPU-SIMD-023
+        # @capture(bit_table): full-row blit boundary pixels retained for review
+        step("blit an 8-pixel source row onto a zeroed destination")
         var dst: [u32] = [0u32; 8]
         var src: [u32] = [0xFFAABBCC; 8]
         simd_blit_row(dst, 0, src, 0, 8)
@@ -234,15 +329,21 @@ describe "simd_blit_row":
         expect(dst[7]).to_equal(0xFFAABBCC)
 
     it "AC-6: copies with offset":
+        # @req REQ-GPU-SIMD-024
+        # @capture(bit_table): offset blit span and untouched neighbours retained for review
+        step("blit four pixels at destination offset 2 and inspect the neighbours")
         var dst: [u32] = [0u32; 8]
         var src: [u32] = [0xFFDDEEFF; 8]
         simd_blit_row(dst, 2, src, 0, 4)
-        expect(dst[0]).to_equal(0)
+        expect(dst[0]).to_equal(0)  # oracle: the blit starts at offset 2, so pixel 0 must stay untouched zero
         expect(dst[2]).to_equal(0xFFDDEEFF)
         expect(dst[5]).to_equal(0xFFDDEEFF)
-        expect(dst[6]).to_equal(0)
+        expect(dst[6]).to_equal(0)  # oracle: the blit ends before pixel 6, so it must stay untouched zero
 
     it "copies a bounded native span without changing adjacent pixels":
+        # @req REQ-GPU-SIMD-025
+        # @capture(bit_table): native span copy interior, clipped tail, and negative-offset verdicts retained for review
+        step("copy a 4-pixel window at offset 2 and probe clipping and negative offsets")
         var dst: [u32] = [0u32; 8]
         val src: [u32] = [10u32, 11u32, 12u32, 13u32, 14u32, 15u32, 16u32, 17u32]
         dst = rt_engine2d_simd_copy_span_u32(dst, 2, src, 3, 4)
@@ -262,11 +363,17 @@ describe "simd_blit_row":
 
 describe "universal fallback":
     it "AC-6: SIMD ops work even when SimdLevel is None (scalar fallback)":
+        # @req REQ-GPU-SIMD-026
+        # @capture(bit_table): scalar-fallback fill result retained for review
+        step("fill through the kernel on a host where the level may be None")
         var buf: [u32] = [0u32; 4]
         simd_fill_row(buf, 0, 4, 0xFFFF0000)
         expect(buf[0]).to_equal(0xFFFF0000)
 
     it "AC-6: same results regardless of SIMD level":
+        # @req REQ-GPU-SIMD-027
+        # @capture(bit_table): two-buffer same-input fill equality retained for review
+        step("fill two identical buffers and compare them pixel for pixel")
         var buf1: [u32] = [0u32; 4]
         var buf2: [u32] = [0u32; 4]
         simd_fill_row(buf1, 0, 4, 0xFF112233)
@@ -280,6 +387,8 @@ describe "universal fallback":
 
 describe "detect_simd_level vs raw feature probes":
     it "F6: chosen level matches the highest-priority true probe (avx2 > sse > neon > rvv > none)":
+        # @req REQ-GPU-SIMD-028
+        # @capture(statistics): detected level vs raw probe priority verdict retained for review
         step("Verify: F6: chosen level matches the highest-priority true probe (avx2 > sse > neon > rvv > none)")
         val level_name = detect_simd_level().to_text()
         val has_avx2 = engine2d_simd_has_avx2()
@@ -299,6 +408,8 @@ describe "detect_simd_level vs raw feature probes":
         expect(level_name).to_equal(expected)
 
     it "F6: active_arch_text/active_feature_text agree with the detected level":
+        # @req REQ-GPU-SIMD-029
+        # @capture(statistics): active arch/feature text vs detected level verdict retained for review
         step("Verify: F6: active_arch_text/active_feature_text agree with the detected level")
         val level = detect_simd_level()
         expect(active_arch_text()).to_equal(level.arch_text())
@@ -310,17 +421,23 @@ describe "detect_simd_level vs raw feature probes":
 
 describe "simd_config_mode":
     it "F6: empty/unset SIMPLE_2D_SIMD defaults to auto":
+        # @req REQ-GPU-SIMD-030
+        # @capture(statistics): unset-env default mode verdict retained for review
         step("Verify: F6: empty/unset SIMPLE_2D_SIMD defaults to auto")
         env_unset("SIMPLE_2D_SIMD")
         expect(simd_config_mode()).to_equal("auto")
 
     it "F6: SIMPLE_2D_SIMD=off is honored verbatim":
+        # @req REQ-GPU-SIMD-031
+        # @capture(statistics): off-mode env verdict retained for review
         step("Verify: F6: SIMPLE_2D_SIMD=off is honored verbatim")
         env_set("SIMPLE_2D_SIMD", "off")
         expect(simd_config_mode()).to_equal("off")
         env_unset("SIMPLE_2D_SIMD")
 
     it "F6: an explicit ISA name passes through unmodified":
+        # @req REQ-GPU-SIMD-032
+        # @capture(statistics): explicit ISA pass-through and post-unset default verdicts retained for review
         step("Verify: F6: an explicit ISA name passes through unmodified")
         env_set("SIMPLE_2D_SIMD", "neon")
         expect(simd_config_mode()).to_equal("neon")
@@ -341,6 +458,8 @@ fn make_ramp(n: i64) -> [u32]:
 
 describe "blit_rect":
     it "F6: dispatch path matches the scalar reference row-by-row":
+        # @req REQ-GPU-SIMD-033
+        # @capture(bit_table): dispatch vs scalar rect blit buffers retained for review
         step("Verify: F6: dispatch path matches the scalar reference row-by-row")
         val src = make_ramp(64)
         var dst_dispatch: [u32] = [0u32; 64]
@@ -351,6 +470,8 @@ describe "blit_rect":
         expect(dst_dispatch[9]).to_equal(src[0])
 
     it "F6: overlapping src/dst regions (same underlying pixel values) stay in parity":
+        # @req REQ-GPU-SIMD-034
+        # @capture(bit_table): overlapping-region dispatch vs scalar parity retained for review
         step("Verify: F6: overlapping src/dst regions (same underlying pixel values) stay in parity")
         val shared = make_ramp(64)
         var dst_dispatch: [u32] = shared
@@ -360,6 +481,8 @@ describe "blit_rect":
         expect(dst_dispatch).to_equal(dst_scalar)
 
     it "F6: zero-area rect (w<=0 or h<=0) is a no-op on both paths":
+        # @req REQ-GPU-SIMD-035
+        # @capture(bit_table): zero-area rect no-op verdict retained for review
         step("Verify: F6: zero-area rect (w<=0 or h<=0) is a no-op on both paths")
         val src = make_ramp(16)
         var dst_dispatch: [u32] = [0xFFFFFFFFu32; 16]
@@ -380,6 +503,8 @@ describe "blit_rect":
 
 describe "scroll_region":
     it "F6: scroll up (negative delta_y) matches scalar reference":
+        # @req REQ-GPU-SIMD-036
+        # @capture(bit_table): scroll-up dispatch vs scalar buffers retained for review
         step("Verify: F6: scroll up (negative delta_y) matches scalar reference")
         val original = make_ramp(64)
         var buf_dispatch: [u32] = original
@@ -390,6 +515,8 @@ describe "scroll_region":
         expect(buf_dispatch[0]).to_equal(original[16])
 
     it "F6: scroll down (positive delta_y) matches scalar reference":
+        # @req REQ-GPU-SIMD-037
+        # @capture(bit_table): scroll-down dispatch vs scalar buffers retained for review
         step("Verify: F6: scroll down (positive delta_y) matches scalar reference")
         val original = make_ramp(64)
         var buf_dispatch: [u32] = original
@@ -400,6 +527,8 @@ describe "scroll_region":
         expect(buf_dispatch[24]).to_equal(original[0])
 
     it "F6: delta_y == 0 and delta_y >= h are no-ops on both paths":
+        # @req REQ-GPU-SIMD-038
+        # @capture(bit_table): zero and oversize delta no-op verdicts retained for review
         step("Verify: F6: delta_y == 0 and delta_y >= h are no-ops on both paths")
         val original = make_ramp(64)
         var buf_zero: [u32] = original
@@ -426,6 +555,8 @@ describe "scroll_region":
 
 describe "cpu_simd_required_evidence_valid":
     it "F6: valid only when arch matches, all kernels executed, native SIMD ran bit-exact, and no fallback calls occurred":
+        # @req REQ-GPU-SIMD-039
+        # @capture(statistics): fully-valid evidence gate acceptance retained for review
         step("Verify: F6: valid only when arch matches, all kernels executed, native SIMD ran bit-exact, and no fallback calls occurred")
         val good = CpuSimdRuntimeEvidence(
             arch: "aarch64", feature: "neon", level: "NEON",
@@ -437,6 +568,8 @@ describe "cpu_simd_required_evidence_valid":
         expect(cpu_simd_required_evidence_valid(good, "aarch64", 0)).to_equal(true)
 
     it "F6: rejects a mismatched expected_arch":
+        # @req REQ-GPU-SIMD-040
+        # @capture(statistics): arch-mismatch gate rejection retained for review
         step("Verify: F6: rejects a mismatched expected_arch")
         val evidence = CpuSimdRuntimeEvidence(
             arch: "aarch64", feature: "neon", level: "NEON",
@@ -448,6 +581,8 @@ describe "cpu_simd_required_evidence_valid":
         expect(cpu_simd_required_evidence_valid(evidence, "x86_64", 0)).to_equal(false)
 
     it "F6: rejects when a kernel never executed (not-executed_all)":
+        # @req REQ-GPU-SIMD-041
+        # @capture(statistics): unexecuted-kernel gate rejection retained for review
         step("Verify: F6: rejects when a kernel never executed (not-executed_all)")
         val evidence = CpuSimdRuntimeEvidence(
             arch: "aarch64", feature: "neon", level: "NEON",
@@ -459,6 +594,8 @@ describe "cpu_simd_required_evidence_valid":
         expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 0)).to_equal(false)
 
     it "F6: rejects a canned-success evidence that never ran native SIMD (fabricated-stub guard)":
+        # @req REQ-GPU-SIMD-042
+        # @capture(statistics): fabricated-stub gate rejection retained for review
         step("Verify: F6: rejects a canned-success evidence that never ran native SIMD (fabricated-stub guard)")
         val evidence = CpuSimdRuntimeEvidence(
             arch: "aarch64", feature: "neon", level: "NEON",
@@ -470,6 +607,8 @@ describe "cpu_simd_required_evidence_valid":
         expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 0)).to_equal(false)
 
     it "F6: rejects when any fallback call occurred, even with otherwise-clean evidence":
+        # @req REQ-GPU-SIMD-043
+        # @capture(statistics): fallback-call gate rejection retained for review
         step("Verify: F6: rejects when any fallback call occurred, even with otherwise-clean evidence")
         val evidence = CpuSimdRuntimeEvidence(
             arch: "aarch64", feature: "neon", level: "NEON",
@@ -481,6 +620,8 @@ describe "cpu_simd_required_evidence_valid":
         expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 1)).to_equal(false)
 
     it "F6: the live host evidence's own executed_all() agrees with the gate's fill/copy/alpha/scroll requirement":
+        # @req REQ-GPU-SIMD-044
+        # @capture(statistics): live evidence vs gate agreement verdict retained for review
         step("Verify: F6: the live host evidence's own executed_all() agrees with the gate's fill/copy/alpha/scroll requirement")
         val live = cpu_simd_runtime_evidence()
         val gated = cpu_simd_required_evidence_valid(live, live.arch, 0)
@@ -495,6 +636,8 @@ describe "cpu_simd_required_evidence_valid":
 
 describe "CpuSimdRuntimeEvidence.diagnostic_text":
     it "F6: names the arch and feature actually detected on this host":
+        # @req REQ-GPU-SIMD-045
+        # @capture(statistics): diagnostic text arch/feature/hits fields retained for review
         step("Verify: F6: names the arch and feature actually detected on this host")
         val evidence = cpu_simd_runtime_evidence()
         val text_out = evidence.diagnostic_text()
@@ -517,6 +660,8 @@ describe "CpuSimdRuntimeEvidence.diagnostic_text":
 
 describe "engine2d_simd_blend_span_u32 (in-place span blend, bit-exact)":
     it "blends a bounded span in place without touching pixels outside it":
+        # @req REQ-GPU-SIMD-046
+        # @capture(bit_table): span blend interior and untouched neighbours retained for review
         step("Verify: blends a bounded span in place without touching pixels outside it")
         var dst: [u32] = [0x11111111u32, 0xFF0000FFu32, 0xFF0000FFu32, 0x22222222u32]
         val src: [u32] = [0xFFFF0000u32, 0xFFFF0000u32]
@@ -527,6 +672,8 @@ describe "engine2d_simd_blend_span_u32 (in-place span blend, bit-exact)":
         expect(dst[3]).to_equal(0x22222222u32)
 
     it "transparent source leaves destination span unchanged":
+        # @req REQ-GPU-SIMD-047
+        # @capture(bit_table): transparent span no-op verdict retained for review
         step("Verify: transparent source leaves destination span unchanged")
         var dst: [u32] = [0xFF0000FFu32, 0xFF0000FFu32]
         val src: [u32] = [0x00000000u32, 0x00000000u32]
@@ -535,6 +682,8 @@ describe "engine2d_simd_blend_span_u32 (in-place span blend, bit-exact)":
         expect(dst[1]).to_equal(0xFF0000FFu32)
 
     it "matches the scalar row kernel value-for-value (bit-exact parity)":
+        # @req REQ-GPU-SIMD-048
+        # @capture(bit_table): span vs scalar row parity and known blend value retained for review
         step("Verify: matches the scalar row kernel value-for-value (bit-exact parity)")
         val dst_row: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
         val src_row: [u32] = [0x80FFFFFFu32, 0x80FF0000u32, 0x00000000u32, 0xFFFFFFFFu32]
@@ -547,6 +696,8 @@ describe "engine2d_simd_blend_span_u32 (in-place span blend, bit-exact)":
 
 describe "engine2d_simd_blend_const_span_u32 (constant-colour span blend, bit-exact)":
     it "blends one constant colour over a bounded span in place":
+        # @req REQ-GPU-SIMD-049
+        # @capture(bit_table): constant-colour span blend interior and neighbours retained for review
         step("Verify: blends one constant colour over a bounded span in place")
         var dst: [u32] = [0x11111111u32, 0xFF0000FFu32, 0xFF0000FFu32, 0x22222222u32]
         dst = engine2d_simd_blend_const_span_u32(dst, 1, 2, 0xFFFF0000i64)
@@ -556,6 +707,8 @@ describe "engine2d_simd_blend_const_span_u32 (constant-colour span blend, bit-ex
         expect(dst[3]).to_equal(0x22222222u32)
 
     it "zero-alpha constant colour is a no-op":
+        # @req REQ-GPU-SIMD-050
+        # @capture(bit_table): zero-alpha no-op verdict retained for review
         step("Verify: zero-alpha constant colour is a no-op")
         var dst: [u32] = [0xFF0000FFu32, 0xFF0000FFu32]
         dst = engine2d_simd_blend_const_span_u32(dst, 0, 2, 0x00FFFFFFi64)
@@ -563,6 +716,8 @@ describe "engine2d_simd_blend_const_span_u32 (constant-colour span blend, bit-ex
         expect(dst[1]).to_equal(0xFF0000FFu32)
 
     it "50%-alpha constant colour matches the row kernel's known bit-exact value":
+        # @req REQ-GPU-SIMD-051
+        # @capture(bit_table): half-alpha constant blend known value retained for review
         step("Verify: 50%-alpha constant colour matches the row kernel's known bit-exact value")
         var dst: [u32] = [0x800000FFu32]
         dst = engine2d_simd_blend_const_span_u32(dst, 0, 1, 0x80FF0000i64)

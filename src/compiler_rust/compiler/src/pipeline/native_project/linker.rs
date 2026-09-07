@@ -14,14 +14,108 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    find_msvc_compiler_rt_builtins, find_objcopy_tool,
-    is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
-    validate_stage4_cli_c_provider_archive_disjointness,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
+    target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
+
+/// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
+///
+/// Returns `(fuse_ld_name, probe_binary)`:
+///   * `fuse_ld_name` is what goes after `-fuse-ld=`. It is a NAME, never a
+///     path — `ld` in particular must be spelled `bfd`, because that is the
+///     spelling both clang and gcc understand.
+///   * `probe_binary` is the concrete `ld.*` program the driver will actually
+///     search PATH for. Probing that exact spelling matters: on hosts where
+///     `ld` is a symlink to mold, a `which ld`-style probe for `bfd` succeeds
+///     while `-fuse-ld=bfd` then fails, and a probe for bare `mold` succeeds
+///     while a driver too old to accept `-fuse-ld=mold` looks for `ld.mold`.
+///
+/// The accepted alias set is deliberately identical to `find_requested_linker`
+/// in `src/compiler/70.backend/linker/mold.spl` — the Simple-side linker
+/// wrapper — so the two link paths cannot disagree about what a given
+/// `SIMPLE_LINKER` value means. Pure function: no environment, no process
+/// spawn, so it is directly unit-testable.
+pub fn linker_alias(name: &str) -> Result<(&'static str, &'static str), String> {
+    let requested = name.trim().to_ascii_lowercase();
+    if requested.is_empty() {
+        return Err("empty SIMPLE_LINKER override".to_string());
+    }
+    match requested.as_str() {
+        "mold" => Ok(("mold", "ld.mold")),
+        "lld" | "ld.lld" | "lld-link" => Ok(("lld", "ld.lld")),
+        "ld" | "gnu" | "bfd" => Ok(("bfd", "ld.bfd")),
+        // No `gold` arm on purpose: the Simple-side table does not accept it,
+        // and an alias one path honours and the other rejects is exactly the
+        // disagreement this mirroring exists to prevent.
+        _ => Err(format!("Unsupported SIMPLE_LINKER value: {name}")),
+    }
+}
+
+/// Human-readable name of the linker family, for the "requested but not
+/// found" diagnostic. Mirrors the wording used by the Simple-side wrapper.
+fn linker_family_label(fuse_ld_name: &str) -> &'static str {
+    match fuse_ld_name {
+        "mold" => "mold",
+        "lld" => "LLD",
+        _ => "ld",
+    }
+}
+
+/// Resolve the `SIMPLE_LINKER` preference into a `-fuse-ld=<name>` value.
+///
+/// * unset  -> `Ok(None)`. No alias lookup, no probe, no process spawn, so the
+///   emitted link command is byte-identical to what it was before this
+///   function existed. This is the bootstrap's link path; the default must not
+///   move.
+/// * set    -> resolve the alias and verify the concrete `ld.*` binary is
+///   runnable. Fails closed on an unsupported value and on a supported value
+///   whose linker is not installed — the previous behaviour was to ignore the
+///   variable entirely and silently link with whatever `cc` defaults to, which
+///   on hosts where `/usr/bin/ld` is mold meant every bootstrap link
+///   front-loaded mold's 8 GiB virtual reservation and died under memory
+///   contention.
+fn requested_linker_driver_name() -> Result<Option<&'static str>, String> {
+    let raw = match std::env::var_os("SIMPLE_LINKER") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let (fuse_ld_name, probe_binary) = linker_alias(&raw)?;
+    let available = std::process::Command::new(probe_binary)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !available {
+        return Err(format!(
+            "SIMPLE_LINKER={raw} requested but {} was not found (looked for `{probe_binary}` on PATH)",
+            linker_family_label(fuse_ld_name)
+        ));
+    }
+    Ok(Some(fuse_ld_name))
+}
+
+/// The native entry stub initializes argc/argv through the core-C ABI.  These
+/// getters must therefore be exported by that same capsule.  Leaving them out
+/// of the C roots localizes their weak core-C definitions and lets the Rust
+/// staticlib's unrelated process-global argv implementation win the final
+/// link.  The setter then populates core-C state while reads observe Rust
+/// state, so every command appears to have no arguments.
+pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
+    "spl_init_args",
+    "spl_arg_count",
+    "spl_get_arg",
+    "rt_set_args",
+    "rt_get_argc",
+    "rt_get_args",
+    "sys_get_args",
+    "rt_cli_get_args",
+    "rt_cli_arg_count",
+    "rt_cli_arg_at",
+];
 
 /// The whole-archive argument for the **clang-cl** driver, WITHOUT `/link`.
 ///
@@ -663,6 +757,14 @@ impl NativeProjectBuilder {
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
+        // `-Wl,-r` below is a real linker invocation, so it must honour the
+        // same SIMPLE_LINKER preference as the final link — otherwise a run
+        // that asked for lld still spawns the default linker here. The caller
+        // (`link_objects`) already resolved and validated the value, so this
+        // lookup cannot introduce a new failure mode; it only re-reads it.
+        if let Some(name) = requested_linker_driver_name()? {
+            command.arg(format!("-fuse-ld={name}"));
+        }
         #[cfg(target_os = "linux")]
         command
             .arg("-nostdlib")
@@ -756,7 +858,6 @@ impl NativeProjectBuilder {
         let target = effective_target();
         let cxx = target_cxx_compiler(target);
         let is_msvc = uses_msvc_flags(target.linker_flavor());
-        let is_clang_cl = is_msvc && cxx.contains("clang-cl");
 
         let has_entry = self.entry_file.is_some();
         let stub_code = if is_msvc {
@@ -845,17 +946,11 @@ int main(int argc, char** argv) {
             main_o.display().to_string(),
             main_cpp.display().to_string(),
         ];
-        let argv: &[String] = if is_clang_cl { &clang_cl_args } else { &other_args };
+        let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
         let output = std::process::Command::new(&cxx)
             .args(argv)
             .output()
-            .map_err(|e| {
-                format!(
-                    "compile main stub: failed to spawn `{} {}`: {e}",
-                    cxx,
-                    argv.join(" ")
-                )
-            })?;
+            .map_err(|e| format!("compile main stub: failed to spawn `{} {}`: {e}", cxx, argv.join(" ")))?;
         if !output.status.success() {
             // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
             // capturing only stderr here previously produced a message ending
@@ -1056,6 +1151,12 @@ int main(int argc, char** argv) {
 
     /// Link object files into a native binary using LinkerBuilder.
     pub(crate) fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
+        // Resolve the `SIMPLE_LINKER` preference FIRST, before any archive is
+        // built or any object is projected: an unsupported or uninstallable
+        // value is a configuration error, and reporting it after several
+        // minutes of runtime-capsule work would be indistinguishable from the
+        // silent-ignore behaviour this replaces.
+        let requested_linker = requested_linker_driver_name()?;
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
@@ -1147,8 +1248,20 @@ int main(int argc, char** argv) {
             }
             other => other,
         };
+        // The dynamic lane bypasses the whole exact-provider profile below.
+        // That profile exists to make a set of STATIC archives link without
+        // duplicate or missing definitions: it projects the Rust runtime into a
+        // capsule, localizes everything outside the requested ABI, and audits
+        // disjointness between the core-C, compiler-backfill and provider
+        // archives. A shared object needs none of it -- the dynamic linker
+        // resolves at load time, and a definition in the executable simply
+        // takes precedence over the library's, so there is no collision class
+        // to project away.
+        let dynamic_runtime_lane = selected_runtime
+            .as_ref()
+            .is_some_and(|(path, _)| super::config::is_shared_runtime_library(path));
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() {
+        let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() && !dynamic_runtime_lane {
             build_stage4_cli_c_provider_archives(&temp_dir.join("stage4_c_providers"))?
         } else {
             Vec::new()
@@ -1177,8 +1290,19 @@ int main(int argc, char** argv) {
         if let Some(rust_runtime) = stage4_rust_runtime.as_ref() {
             backfill_providers.push(rust_runtime.clone());
         }
-        let compiler_backfill =
-            self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?;
+        let compiler_backfill = if dynamic_runtime_lane {
+            // Take the backfill archive as it is. Projecting it against a
+            // shared object would be meaningless: an archive member and a
+            // dynamic definition never collide (the executable's own
+            // definition wins), so there is nothing to localize, and the
+            // projection helpers read archive members, not ELF dynamic tables.
+            // Measured on this host, the backfill's 76 `rt_*` definitions
+            // (all `rt_cranelift_*`) are disjoint from the shared runtime's
+            // 1,646 exported `rt_*` -- the two compose rather than overlap.
+            self.selected_stage4_compiler_backfill_archive()?
+        } else {
+            self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?
+        };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let stage4_profile = if exact_stage4 {
             let (core, is_native_all) = selected_runtime
@@ -1250,12 +1374,16 @@ int main(int argc, char** argv) {
             // CLI invocation fell through to the empty-args REPL path,
             // 2026-07-25) and runtime init/shutdown never run. Keep every
             // stub-contract symbol the core C runtime actually defines global.
-            for contract in [
-                "rt_set_args",
+            // Keep the complete argv family with `rt_set_args`, rather than
+            // merely keeping the setter.  The adjacent Rust projection has
+            // strong argv exports; any getter localized from this C capsule
+            // would otherwise resolve to that foreign state.  The core-C
+            // setter and getters are one initialized provider contract.
+            for contract in STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS.iter().copied().chain([
                 "__simple_runtime_init",
                 "__simple_runtime_shutdown",
                 "__simple_call_module_inits",
-            ] {
+            ]) {
                 if c_defined.contains(contract) && !c_requested.iter().any(|s| s == contract) {
                     c_requested.push(contract.to_string());
                 }
@@ -1285,6 +1413,22 @@ int main(int argc, char** argv) {
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
+        // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
+        // the linker binary directly because this is the HOSTED link: the C
+        // driver contributes crt1/crti/crtn, the libc and libgcc search paths,
+        // and the sysroot for a cross target. Selecting the linker program
+        // ourselves would mean reconstructing all of that by hand, which is
+        // exactly the kind of change that breaks a bootstrap. One extra
+        // argument, emitted only when the variable is set, keeps the default
+        // command byte-identical.
+        //
+        // Skipped for a real MSVC driver (`cl.exe` has no `-fuse-ld`);
+        // clang-cl does accept it, so it stays enabled there.
+        if let Some(name) = requested_linker {
+            if !is_msvc || is_clang_cl {
+                cmd.arg(format!("-fuse-ld={name}"));
+            }
+        }
         if !is_msvc {
             cmd.arg("-fPIC");
         }
@@ -1499,7 +1643,89 @@ int main(int argc, char** argv) {
 
         if !exact_stage4 {
             if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
-                if *is_native_all {
+                if super::config::is_shared_runtime_library(runtime_lib) {
+                    // Dynamic runtime lane. The `-lunwind` entry resolves nothing
+                    // here (libunwind.so.8 defines 0 `_Unwind_*`; libgcc_s.so.1
+                    // defines 18), which is why chasing those symbols was a dead
+                    // end. `omit_unwind` above already drops it on this lane shape.
+                    //
+                    // `-L<dir> -l<stem>` rather than the bare path: the shared
+                    // object carries no SONAME, and with a path argument the
+                    // linker records that PATH verbatim as DT_NEEDED, which
+                    // bakes a build directory into the produced compiler.
+                    // Passing it via -l records the plain file name instead,
+                    // which is what RUNPATH is then able to resolve.
+                    let dir = runtime_lib
+                        .parent()
+                        .ok_or_else(|| format!("shared runtime `{}` has no parent dir", runtime_lib.display()))?;
+                    let stem = runtime_lib
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.strip_prefix("lib"))
+                        .ok_or_else(|| {
+                            format!("shared runtime `{}` is not a lib<name>.so", runtime_lib.display())
+                        })?;
+                    cmd.arg(format!("-L{}", dir.display()));
+                    // --no-as-needed keeps the DT_NEEDED entry even for a link
+                    // where --gc-sections later drops the referencing section;
+                    // the runtime is loaded for its initializers too, not only
+                    // for symbols the linker can see being used.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    cmd.arg("-Wl,--no-as-needed");
+                    cmd.arg(format!("-l{stem}"));
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    cmd.arg("-Wl,--as-needed");
+                    // RUNPATH, not LD_LIBRARY_PATH: a binary that only runs
+                    // with the right env var set is a trap the bootstrap would
+                    // fall into. `$ORIGIN` only -- deliberately NOT the build
+                    // directory. An absolute rpath would let a failed
+                    // copy-beside still look like it worked, and would bake a
+                    // build path into a shipped compiler. The copy below is the
+                    // single mechanism, and it is fail-closed.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
+                        cmd.arg("-Wl,-rpath,$ORIGIN");
+                        cmd.arg("-Wl,-rpath,$ORIGIN/../lib");
+                    }
+                    #[cfg(target_os = "macos")]
+                    cmd.arg("-Wl,-rpath,@loader_path");
+
+                    // Core-C supplement, appended AFTER the shared runtime.
+                    //
+                    // The shared runtime is the Rust runtime crate built as a
+                    // cdylib; it is not a superset of the static
+                    // `libsimple_runtime.a`. Measured on this host: the archive
+                    // defines 2,043 `rt_*`, the `.so` exports 1,646, and the
+                    // 397-symbol difference splits into 165 that are present in
+                    // the `.so` but not exported and 232 that are absent from it
+                    // entirely (audio/GPU providers feature-gated out of the
+                    // cdylib). Of the symbols the Stage4 object closure actually
+                    // demands, 122 fall in that gap, and 121 of them are the
+                    // C-only entry points -- `rt_iocp_*`, `rt_kqueue_*`,
+                    // `rt_event_ports_*`, `rt_alloc`, `rt_mmap_raw` and friends
+                    // -- which live in `runtime_native.c` and the
+                    // `platform/*.h` bodies it includes, i.e. exactly the
+                    // archive this lane is replacing as the PRIMARY runtime.
+                    //
+                    // So the composition is additive, not a swap: the `.so`
+                    // supplies the 1,646 Rust-side symbols the core-C archive
+                    // never had (the cause of the 167 unresolved symbols), and
+                    // the archive still supplies the C-only remainder.
+                    //
+                    // Ordering matters and is safe here in a way it is not for
+                    // two archives. Members are pulled only for symbols still
+                    // undefined at this point, and a static definition never
+                    // COLLIDES with a shared-object one -- the executable's copy
+                    // simply wins for the whole process, including calls made
+                    // from inside the runtime. That is why this needs no
+                    // `--allow-multiple-definition`, unlike the Windows
+                    // native_all + core-C layering below.
+                    let core_c = build_core_c_runtime_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
+                        .ok_or_else(|| {
+                            "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
+                        })?;
+                    cmd.arg(core_c);
+                } else if *is_native_all {
                     #[cfg(target_os = "macos")]
                     {
                         cmd.arg("-Wl,-force_load").arg(runtime_lib);
@@ -1643,6 +1869,7 @@ int main(int argc, char** argv) {
                             build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
+                        // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured
                         // Archive members resolve at OBJECT granularity, not
                         // symbol granularity: pulling runtime_native.obj to
                         // satisfy rt_iocp_create also drags in every other
@@ -1808,7 +2035,18 @@ int main(int argc, char** argv) {
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
                     // ponytail: ELF archives resolve left-to-right; stubs may reference runtime helpers.
-                    cmd.arg(runtime_lib);
+                    //
+                    // A shared object is deliberately NOT repeated here. Unlike
+                    // an archive it is not consumed left-to-right -- every
+                    // DT_NEEDED library is searched for every remaining
+                    // undefined symbol -- so the earlier `-L`/`-l` already
+                    // covers the stub object. Appending the bare path would
+                    // additionally record that PATH as a second DT_NEEDED entry
+                    // (the runtime carries no SONAME), baking a build directory
+                    // into the produced compiler.
+                    if !super::config::is_shared_runtime_library(runtime_lib) {
+                        cmd.arg(runtime_lib);
+                    }
                 }
             }
         }
@@ -1845,13 +2083,16 @@ int main(int argc, char** argv) {
             // sets SIMPLE_NO_STUB_FALLBACK=1, which is why the two-group bug
             // has been latent rather than fatal.
             //
-            // NOTE (not changed here): the bare `/WHOLEARCHIVE` has no `:lib`
-            // argument, so it whole-archives EVERY input archive, which is what
-            // multiplies duplicate import descriptors such as
-            // __IMPORT_DESCRIPTOR_kernel32 (measured 4x in
-            // simple_native_all.lib). Narrowing that is a linker-contract
-            // change and is deliberately left for its own commit.
-            clang_cl_link_args.push("/WHOLEARCHIVE".to_string());
+            // REMOVED 2026-09-06 (patch item 3 of
+            // doc/08_tracking/bug/windows_whole_archive_duplicate_import_descriptors_2026-08-30.md):
+            // the bare `/WHOLEARCHIVE` had no `:lib` argument, so it
+            // whole-archived EVERY input archive, which is what multiplies
+            // duplicate import descriptors such as __IMPORT_DESCRIPTOR_kernel32
+            // (measured 4x in simple_native_all.lib). Nothing depends on it:
+            // the runtime archive's retention roots are emitted unconditionally
+            // on the non-force path above, and SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1
+            // remains the escape hatch. `/FORCE:MULTIPLE,UNRESOLVED` stays --
+            // that is what makes the stub-fallback path tolerant.
             clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
@@ -1887,6 +2128,32 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
+            // Dynamic lane: place the runtime beside the binary so the
+            // `$ORIGIN` RUNPATH resolves without LD_LIBRARY_PATH. A compiler
+            // that only runs with the right env var set is a trap the bootstrap
+            // would fall into, so this is part of producing the artifact, not
+            // an optional convenience.
+            if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
+                if super::config::is_shared_runtime_library(runtime_lib) {
+                    if let (Some(out_dir), Some(name)) = (self.output.parent(), runtime_lib.file_name()) {
+                        let beside = out_dir.join(name);
+                        if beside != *runtime_lib {
+                            // Write to a temp name and rename: a direct copy
+                            // over a shared object another process has mapped
+                            // fails with ETXTBSY.
+                            let staged = out_dir.join(format!(".{}.new", name.to_string_lossy()));
+                            std::fs::copy(runtime_lib, &staged)
+                                .and_then(|_| std::fs::rename(&staged, &beside))
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to place the shared runtime beside {}: {e}",
+                                        self.output.display()
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if self.config.strip {
                 if let Some(objcopy) = find_objcopy_tool() {
@@ -2745,6 +3012,7 @@ pub(crate) fn normalize_windows_pe_metadata(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod linker_tests {
     use super::*;
+
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
 

@@ -1,0 +1,460 @@
+#!/bin/sh
+# gen-stdlib-api-registry.shs — generate the `stdlib` surface of the API
+# registry, and check it against the tree.
+#
+# WHY THIS EXISTS
+# ---------------
+# `config/api/api_registry.sdn` (arriving via PR #405 / #419) answers, for the
+# `rt` surface, "which group does this symbol belong to and who may call it".
+# The owner's fourth ask was "db like access to all other api also" — the same
+# question asked of every OTHER callable surface, starting with the stdlib.
+#
+# This generator proves the rt schema generalises without changing it. It emits
+# the SAME two tables with the SAME column names; only the per-surface MEANING
+# of four columns differs, and that mapping is stated in the emitted header so
+# a reader never has to guess:
+#
+#   api_groups  |surface, group, symbols, sites, provider, access|
+#   api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|
+#
+# THE STDLIB ANALOGY, stated once
+# -------------------------------
+#   rt surface                          stdlib surface
+#   ----------------------------------  ------------------------------------
+#   group  = rt_<family>_*              group  = <space>.<family> under src/lib
+#   symbol = an exported rt_* name      symbol = a name in the family's
+#                                                `__init__.spl` public surface
+#   provider = the allowlisted file     provider = that `__init__.spl` — the
+#              permitted to call rt_               one module `use std.X` is
+#              directly                            meant to resolve through
+#   sites  = FORBIDDEN direct rt_*      sites  = BYPASS imports: a file outside
+#            call sites (a caller                  the family importing a
+#            reaching past the seam)                SUBMODULE directly, reaching
+#                                                   past `__init__`
+#
+# A bypass import is the stdlib's exact equivalent of a direct `rt_*` call: the
+# consumer has pinned itself to an internal file, so the family can no longer
+# reorganise behind its own facade. Counting them is the whole point of the DB.
+#
+# SCOPE. One memory space at a time (`--space`), because a space is the unit
+# `src/lib` is actually organised by (`.claude/rules/structure.md`) and because
+# a partial DB that is complete for what it covers is worth more than a stub
+# covering all five. Default `nogc_async_mut` — the space SOSIX lives in.
+#
+# Usage:
+#   sh scripts/check/gen-stdlib-api-registry.shs [--space NAME] [--out FILE]
+#   sh scripts/check/gen-stdlib-api-registry.shs --check [--space NAME] [--in FILE]
+#   sh scripts/check/gen-stdlib-api-registry.shs --selftest
+#
+# --check verdict is the LAST stdout line, always one of:
+#   PASS  — <n> stdlib symbol(s) checked, ...          exit 0   (n > 0 always)
+#   FAIL  — ...                                        exit 1
+#   ERROR — nothing was checked (<reason>)             exit 2
+# Zero checked is ERROR, never PASS.
+
+set -u
+
+MODE=gen
+SPACE=nogc_async_mut
+OUT=""
+IN=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --space) SPACE="$2"; shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        --in) IN="$2"; shift 2 ;;
+        --check) MODE=check; shift ;;
+        --selftest) MODE=selftest; shift ;;
+        -h|--help) sed -n '1,60p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "${ROOT:-}" ] || [ ! -d "$ROOT" ]; then
+    echo "ERROR — nothing was checked (no repo root)"; exit 2
+fi
+[ -n "$IN" ] || IN="$ROOT/config/api/api_registry_stdlib.sdn"
+[ -n "$OUT" ] || OUT="$ROOT/config/api/api_registry_stdlib.sdn"
+
+command -v rg >/dev/null 2>&1 || RG_OK=0
+RG_OK=${RG_OK:-1}
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# scan_space <repo-root> <space> -> $WORK/groups.tsv, $WORK/symbols.tsv
+#
+# A FAMILY is a directory `src/lib/<space>/<family>` holding an `__init__.spl`.
+# Its PUBLIC SURFACE is every name that module publishes, by either route the
+# language offers:
+#   `export use std.a.b.{X, Y}`   -> class=re-export, alias=std.a.b
+#   `pub fn X` / `pub val X` /
+#   `pub struct X` / `pub enum X` -> class=own,       alias=<the __init__ path>
+# Anything else in the directory is internal by construction.
+# ---------------------------------------------------------------------------
+scan_space() {
+    _root="$1"; _space="$2"
+    : > "$WORK/symbols.tsv"
+    : > "$WORK/groups.tsv"
+    : > "$WORK/bypass_test.txt"
+    _base="$_root/src/lib/$_space"
+    [ -d "$_base" ] || return 1
+
+    # Every family directory, sorted, one per line.
+    find "$_base" -mindepth 2 -maxdepth 2 -name '__init__.spl' 2>/dev/null \
+        | sed "s|^$_base/||; s|/__init__.spl$||" | sort > "$WORK/families.txt"
+    [ -s "$WORK/families.txt" ] || return 1
+
+    while IFS= read -r fam; do
+        _init="$_base/$fam/__init__.spl"
+        [ -f "$_init" ] || continue
+
+        # --- public surface -------------------------------------------------
+        # The tree publishes through FOUR distinct forms, all of which occur in
+        # `src/lib/**/__init__.spl` today. Supporting only the first was a real
+        # bug in the first cut of this generator: it reported 70 of 83 families
+        # as publishing nothing, which was a scanner artifact, not a fact.
+        #
+        #   1. `export use std.a.b.{X, Y}`  (may span lines to the `}`)
+        #        -> class=re-export   backing=export-use   alias=std.a.b
+        #   2. `export X, Y, Z`             (bare name list, no `use`)
+        #        -> class=re-export   backing=export-list  alias=<this family>
+        #   3. `export mod.*` / `export use std.a.b.*`  (wildcard)
+        #        -> class=glob        backing=export-glob  symbol=`mod.*`
+        #      A wildcard's name set is NOT statically enumerable by a text
+        #      scanner, so it is recorded as ONE row naming the wildcard rather
+        #      than silently expanded or silently dropped. A family that
+        #      publishes only wildcards therefore has a surface (access=group)
+        #      whose symbol count understates it — stated here and in the
+        #      emitted header rather than papered over.
+        #   4. `pub fn X` / `pub val X` / ...  declared in `__init__.spl` itself
+        #        -> class=own         backing=pub-decl     alias=<this family>
+        #
+        # One awk pass, so emitted row ORDER is source order and regeneration
+        # diffs stay readable.
+        awk -v fam="$fam" -v space="$_space" '
+            function emit_names(list, cls, bk, al,   n, i, parts, s) {
+                n = split(list, parts, ",")
+                for (i = 1; i <= n; i++) {
+                    s = parts[i]
+                    gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", s)
+                    # `X as Y` has no renaming re-export in the language today;
+                    # if it gains one, the published name is the tail.
+                    sub(/^.*[ \t]as[ \t]+/, "", s)
+                    if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/)
+                        print s "\t" cls "\t" bk "\t" al
+                }
+            }
+            function flush_block(   body) {
+                body = blk
+                gsub(/^[^{]*\{/, "", body); gsub(/\}.*$/, "", body)
+                emit_names(body, "re-export", "export-use", mod)
+                blk = ""; mod = ""
+            }
+            collecting {
+                blk = blk " " $0
+                if ($0 ~ /\}/) { collecting = 0; flush_block() }
+                next
+            }
+            # form 3 — wildcard, either spelling. Checked BEFORE form 1 so a
+            # `export use a.b.*` is not mistaken for a brace-less module path.
+            /^[ \t]*export[ \t]+(use[ \t]+)?[A-Za-z_][A-Za-z0-9_.]*\.\*[ \t]*$/ {
+                s = $0
+                sub(/^[ \t]*export[ \t]+(use[ \t]+)?/, "", s)
+                sub(/[ \t]*$/, "", s)
+                print s "\tglob\texport-glob\tstd." space "." fam
+                next
+            }
+            # form 1 — `export use <module>.{...}`
+            /^[ \t]*export[ \t]+use[ \t]+/ {
+                mod = $0
+                sub(/^[ \t]*export[ \t]+use[ \t]+/, "", mod)
+                sub(/[ \t]*\{.*$/, "", mod)
+                sub(/[ \t]*$/, "", mod); sub(/\.$/, "", mod)
+                blk = $0
+                if ($0 ~ /\{/) {
+                    if ($0 ~ /\}/) { flush_block() } else { collecting = 1 }
+                }
+                next
+            }
+            # form 2 — `export X, Y, Z`
+            /^[ \t]*export[ \t]+[A-Za-z_][A-Za-z0-9_]*([ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*)*[ \t]*$/ {
+                s = $0
+                sub(/^[ \t]*export[ \t]+/, "", s)
+                emit_names(s, "re-export", "export-list", "std." space "." fam)
+                next
+            }
+            # form 4 — a `pub` declaration in the provider itself
+            /^[ \t]*pub[ \t]+(fn|val|var|struct|enum|trait|type|class|mixin)[ \t]+[A-Za-z_]/ {
+                s = $0
+                sub(/^[ \t]*pub[ \t]+(fn|val|var|struct|enum|trait|type|class|mixin)[ \t]+/, "", s)
+                sub(/[^A-Za-z0-9_].*$/, "", s)
+                if (s != "") print s "\town\tpub-decl\tstd." space "." fam
+            }
+        ' "$_init" | awk '!seen[$1]++' > "$WORK/fam_syms.tsv"
+
+        _nsym=$(awk 'END{print NR+0}' "$WORK/fam_syms.tsv")
+
+        # --- bypass imports -------------------------------------------------
+        # A file OUTSIDE the family importing `std.<space>.<fam>.<submodule>`
+        # has reached past the provider. Importing `std.<space>.<fam>` itself
+        # (with or without a brace list) resolves through `__init__` and is the
+        # sanctioned path, so it is NOT a bypass.
+        _pat="use[ \t]+std\.$_space\.$(printf '%s' "$fam" | sed 's/[.[\*^$]/\\&/g')\.[a-z_][a-z0-9_]*"
+        if [ "$RG_OK" = 1 ]; then
+            rg -N --with-filename --no-heading -e "$_pat" -g '*.spl' \
+               "$_root/src" "$_root/test" 2>/dev/null \
+               | sed "s|^$_root/||" > "$WORK/fam_bypass.raw" || true
+        else
+            grep -rEn --include='*.spl' "$_pat" "$_root/src" "$_root/test" 2>/dev/null \
+               | sed "s|^$_root/||" > "$WORK/fam_bypass.raw" || true
+        fi
+        grep -v "^src/lib/$_space/$fam/" "$WORK/fam_bypass.raw" \
+            > "$WORK/fam_bypass.tsv" 2>/dev/null || true
+        _nbypass_src=$(awk '/^src\//{n++} END{print n+0}' "$WORK/fam_bypass.tsv")
+        # Test bypasses are EXCLUDED from the `sites` column (a spec for a
+        # submodule legitimately imports that submodule) but are accumulated
+        # here so the emitted header can report them, rather than the policy
+        # claiming a separate report that does not exist.
+        awk '/^test\//{n++} END{print n+0}' "$WORK/fam_bypass.tsv" >> "$WORK/bypass_test.txt"
+
+        # --- access class ---------------------------------------------------
+        # `group`   the family publishes a surface through its provider
+        # `unowned` an `__init__.spl` exists but publishes nothing — there is
+        #           no seam to route through, so every consumer must bypass
+        if [ "$_nsym" -gt 0 ]; then _access=group; else _access=unowned; fi
+
+        printf 'stdlib, %s, %d, %d, "%s", %s\n' \
+            "$_space.$fam" "$_nsym" "$_nbypass_src" \
+            "src/lib/$_space/$fam/__init__.spl" "$_access" >> "$WORK/groups.tsv"
+
+        # --- symbol rows ----------------------------------------------------
+        while IFS='	' read -r sym cls _backing alias; do
+            [ -n "$sym" ] || continue
+            # A wildcard row names no single symbol, so counting "files that
+            # name it" is meaningless; record 0 rather than a fabricated count.
+            if [ "$RG_OK" = 1 ] && [ "$cls" != glob ]; then
+                _ssites=$(rg -lN -e "\b$sym\b" -g '*.spl' "$_root/src" 2>/dev/null \
+                          | grep -cv "^$_root/src/lib/$_space/$fam/" || true)
+                _ssites=${_ssites:-0}
+            else
+                _ssites=0
+            fi
+            _desc=$(printf '%s' "$sym" \
+                    | sed 's/^sosix_//; s/_/ /g' \
+                    | awk '{print tolower($0)}')
+            printf 'stdlib, %s, %s, %s, %s, %s, %d, -, %s, "%s: %s"\n' \
+                "$_space.$fam" "$sym" "$_space" "$_backing" "$cls" \
+                "$_ssites" "$alias" "$fam" "$_desc" >> "$WORK/symbols.tsv"
+        done < "$WORK/fam_syms.tsv"
+    done < "$WORK/families.txt"
+    return 0
+}
+
+emit_header() {
+    _ngroups=$(awk 'END{print NR+0}' "$WORK/groups.tsv")
+    _nsyms=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    _nunowned=$(awk '/, unowned$/{n++} END{print n+0}' "$WORK/groups.tsv")
+    _nbypass=$(awk -F', ' '{s+=$4} END{print s+0}' "$WORK/groups.tsv")
+    _nbypass_test=$(awk '{s+=$1} END{print s+0}' "$WORK/bypass_test.txt")
+    cat <<EOF
+# API registry — \`stdlib\` surface shard.
+#
+# GENERATED by scripts/check/gen-stdlib-api-registry.shs. Do not hand-edit
+# rows; edit the generator or the sources it reads and regenerate. The policy
+# this database serves is
+# doc/04_architecture/runtime/rt_api/api_access_policy.md.
+#
+# This is a SHARD of the same database as \`config/api/api_registry.sdn\` (the
+# \`rt\` surface, arriving via PR #405/#419): identical table names, identical
+# column names, distinguished by the \`surface\` column. A reader that can load
+# one can load the other; shards concatenate. It is a separate FILE only so
+# this lane does not conflict with the 4,389-line generated \`rt\` shard being
+# landed by three other branches.
+#
+# generated: $(date -u +%Y-%m-%d)  space: $SPACE
+# stdlib surface counts: families=$_ngroups symbols=$_nsyms
+#   families publishing nothing (access=unowned): $_nunowned
+#   bypass imports from src/ (the stdlib analogue of a direct rt_* call): $_nbypass
+#   bypass imports from test/ (excluded from the \`sites\` column, reported
+#     here so the exclusion is visible rather than merely claimed): $_nbypass_test
+#
+# Per-surface column meanings. The columns are the rt surface's columns; four
+# of them mean something surface-specific, and that mapping is HERE rather than
+# left to a reader's guess:
+#
+#   surface  stdlib
+#   group    <memory-space>.<family> — a directory under src/lib holding an
+#            \`__init__.spl\`, which is the unit \`use std.X\` resolves to
+#   symbols  names on the family's public surface
+#   sites    BYPASS imports from src/: a file outside the family importing one
+#            of its SUBMODULES directly, reaching past \`__init__.spl\`. This is
+#            the stdlib equivalent of a forbidden direct rt_* call site, and it
+#            is what the policy ratchets. Test files are excluded from this
+#            count and reported separately: a spec for a submodule legitimately
+#            imports that submodule.
+#   provider the family's \`__init__.spl\` — the one module consumers may name
+#   access   group   = publishes a surface through its provider
+#            unowned = has an \`__init__.spl\` that publishes nothing, so there
+#                      is no seam and every consumer must reach inside
+#
+#   lane     the memory space (\`nogc_sync_mut\`, \`nogc_async_mut\`, ...). On the
+#            rt surface \`lane\` says which runtime implements a symbol; on the
+#            stdlib surface it says which effect discipline it lives under.
+#            Both answer "which implementation world is this in".
+#   backing  export-use = published by an \`export use\` re-export block
+#            pub-decl   = published by a \`pub\` declaration in \`__init__.spl\`
+#            (the rt surface's \`nm\`/\`text\` — HOW the symbol was observed)
+#   class    re-export = defined elsewhere and republished by the provider
+#            own       = defined in \`__init__.spl\` itself
+#   sites    files under src/ outside the family that name this symbol
+#   twin     always \`-\`: the C-migration twin inventory is an rt-surface
+#            concept and is not fabricated here
+#   alias    the module that actually defines the symbol
+#   desc     mechanically derived from the name. A placeholder, not prose —
+#            the same honesty the rt shard's header states about its own.
+
+EOF
+}
+
+case "$MODE" in
+gen)
+    scan_space "$ROOT" "$SPACE" || {
+        echo "ERROR — nothing was generated (no families under src/lib/$SPACE)"; exit 2; }
+    _nsyms=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    if [ "$_nsyms" -eq 0 ]; then
+        echo "ERROR — nothing was generated (0 symbols found in $SPACE)"; exit 2
+    fi
+    {
+        emit_header
+        echo 'api_groups |surface, group, symbols, sites, provider, access|'
+        sed 's/^/    /' "$WORK/groups.tsv"
+        echo ''
+        echo 'api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|'
+        sed 's/^/    /' "$WORK/symbols.tsv"
+    } > "$OUT"
+    _ng=$(awk 'END{print NR+0}' "$WORK/groups.tsv")
+    echo "PASS — $_nsyms stdlib symbol(s) generated across $_ng family(ies) in space $SPACE -> $OUT"
+    exit 0
+    ;;
+check)
+    if [ ! -f "$IN" ]; then
+        echo "ERROR — nothing was checked (no registry $IN)"; exit 2
+    fi
+    scan_space "$ROOT" "$SPACE" || {
+        echo "ERROR — nothing was checked (no families under src/lib/$SPACE)"; exit 2; }
+    awk '/^api_symbols \|/{on=1;next} /^api_groups \|/{on=0} on && /^    stdlib, /{
+        gsub(/^ +/,""); print }' "$IN" | sed 's/, /\t/g' | cut -f2,3 | sort > "$WORK/have.tsv"
+    awk -F', ' '{print $2 "\t" $3}' "$WORK/symbols.tsv" | sort > "$WORK/want.tsv"
+    _nwant=$(awk 'END{print NR+0}' "$WORK/want.tsv")
+    _nhave=$(awk 'END{print NR+0}' "$WORK/have.tsv")
+    if [ "$_nwant" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 symbols scanned in $SPACE)"; exit 2
+    fi
+    if [ "$_nhave" -eq 0 ]; then
+        echo "ERROR — nothing was checked (registry $IN holds no stdlib symbol rows)"; exit 2
+    fi
+    comm -23 "$WORK/want.tsv" "$WORK/have.tsv" > "$WORK/unreg.tsv"
+    comm -13 "$WORK/want.tsv" "$WORK/have.tsv" > "$WORK/stale.tsv"
+    _nunreg=$(awk 'END{print NR+0}' "$WORK/unreg.tsv")
+    _nstale=$(awk 'END{print NR+0}' "$WORK/stale.tsv")
+    if [ "$_nunreg" -gt 0 ] || [ "$_nstale" -gt 0 ]; then
+        printf 'FAIL — %d stdlib symbol(s) checked in space %s, %d unregistered, %d stale;' \
+            "$_nwant" "$SPACE" "$_nunreg" "$_nstale"
+        awk -F'\t' 'NR<=5{printf " unregistered:%s.%s", $1, $2}' "$WORK/unreg.tsv"
+        awk -F'\t' 'NR<=5{printf " stale:%s.%s", $1, $2}' "$WORK/stale.tsv"
+        echo ''
+        exit 1
+    fi
+    _nbypass=$(awk -F', ' '{s+=$4} END{print s+0}' "$WORK/groups.tsv")
+    _nunowned=$(awk '/, unowned$/{n++} END{print n+0}' "$WORK/groups.tsv")
+    _nbypass_test=$(awk '{s+=$1} END{print s+0}' "$WORK/bypass_test.txt")
+    echo "PASS — $_nwant stdlib symbol(s) checked in space $SPACE, 0 unregistered, 0 stale, $_nbypass bypass import(s) from src/ ($_nbypass_test more from test/, excluded), $_nunowned family(ies) publishing nothing"
+    exit 0
+    ;;
+selftest)
+    # Fixtures are real directories scanned by the real scanner. A fixture that
+    # asserts nothing is worse than no fixture, so each one names the exact
+    # property it fences.
+    FAILED=0
+    FIX="$WORK/fx"; mkdir -p "$FIX"
+    _sub() { mkdir -p "$FIX/src/lib/$1/$2"; }
+
+    # 1. form 1 (`export use m.{...}`) + form 4 (`pub fn`) in one provider
+    _sub sp fam1
+    cat > "$FIX/src/lib/sp/fam1/__init__.spl" <<'EOF'
+"""doc"""
+export use std.sp.fam1.inner.{Alpha, beta_fn}
+pub fn gamma_fn() -> i32 { 0 }
+EOF
+    ROOT_SAVE="$ROOT"; ROOT="$FIX"
+    scan_space "$FIX" sp >/dev/null 2>&1
+    n=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    if [ "$n" -ne 3 ]; then echo "selftest 1 FAILED: expected 3 symbols, got $n"; FAILED=1; fi
+    if ! grep -q 'Alpha, sp, export-use, re-export' "$WORK/symbols.tsv"; then
+        echo "selftest 1 FAILED: export-use name missing or misclassed"; FAILED=1; fi
+    if ! grep -q 'gamma_fn, sp, pub-decl, own' "$WORK/symbols.tsv"; then
+        echo "selftest 1 FAILED: pub decl not classed own/pub-decl"; FAILED=1; fi
+
+    # 2. a multi-line export-use block is collected to its closing brace
+    rm -rf "$FIX/src/lib/sp"; _sub sp fam2
+    printf '"""d"""\nexport use std.sp.fam2.inner.{\n    One, Two,\n    Three\n}\n' \
+        > "$FIX/src/lib/sp/fam2/__init__.spl"
+    scan_space "$FIX" sp >/dev/null 2>&1
+    n=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    if [ "$n" -ne 3 ]; then echo "selftest 2 FAILED: multi-line block gave $n, expected 3"; FAILED=1; fi
+
+    # 3. an __init__ that publishes nothing is access=unowned, not dropped
+    rm -rf "$FIX/src/lib/sp"; _sub sp fam3
+    printf '"""nothing public here"""\n' > "$FIX/src/lib/sp/fam3/__init__.spl"
+    scan_space "$FIX" sp >/dev/null 2>&1
+    if ! grep -q 'sp.fam3, 0, 0, .*, unowned' "$WORK/groups.tsv"; then
+        echo "selftest 3 FAILED: empty family not recorded unowned"; FAILED=1; fi
+
+    # 4. a space with no families must not silently produce an empty registry
+    rm -rf "$FIX/src/lib/sp"
+    if scan_space "$FIX" sp >/dev/null 2>&1; then
+        echo "selftest 4 FAILED: empty space returned success"; FAILED=1; fi
+
+    # 5. form 2 — a bare `export X, Y, Z` list is a published surface.
+    #    REGRESSION FENCE: the first cut of this generator handled only form 1
+    #    and reported such a family as publishing nothing, which produced a
+    #    false "70 of 83 families publish nothing" finding. Never again.
+    _sub sp fam5
+    printf '"""d"""\nexport Alpha, beta_fn\nexport gamma_fn\n' \
+        > "$FIX/src/lib/sp/fam5/__init__.spl"
+    scan_space "$FIX" sp >/dev/null 2>&1
+    n=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    if [ "$n" -ne 3 ]; then echo "selftest 5 FAILED: export-list gave $n, expected 3"; FAILED=1; fi
+    if ! grep -q 'beta_fn, sp, export-list, re-export' "$WORK/symbols.tsv"; then
+        echo "selftest 5 FAILED: export-list not classed"; FAILED=1; fi
+    if grep -q 'sp.fam5, 0,' "$WORK/groups.tsv"; then
+        echo "selftest 5 FAILED: export-list family recorded as publishing nothing"; FAILED=1; fi
+
+    # 6. form 3 — a wildcard is ONE row naming the wildcard, never expanded
+    #    and never dropped, and the family is `group`, not `unowned`.
+    rm -rf "$FIX/src/lib/sp"; _sub sp fam6
+    printf '"""d"""\nexport resource.*\nexport use std.sp.other.*\n' \
+        > "$FIX/src/lib/sp/fam6/__init__.spl"
+    scan_space "$FIX" sp >/dev/null 2>&1
+    n=$(awk 'END{print NR+0}' "$WORK/symbols.tsv")
+    if [ "$n" -ne 2 ]; then echo "selftest 6 FAILED: wildcard gave $n rows, expected 2"; FAILED=1; fi
+    if ! grep -q 'export-glob, glob' "$WORK/symbols.tsv"; then
+        echo "selftest 6 FAILED: wildcard not classed glob/export-glob"; FAILED=1; fi
+    if ! grep -q 'sp.fam6, 2, .*, group' "$WORK/groups.tsv"; then
+        echo "selftest 6 FAILED: wildcard family not recorded as publishing"; FAILED=1; fi
+
+    ROOT="$ROOT_SAVE"
+    if [ "$FAILED" -ne 0 ]; then
+        echo "FAIL — 6 selftest fixture(s) checked, at least one failed"; exit 1
+    fi
+    echo "PASS — 6 selftest fixture(s) checked"
+    exit 0
+    ;;
+esac
+
+echo "ERROR — nothing was checked (unreachable mode $MODE)"
+exit 2

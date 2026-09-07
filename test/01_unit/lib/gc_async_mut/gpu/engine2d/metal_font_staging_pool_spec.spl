@@ -1,0 +1,117 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/local/metal_2d_frame_cost_perf.md ; plan: doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ; architecture: doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; design: doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl 40%
+# @tag: unit, gpu, metal, font, perf
+"""
+# Metal Font Host Staging Pool Spec
+
+## Overview
+
+Pins the warm host-staging contract of the Metal font backend. The packed
+words and the 4-byte word count were allocated and freed once per text batch;
+they are now kept on the backend state and grown only when a larger batch
+arrives. This spec fixes that behaviour so a later change cannot silently
+return to per-batch allocation.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Design
+
+**Design:** doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Research
+
+**Research:** doc/01_research/local/metal_2d_frame_cost_perf.md
+
+## Syntax
+
+Host staging is ordinary process memory, not device memory, so the whole
+contract is exercised without a Metal device. Device submission remains a
+separate hardware gate.
+
+## Examples
+
+```simple
+var state = MetalFontBackendState.create()
+expect(state._ensure_staging(128)).to_be(true)
+```
+
+## Acceptance
+
+A fresh state owns no staging; the first request allocates; a smaller request
+reuses the same block without shrinking; a larger request grows it; and
+release returns the state to owning nothing.
+"""
+
+use std.spec.*
+use std.gpu.engine2d.backend_metal_font.{MetalFontBackendState}
+
+describe "Metal font host staging pool":
+
+    it "owns no staging until something asks for it":
+        # @req REQ-SSPEC-UNIT
+        step("Create a fresh backend state")
+        var state = MetalFontBackendState.create()
+        expect(state.staging_host).to_equal(0)  # oracle: 0 is the no-allocation sentinel
+        expect(state.staging_bytes).to_equal(0)  # oracle: no capacity before any request
+        expect(state.word_count_host).to_equal(0)  # oracle: the 4-byte word-count block is lazy too
+
+    it "allocates once and reports the capacity it took":
+        # @req REQ-SSPEC-UNIT
+        step("Ask for a staging block")
+        var state = MetalFontBackendState.create()
+        expect(state._ensure_staging(128)).to_be(true)  # oracle: a positive request succeeds
+        expect(state.staging_bytes).to_equal(128)  # oracle: capacity equals what was asked for
+        val first = state.staging_host
+        expect(first != 0).to_be(true)  # oracle: a real host pointer, not the sentinel
+        state.release()
+
+    it "reuses the block for a smaller batch instead of reallocating":
+        # @req REQ-SSPEC-UNIT
+        step("Grow once, then ask for less")
+        var state = MetalFontBackendState.create()
+        expect(state._ensure_staging(256)).to_be(true)
+        val grown = state.staging_host
+        expect(state._ensure_staging(64)).to_be(true)  # oracle: a smaller batch is still satisfiable
+        expect(state.staging_host).to_equal(grown)  # oracle: THE point of the pool — same block, no realloc
+        expect(state.staging_bytes).to_equal(256)  # oracle: capacity never shrinks
+        state.release()
+
+    it "grows only when a larger batch arrives":
+        # @req REQ-SSPEC-UNIT
+        step("Ask for more than the current capacity")
+        var state = MetalFontBackendState.create()
+        expect(state._ensure_staging(64)).to_be(true)
+        expect(state._ensure_staging(512)).to_be(true)
+        expect(state.staging_bytes).to_equal(512)  # oracle: capacity follows the high-water mark
+        expect(state.staging_host != 0).to_be(true)
+        state.release()
+
+    it "rejects a non-positive request rather than allocating":
+        # @req REQ-SSPEC-UNIT
+        step("A zero or negative byte count is not a valid batch")
+        var state = MetalFontBackendState.create()
+        expect(state._ensure_staging(0)).to_be(false)  # oracle: nothing to stage is a rejection, not a 0-byte alloc
+        expect(state._ensure_staging(-1)).to_be(false)  # oracle: a negative size must never reach rt_alloc
+        expect(state.staging_host).to_equal(0)  # oracle: a rejected request leaves the pool untouched
+        state.release()
+
+    it "returns to owning nothing after release":
+        # @req REQ-SSPEC-UNIT
+        step("Release a state that holds both staging blocks")
+        var state = MetalFontBackendState.create()
+        expect(state._ensure_staging(128)).to_be(true)
+        expect(state._ensure_word_count_host()).to_be(true)
+        expect(state.word_count_host != 0).to_be(true)  # oracle: the word-count block was taken
+        state.release()
+        expect(state.staging_host).to_equal(0)  # oracle: release must not leave a dangling host pointer
+        expect(state.staging_bytes).to_equal(0)
+        expect(state.word_count_host).to_equal(0)

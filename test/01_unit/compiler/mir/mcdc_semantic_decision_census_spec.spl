@@ -1,4 +1,31 @@
-"""REQ-001 authoritative semantic decision-form census."""
+"""
+## Purpose and audience
+Authoritative semantic decision-form census for MC/DC instrumentation, for
+the coverage-infrastructure maintainers who own
+`src/compiler/50.mir/mcdc_decision_census`. Scope: the frozen v1 catalog of
+decision forms, the HIR-owner enumeration that produces manifest ids, and
+the instrumented versus compile-time-only disposition split.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/mir/mcdc_semantic_decision_census_spec.spl — helpers
+lower small fixture modules through the full frontend with the static MC/DC
+policy and assert on the produced manifest ids and the v1 census rows.
+## Compatibility and limitations
+Scenarios are tagged `only-compiled`: the interpreter lane cannot resolve the
+compiler-module imports, so a RED run there is a lane limitation, not a
+census defect. The v1 catalog is closed — adding a form is a version bump,
+not an edit.
+## Verification guidance and troubleshooting
+A failure means the census grew or shrank, a form lost its stable name or
+disposition, a compile-time-only row started carrying governed code, or the
+HIR owner stopped enumerating a decision form. Each scenario name names
+which contract broke.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/cert/redeploy_kit/mcdc_codegen_instrumentation.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/app/coverage/MCDC_COVERAGE_DESIGN.md
+# @manual_section: mcdc-semantic-decision-census
 
 use std.spec.*
 use compiler.mir.mcdc_decision_census.*
@@ -26,25 +53,40 @@ fn census_has(ids: [text], form: text) -> bool:
 
 describe "MC/DC semantic decision census", tag: ["only-compiled"]:
     it "is a closed, unique, reason-bearing catalog":
+        # @req REQ-001
+        # @capture(statistics): the v1 census row count
+        step("Load the v1 census and run its well-formedness check")
         expect(mcdc_semantic_decision_census_v1_well_formed()).to_equal(true)
-        expect(mcdc_semantic_decision_census_v1().len()).to_equal(9)
+        expect(mcdc_semantic_decision_census_v1().len()).to_equal(9)  # oracle: v1 froze exactly nine decision forms; any other count means the closed catalog was edited without a version bump
 
     it "enumerates statement if and value conditional through their shared HIR owner":
+        # @req REQ-001
+        # @capture(statistics): manifest decision-form ids for the if fixture
+        step("Lower an `if a and b` module and inspect its manifest ids")
         val ids = census_manifest_ids("fn choose(a: bool, b: bool) -> bool:\n    if a and b:\n        true\n    else:\n        false\n")
         expect(census_has(ids, "if-or-conditional")).to_equal(true)
-        expect(census_has(ids, "while")).to_equal(false)
+        expect(census_has(ids, "while")).to_equal(false)  # oracle: the fixture contains no loop, so a while decision in the manifest would be a phantom entry
 
     it "enumerates every elif arm independently":
+        # @req REQ-001
+        # @capture(statistics): manifest decision-form ids for the elif fixture
+        step("Lower an if/elif/else chain and inspect its manifest ids")
         val ids = census_manifest_ids("fn choose(a: bool, b: bool) -> i64:\n    if a:\n        1\n    elif b:\n        2\n    else:\n        3\n")
         expect(census_has(ids, "elif")).to_equal(true)
-        expect(census_has(ids, "while")).to_equal(false)
+        expect(census_has(ids, "while")).to_equal(false)  # oracle: the chain has no loop, so a while decision would be a phantom entry
 
     it "enumerates while while retaining one short-circuit decision":
+        # @req REQ-001
+        # @capture(statistics): manifest id count for the while fixture
+        step("Lower a `while a and b` loop and inspect its manifest ids")
         val ids = census_manifest_ids("fn spin(a: bool, b: bool):\n    while a and b:\n        break\n")
         expect(census_has(ids, "while")).to_equal(true)
-        expect(ids.len()).to_equal(1)
+        expect(ids.len()).to_equal(1)  # oracle: the loop condition is one decision, not one per iteration shape
 
     it "classifies match guards and comprehension filters as instrumented decisions":
+        # @req REQ-001
+        # @capture(statistics): the instrumented rows' disposition and governed code
+        step("Scan the census rows for the two instrumented decision forms")
         val rows = mcdc_semantic_decision_census_v1()
         var instrumented_forms = 0
         for row in rows:
@@ -52,9 +94,12 @@ describe "MC/DC semantic decision census", tag: ["only-compiled"]:
                 expect(row.disposition).to_equal(McdcSemanticDecisionDispositionV1.Instrumented)
                 expect(row.governed_code).to_equal("")
                 instrumented_forms = instrumented_forms + 1
-        expect(instrumented_forms).to_equal(2)
+        expect(instrumented_forms).to_equal(2)  # oracle: v1 froze exactly these two instrumented forms; a third means the catalog grew
 
     it "instruments executable assertions but keeps static assertions and proof contracts compile-time-only":
+        # @req REQ-001
+        # @capture(statistics): manifest ids plus the compile-time-only row census
+        step("Lower a runtime assert and audit the compile-time-only rows")
         val ids = census_manifest_ids("fn validate(a: bool, b: bool):\n    assert a and b, \"required\"\n")
         expect(census_has(ids, "runtime-assertion")).to_equal(true)
         val rows = mcdc_semantic_decision_census_v1()
@@ -64,4 +109,4 @@ describe "MC/DC semantic decision census", tag: ["only-compiled"]:
                 expect(row.governed_code).to_equal("")
                 expect(row.reason.contains("compile-time")).to_equal(true)
                 compile_time = compile_time + 1
-        expect(compile_time).to_equal(3)
+        expect(compile_time).to_equal(3)  # oracle: v1 froze exactly three compile-time-only forms — static assert, proof contract, and the assertion-adjacent form

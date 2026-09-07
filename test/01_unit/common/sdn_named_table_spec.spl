@@ -1,0 +1,70 @@
+# @cover src/lib/common/sdn/parser.spl 80%
+use std.spec
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+
+fn table_shape(source: text, key: text) -> (i64, i64):
+    match parse(source):
+        case Err(_): (-1, -1)
+        case Ok(v):
+            match v.get(key):
+                case None: (-2, -2)
+                case Some(t):
+                    match t:
+                        case Table(headers, rows): (headers.len(), rows.len())
+                        case _: (-3, -3)
+
+describe "SDN named tables":
+    # The `name |h1, h2|` form is what every table SDN in this repo actually
+    # uses (config/check/must_check_gates.sdn, config/api/api_registry.sdn).
+    # Only the ANONYMOUS top-level `|h1, h2|` form used to parse; a named one
+    # reached neither the table parser nor the block parser and came back as a
+    # single bare string, so the table was silently dropped.
+    it "parses a named table inside a document":
+        val src = "gates |id, tier|\n    a, push\n    b, bootstrap\n"
+        expect(table_shape(src, "gates")).to_equal((2, 2))
+
+    it "parses two named tables in one document and keeps them apart":
+        val src = "groups |g, n|\n    file, 2\n" +
+            "\n" +
+            "symbols |g, s|\n    file, rt_file_exists\n    file, rt_file_read_text\n" +
+            "    net, rt_net_open\n"
+        expect(table_shape(src, "groups")).to_equal((2, 1))
+        expect(table_shape(src, "symbols")).to_equal((2, 3))
+
+    it "keeps a named table alongside ordinary key/value entries":
+        val src = "schema: api-registry/1\n" +
+            "rows |a, b|\n    1, 2\n" +
+            "\n" +
+            "trailing: yes\n"
+        expect(table_shape(src, "rows")).to_equal((2, 1))
+        match parse(src):
+            case Err(e): fail("parse failed: " + e)
+            case Ok(v):
+                expect(v.get("schema").is_some()).to_equal(true)
+                expect(v.get("trailing").is_some()).to_equal(true)
+
+    it "treats a # line as a comment even when it carries a colon":
+        # Before the fix this line matched the `key: value` branch and
+        # `# note` became a real dict key — silent corruption, not an error.
+        val src = "# note: this is a comment, not a key\n" +
+            "rows |a, b|\n    1, 2\n"
+        expect(table_shape(src, "rows")).to_equal((2, 1))
+        match parse(src):
+            case Err(e): fail("parse failed: " + e)
+            case Ok(v): expect(v.get("# note").is_some()).to_equal(false)
+
+    it "leaves prose containing a pipe alone rather than inventing a table":
+        # The recogniser must be conservative: a name with whitespace in it is
+        # not a table header, or every sentence ending in `|` would become one.
+        val src = "note: a | b |\n"
+        match parse(src):
+            case Err(e): fail("parse failed: " + e)
+            case Ok(v): expect(v.get("note").is_some()).to_equal(true)
+
+    it "reads the repo's own gate manifest, which no Simple reader could parse before":
+        val shape = table_shape(
+            "must_check_gates |id, tier, push_blocking, mode, command, description|\n" +
+            "    push-rt-api-groups, push, false, tree, \"sh scripts/check/check-rt-api-groups.shs\", \"advisory\"\n",
+            "must_check_gates")
+        expect(shape).to_equal((6, 1))

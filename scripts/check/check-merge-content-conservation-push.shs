@@ -1,0 +1,835 @@
+#!/bin/sh
+# Refuse to push a commit range whose MERGE commits silently lost content that
+# git's own automatic resolution had no right to discard.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-09-07, gpu_provider_probes.spl. Merge 7d40e71aa9c landed PR
+# #370. The path
+#   src/lib/gc_async_mut/gpu/engine2d/gpu_provider_probes.spl
+# did NOT exist at the merge base 4699194f81e (verified with `git cat-file -e`)
+# but existed on BOTH parents -- an add/add. Git therefore three-way-merged the
+# two files against an EMPTY base, which degenerates into a plain LCS alignment
+# of two whole files. It printed `Auto-merging <path>`, reported no conflict,
+# emitted no marker, and dropped `session.retain()` (present at parent
+# 506601075df line 69, absent at parent 451b6ed31d1, absent from the result).
+# The recorded tree is byte-identical to what `git merge-tree --write-tree`
+# replays, so this is not an "evil merge" a human hand-edited -- git did it,
+# silently, and every guard in the repo said PASS:
+#   * check-no-conflict-markers-push.shs greps for literal `<<<<<<<`. There is
+#     none: git never conflicted.
+#   * check-no-conflict-tree-push.shs looks for `.jjconflict-*` tree entries.
+#     There are none: the tree is a perfectly ordinary tree.
+#   * check-tree-size-push.shs bands FILE COUNTS. No file appeared or vanished.
+#   * check-runtime-api-regression-push.shs tracks `rt_*` symbol deletions.
+#     `session.retain()` is a method CALL, not an rt_* definition.
+#   * check-c-runtime-compiles-push.shs compiles C. This is Simple, and it
+#     still parses -- it is semantically dead, not syntactically broken.
+# A merge result that is well-formed bytes, correctly sized, non-conflicted and
+# symbol-preserving passes every one of them while being broken. That is the
+# damage class this guard exists for.
+#
+# Second incident of the same class, same day, source_facts.spl: a clean
+# textual three-way merge where one side deleted `val code_lines = ...` and the
+# other side added new uses of `code_lines[...]` in a DIFFERENT region of the
+# file. Git merged both edits without conflict; the result referenced a name
+# that no longer had a definition, and the damage sat OUTSIDE any marker. That
+# one was caught by hand before it was committed, so it is NOT in committed
+# history (scanned: zero commits touching either source_facts.spl carry the
+# use-without-def shape). Its SHAPE is replayed as selftest fixture 3 anyway,
+# because nothing stopped it from being committed.
+#
+# ---------------------------------------------------------------------------
+# THE INVARIANT
+# ---------------------------------------------------------------------------
+# A merge is a CONSERVATIVE operation: it may combine what its parents say, and
+# it may record a deliberate human resolution, but it must not invent content
+# and must not lose content that neither parent asked to remove.
+#
+#   Layer A -- add/add conservation. When a path is absent at the merge base
+#   and present on both parents, neither parent can have "deleted" anything:
+#   there was nothing there to delete. Therefore EVERY substantive line on
+#   either parent must survive into the result. Formally, for a path P whose
+#   base is absent:
+#       (lines(P1) UNION lines(P2)) \ lines(result)   must be empty
+#   The gpu_provider_probes.spl drop violates it with exactly one member:
+#   `session.retain()`, which parent 506601075df had and parent 451b6ed31d1
+#   did not. A line BOTH parents carried and the result lost is the same
+#   violation and the least ambiguous form of it -- neither side even
+#   disagreed about the line -- which is why the set is a union and not two
+#   one-sided differences. Fixture 1 pins the one-sided case (the real
+#   incident), fixture 6 the commonly-held case.
+#
+#   Layer B -- definition conservation. For any merged path, a NAME that a
+#   parent DEFINED, that the result no longer defines, and that the result
+#   still REFERENCES, is a lost definition with a surviving caller. That is
+#   source_facts.spl. Scoping to definitions that a parent actually had keeps
+#   this merge-specific: it is not a general undefined-symbol lint (which would
+#   fire on every import in the tree), it only asks whether THIS MERGE dropped
+#   a definition out from under a use it kept.
+#
+# Both layers read COMMITTED content only (`git cat-file`), never the working
+# checkout -- see
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+# for the 20+ rows that had that defect.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS GUARD DOES NOT DO
+# ---------------------------------------------------------------------------
+# It says nothing about single-parent commits. A stale whole-subtree "restore
+# to origin" (doc/08_tracking/bug/aspect_dynload_facet_implementation_deleted_
+# by_merge_restore_2026-09-05.md, commit fcbec1c3b62) is the SAME damage class
+# by outcome but has ONE parent, so no merge invariant applies to it -- that is
+# the anti-revert protocol's job (.claude/rules/vcs.md "Sync must never
+# clobber"). Layer A applies ONLY to add/add paths -- a path that existed at
+# the merge base is skipped entirely, because there a parent CAN legitimately
+# have deleted a line and the result is right to honour it; deciding that needs
+# the base-relative diff, not a set difference. Layer B is textual: it does not
+# resolve imports beyond a same-file `use`/`import`/`#include` of the same name,
+# so a definition that legitimately moved to another module in the same merge
+# reads as lost, and it only sees top-level declarations (see `definitions`).
+# Those are measured, not assumed -- see the false-positive numbers in
+# doc/08_tracking/bug/merge_automerge_silent_content_loss_2026-09-07.md.
+#
+# `--expect-drops <n>` is compared PER PATH, not per range: it tolerates up to n
+# dropped lines in EVERY add/add path the range touches, not n in total. That is
+# deliberately blunt -- the escape exists for one reviewed push and the accepted
+# count is recorded in the verdict line -- but do not read it as a range budget.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  — <n> commit(s) checked, ...            exit 0
+#   FAIL  — <n> commit(s) checked, ...            exit 1
+#   ERROR — nothing was checked (<reason>)        exit 2
+# A run that checked 0 commits is ERROR, never a pass.
+
+SELF=$(basename "$0")
+VERDICT_EMITTED=0
+
+# Number of substantive dropped lines tolerated before Layer A fails.
+# 0: an add/add merge has no legitimate reason to lose a line.
+CFG_MAX_DROPS=0
+SELFTEST_EXPECTED=6
+
+GREP=grep
+
+die() {
+    _rc=$1
+    shift
+    [ -n "$*" ] && printf '%s: %s\n' "$SELF" "$*" >&2
+    VERDICT_EMITTED=1
+    if [ "$_rc" -eq 2 ]; then
+        echo "$SELF: ERROR — nothing was checked ($*)"
+    fi
+    cleanup
+    exit "$_rc"
+}
+
+cleanup() {
+    [ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] && rm -rf "$TMPROOT"
+}
+
+# A guard that exits without a verdict line is indistinguishable from a pass to
+# a caller reading the last line of stdout. Refuse to do that.
+on_exit() {
+    _ec=$?
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        echo "$SELF: ERROR — nothing was checked (guard exited at status $_ec without emitting a verdict)"
+        cleanup
+        exit 2
+    fi
+    cleanup
+}
+trap on_exit EXIT
+
+# ---------------------------------------------------------------------------
+# is_scanned_path <path>
+#   Owned source only. CLAUDE.md Owned-Code Scope excludes vendored runtime.
+# ---------------------------------------------------------------------------
+is_scanned_path() {
+    case "$1" in
+        */vendor/*|vendor/*) return 1 ;;
+        src/runtime/miniaudio.h|src/runtime/stb_image.h|src/runtime/stb_truetype.h) return 1 ;;
+    esac
+    case "$1" in
+        *.spl|*.shs|*.c|*.h|*.rs) return 0 ;;
+    esac
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# substantive <file-in> <file-out>
+#   Sorted unique "substantive" lines: leading/trailing whitespace stripped,
+#   blanks, comment-only lines and short punctuation-shaped lines dropped. The
+#   length floor exists so that closing braces, `)`, `end` and other structural
+#   noise -- which legitimately move around in any merge -- never produce a
+#   finding. `session.retain()` is 17 characters and clears it comfortably.
+# ---------------------------------------------------------------------------
+substantive() {
+    awk '
+        { line = $0
+          sub(/[ \t\r]+$/, "", line)
+          sub(/^[ \t]+/, "", line)
+          if (line == "") next
+          if (line ~ /^#/) next
+          if (line ~ /^\/\//) next
+          if (line ~ /^\*/) next
+          if (length(line) < 10) next
+          print line
+        }
+    ' "$1" | LC_ALL=C sort -u > "$2"
+}
+
+# ---------------------------------------------------------------------------
+# definitions <file-in> <file-out>
+#   TOP-LEVEL (column 0) definitions only, and only forms whose left-hand side
+#   is unambiguous: fn / struct / class / enum / trait / mixin.
+#
+#   Why not indented `val`/`var` too, which is literally what source_facts.spl
+#   lost: a textual scan cannot see the OTHER ways a name gets bound -- function
+#   parameters, for-loop bindings, match/destructuring patterns, closure
+#   arguments. Treating an indented `val NAME` as "the" definition of NAME
+#   therefore reports every parameter-bound name as undefined. Measured on the
+#   real range 7d40e71aa9c^..7d40e71aa9c, the permissive version produced 1,657
+#   findings across 5 merges -- `p`, `data`, `oob_ecc`, all of them parameters
+#   or loop bindings, none of them damage. That is a cry-wolf rate that gets a
+#   gate routed around with --no-verify, which is worse than no gate.
+#
+#   Column-0 declarations have no such competing binding form: nothing else in
+#   the language introduces a top-level `fn`/`struct`/`class` name. So Layer B
+#   is scoped to the granularity shell can decide SOUNDLY. It still catches
+#   incident 1's mechanism -- one side deletes a definition, the other side adds
+#   a use somewhere else in the file, git merges both cleanly and the result
+#   references a name nothing defines -- just at file scope rather than function
+#   scope. The function-local half of that incident is NOT covered here, and
+#   closing it needs real scope analysis, not a grep.
+# ---------------------------------------------------------------------------
+definitions() {
+    awk '
+        /^(pub )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/ {
+          line = $0
+          match(line, /^(pub )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/)
+          s = substr(line, RSTART, RLENGTH)
+          sub(/^(pub )?(fn|struct|class|enum|trait|mixin) /, "", s)
+          print s
+        }
+    ' "$1" | LC_ALL=C sort -u > "$2"
+}
+
+# ---------------------------------------------------------------------------
+# evaluate <repo> <base> <new> <max_drops>
+#   0 clean / 1 offenders found ($EV_MSG) / 2 error ($EV_ERR).
+#   Sets EV_CHECKED (commits in range), EV_MERGES, EV_PATHS, EV_DROPS, EV_LOSTDEFS.
+# ---------------------------------------------------------------------------
+evaluate() {
+    ev_repo=$1
+    ev_base=$2
+    ev_new=$3
+    ev_max=$4
+    EV_ERR=""
+    EV_MSG=""
+    EV_CHECKED=0
+    EV_MERGES=0
+    EV_PATHS=0
+    EV_DROPS=0
+    EV_LOSTDEFS=0
+
+    ev_findings="$TMPROOT/findings.txt"
+    : > "$ev_findings"
+
+    ev_commits="$TMPROOT/commits.txt"
+    git -C "$ev_repo" rev-list "$ev_base..$ev_new" > "$ev_commits" 2>"$TMPROOT/revlist.err"
+    ev_rc=$?
+    if [ "$ev_rc" -ne 0 ]; then
+        EV_ERR="cannot enumerate $ev_base..$ev_new: $(head -n 1 "$TMPROOT/revlist.err")"
+        return 2
+    fi
+    EV_CHECKED=$(wc -l < "$ev_commits" | tr -d ' ')
+    [ "$EV_CHECKED" -gt 0 ] || return 0
+
+    while IFS= read -r ev_m; do
+        # Parents of this commit. Two or more -> a merge.
+        ev_parents=$(git -C "$ev_repo" rev-list --parents -n 1 "$ev_m" 2>/dev/null)
+        ev_rc=$?
+        [ "$ev_rc" -eq 0 ] || { EV_ERR="cannot read parents of $ev_m"; return 2; }
+        # shellcheck disable=SC2086
+        set -- $ev_parents
+        shift
+        ev_p1=$1
+        ev_p2=$2
+        [ -n "$ev_p2" ] || continue
+        EV_MERGES=$((EV_MERGES + 1))
+
+        ev_mb=$(git -C "$ev_repo" merge-base "$ev_p1" "$ev_p2" 2>/dev/null)
+        ev_rc=$?
+        [ "$ev_rc" -eq 0 ] || ev_mb=""
+
+        ev_paths="$TMPROOT/paths.txt"
+        # Union of both parent diffs. A three-tree `git diff-tree A B C` reports
+        # NOTHING (measured: 0 paths where the two-tree diffs report 469 and
+        # 973), which silently made an earlier prototype of this guard scan
+        # zero paths and report a clean sweep of 260 merges.
+        { git -C "$ev_repo" diff-tree -r --name-only --no-commit-id "$ev_p1" "$ev_m"
+          git -C "$ev_repo" diff-tree -r --name-only --no-commit-id "$ev_p2" "$ev_m"
+        } 2>/dev/null | LC_ALL=C sort -u > "$ev_paths"
+
+        while IFS= read -r ev_p; do
+            [ -n "$ev_p" ] || continue
+            is_scanned_path "$ev_p" || continue
+            git -C "$ev_repo" cat-file -e "$ev_m:$ev_p"  2>/dev/null || continue
+            git -C "$ev_repo" cat-file -e "$ev_p1:$ev_p" 2>/dev/null || continue
+            git -C "$ev_repo" cat-file -e "$ev_p2:$ev_p" 2>/dev/null || continue
+
+            ev_rf="$TMPROOT/rf"; ev_af="$TMPROOT/af"; ev_bf="$TMPROOT/bf"
+            git -C "$ev_repo" cat-file -p "$ev_m:$ev_p"  > "$ev_rf" 2>/dev/null
+            git -C "$ev_repo" cat-file -p "$ev_p1:$ev_p" > "$ev_af" 2>/dev/null
+            git -C "$ev_repo" cat-file -p "$ev_p2:$ev_p" > "$ev_bf" 2>/dev/null
+            EV_PATHS=$((EV_PATHS + 1))
+
+            # ---- Layer A: add/add conservation -------------------------
+            ev_addadd=1
+            if [ -n "$ev_mb" ] && git -C "$ev_repo" cat-file -e "$ev_mb:$ev_p" 2>/dev/null; then
+                ev_addadd=0
+            fi
+            if [ "$ev_addadd" -eq 1 ]; then
+                substantive "$ev_rf" "$TMPROOT/r.s"
+                substantive "$ev_af" "$TMPROOT/a.s"
+                substantive "$ev_bf" "$TMPROOT/b.s"
+                # (P1 UNION P2) MINUS result -- literally the invariant in the
+                # header. An earlier draft computed the two one-sided
+                # differences ((P1\R)\P2 and (P2\R)\P1), which silently
+                # EXEMPTED every line BOTH parents carried and the result
+                # lost. That is the least ambiguous damage there is: neither
+                # side even disagreed about the line. Code and prose must not
+                # diverge, so the union is what is computed. Fixture 6 pins it.
+                LC_ALL=C sort -u "$TMPROOT/a.s" "$TMPROOT/b.s" > "$TMPROOT/ab.s"
+                LC_ALL=C comm -23 "$TMPROOT/ab.s" "$TMPROOT/r.s" > "$TMPROOT/da.s"
+                ev_dt=$(wc -l < "$TMPROOT/da.s" | tr -d ' ')
+                if [ "$ev_dt" -gt "$ev_max" ]; then
+                    EV_DROPS=$((EV_DROPS + ev_dt))
+                    ev_sample=$(head -n 2 "$TMPROOT/da.s" | tr '\n' '|')
+                    printf 'add/add-drop %s %s %s line(s), e.g. %s\n' \
+                        "$(echo "$ev_m" | cut -c1-11)" "$ev_p" "$ev_dt" "$ev_sample" >> "$ev_findings"
+                fi
+            fi
+
+            # ---- Layer B: definition conservation ----------------------
+            definitions "$ev_rf" "$TMPROOT/r.d"
+            definitions "$ev_af" "$TMPROOT/a.d"
+            definitions "$ev_bf" "$TMPROOT/b.d"
+            LC_ALL=C sort -u "$TMPROOT/a.d" "$TMPROOT/b.d" > "$TMPROOT/pp.d"
+            LC_ALL=C comm -23 "$TMPROOT/pp.d" "$TMPROOT/r.d" > "$TMPROOT/lost.d"
+            if [ -s "$TMPROOT/lost.d" ]; then
+                while IFS= read -r ev_name; do
+                    [ -n "$ev_name" ] || continue
+                    # An import of the same name in the result is a legitimate
+                    # relocation of the definition, not a loss.
+                    if $GREP -qE "^[[:space:]]*(use|import|#include)\b.*\b${ev_name}\b" "$ev_rf" 2>/dev/null; then
+                        continue
+                    fi
+                    # ... including a MULTI-LINE `use mod.{ a, b, c }` block,
+                    # whose continuation lines carry the name alone (optionally
+                    # `orig as alias`) with no `use` keyword on them. Measured
+                    # FP without this: merge 33391d7b331,
+                    # src/os/drivers/framebuffer/ramfb.spl -- parent1 declared
+                    # `fn x86_port_inb` locally while parent2 imported it, the
+                    # merge kept parent2's import spread over lines 26-30, and
+                    # the single-line check saw a lost definition with two live
+                    # callers. Three names in one file, none of them damage.
+                    if $GREP -qE "^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*[[:space:]]+as[[:space:]]+)?${ev_name}[[:space:]]*,?[[:space:]]*\}?[[:space:]]*$" "$ev_rf" 2>/dev/null; then
+                        continue
+                    fi
+                    # A FREE call: `name(` not reached through a receiver and
+                    # not a named-argument label. Plain word-boundary matching
+                    # was tried and measured unusable -- on the real range
+                    # ee1aff2ee38..0f54654535d it counted `.compile(` as 29
+                    # references to a lost top-level `fn compile`, and did the
+                    # same for `.access`, `.request`, `.exclusion`. A method
+                    # call and a named-arg label resolve somewhere else
+                    # entirely; only a bare `name(` needs a definition in this
+                    # file (or an import, excluded just above).
+                    ev_refs=$($GREP -cE "(^|[^.[:alnum:]_])${ev_name}[[:space:]]*\(" "$ev_rf" 2>/dev/null)
+                    [ -n "$ev_refs" ] || ev_refs=0
+                    if [ "$ev_refs" -gt 0 ]; then
+                        EV_LOSTDEFS=$((EV_LOSTDEFS + 1))
+                        printf 'lost-definition %s %s %s (%s surviving reference(s))\n' \
+                            "$(echo "$ev_m" | cut -c1-11)" "$ev_p" "$ev_name" "$ev_refs" >> "$ev_findings"
+                    fi
+                done < "$TMPROOT/lost.d"
+            fi
+        done < "$ev_paths"
+    done < "$ev_commits"
+
+    if [ -s "$ev_findings" ]; then
+        ev_n=$(wc -l < "$ev_findings" | tr -d ' ')
+        # Distinct OFFENDING merges, not the total scanned. Saying "across
+        # $EV_MERGES merge(s)" reads as if every merge in the range were
+        # flagged, which on the incident range would have claimed 5 of 5 when
+        # the real answer is 1 of 5.
+        ev_bad=$(cut -d' ' -f2 "$ev_findings" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+        EV_MSG="$ev_n finding(s) in $ev_bad of $EV_MERGES merge(s): $(head -n 6 "$ev_findings" | tr '\n' ';')"
+        return 1
+    fi
+    return 0
+}
+
+# ===========================================================================
+# SELFTEST
+# ===========================================================================
+st_commit_tree() {
+    # st_commit_tree <msg> <parent...> -- builds a commit from the current index
+    st_msg=$1
+    shift
+    st_tree=$(git write-tree) || return 1
+    st_pargs=""
+    for st_p in "$@"; do st_pargs="$st_pargs -p $st_p"; done
+    # shellcheck disable=SC2086
+    git commit-tree "$st_tree" $st_pargs -m "$st_msg"
+}
+
+selftest() {
+    st_dir="$TMPROOT/st"
+    rm -rf "$st_dir"
+    mkdir -p "$st_dir/src/lib/gpu" "$st_dir/src/app" "$st_dir/src/lib/vendor" || return 1
+    ( cd "$st_dir" && git init -q . ) || return 1
+    GIT_DIR="$st_dir/.git"; GIT_WORK_TREE="$st_dir"
+    export GIT_DIR GIT_WORK_TREE
+    git config user.email selftest@example.invalid
+    git config user.name selftest
+    git config commit.gpgsign false
+    st_fail=0
+    st_ran=0
+
+    P_GPU=src/lib/gpu/gpu_provider_probes.spl
+    P_FACT=src/app/source_facts.spl
+    P_VEND=src/lib/vendor/gpu_provider_probes.spl
+
+    # ---- root: neither incident path exists yet (add/add requires this) ----
+    printf 'fn placeholder_root_marker() -> i64:\n    return 1\n' > "$st_dir/src/app/root.spl"
+    git add -A >/dev/null
+    C_ROOT=$(st_commit_tree "root") || return 1
+
+    # ---- Fixture 1: incident-2 replay, add/add silent drop, must FAIL -----
+    # Parent A adds the file WITH session.retain(); parent B adds a variant
+    # WITHOUT it. Both add; the base has no such path. The merge result is
+    # recorded as parent B's content -- exactly what git's empty-base LCS
+    # produced for 7d40e71aa9c.
+    git read-tree "$C_ROOT"; git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXA'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(
+        provider_name: "vulkan",
+        probe_error: ""
+    )
+    session.retain()
+    session.release()
+    report
+FIXA
+    git add -A >/dev/null
+    C_A=$(st_commit_tree "sideA: probe with retain" "$C_ROOT") || return 1
+
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_GPU"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXB'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(
+        provider_name: "vulkan",
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+    session.release()
+    report
+FIXB
+    git add -A >/dev/null
+    C_B=$(st_commit_tree "sideB: probe with timestamps" "$C_ROOT") || return 1
+
+    # merge tree == side B exactly: retain() is gone, no marker, no conflict.
+    git read-tree "$C_B"
+    C_M1=$(st_commit_tree "merge: land both probe changes" "$C_A" "$C_B") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_ROOT" "$C_M1" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 1 ]; then
+        echo "SELFTEST FAIL: fixture 1 (add/add silent drop) expected verdict 1, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+    case "$EV_MSG" in
+        *session.retain*) : ;;
+        *) echo "SELFTEST FAIL: fixture 1 EV_MSG does not name the dropped session.retain() line: $EV_MSG" >&2; st_fail=1 ;;
+    esac
+    case "$EV_MSG" in
+        *add/add-drop*) : ;;
+        *) echo "SELFTEST FAIL: fixture 1 EV_MSG missing add/add-drop classification: $EV_MSG" >&2; st_fail=1 ;;
+    esac
+
+    # ---- Fixture 2: clean control, merge keeps both sides, must PASS ------
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_GPU"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXC'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(
+        provider_name: "vulkan",
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+    session.retain()
+    session.release()
+    report
+FIXC
+    git add -A >/dev/null
+    C_M2=$(st_commit_tree "merge: land both probe changes, conserving" "$C_A" "$C_B") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_ROOT" "$C_M2" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: fixture 2 (conserving merge) expected verdict 0, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+
+    # ---- Fixture 3: incident-1 replay, lost definition, must FAIL --------
+    # source_facts.spl's mechanism exactly: side A DELETES a definition, side B
+    # ADDS a use of it in a DIFFERENT region of the same file. The two edits do
+    # not overlap, so git merges both cleanly -- no conflict, no marker, damage
+    # entirely OUTSIDE any marker -- and the result references a name nothing
+    # defines. The path exists at the merge base here, so Layer A does not fire
+    # at all: this fixture proves Layer B discriminates on its own.
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_GPU"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_FACT" <<'FIXD'
+fn simple_code_lines(source: text) -> [text]:
+    return source.split_lines()
+fn extract_sspec_source_facts(source: text) -> i64:
+    val counted_rows = simple_code_lines(source).len()
+    return counted_rows
+fn extract_sspec_manual_facts(content: text) -> i64:
+    return content.len()
+FIXD
+    git add -A >/dev/null
+    C_FBASE=$(st_commit_tree "facts: introduce simple_code_lines" "$C_ROOT") || return 1
+
+    # Side A: the definition is refactored away (its one caller went with it).
+    cat > "$st_dir/$P_FACT" <<'FIXE'
+fn extract_sspec_source_facts(source: text) -> i64:
+    val counted_rows = 0
+    return counted_rows
+fn extract_sspec_manual_facts(content: text) -> i64:
+    return content.len()
+FIXE
+    git add -A >/dev/null
+    C_FA=$(st_commit_tree "facts: drop simple_code_lines" "$C_FBASE") || return 1
+
+    # Side B: a NEW caller, far from side A's deletion, in a different function.
+    cat > "$st_dir/$P_FACT" <<'FIXF'
+fn simple_code_lines(source: text) -> [text]:
+    return source.split_lines()
+fn extract_sspec_source_facts(source: text) -> i64:
+    val counted_rows = simple_code_lines(source).len()
+    return counted_rows
+fn extract_sspec_manual_facts(content: text) -> i64:
+    val manual_rows = simple_code_lines(content).len()
+    return manual_rows
+FIXF
+    git add -A >/dev/null
+    C_FB=$(st_commit_tree "facts: count manual rows too" "$C_FBASE") || return 1
+
+    # git's clean automerge of the two non-overlapping edits.
+    cat > "$st_dir/$P_FACT" <<'FIXG'
+fn extract_sspec_source_facts(source: text) -> i64:
+    val counted_rows = 0
+    return counted_rows
+fn extract_sspec_manual_facts(content: text) -> i64:
+    val manual_rows = simple_code_lines(content).len()
+    return manual_rows
+FIXG
+    git add -A >/dev/null
+    C_M3=$(st_commit_tree "merge: land the manual row count" "$C_FA" "$C_FB") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_FBASE" "$C_M3" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 1 ]; then
+        echo "SELFTEST FAIL: fixture 3 (lost definition) expected verdict 1, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+    case "$EV_MSG" in
+        *lost-definition*simple_code_lines*) : ;;
+        *) echo "SELFTEST FAIL: fixture 3 EV_MSG does not name the lost simple_code_lines definition: $EV_MSG" >&2; st_fail=1 ;;
+    esac
+    if [ "$EV_DROPS" -ne 0 ]; then
+        echo "SELFTEST FAIL: fixture 3 must be a Layer B finding only, but Layer A reported $EV_DROPS drop(s)" >&2
+        st_fail=1
+    fi
+
+    # ---- Fixture 4: identical damage under vendor/, must NOT be scanned --
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_FACT"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    mkdir -p "$st_dir/src/lib/vendor"
+    cat > "$st_dir/$P_VEND" <<'FIXH'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(
+        provider_name: "vulkan",
+        probe_error: ""
+    )
+    session.retain()
+    session.release()
+    report
+FIXH
+    git add -A >/dev/null
+    C_VA=$(st_commit_tree "vendor sideA" "$C_ROOT") || return 1
+
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_VEND"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    mkdir -p "$st_dir/src/lib/vendor"
+    cat > "$st_dir/$P_VEND" <<'FIXI'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(
+        provider_name: "vulkan",
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+    session.release()
+    report
+FIXI
+    git add -A >/dev/null
+    C_VB=$(st_commit_tree "vendor sideB" "$C_ROOT") || return 1
+
+    git read-tree "$C_VB"
+    C_M4=$(st_commit_tree "merge: vendor add/add" "$C_VA" "$C_VB") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_ROOT" "$C_M4" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: fixture 4 (vendored path) expected verdict 0 (not scanned), got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+    if [ "$EV_PATHS" -ne 0 ]; then
+        echo "SELFTEST FAIL: fixture 4 scanned $EV_PATHS vendored path(s); it must scan none" >&2
+        st_fail=1
+    fi
+
+    # ---- Fixture 5: empty range -> EV_CHECKED 0 so the caller ERRORs -----
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_M4" "$C_M4" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 0 ] || [ "$EV_CHECKED" -ne 0 ]; then
+        echo "SELFTEST FAIL: fixture 5 (empty range) expected verdict 0 with EV_CHECKED=0, got $st_got / $EV_CHECKED" >&2
+        st_fail=1
+    fi
+
+    # ---- Fixture 6: a line BOTH parents carried, lost by the merge -------
+    # The one case the one-sided set difference exempted. Both parents have
+    # `session.release()`; the recorded merge has neither it nor retain().
+    # Neither side disagreed about that line, so nothing can justify its loss.
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_VEND" "$st_dir/$P_FACT"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXJ'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(provider_name: "vulkan")
+    session.release()
+    report
+FIXJ
+    git add -A >/dev/null
+    C_SA=$(st_commit_tree "sideA: release" "$C_ROOT") || return 1
+
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_GPU"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXK'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(provider_name: "vulkan", probe_error: "")
+    session.release()
+    report
+FIXK
+    git add -A >/dev/null
+    C_SB=$(st_commit_tree "sideB: release plus probe_error" "$C_ROOT") || return 1
+
+    git read-tree "$C_ROOT"
+    rm -f "$st_dir/$P_GPU"
+    git checkout-index -a -f --prefix="$st_dir/" >/dev/null 2>&1
+    cat > "$st_dir/$P_GPU" <<'FIXL'
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    val session = engine2d_gpu_session_open()
+    val report = Engine2dGpuProviderReport(provider_name: "vulkan", probe_error: "")
+    report
+FIXL
+    git add -A >/dev/null
+    C_M6=$(st_commit_tree "merge: lose a line both sides had" "$C_SA" "$C_SB") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$C_ROOT" "$C_M6" "$CFG_MAX_DROPS"
+    st_got=$?
+    if [ "$st_got" -ne 1 ]; then
+        echo "SELFTEST FAIL: fixture 6 (line both parents had) expected verdict 1, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+    case "$EV_MSG" in
+        *session.release*) : ;;
+        *) echo "SELFTEST FAIL: fixture 6 EV_MSG does not name the commonly-held session.release() line: $EV_MSG" >&2; st_fail=1 ;;
+    esac
+
+    unset GIT_DIR GIT_WORK_TREE
+
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 add/add-drop incident replay, 1 conserving control, 1 lost-definition incident replay, 1 vendored must-not-scan, 1 empty-range, 1 commonly-held-line loss)"
+    return 0
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+TMPROOT=$(mktemp -d) || { VERDICT_EMITTED=1
+                          echo "$SELF: ERROR — cannot mktemp" >&2
+                          echo "$SELF: ERROR — nothing was checked (cannot mktemp)"
+                          exit 2; }
+
+RUN_SELFTEST=1
+if [ "${1:-}" = --scan-only ]; then
+    RUN_SELFTEST=0
+    shift
+fi
+
+if [ "$RUN_SELFTEST" -eq 1 ]; then
+    ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+            GIT_CONFIG GIT_CONFIG_COUNT
+      selftest )
+    st_rc=$?
+    if [ "$st_rc" -ne 0 ]; then
+        VERDICT_EMITTED=1
+        echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+        echo "$SELF: ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+expect_drops=0
+max_drops=$CFG_MAX_DROPS
+if [ "${1:-}" = "--expect-drops" ]; then
+    shift
+    [ "$#" -gt 0 ] || die 2 "--expect-drops needs a number"
+    expect_drops=$1
+    case "$expect_drops" in
+        ''|*[!0-9]*) die 2 "--expect-drops '$expect_drops' is not a non-negative integer" ;;
+    esac
+    max_drops=$expect_drops
+    shift
+fi
+
+range="${1:-}"
+explicit=0
+[ -n "$range" ] && explicit=1
+[ "$RUN_SELFTEST" -eq 1 ] || [ "$explicit" -eq 1 ] || die 2 "--scan-only requires an explicit base..new range"
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        base=$(git rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null) || base=""
+        tip=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || tip=""
+    fi
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve the outgoing range from jj or origin/main.
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<new-sha>'."
+    fi
+    range="$base..$tip"
+else
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git, which is not
+  what this guard is for. Pass '<base>..<new>'." ;;
+    esac
+    base=${range%%..*}
+    tip=${range#*..}
+    tip=${tip#.}
+fi
+
+for ep in "$base" "$tip"; do
+    git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+        || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel."
+done
+
+evaluate "$toplevel" "$base" "$tip" "$max_drops"
+st=$?
+
+if [ "$st" -eq 2 ]; then
+    die 2 "$EV_ERR"
+fi
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    die 2 "range '$range' contains 0 commits. If the range is genuinely empty, do not call this guard."
+fi
+
+if [ "$st" -eq 1 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. A merge in this range lost content its parents did not agree to
+remove -- the shape of the 2026-09-07 gpu_provider_probes.spl incident, where
+git auto-merged an add/add against an EMPTY base, printed "Auto-merging",
+emitted no conflict and no marker, and silently dropped session.retain().
+
+$EV_MSG
+
+Investigate before doing anything else:
+  git rev-list --parents -n1 <merge>
+  git diff <parent1> <merge> -- <path>
+  git diff <parent2> <merge> -- <path>
+
+An "add/add-drop" finding means a line existed on one parent, was absent from
+the other, and vanished from the result: no parent asked for that deletion.
+A "lost-definition" finding means the merge deleted a definition while keeping
+code that still references the name.
+
+If a drop is DELIBERATE and reviewed, re-run with --expect-drops <n> for this
+one push and record the accepted count -- do not silently retry.
+EOF
+    VERDICT_EMITTED=1
+    echo "$SELF: FAIL — $EV_CHECKED commit(s) checked in $range ($EV_MERGES merge(s), $EV_PATHS merged path(s)), $EV_DROPS add/add drop(s), $EV_LOSTDEFS lost definition(s), $EV_MSG"
+    exit 1
+fi
+
+VERDICT_EMITTED=1
+if [ "$expect_drops" -gt 0 ]; then
+    echo "$SELF: PASS — $EV_CHECKED commit(s) checked, $EV_MERGES merge(s), $EV_PATHS merged path(s), 0 unexpected losses ($expect_drops drop(s) accepted via --expect-drops)"
+else
+    echo "$SELF: PASS — $EV_CHECKED commit(s) checked, $EV_MERGES merge(s), $EV_PATHS merged path(s), 0 add/add drops, 0 lost definitions"
+fi
+exit 0

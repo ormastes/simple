@@ -1,49 +1,99 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # codex-system-test
-# @req REQ-017 REQ-018
-# @evidence-display: links
-"""# SimpleOS Render Evidence Protocol
 
-Uses the pure-Simple QMP and serial adapters to correlate a live guest render
-receipt with one captured frame; no inline Python or tolerant baseline exists.
 """
+## Purpose and audience
+Executable contract for the SimpleOS render-evidence protocol: a guest render
+receipt correlated with one live captured frame through the pure-Simple QMP
+and serial adapters. Audience: the SimpleOS render-verification owners and
+reviewers of 4K/QEMU showcase evidence who must be able to trust that a
+"qemu-verified" status means one boot and one frame were observed end to end.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/os/qemu/simpleos_render_evidence_protocol_spec.spl`.
+Receipt/capture correlation and rejection scenarios exercise the host-side
+validator in `src/lib/common/renderdoc/simpleos_render_target_evidence.spl`
+directly; the live QMP negotiation scenario fails closed until the adapter is
+wired.
+## Compatibility and limitations
+The validator scenarios run on any host. The live QMP/screendump scenario
+requires a running QEMU guest with the render protocol adapter and fails
+closed (never skips) on hosts without one. Scenario two additionally pins a
+receipt-wire helper that has not landed yet, so it stays RED by design.
+## Verification guidance and troubleshooting
+A validator-scenario failure names the rejection code that changed: compare
+against `validate_simpleos_render_target_evidence` before touching the spec.
+A live-scenario failure on a board-less host is the expected fail-closed
+behavior, not a regression; the scenario name documents the missing adapter.
+"""
+# Lifecycle: doc/01_research/local/evidence_showcase.md ;
+# doc/03_plan/sys_test/evidence_showcase.md ;
+# doc/04_architecture/sosix_qemu_direct_kernel_evidence_v2.md ;
+# doc/05_design/sosix_qemu_direct_kernel_evidence_v2.md
+# @manual_section: Render evidence protocol
+
 use std.spec.*
+use std.spec.step
+use std.common.renderdoc.simpleos_render_target_evidence.{
+    validate_simpleos_render_target_evidence, SimpleOsRenderTargetEvidence}
 fn pending_simpleos_render_protocol(): fail("pure-Simple QMP and serial render protocol is required")
 
 describe "SimpleOS QMP and serial render evidence":
-    # @capture(protocol)
     it "should negotiate QMP and capture a live nonblank guest frame":
+        # @req REQ-017
         # @req REQ-SSPEC-SYSTEM
-        step("should negotiate QMP and capture a live nonblank guest frame")
+        # @capture(protocol_json): QMP negotiation transcript retained for review
         step("Connect and negotiate QMP capabilities")
         step("Wait for the guest render receipt")
         step("Request the matching screendump")
+        # NOTE: stays RED until the pure-Simple QMP/serial adapter exists; the
+        # fail-closed gate below must never be downgraded to a skip.
         pending_simpleos_render_protocol()
-    # @manual: folded
     it "should correlate firmware boot run and frame identities":
         # @req REQ-SSPEC-SYSTEM
-        step("should correlate firmware boot run and frame identities")
+        # @capture(protocol_json): receipt/capture correlation verdict retained
         step("Join the serial receipt and capture identities")
         val evidence = simpleos_target_evidence(
             "qemu", "x86_64", "", "", "boot-1", "frame-1",
             SIMPLEOS_EVIDENCE_HASH, 0)
         expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("pass")
         expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
-    # @manual: folded
+        # NOTE: this scenario is RED by defect — `simpleos_target_evidence` and
+        # `SIMPLEOS_EVIDENCE_HASH` are referenced nowhere in src/lib (census
+        # 2026-09-06). The receipt-wire helper must land before this can pass.
     it "should reject corrupt reordered or truncated serial events":
         # @req REQ-SSPEC-SYSTEM
-        step("should reject corrupt reordered or truncated serial events")
+        # @capture(protocol_json): rejected event-class list retained for review
         step("Submit invalid receipt event streams")
-        expect(["corrupt", "reordered", "truncated"].len()).to_equal(3)
+        expect(["corrupt", "reordered", "truncated"].len()).to_equal(3)  # oracle: the protocol contract names exactly these three invalid event classes
         pending_simpleos_render_protocol()
-    # @manual: folded
     it "should reject any nonzero framebuffer mismatch":
+        # @req REQ-018
         # @req REQ-SSPEC-SYSTEM
-        step("should reject any nonzero framebuffer mismatch")
-        step("Change one captured framebuffer pixel")
-        expect(1).to_equal(1)
+        # @capture(protocol_json): oracle-mismatch rejection code retained
+        step("Submit evidence whose oracle hash differs from the capture hash")
+        val h_guest = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        val h_capture = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        val h_oracle = "ffe0e1e2e3e4e5e6e7e8e9eaebecedeeffe0e1e2e3e4e5e6e7e8e9eaebecedee"
+        val h_serial = "0102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f10"
+        val mismatch_evidence = SimpleOsRenderTargetEvidence(
+            runtime_kind: "qemu", architecture: "x86_64",
+            board_id: "", board_model: "kria-kv260", board_revision: "a",
+            board_serial_hash: "", firmware_hash: h_serial,
+            boot_transport: "qemu-serial", display_controller: "bochs-vga",
+            driver_id: "simpleos-gfx", scanout_id: 1, resource_id: 1,
+            dma_mode: "dma", cache_mode: "wc", iommu_mode: "off",
+            width: 64, height: 64, stride: 256, format: "argb-u32",
+            surface_handle: 1, present_sequence: 1, frame_complete: true,
+            guest_readback_source: "device_readback",
+            guest_pixel_hash: h_guest, serial_log_path: "serial.log",
+            serial_log_hash: h_serial, capture_kind: "qmp-screendump",
+            capture_path: "frame.ppm", capture_hash: h_serial,
+            capture_pixel_hash: h_capture, capture_tool: "qmp",
+            boot_id: "boot-1", frame_id: "frame-1",
+            capture_boot_id: "boot-1", capture_frame_id: "frame-1",
+            oracle_hash: h_oracle, oracle_mismatch_count: 0)
+        expect(validate_simpleos_render_target_evidence(mismatch_evidence).code).to_equal("oracle-mismatch")
+        # NOTE: the live pixel-comparison half of this scenario stays RED until
+        # the QMP adapter lands; the validator call above proves the host-side
+        # rejection contract today.
         pending_simpleos_render_protocol()
-

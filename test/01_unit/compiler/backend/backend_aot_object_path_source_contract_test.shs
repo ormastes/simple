@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+tools=$root/src/compiler/70.backend/backend/llvm_backend_tools.spl
+adapter=$root/src/compiler/70.backend/backend/llvm_codegen_adapter.spl
+helpers=$root/src/compiler/70.backend/backend/backend_helpers.spl
+session=$root/src/compiler/70.backend/backend_plugin/session.spl
+driver=$root/src/compiler/80.driver/driver_aot_native_output.spl
+builtin=$root/src/compiler/70.backend/backend_plugin/builtin_adapter.spl
+dynamic=$root/src/compiler/70.backend/backend_plugin/dynamic_adapter.spl
+diagnostic=$root/src/compiler/70.backend/backend/aot_path_diagnostic.spl
+registry=$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+extern_abi=$root/src/compiler/50.mir/text_extern_abi.spl
+rust_seed_calls=$root/src/compiler_rust/compiler/src/codegen/instr/calls.rs
+runtime_test=$root/test/01_unit/runtime/secure_staging_runtime_test.c
+runtime_build=$root/src/compiler_rust/runtime/build.rs
+capsule_tools=$root/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
+capsule_tests=$root/src/compiler_rust/compiler/src/pipeline/native_project/tests.rs
+
+grep -F 'pub fn compile_ir_to_object_path(' "$tools" >/dev/null
+grep -F 'pub fn llvm_compile_module_direct_to_path(' "$adapter" >/dev/null
+grep -F 'fn compile_llvm_module_to_object_path(' "$helpers" >/dev/null
+grep -F 'fn compile_aot_into_path(' "$session" >/dev/null
+grep -F 'return builtin.compile_aot_into_path(' "$session" >/dev/null
+grep -F 'compile_llvm_module_to_object_path(' "$builtin" >/dev/null
+grep -F 'val envelope = backend_plugin_run_module_v1(' "$dynamic" >/dev/null
+grep -F 'dynamic_backend_publish_object_v1(' "$dynamic" >/dev/null
+grep -F 'val stage_dir = secure_temp_dir_raw(dirname(object_path),' "$dynamic" >/dev/null
+grep -F 'val publish_status = file_publish_noreplace_raw(staged_object, object_path)' "$dynamic" >/dev/null
+grep -F 'diagnostic_path, envelope.diagnostic' "$dynamic" >/dev/null
+grep -F 'session.compile_aot_into_path(' "$driver" >/dev/null
+grep -F 'case Err(error): return Err(error)' "$driver" >/dev/null
+if sed -n '/fn _compile_frozen_module_capsule(/,/fn _compile_selected_module(/p' "$driver" \
+    | grep -F 'case Err(_): return result'; then
+    echo 'frozen capsule forwards a consumed Result and may lose diagnostics' >&2
+    exit 1
+fi
+grep -F 'secure_temp_dir_raw(' "$driver" >/dev/null
+grep -F 'file_read_regular_no_follow_bounded(' "$driver" >/dev/null
+grep -F 'file_atomic_write(path, bounded)' "$diagnostic" >/dev/null
+grep -F 'print "warning: backend AOT:' "$driver" >/dev/null
+grep -F 'print "warning: published object; diagnostic staging cleanup failed:' "$driver" >/dev/null
+grep -F 'if not dir_remove(diagnostic_dir, true):' "$driver" >/dev/null
+grep -F 'RuntimeFuncSpec::new("rt_secure_temp_dir", &[I64, I64, I64, I64], &[I64])' "$registry" >/dev/null
+grep -F 'RuntimeFuncSpec::new("rt_file_publish_noreplace", &[I64, I64, I64, I64], &[I64])' "$registry" >/dev/null
+grep -F '"rt_secure_temp_dir" | "rt_file_publish_noreplace"' "$extern_abi" >/dev/null
+grep -F '"rt_secure_temp_dir" | "rt_file_publish_noreplace" => Some(&[0, 1])' "$rust_seed_calls" >/dev/null
+grep -F 'fn secure_staging_expands_both_text_arguments_to_ptr_len_pairs()' "$rust_seed_calls" >/dev/null
+grep -F 'rt_file_publish_noreplace' "$runtime_test" | grep -F '== 0' >/dev/null
+grep -F 'rt_file_publish_noreplace' "$runtime_test" | grep -F '== -1' >/dev/null
+test "$(sed -n '/let mut c_sources = vec!\[/,/^    \];/p' "$runtime_build" | grep -F '"runtime_secure_staging.c"' | wc -l | tr -d ' ')" = 1
+if sed -n '/fn build_bootstrap_mutex_runtime_capsule_archive(/,/fn project_stage4_archive_closure(/p' "$capsule_tools" | grep -E 'rt_secure_temp_dir|rt_file_publish_noreplace'; then
+    echo 'secure staging has duplicate bootstrap-capsule ownership' >&2
+    exit 1
+fi
+grep -F 'defined.intersection(&secure_staging).count(), 0' "$capsule_tests" >/dev/null
+grep -F 'val stage_dir = rt_secure_temp_dir(parent, "simple-llvm-aot")' "$tools" >/dev/null
+grep -F 'val publish_status = rt_file_publish_noreplace(staged_obj_path, obj_path)' "$tools" >/dev/null
+grep -F 'if publish_status == 1:' "$tools" >/dev/null
+grep -F 'if publish_status == 0:' "$tools" >/dev/null
+grep -F 'file_is_regular_no_follow(staged_obj_path)' "$tools" >/dev/null
+grep -F 'dir_remove(stage_dir, true)' "$tools" >/dev/null
+grep -F 'file_is_regular_no_follow(obj_path)' "$driver" >/dev/null
+if grep -F 'args.push(obj_path)' "$tools" >/dev/null; then
+    echo 'llc still writes the public object leaf' >&2
+    exit 1
+fi
+if sed -n '/pub fn compile_ir_to_object_path(/,/fn llvm_target_flags/p' "$tools" | grep -E 'Result<|case Ok|case Err'; then
+    echo 'aggregate Result remains in selected object-path producer' >&2
+    exit 1
+fi
+if grep -F 'file_delete(object_path)' "$dynamic" "$session" "$builtin" >/dev/null; then
+    echo 'fail-closed provider deletes the public destination' >&2
+    exit 1
+fi
+if sed -n '/fn compile_aot_into_path(/,/me close()/p' "$dynamic" | grep -E 'Result<|CompiledModule|CodegenOutput'; then
+    echo 'aggregate result remains in dynamic object-path producer' >&2
+    exit 1
+fi
+if grep -R -F 'BackendAotDiagnosticSink' "$root/src/compiler/70.backend" "$driver" >/dev/null; then
+    echo 'value-copied diagnostic sink remains in object-path chain' >&2
+    exit 1
+fi
+if sed -n '/if val session = backend_session:/,/compile_module_with_backend_target_cpu_storage_bindings(/p' "$driver" | grep -F 'compile_aot_module('; then
+    echo 'unsafe aggregate session AOT call remains' >&2
+    exit 1
+fi
+printf '%s\n' 'PASS backend AOT object-path scalar source contract'

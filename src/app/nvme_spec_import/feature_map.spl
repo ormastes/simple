@@ -1,0 +1,153 @@
+"""
+feature_map — the 20 MANDATORY rows of
+`doc/02_requirements/hardware/nvme/nvme_mandatory_feature_matrix.md`, expressed
+as data so the extractor can map an extracted clause onto a work item and the
+generator can decide what kind of scenario is honest for it.
+
+STATUS VALUES, and what each one licenses a generated scenario to do:
+
+  `transport`  — drivable through the HOST-EQUIVALENT path: an SQE written into
+                 queue memory, a doorbell rung, a phase-tagged CQE polled.
+                 `fw/nvme_host_driver.spl` does this for the NVM command set and
+                 `fw/admin_transport.spl` does it for all 13 admin opcodes.
+                 Highest fidelity available in-tree.
+  `dispatch`   — drivable only by calling controller entry points directly.
+                 NOT host-equivalent. No row uses this status any more; the
+                 value is kept because a future row may legitimately need it.
+  `blocked`    — not testable at all today. Carries a NAMED blocker; the
+                 generator emits a blocked marker that ASSERTS the blocker,
+                 never an assertion that quietly passes.
+
+RE-SCORED 2026-09-01 against capability that landed after the first scoring.
+Four blockers that this file previously recorded are now CLOSED, verified by
+running the named programs from the repo root and reading their verdict lines:
+
+  * no controller register file  -> CLOSED. `fw/nvme_reg_defs.spl` and
+    `fw/nvme_reg_file.spl` implement CAP/VS/CC/CSTS/AQA/ASQ/ACQ with enforced
+    RO/RW/RW1C/reserved semantics; `fw/nvme_registers_check.spl` prints
+    NVME REGISTERS OK.
+  * no admin transport           -> CLOSED. `fw/admin_transport.spl` carries all
+    13 admin opcodes SQE-in-memory -> doorbell -> phase-tagged CQE;
+    `fw/admin_transport_check.spl` prints ADMIN TRANSPORT OK. The old note that
+    "no admin command can travel through the doorbell path" is therefore FALSE
+    and has been removed rather than softened.
+  * one-word command payload     -> CLOSED. Real 4096-byte PageData moves
+    host -> media -> host (`fw/payload_widening_witness_check.spl`).
+  * PRP is two packed bases      -> CLOSED. PRP1/PRP2 are real addresses the
+    device DMAs from, witnessed by mutating the data at the PRP address before
+    the doorbell (`fw/prp_wire_witness_check.spl`).
+
+`arbitration` -> CLOSED 2026-09-01, and it was the LAST blocked row: no row now
+carries `blocked` status. The gap the old blocker named was the harness and the
+fairness oracle, not the arbiter — `QueueSet.next_pending_sq()`
+(`fw/nvme_qset.spl`) was already a real round-robin selector.
+`fw/arbitration_check.spl` now loads three competing I/O queues to equal depth,
+drains them through THAT product arbiter, and judges the recorded service order
+against two properties: equal service, and no consecutive service while another
+queue still holds backlog. It prints ARBITRATION OK.
+
+WHICH SCHEME IS CLAIMED, since a capability bit must never outrun its tests:
+ROUND ROBIN only — the NVMe mandatory baseline, which is not signalled by a
+CAP.AMS bit at all. WEIGHTED ROUND ROBIN WITH URGENT PRIORITY (CAP.AMS bit 0) is
+NOT implemented and NOT advertised: `CAP_AMS_VAL` is 0 in `fw/nvme_reg_file.spl`
+and the check asserts CAP.AMS reads 0. No Set Features (Arbitration, FID 01h)
+burst/weight state and no urgent priority class exist, so nothing weighted is
+bound.
+
+The oracle is proved to discriminate INSIDE the check rather than by assertion:
+a deliberately biased always-lowest-qid arbiter is run over an identical
+backlog through the same oracle and must be REJECTED, and the equal-service
+property alone is shown to ACCEPT it — which is why that property alone would
+be a vacuous test. Because that witness lives in the evidence program, every run
+re-proves it.
+"""
+
+struct NvmeFeature:
+    id:        text     # stable key, also the generated file stem
+    title:     text
+    class_num: i64      # 1 = any controller, 2 = NVM Command Set
+    status:    text     # transport | dispatch | blocked
+    blocker:   text     # "" unless status == blocked
+    terms:     text     # lowercase match terms, comma separated
+
+val FEATURE_STATUS_TRANSPORT: text = "transport"
+val FEATURE_STATUS_DISPATCH: text = "dispatch"
+val FEATURE_STATUS_BLOCKED: text = "blocked"
+
+"""Retained for history: the blocker that `arbitration` carried until it was
+CLOSED on 2026-09-01 by `fw/arbitration_check.spl`. Kept as a named value, and
+deliberately unused by any row, so the closed blocker's exact wording stays
+readable next to the evidence that closed it rather than vanishing from the
+record. It must not be reattached to a row without new evidence of the gap."""
+val BLOCKER_NO_MULTI_QUEUE_FAIRNESS_CLOSED: text = "only a round-robin cursor exists (fw/nvme_qset.spl); no multi-queue arbitration harness drives competing queues"
+
+"""The 20 mandatory rows. Order is the matrix document's order."""
+fn nvme_features() -> [NvmeFeature]:
+    var fs: [NvmeFeature] = []
+    fs.push(NvmeFeature(id: "controller_registers", title: "Controller registers CAP/VS/CC/CSTS/AQA/ASQ/ACQ", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "controller capabilities,cap register,csts,controller configuration,aqa,admin queue attributes,asq,acq,property"))
+    fs.push(NvmeFeature(id: "enable_handshake", title: "Controller enable/disable handshake", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "cc.en,csts.rdy,enable bit,ready bit,controller enable,controller disable"))
+    fs.push(NvmeFeature(id: "controller_reset", title: "Controller reset behavior", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "controller reset,controller level reset,nvm subsystem reset,reset the controller"))
+    fs.push(NvmeFeature(id: "admin_queue_pair", title: "Admin SQ/CQ pair", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "admin submission queue,admin completion queue,admin queue"))
+    fs.push(NvmeFeature(id: "doorbell_registers", title: "SQ/CQ doorbell registers", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "doorbell,submission queue tail doorbell,completion queue head doorbell,doorbell stride"))
+    fs.push(NvmeFeature(id: "cqe_phase_tag", title: "CQE phase tag", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "phase tag,phase bit,completion queue entry"))
+    fs.push(NvmeFeature(id: "identify", title: "Identify (Controller, Namespace, Active NS list)", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "identify command,identify controller,identify namespace,controller or namespace structure,cns"))
+    fs.push(NvmeFeature(id: "get_log_error", title: "Get Log Page - Error Information log", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "error information log,error log page"))
+    fs.push(NvmeFeature(id: "get_log_smart", title: "Get Log Page - SMART/Health log", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "smart / health information,smart/health,health information log"))
+    fs.push(NvmeFeature(id: "get_log_fw_slot", title: "Get Log Page - Firmware Slot log", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "firmware slot information,firmware slot log"))
+    fs.push(NvmeFeature(id: "features_set_get", title: "Set Features / Get Features", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "set features,get features,feature identifier,number of queues"))
+    fs.push(NvmeFeature(id: "io_queue_create_delete", title: "Create/Delete I/O SQ and CQ", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "create i/o submission queue,create i/o completion queue,delete i/o submission queue,delete i/o completion queue"))
+    fs.push(NvmeFeature(id: "abort", title: "Abort", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "abort command,abort request"))
+    fs.push(NvmeFeature(id: "async_event_request", title: "Asynchronous Event Request", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "asynchronous event request,asynchronous event"))
+    fs.push(NvmeFeature(id: "arbitration", title: "Command arbitration (round-robin minimum)", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "round robin arbitration,arbitration mechanism,weighted round robin"))
+    fs.push(NvmeFeature(id: "status_code_reporting", title: "Mandatory status-code reporting (fail-closed)", class_num: 1, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "invalid command opcode,invalid field in command,status code,status field"))
+    fs.push(NvmeFeature(id: "nvm_read", title: "Read", class_num: 2, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "read command,reads data"))
+    fs.push(NvmeFeature(id: "nvm_write", title: "Write", class_num: 2, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "write command,writes data"))
+    fs.push(NvmeFeature(id: "nvm_flush", title: "Flush", class_num: 2, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "flush command,volatile write cache"))
+    fs.push(NvmeFeature(id: "prp_transfer", title: "PRP data transfer", class_num: 2, status: FEATURE_STATUS_TRANSPORT, blocker: "", terms: "physical region page,prp entry,prp list,prp1,prp2"))
+    fs
+
+"""Feature id whose term list matches `hay` (already lowercased). "" when none.
+
+First match wins; the term lists are disjoint by construction, and a clause
+that matches nothing is recorded as unmapped rather than forced into a row.
+"""
+fn map_feature(hay: text) -> text:
+    val fs = nvme_features()
+    var i: i64 = 0
+    while i < fs.len():
+        val terms = fs[i].terms.split(",")
+        var k: i64 = 0
+        while k < terms.len():
+            if terms[k].len() > 0 and hay.contains(terms[k]):
+                return fs[i].id
+            k = k + 1
+        i = i + 1
+    ""
+
+"""The subject terms of `feature_id` that actually occur in `hay`."""
+fn matched_terms(feature_id: text, hay: text) -> [text]:
+    var out: [text] = []
+    val fs = nvme_features()
+    var i: i64 = 0
+    while i < fs.len():
+        if fs[i].id == feature_id:
+            val terms = fs[i].terms.split(",")
+            var k: i64 = 0
+            while k < terms.len():
+                if terms[k].len() > 0 and hay.contains(terms[k]):
+                    out.push(terms[k])
+                k = k + 1
+        i = i + 1
+    out
+
+fn feature_by_id(fid: text) -> NvmeFeature:
+    val fs = nvme_features()
+    var i: i64 = 0
+    while i < fs.len():
+        if fs[i].id == fid:
+            return fs[i]
+        i = i + 1
+    NvmeFeature(id: "", title: "", class_num: 0, status: "", blocker: "", terms: "")
+
+export NvmeFeature, nvme_features, map_feature, matched_terms, feature_by_id
+export FEATURE_STATUS_TRANSPORT, FEATURE_STATUS_DISPATCH, FEATURE_STATUS_BLOCKED

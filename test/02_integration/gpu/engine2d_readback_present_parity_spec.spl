@@ -1,0 +1,80 @@
+# @tag: engine2d, rendering
+"""# Engine2D readback is present-count invariant
+
+`test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl` printed `checksum=0` for every
+EVEN frame count (2/4/6/8/10) and `-15461356` for every odd one, 9/9 runs.
+That reads like a two-buffer ping-pong in which `read_pixels_with_source()`
+samples the surface that was NOT just presented, and `0` is indistinguishable
+from a legitimately blank surface, so "checksum stable" gates cannot see it.
+
+It was not the renderer. Per-frame `VK2D_DEBUG=1` output was byte-identical on
+every frame of every run (`px0=4279505940 nonzero=4096/4096 nonclear=800`), and
+the vulkan backend holds exactly one `host_buf` and one `d_framebuffer` -- there
+is no second surface to ping-pong between. The alternation came from the bench's
+own accumulator, `checksum = checksum ^ acc`: the scene is fixed, so every frame
+folds to the SAME `acc`, and XOR of an even number of equal values is 0.
+
+Two behaviours are pinned here:
+
+- the engine invariant the bug was blamed on -- consecutive presents must each
+  hand back the same pixels, so a fold over frame N equals the fold over frame 1
+  and is not blank. Driven on the `cpu` backend so the check runs with no ICD.
+- the harness defect itself -- the bench must no longer carry the
+  self-cancelling accumulator, and must report the per-frame divergence count it
+  now tracks in its place.
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use gpu.engine2d.engine.{Engine2D}
+
+val VK2D_BENCH_PATH = "test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl"
+
+# A stride fold over the whole 64x64 surface. Deliberately a rolling hash and
+# not XOR: XOR over an even number of equal samples is 0 -- the very shape that
+# made the bench blind -- and a flat-coloured region would cancel itself here
+# too, leaving the parity check vacuous.
+fn parity_fold(pixels: [u32]) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    val n = pixels.len()
+    while i < n:
+        acc = (acc * 31 + (pixels[i].to_i32().to_i64() & 0xFFFFFFFF)) % 2147483647
+        i = i + 64
+    acc
+
+# One bench-shaped frame: clear, draw the scene, submit, present, read back.
+fn parity_frame(engine: Engine2D) -> i64:
+    engine.clear(0xFF141414u32)
+    engine.draw_rect_filled(4, 4, 20, 20, 0xFFF34DADu32)
+    engine.draw_rect_filled(30, 30, 20, 20, 0xFF6E6076u32)
+    engine.submit_batch()
+    engine.present()
+    parity_fold(engine.read_pixels_with_source().pixels)
+
+describe "Engine2D readback across repeated presents":
+    it "returns the same pixels on the 2nd, 3rd and 4th present as on the 1st":
+        val engine = Engine2D.create_with_backend_fast(64, 64, "cpu")
+        expect(engine.backend_name()).to_equal("cpu")
+        val first = parity_frame(engine)
+        # not a blank surface: a zero fold would make the parity check vacuous,
+        # which is exactly how the reported symptom hid itself.
+        expect(first == 0).to_equal(false)
+        var frame = 2
+        while frame <= 4:
+            expect(parity_frame(engine)).to_equal(first)
+            frame = frame + 1
+        engine.shutdown()
+
+describe "vk2d_bench frame accumulator":
+    it "does not fold frames with a self-cancelling XOR accumulator":
+        val body = read_file(VK2D_BENCH_PATH)
+        expect(body.len() > 0).to_equal(true)
+        # `checksum = checksum ^ acc` prints 0 for every even frame count no
+        # matter what was rendered.
+        expect(body.contains("checksum = checksum ^ acc")).to_equal(false)
+
+    it "reports how many frames diverged from the latched fold":
+        val body = read_file(VK2D_BENCH_PATH)
+        expect(body.contains("frame_mismatches = frame_mismatches + 1")).to_equal(true)
+        expect(body.contains("frame_mismatches=")).to_equal(true)

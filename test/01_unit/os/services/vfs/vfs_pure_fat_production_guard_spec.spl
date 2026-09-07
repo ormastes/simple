@@ -1,27 +1,69 @@
+"""
+## Purpose and audience
+For SimpleOS filesystem maintainers. Guards the migration off the legacy
+`Fat32Driver` (`src/os/services/fat32/fat32*.spl`) onto the shared pure
+Simple FAT core (`shared_fat32_driver.spl`): no production VFS/boot path may
+import or instantiate the legacy driver directly, and the retired legacy
+unit spec must not still instantiate it either.
+## Operator workflow
+Run after touching any `src/os/**` module or the FAT32 driver family:
+`bin/simple test
+test/01_unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl`. Each
+scenario reads shipped source (a named file, or a full `src/os` tree walk)
+and checks it for legacy-driver imports/instantiations.
+## Compatibility and limitations
+This is a source-contract check, not a runtime behavior check: there is no
+public runtime API that exposes "which FAT driver backs this VFS mount", so
+the only observable evidence is the shipped source text of the VFS/boot
+modules and a full-tree walk excluding the legacy implementation files
+themselves (which are expected to keep referencing their own types).
+## Verification guidance and troubleshooting
+A failure names the file and the legacy import/instantiation pattern that
+reappeared. Re-open the named file, route it through
+`shared_fat32_driver.spl` instead, and re-run this file.
+"""
+# Lifecycle: doc/01_research/os/fs/fs_driver_interface.md ;
+# doc/03_plan/os/simpleos/kernel_apps/simpleos_nvme_fat_production_restart_2026-05-28.md ;
+# doc/04_architecture/os/storage/nvfs_completion.md ;
+# doc/05_design/os/fat32_atomic_replace_recovery.md
+# @manual_section: simpleos_pure_fat_production_guard
+
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
 
 extern fn rt_dir_walk(path: text) -> [text]
 
 fn _assert_no_legacy_fat_driver(path: text):
-    val source = read_file(path)
+    val module_source = read_file(path)
     val legacy_type = "Fat32" + "Driver"
-    expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-    expect(source.contains("use os.services.fat32.fat32_write")).to_equal(false)
-    expect(source.contains("use os.services.fat32.fat32_filesystem_ops")).to_equal(false)
-    expect(source.contains("use os.services.fat32.fat32_write_helpers")).to_equal(false)
-    expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
-    expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
-    expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
+    val imports_legacy_fat32 = module_source.contains("use os.services.fat32.fat32")
+    val imports_legacy_fat32_write = module_source.contains("use os.services.fat32.fat32_write")
+    val imports_legacy_fat32_ops = module_source.contains("use os.services.fat32.fat32_filesystem_ops")
+    val imports_legacy_fat32_write_helpers = module_source.contains("use os.services.fat32.fat32_write_helpers")
+    val instantiates_legacy_via_space = module_source.contains(" " + legacy_type + ".new(")
+    val instantiates_legacy_via_assign = module_source.contains("=" + legacy_type + ".new(")
+    val instantiates_legacy_via_call_arg = module_source.contains("(" + legacy_type + ".new(")
+    expect(imports_legacy_fat32).to_equal(false)
+    expect(imports_legacy_fat32_write).to_equal(false)
+    expect(imports_legacy_fat32_ops).to_equal(false)
+    expect(imports_legacy_fat32_write_helpers).to_equal(false)
+    expect(instantiates_legacy_via_space).to_equal(false)
+    expect(instantiates_legacy_via_assign).to_equal(false)
+    expect(instantiates_legacy_via_call_arg).to_equal(false)
 
 fn _assert_no_legacy_fat_module_import(path: text):
-    val source = read_file(path)
-    if source.contains("use os.services.fat32."):
-        expect(source.contains("use os.services.fat32.shared_fat32_driver")).to_equal(true)
-        expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-        expect(source.contains("use os.services.fat32.fat32_write")).to_equal(false)
-        expect(source.contains("use os.services.fat32.fat32_filesystem_ops")).to_equal(false)
-        expect(source.contains("use os.services.fat32.fat32_write_helpers")).to_equal(false)
+    val module_source = read_file(path)
+    if module_source.contains("use os.services.fat32."):
+        val imports_shared_driver = module_source.contains("use os.services.fat32.shared_fat32_driver")
+        val imports_legacy_fat32 = module_source.contains("use os.services.fat32.fat32")
+        val imports_legacy_fat32_write = module_source.contains("use os.services.fat32.fat32_write")
+        val imports_legacy_fat32_ops = module_source.contains("use os.services.fat32.fat32_filesystem_ops")
+        val imports_legacy_fat32_write_helpers = module_source.contains("use os.services.fat32.fat32_write_helpers")
+        expect(imports_shared_driver).to_equal(true)
+        expect(imports_legacy_fat32).to_equal(false)
+        expect(imports_legacy_fat32_write).to_equal(false)
+        expect(imports_legacy_fat32_ops).to_equal(false)
+        expect(imports_legacy_fat32_write_helpers).to_equal(false)
 
 fn _is_legacy_fat_implementation(path: text) -> bool:
     path == "src/os/services/fat32/fat32.spl" or
@@ -37,30 +79,62 @@ fn _assert_os_tree_no_production_legacy_fat_driver():
 
 describe "SimpleOS production FAT purity guard":
     it "keeps VFS and boot production paths on the shared pure Simple FAT core":
+        # @req REQ-SIMPLEOS-FAT-001
+        # @capture(statistics): per-file boolean legacy-import/instantiation checks across 5 production modules
+        step("Check the five named VFS/boot production modules for legacy FAT imports or instantiations")
         _assert_no_legacy_fat_driver("src/os/services/vfs/vfs_boot_init.spl")
         _assert_no_legacy_fat_driver("src/os/services/vfs/vfs_init.spl")
         _assert_no_legacy_fat_driver("src/os/services/vfs/vfs_write_ops.spl")
         _assert_no_legacy_fat_driver("src/os/services/vfs/nvme_filesystem_mounts.spl")
         _assert_no_legacy_fat_driver("src/os/kernel/boot/boot_fs_mount.spl")
 
-        val boot_source = read_file("src/os/services/vfs/vfs_boot_init.spl")
-        val mount_source = read_file("src/os/services/vfs/nvme_filesystem_mounts.spl")
-        val shared_source = read_file("src/os/services/fat32/shared_fat32_driver.spl")
+        # NOTE: legitimate RED, verified 2026-09-06. src/os/services/vfs/vfs_boot_init.spl no
+        # longer contains Fat32Core/shared_fat32_driver/g_vfs_nvme_* at all -- it was refactored
+        # into a re-export hub over vfs_boot_state.spl, nvme_boot_runtime_owner.spl,
+        # nvme_filesystem_direct_io.spl, nvme_q35_lease_perf.spl, and
+        # direct_fat32_boot_reader.spl. This scenario's boot-module string-literal expectations
+        # are stale against that split and were already failing before this modernization pass
+        # (verified identical against `git show HEAD:...`). Do not weaken these assertions;
+        # either update them to the current split module layout or file a bug for the owning
+        # session -- out of scope for this batch (test-file-only).
+        step("Read the boot, mount, and shared-driver module sources")
+        val boot_module_source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+        val mount_module_source = read_file("src/os/services/vfs/nvme_filesystem_mounts.spl")
+        val shared_driver_module_source = read_file("src/os/services/fat32/shared_fat32_driver.spl")
         val shared_fat = "SharedFat32" + "Driver"
         val fs_fat = "FsFat32" + "Driver"
-        expect(boot_source.contains("use os.services.fat32.shared_fat32_driver.{" + shared_fat + " as Fat32Core}")).to_equal(true)
-        expect(boot_source.contains("boot_nvme_production_handoff_provision(g_adapter, transfer_evidence, lease)\n    var root = Fat32Core.new(g_adapter)")).to_equal(true)
-        expect(boot_source.contains("g_vfs_nvme_active_leases = [lease]\n    g_vfs_nvme_direct_adapter_leases = [lease]\n    g_vfs_nvme_direct_adapters = [g_adapter]")).to_equal(true)
-        expect(mount_source.contains("use std.fs_driver.fat32_stub.{" + fs_fat + "}")).to_equal(true)
-        expect(shared_source.contains("me fn sync() -> Result<bool, text>:")).to_equal(true)
-        expect(shared_source.contains("val rc = self.inner.sync()")).to_equal(true)
+        step("Confirm the boot module imports and constructs the shared FAT core, not the legacy driver")
+        val boot_imports_shared_core = boot_module_source.contains("use os.services.fat32.shared_fat32_driver.{" + shared_fat + " as Fat32Core}")
+        val boot_constructs_shared_core = boot_module_source.contains("boot_nvme_production_handoff_provision(g_adapter, transfer_evidence, lease)\n    var root = Fat32Core.new(g_adapter)")
+        val boot_tracks_nvme_lease = boot_module_source.contains("g_vfs_nvme_active_leases = [lease]\n    g_vfs_nvme_direct_adapter_leases = [lease]\n    g_vfs_nvme_direct_adapters = [g_adapter]")
+        step("Confirm the mount module imports the stub FAT driver used for non-boot mounts")
+        val mount_imports_fs_stub = mount_module_source.contains("use std.fs_driver.fat32_stub.{" + fs_fat + "}")
+        step("Confirm the shared driver exposes the sync() delegation the boot/mount paths rely on")
+        val shared_driver_exposes_sync = shared_driver_module_source.contains("me fn sync() -> Result<bool, text>:")
+        val shared_driver_delegates_sync = shared_driver_module_source.contains("val rc = self.inner.sync()")
+        expect(boot_imports_shared_core).to_equal(true)
+        expect(boot_constructs_shared_core).to_equal(true)
+        expect(boot_tracks_nvme_lease).to_equal(true)
+        expect(mount_imports_fs_stub).to_equal(true)
+        expect(shared_driver_exposes_sync).to_equal(true)
+        expect(shared_driver_delegates_sync).to_equal(true)
 
     it "keeps the SimpleOS source tree off legacy FAT outside the isolated compatibility module":
+        # @req REQ-SIMPLEOS-FAT-002
+        # @capture(statistics): legacy-import/instantiation checks across every non-legacy .spl file under src/os
+        step("Walk the full src/os tree and check every non-legacy module for legacy FAT imports or instantiations")
         _assert_os_tree_no_production_legacy_fat_driver()
 
     it "keeps legacy FAT unit coverage from instantiating the retired driver":
-        val source = read_file("test/unit/os/services/fat32/fat32_spec.spl")
+        # @req REQ-SIMPLEOS-FAT-003
+        # @capture(statistics): boolean absence checks for legacy-driver instantiation and legacy-only method calls
+        step("Read the retired legacy FAT32 unit spec source")
+        val legacy_spec_source = read_file("test/unit/os/services/fat32/fat32_spec.spl")
         val legacy_type = "Fat32" + "Driver"
-        expect(source.contains(legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("resolve_path(")).to_equal(false)
-        expect(source.contains("readdir(")).to_equal(false)
+        step("Confirm the retired spec no longer instantiates the legacy driver or calls its retired methods")
+        val still_instantiates_legacy_driver = legacy_spec_source.contains(legacy_type + ".new(")
+        val still_calls_resolve_path = legacy_spec_source.contains("resolve_path(")
+        val still_calls_readdir = legacy_spec_source.contains("readdir(")
+        expect(still_instantiates_legacy_driver).to_equal(false)
+        expect(still_calls_resolve_path).to_equal(false)
+        expect(still_calls_readdir).to_equal(false)

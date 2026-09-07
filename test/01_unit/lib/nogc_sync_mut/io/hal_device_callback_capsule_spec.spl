@@ -1,3 +1,41 @@
+"""
+## Purpose and audience
+Executable evidence that the pure device callback capsule binds exactly one
+transport cookie, rejects stale handle generations, dispatches once per
+sequence, and shuts down exactly once — plus a source-contract scenario
+pinning the capsule registry's no-dynamic-container shape. Written for the
+engineers who own the nogc_sync_mut/io HAL device lane.
+## Operator workflow
+Run:
+    bin/simple test test/01_unit/lib/nogc_sync_mut/io/hal_device_callback_capsule_spec.spl
+Every scenario must pass; a failure is a regression in capsule registration,
+callback preparation, dispatch, or shutdown accounting.
+## Compatibility and limitations
+CURRENTLY UNRUNNABLE: both imports at the top of this file fail to resolve —
+no src/lib module defines hal_device_callback_capsule, and
+std.common.structural does not export environment_instruction (the module
+tree under src/lib/common/structural/ has no such member). The file loads
+past parsing and fails at import resolution, so both scenarios report
+outcome=ERROR with 0 executed. This is a product-side import defect, not a
+spec defect; the scenarios are kept intact until the modules land or the
+imports are corrected.
+## Verification guidance and troubleshooting
+A failure in the binding scenario means the capsule registry accepted a
+stale generation or allowed a double shutdown; compare the observed status
+code against the prepare/dispatch/shutdown contract in the notes below. A
+failure in the lookup scenario means a dynamic container or borrowed pointer
+crept back into the registry source.
+"""
+# NOTE (import defect, observed 2026-09-05): `use std.common.structural.environment_instruction.*`
+# and `use std.nogc_sync_mut.io.hal_device_callback_capsule.*` both fail with
+# "Module ... does not export ..." — neither module exists in the tree, so the
+# runner reports outcome=ERROR before executing any scenario.
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/runtime/remaining_hardening_tasks_2026-06-11.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hal-device-capsule
+
 use std.spec.*
 use std.io_runtime.{file_read}
 use std.common.structural.environment_instruction.*
@@ -23,6 +61,9 @@ fn callback_capsule_fixture()
 
 describe "Pure device callback capsule":
     it "binds one explicit transport cookie and rejects stale shutdown":
+        # @req REQ-HAL-CAPSULE-001
+        # @capture(statistics): prepare/dispatch/shutdown status codes for one cookie lifetime
+        step("Register a sealed capsule from the authority-granted fixture")
         val fixture = callback_capsule_fixture()
         val acquisition = fixture.0
         val executor = fixture.1
@@ -32,6 +73,7 @@ describe "Pure device callback capsule":
             HalRunMode.NormalPreferred, HalProviderKind.PureSimple,
             3, 1000)
         val cookie = (1u64 << 32) | 1u64
+        step("Prepare the callback with a wrong handle generation")
         val wrong_generation = rt_hal_device_pure_prepare_callback_v1(
             cookie, capsule_id, acquisition.handle.capability_id,
             acquisition.handle.generation + 1,
@@ -44,6 +86,7 @@ describe "Pure device callback capsule":
             acquisition.proof.allowed_opcode_mask,
             acquisition.grant.range_base, acquisition.grant.range_length,
             3, 2, 0, 1000)
+        step("Prepare the callback with the matching handle generation")
         val prepared = rt_hal_device_pure_prepare_callback_v1(
             cookie, capsule_id, acquisition.handle.capability_id,
             acquisition.handle.generation,
@@ -56,56 +99,67 @@ describe "Pure device callback capsule":
             acquisition.proof.allowed_opcode_mask,
             acquisition.grant.range_base, acquisition.grant.range_length,
             3, 2, 0, 1000)
-        expect(capsule_id > 0).to_be(true)
-        expect(wrong_generation).to_equal(1)
-        expect(prepared).to_equal(0)
+        expect(capsule_id > 0).to_be(true)  # oracle: registration must mint a positive capsule id
+        expect(wrong_generation).to_equal(1)  # oracle: status 1 is the stale-generation rejection code
+        expect(prepared).to_equal(0)  # oracle: status 0 means the callback prepared cleanly
+        step("Dispatch the prepared callback once and read the sequence")
         val dispatched = rt_hal_device_pure_direct_callback_v1(
             cookie, 16, cookie, 91, 0, 32, 0, 0,
             1, 0, 0, 0, 1, 1, 0 as *u8, 0,
             0 as *mut u8, 0, 11, 12, 0, 1, 1)
-        expect(dispatched).to_equal(0)
+        expect(dispatched).to_equal(0)  # oracle: status 0 means the direct dispatch executed
         expect(rt_hal_device_pure_capsule_sequence_v1(
-            capsule_id, HalProviderKind.PureSimple)).to_equal(1)
-        expect(rt_hal_device_pure_shutdown_callback_v1(cookie)).to_equal(0)
-        expect(rt_hal_device_pure_shutdown_callback_v1(cookie)).to_equal(1)
+            capsule_id, HalProviderKind.PureSimple)).to_equal(1)  # oracle: exactly one dispatch advanced the sequence to 1
+        step("Shut the cookie down twice to prove single-use shutdown")
+        expect(rt_hal_device_pure_shutdown_callback_v1(cookie)).to_equal(0)  # oracle: the first shutdown succeeds with status 0
+        expect(rt_hal_device_pure_shutdown_callback_v1(cookie)).to_equal(1)  # oracle: the second shutdown is rejected with status 1
 
     it "keeps callback lookup fixed and retains no borrowed pointer":
+        # @req REQ-HAL-CAPSULE-002
+        # @capture(bit_table): source-contract tokens pinned in the capsule registry source
+        step("Read the capsule registry source and check its container shape")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_device_callback_capsule.spl")
-        expect(source.contains("Dict<")).to_equal(false)
-        expect(source.contains("argument: *u8")).to_equal(true)
-        expect(source.contains("argument_staging: [u8]")).to_equal(true)
-        expect(source.contains("cookie_capsule_index_v1(cookie)")).to_equal(true)
-        expect(source.contains("_rt_hal_device_pure_capsules_v1.push(capsule)"))
-            .to_equal(true)
-        expect(source.contains("trace_identity_hi == 0 or trace_identity_lo == 0"))
-            .to_equal(true)
-        expect(source.contains("trace_length != trace_cursor + 1"))
-            .to_equal(true)
-        expect(source.contains("fn hal_device_pure_route_prepare_v1("))
-            .to_equal(true)
-        expect(source.contains(
-            "rt_hal_device_pure_prepare_callback_v1 as u64"))
-            .to_equal(true)
-        expect(source.contains(
-            "rt_hal_device_pure_shutdown_callback_v1 as u64"))
-            .to_equal(true)
-        expect(source.contains(
-            "rt_hal_device_pure_configured_callback_v1 as u64"))
-            .to_equal(true)
-        expect(source.contains(
-            "rt_hal_device_pure_direct_callback_v1 as u64"))
-            .to_equal(true)
-        expect(source.contains(
-            "rt_hal_device_pure_compare_callback_v1 as u64"))
-            .to_equal(true)
+        val keeps_lookup_dict_free = source.contains("Dict<")
+        val keeps_explicit_argument_slot = source.contains("argument: *u8")
+        val keeps_staged_argument_copy = source.contains("argument_staging: [u8]")
+        val keeps_cookie_index_helper = source.contains("cookie_capsule_index_v1(cookie)")
+        val keeps_fixed_registry_entry = source.contains("_rt_hal_device_pure_capsules_v1.push(capsule)")
+        val tolerates_missing_trace_identity = source.contains("trace_identity_hi == 0 or trace_identity_lo == 0")
+        val tolerates_missing_trace_length = source.contains("trace_length != trace_cursor + 1")
+        val exposes_route_prepare_wrapper = source.contains("fn hal_device_pure_route_prepare_v1(")
+        val wires_prepare_through_route = source.contains(
+            "rt_hal_device_pure_prepare_callback_v1 as u64")
+        val wires_shutdown_through_route = source.contains(
+            "rt_hal_device_pure_shutdown_callback_v1 as u64")
+        val wires_configured_through_route = source.contains(
+            "rt_hal_device_pure_configured_callback_v1 as u64")
+        val wires_direct_through_route = source.contains(
+            "rt_hal_device_pure_direct_callback_v1 as u64")
+        val wires_compare_through_route = source.contains(
+            "rt_hal_device_pure_compare_callback_v1 as u64")
+        expect(keeps_lookup_dict_free).to_equal(false)  # oracle: the registry must stay a fixed array, never a Dict
+        expect(keeps_explicit_argument_slot).to_equal(true)  # oracle: the callback carries one explicit argument slot
+        expect(keeps_staged_argument_copy).to_equal(true)  # oracle: arguments are staged into an owned byte array
+        expect(keeps_cookie_index_helper).to_equal(true)  # oracle: lookup routes through the fixed cookie index helper
+        expect(keeps_fixed_registry_entry).to_equal(true)  # oracle: registration appends to the fixed registry array
+        expect(tolerates_missing_trace_identity).to_equal(true)  # oracle: zero trace identity must remain an accepted input
+        expect(tolerates_missing_trace_length).to_equal(true)  # oracle: a mismatched trace length must remain detected
+        expect(exposes_route_prepare_wrapper).to_equal(true)  # oracle: preparation is wrapped by the route prepare function
+        expect(wires_prepare_through_route).to_equal(true)  # oracle: the prepare callback is exported through the route table
+        expect(wires_shutdown_through_route).to_equal(true)  # oracle: the shutdown callback is exported through the route table
+        expect(wires_configured_through_route).to_equal(true)  # oracle: the configured callback is exported through the route table
+        expect(wires_direct_through_route).to_equal(true)  # oracle: the direct callback is exported through the route table
+        expect(wires_compare_through_route).to_equal(true)  # oracle: the compare callback is exported through the route table
+        step("Check the route wrapper seals the registry before dispatching")
         val wrapper = source.substring(
             source.find("fn hal_device_pure_route_prepare_v1("),
             source.find("@export(\"C\", name: \"rt_hal_device_pure_prepare_callback_v1\")"))
-        expect(wrapper.find("registry_sealed_v1, 1")).to_be_greater_than(-1)
+        expect(wrapper.find("registry_sealed_v1, 1")).to_be_greater_than(-1)  # oracle: the wrapper must seal the registry
         expect(wrapper.find("registry_lock_v1, 0")).to_be_greater_than(
-            wrapper.find("registry_sealed_v1, 1"))
-        expect(wrapper.find("rt_hal_device_route_prepare_v1("))
-            .to_be_greater_than(wrapper.find("registry_lock_v1, 0"))
-        expect(source.contains("while i < _rt_hal_device_pure_capsules_v1.len()"))
-            .to_equal(false)
+            wrapper.find("registry_sealed_v1, 1"))  # oracle: the lock is taken only after the seal
+        expect(wrapper.find("rt_hal_device_route_prepare_v1(")).to_be_greater_than(
+            wrapper.find("registry_lock_v1, 0"))  # oracle: dispatch happens last, under the lock
+        step("Confirm no linear scan of the capsule array survives")
+        val keeps_linear_scan_out = source.contains("while i < _rt_hal_device_pure_capsules_v1.len()")
+        expect(keeps_linear_scan_out).to_equal(false)  # oracle: lookup must stay O(1); no linear while-scan may return

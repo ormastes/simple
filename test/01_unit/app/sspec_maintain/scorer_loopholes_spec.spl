@@ -38,6 +38,38 @@ fn scenario_with(body: text) -> text:
     val req_id = "REQ" + "-LOOP-001"
     "describe \"x\":\n    it \"reports the outcome\":\n        # @req " + req_id + "\n        step(\"Act\")\n        # @capture: evidence_manifest(\"loop\")\n" + body
 
+describe "sspec scorer loopholes closed on 2026-09-06":
+    # @manual_section: indirection that used to evade the tautology detector
+
+    it "flags a literal reached through one hop of a locally built array":
+        # @req REQ-SSDOC-ORA-002-ARRAY-HOP
+        step("Score a scenario that copies its expected literal into an array, then indexes it back out")
+        val report = analyze_sspec_text("array_hop_spec.spl",
+            scenario_with("        val fields = [\"board_id\", \"jtag\"]\n        val field = fields[0]\n        expect(field).to_equal(\"board_id\")\n"))
+        step("Verify the extra hop does not launder the tautology into a passing oracle")
+        # @capture: evidence_manifest("ora_002_array_hop") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_contain("SSDOC-ORA-002")
+        expect(report.score.effective_aggregate).to_equal(49)  # oracle: score.spl caps any blocker at 49
+
+    it "flags the same tautology when the comparison is moved inside expect(...)":
+        # @req REQ-SSDOC-ORA-002-INNER-COMPARE
+        step("Score `val x = \"foo\"` / `expect(x == \"foo\").to_equal(true)`")
+        val report = analyze_sspec_text("inner_compare_spec.spl",
+            scenario_with("        val label = \"board_id\"\n        expect(label == \"board_id\").to_equal(true)\n"))
+        step("Verify relocating the comparison changes the source text but not the evidence")
+        # @capture: evidence_manifest("ora_002_inner_compare") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_contain("SSDOC-ORA-002")
+        expect(report.score.effective_aggregate).to_equal(49)  # oracle: score.spl caps any blocker at 49
+
+    it "leaves a comparison against a computed value unflagged":
+        # @req REQ-SSDOC-ORA-002-COMPUTED-NEGATIVE
+        step("Score a scenario whose compared value comes from a real parse rather than a copied literal")
+        val report = analyze_sspec_text("computed_spec.spl",
+            scenario_with("        val parsed = \"12\".to_i64() ?? -1\n        expect(parsed == 12).to_equal(true)\n"))
+        step("Verify the widened detector still discriminates real work from self-comparison")
+        # @capture: evidence_manifest("ora_002_computed_negative") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_not_contain("SSDOC-ORA-002")
+
 describe "sspec scorer loopholes closed on 2026-09-05":
 
     it "flags a var bound to a literal and asserted equal to it as an ORA-002 tautology":

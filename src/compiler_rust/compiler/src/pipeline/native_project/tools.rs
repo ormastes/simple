@@ -316,6 +316,31 @@ pub(crate) fn core_c_target_flags(
     flags
 }
 
+/// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
+///
+/// Measured 2026-09-06 (cl 19.44.35207, MSVC 2022 14.44): without BOTH
+/// `-std:c11` and `-experimental:c11atomics`, cl.exe stops at
+/// `fatal error C1189: "C atomics require C11 or later"` inside
+/// `<vcruntime_c11_stdatomic.h>` before it ever reaches a runtime source, so
+/// `runtime.c` / `runtime_native.c` cannot compile at all. With both, they
+/// compile clean (the GNU-shaped `-f*` / `-std=gnu11` flags around them are
+/// merely ignored with `warning D9002`). clang-cl 18.1.8 accepts both too --
+/// it needs neither, and reports `-experimental:c11atomics` as unused -- so
+/// one flag set covers both MSVC drivers.
+///
+/// Gated on the compiler BINARY, not on `LinkerFlavor::Msvc`: that flavor can
+/// also resolve to plain `clang` (see `MSVC_C_COMPILERS` in `cc_detect`),
+/// whose GNU driver rejects `-std:c11`. Every gcc/clang lane on Linux/macOS
+/// gets an empty slice, so their argument vectors stay byte-identical.
+fn msvc_c11_atomics_flags(cc: &str) -> &'static [&'static str] {
+    let base = Path::new(cc).file_name().and_then(|n| n.to_str()).unwrap_or(cc);
+    if simple_common::platform::cc_detect::is_msvc_compiler(cc) || base.contains("clang-cl") {
+        &["-std:c11", "-experimental:c11atomics"]
+    } else {
+        &[]
+    }
+}
+
 pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -344,6 +369,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
@@ -364,6 +390,42 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
+        // and siblings) and the coverage probe/dump ABI. Both were registered by
+        // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped
+        // from this list by the 929de773c88 (#150) stale snapshot alongside
+        // runtime_core_host_services.c (since restored). The pure-Simple backend
+        // list (src/compiler/70.backend/backend/runtime_compiler.spl) has carried
+        // runtime_process_owned throughout, so this was a seed-only lane gap of
+        // the same never-an-archive-member class as runtime_simd_case.c above.
+        // Verified collision-free against every other member (nm, host cc).
+        //
+        // Restored 2026-09-06: dropped a SECOND time by bcc52735edb, a
+        // stale-snapshot "Merge remote-tracking branch 'origin/main' into HEAD"
+        // in the PR #261 lineage, which rewound all three of 0e3bf3f535a (#273)
+        // hunks in this file while carrying its own forward work. Detected by
+        // scripts/check/check-runtime-source-list-parity.shs, which is exactly
+        // the dropped-list-entry class that gate exists to catch.
+        "runtime_memory.c",
+        // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+        // (see the compile flags below).  It shares 16 symbol NAMES with
+        // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
+        // rt_struct_alloc, rt_struct_receiver_valid, rt_ptr_*, copy_mem,
+        // rt_mem_guard_stats) but those are not duplicate DEFINITIONS:
+        // runtime_native.c wraps its entire copy of that family in
+        // `#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)` (lines 5893 and 11701), so
+        // exactly one owner survives any given build.  The macro is what makes
+        // the two mutually exclusive, and the seed lane was setting neither the
+        // flag nor the file -- which is why core-C carried NO definition at all
+        // of rt_ptr_read_i32, rt_mem_harden_check_native, rt_mem_profile_*,
+        // rt_transient_raw_scope_* or spl_i64_is_zero: those live ONLY in
+        // runtime_memory.c.  The pure-Simple backend lane already does both
+        // (70.backend/backend/runtime_compiler.spl:521,545 push the define, and
+        // its `sources` array carries "runtime_memory"), and tests.rs:3145-3150
+        // pins that lane's flag -- so this closes a seed-only lane gap rather
+        // than changing the design.
+        "runtime_process_owned.c",
+        "runtime_coverage_core.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -413,6 +475,19 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // see the TU header; behavioural tests in
         // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
+        // Backend-plugin transport (spl_backend_plugin_run_v1), backing
+        // compiler.backend.backend_plugin.transport. Same never-an-archive-member
+        // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
+        // is defined in src/runtime/runtime_backend_plugin.c and declared in
+        // runtime.h, but this list never carried the TU, so a core-lane native
+        // link of any entry whose closure reaches the backend-plugin transport
+        // left it undefined. Surfaced by the Stage4 compiler DRIVER entry on the
+        // dynamic-runtime lane, where it was the ONLY unresolved symbol left
+        // after the shared runtime and the core-C supplement resolved everything
+        // else. Measured before adding: the TU defines exactly one global symbol
+        // and has ZERO overlap with the 1,302 symbols defined by the other
+        // members of this list.
+        "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
@@ -478,7 +553,12 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .args(msvc_c11_atomics_flags(&cc))
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+            // Selects runtime_memory.c as THE memory provider and compiles out
+            // runtime_native.c's mutually-exclusive fallback copies of the same
+            // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
+            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
@@ -601,6 +681,7 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
         .arg("-fno-stack-protector")
         .arg("-fPIC")
         .arg("-std=gnu11")
+        .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
         .args(core_c_target_flags(target, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
@@ -1153,21 +1234,33 @@ struct Stage4CliCProviderSpec {
     undefined: Stage4CliCUndefinedPolicy,
 }
 
+// Stage4's C time provider is a THIN ABI SHIM only: a hosted clock plus the
+// bounded thread-local progress slots. Calendar arithmetic and progress policy
+// are owned by `std.common.time_utils` in pure Simple (fa170a1350d
+// "refactor(runtime): move timestamp policy to Simple"), and the C bodies for
+// rt_timestamp_* / rt_progress_{init,reset,get_elapsed_seconds} survive ONLY
+// inside `#ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT` in
+// src/runtime/runtime_timestamp.c -- a macro defined in exactly one place
+// (src/compiler_rust/runtime/build.rs) for the Rust seed's cdylib, which cannot
+// link Pure Simple modules. Stage4 never defines it, so expecting those 12
+// names here asserted a duplicate policy provider that the architecture
+// deliberately removed.
+//
+// fa170a1350d corrected this list to the 6 shim symbols; 929de773c88 (#150,
+// "fix(windows): native-build works end to end") reintroduced the pre-refactor
+// 14 as a stale-snapshot clobber -- it never touched runtime_timestamp.c and
+// added no replacement Windows provider, so this is a revert, not a redesign.
+//
+// Restored 2026-09-06 after bcc52735edb (a stale "Merge remote-tracking branch
+// 'origin/main' into HEAD" in the PR #261 lineage) rewound 0e3bf3f535a (#273)
+// and reinstated the pre-refactor 14 for a THIRD time.
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_get_elapsed_seconds",
-    "rt_progress_init",
-    "rt_progress_reset",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_time_now_seconds_f64",
-    "rt_timestamp_add_days",
-    "rt_timestamp_diff_days",
-    "rt_timestamp_from_components",
-    "rt_timestamp_get_day",
-    "rt_timestamp_get_hour",
-    "rt_timestamp_get_microsecond",
-    "rt_timestamp_get_minute",
-    "rt_timestamp_get_month",
-    "rt_timestamp_get_second",
-    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
@@ -1201,6 +1294,18 @@ const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
 ];
 
 const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
+
+/// Undefined symbols a provider MAY carry without being required to.
+///
+/// `_tlv_bootstrap` is emitted by clang into any Mach-O object that declares a
+/// thread-local — `runtime_timestamp.c:15` defines `RT_TIME_THREAD_LOCAL` as
+/// `_Thread_local`, so every macOS build of that provider references it. It is
+/// resolved by dyld/libSystem, never by us. It cannot appear in an ELF object,
+/// so permitting it unconditionally weakens nothing on Linux while unblocking
+/// the Stage-4 link on Apple targets. Membership here only removes a symbol
+/// from `unexpected_undefined`; it is never treated as required, so a provider
+/// that does not reference it still validates.
+const STAGE4_C_PERMITTED_UNDEFINED: &[&str] = &["_tlv_bootstrap"];
 
 const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
     // NUL-terminating copies (commit 8d04ee87582) allocate with malloc/free and
@@ -1304,6 +1409,7 @@ fn validate_stage4_cli_c_provider_archive(
     let unexpected_undefined: Vec<&str> = actual_undefined
         .difference(&expected_undefined)
         .map(String::as_str)
+        .filter(|symbol| !STAGE4_C_PERMITTED_UNDEFINED.contains(symbol))
         .collect();
     if !missing.is_empty()
         || !unexpected.is_empty()
@@ -1567,11 +1673,16 @@ fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_
             .arg("-Wl,-undefined,error")
             .arg(format!("-Wl,-force_load,{}", archive.display()));
         if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
-            // These two ABI names are deliberately owned by the adjacent
+            // These three ABI names are deliberately owned by the adjacent
             // core-C capsule; every remaining undefined must resolve through
             // the macOS SDK's SQLite/System libraries in this strict probe.
+            // The set must stay in step with STAGE4_C_SQLITE_UNDEFINED and with
+            // validate_stage4_system_library_ownership, which both already list
+            // all three. `_rt_string_len` was missing here, so `_borrow_string`
+            // in runtime_sqlite.o failed this probe on every macOS Stage-4 link.
             command
                 .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_len")
                 .arg("-Wl,-U,_rt_string_new")
                 .arg("-lsqlite3");
         }
@@ -1684,6 +1795,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
             .arg("-fno-builtin")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .args(msvc_c11_atomics_flags(&cc))
             .args(core_c_target_flags(target, spec.source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))

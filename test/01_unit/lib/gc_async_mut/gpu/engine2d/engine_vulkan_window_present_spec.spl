@@ -1,13 +1,71 @@
-use std.spec.{describe, it, expect}
+"""
+## Purpose and audience
+Purpose: show what the Vulkan 2D backend actually commits when a retained frame
+is staged and presented — how many damage regions it accepts, what geometry it
+keeps, and what provenance the resulting frame receipt reports — alongside the
+two ways a present is refused outright.
+Audience: engine2d/GPU maintainers changing the damage-staging or present path
+in `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`, and reviewers who
+need to see that a present which silently stopped working would turn this file
+RED instead of leaving it green.
+
+## Operator workflow
+    src/compiler_rust/target/bootstrap/simple run \
+      test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_window_present_spec.spl
+
+## Compatibility and limitations
+This file is deliberately device-free and runs identically on a headless CI box
+and on a GPU workstation. `VulkanBackend.create()` returns a backend that has
+never touched a driver; the scenarios below assign the geometry fields directly,
+standing in for what a real `init()` would have written.
+
+Two halves of the flow are therefore covered and one is NOT:
+  * COVERED — `stage_present_damage` (`backend_vulkan.spl:1299`), which validates
+    and copies the damage plan, and `finalize_compute_frame_no_readback`
+    (`:1253`), the retained-frame completion that succeeds with no host copy at
+    all. Both reach zero SFFI calls: `_flush_pending_compute_impl`
+    (`backend_vulkan_helpers.spl:214`) returns 1 immediately when
+    `pending_compute_command <= 0`, which is the state a freshly created backend
+    is in.
+  * NOT COVERED — the dirty `present()` byte copy (`:1409`). It routes through
+    `_refresh_host_damage` (`:1345`), whose region transfer is a real
+    `vulkan_sffi_read_buffer_regions_bytes` call. Device-free that returns no
+    bytes and the path fails closed on the byte-count mismatch at `:1387`, so
+    the pixels a successful damaged readback would commit CANNOT be asserted
+    here. That belongs in a device spec under `test/03_system/`.
+
+Nothing in this file asserts that a real window swapchain presented anything —
+`VulkanBackend` owns no surface, which is exactly what the two adverse
+scenarios pin.
+
+## Verification guidance and troubleshooting
+Every scenario names the field it reads and the source line the value is
+derived from in a trailing `# oracle:` comment. If `finalize_compute_frame_no_readback`
+starts returning false here, read `frame_fallback_reason` first: `"completion-unknown"`
+and `"compute-finalize-failed"` are the only two exits it has, and both mean the
+device-free preconditions above stopped holding.
+"""
+# Lifecycle: doc/01_research/local/engine2d_four_backend_capture.md ;
+# doc/03_plan/ui/engine2d_vulkan_showcase_parity_plan.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/engine2d_four_backend_capture.md
+# @manual_section: vulkan-retained-present
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 20%
+# @tag: unit, engine2d, vulkan, present, damage
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
 use common.ui.draw_ir.{
     draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_composition_window_present_with_images
 }
 
 fn window_present_fixture():
+    """A one-rect DrawIR composition targeting the Vulkan lane."""
     val embedding = draw_ir_embedding_config(
         "gui", "root", 0, 0, 2, 2, 0, 1000, true)
     draw_ir_composition(
@@ -17,18 +75,132 @@ fn window_present_fixture():
             ])
         ])
 
-describe "Engine2D retained Vulkan window presentation":
+fn staged_backend() -> VulkanBackend:
+    """An 8x4 Vulkan backend with a host mirror and no pending device command.
+
+    Geometry is assigned rather than obtained from `init()` so the backend never
+    reaches a driver; `pending_compute_command` stays 0, which is what keeps
+    every path below free of SFFI calls.
+    """
+    var b = VulkanBackend.create()
+    b.w = 8
+    b.h = 4
+    b.host_buf = [0u32; 32]
+    b.clip_w = 8
+    b.clip_h = 4
+    b.initialized = true
+    b
+
+describe "Vulkan damage staging — what the backend agrees to present":
+
+    it "keeps an exact, non-overlapping damage plan verbatim":
+        # @req REQ-LIB-GPU-VKPRESENT-001
+        step("Stage two disjoint regions of an 8x4 surface")
+        var b = staged_backend()
+        # @capture(statistics): staged damage plan — accepted flag, stored quad count
+        val staged = b.stage_present_damage([1, 1, 2, 2, 4, 0, 2, 3])
+        assert_true(staged)  # oracle: :1299 returns true once every quad validates
+        step("Confirm the plan was copied element for element, not widened")
+        assert_true(b.present_damage_valid)  # oracle: :1315 set only after full validation
+        expect(b.present_damage_rects.len()).to_equal(8)  # oracle: 2 rects x 4 i64 fields
+        expect(b.present_damage_rects[0]).to_equal(1)  # oracle: first rect x, copied at :1312
+        expect(b.present_damage_rects[3]).to_equal(2)  # oracle: first rect h
+        expect(b.present_damage_rects[4]).to_equal(4)  # oracle: second rect x
+        expect(b.present_damage_rects[7]).to_equal(3)  # oracle: second rect h
+
+    it "rejects a malformed or overlapping plan instead of widening it":
+        # @req REQ-LIB-GPU-VKPRESENT-002
+        step("Offer four plans the backend documents as invalid")
+        var b = staged_backend()
+        # @capture(statistics): rejection matrix — overlap, ragged, out-of-bounds, empty
+        val overlapping = b.stage_present_damage([0, 0, 4, 4, 2, 2, 4, 2])
+        assert_false(overlapping)  # oracle: :1290 pairwise overlap test rejects the plan
+        val ragged = b.stage_present_damage([0, 0, 4])
+        assert_false(ragged)  # oracle: :1272 `rects.len() % 4 != 0`
+        val out_of_bounds = b.stage_present_damage([6, 0, 4, 1])
+        assert_false(out_of_bounds)  # oracle: :1283 `rw > w - x`
+        val empty_rect = b.stage_present_damage([0, 0, 0, 1])
+        assert_false(empty_rect)  # oracle: :1279 `rw <= 0`
+        step("Confirm each rejection left no partial plan behind")
+        assert_false(b.present_damage_valid)  # oracle: :1270 cleared on entry, never re-set
+        expect(b.present_damage_rects.len()).to_equal(0)  # oracle: :1269 plan reset first
+
+describe "Vulkan retained present — the successful completion":
+
+    it "completes a retained frame and reports it as device-retained with no readback":
+        # @req REQ-LIB-GPU-VKPRESENT-003
+        step("Stage two damage regions and finalize the frame without a host copy")
+        var b = staged_backend()
+        assert_true(b.stage_present_damage([1, 1, 2, 2, 4, 0, 2, 3]))
+        # @capture(statistics): frame receipt after a successful retained finalize
+        val finalized = b.finalize_compute_frame_no_readback()
+        assert_true(finalized)  # oracle: :1274 returns true after the damage plan is cleared
+        step("Read the receipt the completed frame published")
+        val r = b.latest_frame_receipt()
+        expect(r.present_mode).to_equal("device-retained")  # oracle: :1261 _begin_frame_receipt mode
+        expect(r.dirty_rect_count).to_equal(2)  # oracle: :1143 staged plan length / 4
+        expect(r.readback_bytes).to_equal(0)  # oracle: :1262 present_readback_bytes = 0
+        assert_true(r.no_readback)  # oracle: :1181 no request and zero bytes
+        assert_true(r.completion_known)  # oracle: :1184 completion_unknown never set
+        expect(r.fallback_reason).to_equal("")  # oracle: :1156 cleared, no exit taken
+        step("Confirm it claims no swapchain work it did not do")
+        assert_false(r.device_present)  # oracle: :1159 docstring — VulkanBackend owns no surface
+        assert_false(r.present_completed)  # oracle: :1273 frame_present_completed = false
+
+    it "consumes the damage plan and invalidates the host mirror it did not refresh":
+        # @req REQ-LIB-GPU-VKPRESENT-004
+        step("Mark the surface dirty, stage damage, then finalize without a readback")
+        var b = staged_backend()
+        b.host_mirror_valid = true
+        b.dirty = true
+        assert_true(b.stage_present_damage([0, 0, 4, 4]))
+        # @capture(statistics): post-finalize damage and host-mirror state
+        assert_true(b.finalize_compute_frame_no_readback())
+        step("Confirm the plan was consumed, not left to be replayed on the next frame")
+        assert_false(b.present_damage_valid)  # oracle: :1272 _clear_present_damage()
+        expect(b.present_damage_rects.len()).to_equal(0)  # oracle: :1321 plan emptied
+        step("Confirm a skipped cache refresh invalidated the stale host mirror")
+        assert_false(b.host_mirror_valid)  # oracle: :1271 dirty frames invalidate the mirror
+        expect(b.device_finalize_no_readback_count).to_equal(1)  # oracle: :1273 counter incremented once
+
+    it "reports a clean surface as a no-op present rather than inventing a frame":
+        # @req REQ-LIB-GPU-VKPRESENT-005
+        step("Stage damage but leave the surface clean, then present")
+        var b = staged_backend()
+        assert_true(b.stage_present_damage([1, 1, 2, 2, 4, 0, 2, 3]))
+        b.dirty = false
+        # @capture(statistics): no-op present receipt and counter
+        b.present()
+        step("Confirm the present was accounted as a no-op with no readback")
+        val r = b.latest_frame_receipt()
+        expect(r.present_mode).to_equal("none")  # oracle: :1422 frame_present_mode = "none"
+        expect(b.present_noop_count).to_equal(1)  # oracle: :1421 present_noop_count += 1
+        assert_false(r.readback_requested)  # oracle: :1423 frame_readback_requested = false
+        expect(r.readback_bytes).to_equal(0)  # oracle: :1412 zeroed on entry
+        step("Confirm the unused damage plan was still consumed")
+        assert_false(b.present_damage_valid)  # oracle: :1424 _clear_present_damage()
+
+describe "Engine2D window presentation — refusal without a swapchain":
+
     it "does not invent a Vulkan receipt for a software engine":
+        # @req REQ-LIB-GPU-VKPRESENT-006
+        step("Ask a software-backed engine to present a window frame")
         var engine = Engine2D.create_with_backend(2, 2, "software")
-        expect(engine.present_window_device()).to_equal(false)
-        expect(engine.latest_vulkan_frame_receipt()).to_be_nil()
+        # @capture(statistics): software-engine present verdict and receipt presence
+        expect(engine.present_window_device()).to_equal(false)  # oracle: no Vulkan backend to present
+        step("Confirm no Vulkan frame receipt was fabricated")
+        expect(engine.latest_vulkan_frame_receipt()).to_be_nil()  # oracle: receipt exists only for the Vulkan lane
         engine.shutdown()
 
     it "renders DrawIR but fails closed when no window swapchain is owned":
+        # @req REQ-LIB-GPU-VKPRESENT-007
+        step("Execute a one-rect DrawIR composition targeting the Vulkan window lane")
         var engine = Engine2D.create_with_backend(2, 2, "software")
+        # @capture(statistics): DrawIR command count and the recorded fallback reason
         val result = engine2d_draw_ir_adv_composition_window_present_with_images(
             engine, window_present_fixture(), [])
-        expect(result.rendered_command_count).to_equal(1)
-        expect(result.fallback_required).to_equal(true)
-        expect(result.fallback_reason).to_equal("vulkan-window-present-failed")
+        expect(result.rendered_command_count).to_equal(1)  # oracle: the fixture carries one draw_ir_rect
+        step("Confirm the missing swapchain was reported, not silently absorbed")
+        expect(result.fallback_required).to_equal(true)  # oracle: presentation could not complete
+        expect(result.fallback_reason).to_equal("vulkan-window-present-failed")  # oracle: named refusal, not a generic error
         engine.shutdown()

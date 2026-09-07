@@ -58,18 +58,24 @@ fn parse_gate_manifest(payload: text) -> [GateManifestEntry]:
         if line == "" or line.starts_with("#") or line.starts_with("must_check_gates"):
             continue
         val fields = _gate_csv_fields(line)
-        if fields.len() != 6:
+        # 6 columns is the historical shape; 8 adds `ci_job, inputs` between
+        # `command` and `description` (see config/check/must_check_gates.sdn).
+        # Both are accepted, nothing between them is: a row of any other width
+        # stays MALFORMED rather than being reinterpreted with shifted fields.
+        if fields.len() != 6 and fields.len() != 8:
             entries.push(GateManifestEntry(gate_id: "", tier: "push", push_blocking: true, mode: "", command: "", description: "malformed mandatory gate row"))
             continue
         val tier = fields[1].trim()
         val blocking_token = fields[2].trim()
-        if (tier != "push" and tier != "bootstrap") or (blocking_token != "true" and blocking_token != "false"):
+        # `ci` rows are read so the registry stays parseable, and are then
+        # ignored by plan_protected_gate_manifest, which selects `push` only.
+        if (tier != "push" and tier != "bootstrap" and tier != "ci") or (blocking_token != "true" and blocking_token != "false"):
             entries.push(GateManifestEntry(gate_id: "", tier: "push", push_blocking: true, mode: "", command: "", description: "invalid mandatory gate tier or blocking token"))
             continue
         entries.push(GateManifestEntry(
             gate_id: fields[0].trim(), tier: tier,
             push_blocking: blocking_token == "true", mode: fields[3].trim(),
-            command: _gate_unquote(fields[4]), description: _gate_unquote(fields[5])
+            command: _gate_unquote(fields[4]), description: _gate_unquote(fields[fields.len() - 1])
         ))
     entries
 

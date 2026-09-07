@@ -1,7 +1,9 @@
 # Windows MSVC: Stage 2 admission blocked — cl.exe cannot compile runtime.c
 
 - **Date:** 2026-09-02
-- **Status:** OPEN — blocks Phase 2 (Stage 2) admission, and therefore Phase 3
+- **Status:** PARTIALLY FIXED (2026-09-06) — C sources now compile under cl.exe;
+  the compiler-flag half is still open in the Rust runtime-compile path.
+  Stage 2 admission NOT observed from this lane.
 - **Failing gate:** `Stage 2: proving struct receiver/runtime capability`
   (`scripts/bootstrap/bootstrap-from-scratch.sh:2592-2626`, exit 3)
 - **Lane:** `x86_64-pc-windows-msvc`, worktree pinned at
@@ -132,3 +134,131 @@ Checked against `b7b4ef8e060` (the later head of the same session lane): the
 divergence is IDENTICAL there (`runtime.h:250` still `void*`/`const char*`,
 `platform_win.h:457` still `(ptr,len)`/`int64_t`). This is a standing defect,
 not a half-landed change, and building the newer sha would not avoid it.
+
+
+---
+
+## Re-measurement 2026-09-06 (lane E, real Windows 11 box, cl.exe 19.44.35228 x64)
+
+Re-measured against the current tree, not the record's text. **Defect 1 is
+STALE — already fixed upstream.** All three sites now agree on the tagged-value
+form and no C2040 is emitted:
+
+| site | current signature |
+|---|---|
+| `src/runtime/runtime.h:262` | `int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly)` |
+| `src/runtime/platform/platform_win.h:457` | identical |
+| `src/runtime/platform/unix_common.h:309` | identical |
+
+**Defect 2 is real, and was larger than recorded.** `/std:c11` alone is not
+enough — MSVC 19.44 then says `fatal error C1189: "C atomic support is not
+enabled"` and needs `-experimental:c11atomics` as well. Underneath that gate sat
+80 further errors in `runtime.c` and 73 in `runtime_native.c` that the C1189
+had been hiding.
+
+### Before (reproduced 2026-09-06)
+
+```
+$ cl.exe -c -nologo -I src/runtime src/runtime/runtime.c
+vcruntime_c11_stdatomic.h(16): fatal error C1189: #error: "C atomics require C11 or later"
+
+$ cl.exe -c -nologo -std:c11 src/runtime/runtime.c
+vcruntime_c11_stdatomic.h(12): fatal error C1189: #error: "C atomic support is not enabled"
+
+$ cl.exe -c -nologo -std:c11 -experimental:c11atomics src/runtime/runtime.c
+runtime.c(108-111): error C2099: initializer is not a constant   [ATOMIC_VAR_INIT]
+runtime.c(1576): error C2143/C2059/C2091/C2082 ...              [__attribute__((weak))]
+  -> 80 errors total
+$ ... src/runtime/runtime_native.c
+  -> 73 errors total (__attribute__((weak)), __atomic_thread_fence, __asm__)
+```
+
+### Source-side fix (this change, `src/runtime/**` only)
+
+- `runtime.h` — new `SPL_WEAK` macro: `__attribute__((weak))` everywhere except
+  `_MSC_VER && !__clang__`, where it expands to nothing (MSVC has no weak
+  symbols and no `__attribute__` syntax). Gated off `__clang__` deliberately so
+  **clang-cl is byte-identical**, preserving the weak-external lowering the
+  existing `SPL_CLI_ARGS_WEAK` note depends on. Linux/macOS/FreeBSD unchanged.
+- `runtime.c` — 14 `__attribute__((weak))` -> `SPL_WEAK`; `ATOMIC_VAR_INIT(0)`
+  -> `0` on the four probe counters (the macro is deprecated in C17 and removed
+  in C23; plain init is valid C11 on clang/gcc, so no ifdef).
+- `runtime_native.c` — 12 `__attribute__((weak))` -> `SPL_WEAK`;
+  `__atomic_thread_fence(__ATOMIC_SEQ_CST)` -> `MemoryBarrier()` under MSVC;
+  two `__asm__ volatile ("" ::: "memory")` compiler barriers ->
+  `_ReadWriteBarrier()` under MSVC. All three are `#if defined(_MSC_VER) &&
+  !defined(__clang__)` forks — genuinely irreducible, no portable C spelling.
+
+### After
+
+```
+src/runtime/runtime.c        rc=0  errors=0
+src/runtime/runtime_native.c rc=0  errors=0
+   (cl.exe -c -nologo -std:c11 -experimental:c11atomics -I src/runtime)
+```
+
+`clang -fsyntax-only -I src/runtime src/runtime/runtime.c` -> exit 0 (only the
+pre-existing `strdup` deprecation warning), so no Unix regression.
+
+### Gate
+
+`sh scripts/check/check-c-runtime-compiles-push.shs`:
+
+```
+FAIL — 5 file(s) failed to compile: src/runtime/test/rt_tls13_sha256_sleep_selfcheck.c
+src/runtime/test/runtime_coverage_core_selfcheck.c
+src/runtime/test/runtime_process_owned_adapter_selfcheck.c
+src/runtime/test/runtime_time_failure_selfcheck.c
+src/runtime/test/runtime_timestamp_failure_selfcheck.c
+(105 compiled clean, 21 skipped for unavailable external dependencies)
+```
+
+**Byte-identical before and after this change** — same 5 offenders, same 105
+clean. All five are POSIX-only selfchecks (`clockid_t`, `nanosleep`) failing on
+a Windows host; none is a file this change touches. Not a regression; a
+pre-existing Windows-host red for the gate.
+
+### What remains open
+
+1. ~~**The two flags are not wired.**~~ **WIRED 2026-09-06.** Corrected
+   location: the invocation is **not** in `native_project/linker.rs` —
+   `LinkerBuilder::compile_c_runtime` there is a dead stub returning
+   `Ok(Vec::new())`. The live runtime-compile invocations are in
+   `src/compiler_rust/compiler/src/pipeline/native_project/tools.rs`:
+   `build_c_runtime_library` (core-C archive, the reachable Windows path),
+   `build_sqlite_runtime_object`, and `build_stage4_cli_c_provider_archives`.
+   All three now call a new helper `msvc_c11_atomics_flags(&cc)`, which appends
+   `-std:c11 -experimental:c11atomics` **only** when the resolved compiler
+   binary is cl.exe (`cc_detect::is_msvc_compiler`) or clang-cl. Gating is on
+   the compiler binary, not `LinkerFlavor::Msvc`, because that flavor can also
+   resolve to plain `clang` (see `MSVC_C_COMPILERS`), whose GNU driver rejects
+   `-std:c11`; every gcc/clang lane on Linux/macOS gets an empty slice and an
+   argument vector that is byte-identical to before.
+   Measured 2026-09-06 on the real Windows box, through the driver's exact flag
+   list (`-c -Os -ffunction-sections -fdata-sections -fno-unwind-tables
+   -fno-asynchronous-unwind-tables -fno-stack-protector -fPIC -std=gnu11` +
+   the two new flags + `-DSIMPLE_CORE_C_STANDALONE=1 -I src/runtime
+   -I src/runtime/platform`):
+   - `cl.exe` 19.44.35207: `runtime.c` **rc=0**, `runtime_native.c` **rc=0**,
+     0 errors, 7 `warning D9002` (the GNU-shaped flags are ignored, not fatal).
+     Without the two flags the same command dies at
+     `fatal error C1189: "C atomics require C11 or later"`.
+   - `clang-cl` 18.1.8: `runtime_native.c` **rc=0** both with and without the
+     flags; `-experimental:c11atomics` is only reported as
+     `argument unused during compilation`. Included in the gate so both MSVC
+     drivers share one flag set.
+   Note for the next lane: on this box `detect_c_compiler_for_target` resolves
+   to **clang-cl** (it is on PATH), so cl.exe is used only when clang-cl is
+   absent or `CC` names it. Also note `runtime.c` is **not** in the core-C
+   `runtime_inputs` list — only `runtime_native.c` is — so its clean cl.exe
+   compile above is direct evidence about the file, not about a driver step
+   that compiles it.
+   Unverified: no end-to-end Windows `native-build` was run through the changed
+   code path (still blocked on Stage 2 admission, item 2 below).
+2. **Stage 2 admission NOT observed.** This lane proved only that the two C
+   translation units compile; it did not run
+   `check-bootstrap-stage2-struct-receiver.shs` or reach admission.
+3. Not attempted: the C4028/C4029 warning family at `platform_win.h`
+   276/492/498/509 (warnings, explicitly out of the minimal unblock), the
+   `-fsyntax-only`-can't-see-it link stage, and the bootstrap diagnostic
+   matcher's blindness to `error C\d+` (still filed, still unfixed).

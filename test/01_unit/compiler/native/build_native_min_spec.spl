@@ -1,35 +1,55 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
 
+Executable evidence that the two native-build support modules this spec is
+named after — the platform linker probe and the nogc driver registry — import
+cleanly and answer real read-only queries. Audience: engineers owning the
+native build lane.
 
+## Operator workflow
 
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/native/build_native_min_spec.spl`
+(the bootstrap seed is currently the only binary on this host with `run`).
+Every scenario must pass; a failure is a regression in the module surfaces
+under test.
 
-# # Build Native Minimum Specification
-#
-# **Feature IDs:** #TBD
-# **Category:** Compiler
-# **Status:** In Progress
-#
-# ## Overview
-#
-# Tests that the linker and driver modules can be imported successfully.
+## Compatibility and limitations
 
-use linker.*
-use driver.*
+Covers import health plus the smallest read-only query of each module.
+Linker detection is host-dependent, so the scenario asserts the detected
+name is one of the four known values rather than one fixed name.
 
+## Verification guidance and troubleshooting
+
+Rerun the command above. An import-resolution error means the module path
+moved; a scenario failure means the module answered outside its contract.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: native-build-module-health
 
 use std.spec.step
+use std.nogc_sync_mut.platform.linker.{get_linker_info}
+use std.nogc_sync_mut.driver.registry.{DriverRegistry}
+use std.nogc_sync_mut.driver.types.{DriverClass}
 
 describe "Build Native Minimum":
-    it "imports linker module successfully":
+    it "reports the detected platform linker as one of the known linkers":
         # @req REQ-SSPEC-COMPILER
-        step("imports linker module successfully")
-        val imported_module = "linker"
-        expect(imported_module).to_equal("linker")
+        # @capture(statistics): detected linker name for this host
+        step("Query the platform linker probe for the detected system linker")
+        val detected = get_linker_info()
+        val known_linker = detected == "mold" or detected == "lld" or
+            detected == "ld" or detected == "unknown"
+        expect(known_linker).to_equal(true)
 
-    it "imports driver module successfully":
+    it "finds no device driver in a freshly created empty driver registry":
         # @req REQ-SSPEC-COMPILER
-        step("imports driver module successfully")
-        val imported_module = "driver"
-        expect(imported_module).to_equal("driver")
+        # @capture(statistics): miss sentinel returned by the empty registry
+        step("Create an empty driver registry and query it for a Display device")
+        val registry = DriverRegistry.empty()
+        val miss = registry.find_for_device(0x1234, 0x5678, DriverClass.Display)
+        expect(miss).to_equal(-1)  # oracle: find_for_device documents -1 as the miss sentinel and an empty registry has no driver to match

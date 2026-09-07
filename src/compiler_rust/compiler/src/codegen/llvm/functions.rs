@@ -2575,6 +2575,35 @@ impl LlvmBackend {
                         "to_u32" | "to_i32" => self.context_ref().i32_type(),
                         _ => self.context_ref().i64_type(),
                     };
+                    // See the twin block in emitter.rs (`emit_method_call_static`)
+                    // for the measured incident: `to_i64`/`to_int` on an
+                    // already-i64-wide value coerces to itself, and a `text`
+                    // handle IS an i64 here, so the receiver's own word was
+                    // returned instead of the parsed number. `rt_to_int_dynamic`
+                    // parses a registry-validated heap string and is the
+                    // IDENTITY for everything else, so the genuinely-i64 case is
+                    // bit-for-bit unchanged; the narrowing targets keep the
+                    // coercion because they really do change width.
+                    if matches!(method, "to_i64" | "to_int")
+                        && recv_val.is_int_value()
+                        && recv_val.into_int_value().get_type() == int_type
+                    {
+                        let dyn_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let dyn_func = module
+                            .get_function("rt_to_int_dynamic")
+                            .unwrap_or_else(|| module.add_function("rt_to_int_dynamic", dyn_fn_type, None));
+                        let dyn_call = builder
+                            .build_call(dyn_func, &[recv_val.into_int_value().into()], "to_int_dyn")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_to_int_dynamic", &e))?;
+                        let dyn_val = dyn_call
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, dyn_val);
+                        }
+                        return Ok(());
+                    }
                     let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
                     if let Some(d) = dest {
                         vreg_map.insert(*d, converted);

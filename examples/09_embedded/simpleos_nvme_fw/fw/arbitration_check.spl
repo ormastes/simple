@@ -1,0 +1,383 @@
+"""
+arbitration_check — multi-queue command arbitration: does the controller serve
+COMPETING I/O submission queues fairly, and does the fairness oracle actually
+discriminate?
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/arbitration_check.spl
+MUST be run from the repo root: fw/nvme_transport_config.spl holds a
+cwd-relative SDN path, and from anywhere else the transport profile silently
+reads as zeroes.
+
+Verdict token on the last line: ARBITRATION OK | ARBITRATION FAIL (n)
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+
+WHICH ARBITRATION SCHEME IS IMPLEMENTED, STATED PLAINLY
+-------------------------------------------------------
+  * ROUND ROBIN — implemented and tested here. It is the NVMe MANDATORY
+    baseline arbitration mechanism and is NOT signalled by a CAP.AMS bit; every
+    controller must provide it. The arbiter under test is the product code
+    `QueueSet.next_pending_sq()` in `fw/nvme_qset.spl`. This file does not
+    reimplement arbitration; it DRIVES the real one and judges the result.
+  * WEIGHTED ROUND ROBIN WITH URGENT PRIORITY (CAP.AMS bit 0) — NOT
+    implemented. There is no priority class, no Set Features (Arbitration,
+    FID 01h) burst/weight state, and no strict-priority urgent queue. Section A
+    therefore asserts that CAP.AMS reads 0, i.e. the firmware advertises NO
+    optional arbitration mechanism. The project rule is that no capability bit
+    is advertised until its tests pass, and that rule is honoured by NOT
+    setting the WRR bit rather than by testing something weaker.
+  * VENDOR SPECIFIC (CAP.AMS bit 1) — NOT implemented, not advertised.
+
+THE FAIRNESS ORACLE, AND WHY IT IS NOT VACUOUS
+-----------------------------------------------
+A fairness test that a "always drain queue 1 first" scheduler can pass is
+worthless. The oracle here is two independent properties, and the SECOND one is
+the one with teeth:
+
+  P1  EQUAL SERVICE. At drain end every competing queue was serviced exactly
+      the same number of times. A biased arbiter passes P1 on its own, because
+      draining queue 1 completely and THEN queue 2 completely still ends with
+      equal totals. P1 alone is exactly the worthless test.
+
+  P2  NO CONSECUTIVE SERVICE UNDER CONTENTION. At any pick where two or more
+      queues still hold backlog, the arbiter must not serve the queue it just
+      served. This is what a drain-one-queue-first scheduler violates on its
+      very first repeat, and it is the property that makes the oracle real.
+
+Section D PROVES the oracle discriminates rather than asserting that it does: a
+deliberately biased always-lowest-qid arbiter is run over an IDENTICAL starting
+backlog, through the SAME oracle, and the oracle must REJECT it. If a future
+change ever made the oracle vacuous, section D goes red immediately, because a
+vacuous oracle accepts the biased arbiter too.
+
+Nothing here is asserted about WHICH queue is served first: `QueueSet.rr` is a
+persistent cursor, so the starting queue is an implementation detail. Only the
+alternation and the totals are spec-shaped properties.
+
+CLAIM BOUNDARY. This proves round-robin fairness of the in-tree arbiter over
+the queue registry, on a host-model Simple run. It does not prove a linked
+firmware image, a QEMU or board execution, per-command latency fairness, or any
+weighted/urgent arbitration, which is not implemented at all.
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use nvme_qset.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_reg_defs.*
+use nvme_reg_file.*
+use nvme_host_driver.*
+use hil_queue.*   # bool_to_i64
+
+# The competing queues and how deep each backlog is. Three queues rather than
+# two so that "alternates between exactly two" cannot masquerade as fairness.
+val ARB_QIDS:  i64 = 3
+val ARB_DEPTH: i64 = 6
+
+"""P1: every competing queue was serviced the same number of times.
+
+`order` is the service sequence (one qid per pick). Returns the number of
+violations, so 0 means fair.
+"""
+fn violations_equal_service(order: [i64], nq: i64) -> i64:
+    var counts: [i64] = []
+    var i: i64 = 0
+    while i <= nq:
+        counts.push(0)
+        i = i + 1
+    i = 0
+    while i < order.len():
+        val q: i64 = order[i]
+        if q >= 1 and q <= nq:
+            counts[q] = counts[q] + 1
+        i = i + 1
+    var bad: i64 = 0
+    var want: i64 = counts[1]
+    var q2: i64 = 1
+    while q2 <= nq:
+        if counts[q2] != want:
+            bad = bad + 1
+        q2 = q2 + 1
+    bad
+
+"""P2: no queue is served twice running while another queue still has backlog.
+
+`contention[i]` is how many queues held pending work at the moment of pick `i`.
+A repeat is only a violation when there was somebody else to serve.
+"""
+fn violations_consecutive(order: [i64], contention: [i64]) -> i64:
+    var bad: i64 = 0
+    var i: i64 = 1
+    while i < order.len():
+        if order[i] == order[i - 1] and contention[i] >= 2:
+            bad = bad + 1
+        i = i + 1
+    bad
+
+"""Print a service order compactly so a failing run is diagnosable."""
+fn order_text(order: [i64]) -> text:
+    var s: text = ""
+    var i: i64 = 0
+    while i < order.len():
+        s = s + "{order[i]}"
+        i = i + 1
+    s
+
+fn main():
+    var fail: i64 = 0
+
+    # ── A. capability honesty: no optional arbitration mechanism advertised ──
+    print "-- A. CAP.AMS advertises no optional arbitration mechanism --"
+    var h = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(h.attach()), 1, "emu transport attaches")
+    val cap_lo: i64 = h.reg_read32(REG_CAP)
+    fail = fail + expect_eq(bf_get(cap_lo, bf_cap_ams()), 0,
+        "CAP.AMS is 0: round robin only, NO weighted-round-robin bit advertised")
+
+    # ── B. the real arbiter, under genuine contention ────────────────────────
+    print "-- B. round-robin service order across {ARB_QIDS} competing queues --"
+    var qs: QueueSet = queue_set_new()
+    var q: i64 = 1
+    while q <= ARB_QIDS:
+        fail = fail + expect_eq(qs.create_cq(q, MAX_QUEUE_SIZE), SC_SUCCESS, "create CQ qid {q}")
+        fail = fail + expect_eq(qs.create_sq(q, MAX_QUEUE_SIZE, q), SC_SUCCESS, "create SQ qid {q}")
+        q = q + 1
+
+    # Load every queue to the SAME depth, so any asymmetry in the drain order is
+    # the arbiter's doing and not the workload's.
+    q = 1
+    while q <= ARB_QIDS:
+        var k: i64 = 0
+        while k < ARB_DEPTH:
+            fail = fail + expect_eq(bool_to_i64(qs.sq_submit(q, cmd_make(q * 100 + k, OP_READ, k, 1, 0))), 1,
+                "backlog qid {q} slot {k}")
+            k = k + 1
+        q = q + 1
+
+    var order: [i64] = []
+    var contention: [i64] = []
+    var guard: i64 = 0
+    val total: i64 = ARB_QIDS * ARB_DEPTH
+    while guard < total:
+        # How many queues still hold work AT THIS PICK — the contention witness.
+        var live: i64 = 0
+        var c: i64 = 1
+        while c <= ARB_QIDS:
+            if qs.sq_len[c] > 0:
+                live = live + 1
+            c = c + 1
+        val picked: i64 = qs.next_pending_sq()
+        if picked < 1:
+            guard = total
+        else:
+            order.push(picked)
+            contention.push(live)
+            val got: NvmeCmd = qs.sq_fetch(picked)
+            fail = fail + expect_eq(bool_to_int(got.cid >= 100), 1, "fetched a real command from qid {picked}")
+            guard = guard + 1
+
+    fail = fail + expect_eq(order.len(), total, "the arbiter drained every queued command ({total})")
+    print "  service order: {order_text(order)}"
+
+    # ── C. the oracle over the REAL arbiter ──────────────────────────────────
+    print "-- C. fairness oracle over the product arbiter --"
+    val real_p1: i64 = violations_equal_service(order, ARB_QIDS)
+    val real_p2: i64 = violations_consecutive(order, contention)
+    fail = fail + expect_eq(real_p1, 0, "P1 EQUAL SERVICE: every competing queue was serviced the same number of times")
+    fail = fail + expect_eq(real_p2, 0, "P2 NO STARVATION: the arbiter never served one queue twice running while another had backlog")
+
+    # ── D. the oracle must REJECT a biased arbiter (non-vacuity witness) ─────
+    # An always-lowest-qid selector over an IDENTICAL starting backlog. It is
+    # built here, in the test, so that every run re-proves the oracle has teeth.
+    print "-- D. MUTATION: the same oracle judges a deliberately biased arbiter --"
+    var backlog: [i64] = []
+    var b: i64 = 0
+    while b <= ARB_QIDS:
+        backlog.push(ARB_DEPTH)
+        b = b + 1
+    backlog[0] = 0
+
+    var b_order: [i64] = []
+    var b_cont: [i64] = []
+    var left: i64 = total
+    while left > 0:
+        var live2: i64 = 0
+        var c2: i64 = 1
+        while c2 <= ARB_QIDS:
+            if backlog[c2] > 0:
+                live2 = live2 + 1
+            c2 = c2 + 1
+        # THE BIAS: take the lowest qid that has work, and keep taking it.
+        var pick: i64 = NULL_IDX
+        var c3: i64 = 1
+        while c3 <= ARB_QIDS:
+            if pick < 1 and backlog[c3] > 0:
+                pick = c3
+            c3 = c3 + 1
+        b_order.push(pick)
+        b_cont.push(live2)
+        backlog[pick] = backlog[pick] - 1
+        left = left - 1
+
+    print "  biased order:  {order_text(b_order)}"
+    val bias_p1: i64 = violations_equal_service(b_order, ARB_QIDS)
+    val bias_p2: i64 = violations_consecutive(b_order, b_cont)
+    # P1 alone CANNOT tell the two apart — that is exactly why P2 exists, and
+    # asserting it here keeps anyone from "simplifying" the oracle down to P1.
+    fail = fail + expect_eq(bias_p1, 0, "WITNESS: P1 alone ACCEPTS the biased arbiter, so P1 alone would be a vacuous oracle")
+    fail = fail + expect_eq(bool_to_int(bias_p2 > 0), 1, "MUTATION: the biased always-lowest-qid arbiter is REJECTED by the fairness oracle")
+    fail = fail + expect_eq(bool_to_int(bias_p2 > real_p2), 1, "MUTATION: the oracle scores the biased arbiter strictly worse than the product arbiter")
+
+    # ── E. an idle or absent queue is never served ───────────────────────────
+    # Fairness must not mean "serve everybody"; a queue with no backlog, and a
+    # qid that was never created, must both be skipped rather than fetched from.
+    print "-- E. idle and non-existent queues are skipped, not served --"
+    var qi: QueueSet = queue_set_new()
+    fail = fail + expect_eq(qi.create_cq(1, MAX_QUEUE_SIZE), SC_SUCCESS, "create CQ qid 1")
+    fail = fail + expect_eq(qi.create_sq(1, MAX_QUEUE_SIZE, 1), SC_SUCCESS, "create SQ qid 1")
+    fail = fail + expect_eq(qi.create_cq(2, MAX_QUEUE_SIZE), SC_SUCCESS, "create CQ qid 2")
+    fail = fail + expect_eq(qi.create_sq(2, MAX_QUEUE_SIZE, 2), SC_SUCCESS, "create SQ qid 2 (left permanently EMPTY)")
+    fail = fail + expect_eq(qi.next_pending_sq(), NULL_IDX, "NEGATIVE: with every queue idle the arbiter selects NOTHING")
+    fail = fail + expect_eq(bool_to_i64(qi.sq_submit(1, cmd_make(11, OP_READ, 0, 1, 0))), 1, "backlog on qid 1 only")
+    var only_one: i64 = 0
+    var e: i64 = 0
+    while e < ARB_QIDS + 2:
+        if qi.next_pending_sq() == 1:
+            only_one = only_one + 1
+            val drained: NvmeCmd = qi.sq_fetch(1)
+            fail = fail + expect_eq(drained.cid, 11, "the single backlogged command is the one served")
+        e = e + 1
+    fail = fail + expect_eq(only_one, 1, "NEGATIVE: the empty qid 2 is never selected, and qid 1 is served exactly once")
+    fail = fail + expect_eq(qi.next_pending_sq(), NULL_IDX, "the drained controller selects NOTHING again")
+
+    # ── F. RESET: the queue registry a Controller Reset leaves behind ────────
+    # NVMe: CC.EN 1->0 deletes all I/O Submission and Completion Queues. In this
+    # firmware that consequence is structural — `nvme_controller_new()` builds a
+    # fresh `queue_set_new()` (fw/nvme_controller.spl:71), and the register lane
+    # separately witnesses the discard of doorbell/phase state
+    # (`DISCARDED: SQ0TDBL is back to 0`, fw/nvme_registers_check.spl).
+    #
+    # SCOPE, STATED PLAINLY: this section asserts the ARBITER's side of that
+    # rule — that the post-reset queue registry arbitrates nothing until the
+    # host re-creates queues, and that the round-robin cursor carries no
+    # pre-reset bias into the new epoch. It does NOT itself drive CC.EN; the
+    # register lane does that, and this file does not restate its claim.
+    print "-- F. RESET: the arbiter over a post-Controller-Reset queue registry --"
+    var qr: QueueSet = queue_set_new()
+    var r: i64 = 1
+    while r <= ARB_QIDS:
+        fail = fail + expect_eq(qr.create_cq(r, MAX_QUEUE_SIZE), SC_SUCCESS, "pre-reset create CQ qid {r}")
+        fail = fail + expect_eq(qr.create_sq(r, MAX_QUEUE_SIZE, r), SC_SUCCESS, "pre-reset create SQ qid {r}")
+        fail = fail + expect_eq(bool_to_i64(qr.sq_submit(r, cmd_make(700 + r, OP_READ, r, 1, 0))), 1, "pre-reset backlog qid {r}")
+        r = r + 1
+    # Drive the cursor off its origin so a reset that FAILED to clear state
+    # would be visible: without this the post-reset cursor would look correct by
+    # accident. This is the non-vacuity witness for the section.
+    val warm: i64 = qr.next_pending_sq()
+    fail = fail + expect_eq(bool_to_int(warm >= 1), 1, "pre-reset the arbiter is live and has advanced its cursor")
+
+    # The Controller Reset: every I/O queue is gone, exactly as a fresh
+    # controller's registry is.
+    var qpost: QueueSet = queue_set_new()
+    fail = fail + expect_eq(qpost.next_pending_sq(), NULL_IDX,
+        "RESET: the post-reset queue registry arbitrates NOTHING -- every I/O queue was discarded")
+    fail = fail + expect_eq(bool_to_i64(qpost.sq_submit(1, cmd_make(701, OP_READ, 0, 1, 0))), 0,
+        "RESET: a submission to a discarded I/O queue is refused, not silently queued")
+
+    # Re-created queues arbitrate fairly again, with no pre-reset bias.
+    r = 1
+    while r <= ARB_QIDS:
+        fail = fail + expect_eq(qpost.create_cq(r, MAX_QUEUE_SIZE), SC_SUCCESS, "post-reset re-create CQ qid {r}")
+        fail = fail + expect_eq(qpost.create_sq(r, MAX_QUEUE_SIZE, r), SC_SUCCESS, "post-reset re-create SQ qid {r}")
+        var rk: i64 = 0
+        while rk < 2:
+            fail = fail + expect_eq(bool_to_i64(qpost.sq_submit(r, cmd_make(800 + r * 10 + rk, OP_READ, rk, 1, 0))), 1, "post-reset backlog qid {r} slot {rk}")
+            rk = rk + 1
+        r = r + 1
+    var r_order: [i64] = []
+    var r_cont: [i64] = []
+    var rg: i64 = 0
+    val r_total: i64 = ARB_QIDS * 2
+    while rg < r_total:
+        var rlive: i64 = 0
+        var rc: i64 = 1
+        while rc <= ARB_QIDS:
+            if qpost.sq_len[rc] > 0:
+                rlive = rlive + 1
+            rc = rc + 1
+        val rp: i64 = qpost.next_pending_sq()
+        if rp < 1:
+            rg = r_total
+        else:
+            r_order.push(rp)
+            r_cont.push(rlive)
+            val rcmd: NvmeCmd = qpost.sq_fetch(rp)
+            fail = fail + expect_eq(bool_to_int(rcmd.cid >= 800), 1, "post-reset fetched a re-created command from qid {rp}")
+            rg = rg + 1
+    print "  post-reset service order: {order_text(r_order)}"
+    fail = fail + expect_eq(violations_equal_service(r_order, ARB_QIDS), 0,
+        "RESET: re-created queues are served equally -- no queue inherited a pre-reset advantage")
+    fail = fail + expect_eq(violations_consecutive(r_order, r_cont), 0,
+        "RESET: round-robin alternation is restored after the Controller Reset")
+
+    # ── G. FAULT: a queue that dies mid-drain must not stall the others ──────
+    # Injected failure: one of three competing queues is deleted while the other
+    # two still hold backlog. A fair arbiter must skip the dead qid and keep the
+    # survivors alternating; a broken one either keeps selecting the dead queue
+    # (livelock) or gives up and starves the survivors.
+    print "-- G. FAULT: one competing queue is deleted mid-drain --"
+    var qf: QueueSet = queue_set_new()
+    var g: i64 = 1
+    while g <= ARB_QIDS:
+        fail = fail + expect_eq(qf.create_cq(g, MAX_QUEUE_SIZE), SC_SUCCESS, "fault-case create CQ qid {g}")
+        fail = fail + expect_eq(qf.create_sq(g, MAX_QUEUE_SIZE, g), SC_SUCCESS, "fault-case create SQ qid {g}")
+        var gk: i64 = 0
+        while gk < ARB_DEPTH:
+            fail = fail + expect_eq(bool_to_i64(qf.sq_submit(g, cmd_make(g * 1000 + gk, OP_READ, gk, 1, 0))), 1, "fault-case backlog qid {g} slot {gk}")
+            gk = gk + 1
+        g = g + 1
+
+    # Drain qid 2 completely, then delete it: the fault lands on a live registry.
+    var d: i64 = 0
+    while d < ARB_DEPTH:
+        val dead: NvmeCmd = qf.sq_fetch(2)
+        fail = fail + expect_eq(bool_to_int(dead.cid >= 2000), 1, "fault-case drained qid 2 slot {d}")
+        d = d + 1
+    fail = fail + expect_eq(qf.delete_sq(2), SC_SUCCESS, "FAULT INJECTED: SQ qid 2 is deleted while qids 1 and 3 still hold backlog")
+
+    var f_order: [i64] = []
+    var f_cont: [i64] = []
+    var fg: i64 = 0
+    val f_total: i64 = ARB_DEPTH * 2
+    var dead_selected: i64 = 0
+    while fg < f_total:
+        var flive: i64 = 0
+        var fc: i64 = 1
+        while fc <= ARB_QIDS:
+            if qf.sq_len[fc] > 0:
+                flive = flive + 1
+            fc = fc + 1
+        val fp: i64 = qf.next_pending_sq()
+        if fp < 1:
+            fg = f_total
+        else:
+            if fp == 2:
+                dead_selected = dead_selected + 1
+            f_order.push(fp)
+            f_cont.push(flive)
+            val fcmd: NvmeCmd = qf.sq_fetch(fp)
+            fail = fail + expect_eq(bool_to_int(fcmd.cid >= 1000), 1, "fault-case fetched from surviving qid {fp}")
+            fg = fg + 1
+    print "  post-fault service order: {order_text(f_order)}"
+    fail = fail + expect_eq(dead_selected, 0, "FAULT: the deleted queue is NEVER selected again -- no livelock on a dead qid")
+    fail = fail + expect_eq(f_order.len(), f_total,
+        "FAULT: both surviving queues drained completely -- a dead peer did not starve them")
+    fail = fail + expect_eq(violations_consecutive(f_order, f_cont), 0,
+        "FAULT: the survivors keep alternating after a competing queue is deleted")
+    fail = fail + expect_eq(qf.next_pending_sq(), NULL_IDX, "FAULT: the fully drained post-fault registry selects NOTHING")
+
+    if fail == 0:
+        print "ARBITRATION OK"
+    else:
+        print "ARBITRATION FAIL ({fail})"

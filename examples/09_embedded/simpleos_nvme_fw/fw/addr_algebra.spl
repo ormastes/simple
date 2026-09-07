@@ -1,0 +1,493 @@
+"""
+addr_algebra — per-layer typed address algebra for the SimpleOS NVMe firmware.
+
+Contract: doc/03_plan/hardware/nvme_typed_address_algebra_plan.md (workstream I,
+wave 1) + doc/09_report/nvme_address_site_census_2026-09-01.md.
+
+WHAT ENFORCES THESE TYPES — read this before trusting anything below.
+--------------------------------------------------------------------
+Simple does NOT check function argument types. `takes_i(x: i64)` called with
+`"hello"` runs to completion and exits 0; `bin/simple lint` reports it clean
+(measured: doc/08_tracking/bug/function_argument_types_unchecked_2026-09-01.md).
+Nothing in this file is compile-time-safe, and no comment here may claim that it
+is. What actually holds the design together is four mechanisms, all runtime or
+review-time:
+
+  1. DISTINCT CONSTRUCTOR NAMES. There is no way to obtain a `FtlBlk` except by
+     calling a function with `ftl_blk` in its name. A reviewer or a grep sees
+     `ftl_blk_trusted(x)` where a page was meant.
+  2. NAMED INTER-LAYER CONVERSIONS. No implicit coercion exists and none is
+     offered. Every layer crossing is a function whose name states both
+     endpoints (`ftl_blk_to_nd_block`), so a crossing is greppable.
+  3. THE RATCHET GATE. scripts/check/check-typed-address-algebra.shs caps the
+     number of bare-`i64` address parameters in fw/ at a baseline that may only
+     decrease. That gate — not the type checker — is what stops the algebra
+     eroding.
+  4. RUNTIME RANGE VALIDATION here, plus the oracles in addr_algebra_check.spl.
+
+WHY RANGE CHECKS ARE NOT ENOUGH (the block/page transposition hazard).
+----------------------------------------------------------------------
+`PAGES_PER_BLOCK` and `NUM_BLOCKS` are BOTH 64 (nvme_types.spl:45-46). Every
+legal block index is therefore also a legal page index and vice versa: a
+block/page transposition passes every range check this file can write, at every
+value, and is numerically invisible. Validation cannot see it — only the
+NAME of the constructor and of the conversion can. That is precisely why
+`nd_block_checked` and `nd_page_checked` are separate functions taking separate
+bounds out of the geometry rather than one `index_checked(raw, limit)` helper:
+the helper would be shorter and would make the hazard undetectable to a reader,
+which is the whole failure mode. The same reasoning is why `nd_page_of_wl_idx`
+exists even though it is the identity in v1 SLC.
+
+SENTINELS.
+----------
+`UNMAP` / `NO_PPN` / `NULL_IDX` (nvme_types.spl:38-40) and `TARGET_INVALID`
+(openssd_config.spl:16) are four names for the one value -1, spanning three
+declared domains that the compiler cannot tell apart (census C1). This module
+introduces `AddrOpt<T>` — an explicit present/value pair — so absence is a
+distinct shape rather than an in-band magic number. It does NOT delete the four
+sentinels: that is a later wave (plan §5.2 step 4, which must not run before the
+u32 narrowing) and would require editing nvme_types.spl.
+
+SCOPE OF THIS FILE (wave 1). Types, geometry, validated + trusted constructors,
+option types, named inter-layer conversions, and the bit-packed codec. NO call
+site in fw/ is converted here — that is a later wave.
+
+Imports: only nvme_types.* (geometry constants) and nd_types.* (the already
+landed `Nd` namespace, whose seven dimension structs this module reuses rather
+than redefining). Both are peer leaves; importing them keeps this module at the
+same depth and cycle-free, per nd_types.spl's own placement rule.
+"""
+
+use nvme_types.*
+use nd_types.*
+
+# ── Geometry profile ──────────────────────────────────────────────────────────
+# Bounds come from a profile VALUE passed to each constructor, never read from a
+# global inside the constructor, so a future OpenSSD board profile plugs in at
+# one place. `fw_geometry()` is the v1 default, built from nvme_types' constants
+# and nd_types' ND_NUM_CHANNELS (the peer-leaf channel count; fil_scheduler is
+# deliberately NOT imported here — see nd_types.spl:104-112).
+#
+# Bit widths: both fw/ dimensions are powers of two (64 blocks x 64 pages), so
+# the packed codec below is shifts and masks only. Plan §4.1: shl/shr/and/or are
+# the only binops HWIR's strict lowering accepts; `/` and `%` are not accepted
+# at all. `blk_bits`/`pg_bits` are asserted against the constants at runtime by
+# addr_algebra_check.spl — this file cannot derive them statically.
+struct FwGeometry:
+    blocks:      i64   # NUM_BLOCKS
+    pages:       i64   # PAGES_PER_BLOCK
+    pg_bits:     i64   # log2(pages)
+    blk_bits:    i64   # log2(blocks)
+    channels:    i64   # ND_NUM_CHANNELS
+    ways:        i64   # ways per channel (v1: 1, no live address math — nd_types.spl:118-126)
+    banks:       i64   # LUNs per way (v1: 1, not modeled)
+    planes:      i64   # NUM_PLANES (datasheet fact; v1 emulator is single-plane)
+    lbas:        i64   # LBA_COUNT
+    namespaces:  i64
+    queues:      i64   # number of NVMe queue pairs addressable by qid
+    qdepth:      i64   # slots per queue ring
+    cids:        i64   # command-id space
+
+fn fw_geometry() -> FwGeometry:
+    FwGeometry(
+        blocks: NUM_BLOCKS,
+        pages: PAGES_PER_BLOCK,
+        pg_bits: 6,
+        blk_bits: 6,
+        channels: ND_NUM_CHANNELS,
+        ways: 1,
+        banks: 1,
+        planes: NUM_PLANES,
+        lbas: LBA_COUNT,
+        namespaces: 1,
+        queues: 8,
+        qdepth: 64,
+        cids: 65536
+    )
+
+# ── Option carrier (absence is a shape, not the value -1) ─────────────────────
+# One generic carrier rather than fifteen hand-rolled Opt structs. Named
+# per-type helpers below (`ftl_ppn_none`, `ftl_blk_some`, ...) preserve the
+# plan's §3.6 vocabulary at every call site.
+struct AddrOpt<T>:
+    present: bool
+    value:   T
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HOST layer (`Hst`) — everything the host names. No media coordinate is
+# visible in this namespace.
+# ══════════════════════════════════════════════════════════════════════════════
+struct HstLba:
+    idx: i64
+
+struct HstNsid:
+    idx: i64
+
+struct HstCid:
+    idx: i64
+
+struct HstQid:
+    idx: i64
+
+struct HstQSlot:       # ring position within one SQ or CQ
+    idx: i64
+
+fn hst_lba_trusted(raw: i64) -> HstLba:
+    HstLba(idx: raw)
+
+fn hst_nsid_trusted(raw: i64) -> HstNsid:
+    HstNsid(idx: raw)
+
+fn hst_cid_trusted(raw: i64) -> HstCid:
+    HstCid(idx: raw)
+
+fn hst_qid_trusted(raw: i64) -> HstQid:
+    HstQid(idx: raw)
+
+fn hst_qslot_trusted(raw: i64) -> HstQSlot:
+    HstQSlot(idx: raw)
+
+fn hst_lba_checked(raw: i64, g: FwGeometry) -> AddrOpt<HstLba>:
+    if raw >= 0 and raw < g.lbas:
+        AddrOpt<HstLba>(present: true, value: HstLba(idx: raw))
+    else:
+        AddrOpt<HstLba>(present: false, value: HstLba(idx: 0))
+
+fn hst_nsid_checked(raw: i64, g: FwGeometry) -> AddrOpt<HstNsid>:
+    # NVMe namespace ids are 1-based; 0 is "no namespace", never a valid id.
+    if raw >= 1 and raw <= g.namespaces:
+        AddrOpt<HstNsid>(present: true, value: HstNsid(idx: raw))
+    else:
+        AddrOpt<HstNsid>(present: false, value: HstNsid(idx: 0))
+
+fn hst_cid_checked(raw: i64, g: FwGeometry) -> AddrOpt<HstCid>:
+    if raw >= 0 and raw < g.cids:
+        AddrOpt<HstCid>(present: true, value: HstCid(idx: raw))
+    else:
+        AddrOpt<HstCid>(present: false, value: HstCid(idx: 0))
+
+fn hst_qid_checked(raw: i64, g: FwGeometry) -> AddrOpt<HstQid>:
+    if raw >= 0 and raw < g.queues:
+        AddrOpt<HstQid>(present: true, value: HstQid(idx: raw))
+    else:
+        AddrOpt<HstQid>(present: false, value: HstQid(idx: 0))
+
+fn hst_qslot_checked(raw: i64, g: FwGeometry) -> AddrOpt<HstQSlot>:
+    if raw >= 0 and raw < g.qdepth:
+        AddrOpt<HstQSlot>(present: true, value: HstQSlot(idx: raw))
+    else:
+        AddrOpt<HstQSlot>(present: false, value: HstQSlot(idx: 0))
+
+# The NULL_IDX domain (pool handles, "no slot", not-found search results) gets
+# its own absence value, distinct from the L2P and block-allocation domains.
+fn hst_qslot_none() -> AddrOpt<HstQSlot>:
+    AddrOpt<HstQSlot>(present: false, value: HstQSlot(idx: 0))
+
+fn hst_qslot_some(s: HstQSlot) -> AddrOpt<HstQSlot>:
+    AddrOpt<HstQSlot>(present: true, value: s)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FTL layer (`Ftl`) — logical-to-physical mapping. No host PRP, no NAND channel.
+# ══════════════════════════════════════════════════════════════════════════════
+# FtlVpn and HstLba are numerically identical today (the L2P is indexed directly
+# by host LBA, ftl_map.spl:117,125) and are still two types, for the same reason
+# NdWordline and NdPage are: the identity is a v1 accident, not a law. A 4K-vs-
+# 512B host block size makes them diverge, and `host_lba_to_ftl_vpn` is where
+# that lands without a caller edit.
+struct FtlVpn:
+    idx: i64
+
+struct FtlPpn:         # flat physical page number (the L2P value)
+    idx: i64
+
+struct FtlBlk:         # FTL erase-block index
+    idx: i64
+
+struct FtlBand:        # allocation group
+    idx: i64
+
+fn ftl_vpn_trusted(raw: i64) -> FtlVpn:
+    FtlVpn(idx: raw)
+
+fn ftl_ppn_trusted(raw: i64) -> FtlPpn:
+    FtlPpn(idx: raw)
+
+fn ftl_blk_trusted(raw: i64) -> FtlBlk:
+    FtlBlk(idx: raw)
+
+fn ftl_band_trusted(raw: i64) -> FtlBand:
+    FtlBand(idx: raw)
+
+fn ftl_vpn_checked(raw: i64, g: FwGeometry) -> AddrOpt<FtlVpn>:
+    if raw >= 0 and raw < g.lbas:
+        AddrOpt<FtlVpn>(present: true, value: FtlVpn(idx: raw))
+    else:
+        AddrOpt<FtlVpn>(present: false, value: FtlVpn(idx: 0))
+
+fn ftl_ppn_checked(raw: i64, g: FwGeometry) -> AddrOpt<FtlPpn>:
+    if raw >= 0 and raw < g.blocks * g.pages:
+        AddrOpt<FtlPpn>(present: true, value: FtlPpn(idx: raw))
+    else:
+        AddrOpt<FtlPpn>(present: false, value: FtlPpn(idx: 0))
+
+fn ftl_blk_checked(raw: i64, g: FwGeometry) -> AddrOpt<FtlBlk>:
+    if raw >= 0 and raw < g.blocks:
+        AddrOpt<FtlBlk>(present: true, value: FtlBlk(idx: raw))
+    else:
+        AddrOpt<FtlBlk>(present: false, value: FtlBlk(idx: 0))
+
+fn ftl_band_checked(raw: i64, g: FwGeometry) -> AddrOpt<FtlBand>:
+    if raw >= 0 and raw < g.blocks:
+        AddrOpt<FtlBand>(present: true, value: FtlBand(idx: raw))
+    else:
+        AddrOpt<FtlBand>(present: false, value: FtlBand(idx: 0))
+
+# L2P absence (the UNMAP / NO_PPN domain) — a shape, never -1.
+fn ftl_ppn_none() -> AddrOpt<FtlPpn>:
+    AddrOpt<FtlPpn>(present: false, value: FtlPpn(idx: 0))
+
+fn ftl_ppn_some(p: FtlPpn) -> AddrOpt<FtlPpn>:
+    AddrOpt<FtlPpn>(present: true, value: p)
+
+fn ftl_ppn_is_mapped(o: AddrOpt<FtlPpn>) -> bool:
+    o.present
+
+fn ftl_ppn_or(o: AddrOpt<FtlPpn>, fallback: FtlPpn) -> FtlPpn:
+    if o.present:
+        o.value
+    else:
+        fallback
+
+# Block-allocation absence ("no victim", "no free block") — a DIFFERENT domain
+# from the L2P one above, and now a different type, which is the whole point.
+fn ftl_blk_none() -> AddrOpt<FtlBlk>:
+    AddrOpt<FtlBlk>(present: false, value: FtlBlk(idx: 0))
+
+fn ftl_blk_some(b: FtlBlk) -> AddrOpt<FtlBlk>:
+    AddrOpt<FtlBlk>(present: true, value: b)
+
+fn ftl_blk_is_present(o: AddrOpt<FtlBlk>) -> bool:
+    o.present
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIL layer (`Fil`) — the scheduler's view of parallelism.
+# ══════════════════════════════════════════════════════════════════════════════
+# FilCh and NdChannel are deliberately two types: FilCh is a scheduling lane,
+# NdChannel is a physical bus. They coincide today (census C4, where the SAME
+# channel count is defined three times), and `fil_ch_to_nd_channel` is the one
+# seam where that coincidence is written down instead of assumed.
+struct FilCh:
+    idx: i64
+
+struct FilWay:         # way within a channel
+    idx: i64
+
+struct FilCe:          # chip-enable line (one CE per way in v1)
+    idx: i64
+
+struct FilLun:         # LUN / die behind a CE
+    idx: i64
+
+struct FilBank:        # bank within a LUN
+    idx: i64
+
+struct FilPlane:       # plane within a bank
+    idx: i64
+
+fn fil_ch_trusted(raw: i64) -> FilCh:
+    FilCh(idx: raw)
+
+fn fil_way_trusted(raw: i64) -> FilWay:
+    FilWay(idx: raw)
+
+fn fil_ce_trusted(raw: i64) -> FilCe:
+    FilCe(idx: raw)
+
+fn fil_lun_trusted(raw: i64) -> FilLun:
+    FilLun(idx: raw)
+
+fn fil_bank_trusted(raw: i64) -> FilBank:
+    FilBank(idx: raw)
+
+fn fil_plane_trusted(raw: i64) -> FilPlane:
+    FilPlane(idx: raw)
+
+fn fil_ch_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilCh>:
+    if raw >= 0 and raw < g.channels:
+        AddrOpt<FilCh>(present: true, value: FilCh(idx: raw))
+    else:
+        AddrOpt<FilCh>(present: false, value: FilCh(idx: 0))
+
+fn fil_way_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilWay>:
+    if raw >= 0 and raw < g.ways:
+        AddrOpt<FilWay>(present: true, value: FilWay(idx: raw))
+    else:
+        AddrOpt<FilWay>(present: false, value: FilWay(idx: 0))
+
+fn fil_ce_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilCe>:
+    # v1: one CE per way, so the CE space is the way space. Written as its own
+    # bound (not `g.ways` reused silently) so a board with 2 CEs per way edits
+    # the geometry, not this predicate.
+    if raw >= 0 and raw < g.ways:
+        AddrOpt<FilCe>(present: true, value: FilCe(idx: raw))
+    else:
+        AddrOpt<FilCe>(present: false, value: FilCe(idx: 0))
+
+fn fil_lun_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilLun>:
+    if raw >= 0 and raw < g.banks:
+        AddrOpt<FilLun>(present: true, value: FilLun(idx: raw))
+    else:
+        AddrOpt<FilLun>(present: false, value: FilLun(idx: 0))
+
+fn fil_bank_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilBank>:
+    if raw >= 0 and raw < g.banks:
+        AddrOpt<FilBank>(present: true, value: FilBank(idx: raw))
+    else:
+        AddrOpt<FilBank>(present: false, value: FilBank(idx: 0))
+
+fn fil_plane_checked(raw: i64, g: FwGeometry) -> AddrOpt<FilPlane>:
+    if raw >= 0 and raw < g.planes:
+        AddrOpt<FilPlane>(present: true, value: FilPlane(idx: raw))
+    else:
+        AddrOpt<FilPlane>(present: false, value: FilPlane(idx: 0))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NAND-device layer (`Nd`) — the seven dimension structs already live in
+# nd_types.spl and are NOT redefined here. What is added is the validated
+# constructor half that nd_types.spl's unchecked `nd_*` free functions lack;
+# those remain the `_trusted` tier and are re-exposed under the `_trusted`
+# name so the gate's escape-hatch grep sees a uniform vocabulary.
+# ══════════════════════════════════════════════════════════════════════════════
+fn nd_block_trusted(raw: i64) -> NdBlock:
+    nd_block(raw)
+
+fn nd_page_trusted(raw: i64) -> NdPage:
+    nd_page(raw)
+
+fn nd_wordline_trusted(raw: i64) -> NdWordline:
+    nd_wordline(raw)
+
+fn nd_channel_trusted(raw: i64) -> NdChannel:
+    nd_channel(raw)
+
+fn nd_way_trusted(raw: i64) -> NdWay:
+    nd_way(raw)
+
+fn nd_bank_trusted(raw: i64) -> NdBank:
+    nd_bank(raw)
+
+fn nd_plane_trusted(raw: i64) -> NdPlane:
+    nd_plane(raw)
+
+# Separate bounds, separate function names, on purpose: g.blocks == g.pages == 64
+# in v1, so these two predicates are numerically identical and a transposition
+# passes both. Only the name distinguishes them. See the header.
+fn nd_block_checked(raw: i64, g: FwGeometry) -> AddrOpt<NdBlock>:
+    if raw >= 0 and raw < g.blocks:
+        AddrOpt<NdBlock>(present: true, value: nd_block(raw))
+    else:
+        AddrOpt<NdBlock>(present: false, value: nd_block(0))
+
+fn nd_page_checked(raw: i64, g: FwGeometry) -> AddrOpt<NdPage>:
+    if raw >= 0 and raw < g.pages:
+        AddrOpt<NdPage>(present: true, value: nd_page(raw))
+    else:
+        AddrOpt<NdPage>(present: false, value: nd_page(0))
+
+fn nd_wordline_checked(raw: i64, g: FwGeometry) -> AddrOpt<NdWordline>:
+    # v1 SLC: one page per wordline, so the wordline space is the page space.
+    if raw >= 0 and raw < g.pages:
+        AddrOpt<NdWordline>(present: true, value: nd_wordline(raw))
+    else:
+        AddrOpt<NdWordline>(present: false, value: nd_wordline(0))
+
+fn nd_channel_checked(raw: i64, g: FwGeometry) -> AddrOpt<NdChannel>:
+    if raw >= 0 and raw < g.channels:
+        AddrOpt<NdChannel>(present: true, value: nd_channel(raw))
+    else:
+        AddrOpt<NdChannel>(present: false, value: nd_channel(0))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EMULATOR universe (`Emu`)
+# ══════════════════════════════════════════════════════════════════════════════
+# The `Emu` namespace already exists and is owned elsewhere:
+# examples/09_embedded/simpleos_nvme_fw/emu/nvme_ct.spl:47-57 declares
+# `newtype Lba | Ppn | Ch | Bank | Plane | Block | Page | Cid | Qid | Addr`,
+# with its own codec (`ppa_to_ppn`, proven in emu/proofs/addr.lean) over a
+# DIFFERENT geometry (2.2.2.2.8, not 64x64).
+#
+# No `Emu*` twin is declared here, deliberately. The emu/ tree is out of
+# migration scope (plan §3.2) and fw/ does not import it, so a second set of
+# emulator address types in this file would be unused code that could silently
+# diverge from the anchor above — the exact failure this workstream exists to
+# prevent. The namespace is recorded, not duplicated. When a real fw/<->emu/
+# boundary appears, it lands here as a named conversion in the §3.5 style
+# (`ftl_ppn_to_emu_ppn`), against that anchor's geometry.
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bit-packed codec (plan §3.7)
+# ══════════════════════════════════════════════════════════════════════════════
+# FtlPpn.idx == (blk << pg_bits) | page. Equivalent to nvme_types' canonical
+# `blk * PAGES_PER_BLOCK + page` for the v1 power-of-two geometry, and
+# addr_algebra_check.spl asserts that equivalence exhaustively rather than
+# assuming it. Shifts/masks are used because they are the only binops HWIR's
+# strict lowering accepts (plan §4.1); `/` and `%` are not.
+#
+# way/bank/plane get ZERO-WIDTH fields in v1 — no bits are allocated for
+# dimensions that have no live conversion math, matching nd_types.spl's
+# no-fake-math rule and its check file's "honest, not faked" assertions.
+fn ftl_ppn_pack(b: FtlBlk, p: NdPage, g: FwGeometry) -> FtlPpn:
+    FtlPpn(idx: (b.idx << g.pg_bits) | p.idx)
+
+fn ftl_ppn_block_of(p: FtlPpn, g: FwGeometry) -> FtlBlk:
+    FtlBlk(idx: p.idx >> g.pg_bits)
+
+fn ftl_ppn_page_of(p: FtlPpn, g: FwGeometry) -> NdPage:
+    nd_page(p.idx & ((1 << g.pg_bits) - 1))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Inter-layer conversions — explicit, named, no implicit coercion.
+# Naming rule: <srcns>_<srcrole>_to_<dstns>_<dstrole>.
+# A conversion that is the identity today is STILL a function: that is the seam
+# where a future non-identity mapping lands without a caller edit.
+# ══════════════════════════════════════════════════════════════════════════════
+fn host_lba_to_ftl_vpn(l: HstLba) -> FtlVpn:
+    FtlVpn(idx: l.idx)
+
+fn ftl_vpn_to_host_lba(v: FtlVpn) -> HstLba:
+    HstLba(idx: v.idx)
+
+fn ftl_blk_to_nd_block(b: FtlBlk) -> NdBlock:
+    nd_block(b.idx)
+
+fn nd_block_to_ftl_blk(b: NdBlock) -> FtlBlk:
+    FtlBlk(idx: b.idx)
+
+fn ftl_blk_to_fil_ch(b: FtlBlk, g: FwGeometry) -> FilCh:
+    # Today: blk % channels — the same assignment fil_scheduler.channel_of and
+    # rain.spl's stripe layout use. Three definitions of that rule exist in the
+    # tree (census C4); this is the one a typed caller reaches, and
+    # addr_algebra_check.spl cross-checks it against fil_scheduler's.
+    FilCh(idx: b.idx % g.channels)
+
+fn fil_ch_to_nd_channel(c: FilCh) -> NdChannel:
+    nd_channel(c.idx)
+
+fn nd_channel_to_fil_ch(c: NdChannel) -> FilCh:
+    FilCh(idx: c.idx)
+
+fn nd_page_to_nd_wordline(p: NdPage) -> NdWordline:
+    nd_wordline_of_page(p)
+
+fn ftl_ppn_to_nd_addr(p: FtlPpn, g: FwGeometry) -> NdAddr:
+    nd_addr(
+        fil_ch_to_nd_channel(ftl_blk_to_fil_ch(ftl_ppn_block_of(p, g), g)),
+        nd_way(0),
+        nd_bank(0),
+        nd_plane(0),
+        ftl_blk_to_nd_block(ftl_ppn_block_of(p, g)),
+        ftl_ppn_page_of(p, g)
+    )
+
+fn nd_addr_to_ftl_ppn(a: NdAddr, g: FwGeometry) -> FtlPpn:
+    ftl_ppn_pack(nd_block_to_ftl_blk(a.block), a.page, g)

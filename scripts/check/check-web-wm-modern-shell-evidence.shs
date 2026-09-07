@@ -102,6 +102,38 @@ write_report() {
     printf '%s\n' "- simple runtime source: \`${SIMPLE_CMD_SOURCE:-unavailable}\`"
     printf '%s\n' "- simple runtime status: \`${SIMPLE_CMD_STATUS:-unavailable}\`"
   } > "$REPORT_PATH"
+  emit_verdict "$1" "$2"
+}
+
+# Every terminating path in this gate calls write_report just before exiting, so
+# the verdict is emitted from there. Until 2026-09-06 the whole gate wrote its
+# status to files only: on a host with no Simple runtime, no Electron and no
+# display it exited 0 having rendered nothing, printing not one byte of stdout.
+emit_verdict() {
+  case "$1" in
+    pass)
+      verdict_signals=0
+      for verdict_signal in "${BITMAP_NONBLANK_STATUS:-}" "${AUDIT_PASS:-}" \
+          "${INTERACTION_PASS:-}" "${INTERACTION_FOCUS:-}" "${INTERACTION_KEYBOARD:-}" \
+          "${INTERACTION_INPUT:-}" "${INTERACTION_POINTER:-}" "${INTERACTION_CLICKS:-}"; do
+        if [ "$verdict_signal" = pass ]; then
+          verdict_signals=$((verdict_signals + 1))
+        fi
+      done
+      if [ "$verdict_signals" -le 0 ]; then
+        echo "ERROR — nothing was checked (no-evidence-signal-verified)"
+        exit 2
+      fi
+      echo "PASS — $verdict_signals rendered-shell evidence signal(s) checked, 0 failures"
+      ;;
+    environment-unavailable)
+      echo "ERROR — nothing was checked ($2)"
+      exit 2
+      ;;
+    *)
+      echo "FAIL — web wm modern shell evidence: $2"
+      ;;
+  esac
 }
 
 is_rust_seed_simple() {

@@ -12,6 +12,8 @@ use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
 val BUILD_DIR = "build/native_struct_field_access_regression"
 val SOURCE_PATH = BUILD_DIR + "/main.spl"
 val BINARY_PATH = BUILD_DIR + "/main"
+val ERASED_SOURCE_PATH = BUILD_DIR + "/erased_receiver.spl"
+val ORDER_SOURCE_PATH = BUILD_DIR + "/erased_receiver_order.spl"
 
 describe "self-hosted native struct field access":
     # @manual scenario evidence
@@ -41,3 +43,106 @@ describe "self-hosted native struct field access":
         val ran = shell(BINARY_PATH)
         expect(ran.exit_code).to_equal(0)
         expect(ran.stdout).to_equal("A")
+
+    # @manual scenario evidence
+    # Regression for
+    # doc/08_tracking/bug/stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30.md
+    #
+    # When the receiver type erases to ANY, the HIR lowerer picks a field
+    # offset from whichever struct in scope declares that field name. Picking
+    # the struct with the MOST fields (the rule before the fix) yields the
+    # LARGEST index, which is past the end of every smaller candidate: a
+    # one-field receiver was loaded at byte_offset 32 and returned adjacent
+    # heap bytes (0x2d363230325f7365, the ASCII "es_2026-").
+    #
+    # This must run through `bin/simple run` (the Cranelift JIT), not inline
+    # in the spec body: `bin/simple test` executes spec bodies in the seed's
+    # tree-walking interpreter, which never lowers a FieldGet and therefore
+    # cannot discriminate the defect.
+    #
+    # `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE` is load-bearing,
+    # not tidiness: the test runner exports `SIMPLE_EXECUTION_MODE=interpret`
+    # and `SIMPLE_RUNTIME_MODE=interpreter`, the child `bin/simple run`
+    # inherits them, and the interpreter answers 42 whether or not the offset
+    # model is broken. Measured on the unfixed binary: with the vars inherited
+    # this scenario PASSES vacuously; with them stripped it reads
+    # 6873726019372056632 at byte_offset 32.
+    it "reads an erased-receiver field from the receiver's own allocation":
+        # @req REQ-SSPEC-SYSTEM
+        step("reads an erased-receiver field from the receiver's own allocation")
+        step("Write a one-field receiver alongside a wider struct sharing the field name")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(
+            ERASED_SOURCE_PATH,
+            "struct ZzSmall:\n" +
+            "    zzq: i64\n" +
+            "\n" +
+            "struct ZzBig:\n" +
+            "    p0: i64\n" +
+            "    p1: i64\n" +
+            "    p2: i64\n" +
+            "    p3: i64\n" +
+            "    zzq: i64\n" +
+            "\n" +
+            "fn read_zzq(o: any) -> i64:\n" +
+            "    return o.zzq\n" +
+            "\n" +
+            "fn main():\n" +
+            "    var s = ZzSmall(zzq: 42)\n" +
+            "    print(read_zzq(s))\n"
+        )).to_equal(true)
+
+        step("Run it through the JIT lowering path")
+        val erased = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+            "bin/simple run " + ERASED_SOURCE_PATH + " 2>/dev/null"
+        )
+        expect(erased.exit_code).to_equal(0)
+
+        step("Observe the receiver's own field value, not adjacent heap bytes")
+        expect(erased.stdout.trim()).to_equal("42")
+
+    # @manual scenario evidence
+    # Generalization: the same shape with the declaration order reversed and a
+    # third candidate at a middle index, so a green verdict cannot be an
+    # artifact of type-registry iteration order.
+    it "resolves the erased-receiver field independently of declaration order":
+        # @req REQ-SSPEC-SYSTEM
+        step("resolves the erased-receiver field independently of declaration order")
+        step("Declare the wide candidates BEFORE the one-field receiver")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(
+            ORDER_SOURCE_PATH,
+            "struct ZzWide:\n" +
+            "    q0: i64\n" +
+            "    q1: i64\n" +
+            "    q2: i64\n" +
+            "    q3: i64\n" +
+            "    q4: i64\n" +
+            "    zzr: i64\n" +
+            "\n" +
+            "struct ZzMid:\n" +
+            "    m0: i64\n" +
+            "    m1: i64\n" +
+            "    zzr: i64\n" +
+            "\n" +
+            "struct ZzTiny:\n" +
+            "    zzr: i64\n" +
+            "\n" +
+            "fn read_zzr(o: any) -> i64:\n" +
+            "    return o.zzr\n" +
+            "\n" +
+            "fn main():\n" +
+            "    var t = ZzTiny(zzr: 7)\n" +
+            "    print(read_zzr(t))\n"
+        )).to_equal(true)
+
+        step("Run it through the JIT lowering path")
+        val ordered = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+            "bin/simple run " + ORDER_SOURCE_PATH + " 2>/dev/null"
+        )
+        expect(ordered.exit_code).to_equal(0)
+
+        step("Observe the one-field receiver's own value")
+        expect(ordered.stdout.trim()).to_equal("7")

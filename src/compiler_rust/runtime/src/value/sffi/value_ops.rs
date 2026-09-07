@@ -53,6 +53,17 @@ pub extern "C" fn rt_value_as_int(v: RuntimeValue) -> i64 {
     }
     v.as_heap_u64().map_or_else(|| v.as_int(), |value| value as i64)
 }
+/// Rust twin of the C lane's `rt_to_int_dynamic` (runtime_native.c): the
+/// receiver-dispatched target of a bare erased `to_i64`/`to_int` — a registry-
+/// validated string parses via `rt_string_to_int`; anything else is returned
+/// as its own raw tagged word, byte-identical to the identity cast it replaces.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    if value.heap_type() == Some(crate::value::heap::HeapObjectType::String) {
+        return crate::value::collections::rt_string_to_int(value);
+    }
+    value.0 as i64
+}
 /// Total, tag-aware `UnboxInt` decode for compiled code (the exact semantics the
 /// Cranelift `emit_unbox_int` used to inline, plus heap-boxed wide/unsigned
 /// integer support):

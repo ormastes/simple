@@ -24,6 +24,12 @@ fn pending_of(body_line: text) -> bool:
     val facts = extract_sspec_source_facts("probe_spec.spl", src)
     facts.scenarios[0].pending
 
+fn has_rule(report: SspecDocumentizationReport, rule_id: text) -> bool:
+    for finding in report.findings:
+        if finding.rule_id == rule_id:
+            return true
+    false
+
 describe "pending detection is statement-position, not mention":
     it "does not flag a comment mentioning fail(\"todo:":
         # @req REQ-SSPEC-ORA-001
@@ -84,3 +90,36 @@ describe "pending detection is statement-position, not mention":
         val src = "describe " + q + "d" + q + ":\n    it " + q + "case" + q + ":\n        enum State:\n            Pending\n        pending\n"
         val facts = extract_sspec_source_facts("probe_spec.spl", src)
         expect(facts.scenarios[0].pending).to_equal(true)
+
+    it "keeps a probe-guarded skip( out of the unconditional-scaffold blocker":
+        # A lane-gated spec (GPU, board, QEMU) reports the documented `skip:`
+        # outcome when its lane is absent. Scoring that as an unconditional
+        # pending scaffold fired SSDOC-ORA-001 and capped every SKIP-clean
+        # lane spec at 49 — measured on
+        # test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl.
+        # @req REQ-SSPEC-ORA-001
+        # @capture(bit_table): lane-gated skip classification
+        step("Classify a scenario whose skip( is reached only through a probe branch")
+        val q = "\""
+        val src = "describe " + q + "d" + q + ":\n    it " + q + "case" + q + ":\n" +
+            "        if not lane.is_available():\n" +
+            "            skip(" + q + "cuda lane absent" + q + ")\n" +
+            "        else:\n" +
+            "            expect(run_cell()).to_equal(" + q + "ok" + q + ")\n"
+        val facts = extract_sspec_source_facts("probe_spec.spl", src)
+        expect(facts.scenarios[0].pending).to_equal(false)
+        expect(has_rule(analyze_sspec_text("probe_spec.spl", src), "SSDOC-ORA-001")).to_equal(false)
+
+    it "still flags an unguarded skip( at the scenario body's own level":
+        # Control for the exemption above: with no probe branch the skip is
+        # exactly the unconditional scaffold ORA-001 names, and stays a blocker.
+        # @req REQ-SSPEC-ORA-001
+        # @capture(bit_table): unguarded scaffold classification
+        step("Classify a scenario whose skip( sits at the body's own indent")
+        val q = "\""
+        val src = "describe " + q + "d" + q + ":\n    it " + q + "case" + q + ":\n" +
+            "        skip(" + q + "not implemented" + q + ")\n" +
+            "        expect(run_cell()).to_equal(" + q + "ok" + q + ")\n"
+        val facts = extract_sspec_source_facts("probe_spec.spl", src)
+        expect(facts.scenarios[0].pending).to_equal(true)
+        expect(has_rule(analyze_sspec_text("probe_spec.spl", src), "SSDOC-ORA-001")).to_equal(true)

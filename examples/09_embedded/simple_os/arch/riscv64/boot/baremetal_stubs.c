@@ -132,6 +132,11 @@ static void rv_heap_progress(size_t off)
 }
 #define RV_HEAP_PROGRESS(off) rv_heap_progress(off)
 #define BAREMETAL_ENABLE_ALIGNED_ALLOC 1
+/* Kernel-stack guard at the allocation funnel (see boot_entry.c). Defined in
+ * boot_entry.c, the one riscv64 boot TU with no duplicate twin, so this hook
+ * cannot be shadowed by the OTHER definition the way rt_index_set was. */
+void rv64_stack_guard_check(void);
+#define RV_ALLOC_GUARD_CHECK() rv64_stack_guard_check()
 #include "../../common/baremetal_bump_heap.h"
 
 /* Width-independent helpers shared with riscv32 (rv_memzero, rv_fence, le/rd

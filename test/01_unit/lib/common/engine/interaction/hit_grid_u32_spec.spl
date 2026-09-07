@@ -1,34 +1,39 @@
 # @cover src/lib/common/engine/interaction/hit_grid_u32.spl 80%
 """
-# Hit grid u32 — CPU rasterizer for the GPU ID-buffer hit-test kernel
+## Purpose and audience
+Executable specification for the CPU rasterizer behind the GPU
+ID-buffer hit-test kernel (doc/03_plan/ui/unified_2d_engine/
+unified_2d_event_panel_offload_2026-07-30.md, decision D6 Stage B).
+Audience: maintainers of the engine interaction stack and whoever
+ports `simple_2d_hit_grid_rasterize` to a compute shader — this spec
+is the CPU executable contract the kernel must reproduce.
 
-**Feature IDs:** N/A (Lane L4 Stage B of the unified 2D event/panel/offload plan)
-**Category:** Stdlib / Engine / GPU offload
-**Status:** Implemented (CPU software backend; GPU kernel not present -- no
-device in this sandbox)
-**Requirements:** N/A
-**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
+## Operator workflow
+Run the spec from the repo root with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/engine/interaction/hit_grid_u32_spec.spl
+Read the trailing SPEC FILE VERDICT line. Each scenario stamps the
+queried texel words it observed, so a wrong node id in a stamped
+bit_table names the offending proxy, layer, or policy directly.
 
-## Overview
+## Compatibility and limitations
+The grid is row-major with half-open proxy bounds; stamping runs
+ascending paint key so later (topmost) proxies overwrite earlier ones
+at shared cells. Untouched cells and out-of-bounds queries both read
+the miss sentinel. The GPU kernel itself is not present in this
+environment — no device — so this spec pins the CPU reference only.
 
-Covers decision D6 Stage B: `simple_2d_hit_grid_rasterize` stamps each
-`HitProxy2D`'s node id across its half-open AABB into a row-major grid,
-bottom-to-front so overlapping proxies resolve to the topmost by the
-core's flattened paint key (same rule `hit_stack` applies).
-`simple_2d_hit_grid_query` then answers a hit query with a single texel
-read instead of walking the proxy list. This is the CPU executable
-specification the GPU ID-buffer kernel (Vulkan/CUDA compute shader,
-untouched in this change) must reproduce.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Stamp order | Ascending paint key (bottom-most first) so a later stamp overwrites an earlier one at any shared cell |
-| Half-open bounds | A proxy [left, right) x [top, bottom) stamps cells left..right-1, top..bottom-1 |
-| Miss sentinel | Untouched cells AND out-of-bounds queries both read back -1 |
-| Policy gate | pointer_policy None, disabled, and invisible proxies never stamp |
+## Verification guidance and troubleshooting
+A cell that should hit but reads -1 usually means the proxy was
+skipped by the policy gate (disabled, invisible, or pointer policy
+None) rather than a bounds bug: check the policy scenarios first.
+An overlapping-proxy mismatch means the paint-key ordering (render
+layer, then insertion sequence) changed under the rasterizer.
 """
+
+# Lifecycle: doc/01_research/ui/engine2d_gc_tier/analysis_2026-07-25.md ;
+# doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md ;
+# doc/04_architecture/ui/engine_2d.md ;
+# doc/05_design/engine2d_four_backend_capture.md
 
 use std.spec.*
 use std.common.engine.interaction.hit_proxy.{HitProxy2D, POINTER_POLICY_NONE}
@@ -38,67 +43,88 @@ use std.common.engine.interaction.hit_grid_u32.{
     simple_2d_hit_grid_query
 }
 
+# @manual_section: stamping-and-query
+
 describe "simple_2d_hit_grid_rasterize / simple_2d_hit_grid_query — CPU ID-buffer":
 
     it "a single proxy stamps its node id across its half-open AABB":
-        step("Proxy [10, 20) x [10, 20) on a 30x30 grid")
+        # @req REQ-2DUI-HITGRID-001
+        step("Rasterize proxy [10, 20) x [10, 20) on a 30x30 grid")
         val a = HitProxy2D.create(7, 10, 10, 20, 20)
         val grid = simple_2d_hit_grid_rasterize([a], 30, 30)
 
-        expect(simple_2d_hit_grid_query(grid, 10, 10)).to_equal(7)
-        expect(simple_2d_hit_grid_query(grid, 19, 19)).to_equal(7)
-        step("the right/bottom edge is exclusive")
+        # @capture(bit_table): queried texel node ids across the stamp area
+        expect(simple_2d_hit_grid_query(grid, 10, 10)).to_equal(7)  # oracle: the top-left covered cell carries the proxy's node id
+        expect(simple_2d_hit_grid_query(grid, 19, 19)).to_equal(7)  # oracle: the last half-open cell still carries the node id
+        step("Check that the right/bottom edge is exclusive")
         expect(simple_2d_hit_grid_query(grid, 20, 10)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
         expect(simple_2d_hit_grid_query(grid, 10, 20)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
-        step("untouched cells read back the miss sentinel")
+        step("Confirm untouched cells read back the miss sentinel")
         expect(simple_2d_hit_grid_query(grid, 0, 0)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
 
     it "out-of-bounds coordinates read back the miss sentinel":
+        # @req REQ-2DUI-HITGRID-002
+        step("Query one texel outside each grid edge")
         val grid = simple_2d_hit_grid_rasterize([], 10, 10)
+        # @capture(bit_table): the four out-of-bounds query results
         expect(simple_2d_hit_grid_query(grid, -1, 0)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
         expect(simple_2d_hit_grid_query(grid, 0, -1)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
         expect(simple_2d_hit_grid_query(grid, 10, 0)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
         expect(simple_2d_hit_grid_query(grid, 0, 10)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
 
     it "overlapping proxies resolve to the topmost by render_layer":
-        step("Low (layer 0) and high (layer 1) both cover (5, 5)")
+        # @req REQ-2DUI-HITGRID-003
+        step("Rasterize a layer-0 and a layer-1 proxy both covering (5, 5)")
         var low = HitProxy2D.create(1, 0, 0, 10, 10)
         low.render_layer = 0
         var high = HitProxy2D.create(2, 0, 0, 10, 10)
         high.render_layer = 1
         val grid = simple_2d_hit_grid_rasterize([low, high], 10, 10)
 
-        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)
-        step("stamping order fed to the rasterizer must not matter")
+        # @capture(bit_table): the winning node id at the overlap for both orders
+        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)  # oracle: the layer-1 proxy paints last and owns the shared cell
+        step("Re-rasterize with the proxy order swapped")
         val grid_reordered = simple_2d_hit_grid_rasterize([high, low], 10, 10)
-        expect(simple_2d_hit_grid_query(grid_reordered, 5, 5)).to_equal(2)
+        expect(simple_2d_hit_grid_query(grid_reordered, 5, 5)).to_equal(2)  # oracle: paint key, not list order, decides the winner
 
     it "overlapping proxies at the same layer resolve to the later insertion_sequence":
+        # @req REQ-2DUI-HITGRID-004
+        step("Rasterize two same-layer proxies with sequences 0 and 1")
         var first = HitProxy2D.create(1, 0, 0, 10, 10)
         first.insertion_sequence = 0
         var second = HitProxy2D.create(2, 0, 0, 10, 10)
         second.insertion_sequence = 1
         val grid = simple_2d_hit_grid_rasterize([first, second], 10, 10)
-        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)
+        # @capture(bit_table): the winning node id at the shared cell
+        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)  # oracle: the later insertion sequence breaks the same-layer tie
 
     it "a disabled or invisible proxy never stamps":
+        # @req REQ-2DUI-HITGRID-005
+        step("Rasterize one disabled and one invisible proxy")
         var disabled = HitProxy2D.create(1, 0, 0, 10, 10)
         disabled.enabled = false
         var invisible = HitProxy2D.create(2, 0, 0, 10, 10)
         invisible.visible = false
         val grid = simple_2d_hit_grid_rasterize([disabled, invisible], 10, 10)
+        # @capture(bit_table): the shared-cell query result
         expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(SIMPLE_2D_HIT_GRID_MISS)
 
     it "a PointerPolicy.None proxy never stamps (hit-test pass-through)":
+        # @req REQ-2DUI-HITGRID-006
+        step("Rasterize a pass-through proxy above a normal proxy")
         var transparent = HitProxy2D.create(1, 0, 0, 10, 10)
         transparent.pointer_policy = POINTER_POLICY_NONE
-        val under = HitProxy2D.create(2, 0, 0, 10, 10)
+        var under = HitProxy2D.create(2, 0, 0, 10, 10)
         val grid = simple_2d_hit_grid_rasterize([under, transparent], 10, 10)
-        step("the pass-through proxy is skipped, so the one under it still stamps")
-        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)
+        # @capture(bit_table): the shared-cell query result under the pass-through proxy
+        step("Confirm the pass-through proxy is skipped, so the one under it still stamps")
+        expect(simple_2d_hit_grid_query(grid, 5, 5)).to_equal(2)  # oracle: the policy-gated proxy never paints, so the under proxy's id wins
 
     it "a grid with no proxies is entirely the miss sentinel":
+        # @req REQ-2DUI-HITGRID-007
+        step("Rasterize an empty proxy list and sweep every cell")
         val grid = simple_2d_hit_grid_rasterize([], 4, 4)
+        # @capture(statistics): count of cells read back as the miss sentinel
         var y = 0
         while y < 4:
             var x = 0

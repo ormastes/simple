@@ -1,15 +1,38 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+## Purpose and audience
+System tests for the RequirementDatabase module: CRUD operations, filtering,
+ID generation, description storage, and persistence. Audience: std.database
+maintainers and the requirement-tooling owners who rely on RequirementDB as
+the backing store for bug/test/requirement tracking.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/stdlib/database/requirement_db_spec.spl`.
+Each scenario creates a fresh in-memory RequirementDatabase, drives one CRUD
+or query surface, and asserts the observed rows; persistence scenarios clean
+their /tmp artifact first.
+## Compatibility and limitations
+Runs against the real `std.database.requirement` module. The persistence
+scenario writes `/tmp/test_reqdb_save.sdn` and needs a writable /tmp;
+filtering scenarios rely on the documented draft/approved/implemented status
+vocabulary.
+## Verification guidance and troubleshooting
+A failure means the CRUD or query surface drifted: check the module's
+`add_requirement`/`next_id`/`requirements_by_*` implementations before the
+spec. Persistence failures usually mean the save path was left behind by a
+concurrent run — remove the /tmp artifact and rerun.
+"""
 # @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: RequirementDB CRUD and query
 
 # @cover src/lib/nogc_sync_mut/database/core.spl 80%
 # RequirementDB System Tests
 #
 # @req REQ-DB
 # tag: system
-#
-# Tests for the RequirementDatabase module: CRUD operations, filtering,
-# ID generation, description storage, and persistence.
 
 use std.database.requirement.{RequirementDatabase, Requirement}
 
@@ -30,15 +53,18 @@ use std.spec.step
 describe "RequirementDatabase creation", tag: ["system"]:
     it "creates a new database":
         # @req REQ-SSPEC-SYSTEM
-        step("creates a new database")
+        # @req REQ-DB
+        # @capture(statistics): row count of the fresh database retained
+        step("Create a fresh requirement database and read its row count")
         val db_path = "/tmp/test_reqdb_create.sdn"
         cleanup(db_path)
         var db = RequirementDatabase.create()
-        expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+        expect(db.all_requirements().len()).to_equal(0)  # oracle: a freshly created database holds no requirements
 
     it "adds a requirement and retrieves it":
         # @req REQ-SSPEC-SYSTEM
-        step("adds a requirement and retrieves it")
+        # @capture(statistics): retrieved requirement fields retained
+        step("Add one requirement and fetch it back by id")
         val db_path = "/tmp/test_reqdb_add.sdn"
         cleanup(db_path)
         var db = RequirementDatabase.create()
@@ -76,7 +102,8 @@ describe "RequirementDatabase creation", tag: ["system"]:
 
     it "returns empty requirement for unknown ID":
         # @req REQ-SSPEC-SYSTEM
-        step("returns empty requirement for unknown ID")
+        # @capture(statistics): unknown-id lookup verdict retained
+        step("Fetch a requirement id that was never added")
         var db = RequirementDatabase.create()
         val retrieved = db.get_requirement("REQ-NONEXISTENT")
         expect(retrieved.id).to_equal("")
@@ -90,14 +117,16 @@ describe "RequirementDatabase creation", tag: ["system"]:
 describe "RequirementDatabase next_id", tag: ["system"]:
     it "generates REQ-001 for empty database":
         # @req REQ-SSPEC-SYSTEM
-        step("generates REQ-001 for empty database")
+        # @capture(statistics): first generated id retained
+        step("Generate the first id in an empty database")
         var db = RequirementDatabase.create()
         val id = db.next_id()
         expect(id).to_equal("REQ-001")
 
     it "generates sequential IDs":
         # @req REQ-SSPEC-SYSTEM
-        step("generates sequential IDs")
+        # @capture(statistics): sequential id progression retained
+        step("Add one requirement and generate the next id")
         var db = RequirementDatabase.create()
 
         val req1 = Requirement(
@@ -121,7 +150,8 @@ describe "RequirementDatabase next_id", tag: ["system"]:
 
     it "generates REQ-003 after two entries":
         # @req REQ-SSPEC-SYSTEM
-        step("generates REQ-003 after two entries")
+        # @capture(statistics): id after two entries retained
+        step("Add two requirements and generate the next id")
         var db = RequirementDatabase.create()
 
         val req1 = Requirement(
@@ -166,7 +196,8 @@ describe "RequirementDatabase next_id", tag: ["system"]:
 describe "RequirementDatabase all_requirements", tag: ["system"]:
     it "returns all valid requirements":
         # @req REQ-SSPEC-SYSTEM
-        step("returns all valid requirements")
+        # @capture(statistics): total row count retained
+        step("Add two requirements and list them all")
         var db = RequirementDatabase.create()
 
         val req1 = Requirement(
@@ -207,7 +238,8 @@ describe "RequirementDatabase all_requirements", tag: ["system"]:
 describe "RequirementDatabase requirements_by_status", tag: ["system"]:
     it "filters requirements by status":
         # @req REQ-SSPEC-SYSTEM
-        step("filters requirements by status")
+        # @capture(statistics): per-status filter counts retained
+        step("Filter three requirements by each status bucket")
         var db = RequirementDatabase.create()
 
         val draft_req = Requirement(
@@ -276,7 +308,8 @@ describe "RequirementDatabase requirements_by_status", tag: ["system"]:
 describe "RequirementDatabase requirements_by_category", tag: ["system"]:
     it "filters requirements by category":
         # @req REQ-SSPEC-SYSTEM
-        step("filters requirements by category")
+        # @capture(statistics): per-category filter counts retained
+        step("Filter three requirements by each category bucket")
         var db = RequirementDatabase.create()
 
         val feat_req = Requirement(
@@ -349,7 +382,8 @@ describe "RequirementDatabase requirements_by_category", tag: ["system"]:
 describe "RequirementDatabase descriptions", tag: ["system"]:
     it "stores and retrieves multiline description":
         # @req REQ-SSPEC-SYSTEM
-        step("stores and retrieves multiline description")
+        # @capture(statistics): multiline description round-trip retained
+        step("Attach a three-line description and read it back")
         var db = RequirementDatabase.create()
 
         val req = Requirement(
@@ -378,7 +412,8 @@ describe "RequirementDatabase descriptions", tag: ["system"]:
 
     it "returns empty string for unknown req_id":
         # @req REQ-SSPEC-SYSTEM
-        step("returns empty string for unknown req_id")
+        # @capture(statistics): unknown-id description verdict retained
+        step("Read the description of an id that was never added")
         var db = RequirementDatabase.create()
         val desc = db.get_description("REQ-NONEXISTENT")
         expect(desc).to_equal("")
@@ -391,7 +426,8 @@ describe "RequirementDatabase descriptions", tag: ["system"]:
 describe "RequirementDatabase save", tag: ["system"]:
     it "persists data to disk":
         # @req REQ-SSPEC-SYSTEM
-        step("persists data to disk")
+        # @capture(statistics): save verdict and on-disk artifact bit retained
+        step("Save a populated database and verify the artifact exists")
         val db_path = "/tmp/test_reqdb_save.sdn"
         cleanup(db_path)
         var db = RequirementDatabase.create()

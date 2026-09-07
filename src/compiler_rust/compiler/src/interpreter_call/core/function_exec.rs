@@ -1247,6 +1247,23 @@ fn identifier_arg_bindings(func: &FunctionDef, args: &[Argument], self_mode: Sel
 /// semantics.
 ///
 /// Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+/// Diagnostic trap: report any write into an OUTER frame's `self` binding with
+/// a value that cannot be a receiver. Gated on SIMPLE_DEBUG_FIELD_ACCESS.
+/// Record: doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+fn trap_self_write(site: &str, func_name: &str, caller_name: &str, value: &Value) {
+    if caller_name != METHOD_SELF || !crate::interpreter::field_access_debug_enabled() {
+        return;
+    }
+    if matches!(value, Value::Object { .. } | Value::Nil) {
+        return;
+    }
+    eprintln!(
+        "[self-write-trap] site={site} func={func_name} value_type={} value={}",
+        value.type_name(),
+        value.to_debug_string().chars().take(200).collect::<String>()
+    );
+}
+
 fn park_written_back_arguments(
     func: &FunctionDef,
     args: &[Argument],
@@ -1278,6 +1295,10 @@ fn park_written_back_arguments(
         }
         // Drop the caller's Arc, keeping the name bound so the write-back's
         // `contains_key` gate still passes.
+        // No trap here: this site writes `Value::Nil`, which `trap_self_write`
+        // classifies as benign and ignores, so a truthful call is a guaranteed
+        // no-op. (It previously passed a synthetic `Value::Bool(false)` purely
+        // to force the trap to fire, which reported a value never written.)
         outer_env.insert(caller_name.clone(), Value::Nil);
         crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_OK, 1);
         parked.push((caller_name.clone(), param_name.clone()));
@@ -1294,6 +1315,7 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
             continue;
         }
         if let Some(value) = local_env.get(param_name.as_str()) {
+            trap_self_write("restore_parked", param_name, caller_name, value);
             outer_env.insert(caller_name.clone(), value.clone());
         }
         crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_RESTORED, 1);
@@ -1453,6 +1475,7 @@ fn write_back_mutable_arguments(
                         && outer_env.contains_key(&caller_name)
                     {
                         let new_val = callee_val.clone();
+                        trap_self_write("write_back_ident", &func.name, &caller_name, &new_val);
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }

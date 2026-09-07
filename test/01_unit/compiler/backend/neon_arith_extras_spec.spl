@@ -1,10 +1,33 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+NEON arithmetic-extras emit functions (FSUB, FMIN, FMAX, FCMGT, FCMGE vector
+forms, REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH). Audience: the ARM64 backend
+engineer who must verify each emitted 4-byte instruction matches the ARMv8 ARM
+opcode layout bit-for-bit — including the FCMGT/FCMGE operand-swap polarity
+convention — before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_arith_extras_spec.spl
+
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode. Only
+the five Wave O2 extras (FSUB, FMIN, FMAX, FCMGT, FCMGE) are covered here;
+other NEON arithmetic ops live in sibling spec files.
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one NEON
+arithmetic-extras instruction as a bit_table. A mismatch names the offending
+byte; cross-reference ARMv8 ARM §C7.2.183 (FSUB), §C7.2.135 (FMIN), §C7.2.136
+(FMAX), §C7.2.111 (FCMGT), §C7.2.110 (FCMGE), and the per-scenario derivation
+comment (`base + Rm*65536 + Rn*32 + Rd`) to locate which register field
+produced the wrong byte. For FCMGT/FCMGE specifically, remember the V-25
+polarity convention: cmp_lt/cmp_le swap the Vn/Vm operands at the call site.
+"""
+# research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+# @manual_section: neon-arith-extras-encoding
 
 # test/unit/compiler/backend/neon_arith_extras_spec.spl
 #
@@ -32,8 +55,8 @@
 #   bit[30]:     Q=1 (128-bit .4S form always)
 #
 # V-25 POLARITY (FCMGT / FCMGE):
-#   cmp_lt(a, b) → emit_neon_vcgtq_f32(rd, b_reg, a_reg)  [swap Vn/Vm at call site]
-#   cmp_le(a, b) → emit_neon_vcgeq_f32(rd, b_reg, a_reg)  [swap Vn/Vm at call site]
+#   cmp_lt(a, b) -> emit_neon_vcgtq_f32(rd, b_reg, a_reg)  [swap Vn/Vm at call site]
+#   cmp_le(a, b) -> emit_neon_vcgeq_f32(rd, b_reg, a_reg)  [swap Vn/Vm at call site]
 
 use compiler.backend.native.arm_neon.{emit_neon_vsubq_f32, emit_neon_vminq_f32, emit_neon_vmaxq_f32, emit_neon_vcgtq_f32, emit_neon_vcgeq_f32}
 
@@ -41,229 +64,348 @@ use compiler.backend.native.arm_neon.{emit_neon_vsubq_f32, emit_neon_vminq_f32, 
 # FSUB V0.4S, V0.4S, V0.4S
 # Base opcode 0x4EA0D400: Q=1 U=0 sz=1 size=00(f32) opcode=11010
 # ARMv8 ARM §C7.2.183 FSUB (vector) — llvm-mc VERIFIED
-# Expected word: 0x4EA0D400 → LE: 0x00 0xD4 0xA0 0x4E
+# Expected word: 0x4EA0D400 -> LE: 0x00 0xD4 0xA0 0x4E
 # ============================================================================
 
+# @manual_section: neon-fsub-golden
 describe "NEON emit_neon_vsubq_f32 f32 golden":
     it "FSUB V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FSUB V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vsubq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FSUB emitted byte count
+        expect(result.len()).to_equal(4)  # oracle: FSUB is a fixed 4-byte AArch64 instruction
 
     it "FSUB V0.4S V0.4S V0.4S byte0 is 0x00":
-        # Rd=0, Rn=0 → bits[9:0]=0 → byte0=0x00
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte0 of FSUB V0.4S, V0.4S, V0.4S")
+        # Rd=0, Rn=0 -> bits[9:0]=0 -> byte0=0x00
         val result = emit_neon_vsubq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FSUB byte0 (Rd/Rn low bits)
+        expect(result[0]).to_equal(0)  # oracle: Rd=0 and Rn's low bits contribute 0 to byte0
 
     it "FSUB V0.4S V0.4S V0.4S byte1 is 0xD4":
-        # opcode=11010(26) → bits[15:11]; bit10=1 → byte1 = 26*8+4 = 212 = 0xD4
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte1 of FSUB V0.4S, V0.4S, V0.4S")
+        # opcode=11010(26) -> bits[15:11]; bit10=1 -> byte1 = 26*8+4 = 212 = 0xD4
         val result = emit_neon_vsubq_f32(0, 0, 0)
-        expect(result[1]).to_equal(212)
+        # @capture(bit_table): FSUB byte1 (opcode field bits[15:11] plus bit10)
+        expect(result[1]).to_equal(212)  # oracle: opcode=11010(26) in bits[15:11], bit10=1 => 26*8+4=212=0xD4
 
     it "FSUB V0.4S V0.4S V0.4S byte2 is 0xA0":
-        # sz=1 → bit23=1; Rm=0 → bits[20:16]=0 → byte2 = 0xA0
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte2 of FSUB V0.4S, V0.4S, V0.4S")
+        # sz=1 -> bit23=1; Rm=0 -> bits[20:16]=0 -> byte2 = 0xA0
         val result = emit_neon_vsubq_f32(0, 0, 0)
-        expect(result[2]).to_equal(160)
+        # @capture(bit_table): FSUB byte2 (sz bit plus Rm field)
+        expect(result[2]).to_equal(160)  # oracle: sz=1 sets bit23 (0x80); base bits give 0x20; Rm=0 adds nothing => 0xA0=160
 
     it "FSUB V0.4S V0.4S V0.4S byte3 is 0x4E":
-        # Q=1 U=0 → 0x4E (bits[31:24])
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte3 of FSUB V0.4S, V0.4S, V0.4S")
+        # Q=1 U=0 -> 0x4E (bits[31:24])
         val result = emit_neon_vsubq_f32(0, 0, 0)
-        expect(result[3]).to_equal(78)
+        # @capture(bit_table): FSUB byte3 (Q/U group identifier)
+        expect(result[3]).to_equal(78)  # oracle: Q=1 U=0 identifies the 0x4E instruction group (bits[31:24])
 
     it "FSUB V1.4S V2.4S V3.4S byte0 encodes Rd and Rn":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FSUB V1.4S, V2.4S, V3.4S and verify byte0")
         # inst = 0x4EA0D400 + 1 + 2*32 + 3*65536 = 0x4EA0D400 + 196673 = 0x4ED0D441
         # byte0 = 0x41 = 65
         val result = emit_neon_vsubq_f32(1, 2, 3)
-        expect(result[0]).to_equal(65)
+        # @capture(bit_table): FSUB byte0 with distinct Rd=1, Rn=2, Rm=3
+        expect(result[0]).to_equal(65)  # oracle: Rd=1 plus Rn=2 shifted into bits[9:5] (2*32=64) folds byte0 to 65=0x41
 
     it "FSUB V1.4S V2.4S V3.4S byte2 encodes Rm":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FSUB V1.4S, V2.4S, V3.4S and verify byte2")
         # Rm=3 in bits[20:16]: byte2 = 0xA0 + 3 = 0xA3 = 163
         val result = emit_neon_vsubq_f32(1, 2, 3)
-        expect(result[2]).to_equal(163)
+        # @capture(bit_table): FSUB byte2 with Rm=3 folded into the base 0xA0
+        expect(result[2]).to_equal(163)  # oracle: base byte2 0xA0 (sz=1) plus Rm=3 in bits[20:16] => 0xA3=163
 
     it "FSUB V31.4S V31.4S V31.4S all-ones register boundary":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FSUB V31.4S, V31.4S, V31.4S (all-31 register boundary) and verify byte0")
         # inst = 0x4EA0D400 + 31 + 31*32 + 31*65536 = 0x4EBFD7FF
         # byte0=0xFF=255, byte1=0xD7=215, byte2=0xBF=191, byte3=0x4E=78
         val result = emit_neon_vsubq_f32(31, 31, 31)
-        expect(result[0]).to_equal(255)
+        # @capture(bit_table): FSUB byte0 at the all-31 register boundary (5-bit field saturation)
+        expect(result[0]).to_equal(255)  # oracle: Rd=31 and Rn=31 (bits[9:5]) both saturate their 5-bit fields, giving byte0=0xFF=255
 
     it "FSUB V31.4S V31.4S V31.4S byte2 boundary":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FSUB V31.4S, V31.4S, V31.4S and verify byte2")
         val result = emit_neon_vsubq_f32(31, 31, 31)
-        expect(result[2]).to_equal(191)
+        # @capture(bit_table): FSUB byte2 at the all-31 register boundary
+        expect(result[2]).to_equal(191)  # oracle: base byte2 0xA0 (sz=1) plus Rm=31 saturating bits[20:16] => 0xBF=191
 
 # ============================================================================
 # FMIN V0.4S, V0.4S, V0.4S
 # Base opcode 0x4EA0F400: Q=1 U=0 sz=1 size=00(f32) opcode=11110
 # ARMv8 ARM §C7.2.135 FMIN (vector, NaN-propagating) — llvm-mc VERIFIED
-# Expected word: 0x4EA0F400 → LE: 0x00 0xF4 0xA0 0x4E
+# Expected word: 0x4EA0F400 -> LE: 0x00 0xF4 0xA0 0x4E
 # ============================================================================
 
+# @manual_section: neon-fmin-golden
 describe "NEON emit_neon_vminq_f32 f32 golden":
     it "FMIN V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FMIN V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vminq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FMIN emitted byte count
+        expect(result.len()).to_equal(4)  # oracle: FMIN is a fixed 4-byte AArch64 instruction
 
     it "FMIN V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte0 of FMIN V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vminq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FMIN byte0 (Rd/Rn low bits)
+        expect(result[0]).to_equal(0)  # oracle: Rd=0 and Rn's low bits contribute 0 to byte0
 
     it "FMIN V0.4S V0.4S V0.4S byte1 is 0xF4":
-        # opcode=11110(30) → byte1 = 30*8+4 = 244 = 0xF4
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte1 of FMIN V0.4S, V0.4S, V0.4S")
+        # opcode=11110(30) -> byte1 = 30*8+4 = 244 = 0xF4
         val result = emit_neon_vminq_f32(0, 0, 0)
-        expect(result[1]).to_equal(244)
+        # @capture(bit_table): FMIN byte1 (opcode field)
+        expect(result[1]).to_equal(244)  # oracle: opcode=11110(30) in bits[15:11], bit10=1 => 30*8+4=244=0xF4
 
     it "FMIN V0.4S V0.4S V0.4S byte2 is 0xA0":
-        # sz=1 → bit23=1; Rm=0 → byte2 = 0xA0 = 160
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte2 of FMIN V0.4S, V0.4S, V0.4S")
+        # sz=1 -> bit23=1; Rm=0 -> byte2 = 0xA0 = 160
         val result = emit_neon_vminq_f32(0, 0, 0)
-        expect(result[2]).to_equal(160)
+        # @capture(bit_table): FMIN byte2 (sz bit plus Rm field)
+        expect(result[2]).to_equal(160)  # oracle: sz=1 sets bit23 (0x80); base bits give 0x20; Rm=0 adds nothing => 0xA0=160
 
     it "FMIN V0.4S V0.4S V0.4S byte3 is 0x4E":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte3 of FMIN V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vminq_f32(0, 0, 0)
-        expect(result[3]).to_equal(78)
+        # @capture(bit_table): FMIN byte3 (Q/U group identifier)
+        expect(result[3]).to_equal(78)  # oracle: Q=1 U=0 identifies the 0x4E instruction group (bits[31:24])
 
     it "FMIN V0.4S V1.4S V0.4S byte0 encodes Rn":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FMIN V0.4S, V1.4S, V0.4S and verify byte0")
         # inst = 0x4EA0F400 + 0 + 1*32 + 0 = 0x4EA0F420
         # byte0 = 0x20 = 32
         val result = emit_neon_vminq_f32(0, 1, 0)
-        expect(result[0]).to_equal(32)
+        # @capture(bit_table): FMIN byte0 with Rn=1 folded in
+        expect(result[0]).to_equal(32)  # oracle: Rn=1 shifted into bits[9:5] (1*32=32) with Rd=0 gives byte0=32=0x20
 
 # ============================================================================
 # FMAX V0.4S, V0.4S, V0.4S
 # Base opcode 0x4E20F400: Q=1 U=0 sz=0 size=00(f32) opcode=11110
 # ARMv8 ARM §C7.2.136 FMAX (vector, NaN-propagating) — llvm-mc VERIFIED
-# Expected word: 0x4E20F400 → LE: 0x00 0xF4 0x20 0x4E
+# Expected word: 0x4E20F400 -> LE: 0x00 0xF4 0x20 0x4E
 # ============================================================================
 
+# @manual_section: neon-fmax-golden
 describe "NEON emit_neon_vmaxq_f32 f32 golden":
     it "FMAX V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FMAX V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vmaxq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FMAX emitted byte count
+        expect(result.len()).to_equal(4)  # oracle: FMAX is a fixed 4-byte AArch64 instruction
 
     it "FMAX V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte0 of FMAX V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vmaxq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FMAX byte0 (Rd/Rn low bits)
+        expect(result[0]).to_equal(0)  # oracle: Rd=0 and Rn's low bits contribute 0 to byte0
 
     it "FMAX V0.4S V0.4S V0.4S byte1 is 0xF4":
-        # opcode=11110(30) → byte1 = 30*8+4 = 244 = 0xF4
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte1 of FMAX V0.4S, V0.4S, V0.4S")
+        # opcode=11110(30) -> byte1 = 30*8+4 = 244 = 0xF4
         val result = emit_neon_vmaxq_f32(0, 0, 0)
-        expect(result[1]).to_equal(244)
+        # @capture(bit_table): FMAX byte1 (opcode field)
+        expect(result[1]).to_equal(244)  # oracle: opcode=11110(30) in bits[15:11], bit10=1 => 30*8+4=244=0xF4
 
     it "FMAX V0.4S V0.4S V0.4S byte2 is 0x20":
-        # sz=0 → bit23=0; Rm=0 → byte2 = 0x20 = 32
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte2 of FMAX V0.4S, V0.4S, V0.4S")
+        # sz=0 -> bit23=0; Rm=0 -> byte2 = 0x20 = 32
         val result = emit_neon_vmaxq_f32(0, 0, 0)
-        expect(result[2]).to_equal(32)
+        # @capture(bit_table): FMAX byte2 (sz bit cleared plus Rm field)
+        expect(result[2]).to_equal(32)  # oracle: sz=0 leaves bit23 clear; base bits give 0x20; Rm=0 adds nothing => 32
 
     it "FMAX V0.4S V0.4S V0.4S byte3 is 0x4E":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte3 of FMAX V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vmaxq_f32(0, 0, 0)
-        expect(result[3]).to_equal(78)
+        # @capture(bit_table): FMAX byte3 (Q/U group identifier)
+        expect(result[3]).to_equal(78)  # oracle: Q=1 U=0 identifies the 0x4E instruction group (bits[31:24])
 
     it "FMAX V0.4S V0.4S V1.4S byte2 encodes Rm":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FMAX V0.4S, V0.4S, V1.4S and verify byte2")
         # inst = 0x4E20F400 + 0 + 0 + 1*65536 = 0x4E21F400
         # byte2 = 0x21 = 33
         val result = emit_neon_vmaxq_f32(0, 0, 1)
-        expect(result[2]).to_equal(33)
+        # @capture(bit_table): FMAX byte2 with Rm=1 folded in
+        expect(result[2]).to_equal(33)  # oracle: base byte2 0x20 (sz=0) plus Rm=1 in bits[20:16] => 0x21=33
 
 # ============================================================================
 # FCMGT V0.4S, V0.4S, V0.4S
 # Base opcode 0x6EA0E400: Q=1 U=1 sz=1 size=00(f32) opcode=11100
 # ARMv8 ARM §C7.2.111 FCMGT (vector, register form) — llvm-mc VERIFIED
-# Expected word: 0x6EA0E400 → LE: 0x00 0xE4 0xA0 0x6E
+# Expected word: 0x6EA0E400 -> LE: 0x00 0xE4 0xA0 0x6E
 #
-# V-25 POLARITY: cmp_lt(a,b) → emit_neon_vcgtq_f32(rd, b_reg, a_reg)
+# V-25 POLARITY: cmp_lt(a,b) -> emit_neon_vcgtq_f32(rd, b_reg, a_reg)
 # ============================================================================
 
+# @manual_section: neon-fcmgt-golden
 describe "NEON emit_neon_vcgtq_f32 f32 golden":
     it "FCMGT V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGT V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vcgtq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FCMGT emitted byte count
+        expect(result.len()).to_equal(4)  # oracle: FCMGT is a fixed 4-byte AArch64 instruction
 
     it "FCMGT V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte0 of FCMGT V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vcgtq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FCMGT byte0 (Rd/Rn low bits)
+        expect(result[0]).to_equal(0)  # oracle: Rd=0 and Rn's low bits contribute 0 to byte0
 
     it "FCMGT V0.4S V0.4S V0.4S byte1 is 0xE4":
-        # opcode=11100(28) → byte1 = 28*8+4 = 228 = 0xE4
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte1 of FCMGT V0.4S, V0.4S, V0.4S")
+        # opcode=11100(28) -> byte1 = 28*8+4 = 228 = 0xE4
         val result = emit_neon_vcgtq_f32(0, 0, 0)
-        expect(result[1]).to_equal(228)
+        # @capture(bit_table): FCMGT byte1 (opcode field)
+        expect(result[1]).to_equal(228)  # oracle: opcode=11100(28) in bits[15:11], bit10=1 => 28*8+4=228=0xE4
 
     it "FCMGT V0.4S V0.4S V0.4S byte2 is 0xA0":
-        # U=1 sz=1 → bit29=1 bit23=1; Rm=0 → byte2=0xA0=160
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte2 of FCMGT V0.4S, V0.4S, V0.4S")
+        # U=1 sz=1 -> bit29=1 bit23=1; Rm=0 -> byte2=0xA0=160
         val result = emit_neon_vcgtq_f32(0, 0, 0)
-        expect(result[2]).to_equal(160)
+        # @capture(bit_table): FCMGT byte2 (sz bit plus Rm field)
+        expect(result[2]).to_equal(160)  # oracle: sz=1 sets bit23 (0x80); base bits give 0x20; Rm=0 adds nothing => 0xA0=160
 
     it "FCMGT V0.4S V0.4S V0.4S byte3 is 0x6E":
-        # Q=1 U=1 → 0x6E (bits[31:24])
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte3 of FCMGT V0.4S, V0.4S, V0.4S")
+        # Q=1 U=1 -> 0x6E (bits[31:24])
         val result = emit_neon_vcgtq_f32(0, 0, 0)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): FCMGT byte3 (Q/U group identifier)
+        expect(result[3]).to_equal(110)  # oracle: Q=1 U=1 identifies the 0x6E instruction group (bits[31:24])
 
     it "FCMGT V0.4S V1.4S V2.4S byte0 encodes Rn (V-25: Vn>Vm form)":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGT V0.4S, V1.4S, V2.4S (V-25 swapped-operand form) and verify byte0")
         # inst = 0x6EA0E400 + 0 + 1*32 + 2*65536 = 0x6EC0E420
         # byte0 = 0x20 = 32
         val result = emit_neon_vcgtq_f32(0, 1, 2)
-        expect(result[0]).to_equal(32)
+        # @capture(bit_table): FCMGT byte0 with Rn=1 folded in under the V-25 swap convention
+        expect(result[0]).to_equal(32)  # oracle: Rn=1 shifted into bits[9:5] (1*32=32) with Rd=0 gives byte0=32=0x20
 
     it "FCMGT V0.4S V1.4S V2.4S byte2 encodes Rm":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGT V0.4S, V1.4S, V2.4S and verify byte2")
         # Rm=2 in bits[20:16]: byte2 = 0xA0 + 2 = 0xA2 = 162; but Rn=1 carries into byte2 bits[25:24]...
-        # Actually byte2 = bits[23:16]: sz(bit23)=1 → 0x80, size[1]=0, size[0]=0, bit21=1 → 0x20 total base = 0xA0
+        # Actually byte2 = bits[23:16]: sz(bit23)=1 -> 0x80, size[1]=0, size[0]=0, bit21=1 -> 0x20 total base = 0xA0
         # + Rm=2 in bits[20:16]: byte2 = 0xA0 + 2 = 0xA2 = 162
         # Rn bits are in bits[9:5] which falls in byte0/byte1, not byte2.
         val result = emit_neon_vcgtq_f32(0, 1, 2)
-        expect(result[2]).to_equal(162)
+        # @capture(bit_table): FCMGT byte2 with Rm=2 folded into the base 0xA0 (Rn does not reach byte2)
+        expect(result[2]).to_equal(162)  # oracle: base byte2 0xA0 (sz=1) plus Rm=2 in bits[20:16] => 0xA2=162
 
     it "FCMGT V31.4S V31.4S V31.4S boundary byte0":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGT V31.4S, V31.4S, V31.4S (all-31 register boundary) and verify byte0")
         # inst = 0x6EA0E400 + 31 + 31*32 + 31*65536 = 0x6EBFE7FF
         # byte0=0xFF=255
         val result = emit_neon_vcgtq_f32(31, 31, 31)
-        expect(result[0]).to_equal(255)
+        # @capture(bit_table): FCMGT byte0 at the all-31 register boundary (5-bit field saturation)
+        expect(result[0]).to_equal(255)  # oracle: Rd=31 and Rn=31 (bits[9:5]) both saturate their 5-bit fields, giving byte0=0xFF=255
 
     it "FCMGT V31.4S V31.4S V31.4S boundary byte3 is 0x6E":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGT V31.4S, V31.4S, V31.4S and verify byte3")
         val result = emit_neon_vcgtq_f32(31, 31, 31)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): FCMGT byte3 at the all-31 register boundary (unaffected by register fields)
+        expect(result[3]).to_equal(110)  # oracle: Q=1 U=1 identifies the 0x6E group regardless of register values
 
 # ============================================================================
 # FCMGE V0.4S, V0.4S, V0.4S
 # Base opcode 0x6E20E400: Q=1 U=1 sz=0 size=00(f32) opcode=11100
 # ARMv8 ARM §C7.2.110 FCMGE (vector, register form) — llvm-mc VERIFIED
-# Expected word: 0x6E20E400 → LE: 0x00 0xE4 0x20 0x6E
+# Expected word: 0x6E20E400 -> LE: 0x00 0xE4 0x20 0x6E
 #
-# V-25 NOTE: cmp_le(a,b) → emit_neon_vcgeq_f32(rd, b_reg, a_reg)
+# V-25 NOTE: cmp_le(a,b) -> emit_neon_vcgeq_f32(rd, b_reg, a_reg)
 # ============================================================================
 
+# @manual_section: neon-fcmge-golden
 describe "NEON emit_neon_vcgeq_f32 f32 golden":
     it "FCMGE V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGE V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vcgeq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FCMGE emitted byte count
+        expect(result.len()).to_equal(4)  # oracle: FCMGE is a fixed 4-byte AArch64 instruction
 
     it "FCMGE V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte0 of FCMGE V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vcgeq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FCMGE byte0 (Rd/Rn low bits)
+        expect(result[0]).to_equal(0)  # oracle: Rd=0 and Rn's low bits contribute 0 to byte0
 
     it "FCMGE V0.4S V0.4S V0.4S byte1 is 0xE4":
-        # opcode=11100(28) → byte1 = 28*8+4 = 228 = 0xE4
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte1 of FCMGE V0.4S, V0.4S, V0.4S")
+        # opcode=11100(28) -> byte1 = 28*8+4 = 228 = 0xE4
         val result = emit_neon_vcgeq_f32(0, 0, 0)
-        expect(result[1]).to_equal(228)
+        # @capture(bit_table): FCMGE byte1 (opcode field)
+        expect(result[1]).to_equal(228)  # oracle: opcode=11100(28) in bits[15:11], bit10=1 => 28*8+4=228=0xE4
 
     it "FCMGE V0.4S V0.4S V0.4S byte2 is 0x20":
-        # U=1 sz=0 → bit29=1 bit23=0; Rm=0 → byte2=0x20=32
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte2 of FCMGE V0.4S, V0.4S, V0.4S")
+        # U=1 sz=0 -> bit29=1 bit23=0; Rm=0 -> byte2=0x20=32
         val result = emit_neon_vcgeq_f32(0, 0, 0)
-        expect(result[2]).to_equal(32)
+        # @capture(bit_table): FCMGE byte2 (sz bit cleared plus Rm field)
+        expect(result[2]).to_equal(32)  # oracle: sz=0 leaves bit23 clear; base bits give 0x20; Rm=0 adds nothing => 32
 
     it "FCMGE V0.4S V0.4S V0.4S byte3 is 0x6E":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Verify byte3 of FCMGE V0.4S, V0.4S, V0.4S")
         val result = emit_neon_vcgeq_f32(0, 0, 0)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): FCMGE byte3 (Q/U group identifier)
+        expect(result[3]).to_equal(110)  # oracle: Q=1 U=1 identifies the 0x6E instruction group (bits[31:24])
 
     it "FCMGE V31.4S V0.4S V0.4S byte0 encodes Rd boundary":
-        # inst = 0x6E20E400 + 31 = 0x6E20E41F → byte0=0x1F=31
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGE V31.4S, V0.4S, V0.4S (Rd boundary) and verify byte0")
+        # inst = 0x6E20E400 + 31 = 0x6E20E41F -> byte0=0x1F=31
         val result = emit_neon_vcgeq_f32(31, 0, 0)
-        expect(result[0]).to_equal(31)
+        # @capture(bit_table): FCMGE byte0 at the Rd=31 boundary
+        expect(result[0]).to_equal(31)  # oracle: Rd=31 alone (Rn=0) saturates bits[4:0], giving byte0=0x1F=31
 
     it "FCMGE V0.4S V2.4S V1.4S byte0 encodes Rn swapped operands":
-        # V-25 example: cmp_le(V1, V2) → FCMGE(rd, V2, V1)
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGE V0.4S, V2.4S, V1.4S (V-25 swapped-operand form) and verify byte0")
+        # V-25 example: cmp_le(V1, V2) -> FCMGE(rd, V2, V1)
         # inst = 0x6E20E400 + 0 + 2*32 + 1*65536 = 0x6E30E440
         # byte0 = 0x40 = 64
         val result = emit_neon_vcgeq_f32(0, 2, 1)
-        expect(result[0]).to_equal(64)
+        # @capture(bit_table): FCMGE byte0 with Rn=2 folded in under the V-25 swap convention
+        expect(result[0]).to_equal(64)  # oracle: Rn=2 shifted into bits[9:5] (2*32=64) with Rd=0 gives byte0=64=0x40
 
     it "FCMGE V0.4S V2.4S V1.4S byte2 encodes Rm":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-ARITH
+        step("Encode FCMGE V0.4S, V2.4S, V1.4S and verify byte2")
         # Rm=1 in bits[20:16]: byte2 = 0x20 + 1 = 0x21 = 33
         val result = emit_neon_vcgeq_f32(0, 2, 1)
-        expect(result[2]).to_equal(33)
+        # @capture(bit_table): FCMGE byte2 with Rm=1 folded into the base 0x20
+        expect(result[2]).to_equal(33)  # oracle: base byte2 0x20 (sz=0) plus Rm=1 in bits[20:16] => 0x21=33

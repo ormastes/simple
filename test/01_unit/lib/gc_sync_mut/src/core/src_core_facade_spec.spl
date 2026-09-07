@@ -1,0 +1,97 @@
+"""
+Purpose and audience: facade smoke verification for the gc_sync_mut src core
+modules. Scope: context managers, decorators, seeded random, regex helpers,
+and synchronization primitives reachable through the facade re-exports.
+Audience: stdlib core maintainers.
+
+research: doc/01_research/lib/collections_impl/collections.md ; plan: doc/03_plan/lib/gpu_containers_unified/unified_compute_stdlib_rollout_2026-06-16_tldr.md ; architecture: doc/04_architecture/lib/runtime_family_stdlib_surface.md ; design: doc/05_design/lib/stdlib/aop_support_matrix.md
+requirements: doc/02_requirements/language/collections/hashmap_basic.md
+"""
+use std.spec
+use std.gc_sync_mut.src.core.context_manager.{TimerContext, Lock, TransactionContext, TransactionState, time_now}
+use std.gc_sync_mut.src.core.decorators.{CachedFunction, LoggedFunction, DeprecatedFunction, TimeoutFunction, TimeoutResult}
+use std.gc_sync_mut.src.core.random.{seed, getstate, setstate, randrange, uniform}
+use std.gc_sync_mut.src.core.regex.{Pattern, compile, search, escape, digit, one_or_more}
+use std.gc_sync_mut.src.core.synchronization.{Atomic, Mutex, RwLock, Semaphore}
+use std.gc_sync_mut.src.core.{randint, word}
+
+describe "gc_sync_mut src core facade":
+
+    # @manual_section Context, decorator, random, and regex helpers
+    it "re-exports context, decorator, random, and regex helpers":
+        # @req REQ-LIB-CORE-FACADE
+        # @capture(text)
+        step("Exercise timer, lock, and transaction context managers")
+        val t0 = time_now()
+        val timer = TimerContext.create("facade")
+        expect(timer.name).to_equal("facade")
+        expect(time_now()).to_be_greater_than(t0)
+        val lock = Lock.create()
+        expect(lock.is_unlocked()).to_equal(true)
+        val tx = TransactionContext.create()
+        expect(tx.state).to_equal(TransactionState.Pending)
+
+        step("Exercise decorator record constructors and accessors")
+        val cached_fn = CachedFunction(wrapped_fn: nil, cache: {}, hits: 0, misses: 0)
+
+        expect(cached_fn.cache_info()["hits"]).to_equal(0)  # oracle: 0 = freshly constructed cache has recorded no hits
+        val logged_fn = LoggedFunction(wrapped_fn: nil, name: "noop", call_count: 0)
+        # oracle: 0 = the logged wrapper starts with a zero call count.
+        expect(logged_fn.call_count).to_equal(0)  # oracle: 0 = logged wrapper starts with a zero call count
+        val deprecated_fn = DeprecatedFunction(wrapped_fn: nil, message: "old", warned: false)
+        expect(deprecated_fn.warned).to_equal(false)
+        val timeout_result = TimeoutResult(value: nil, success: true)
+        expect(timeout_result.is_success()).to_equal(true)
+        val timeout_fn = TimeoutFunction(wrapped_fn: nil, timeout_seconds: 10)
+        # oracle: 10 = the configured timeout_seconds echoed back by the accessor.
+        expect(timeout_fn.timeout_seconds).to_equal(10)  # oracle: 10 = configured timeout echoed back by the accessor
+
+        step("Exercise seeded random state round-trip and bounded draws")
+        seed(42)
+        val state = getstate()
+        setstate(state)
+        expect(randrange(0, 10, 1)).to_be_less_than(10)
+        expect(randint(1, 1)).to_equal(1)  # oracle: 1 = randint over the degenerate [1,1] range always yields 1
+        expect(uniform(0.0, 1.0)).to_be_less_than(1.0)
+
+        step("Exercise regex compile, search, escape, and class builders")
+        val pattern = Pattern(pattern: "ab")
+        expect(pattern.get_pattern()).to_equal("ab")
+        expect(compile("ab").get_pattern()).to_equal("ab")
+        expect(search("bc", "abc").get()).to_equal("bc")
+        expect(escape("a.b")).to_equal("a\\.b")
+        expect(one_or_more(digit())).to_equal("[0-9]+")
+        expect(word()).to_equal("[a-zA-Z0-9_]")  # oracle: canonical word-class charset
+
+    # @manual_section Synchronization primitives
+    it "re-exports synchronization primitives":
+        # @req REQ-LIB-CORE-FACADE
+        # @capture(text)
+        step("Exercise Atomic create, fetch_add, and load")
+        var atomic = Atomic.create(1)
+
+        expect(atomic.load()).to_equal(1)  # oracle: 1 = initial value passed to Atomic.create
+
+        expect(atomic.fetch_add(2)).to_equal(1)  # oracle: 1 = fetch_add returns the pre-increment value
+
+        expect(atomic.load()).to_equal(3)  # oracle: 3 = stored value after adding 2 to initial 1
+
+        step("Exercise Mutex try_lock, is_locked, and unlock")
+        var mutex = Mutex.create("data")
+        expect(mutex.try_lock()).to_equal(true)
+        expect(mutex.is_locked()).to_equal(true)
+        mutex.unlock()
+        expect(mutex.is_locked()).to_equal(false)
+
+        step("Exercise RwLock read, write, and into_inner")
+        var rw = RwLock.create("read")
+        expect(rw.read()).to_equal("read")
+        rw.read_unlock()
+        rw.write("write")
+        expect(rw.into_inner()).to_equal("write")
+
+        step("Exercise Semaphore acquire and permit accounting")
+        var sem = Semaphore.create(2)
+        expect(sem.try_acquire(1)).to_equal(true)
+
+        expect(sem.available_permits()).to_equal(1)  # oracle: 1 = 2 initial permits minus 1 acquired

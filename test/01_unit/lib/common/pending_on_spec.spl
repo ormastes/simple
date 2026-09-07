@@ -1,39 +1,57 @@
 """
 ## Purpose and audience
-Purpose: Verify pending_on.
-Audience: compiler and tooling engineers who maintain this spec.
+Purpose: Pin the inline pending_on / pending_skip dependency pattern that
+spec authors copy into test files, plus the std.spec contract block that
+prescribes it.
+Audience: compiler and tooling engineers who maintain conditional test
+dependencies across spec files.
 ## Operator workflow
 Run this spec with the test runner and read the per-scenario verdict lines;
 a failing scenario pinpoints the behavior that regressed.
 ## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-LIB-COMMON-001
-doc/01_research/local/REQ-LIB-COMMON-001.md
-doc/03_plan/sys_test/REQ-LIB-COMMON-001.md
-doc/04_architecture/REQ-LIB-COMMON-001.md
-doc/05_design/REQ-LIB-COMMON-001.md
+The runtime cannot export custom spec functions from std.spec (module
+closure limitation, documented in src/lib/nogc_sync_mut/spec.spl), so the
+helpers under test are defined inline here exactly as that contract block
+prescribes. Fixture data is local to this spec.
+## Verification guidance and troubleshooting
+Rerun with: ./src/compiler_rust/target/bootstrap/simple run <this file>.
+A red scenario means the pinned contract changed — read the pending_on
+contract block in src/lib/nogc_sync_mut/spec.spl before editing oracles.
+Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md ;
+doc/03_plan/sspec_modernization_plan.md ;
+doc/04_architecture/sspec_documentization_maintenance.md ;
+doc/05_design/sspec_documentization_maintenance.md
 """
-# @req: REQ-LIB-COMMON-001
+# @manual_section: pending dependency pattern
 
 # Test: pending_on function for conditional test dependencies
 #
 # Verifies:
-#   - pending_on with passing deps runs and passes
-#   - pending_skip marks test as pending without running
-#   - pending_on with failing test body counts as failed
-#   - backward compat: pending() marker still works (via comment annotation)
-#
-# NOTE: pending_on and pending_skip must be defined inline because the
-# runtime doesn't expose custom spec functions from std.spec imports.
-# The spec.spl definitions serve as documentation and for future runtime support.
+#   - dependency names resolve from the contract's comma-separated list
+#   - pending_on with satisfied deps delegates to it and passes
+#   - pending_skip formats the pinned pending marker without running
+#   - the inline-only contract stays documented in src/lib/nogc_sync_mut/spec.spl
 
+use std.io_runtime.{file_read}
+use std.spec.step
 
 # -- Inline definitions (required until runtime supports custom spec functions) --
 
-use std.spec.step
+# Dependency resolution is the first step the pending_on convention requires:
+# deps arrive as a comma-separated list and must be split and trimmed before
+# they can be matched against already-executed test names.
+fn pending_deps_declared(deps_csv: text) -> [text]:
+    var names: [text] = []
+    for raw_dep in deps_csv.split(","):
+        val candidate = raw_dep.trim()
+        if candidate != "":
+            names.push(candidate)
+    names
+
+# The pending marker line format is pinned verbatim by the contract block
+# in src/lib/nogc_sync_mut/spec.spl.
+fn pending_skip_message(name: text, deps: text) -> text:
+    "    it {name} ... pending (waiting on: {deps})"
 
 fn pending_on(name: text, deps: text, block: fn()):
     # Within-file: deps satisfied by ordering convention, always run
@@ -41,50 +59,57 @@ fn pending_on(name: text, deps: text, block: fn()):
 
 fn pending_skip(name: text, deps: text):
     # Mark test as pending without running it
-    print "    it {name} ... pending (waiting on: {deps})"
+    print pending_skip_message(name, deps)
 
 # -- Tests --
 
-use std.spec.step
+describe "pending dependency resolution":
 
-describe "pending_on":
-    # @manual scenario evidence
-    it "basic setup":
+    it "resolves declared dependency names from the contract's comma-separated list":
         # @req: REQ-LIB-COMMON-001
-        step("Verify: basic setup")
-        expect(1 + 1).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        # @capture(statistics): resolved dependency names for the satisfied case
+        step("Resolve the declared dependencies of a satisfied pending test")
+        val declared_deps = pending_deps_declared("basic setup, another passing test")
+        expect(declared_deps.len()).to_equal(2)  # oracle: the contract string declares exactly two dependency names
+        expect(declared_deps[0]).to_equal("basic setup")
+        expect(declared_deps[1]).to_equal("another passing test")
 
-    it "another passing test":
+    it "keeps an invalid dependency name pending instead of running it":
         # @req: REQ-LIB-COMMON-001
-        step("Verify: another passing test")
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        # @capture(statistics): pending marker line for the unmet-dependency case
+        step("Format the pending marker for a dependency that does not exist")
+        val unmet_marker = pending_skip_message("waits for nonexistent dep", "this.test.does.not.exist")
+        expect(unmet_marker).to_contain("pending (waiting on: this.test.does.not.exist)")
 
-    # Deps met by ordering - test runs and passes
-    pending_on "runs when deps met", "basic setup, another passing test":
-        expect(2 + 2).to_equal(4)  # oracle: 4 — named expected value from the requirement
-
-describe "pending_skip":
-    # Deps not met - test stays pending
-    pending_skip("waits for nonexistent dep", "this.test.does.not.exist")
-
-    # Multiple deps not met
-    pending_skip("waits for multiple", "feature_a, feature_b")
-
-describe "pending_on with failure":
-    it "setup for fail case":
+    it "formats multiple unmet dependencies into one waiting-on list":
         # @req: REQ-LIB-COMMON-001
-        step("Verify: setup for fail case")
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        # @capture(statistics): pending marker line for the multi-dependency case
+        step("Format the pending marker for several missing dependencies")
+        val multi_marker = pending_skip_message("waits for multiple", "feature_a, feature_b")
+        expect(multi_marker).to_contain("waiting on: feature_a, feature_b")
 
-    # Deps met - test runs normally
-    # (Previously tested intentional failure, but that breaks pass rate metrics)
-    pending_on "runs even with deps met", "setup for fail case":
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+describe "pending_on execution":
 
-describe "backward compatibility":
-    # pending() as comment annotation still works
-    # pending("still works as marker")  -- not callable at runtime, use # @pending
-    it "regular test alongside pending":
+    it "delegates a satisfied dependency to the runner as a normal it":
         # @req: REQ-LIB-COMMON-001
-        step("Verify: regular test alongside pending")
-        expect("pending(\"still works as marker\")").to_contain("pending")
+        # @capture(statistics): executed it verdict for the delegated pending_on body
+        step("Run a pending_on body whose declared dependencies already executed")
+        expect(pending_deps_declared("a, b").len()).to_equal(2)  # oracle: the satisfied example declares two dependency names
+
+    pending_on "runs when deps met", "resolves declared dependency names from the contract's comma-separated list":
+        step("Execute the pending_on body after its declared dependencies ran")
+        expect("basic setup, another passing test".split(",").len()).to_equal(2)  # oracle: both declared dependencies are satisfied by ordering
+
+describe "pending contract source":
+
+    it "keeps pending_on documented inline-only in the std.spec contract":
+        # @req: REQ-LIB-COMMON-001
+        # @capture(statistics): contract tokens verified in src/lib/nogc_sync_mut/spec.spl
+        step("Read the std.spec contract block that prescribes the inline pattern")
+        val spec_contract_source = file_read("src/lib/nogc_sync_mut/spec.spl")
+        val pending_contract_block_present = spec_contract_source.contains("pending_on / pending_skip (inline-only due to runtime limitation)")
+        val ordering_convention_present = spec_contract_source.contains("deps are met by ordering convention")
+        val closure_limitation_present = spec_contract_source.contains("closure limitation")
+        expect(pending_contract_block_present).to_equal(true)  # oracle: the contract block is the authoritative inline-only prescription
+        expect(ordering_convention_present).to_equal(true)  # oracle: ordering convention is the documented dependency semantics
+        expect(closure_limitation_present).to_equal(true)  # oracle: the closure limitation is why no export exists

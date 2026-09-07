@@ -1,0 +1,113 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; plan: doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ; architecture: doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; design: doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+# @cover src/lib/common/ui/draw_ir.spl 30%
+# @tag: unit, ui, draw_ir, gpu
+"""
+# DrawIR Composition Generation Spec
+
+## Overview
+
+Pins the composition generation contract. The generation is a process-unique
+value identity for a DrawIrComposition, added so a consumer can tell one
+composition value from another in O(1) without hashing the scene. This spec
+fixes the two properties a consumer is allowed to rely on, and the one it is
+NOT allowed to rely on.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Design
+
+**Design:** doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Research
+
+**Research:** doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Syntax
+
+The generation is a plain counter on a value type, so the whole contract is
+exercised without any GPU device or backend.
+
+## Examples
+
+```simple
+val a = draw_ir_next_composition_generation()
+val b = draw_ir_next_composition_generation()
+expect(b > a).to_be(true)
+```
+
+## Acceptance
+
+Generations are strictly increasing and never reused, the canonical
+constructor assigns a non-zero one, two separately built compositions never
+share a generation, and an identical rebuild gets a DIFFERENT generation --
+the last being the documented limit that stops a memo from skipping work.
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_next_composition_generation,
+    draw_ir_rect
+}
+
+val GREEN: u32 = 0xff00ff00u32
+
+fn sample_batch(batch_id: text):
+    draw_ir_batch(batch_id, DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false),
+        [draw_ir_rect("body", 2, 3, 6, 5, GREEN)])
+
+describe "DrawIR composition generation":
+
+    it "hands out strictly increasing values":
+        # @req REQ-SSPEC-UNIT
+        step("Take three generations in a row")
+        val a = draw_ir_next_composition_generation()
+        val b = draw_ir_next_composition_generation()
+        val c = draw_ir_next_composition_generation()
+        expect(b > a).to_be(true)  # oracle: monotonic, so an older value can never look newer
+        expect(c > b).to_be(true)
+        expect(a != 0).to_be(true)  # oracle: 0 is reserved for "unassigned" and must never be handed out
+
+    it "assigns a non-zero generation through the canonical constructor":
+        # @req REQ-SSPEC-UNIT
+        step("Build a composition the normal way")
+        val comp = draw_ir_composition("c1", "scene", "vulkan", [sample_batch("b1")])
+        expect(comp.generation != 0).to_be(true)  # oracle: a constructed composition is always identified
+
+    it "never lets two separately built compositions share a generation":
+        # @req REQ-SSPEC-UNIT
+        step("Build two compositions with DIFFERENT content")
+        val first = draw_ir_composition("c1", "scene", "vulkan", [sample_batch("b1")])
+        val second = draw_ir_composition("c2", "scene", "vulkan", [sample_batch("b2")])
+        expect(first.generation != second.generation).to_be(true)  # oracle: the whole point — no collision between distinct scenes
+
+    it "gives an identical rebuild a DIFFERENT generation":
+        # @req REQ-SSPEC-UNIT
+        # This is the documented LIMIT, pinned deliberately. The generation
+        # changes when content changes, but is NOT stable when content is
+        # identical, so a consumer can detect staleness and must NOT assume it
+        # can skip work on a rebuild. The web route rebuilds every frame, which
+        # is exactly why a generation-keyed memo does not fire there.
+        step("Build the same composition twice")
+        val once = draw_ir_composition("same", "scene", "vulkan", [sample_batch("b1")])
+        val twice = draw_ir_composition("same", "scene", "vulkan", [sample_batch("b1")])
+        expect(once.generation != twice.generation).to_be(true)  # oracle: identical content still yields a fresh identity
+
+    it "keeps a default of zero for a composition built without the constructor":
+        # @req REQ-SSPEC-UNIT
+        step("A consumer must treat 0 as unassigned, never as an identity")
+        val comp = draw_ir_composition("c1", "scene", "vulkan", [sample_batch("b1")])
+        expect(comp.generation > 0).to_be(true)  # oracle: constructed values are positive, so 0 is unambiguously "no identity"

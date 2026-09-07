@@ -1,3 +1,38 @@
+"""
+## Purpose and audience
+Source-contract spec for linked if-chain type substitution: the substitution
+pass must dispatch STMT_IF_CHAIN/EXPR_IF_CHAIN owner ids before the generic
+expression/type recursion, visit every linked arm and terminal child through
+the scalar flat-arena getters, substitute annotations stored in the owner
+arrays, and carry no placeholder bodies. Audience: frontend type-substitution
+maintainers.
+
+## Operator workflow
+Run the file with the self-hosted runner from the repo root:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/frontend/type_subst_if_chain_source_spec.spl`.
+The first, second, and fourth scenarios grep the shipped owner source; the
+third scenario drives the real substitution over a flat linked chain.
+
+## Compatibility and limitations
+Under the bare `run` lane the `compiler.frontend.core.if_chain_nodes` import
+fails path resolution (executed=0 until that lane defect is fixed); the unit
+lane resolves it. The source-contract scenarios assert on
+`src/compiler/10.frontend/core/type_subst.spl` as shipped text — they pin
+structure that has no runtime API, not behavior.
+
+## Verification guidance and troubleshooting
+A failure means the substitution owner drifted: either the if-chain
+early-return dispatch moved after the generic recursion, an arm/else child is
+no longer visited through its scalar getter, or a placeholder body
+reappeared. Re-read `type_subst.spl` around the matching grep token before
+adjusting this spec.
+"""
+# Lifecycle: doc/01_research/local/parser_framework.md ;
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ;
+# doc/04_architecture/compiler/misc/parser_file_locations_2026-02-04.md ;
+# doc/05_design/compiler/parsing/parser_architecture_unified_2026-02-04.md
+# @manual_section: linked-if-chain-type-substitution
+
 extern fn rt_file_read_text(path: text) -> text
 
 use compiler.core.ast.{
@@ -13,23 +48,43 @@ use compiler.core.type_subst.{
 
 describe "linked if-chain type substitution source contract":
     it "dispatches owner ids before generic expression and type recursion":
+        # @req REQ-COMPILER-FRONTEND-TYPESUBST-001
+        # @capture(protocol_json): the grep-verified early-dispatch clauses of the substitution owner
+        step("Read the substitution owner and verify the if-chain early dispatch")
         val source = rt_file_read_text("src/compiler/10.frontend/core/type_subst.spl") ?? ""
-        expect(source).to_contain("if e.tag == EXPR_IF_CHAIN:\n        subst_type_in_if_chain(e.extra)\n        return")
-        expect(source).to_contain("if s.tag == STMT_IF_CHAIN:\n        subst_type_in_if_chain(s.type_tag)\n        return")
-        expect(source.contains("subst_type_in_expr(e.extra)\n\n    # Recurse into argument lists")).to_equal(true)
-        expect(source.contains("materialize_legacy")).to_equal(false)
+        val dispatches_expr_owner_first = source.contains("if e.tag == EXPR_IF_CHAIN:\n        subst_type_in_if_chain(e.extra)\n        return")
+        val dispatches_stmt_owner_first = source.contains("if s.tag == STMT_IF_CHAIN:\n        subst_type_in_if_chain(s.type_tag)\n        return")
+        val keeps_argument_list_recursion = source.contains("subst_type_in_expr(e.extra)\n\n    # Recurse into argument lists")
+        val carries_no_legacy_materializer = not source.contains("materialize_legacy")
+        expect(dispatches_expr_owner_first).to_equal(true)
+        expect(dispatches_stmt_owner_first).to_equal(true)
+        expect(keeps_argument_list_recursion).to_equal(true)
+        expect(carries_no_legacy_materializer).to_equal(true)
 
     it "visits every linked arm and terminal child through scalar getters":
+        # @req REQ-COMPILER-FRONTEND-TYPESUBST-002
+        # @capture(protocol_json): the grep-verified scalar-getter visit clauses
+        step("Read the substitution owner and verify each arm and terminal visit")
         val source = rt_file_read_text("src/compiler/10.frontend/core/type_subst.spl") ?? ""
-        expect(source).to_contain("subst_type_in_expr(flat_if_arm_head_get(arm_id))")
-        expect(source).to_contain("subst_type_in_expr(flat_if_arm_init_get(arm_id))")
-        expect(source).to_contain("subst_type_in_expr(flat_if_arm_then_expr_get(arm_id))")
-        expect(source).to_contain("subst_type_in_stmt(flat_if_arm_body_at(arm_id, body_offset))")
-        expect(source).to_contain("arm_id = flat_if_arm_next_get(arm_id)")
-        expect(source).to_contain("subst_type_in_expr(flat_if_chain_else_expr_get(chain_id))")
-        expect(source).to_contain("subst_type_in_stmt(flat_if_chain_else_stmt_at(chain_id, else_offset))")
+        val visits_arm_head = source.contains("subst_type_in_expr(flat_if_arm_head_get(arm_id))")
+        val visits_arm_init = source.contains("subst_type_in_expr(flat_if_arm_init_get(arm_id))")
+        val visits_arm_then = source.contains("subst_type_in_expr(flat_if_arm_then_expr_get(arm_id))")
+        val visits_arm_body = source.contains("subst_type_in_stmt(flat_if_arm_body_at(arm_id, body_offset))")
+        val walks_the_arm_link = source.contains("arm_id = flat_if_arm_next_get(arm_id)")
+        val visits_expr_else = source.contains("subst_type_in_expr(flat_if_chain_else_expr_get(chain_id))")
+        val visits_stmt_else = source.contains("subst_type_in_stmt(flat_if_chain_else_stmt_at(chain_id, else_offset))")
+        expect(visits_arm_head).to_equal(true)
+        expect(visits_arm_init).to_equal(true)
+        expect(visits_arm_then).to_equal(true)
+        expect(visits_arm_body).to_equal(true)
+        expect(walks_the_arm_link).to_equal(true)
+        expect(visits_expr_else).to_equal(true)
+        expect(visits_stmt_else).to_equal(true)
 
     it "substitutes declaration and linked arm/else annotations in the owner arrays":
+        # @req REQ-COMPILER-FRONTEND-TYPESUBST-003
+        # @capture(bit_table): the substituted param/ret/arm/else type tags after subst_type_in_decl
+        step("Build a generic linked if-chain decl and run the real substitution")
         ast_reset()
         val named_id = named_type_register("FlatIfTypeParam", [], [])
         val param_tag = TYPE_NAMED_BASE + named_id
@@ -51,13 +106,20 @@ describe "linked if-chain type substitution source contract":
         type_subst_add("FlatIfTypeParam", TYPE_I64)
         subst_type_in_decl(decl_id)
 
+        step("Require every owner-array annotation rewritten to the concrete type")
         expect(decl_get_param_types(decl_id)[0]).to_equal(TYPE_I64)
         expect(decl_get_ret_type(decl_id)).to_equal(TYPE_I64)
         expect(stmt_get_type(arm_local)).to_equal(TYPE_I64)
         expect(stmt_get_type(else_local)).to_equal(TYPE_I64)
 
     it "contains no placeholder substitution bodies":
+        # @req REQ-COMPILER-FRONTEND-TYPESUBST-004
+        # @capture(protocol_json): the grep-verified no-placeholder clauses of the substitution owner
+        step("Read the substitution owner and verify no placeholder bodies remain")
         val source = rt_file_read_text("src/compiler/10.frontend/core/type_subst.spl") ?? ""
-        expect(source.contains("pass_do_nothing")).to_equal(false)
-        expect(source.contains("Will be replaced with actual clone")).to_equal(false)
-        expect(source).to_contain("val cloned_did = ast_clone_decl(generic_did)")
+        val carries_no_do_nothing_marker = not source.contains("pass_do_nothing")
+        val carries_no_clone_stub_comment = not source.contains("Will be replaced with actual clone")
+        val clones_decls_through_the_real_owner = source.contains("val cloned_did = ast_clone_decl(generic_did)")
+        expect(carries_no_do_nothing_marker).to_equal(true)
+        expect(carries_no_clone_stub_comment).to_equal(true)
+        expect(clones_decls_through_the_real_owner).to_equal(true)

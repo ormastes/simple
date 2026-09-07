@@ -1,323 +1,491 @@
-# SIMD Type Checking Tests
-#
-# Tests for SIMD type checking and auto-vectorization.
+"""
+## Purpose and audience
+Executable contract for the SIMD type checker and auto-vectorizer shipped in
+`src/compiler/35.semantics/simd_check.spl`: element/vector types, operations,
+error formatting, target-width checks, loop analysis, and backend capability
+sets. Written for the SIMD-lane owners; every scenario drives the shipped
+product API directly.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/native/simd_check_spec.spl
+## Compatibility and limitations
+The shipped width rule accepts exactly 128, 256, or 512 total bits; anything
+else is invalid regardless of target. `check_simd_binary` always checks
+against the AVX (256-bit) target, so an SSE-only host is not modelled by that
+convenience path. Shuffle masks may reference either source operand, i.e.
+indices up to `2 * lane_count - 1`.
+## Verification guidance and troubleshooting
+A failure prints the scenario's product value; for rejected checks inspect
+`checker.get_errors()` and render the `SimdCheckError` with `to_text()`, whose
+message names the exact width, lane, or operation that was refused.
+"""
+# Lifecycle: doc/01_research/compiler/simd/simd_spec_verification_2026-05-02.md ;
+# doc/03_plan/compiler/method_resolution_primitive_conversion_shadowing.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/phases/bidir_phase1a.spl
+# @manual_section: simd-check
 
-
-# ============================================================================
-# SimdElementType Tests
-# ============================================================================
+use std.spec
+use compiler.semantics.simd_check.{SimdElementType, SimdVectorType, SimdOperation, SimdCheckError, SimdTypeChecker, VectorizationStatus, SimdLoopInfo, AutoVectorizer, SimdInstructionInfo, SimdCapability, check_simd_binary, can_vectorize_loop, get_vector_type_for_scalar}
 
 describe "SimdElementType":
     it "converts to text":
-        # SimdElementType.I32.to_text() == "i32"
-        pass
+        # @req REQ-SIMD-001
+        # @capture(bit_table): element type rendering check
+        step("Render the i32 element type as text")
+        expect(SimdElementType.I32.to_text()).to_equal("i32")
 
     it "returns correct bit width":
-        # SimdElementType.I8.bit_width() == 8
-        # SimdElementType.I64.bit_width() == 64
-        pass
+        # @req REQ-SIMD-002
+        # @capture(bit_table): element bit width check
+        step("Read the bit widths of the byte and word element types")
+        expect(SimdElementType.I8.bit_width()).to_equal(8)  # oracle: one byte per lane
+        expect(SimdElementType.I64.bit_width()).to_equal(64)  # oracle: one quadword per lane
 
     it "identifies integer types":
-        # SimdElementType.I32.is_integer() == true
-        # SimdElementType.F32.is_integer() == false
-        pass
+        # @req REQ-SIMD-003
+        # @capture(bit_table): integer classification check
+        step("Classify i32 and f32 by integer-ness")
+        expect(SimdElementType.I32.is_integer()).to_equal(true)
+        expect(SimdElementType.F32.is_integer()).to_equal(false)
 
     it "identifies float types":
-        # SimdElementType.F32.is_float() == true
-        # SimdElementType.I32.is_float() == false
-        pass
-
-# ============================================================================
-# SimdVectorType Tests
-# ============================================================================
+        # @req REQ-SIMD-004
+        # @capture(bit_table): float classification check
+        step("Classify f32 and i32 by float-ness")
+        expect(SimdElementType.F32.is_float()).to_equal(true)
+        expect(SimdElementType.I32.is_float()).to_equal(false)
 
 describe "SimdVectorType":
     it "creates vector type":
-        # SimdVectorType.create(I32, 4)
-        # ty.lane_count == 4
-        pass
+        # @req REQ-SIMD-005
+        # @capture(bit_table): vector construction check
+        step("Build a four-lane i32 vector from first principles")
+        val ty = SimdVectorType.create(SimdElementType.I32, 4)
+        expect(ty.lane_count).to_equal(4)  # oracle: create() stores the lane count verbatim
 
     it "creates standard types":
-        # SimdVectorType.i32x4()
-        # SimdVectorType.f64x2()
-        pass
+        # @req REQ-SIMD-006
+        # @capture(bit_table): standard type factory check
+        step("Build the i32x4 and f64x2 shorthands and read their lanes")
+        expect(SimdVectorType.i32x4().lane_count).to_equal(4)  # oracle: x4 means four lanes
+        expect(SimdVectorType.f64x2().lane_count).to_equal(2)  # oracle: x2 means two lanes
 
     it "formats as string":
-        # SimdVectorType.i32x4().to_text() == "i32x4"
-        pass
+        # @req REQ-SIMD-007
+        # @capture(bit_table): vector type rendering check
+        step("Render the i32x4 shorthand as text")
+        expect(SimdVectorType.i32x4().to_text()).to_equal("i32x4")
 
     it "calculates total bits":
-        # SimdVectorType.i32x4().total_bits() == 128
-        pass
+        # @req REQ-SIMD-008
+        # @capture(bit_table): total width computation check
+        step("Multiply element width by lane count for i32x4")
+        expect(SimdVectorType.i32x4().total_bits()).to_equal(128)  # oracle: 4 lanes of 32 bits
 
     it "validates vector width":
-        # 128-bit vector is valid
-        # 96-bit vector is invalid
-        pass
+        # @req REQ-SIMD-009
+        # @capture(bit_table): width validation check
+        step("Validate a 128-bit vector and reject a 96-bit one")
+        expect(SimdVectorType.i32x4().is_valid_width()).to_equal(true)
+        expect(SimdVectorType.create(SimdElementType.I32, 3).is_valid_width()).to_equal(false)
 
     it "checks type compatibility":
-        # i32x4 compatible with i32x4
-        # i32x4 not compatible with i64x2
-        pass
-
-# ============================================================================
-# SimdOperation Tests
-# ============================================================================
+        # @req REQ-SIMD-010
+        # @capture(bit_table): operand compatibility check
+        step("Compare i32x4 with itself and with i64x2 for operand compatibility")
+        expect(SimdVectorType.i32x4().is_compatible_with(SimdVectorType.i32x4())).to_equal(true)
+        expect(SimdVectorType.i32x4().is_compatible_with(SimdVectorType.i64x2())).to_equal(false)
 
 describe "SimdOperation":
     it "converts to text":
-        # SimdOperation.Add.to_text() == "add"
-        pass
+        # @req REQ-SIMD-011
+        # @capture(bit_table): operation rendering check
+        step("Render the Add operation as text")
+        expect(SimdOperation.Add.to_text()).to_equal("add")
 
     it "identifies binary operations":
-        # SimdOperation.Add.is_binary() == true
-        pass
+        # @req REQ-SIMD-012
+        # @capture(bit_table): binary classification check
+        step("Classify Add as a binary operation")
+        expect(SimdOperation.Add.is_binary()).to_equal(true)
 
     it "identifies unary operations":
-        # SimdOperation.Not.is_unary() == true
-        pass
+        # @req REQ-SIMD-013
+        # @capture(bit_table): unary classification check
+        step("Classify Not as a unary operation")
+        expect(SimdOperation.Not.is_unary()).to_equal(true)
 
     it "checks float support":
-        # SimdOperation.Add.supports_float() == true
-        # SimdOperation.And.supports_float() == false
-        pass
+        # @req REQ-SIMD-014
+        # @capture(bit_table): float support classification check
+        step("Check which of Add and And supports float lanes")
+        expect(SimdOperation.Add.supports_float()).to_equal(true)
+        expect(SimdOperation.And.supports_float()).to_equal(false)
 
     it "checks integer support":
-        # SimdOperation.And.supports_integer() == true
-        pass
-
-# ============================================================================
-# SimdCheckError Tests
-# ============================================================================
+        # @req REQ-SIMD-015
+        # @capture(bit_table): integer support classification check
+        step("Check that And supports integer lanes")
+        expect(SimdOperation.And.supports_integer()).to_equal(true)
 
 describe "SimdCheckError":
     it "formats invalid lane count error":
-        # SimdCheckError.InvalidLaneCount(4, 8).to_text()
-        pass
+        # @req REQ-SIMD-016
+        # @capture(protocol_json): invalid-lane-count message check
+        step("Render an invalid-lane-count error and read its text")
+        val message = SimdCheckError.InvalidLaneCount(4, 8).to_text()
+        expect(message.contains("Invalid lane count")).to_equal(true)
+        expect(message.contains("got 8")).to_equal(true)
 
     it "formats incompatible types error":
-        # SimdCheckError.IncompatibleTypes(i32x4, i64x2).to_text()
-        pass
+        # @req REQ-SIMD-017
+        # @capture(protocol_json): incompatible-types message check
+        step("Render an incompatible-types error naming both vector types")
+        val message = SimdCheckError.IncompatibleTypes(SimdVectorType.i32x4(), SimdVectorType.i64x2()).to_text()
+        expect(message.contains("Incompatible SIMD types")).to_equal(true)
+        expect(message.contains("i64x2")).to_equal(true)
 
     it "formats invalid width error":
-        # SimdCheckError.InvalidVectorWidth(96).to_text()
-        pass
+        # @req REQ-SIMD-018
+        # @capture(protocol_json): invalid-width message check
+        step("Render an invalid-width error for a 96-bit vector")
+        val message = SimdCheckError.InvalidVectorWidth(96).to_text()
+        expect(message.contains("96 bits")).to_equal(true)
 
     it "formats unsupported operation error":
-        # SimdCheckError.UnsupportedOperation(And, F32).to_text()
-        pass
+        # @req REQ-SIMD-019
+        # @capture(protocol_json): unsupported-operation message check
+        step("Render an unsupported-operation error for And over f32")
+        val message = SimdCheckError.UnsupportedOperation(SimdOperation.And, SimdElementType.F32).to_text()
+        expect(message.contains("and")).to_equal(true)
+        expect(message.contains("not supported for f32")).to_equal(true)
 
     it "formats lane index out of bounds error":
-        # SimdCheckError.LaneIndexOutOfBounds(5, 4).to_text()
-        pass
-
-# ============================================================================
-# SimdTypeChecker Tests
-# ============================================================================
+        # @req REQ-SIMD-020
+        # @capture(protocol_json): lane-bounds message check
+        step("Render an out-of-bounds lane error for index 5 over 4 lanes")
+        val message = SimdCheckError.LaneIndexOutOfBounds(5, 4).to_text()
+        expect(message.contains("out of bounds")).to_equal(true)
 
 describe "SimdTypeChecker":
     it "creates checker with max width":
-        # SimdTypeChecker.create(128)
-        pass
+        # @req REQ-SIMD-021
+        # @capture(bit_table): checker construction check
+        step("Create a checker with an explicit 128-bit target width")
+        val checker = SimdTypeChecker.create(128)
+        expect(checker.target_max_width).to_equal(128)  # oracle: create() stores the width verbatim
 
     it "creates SSE checker":
-        # SimdTypeChecker.for_sse() has 128-bit max
-        pass
+        # @req REQ-SIMD-022
+        # @capture(bit_table): SSE target width check
+        step("Create the SSE checker and read its target width")
+        expect(SimdTypeChecker.for_sse().target_max_width).to_equal(128)  # oracle: SSE is 128-bit
 
     it "creates AVX checker":
-        # SimdTypeChecker.for_avx() has 256-bit max
-        pass
+        # @req REQ-SIMD-023
+        # @capture(bit_table): AVX target width check
+        step("Create the AVX checker and read its target width")
+        expect(SimdTypeChecker.for_avx().target_max_width).to_equal(256)  # oracle: AVX is 256-bit
 
     it "creates AVX-512 checker":
-        # SimdTypeChecker.for_avx512() has 512-bit max
-        pass
+        # @req REQ-SIMD-024
+        # @capture(bit_table): AVX-512 target width check
+        step("Create the AVX-512 checker and read its target width")
+        expect(SimdTypeChecker.for_avx512().target_max_width).to_equal(512)  # oracle: AVX-512 is 512-bit
 
     it "validates vector types":
-        # checker.check_vector_type(i32x4) == true
-        pass
+        # @req REQ-SIMD-025
+        # @capture(bit_table): vector type acceptance check
+        step("Validate i32x4 against a 128-bit target")
+        val checker = SimdTypeChecker.for_sse()
+        expect(checker.check_vector_type(SimdVectorType.i32x4())).to_equal(true)
 
     it "rejects invalid vector width":
-        # checker.check_vector_type with 96-bit vector fails
-        pass
+        # @req REQ-SIMD-026
+        # @capture(bit_table): invalid width rejection check
+        step("Reject a 96-bit vector and record the width error")
+        val checker = SimdTypeChecker.for_sse()
+        expect(checker.check_vector_type(SimdVectorType.create(SimdElementType.I32, 3))).to_equal(false)
+        expect(checker.has_errors()).to_equal(true)
 
     it "rejects vectors too wide for target":
-        # SSE checker rejects 256-bit vectors
-        pass
+        # @req REQ-SIMD-027
+        # @capture(bit_table): over-width rejection check
+        step("Reject a 256-bit vector on the 128-bit SSE target")
+        val checker = SimdTypeChecker.for_sse()
+        expect(checker.check_vector_type(SimdVectorType.create(SimdElementType.I32, 8))).to_equal(false)
 
     it "validates binary operations":
-        # checker.check_binary_op(Add, i32x4, i32x4) == true
-        pass
+        # @req REQ-SIMD-028
+        # @capture(bit_table): binary operation acceptance check
+        step("Accept Add over two i32x4 operands")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_binary_op(SimdOperation.Add, SimdVectorType.i32x4(), SimdVectorType.i32x4())).to_equal(true)
 
     it "rejects incompatible operand types":
-        # checker.check_binary_op(Add, i32x4, i64x2) == false
-        pass
+        # @req REQ-SIMD-029
+        # @capture(bit_table): operand mismatch rejection check
+        step("Reject Add over mixed i32x4 and i64x2 operands")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_binary_op(SimdOperation.Add, SimdVectorType.i32x4(), SimdVectorType.i64x2())).to_equal(false)
 
     it "rejects unsupported operations for type":
-        # checker.check_binary_op(And, f32x4, f32x4) == false
-        pass
+        # @req REQ-SIMD-030
+        # @capture(bit_table): unsupported operation rejection check
+        step("Reject the bitwise And over float operands")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_binary_op(SimdOperation.And, SimdVectorType.f32x4(), SimdVectorType.f32x4())).to_equal(false)
 
     it "validates lane access":
-        # checker.check_lane_access(i32x4, 2) == true
-        # checker.check_lane_access(i32x4, 5) == false
-        pass
+        # @req REQ-SIMD-031
+        # @capture(bit_table): lane bounds check
+        step("Access lane 2 and lane 5 of a four-lane vector")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_lane_access(SimdVectorType.i32x4(), 2)).to_equal(true)
+        expect(checker.check_lane_access(SimdVectorType.i32x4(), 5)).to_equal(false)
 
     it "validates shuffle masks":
-        # checker.check_shuffle(i32x4, [0, 1, 2, 3]) == true
-        pass
+        # @req REQ-SIMD-032
+        # @capture(bit_table): shuffle mask acceptance check
+        step("Accept a full-length identity shuffle mask")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_shuffle(SimdVectorType.i32x4(), [0, 1, 2, 3])).to_equal(true)
 
     it "rejects invalid shuffle mask length":
-        # checker.check_shuffle(i32x4, [0, 1]) == false
-        pass
-
-# ============================================================================
-# VectorizationStatus Tests
-# ============================================================================
+        # @req REQ-SIMD-033
+        # @capture(bit_table): shuffle mask length rejection check
+        step("Reject a two-entry mask for a four-lane vector")
+        val checker = SimdTypeChecker.for_avx()
+        expect(checker.check_shuffle(SimdVectorType.i32x4(), [0, 1])).to_equal(false)
 
 describe "VectorizationStatus":
     it "identifies vectorizable status":
-        # VectorizationStatus.Vectorizable(4).can_vectorize() == true
-        pass
+        # @req REQ-SIMD-034
+        # @capture(bit_table): vectorizable verdict check
+        step("Ask a Vectorizable verdict whether it can vectorize")
+        expect(VectorizationStatus.Vectorizable(4).can_vectorize()).to_equal(true)
 
     it "identifies non-vectorizable status":
-        # VectorizationStatus.NotVectorizable("reason").can_vectorize() == false
-        pass
+        # @req REQ-SIMD-035
+        # @capture(bit_table): not-vectorizable verdict check
+        step("Ask a NotVectorizable verdict whether it can vectorize")
+        expect(VectorizationStatus.NotVectorizable("reason").can_vectorize()).to_equal(false)
 
     it "identifies partially vectorizable":
-        # VectorizationStatus.PartiallyVectorizable(4, 2).can_vectorize() == true
-        pass
+        # @req REQ-SIMD-036
+        # @capture(bit_table): partial verdict check
+        step("Ask a PartiallyVectorizable verdict whether it can vectorize")
+        expect(VectorizationStatus.PartiallyVectorizable(4, 2).can_vectorize()).to_equal(true)
 
     it "formats status as text":
-        # status.to_text() describes the status
-        pass
-
-# ============================================================================
-# LoopInfo Tests
-# ============================================================================
+        # @req REQ-SIMD-037
+        # @capture(protocol_json): status rendering check
+        step("Render a Vectorizable verdict with factor 4 as text")
+        expect(VectorizationStatus.Vectorizable(4).to_text()).to_equal("vectorizable (factor: 4)")
 
 describe "LoopInfo":
     it "creates simple loop info":
-        # LoopInfo.simple_loop(100)
-        # info.iteration_count == Some(100)
-        pass
+        # @req REQ-SIMD-038
+        # @capture(bit_table): loop info construction check
+        step("Build a simple loop with a known trip count and read it back")
+        val info = SimdLoopInfo.simple_loop(100)
+        match info.iteration_count:
+            case Some(count):
+                expect(count).to_equal(100)  # oracle: simple_loop stores the given count
+            case nil:
+                expect(false).to_equal(true)  # oracle: the trip count must be known
 
     it "identifies vectorization candidates":
-        # Simple loop is candidate
-        pass
+        # @req REQ-SIMD-039
+        # @capture(bit_table): candidacy check
+        step("Confirm a dependency-free stride-1 loop is a candidate")
+        expect(SimdLoopInfo.simple_loop(100).is_vectorization_candidate()).to_equal(true)
 
     it "rejects loops with dependencies":
-        # has_dependencies = true not a candidate
-        pass
+        # @req REQ-SIMD-040
+        # @capture(bit_table): dependency disqualification check
+        step("Disqualify a loop that carries data dependencies")
+        val info = SimdLoopInfo.simple_loop(100)
+        info.has_dependencies = true
+        expect(info.is_vectorization_candidate()).to_equal(false)
 
     it "rejects loops with function calls":
-        # has_function_calls = true not a candidate
-        pass
-
-# ============================================================================
-# AutoVectorizer Tests
-# ============================================================================
+        # @req REQ-SIMD-041
+        # @capture(bit_table): function-call disqualification check
+        step("Disqualify a loop that contains function calls")
+        val info = SimdLoopInfo.simple_loop(100)
+        info.has_function_calls = true
+        expect(info.is_vectorization_candidate()).to_equal(false)
 
 describe "AutoVectorizer":
     it "creates with target vector width":
-        # AutoVectorizer.create(128)
-        pass
+        # @req REQ-SIMD-042
+        # @capture(bit_table): vectorizer construction check
+        step("Create a vectorizer with a 128-bit target width")
+        val vectorizer = AutoVectorizer.create(128)
+        expect(vectorizer.target_vector_width).to_equal(128)  # oracle: create() stores the width verbatim
 
     it "analyzes simple loop as vectorizable":
-        # Simple loop with 100 iterations is vectorizable
-        pass
+        # @req REQ-SIMD-043
+        # @capture(bit_table): loop analysis verdict check
+        step("Analyze a 100-iteration stride-1 loop for vectorization")
+        val vectorizer = AutoVectorizer.create(128)
+        val status = vectorizer.analyze_loop(SimdLoopInfo.simple_loop(100), 32)
+        expect(status.can_vectorize()).to_equal(true)
 
     it "calculates vectorization factor":
-        # For 128-bit and i32: factor = 4
-        pass
+        # @req REQ-SIMD-044
+        # @capture(bit_table): factor computation check
+        step("Compute the factor for 32-bit elements on a 128-bit target")
+        val vectorizer = AutoVectorizer.create(128)
+        val status = vectorizer.analyze_loop(SimdLoopInfo.simple_loop(100), 32)
+        match status:
+            case Vectorizable(factor):
+                expect(factor).to_equal(4)  # oracle: 128 bits / 32 bits per lane
+            case _:
+                expect(false).to_equal(true)  # oracle: a clean loop must be Vectorizable
 
     it "detects partial vectorization":
-        # Loop with 6 iterations and factor 4 has remainder 2
-        pass
+        # @req REQ-SIMD-045
+        # @capture(bit_table): remainder computation check
+        step("Analyze a 6-iteration loop and read factor and remainder")
+        val vectorizer = AutoVectorizer.create(128)
+        val status = vectorizer.analyze_loop(SimdLoopInfo.simple_loop(6), 32)
+        match status:
+            case PartiallyVectorizable(factor, remainder):
+                expect(factor).to_equal(4)  # oracle: 128 bits / 32 bits per lane
+                expect(remainder).to_equal(2)  # oracle: 6 iterations leaves 2 after full vectors
+            case _:
+                expect(false).to_equal(true)  # oracle: 6 iterations must be partially vectorizable
 
     it "rejects loops with low trip count":
-        # Loop with 2 iterations not worth vectorizing
-        pass
+        # @req REQ-SIMD-046
+        # @capture(bit_table): trip count rejection check
+        step("Reject a 2-iteration loop below the minimum trip count")
+        val vectorizer = AutoVectorizer.create(128)
+        val status = vectorizer.analyze_loop(SimdLoopInfo.simple_loop(2), 32)
+        expect(status.can_vectorize()).to_equal(false)
 
     it "rejects loops with dependencies":
-        # Returns NotVectorizable with reason
-        pass
+        # @req REQ-SIMD-047
+        # @capture(protocol_json): dependency rejection reason check
+        step("Analyze a dependency-carrying loop and read the rejection reason")
+        val vectorizer = AutoVectorizer.create(128)
+        val info = SimdLoopInfo.simple_loop(100)
+        info.has_dependencies = true
+        val status = vectorizer.analyze_loop(info, 32)
+        match status:
+            case NotVectorizable(reason):
+                expect(reason.contains("dependencies")).to_equal(true)
+            case _:
+                expect(false).to_equal(true)  # oracle: a dependent loop must be rejected
 
     it "suggests vector type for element type":
-        # For i32 with 128-bit target: i32x4
-        pass
-
-# ============================================================================
-# SimdInstructionInfo Tests
-# ============================================================================
+        # @req REQ-SIMD-048
+        # @capture(bit_table): type suggestion check
+        step("Suggest a vector type for i32 on a 128-bit target")
+        val vectorizer = AutoVectorizer.create(128)
+        expect(vectorizer.suggest_vector_type(SimdElementType.I32).to_text()).to_equal("i32x4")
 
 describe "SimdInstructionInfo":
     it "creates binary instruction info":
-        # SimdInstructionInfo.binary(Add, i32x4)
-        pass
+        # @req REQ-SIMD-049
+        # @capture(bit_table): binary instruction info check
+        step("Build binary Add info and count its operand types")
+        val info = SimdInstructionInfo.binary(SimdOperation.Add, SimdVectorType.i32x4())
+        expect(info.operand_types.len()).to_equal(2)  # oracle: a binary op has two operands
 
     it "creates unary instruction info":
-        # SimdInstructionInfo.unary(Not, i32x4)
-        pass
-
-# ============================================================================
-# SimdCapability Tests
-# ============================================================================
+        # @req REQ-SIMD-050
+        # @capture(bit_table): unary instruction info check
+        step("Build unary Not info and count its operand types")
+        val info = SimdInstructionInfo.unary(SimdOperation.Not, SimdVectorType.i32x4())
+        expect(info.operand_types.len()).to_equal(1)  # oracle: a unary op has one operand
 
 describe "SimdCapability":
     it "creates SSE2 capability":
-        # SimdCapability.sse2()
-        # capability.max_vector_width == 128
-        pass
+        # @req REQ-SIMD-051
+        # @capture(bit_table): SSE2 capability check
+        step("Build the SSE2 capability and read its width")
+        expect(SimdCapability.sse2().max_vector_width).to_equal(128)  # oracle: SSE2 is 128-bit
 
     it "creates AVX2 capability":
-        # SimdCapability.avx2()
-        # capability.has_fma == true
-        pass
+        # @req REQ-SIMD-052
+        # @capture(bit_table): AVX2 capability check
+        step("Build the AVX2 capability and read its FMA flag")
+        expect(SimdCapability.avx2().has_fma).to_equal(true)
 
     it "checks type support":
-        # capability.supports_type(i32x4) == true
-        pass
+        # @req REQ-SIMD-053
+        # @capture(bit_table): capability type support check
+        step("Ask the SSE2 capability whether it supports i32x4")
+        expect(SimdCapability.sse2().supports_type(SimdVectorType.i32x4())).to_equal(true)
 
     it "checks operation support":
-        # capability.supports_operation(Add) == true
-        pass
-
-# ============================================================================
-# Convenience Function Tests
-# ============================================================================
+        # @req REQ-SIMD-054
+        # @capture(bit_table): capability operation support check
+        step("Ask the SSE2 capability whether it supports Add")
+        expect(SimdCapability.sse2().supports_operation(SimdOperation.Add)).to_equal(true)
 
 describe "check_simd_binary":
     it "validates compatible operation":
-        # check_simd_binary(Add, i32x4, i32x4) == Ok(())
-        pass
+        # @req REQ-SIMD-055
+        # @capture(protocol_json): compatible operation verdict check
+        step("Run the convenience checker on Add over two i32x4 operands")
+        val result = check_simd_binary(SimdOperation.Add, SimdVectorType.i32x4(), SimdVectorType.i32x4())
+        match result:
+            case Ok(_):
+                expect(true).to_equal(true)  # oracle: compatible operands must yield Ok
+            case Err(_):
+                expect(false).to_equal(true)  # oracle: compatible operands must yield Ok
 
     it "rejects incompatible types":
-        # check_simd_binary(Add, i32x4, i64x2) is Err
-        pass
+        # @req REQ-SIMD-056
+        # @capture(protocol_json): incompatible operation verdict check
+        step("Run the convenience checker on Add over i32x4 and i64x2")
+        val result = check_simd_binary(SimdOperation.Add, SimdVectorType.i32x4(), SimdVectorType.i64x2())
+        match result:
+            case Err(err):
+                expect(err.to_text().contains("Incompatible")).to_equal(true)
+            case Ok(_):
+                expect(false).to_equal(true)  # oracle: mixed operands must yield Err
 
 describe "can_vectorize_loop":
     it "returns true for vectorizable loop":
-        # can_vectorize_loop(100, 32) == true
-        pass
+        # @req REQ-SIMD-057
+        # @capture(bit_table): convenience candidacy verdict check
+        step("Run the convenience check on a 100-iteration 32-bit loop")
+        expect(can_vectorize_loop(100, 32)).to_equal(true)
 
     it "returns false for low iteration count":
-        # can_vectorize_loop(2, 32) == false
-        pass
+        # @req REQ-SIMD-058
+        # @capture(bit_table): convenience trip count rejection check
+        step("Run the convenience check on a 2-iteration loop")
+        expect(can_vectorize_loop(2, 32)).to_equal(false)
 
 describe "get_vector_type_for_scalar":
     it "returns i32x4 for i32":
-        # get_vector_type_for_scalar("i32") == Some(i32x4)
-        pass
+        # @req REQ-SIMD-059
+        # @capture(bit_table): scalar mapping check for i32
+        step("Map the i32 scalar type to its vector type")
+        match get_vector_type_for_scalar("i32"):
+            case Some(ty):
+                expect(ty.to_text()).to_equal("i32x4")
+            case nil:
+                expect(false).to_equal(true)  # oracle: i32 must map to a vector type
 
     it "returns f64x2 for f64":
-        # get_vector_type_for_scalar("f64") == Some(f64x2)
-        pass
+        # @req REQ-SIMD-060
+        # @capture(bit_table): scalar mapping check for f64
+        step("Map the f64 scalar type to its vector type")
+        match get_vector_type_for_scalar("f64"):
+            case Some(ty):
+                expect(ty.to_text()).to_equal("f64x2")
+            case nil:
+                expect(false).to_equal(true)  # oracle: f64 must map to a vector type
 
     it "returns None for unknown scalar":
-        # get_vector_type_for_scalar("unknown") == None
-        pass
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export describe
+        # @req REQ-SIMD-061
+        # @capture(bit_table): unknown scalar rejection check
+        step("Map an unknown scalar type name and expect no vector type")
+        expect(get_vector_type_for_scalar("unknown") == nil).to_equal(true)

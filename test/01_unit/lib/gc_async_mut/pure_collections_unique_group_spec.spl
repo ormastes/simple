@@ -1,3 +1,34 @@
+"""
+## Purpose and audience
+Pins the order and duplicate semantics of the dict-backed `unique` and
+`group_by` in std.gc_async_mut.pure.collections after their O(n^2) -> O(n)
+rewrite: first occurrence wins, input order is kept, groups come back in
+first-encounter key order, and each group holds every member that maps to its
+key in input order. Written for engineers touching the pure collections
+implementations who need the observable contract held exactly while the
+internals change.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/pure_collections_unique_group_spec.spl`
+and read the `SPEC FILE VERDICT` line. Every scenario calls `unique` or
+`group_by` directly; no allocation tracing or device is needed.
+## Compatibility and limitations
+Covers only `unique` and `group_by` on integer and text element lists with a
+parity key function; it does not cover dict/set collections, custom key types,
+or the GC arena behaviour of the collections.
+## Verification guidance and troubleshooting
+A failing order expectation means the rewrite started reordering; a failing
+membership expectation means a group is dropping or duplicating members; a
+failing empty-input expectation means an edge case regressed. Rerun after any
+edit to `src/lib/gc_async_mut/pure/collections.spl` and compare per-scenario
+pass/fail counts.
+"""
+# Lifecycle: doc/01_research/lib/collections_impl/collections.md ;
+# doc/03_plan/agent_tasks/collection_planner_parallel_agents_2026-07-31.md ;
+# doc/04_architecture/minimal_bootstrap_configuration_composed_dynamic_architecture.md ;
+# doc/05_design/language/collections/fixed_size_arrays.md
+# @manual_section: pure-collections-unique-group
+
 # Order and duplicate semantics of the dict-backed unique/group_by.
 #
 # These two were O(n^2) (inner linear scan per element). The rewrite is only
@@ -12,55 +43,81 @@ fn parity(n: i64) -> i64:
 describe "pure collections unique":
 
     it "keeps the first occurrence of each element in input order":
+        # @req REQ-PURE-COLLECTIONS-001
+        # @capture(statistics): deduped list for a separated-duplicates input
         """Dedupe must not reorder; a caller reading the result expects the
         order it supplied."""
         step("Dedupe a list whose duplicates are separated by other values")
         expect(unique([3, 1, 3, 2, 1, 3])).to_equal([3, 1, 2])
 
     it "returns an empty list unchanged":
-        expect(unique([]).len()).to_equal(0)
+        # @req REQ-PURE-COLLECTIONS-001
+        # @capture(statistics): deduped length for an empty input
+        step("Dedupe an empty list")
+        expect(unique([]).len()).to_equal(0)  # oracle: deduping nothing yields nothing
 
     it "keeps a list that has no duplicates intact":
+        # @req REQ-PURE-COLLECTIONS-001
+        # @capture(statistics): deduped list for a duplicate-free input
+        step("Dedupe a list that has no duplicates")
         expect(unique([5, 4, 6])).to_equal([5, 4, 6])
 
     it "collapses a list that is entirely one repeated value":
+        # @req REQ-PURE-COLLECTIONS-001
+        # @capture(statistics): deduped list for a single-repeated-value input
+        step("Dedupe a list whose elements are all the same value")
         expect(unique([7, 7, 7, 7])).to_equal([7])
 
     it "dedupes text elements by value":
+        # @req REQ-PURE-COLLECTIONS-001
+        # @capture(statistics): deduped list for a text-element input
+        step("Dedupe a list of text elements with separated duplicates")
         expect(unique(["b", "a", "b", "c", "a"])).to_equal(["b", "a", "c"])
 
 describe "pure collections group_by":
 
     it "returns no groups for an empty list":
-        expect(group_by([], parity).len()).to_equal(0)
+        # @req REQ-PURE-COLLECTIONS-002
+        # @capture(statistics): group count for an empty input
+        step("Group an empty list by parity")
+        expect(group_by([], parity).len()).to_equal(0)  # oracle: grouping nothing yields no groups
 
     it "creates one group per distinct key":
+        # @req REQ-PURE-COLLECTIONS-002
+        # @capture(statistics): group count for a two-key parity input
+        step("Group 1, 2, 3 by parity and count the groups")
         val groups = group_by([1, 2, 3], parity)
-        expect(groups.len()).to_equal(2)
+        expect(groups.len()).to_equal(2)  # oracle: parity over 1, 2, 3 yields exactly an odd and an even group
 
     it "orders groups by first encounter of their key":
+        # @req REQ-PURE-COLLECTIONS-003
+        # @capture(statistics): group key order for a mixed parity input
         """The group for key 1 comes first because an odd number appears first,
         even though key 0 ends up with more members."""
         step("Group a mixed list by parity and read back the key order")
         val groups = group_by([1, 2, 4, 3, 6], parity)
-        expect(groups.len()).to_equal(2)
-        expect(groups[0].0).to_equal(1)
-        expect(groups[1].0).to_equal(0)
+        expect(groups.len()).to_equal(2)  # oracle: parity yields exactly two groups regardless of member counts
+        expect(groups[0].0).to_equal(1)  # oracle: the odd key is met first in the input, so it leads
+        expect(groups[1].0).to_equal(0)  # oracle: the even key is encountered second
 
     it "collects every member of a group, in input order":
+        # @req REQ-PURE-COLLECTIONS-003
+        # @capture(statistics): full member lists for both parity groups
         """Each group must hold ALL elements that map to its key, not just the
         one that created the group, and in the order they were supplied."""
         step("Group a mixed list by parity and read back full member lists")
         val groups = group_by([1, 2, 4, 3, 6], parity)
-        expect(groups.len()).to_equal(2)
-        expect(groups[0].0).to_equal(1)
-        expect(groups[0].1).to_equal([1, 3])
-        expect(groups[1].0).to_equal(0)
-        expect(groups[1].1).to_equal([2, 4, 6])
+        expect(groups.len()).to_equal(2)  # oracle: parity yields exactly two groups
+        expect(groups[0].0).to_equal(1)  # oracle: the odd key leads by first encounter
+        expect(groups[0].1).to_equal([1, 3])  # oracle: both odd members, in input order
+        expect(groups[1].0).to_equal(0)  # oracle: the even key follows by first encounter
+        expect(groups[1].1).to_equal([2, 4, 6])  # oracle: all three even members, in input order
 
     it "keeps members in input order within a single group":
+        # @req REQ-PURE-COLLECTIONS-003
+        # @capture(statistics): member list for a single-key input
         step("Group a list that maps entirely to one key")
         val groups = group_by([2, 8, 4], parity)
-        expect(groups.len()).to_equal(1)
-        expect(groups[0].0).to_equal(0)
-        expect(groups[0].1).to_equal([2, 8, 4])
+        expect(groups.len()).to_equal(1)  # oracle: all-even input yields exactly one group
+        expect(groups[0].0).to_equal(0)  # oracle: the sole key is even
+        expect(groups[0].1).to_equal([2, 8, 4])  # oracle: members stay in the supplied order

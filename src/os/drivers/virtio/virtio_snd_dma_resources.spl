@@ -5,12 +5,7 @@
 use os.drivers.virtio.virtio_snd_mmio.{VirtioSndQueueMemory}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 
-extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
-extern fn rt_dma_free(handle: i64)
-extern fn rt_dma_virt_of(handle: i64) -> i64
-extern fn rt_dma_phys_of(handle: i64) -> i64
-extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
-extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+use std.io.dma.{dma_raw_alloc, dma_raw_free, dma_raw_phys_of, dma_raw_sync_for_cpu, dma_raw_sync_for_device, dma_raw_virt_of}
 
 val VIRTIO_SND_DMA_BYTES: i64 = 24576
 val VIRTIO_SND_QUEUE_BYTES: i64 = 512
@@ -37,25 +32,25 @@ fn virtio_snd_dma_resources_valid(resources: VirtioSndDmaResources) -> bool:
         (resources.cpu_base & 127u64) == 0u64 and (resources.device_base & 127u64) == 0u64
 
 fn virtio_snd_dma_create() -> VirtioSndDmaResources:
-    val handle = rt_dma_alloc(VIRTIO_SND_DMA_BYTES, VIRTIO_SND_DMA_BIDIRECTIONAL)
+    val handle = dma_raw_alloc(VIRTIO_SND_DMA_BYTES, VIRTIO_SND_DMA_BIDIRECTIONAL)
     if handle < 0:
         return VirtioSndDmaResources(handle: -1, cpu_base: 0u64, device_base: 0u64)
-    val cpu = rt_dma_virt_of(handle)
-    val device = rt_dma_phys_of(handle)
+    val cpu = dma_raw_virt_of(handle)
+    val device = dma_raw_phys_of(handle)
     val resources = VirtioSndDmaResources(handle: handle, cpu_base: cpu.to_u64(), device_base: device.to_u64())
     if not virtio_snd_dma_resources_valid(resources):
-        rt_dma_free(handle)
+        dma_raw_free(handle)
         return VirtioSndDmaResources(handle: -2, cpu_base: cpu.to_u64(), device_base: device.to_u64())
     var offset: i64 = 0
     while offset < VIRTIO_SND_DMA_BYTES:
         mmio_write32(cpu.to_u64() + offset.to_u64(), 0u32)
         offset = offset + 4
-    rt_dma_sync_for_device(handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
+    dma_raw_sync_for_device(handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
     resources
 
 fn virtio_snd_dma_destroy(resources: VirtioSndDmaResources):
     if resources.handle >= 0:
-        rt_dma_free(resources.handle)
+        dma_raw_free(resources.handle)
 
 fn virtio_snd_dma_queue(resources: VirtioSndDmaResources, index: u32) -> VirtioSndQueueMemory:
     if not virtio_snd_dma_resources_valid(resources) or index >= 4u32:
@@ -86,11 +81,11 @@ fn virtio_snd_dma_device_address(resources: VirtioSndDmaResources, offset: i64) 
 
 fn virtio_snd_dma_sync_for_device(resources: VirtioSndDmaResources):
     if resources.handle >= 0:
-        rt_dma_sync_for_device(resources.handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
+        dma_raw_sync_for_device(resources.handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
 
 fn virtio_snd_dma_sync_for_cpu(resources: VirtioSndDmaResources):
     if resources.handle >= 0:
-        rt_dma_sync_for_cpu(resources.handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
+        dma_raw_sync_for_cpu(resources.handle, VIRTIO_SND_DMA_BIDIRECTIONAL)
 
 fn virtio_snd_dma_range_valid(offset: i64, length: i64) -> bool:
     offset >= 0 and length >= 0 and offset <= VIRTIO_SND_DMA_BYTES and

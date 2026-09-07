@@ -144,6 +144,80 @@ fn count_skip_marker_cases(path: text) -> i64:
         return count
     1
 
+# =========================================================================
+# Degraded git-symlink placeholders (Windows, core.symlinks=false)
+# =========================================================================
+#
+# A git symlink (mode 120000) checked out on a Windows box without
+# SeCreateSymbolicLinkPrivilege lands as a PLAIN FILE whose entire content is
+# the link target path. `test/` carries 23 such tracked symlinks, six of them
+# DIRECTORY aliases inside the trees dir-mode walks
+# (`test/01_unit/compiler/compiler`, `test/01_unit/lib/database/lib`,
+# `test/03_system/feature/lib/{app,compiler,lib}`, ...). Degraded, they stop
+# being directories, so `dir_walk` never descends into the aliased subtree and
+# a directory-mode run silently under-collects with no error at all — the
+# "a scan that found nothing may have scanned nothing" trap. A degraded `.spl`
+# alias is worse: it reaches the compiler, which reports the bewildering
+# `Unexpected token: expected expression, found Slash` on the target's first
+# `/`.
+#
+# The remedy is `scripts/setup/materialize-symlinks-windows.shs`. This code
+# deliberately does NOT follow a placeholder — a silent path redirect was
+# rejected in
+# doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md
+# — it only refuses to walk a tree it cannot see all of.
+
+val SYMLINK_PLACEHOLDER_MAX_BYTES: i64 = 4096
+
+fn is_symlink_placeholder(path: text) -> bool:
+    """True when `path` is a git symlink degraded into path TEXT by a
+    `core.symlinks=false` checkout.
+
+    Shape mirrors `placeholder_looks_like_target` in
+    scripts/setup/materialize-symlinks-windows.shs (small, single line), then
+    tightens it so real source can never match: a placeholder holds one bare
+    relative path, so it carries a separator and NO whitespace at all, and no
+    valid `.spl` source file is a single whitespace-free line."""
+    val name = path_basename(path)
+    # Only an extensionless entry can be a degraded DIRECTORY alias, and only a
+    # `.spl` entry a degraded module/spec alias. Skip everything else so the
+    # walk stays cheap.
+    if name.contains(".") and not name.ends_with(".spl"):
+        return false
+    val content = file_read(path) ?? ""
+    if content == "" or content.len() >= SYMLINK_PLACEHOLDER_MAX_BYTES:
+        return false
+    if content.contains("\n") or content.contains("\r") or content.contains(" ") or content.contains("\t"):
+        return false
+    content.contains("/") or content.contains("\\")
+
+fn symlink_placeholder_report(paths: [text]) -> text:
+    """Operator-facing diagnostic for a tree that cannot be walked correctly.
+
+    Pure, so a spec can pin the wording without touching the filesystem."""
+    var out = "error: {paths.len()} unmaterialized git symlink(s) in the walked tree —\n"
+    out = out + "       directory-mode discovery cannot see the aliased subtree(s), so this run\n"
+    out = out + "       would silently under-collect. Refusing to report a result.\n"
+    for p in paths:
+        out = out + "  placeholder: {p}\n"
+    out + "  remedy: sh scripts/setup/materialize-symlinks-windows.shs\n"
+
+fn find_symlink_placeholders(all_files: [text], include_spl: bool) -> [text]:
+    """Placeholders among `all_files`.
+
+    `include_spl` false checks only EXTENSIONLESS entries — the degraded
+    DIRECTORY aliases, which are the silent hazard (dir_walk skips the subtree
+    and nothing complains). The manifest fast path passes false so it stays
+    free of per-spec content reads; a degraded `.spl` alias there is not silent
+    anyway, the compiler rejects it loudly."""
+    var found: [text] = []
+    for f in all_files:
+        if not include_spl and path_basename(f).ends_with(".spl"):
+            continue
+        if is_symlink_placeholder(f):
+            found.push(f)
+    found
+
 fn matches_level(path: text, level: TestLevel) -> bool:
     # Segment-based classification: matches BOTH the maintained numbered tree
     # (`test/01_unit/`, `test/02_integration/`, `test/03_system/`) and the
@@ -283,9 +357,22 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         # that never indexed this subtree yields zero files and reads as
         # "No test files found" even when the directory is full of specs.
         val result = discover_test_files_slow(base_path, options)
-        # Build manifest in background for next run
-        save_manifest_from_discovery(base_path)
+        # Never cache a scan of a tree the slow path refused to trust: a
+        # manifest built from a degraded checkout would make the NEXT run take
+        # the fast branch below and silently return the under-collected set.
+        if result.len() > 0:
+            # Build manifest in background for next run
+            save_manifest_from_discovery(base_path)
         return result
+
+    # An already-fresh manifest skips the walk entirely, so the slow path's
+    # refusal never fires. Re-check the tree for degraded DIRECTORY aliases
+    # here — extensionless entries only, so the fast path keeps its "no
+    # per-spec content reads" property.
+    val cached_placeholders = find_symlink_placeholders(dir_walk(base_path), false)
+    if cached_placeholders.len() > 0:
+        print symlink_placeholder_report(cached_placeholders)
+        return []
 
     # Fast path: filter manifest entries in-memory
     val start = time_now_unix_micros()
@@ -419,6 +506,15 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
             return [base_path]
         return []
     val all_files = dir_walk(base_path)
+    # Fail closed on a tree we cannot fully see: an unmaterialized git symlink
+    # makes dir_walk skip a whole aliased subtree with no error at all.
+    # Returning [] here is deliberate — for an explicit path, empty selection is
+    # already a failure (test_empty_selection_is_success), so the run cannot go
+    # green on a tree that was never fully walked.
+    val placeholders = find_symlink_placeholders(all_files, true)
+    if placeholders.len() > 0:
+        print symlink_placeholder_report(placeholders)
+        return []
     # Check if we need content-based filtering at all
     # Always need content if filtering slow tests (default behavior)
     val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != "" or not options.run_all

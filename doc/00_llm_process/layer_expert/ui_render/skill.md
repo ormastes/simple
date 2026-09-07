@@ -291,3 +291,16 @@ Two facts that change how this layer should be read:
 
 Rendering correctness is NOT the problem here: cpu-vs-vulkan is bit-identical
 across 38 primitives, and Simple matches the C reference byte for byte.
+
+## GPU scheduler hardening: epoch contract and packed seam (2026-09-05)
+
+- Contract: `src/lib/common/gpu/engine2d/gpu_epoch.spl`. Providers grade via
+  `gpu_provider_conformance.spl`; probes in `gc_async_mut/gpu/engine2d/gpu_provider_probes.spl`.
+  Packed queue path: `nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`
+  (`*_submit_packed` / `*_complete_packed` / `*_retire_packed`); SDN text only via `*_sdn_compat`.
+- Rule: every receipt is `routing_evidence_only` until a provider exposes a fence
+  token and distinct phases. None does yet. Do not flip `device_execution_proven` by hand.
+- Verify with the Sep-5 seed: `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple run <one spec>`.
+  `bin/release/macos-arm64/simple test` (Apr-11) counts `it` blocks without executing them.
+- Device lanes gate on `SIMPLE_GPU_TEST=1` via `std.spec` `get_env` + `skip_if`; never `@tag:in-development`.
+- Plan/acceptance map: `doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md`.

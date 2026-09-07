@@ -257,31 +257,29 @@ impl HirLowering:
         # does have imports.
         if module.imports.len() == 0:
             return
-        var importer_key = module.name
-        if importer_key.ends_with(".spl"):
-            importer_key = importer_key[0:importer_key.len() - 4]
-        importer_key = importer_key.replace("/", ".")
-        if importer_key.starts_with("src."):
-            importer_key = importer_key.substring(4)
+        # Use the same owner as source discovery and native symbol naming.
+        # A positional entry can be absolute and contain host punctuation
+        # (`/tmp/probe-dir/main.spl`). The old local slash-only rewrite kept
+        # the hyphen while the surface registry key sanitized it to `_`, so
+        # the importing module could not find its own already-frozen surface.
+        val importer_key = module_logical_name_from_path(module.name)
         var importer_surface_index = self.surface_index_for_name(importer_key)
         if importer_surface_index < 0:
-            # The hand-rolled key above drops `.spl`, `/`->`.` and a leading
-            # `src.`, but NOT the all-digit tier segment. The registry keys its
+            # The logical key elides host punctuation but the registry keys its
             # surfaces with `module_surface_canonical_module_name`
             # (module_surface_registry.spl:79), whose canonical spelling also
-            # drops tier segments and folds `std.` -> `lib.`;
+            # drops all-digit tier segments and folds `std.` -> `lib.`;
             # `hir_pkg_canonical_module_name` (module_lowering.spl:90) is the
             # in-scope twin of that rule and is already used on `module.name`
-            # at :394 below. Under SIMPLE_BOOTSTRAP `ParserModule.name` is the
+            # below. Under SIMPLE_BOOTSTRAP `ParserModule.name` is the
             # raw physical path, so `src/compiler/60.mir_opt/mir_opt/mod.spl`
-            # yields `compiler.60.mir_opt.mir_opt.mod` here while the surface
-            # is registered as `compiler.mir_opt.mir_opt.mod` -> exact miss ->
-            # the file gets NO import surface at all, and every name it imports
-            # is later reported as `unresolved type`/`unresolved name`. In the
-            # Stage 3 log of 2026-09-01 all 78 files whose FIRST HIR error was
-            # `missing importing module surface` carried a numbered path, no
-            # de-numbered-path file hit this error, and those 78 files account
-            # for 4796 of the run's 5024 HIR fatals.
+            # yields a numbered key here while the surface is registered
+            # de-numbered -> exact miss -> the file gets NO import surface at
+            # all, and every name it imports is later reported as
+            # `unresolved type`/`unresolved name`. In the Stage 3 log of
+            # 2026-09-01 all 78 files whose FIRST HIR error was
+            # `missing importing module surface` carried a numbered path, and
+            # those 78 files account for 4796 of the run's 5024 HIR fatals.
             importer_surface_index = self.surface_index_for_name(
                 hir_pkg_canonical_module_name(module.name))
         if importer_surface_index < 0:
@@ -308,12 +306,7 @@ impl HirLowering:
                 # so a raw leading-dot key always misses. Normalize against the
                 # importing module's own name. The entry module's name can be a
                 # FILE PATH (src/app/mcp/main.spl) — canonicalize to dotted.
-                var rel_base = module.name
-                if rel_base.ends_with(".spl"):
-                    rel_base = rel_base[0:rel_base.len() - 4]
-                rel_base = rel_base.replace("/", ".")
-                if rel_base.starts_with("src."):
-                    rel_base = rel_base.substring(4)
+                val rel_base = module_logical_name_from_path(module.name)
                 var rel_dots = 0
                 while rel_dots < imp.module.len() and imp.module.substring(rel_dots, rel_dots + 1) == ".":
                     rel_dots = rel_dots + 1
@@ -408,12 +401,7 @@ impl HirLowering:
         module's public symbols explicitly, or every bare cross-file call in a
         package dies with "unresolved name" (fatal since HIR lowering errors
         became build errors)."""
-        var self_name = module.name
-        if self_name.ends_with(".spl"):
-            self_name = self_name[0:self_name.len() - 4]
-            self_name = self_name.replace("/", ".")
-            if self_name.starts_with("src."):
-                self_name = self_name.substring(4)
+        val self_name = module_logical_name_from_path(module.name)
         val self_segs = self_name.split(".")
         if self_segs.len() < 2:
             return

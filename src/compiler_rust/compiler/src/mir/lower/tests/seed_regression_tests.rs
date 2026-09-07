@@ -259,6 +259,106 @@ fn and_suspend_keeps_eager_unconditional_evaluation() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// std_math_abs_f64_returns_zero_2026-08-08
+//
+// A tail-position `if`/`else` STATEMENT merges its arms through an
+// `__if_merge_*` temp local whose type was hardcoded `TypeId::I64`.
+// `compile_store` reads that slot type, sees I64 where the arm produced an F64
+// value, matches no coercion arm and falls through to `create_default` —
+// `iconst(I64, 0)`. Every f64-returning function shaped like `math_abs`
+// therefore returned 0.0 under the JIT/native lanes (the tree-walking
+// interpreter, which does not use MIR, was correct).
+// ---------------------------------------------------------------------------
+
+fn if_merge_local_ty(func: &MirFunction) -> Option<TypeId> {
+    func.locals
+        .iter()
+        .find(|l| l.name.starts_with("__if_merge_"))
+        .map(|l| l.ty)
+}
+
+#[test]
+fn tail_if_statement_merge_slot_is_f64_for_float_arms() {
+    let mir = compile_to_mir("fn my_abs(x: f64) -> f64:\n    if x < 0.0:\n        -x\n    else:\n        x\n").unwrap();
+    let func = mir.functions.iter().find(|f| f.name == "my_abs").expect("my_abs fn");
+
+    assert_eq!(
+        if_merge_local_ty(func),
+        Some(TypeId::F64),
+        "tail if/else with f64 arms must merge through an F64 slot; an I64 slot makes \
+         compile_store zero the value (math_abs(-3.0) == 0.0)"
+    );
+
+    // Every Store/Load against that merge slot must agree with the slot type.
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::Store { ty, .. } | MirInst::Load { ty, .. } => {
+                    assert_ne!(
+                        *ty,
+                        TypeId::I64,
+                        "no I64-typed merge access may survive in an all-f64 tail if/else"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn tail_if_statement_merge_slot_stays_i64_for_int_arms() {
+    let mir = compile_to_mir("fn my_abs_i(x: i64) -> i64:\n    if x < 0:\n        -x\n    else:\n        x\n").unwrap();
+    let func = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "my_abs_i")
+        .expect("my_abs_i fn");
+
+    assert_eq!(
+        if_merge_local_ty(func),
+        Some(TypeId::I64),
+        "non-float arms must keep the historical I64 merge slot — the fix is narrow on purpose"
+    );
+}
+
+#[test]
+fn tail_if_statement_merge_slot_stays_i64_for_text_arms() {
+    let mir = compile_to_mir("fn pick(x: i64) -> text:\n    if x < 0:\n        \"neg\"\n    else:\n        \"pos\"\n")
+        .unwrap();
+    let func = mir.functions.iter().find(|f| f.name == "pick").expect("pick fn");
+
+    assert_eq!(
+        if_merge_local_ty(func),
+        Some(TypeId::I64),
+        "heap/text arms cross the merge as pointers in an I64 slot; that must not change"
+    );
+}
+
+/// Arms with disagreeing value types (`1.5` vs the int literal `2` in an
+/// f64-returning function) keep the historical I64 slot. This pins CURRENT
+/// behaviour, not correct behaviour: that shape is still wrong at runtime
+/// (`mixed(-1)` yields `0.0`, `mixed(1)` yields a denormal), exactly as it was
+/// before this fix — see
+/// `doc/08_tracking/bug/tail_if_mixed_int_float_arms_lose_the_float_2026-09-06.md`.
+/// Picking one arm's float type here would silently bitcast the OTHER arm's
+/// integer, which is a different wrong answer; the real repair is an HIR-level
+/// numeric coercion of the int arm and is out of this fix's scope. The test
+/// exists so that repair has to update it deliberately.
+#[test]
+fn tail_if_statement_merge_slot_stays_i64_when_arms_disagree() {
+    let mir = compile_to_mir("fn mixed(x: i64) -> f64:\n    if x < 0:\n        1.5\n    else:\n        2\n").unwrap();
+    let func = mir.functions.iter().find(|f| f.name == "mixed").expect("mixed fn");
+
+    assert_eq!(
+        if_merge_local_ty(func),
+        Some(TypeId::I64),
+        "arms with disagreeing value types keep the historical I64 slot rather than \
+         picking one arm's type and mis-storing the other"
+    );
+}
+
 #[test]
 fn or_suspend_keeps_eager_unconditional_evaluation() {
     let mir =

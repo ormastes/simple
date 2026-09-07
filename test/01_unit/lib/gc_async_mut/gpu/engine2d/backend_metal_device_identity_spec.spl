@@ -1,5 +1,39 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 80%
 # @tag: unit, gpu, engine2d, metal, device_identity
+# @manual_section: metal-device-identity
+
+"""
+## Purpose and audience
+
+Pins the Metal backend's single owner device identity: one positive device
+identity shared across active glass-material execution and checked device
+readback, and a fail-closed receipt trail when native Metal glass is
+inactive. Audience: Engine2D Metal backend owners.
+
+**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
+**Plan:** doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/host_gpu_lane.md
+
+## Operator workflow
+
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_device_identity_spec.spl`.
+Both scenarios require a live native Metal backend; on hosts without one they
+verify only that the backend is absent and pass on that contract.
+
+## Compatibility and limitations
+
+Requires macOS with a live Metal device for the identity assertions. The
+inactive-glass scenario is a fail-closed contract check, not a rendering
+check.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above. An identity mismatch between execution and readback
+means the readback path lost the owner identity; a non-zero unfulfilled
+count in the active scenario means glass material lost its device binding.
+"""
 
 use std.spec.{describe, it, expect}
 use common.ui.draw_ir.{
@@ -62,10 +96,12 @@ fn _inactive_metal_composition() -> DrawIrComposition:
 describe "Metal backend owner device identity":
 
     it "keeps one positive owner identity across active glass and device readback when native Metal is available":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): owner device identity shared by glass execution and device readback
+        step("Create a native Metal engine, apply an active glass material, and read pixels back")
         var engine = Engine2D.create_with_backend_fast(4, 4, "metal")
         if engine.backend_name() != "metal":
-            val native_metal_status = "unavailable"
-            expect(native_metal_status).to_equal("unavailable")
+            expect(engine.backend_name() != "metal").to_equal(true)
         else:
             expect(engine.backend_name()).to_equal("metal")
             engine.clear(0xFF204060u32)
@@ -99,24 +135,26 @@ describe "Metal backend owner device identity":
                 execution.backend_handle)
             expect(readback.device_identity).to_equal(
                 execution.device_identity)
-            expect(readback.pixels.len()).to_equal(16)
+            expect(readback.pixels.len()).to_equal(16)  # oracle: a 4x4 framebuffer reads back sixteen pixels
             engine.shutdown()
 
     it "fails closed before device dispatch for inactive 930 native Metal when available":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): fail-closed glass receipts for the inactive 930 composition
+        step("Push an inactive 930 glass composition through the adv dispatcher and read the receipts")
         var engine = Engine2D.create_with_backend_fast(4, 4, "metal")
         if engine.backend_name() != "metal":
-            val native_metal_status = "unavailable"
-            expect(native_metal_status).to_equal("unavailable")
+            expect(engine.backend_name() != "metal").to_equal(true)
         else:
             val composition = _inactive_metal_composition()
             val result = engine2d_draw_ir_adv_composition(
                 engine, composition, true)
-            expect(result.rendered_command_count).to_equal(0)
-            expect(result.skipped_command_count).to_equal(2)
-            expect(result.metal_device_glass_material_count).to_equal(0)
-            expect(result.metal_device_glass_requested_count).to_equal(2)
-            expect(result.metal_device_glass_unfulfilled_count).to_equal(2)
-            expect(result.metal_device_glass_receipts.len()).to_equal(2)
+            expect(result.rendered_command_count).to_equal(0)  # oracle: fail-closed inactive glass dispatches nothing to the device
+            expect(result.skipped_command_count).to_equal(2)  # oracle: the composition carries exactly two glass commands and both are skipped
+            expect(result.metal_device_glass_material_count).to_equal(0)  # oracle: no glass material executes when the device receipt is missing
+            expect(result.metal_device_glass_requested_count).to_equal(2)  # oracle: both glass commands still register their request
+            expect(result.metal_device_glass_unfulfilled_count).to_equal(2)  # oracle: without a device receipt both requests stay unfulfilled
+            expect(result.metal_device_glass_receipts.len()).to_equal(2)  # oracle: one receipt per glass command, fulfilled or not
             val body_receipt = result.metal_device_glass_receipts[0]
             val title_receipt = result.metal_device_glass_receipts[1]
             expect(body_receipt.material_id).to_equal(
@@ -127,10 +165,10 @@ describe "Metal backend owner device identity":
             expect(title_receipt.fulfilled).to_equal(false)
             expect(body_receipt.execution_target).to_equal("unavailable")
             expect(title_receipt.execution_target).to_equal("unavailable")
-            expect(body_receipt.backend_handle).to_equal(0)
-            expect(title_receipt.backend_handle).to_equal(0)
-            expect(body_receipt.device_identity).to_equal(0)
-            expect(title_receipt.device_identity).to_equal(0)
+            expect(body_receipt.backend_handle).to_equal(0)  # oracle: an unfulfilled receipt never holds a device handle
+            expect(title_receipt.backend_handle).to_equal(0)  # oracle: an unfulfilled receipt never holds a device handle
+            expect(body_receipt.device_identity).to_equal(0)  # oracle: an unfulfilled receipt never claims an owner identity
+            expect(title_receipt.device_identity).to_equal(0)  # oracle: an unfulfilled receipt never claims an owner identity
             expect(result.fallback_required).to_equal(true)
             expect(result.fallback_reason).to_contain(
                 "metal glass material device receipt missing")

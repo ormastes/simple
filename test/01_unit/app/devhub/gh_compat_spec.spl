@@ -1,0 +1,327 @@
+# devhub — `gh` compatibility translation unit tests.
+#
+# Feature: gh-argv -> backend-argv and backend-JSON -> gh-JSON translation
+# Category: DevHub, CLI, Bitbucket, GitHub-compat
+# Status: Implemented
+#
+# WHY THESE ARE THE IMPORTANT TESTS: translation defects are SILENT. A dropped
+# `--base` opens a pull request against the wrong branch and still exits 0; a
+# `--state closed` that fails to become `DECLINED` returns the wrong PRs with
+# no error. Nothing downstream notices. Every function under test here is
+# pure, so the entire translation surface is pinned without a Bitbucket
+# account, a token, or a network call.
+#
+# Source: src/app/devhub/gh_compat.spl
+# Research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md §3
+
+use app.devhub.gh_compat.{
+    gh_state_to_bb,
+    bb_state_to_gh,
+    gh_pr_to_bb_argv,
+    gh_repo_to_bb_argv,
+    bb_pr_to_gh_json,
+    first_unsupported_flag,
+    first_unknown_flag,
+    flag_positions,
+    json_escape
+}
+
+
+# A brace pair inside a plain double-quoted Simple string is INTERPOLATION,
+# not literal text: `}}` collapses to `}`, which silently turned the first
+# version of this fixture into invalid JSON (json_parse returned nil and
+# bb_pr_to_gh_json dutifully echoed the input back, so four assertions failed
+# on a fixture bug rather than a code bug). cmd_bb_spec.spl's header records
+# the same trap from the other direction. Composing the braces through lb()/rb()
+# is the same technique adapter_bitbucket.spl uses (_bb_lbrace/_bb_rbrace).
+fn lb() -> text:
+    "{"
+
+fn rb() -> text:
+    "}"
+
+fn obj(inner: text) -> text:
+    lb() + inner + rb()
+
+fn sample_pr() -> text:
+    """One Bitbucket PR object, shaped exactly as REST 2.0 returns it:
+    nested source/destination branches, a `nickname` author, an html link
+    under links, and `description` where gh says `body`."""
+    obj(
+        "\"id\": 42, \"title\": \"Add widget\", \"state\": \"DECLINED\", " +
+        "\"description\": \"why\", " +
+        "\"created_on\": \"2026-09-01T10:00:00Z\", \"updated_on\": \"2026-09-02T11:00:00Z\", " +
+        "\"author\": " + obj("\"nickname\": \"ada\"") + ", " +
+        "\"source\": " + obj("\"branch\": " + obj("\"name\": \"work/widget\"")) + ", " +
+        "\"destination\": " + obj("\"branch\": " + obj("\"name\": \"main\"")) + ", " +
+        "\"links\": " + obj("\"html\": " + obj("\"href\": \"https://bitbucket.org/acme/widgets/pull-requests/42\""))
+    )
+
+
+describe "devhub gh compatibility translation":
+
+    describe "state vocabulary":
+        it "maps gh open/merged/all onto Bitbucket's":
+            expect(gh_state_to_bb("open")).to_equal("OPEN")
+            expect(gh_state_to_bb("merged")).to_equal("MERGED")
+            expect(gh_state_to_bb("all")).to_equal("all")
+
+        it "maps gh `closed` to DECLINED, not MERGED":
+            # Bitbucket splits gh's single "closed" into DECLINED (rejected)
+            # and MERGED (landed). Mapping closed->MERGED would silently
+            # return landed PRs to a caller asking for rejected ones.
+            expect(gh_state_to_bb("closed")).to_equal("DECLINED")
+
+        it "is case- and whitespace-insensitive":
+            expect(gh_state_to_bb("  OPEN ")).to_equal("OPEN")
+
+        it "returns empty for an unknown state so the caller can refuse":
+            expect(gh_state_to_bb("reopened")).to_equal("")
+            expect(gh_state_to_bb("")).to_equal("")
+
+        it "maps Bitbucket states back into gh's vocabulary":
+            expect(bb_state_to_gh("OPEN")).to_equal("OPEN")
+            expect(bb_state_to_gh("MERGED")).to_equal("MERGED")
+            expect(bb_state_to_gh("DECLINED")).to_equal("CLOSED")
+            expect(bb_state_to_gh("SUPERSEDED")).to_equal("CLOSED")
+
+    describe "pr create argv":
+        it "renames --head to --source and --base to --dest":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "work/x", "--base", "main"])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+            expect(argv.join(" ")).to_equal("pr create --title T --source work/x --dest main")
+
+        it "accepts gh's short forms":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["-t", "T", "-H", "work/x", "-B", "main", "-b", "body"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("pr create --title T --source work/x --dest main --body body")
+
+        it "passes --body through unchanged":
+            # Bitbucket's PR description had no plumbing at all before
+            # 2026-09-06 (bb_build_create_pr_body took no description), so a
+            # gh --body would have been silently discarded.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body", "the body"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_contain("--body the body")
+
+        it "refuses --draft rather than dropping it":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--draft"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--draft")
+            expect(err).to_contain("bitbucket")
+
+        it "refuses every other flag with no Bitbucket equivalent":
+            expect(gh_pr_to_bb_argv("create", ["--web"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("create", ["--fill"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("create", ["--template", "t.md"]).0).to_equal(false)
+
+    describe "pr list argv":
+        it "translates the --state VALUE, not just the flag name":
+            val (ok, argv, err) = gh_pr_to_bb_argv("list", ["--state", "closed", "--limit", "5"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("pr list --state DECLINED --limit 5")
+
+        it "renames gh's -L to --limit":
+            val (ok, argv, err) = gh_pr_to_bb_argv("list", ["-L", "10"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("pr list --limit 10")
+
+        it "rejects an unknown --state value with a message naming it":
+            val (ok, argv, err) = gh_pr_to_bb_argv("list", ["--state", "banana"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("banana")
+
+        it "refuses --search, which has no Bitbucket equivalent":
+            expect(gh_pr_to_bb_argv("list", ["--search", "is:open"]).0).to_equal(false)
+
+    describe "pr merge argv":
+        it "renests under Bitbucket's top-level merge and defaults to a merge commit":
+            # gh's default is a merge commit. cmd_bb's own default is squash,
+            # so passing through unchanged would make `gh pr merge N` do
+            # something different from what gh does.
+            val (ok, argv, err) = gh_pr_to_bb_argv("merge", ["7"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("merge 7 --strategy merge_commit")
+
+        it "maps --squash and --rebase onto Bitbucket strategies":
+            expect(gh_pr_to_bb_argv("merge", ["7", "--squash"]).1.join(" ")).to_equal("merge 7 --strategy squash")
+            expect(gh_pr_to_bb_argv("merge", ["7", "--rebase"]).1.join(" ")).to_equal("merge 7 --strategy fast_forward")
+
+        it "refuses --admin and --auto, which Bitbucket cannot honour":
+            expect(gh_pr_to_bb_argv("merge", ["7", "--admin"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("merge", ["7", "--auto"]).0).to_equal(false)
+
+    describe "pr review and comment argv":
+        it "maps `review --approve` onto Bitbucket's top-level approve":
+            val (ok, argv, err) = gh_pr_to_bb_argv("review", ["7", "--approve"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("approve 7")
+
+        it "refuses a review that is not an approval":
+            val (ok, argv, err) = gh_pr_to_bb_argv("review", ["7", "--request-changes"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--approve")
+
+        it "maps `comment --body` onto `comment post --content`":
+            val (ok, argv, err) = gh_pr_to_bb_argv("comment", ["7", "--body", "nice"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("comment post 7 --content nice")
+
+    describe "unsupported verbs":
+        it "names the verb and lists what IS supported":
+            val (ok, argv, err) = gh_pr_to_bb_argv("diff", ["7"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("gh pr diff")
+            expect(err).to_contain("create")
+
+        it "refuses an unsupported repo verb":
+            expect(gh_repo_to_bb_argv("clone", ["acme/widgets"]).0).to_equal(false)
+            expect(gh_repo_to_bb_argv("view", []).0).to_equal(true)
+
+    describe "first_unsupported_flag":
+        it "returns the offending flag, or empty when all are fine":
+            expect(first_unsupported_flag(["--a", "--b"], ["--b"])).to_equal("--b")
+            expect(first_unsupported_flag(["--a"], ["--b"])).to_equal("")
+
+    describe "allowlist enforcement (the half that actually holds the policy)":
+        # The named refuse-lists are a BLOCKLIST: anything nobody thought of
+        # sails through to the Bitbucket command layer, which never reads it.
+        # That is not hypothetical — `gh pr create --body-file <f>`, the exact
+        # form .claude/rules/vcs.md prescribes for opening a PR, did precisely
+        # that: the body vanished and the command exited 0.
+        it "refuses an unlisted flag by name rather than passing it through":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--assignee", "bob"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--assignee")
+            expect(err).to_contain("not translatable")
+
+        it "refuses --body-file at this layer, since honouring it needs I/O":
+            # cmd_git.spl rewrites --body-file to --body BEFORE calling here
+            # (gh_compat is pure). Reaching this function with one still set
+            # therefore means the rewrite was skipped — a real bug that must
+            # fail loudly rather than drop the body.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body-file", "b.md"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--body-file")
+
+        it "still accepts every flag it can genuinely translate":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--base", "main", "--body", "B", "--reviewer", "u", "--json", "number"])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+
+        it "applies to list, merge and comment too":
+            expect(gh_pr_to_bb_argv("list", ["--author", "me"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("merge", ["7", "--body", "note"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("comment", ["7", "--editor"]).0).to_equal(false)
+
+        it "handles the --flag=value spelling":
+            expect(gh_pr_to_bb_argv("create", ["--assignee=bob"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("list", ["--state=open"]).0).to_equal(true)
+
+        it "does not mistake a positional argument for a flag":
+            expect(gh_pr_to_bb_argv("view", ["42", "--json", "number"]).0).to_equal(true)
+
+    describe "flag values are never mistaken for flags":
+        # A pull-request body is one argv element and is arbitrary text. Every
+        # naive `starts_with("--")` scan in this module was wrong for the same
+        # reason: it inspected VALUES as though they were flags.
+        it "accepts a body that begins with a markdown horizontal rule":
+            # Measured 2026-09-06, before flag_positions existed: this was
+            # refused with "`gh pr create ---` is not translatable". `---` is
+            # entirely ordinary in a PR description.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body", "---\nfooter"])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+
+        it "does not rewrite a body whose text is itself a flag name":
+            # Without the same guard, `_rename_flags` turned a body of "--base"
+            # into "--dest", corrupting the description.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body", "--base"])
+            expect(ok).to_equal(true)
+            expect(argv.join("|")).to_equal("pr|create|--title|T|--source|x|--body|--base")
+
+        it "still translates ordinary flags around such a value":
+            val (ok, argv, err) = gh_pr_to_bb_argv("list", ["--state", "open", "--json", "number"])
+            expect(ok).to_equal(true)
+            expect(argv.join("|")).to_equal("pr|list|--state|OPEN|--json|number")
+
+        it "separates view's allowlist from review's":
+            # PR_READ_KNOWN was shared, so `gh pr view 42 --approve` was
+            # accepted and handed to cmd_bb, which ignores it — a silent no-op
+            # on a flag the user clearly meant.
+            expect(gh_pr_to_bb_argv("view", ["42", "--approve"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("review", ["42", "--approve"]).0).to_equal(true)
+
+    describe "flag_positions":
+        it "marks flags but not their values":
+            val p = flag_positions(["--title", "T", "--squash", "42"])
+            expect(p[0]).to_equal(true)   # --title is a flag
+            expect(p[1]).to_equal(false)  # T is its value
+            expect(p[2]).to_equal(true)   # --squash is boolean
+            expect(p[3]).to_equal(false)  # 42 is a positional... see below
+
+        it "treats a value that looks like a flag as a value":
+            val p = flag_positions(["--body", "---"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(false)
+
+        it "does not consume a value after a boolean flag":
+            val p = flag_positions(["--squash", "--json"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(true)
+
+        it "treats --flag=value as self-contained":
+            val p = flag_positions(["--state=open", "42"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(false)
+
+    describe "first_unknown_flag":
+        it "returns the first long flag not in the allowlist":
+            expect(first_unknown_flag(["--a", "--b"], ["--a"])).to_equal("--b")
+            expect(first_unknown_flag(["--a", "--b"], ["--a", "--b"])).to_equal("")
+
+        it "compares the name only for --flag=value":
+            expect(first_unknown_flag(["--a=1"], ["--a"])).to_equal("")
+            expect(first_unknown_flag(["--z=1"], ["--a"])).to_equal("--z")
+
+        it "ignores positionals and short flags":
+            # Short forms are consumed by the rename tables; a bare -x is
+            # ambiguous with a negative-number value, so it is not policed here.
+            expect(first_unknown_flag(["42", "value"], ["--a"])).to_equal("")
+            expect(first_unknown_flag(["-x"], ["--a"])).to_equal("")
+
+    describe "Bitbucket JSON -> gh JSON":
+        it "renames every field an LLM reads back":
+            val out = bb_pr_to_gh_json(sample_pr())
+            expect(out).to_contain("\"number\": 42")
+            expect(out).to_contain("\"headRefName\": \"work/widget\"")
+            expect(out).to_contain("\"baseRefName\": \"main\"")
+            expect(out).to_contain("\"url\": \"https://bitbucket.org/acme/widgets/pull-requests/42\"")
+            expect(out).to_contain("\"author\": " + obj("\"login\": \"ada\""))
+            expect(out).to_contain("\"body\": \"why\"")
+
+        it "translates the state into gh's vocabulary on the way out too":
+            expect(bb_pr_to_gh_json(sample_pr())).to_contain("\"state\": \"CLOSED\"")
+
+        it "emits isDraft false rather than omitting it":
+            # Bitbucket has no draft PRs. An honest false keeps the shape
+            # stable for a consumer that indexes the field.
+            expect(bb_pr_to_gh_json(sample_pr())).to_contain("\"isDraft\": false")
+
+        it "unwraps a paginated collection into a gh-style array":
+            val collection = obj("\"values\": [" + sample_pr() + "], \"pagelen\": 10")
+            val out = bb_pr_to_gh_json(collection)
+            expect(out.starts_with("[")).to_equal(true)
+            expect(out.ends_with("]")).to_equal(true)
+            expect(out).to_contain("\"number\": 42")
+
+        it "returns unparseable input verbatim instead of swallowing it":
+            # A caller debugging an API error needs to see the body.
+            expect(bb_pr_to_gh_json("not json at all")).to_equal("not json at all")
+
+    describe "json_escape":
+        it "escapes quotes, backslashes and newlines":
+            expect(json_escape("a\"b")).to_equal("a\\\"b")
+            expect(json_escape("a\\b")).to_equal("a\\\\b")
+            expect(json_escape("a\nb")).to_equal("a\\nb")

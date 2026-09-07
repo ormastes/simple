@@ -1,0 +1,134 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 15%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl 10%
+# @tag: unit, engine2d, metal
+# @manual_section: metal-engine2d-device-free-contracts
+
+"""
+# Metal 2D backend — contracts that hold with no device present
+
+## Purpose and audience
+
+Two Metal backend contracts are checkable without a GPU, and both were
+unenforced until now. Audience: Engine2D backend owners.
+
+1. **The per-frame font batch contract had no caller.**
+   `MetalFontBackendState.frame_batch_contract_met()`
+   (`src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl:162`) reads the
+   four real per-frame counters, but nothing repo-wide called it. The
+   1-dispatch / 1-commit / 1-wait rule was therefore only ever asserted against
+   literal integers in `metal_font_packed_parity_spec.spl`, never against
+   counters a frame actually produced: a submit that fanned out per glyph
+   reported success exactly like a correct one. It is now evaluated in
+   `MetalBackend.submit_batch()`, whose bool is consumed at
+   `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:2909,3212`.
+
+2. **`draw_rect_blend_mode()` dropped the caller's blend mode.** On the
+   non-`gpu_only` lane it forwarded to `draw_rect_blend()`, which applies the
+   default blend, so the requested `mode` was silently discarded — while the
+   `gpu_only` branch immediately above honoured it.
+
+## Operator workflow
+
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_device_free_contract_spec.spl`.
+
+## Compatibility and limitations
+
+Device-free by construction: `MetalBackend.create()` never initializes a Metal
+device here, so every scenario exercises the CPU-mirror lane and the
+counter-driven contract. No scenario claims a device executed anything. The
+counters are staged directly because moving them for real needs a device; the
+contract logic and its wiring are what is under test, not the device.
+
+## Acceptance
+
+- A frame that drew no text is unaffected: `submit_batch()` answers the flush
+  verdict alone.
+- A frame that drew text and did NOT cost exactly one command buffer, one
+  commit and one wait must make `submit_batch()` answer false.
+- `draw_rect_blend_mode()` on the CPU-mirror lane must produce the same pixels
+  as `SoftwareBackend.draw_rect_blend_mode()` with the same mode, and must NOT
+  produce the pixels of the default `draw_rect_blend()`.
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+describe "Metal 2D backend — per-frame font batch contract is actually evaluated":
+
+    it "a frame with no text is unaffected by the contract":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): submit verdict for a text-free frame
+        step("Submit a freshly created backend that drew no text")
+        var b = MetalBackend.create()
+        expect(b.font.frame_text_count).to_equal(0)  # oracle: a fresh state has drawn no text yet
+        expect(b.submit_batch()).to_equal(true)  # oracle: with no text pending the flush verdict is the whole answer
+
+    it "a text frame that honoured one dispatch, one commit and one wait submits":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): the four per-frame counters of a conforming frame
+        step("Stage a conforming frame's counters and submit")
+        var b = MetalBackend.create()
+        b.font.frame_text_count = 30
+        b.font.frame_command_count = 1
+        b.font.frame_commit_count = 1
+        b.font.frame_wait_count = 1
+        expect(b.font.frame_batch_contract_met()).to_equal(true)  # oracle: many glyphs still share the single per-frame submission
+        expect(b.submit_batch()).to_equal(true)
+
+    it "a text frame that fanned out per glyph must not report a successful submit":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): the four per-frame counters of a fanned-out frame
+        step("Stage a per-glyph fan-out frame's counters and submit")
+        var b = MetalBackend.create()
+        b.font.frame_text_count = 30
+        b.font.frame_command_count = 30
+        b.font.frame_commit_count = 30
+        b.font.frame_wait_count = 30
+        expect(b.font.frame_batch_contract_met()).to_equal(false)  # oracle: thirty command buffers for one frame violates the batching contract
+        expect(b.submit_batch()).to_equal(false)  # oracle: submit_batch must consume that verdict, not report success beside it
+
+    it "a text frame whose completion was never waited on must not report a successful submit":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): counters for a committed-but-unwaited frame
+        step("Stage a committed frame with no completion wait and submit")
+        var b = MetalBackend.create()
+        b.font.frame_text_count = 4
+        b.font.frame_command_count = 1
+        b.font.frame_commit_count = 1
+        b.font.frame_wait_count = 0
+        expect(b.font.frame_batch_contract_met()).to_equal(false)  # oracle: a frame whose completion was never awaited has unknown results
+        expect(b.submit_batch()).to_equal(false)
+
+
+describe "Metal 2D backend — draw_rect_blend_mode forwards the requested mode":
+
+    it "the CPU-mirror lane applies the requested blend mode, not the default blend":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(gui_image): first pixel after a mode-3 blended rect on three backends
+        step("Blend the same rect through the metal mirror, a mode-aware software backend, and the default blend")
+        var b = MetalBackend.create()
+        b.mirror.init(8, 8)
+        b.mirror.clear(0xFF000000u32)
+        b.draw_rect_blend_mode(0, 0, 4, 4, 0x80FF0000u32, 3)
+
+        var same_mode = SoftwareBackend.create()
+        same_mode.init(8, 8)
+        same_mode.clear(0xFF000000u32)
+        same_mode.draw_rect_blend_mode(0, 0, 4, 4, 0x80FF0000u32, 3)
+
+        var default_blend = SoftwareBackend.create()
+        default_blend.init(8, 8)
+        default_blend.clear(0xFF000000u32)
+        default_blend.draw_rect_blend(0, 0, 4, 4, 0x80FF0000u32)
+
+        val got = b.mirror.read_pixels()[0]
+        val with_mode = same_mode.read_pixels()[0]
+        val with_default = default_blend.read_pixels()[0]
+
+        # Guard against a vacuous comparison: if mode 3 happened to agree with
+        # the default blend, this scenario would pass either way.
+        expect(with_mode).to_not_equal(with_default)  # oracle: mode 3 must be observably different from the default blend, or this scenario proves nothing
+        expect(got).to_equal(with_mode)  # oracle: the mirror lane must apply the mode the caller asked for
+        expect(got).to_not_equal(with_default)  # oracle: falling back to draw_rect_blend() would silently drop the caller's mode

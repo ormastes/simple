@@ -1,0 +1,119 @@
+# Executable proof for doc/08_tracking/bug/interp_while_body_scope_leak_2026-07-15.md
+#
+# The record has said since 2026-07-15: "source fixed; executable interpreter
+# proof pending a runnable pure-Simple compiler artifact". This spec IS that
+# proof — it drives the pure-Simple interpreter's own
+# src/compiler/10.frontend/core/interpreter/eval_stmts.spl `eval_stmt_while`
+# (and eval.spl `eval_while_expr`) over a hand-built AST, so no deployed
+# self-hosted binary is needed.
+#
+# Original defect: the while body executed in the ENCLOSING environment, so a
+# body-local `val x = ...` overwrote an outer `x` and stayed visible after the
+# loop. That is silent caller-state mutation.
+
+use compiler.frontend.core.ast_expr.{expr_int_lit, expr_ident, expr_binary, expr_reset}
+use compiler.frontend.core.ast_stmt.{stmt_val_decl, stmt_assign_stmt, stmt_while_stmt}
+use compiler.core.interpreter.eval.{eval_stmt, eval_reset, eval_get_error}
+use compiler.core.interpreter.env.{env_reset, env_define, env_lookup, env_scope_depth}
+use compiler.core.interpreter.value.{val_reset, val_make_int, val_get_int}
+use compiler.core.interpreter.ops.{ops_clear_error}
+
+val OP_PLUS: i64 = 60     # TOK_PLUS
+val OP_LT: i64 = 82       # TOK_LT
+
+# `stmt_val_decl`/`stmt_var_decl` take a type tag; 0 is TYPE_VOID
+# (`core/types.spl:218`), which the parser itself uses as its "no explicit
+# type" sentinel (`parser_stmts.spl:1177`: `if type_tag == 0: infer...`) and
+# which `type_check_value` (`interpreter/eval.spl`) treats as "no constraint".
+# It is therefore inert here and cannot make these blocks fail for a
+# type-checking reason rather than a scoping one.
+val UNTYPED: i64 = 0
+
+describe "Interpreter while-body scope":
+    fn fresh():
+        expr_reset()
+        val_reset()
+        eval_reset()
+        env_reset()
+        ops_clear_error()
+
+    # `while i < 2: <body>; i = i + 1` — two full iterations.
+    fn two_iteration_while(extra_body: [i64]) -> i64:
+        val bump = stmt_assign_stmt(
+            expr_ident("i", -1),
+            expr_binary(OP_PLUS, expr_ident("i", -1), expr_int_lit(1, -1), -1),
+            -1
+        )
+        var body: [i64] = []
+        for s in extra_body:
+            body.push(s)
+        body.push(bump)
+        val cond = expr_binary(OP_LT, expr_ident("i", -1), expr_int_lit(2, -1), -1)
+        stmt_while_stmt(cond, body, -1)
+
+    # ---- reproduction: the exact defect the record describes ----
+
+    it "does not let a body-local val overwrite an outer binding of the same name":
+        fresh()
+        env_define("x", val_make_int(99))
+        env_define("i", val_make_int(0))
+        val shadow = stmt_val_decl("x", UNTYPED, expr_int_lit(7, -1), -1)
+        eval_stmt(two_iteration_while([shadow]))
+        expect(eval_get_error()).to_equal("")
+        # The loop really ran twice, so the body was executed at all.
+        expect(val_get_int(env_lookup("i"))).to_equal(2)
+        # ...and the outer x is untouched.
+        expect(val_get_int(env_lookup("x"))).to_equal(99)
+
+    it "does not leave a body-local binding visible after the loop":
+        fresh()
+        env_define("i", val_make_int(0))
+        val decl = stmt_val_decl("only_in_body", UNTYPED, expr_int_lit(5, -1), -1)
+        eval_stmt(two_iteration_while([decl]))
+        expect(eval_get_error()).to_equal("")
+        expect(val_get_int(env_lookup("i"))).to_equal(2)
+        # env_lookup returns a negative value id for an unbound name.
+        expect(env_lookup("only_in_body") < 0).to_equal(true)
+
+    # ---- control: the body IS entered, so the assertions above are not vacuous ----
+
+    it "runs the body once per iteration":
+        fresh()
+        env_define("n", val_make_int(0))
+        env_define("i", val_make_int(0))
+        val count = stmt_assign_stmt(
+            expr_ident("n", -1),
+            expr_binary(OP_PLUS, expr_ident("n", -1), expr_int_lit(1, -1), -1),
+            -1
+        )
+        eval_stmt(two_iteration_while([count]))
+        expect(val_get_int(env_lookup("n"))).to_equal(2)
+
+    # ---- generalization: adjacent scope invariants on the same path ----
+
+    it "assignment from the body still reaches the outer binding":
+        fresh()
+        env_define("x", val_make_int(99))
+        env_define("i", val_make_int(0))
+        # `x = 7` is an ASSIGNMENT, not a declaration: it must still mutate the
+        # outer x. Scoping the body must not break write-through.
+        val write = stmt_assign_stmt(expr_ident("x", -1), expr_int_lit(7, -1), -1)
+        eval_stmt(two_iteration_while([write]))
+        expect(val_get_int(env_lookup("x"))).to_equal(7)
+
+    it "leaves the scope stack balanced after the loop":
+        fresh()
+        env_define("i", val_make_int(0))
+        val depth_before = env_scope_depth()
+        val decl = stmt_val_decl("t", UNTYPED, expr_int_lit(1, -1), -1)
+        eval_stmt(two_iteration_while([decl]))
+        expect(env_scope_depth()).to_equal(depth_before)
+
+    it "leaves the scope stack balanced when the loop body never runs":
+        fresh()
+        env_define("i", val_make_int(5))
+        val depth_before = env_scope_depth()
+        val decl = stmt_val_decl("t", UNTYPED, expr_int_lit(1, -1), -1)
+        eval_stmt(two_iteration_while([decl]))
+        expect(env_scope_depth()).to_equal(depth_before)
+        expect(env_lookup("t") < 0).to_equal(true)

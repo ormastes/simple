@@ -892,7 +892,14 @@ S1(rt_math_abs) S1(rt_math_floor) S1(rt_math_ceil) S1(rt_math_round)
 S1(rt_math_log) S1(rt_math_log2) S1(rt_math_log10) S1(rt_math_exp)
 S2(rt_math_min) S2(rt_math_max) S2(rt_math_pow) S0(rt_math_random)
 S0(rt_math_pi) S0(rt_math_e) S0(rt_math_inf) S0(rt_math_nan)
-S1(rt_math_is_nan) S1(rt_math_is_inf)
+_Bool rt_math_is_nan(double x) { return x != x; }
+_Bool rt_math_is_inf(double x) {
+    double inf = 1.0e308 * 10.0;
+    return x == inf || x == -inf;
+}
+_Bool rt_math_is_finite(double x) {
+    return !rt_math_is_nan(x) && !rt_math_is_inf(x);
+}
 
 S2(rt_register_isr) S1(rt_send_eoi) S0(rt_get_interrupt_flag)
 

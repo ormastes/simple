@@ -1,4 +1,43 @@
-use std.spec.*
+"""
+## Purpose and audience
+
+Executable expansion evidence for the shared RV32/RV64 scalar integer
+projection in the HWIR RISC-V backend, written for the compiler engineers
+owning the hwir/lowering stage and for hardware reviewers auditing the
+emitted VHDL ALU slice.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed once the
+emitter-scope defect below is fixed. Each scenario builds a strict scalar
+ALU HWIR module from a real encoded instruction, evaluates it through the
+strict combinational host evaluator, and asserts the retired register value
+or the emitted VHDL text.
+
+## Compatibility and limitations
+
+The scalar emitter's admission scope currently rejects every row that is
+not a precise base-I ADD/SUB/AND/OR/XOR register-or-immediate op, so the
+upper-immediate, shift and RV64 word-op scenarios below are legitimate REDs
+(see the NOTE in each body). The x0 retirement scenario is inside the
+admitted scope and runs green. Hex instruction encodings are exact; decimal
+oracles annotate the architectural value each retired register must hold.
+
+## Verification guidance and troubleshooting
+
+If a scenario fails with HWIR-E-RISCV-SCALAR-EMIT-SCOPE, the emitter scope
+at src/compiler/50.mir/hwir/riscv_scalar_execution.spl:97 still excludes the
+op class under test -- fix the scope, not the spec. If the VHDL text
+assertions fail, compare the emitted shift/compare templates against the
+pinned substrings before touching the evaluator.
+"""
+# Lifecycle: research: doc/01_research/domain/riscv_gen2_hwir_foundation.md ; plan: doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md ; architecture: doc/04_architecture/hardware/riscv/riscv_architecture.md ; design: doc/05_design/hardware/vhdl/vhdl_python_hdl_parity.md
+# @cover src/compiler/50.mir/hwir/riscv_scalar_execution.spl
+# @manual_section: expanded RV32/RV64 scalar projection
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
 use compiler.mir.hwir.types.{CoreConfig}
 use compiler.mir.hwir.host_evaluator.{HwHostInput, prepare_strict_comb_hwir}
 use compiler.mir.hwir.riscv_scalar_execution.{strict_riscv_scalar_alu_retire_projection_hwir}
@@ -14,18 +53,30 @@ fn result(config: CoreConfig, instruction: u32, rs1: i64, rs2: i64, pc: i64) -> 
     ]).unwrap().value_of("retire_rd_value").unwrap()
 
 describe "expanded shared RV32/RV64 scalar integer projection":
-    # @req REQ-G2-015 NFR-G2-016
     it "implements upper immediates and signed/unsigned comparisons":
+        # @req REQ-G2-015 NFR-G2-016
+        # @capture(bit_table): retired rd for each encoded instruction in the table above
+        step("evaluate LUI, AUIPC, SLT and SLTU encodings through the strict evaluator")
+        # NOTE: legitimate RED. The scalar emitter's admission scope
+        # (src/compiler/50.mir/hwir/riscv_scalar_execution.spl:97,
+        # HWIR-E-RISCV-SCALAR-EMIT-SCOPE) rejects every non base-I ADD/SUB/
+        # AND/OR/XOR row, so upper immediates and comparisons cannot be built
+        # yet. Fix the scope; do not weaken these assertions.
         expect(result(CoreConfig.rv32(), 0x123451B7, 0, 0, 0)).to_equal(0x12345000)
         expect(result(CoreConfig.rv32(), 0x00001197, 0, 0, 0x100)).to_equal(0x1100)
-        expect(result(CoreConfig.rv32(), 0x0020A1B3, -1, 1, 0)).to_equal(1)
-        expect(result(CoreConfig.rv32(), 0x0020B1B3, -1, 1, 0)).to_equal(0)
-        expect(result(CoreConfig.rv64(), 0xFFF0A193, -2, 0, 0)).to_equal(1)
+        expect(result(CoreConfig.rv32(), 0x0020A1B3, -1, 1, 0)).to_equal(1)  # oracle: signed less-than holds (rs1 -1 < rs2 1), so SLT retires 1
+        expect(result(CoreConfig.rv32(), 0x0020B1B3, -1, 1, 0)).to_equal(0)  # oracle: unsigned 0xFFFF... < 1 is false, so SLTU retires 0
+        expect(result(CoreConfig.rv64(), 0xFFF0A193, -2, 0, 0)).to_equal(1)  # oracle: ADDI -2,0 produces -2 whose sign bit SLTI compares as less-than 0
 
-    # @req REQ-G2-015 NFR-G2-016
     it "masks register shifts and emits typed arithmetic right shift":
-        expect(result(CoreConfig.rv32(), 0x002091B3, 1, 33, 0)).to_equal(2)
-        expect(result(CoreConfig.rv32(), 0x4020D1B3, -8, 2, 0)).to_equal(0xFFFFFFFE)
+        # @req REQ-G2-015 NFR-G2-016
+        # @capture(bit_table): shift results plus the emitted VHDL template lines
+        step("evaluate SLL/SRA encodings and render the typed shift VHDL")
+        # NOTE: legitimate RED, same emitter-scope defect as above
+        # (src/compiler/50.mir/hwir/riscv_scalar_execution.spl:97). Fix the
+        # scope; do not weaken these assertions.
+        expect(result(CoreConfig.rv32(), 0x002091B3, 1, 33, 0)).to_equal(2)  # oracle: SLL masks the shift amount to 5 bits (33 & 31 == 1), so 1 << 1 retires 2
+        expect(result(CoreConfig.rv32(), 0x4020D1B3, -8, 2, 0)).to_equal(0xFFFFFFFE)  # oracle: SRAI by 2 of -8 retires the sign-extended 32-bit ...FFFFFFFE pattern
         val module = strict_riscv_scalar_alu_retire_projection_hwir(
             "expanded_sra", CoreConfig.rv64(), 0x4020D1B3).unwrap()
         val emitted = render_strict_hwir_vhdl(module)
@@ -33,24 +84,31 @@ describe "expanded shared RV32/RV64 scalar integer projection":
         expect(emitted.vhdl).to_contain("shift_right(signed(rs1_value)")
         expect(emitted.vhdl).to_contain("unsigned(shift_amount) >= to_unsigned(64, 64)")
 
-    # @req REQ-G2-015 NFR-G2-016
     it "sign-extends RV64 word results exactly once":
-        expect(result(CoreConfig.rv64(), 0x0010819B, 0x7FFFFFFF, 0, 0)).to_equal(-2147483648)
-        expect(result(CoreConfig.rv64(), 0x002091BB, 0x40000000, 1, 0)).to_equal(-2147483648)
-        expect(result(CoreConfig.rv64(), 0x4020D1BB, 0x80000000, 1, 0)).to_equal(-1073741824)
+        # @req REQ-G2-015 NFR-G2-016
+        # @capture(bit_table): word-op retirement values and the comb-op slice
+        step("evaluate ADDW/SUBW/SRAW encodings and inspect the word-truncation ops")
+        # NOTE: legitimate RED, same emitter-scope defect as above
+        # (src/compiler/50.mir/hwir/riscv_scalar_execution.spl:97). Fix the
+        # scope; do not weaken these assertions.
+        expect(result(CoreConfig.rv64(), 0x0010819B, 0x7FFFFFFF, 0, 0)).to_equal(-2147483648)  # oracle: SLLIW by 1 overflows int32 and must sign-extend to exactly INT32_MIN
+        expect(result(CoreConfig.rv64(), 0x002091BB, 0x40000000, 1, 0)).to_equal(-2147483648)  # oracle: SRAW of 0x40000000 << 1 wraps to INT32_MIN and sign-extends exactly once
+        expect(result(CoreConfig.rv64(), 0x4020D1BB, 0x80000000, 1, 0)).to_equal(-1073741824)  # oracle: SRAW of INT32_MIN by 1 retires -2^30 after one sign extension
         val addw = strict_riscv_scalar_alu_retire_projection_hwir(
             "expanded_addw", CoreConfig.rv64(), 0x002081BB).unwrap()
         expect(addw.comb_ops.any(_.result == "rs2_word" and _.op == "trunc")).to_equal(true)
         expect(addw.comb_ops.any(_.result == "word_result" and _.rhs == "rs2_word" and
-            _.bit_width == 32)).to_equal(true)
+            _.bit_width == 32)).to_equal(true)  # oracle: the word slice must be exactly 32 bits wide before the single sign extension
 
-    # @req REQ-G2-015 NFR-G2-013
     it "keeps invalid and x0 retirement payload normalized":
+        # @req REQ-G2-015 NFR-G2-013
+        # @capture(bit_table): retire_rd_write and retire_rd_value for the x0 ADD probe
+        step("evaluate an ADD into x0 and assert both retirement payloads stay zero")
         val module = strict_riscv_scalar_alu_retire_projection_hwir(
             "expanded_x0", CoreConfig.rv32(), 0x00208033).unwrap()
         val evaluated = prepare_strict_comb_hwir(module).unwrap().evaluate([
             HwHostInput.bits("in_valid", 1), HwHostInput.bits("in_order", 4),
             HwHostInput.bits("in_privilege", 3), HwHostInput.bits("in_pc", 0),
             HwHostInput.bits("rs1_value", 7), HwHostInput.bits("rs2_value", 9)]).unwrap()
-        expect(evaluated.value_of("retire_rd_write").unwrap()).to_equal(0)
-        expect(evaluated.value_of("retire_rd_value").unwrap()).to_equal(0)
+        expect(evaluated.value_of("retire_rd_write").unwrap()).to_equal(0)  # oracle: writes to x0 are architecturally discarded, so the write strobe must be 0
+        expect(evaluated.value_of("retire_rd_value").unwrap()).to_equal(0)  # oracle: x0 reads as zero regardless of the 7+9 ALU result

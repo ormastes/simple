@@ -426,11 +426,22 @@ pub fn rt_string_len(value: i64) -> i64:
         return _sffi_core_string_strlen(value)
     return -1
 
+# The raw-pointer fallback MUST mirror rt_string_len's above, with the same
+# `> 65535` guard. The compiler lowers a `text` extern argument to the PAIR
+# (rt_string_data(v), rt_string_len(v)); a `text` LITERAL is a bare pointer into
+# read-only data, not a heap string header, so string_ptr cannot decode it.
+# rt_string_len already fell back to strlen for that case and this did not,
+# returning 0 -- and the pair (0, 13) is rejected by every rt_* path entry
+# point, so a text-ABI extern called with a literal failed. Same defect and same
+# fix as rt_string_data in src/runtime/runtime_native.c; the two lanes are
+# paired by the push-rt-dual-implementation ratchet and must not diverge.
 pub fn rt_string_data(value: i64) -> i64:
     val ptr = string_ptr(value)
-    if ptr < 1:
-        return 0
-    return string_data_ptr_value(ptr)
+    if ptr > 0:
+        return string_data_ptr_value(ptr)
+    if value > 65535:
+        return value
+    return 0
 
 # Raw builder handle layout: len @0, cap @8, byte buffer @16.
 pub fn rt_string_builder_new() -> i64:

@@ -1,0 +1,210 @@
+#!/bin/sh
+# Spec 2 of 2 for the no-Windows-style-paths policy, .shs half.
+#
+# POLICY (user, 2026-09-02):
+#   "code should not have drive-letter-backslash style paths. only mingw /
+#    linux style, and lib path/file convert it for system."
+#
+# The second clause is load-bearing and is what this guard pins. A blanket
+# rewrite of every backslash would be WRONG: a .shs script that constructs a
+# native path immediately before handing it to a native Windows tool is doing
+# exactly what the policy asks for -- that construction IS the conversion seam.
+# Converting it would break the script.
+#
+# WHAT THIS PINS
+#   (1) The seam still produces native form. A MinGW path converted for a
+#       native tool must come back as drive-letter + backslash.
+#   (2) The seam is still NECESSARY -- i.e. the native tool genuinely rejects
+#       the MinGW form it accepts in native form. Without this, "keep it
+#       native" is an unfalsifiable excuse for any leftover path.
+#   (3) The repo's one real boundary file, scripts/setup/windows-msvc-bootstrap-env.shs,
+#       still exports INCLUDE/LIB in native form while keeping every
+#       shell-consumed path (PATH components, LLVM_SYS_180_PREFIX) in MinGW
+#       form. Checked by reading the file, never by sourcing it: sourcing
+#       mutates PATH and the script fails closed when the MSVC directories are
+#       absent.
+#
+# MEASURED BASIS (2026-09-02, this host)
+#   cmd.exe rejects a forward-slash redirect target and requires backslash form;
+#   clang-cl rejects the MinGW form /d/.../x.c (rc=1) and accepts the native
+#   drive-letter-backslash form of the same file (rc=0). The seam
+#   is real, not defensive coding.
+#
+# CROSS-PLATFORM
+#   Pure POSIX sh. (1) and (2) require a native tool and a path converter and
+#   are reported as NOT RUN on Unix -- never as a pass. (3) is pure text and
+#   runs everywhere. No drive-letter literal is stored in this file; the
+#   backslash is built from `printf`, so this guard is not itself an offender.
+#
+# Verdict convention:
+#   PASS  -- exit 0, states how many assertions were checked (n > 0)
+#   FAIL  -- exit 1, names the failing assertion
+#   ERROR -- exit 2, "nothing was checked"; a vacuous run is never a pass.
+#
+# --selftest runs first and is fatal.
+
+set -u
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+BS=$(printf '\\')
+NATIVE_PATTERN="[A-Za-z]:${BS}${BS}[A-Za-z0-9_][A-Za-z0-9_]"
+BOUNDARY_FILE="scripts/setup/windows-msvc-bootstrap-env.shs"
+
+is_native_path() {
+    printf '%s\n' "$1" | LC_ALL=C grep -qE "$NATIVE_PATTERN"
+}
+
+selftest() {
+    _rc=0
+
+    # (a) native form must be recognised
+    if ! is_native_path "$(printf 'C:%sProgram Files\n' "$BS")"; then
+        echo "selftest FAIL: did not recognise native form"; _rc=1
+    fi
+
+    # (b) NEGATIVE CONTROL: MinGW form is not native form
+    if is_native_path '/c/Program Files'; then
+        echo "selftest FAIL: called MinGW form native"; _rc=1
+    fi
+
+    # (c) NEGATIVE CONTROL: a printf escape is not a native path. This is the
+    #     shape of the large majority of .shs detector hits.
+    if is_native_path "$(printf "printf 'Options:%sn'\n" "$BS")"; then
+        echo "selftest FAIL: called a printf escape a native path"; _rc=1
+    fi
+
+    # (d) the boundary-file reader must discriminate. A file with a MinGW-form
+    #     INCLUDE must be rejected; a native-form one accepted.
+    _d="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/shsbound.$$")"
+    mkdir -p "$_d" || { echo "selftest FAIL: no temp dir"; return 1; }
+    printf 'INCLUDE="/c/Program Files/x"\n' > "$_d/bad.shs"
+    printf 'INCLUDE="C:%sProgram Files%sx"\n' "$BS" "$BS" > "$_d/good.shs"
+    if is_native_path "$(grep '^INCLUDE=' "$_d/bad.shs")"; then
+        echo "selftest FAIL: accepted a MinGW-form INCLUDE as native"; _rc=1
+    fi
+    if ! is_native_path "$(grep '^INCLUDE=' "$_d/good.shs")"; then
+        echo "selftest FAIL: rejected a native-form INCLUDE"; _rc=1
+    fi
+    rm -rf "$_d" 2>/dev/null
+
+    return $_rc
+}
+
+if ! selftest; then
+    echo "FAIL - selftest failed; refusing to run"
+    exit 1
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS - selftest only, 5 fixtures"
+    exit 0
+fi
+
+ASSERTS=0
+FAILED=""
+note_fail() { FAILED="${FAILED}${FAILED:+; }$1"; }
+
+# --------------------------------------------------------------------------
+# (1) + (2): the live seam, where a native tool exists.
+# --------------------------------------------------------------------------
+SEAM="not-run(no cygpath and/or no cmd.exe; native-tool seam is Windows-only)"
+if command -v cygpath >/dev/null 2>&1 && command -v cmd.exe >/dev/null 2>&1; then
+    D="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/shsbound2.$$")"
+    if mkdir -p "$D" 2>/dev/null; then
+        printf 'hello\n' > "$D/probe.txt"
+        POSIX_P="$D/probe.txt"
+        NATIVE_P=$(cygpath -w "$POSIX_P" 2>/dev/null)
+
+        # --- assertion 1: the conversion produces native form ---------------
+        ASSERTS=$((ASSERTS + 1))
+        if ! is_native_path "$NATIVE_P"; then
+            note_fail "cygpath -w did not yield native form: '$NATIVE_P'"
+        fi
+
+        # --- assertion 2: the native tool ACCEPTS the native form -----------
+        ASSERTS=$((ASSERTS + 1))
+        # MSYS_NO_PATHCONV=1 is required: without it MSYS rewrites a native
+        # argument on its way to a Windows binary and the probe measures MSYS's
+        # mangling instead of cmd.exe's parser. Measured 2026-09-02 -- without
+        # it BOTH forms return a non-answer; with it the seam is unambiguous.
+        NAT_OUT=$(MSYS_NO_PATHCONV=1 cmd.exe /c type "$NATIVE_P" 2>&1)
+        NAT_RC=$?        # read DIRECTLY into a variable, never through a pipe
+        case "$NAT_OUT" in *hello*) NAT_OK=1 ;; *) NAT_OK=0 ;; esac
+        if [ "$NAT_RC" -ne 0 ] || [ "$NAT_OK" -ne 1 ]; then
+            note_fail "native tool rejected native form (rc=$NAT_RC)"
+        fi
+
+        # --- assertion 3: the native tool REJECTS the MinGW form ------------
+        # This is what makes "keep it native" falsifiable. If the tool ever
+        # starts accepting POSIX form, the seam is no longer justified and
+        # this guard must be revisited rather than silently trusted.
+        ASSERTS=$((ASSERTS + 1))
+        POS_OUT=$(MSYS_NO_PATHCONV=1 cmd.exe /c type "$POSIX_P" 2>&1)
+        POS_RC=$?        # direct, not piped
+        case "$POS_OUT" in *hello*) POS_OK=1 ;; *) POS_OK=0 ;; esac
+        if [ "$POS_RC" -eq 0 ] && [ "$POS_OK" -eq 1 ]; then
+            note_fail "native tool ACCEPTED MinGW form -- the boundary seam is no longer justified; re-triage the class-(b) exemption"
+        fi
+
+        SEAM="ran(native rc=$NAT_RC ok=$NAT_OK; posix rc=$POS_RC ok=$POS_OK)"
+        rm -rf "$D" 2>/dev/null
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# (3): the repo's real boundary file. Pure text; runs everywhere.
+# --------------------------------------------------------------------------
+BFILE="$ROOT/$BOUNDARY_FILE"
+if [ ! -f "$BFILE" ]; then
+    # The file is Windows-lane-only and may legitimately be absent from a
+    # checkout. Report it; do not invent a pass, and do not fail a Unix clone.
+    BOUND="not-present($BOUNDARY_FILE)"
+else
+    BOUND="checked"
+
+    # --- assertion 4: INCLUDE and LIB are exported in NATIVE form ----------
+    # cl.exe and link.exe read these directly and cannot parse /c/... form.
+    for v in INCLUDE LIB; do
+        ASSERTS=$((ASSERTS + 1))
+        line=$(grep -m1 "^${v}=" "$BFILE" 2>/dev/null)
+        if [ -z "$line" ]; then
+            note_fail "$BOUNDARY_FILE: no $v assignment found"
+        elif ! is_native_path "$line"; then
+            note_fail "$BOUNDARY_FILE: $v is not in native form (a native tool consumes it)"
+        fi
+    done
+
+    # --- assertion 5: shell-consumed paths stay MinGW ----------------------
+    # Everything the SHELL touches must be POSIX. These are the assignments
+    # feeding PATH and the LLVM prefix; a native path here would be a genuine
+    # class-(a) violation hiding inside a boundary file.
+    ASSERTS=$((ASSERTS + 1))
+    shell_bad=""
+    for v in simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin \
+             simple_msvc_llvm_bin LLVM_SYS_180_PREFIX; do
+        line=$(grep -m1 "^ *${v}=" "$BFILE" 2>/dev/null)
+        [ -n "$line" ] || continue
+        if is_native_path "$line"; then
+            shell_bad="${shell_bad}${shell_bad:+,}$v"
+        fi
+    done
+    if [ -n "$shell_bad" ]; then
+        note_fail "$BOUNDARY_FILE: shell-consumed variable(s) in native form: $shell_bad"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Verdict
+# --------------------------------------------------------------------------
+if [ "$ASSERTS" -eq 0 ]; then
+    echo "ERROR - nothing was checked (no seam tool and no boundary file)"
+    exit 2
+fi
+
+if [ -n "$FAILED" ]; then
+    echo "FAIL - $ASSERTS assertion(s) checked; seam=$SEAM boundary=$BOUND; failures: $FAILED"
+    exit 1
+fi
+
+echo "PASS - $ASSERTS assertion(s) checked, native-tool seam produces and requires native form, shell paths stay MinGW; seam=$SEAM boundary=$BOUND"
+exit 0

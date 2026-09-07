@@ -1,17 +1,31 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Executable regression evidence for module-level typed variable declarations,
+written for the engineers who own the HIR module pass
+(`extract_pattern_type()` in module_pass.rs). Before the Phase 0A fix,
+`var x: u64 = 42` at module level resolved as TypeId::ANY, causing Cranelift
+to emit rt_string_concat instead of iadd; after the fix it resolves as u64 and
+native integer arithmetic runs. The variables below MUST stay at module level
+(not inside it blocks) to exercise the register_declarations_from_node path.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/global_var_type_spec.spl
+Each scenario computes through a module-level global (or mutates one) and
+asserts the u64/i64 arithmetic outcome.
+## Compatibility and limitations
+Interpreter mode executes the bodies but proves nothing about Cranelift
+lowering; the arithmetic-collapse defect this spec guards only shows under
+native codegen.
+## Verification guidance and troubleshooting
+A failure names the global whose type collapsed to ANY. Re-check
+extract_pattern_type() and register_declarations_from_node() in the HIR
+module pass before touching this spec.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: module-level-typed-vars
 
-# Regression test: module-level typed var declarations resolve correctly
-#
-# Phase 0A fix: HIR module_pass.rs extract_pattern_type()
-# Before fix: `var x: u64 = 42` at module level resolved as TypeId::ANY
-# causing Cranelift to emit rt_string_concat instead of iadd.
-# After fix: resolves as u64 → native integer arithmetic.
-#
-# CRITICAL: The variables below MUST be at module level (not inside it blocks)
-# to exercise the register_declarations_from_node path in module_pass.rs.
-#
 # @tag: compiler,regression,global
 
 # Module-level typed var — this is the exact pattern that was broken
@@ -33,18 +47,33 @@ fn signed_add() -> i64:
 
 describe "Module-level typed variable declarations":
     it "var g_addr: u64 preserves integer addition":
-        expect(compute_address()).to_equal(0xFD001000)
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): computed address through the module-level u64 var
+        step("Compute the address through the module-level u64 var and offset")
+        expect(compute_address()).to_equal(0xFD001000)  # oracle: 0xFD000000 + 0x1000 assembled via u64 iadd on the globals
 
     it "var g_count: u64 preserves integer arithmetic":
-        expect(increment_count()).to_equal(101)
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): incremented count through the module-level u64 var
+        step("Increment the module-level u64 counter through its helper")
+        expect(increment_count()).to_equal(101)  # oracle: g_count starts at 100 and the helper adds exactly 1
 
     it "val g_offset: u64 preserves value":
-        expect(g_offset).to_equal(0x1000)
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): readback of the immutable module-level u64
+        step("Read the immutable module-level offset back")
+        expect(g_offset).to_equal(0x1000)  # oracle: the module-level val is declared 0x1000 and must round-trip untyped-lossy
 
     it "var g_signed: i64 supports negative values":
-        expect(signed_add()).to_equal(10)
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): signed i64 arithmetic on a negative module global
+        step("Add 20 to the negative module-level i64 var")
+        expect(signed_add()).to_equal(10)  # oracle: g_signed is declared -10 and the helper adds 20
 
     it "module-level var can be mutated":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): mutation round-trip of the module-level counter
+        step("Reassign the module-level u64 var inside the scenario body")
         g_count = 200
-        expect(g_count).to_equal(200)
+        expect(g_count).to_equal(200)  # oracle: the scenario reassigned g_count from its initial 100 to 200
         g_count = 100

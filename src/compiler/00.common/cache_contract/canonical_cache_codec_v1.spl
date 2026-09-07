@@ -1,0 +1,1086 @@
+#![allow(primitive_api, COLL006)]
+
+use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, SnapshotSourceEntryV1, NegativeCandidateV1, DirectoryGenerationV1, GeneratedInputV1, NamedDigestV1, logical_source_path_valid_v1}
+use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
+use compiler.common.cache_contract.semantic_read_set_v1.{SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1}
+
+pub fn canonical_cache_max_payload_bytes_v1() -> i64: 268435456
+pub fn canonical_cache_max_entries_v1() -> i64: 1048576
+pub fn canonical_cache_max_text_bytes_v1() -> i64: 16777216
+pub fn canonical_cache_header_bytes_v1() -> i64: 56
+pub fn canonical_cache_kind_public_summary_v1() -> i64: 3
+pub fn canonical_cache_kind_source_blob_v1() -> i64: 1
+pub fn canonical_cache_kind_compile_snapshot_v1() -> i64: 2
+pub fn canonical_cache_kind_file_ast_v1() -> i64: 4
+pub fn canonical_cache_kind_semantic_read_set_v1() -> i64: 5
+
+# Cache codecs must remain executable in the self-hosted interpreter, whose
+# runtime surface does not provide secure_memory's rt_array_data_ptr seam.
+# Use the pure-Simple scalar SHA core and explicit value-returning blocks.
+fn _canonical_sha256_u8_hex_v1(data: [u8]) -> text:
+    var input: [i64] = []
+    for byte in data: input.push(byte as i64)
+    val padded = sha256_pad_message(input)
+    var state = sha256_initial_hash()
+    var offset = 0
+    while offset < padded.len():
+        var block: [i64] = []
+        var i = 0
+        while i < 64:
+            block.push(padded[offset + i])
+            i = i + 1
+        state = sha256_process_block(state, block)
+        offset = offset + 64
+    val digits = "0123456789abcdef"
+    var result = ""
+    for word in state:
+        var shift = 28
+        while shift >= 0:
+            val nibble = (word >> shift) & 15
+            result = result + digits.char_at(nibble)
+            shift = shift - 4
+    result
+
+pub struct CanonicalCacheEnvelopeV1:
+    kind: i64
+    schema: i64
+    payload: [u8]
+    payload_digest: text
+    object_digest: text
+
+pub struct CanonicalCacheDecodeV1:
+    ok: bool
+    value: CanonicalCacheEnvelopeV1?
+    error: text
+
+fn _push_u16_v1(buffer: [u8], value: i64) -> [u8]:
+    var out = buffer
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out
+
+fn _push_u32_v1(buffer: [u8], value: i64) -> [u8]:
+    var out = buffer
+    var shift = 0
+    while shift < 32:
+        out.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+    out
+
+fn _push_u64_v1(buffer: [u8], value: i64) -> [u8]:
+    var out = buffer
+    var shift = 0
+    while shift < 64:
+        out.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+    out
+
+fn _read_le_v1(bytes: [u8], offset: i64, count: i64) -> i64:
+    var value: i64 = 0
+    var i = 0
+    while i < count:
+        value = value | ((bytes[offset + i] as i64) << (i * 8))
+        i = i + 1
+    value
+
+fn _hex_nibble_v1(ch: text) -> i64:
+    val lower = "0123456789abcdef"
+    var i = 0
+    while i < 16:
+        if ch == lower.char_at(i): return i
+        i = i + 1
+    -1
+
+fn _digest_hex_to_raw_v1(digest: text) -> [u8]:
+    var buffer: [u8] = []
+    if digest.len() != 64: return buffer
+    var i = 0
+    while i < 64:
+        val hi = _hex_nibble_v1(digest.char_at(i))
+        val lo = _hex_nibble_v1(digest.char_at(i + 1))
+        if hi < 0 or lo < 0:
+            val empty: [u8] = []
+            return empty
+        buffer.push(((hi << 4) | lo) as u8)
+        i = i + 2
+    buffer
+
+fn _raw_digest_to_hex_v1(bytes: [u8], offset: i64) -> text:
+    val digits = "0123456789abcdef"
+    var buffer = ""
+    var i = 0
+    while i < 32:
+        val value = bytes[offset + i] as i64
+        buffer = buffer + digits.char_at((value >> 4) & 15)
+        buffer = buffer + digits.char_at(value & 15)
+        i = i + 1
+    buffer
+
+fn _append_bytes_v1(buffer: [u8], values: [u8]) -> [u8]:
+    var out = buffer
+    var i = 0
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out
+
+pub fn canonical_cache_encode_envelope_v1(kind: i64, schema: i64, payload: [u8]) -> [u8]:
+    var buffer: [u8] = []
+    if kind < 0 or kind > 65535 or schema < 0 or schema > 65535:
+        return buffer
+    if payload.len() > canonical_cache_max_payload_bytes_v1():
+        return buffer
+    buffer = _append_bytes_v1(buffer, text_to_bytes("SMPLCAV1"))
+    buffer = _push_u16_v1(buffer, kind)
+    buffer = _push_u16_v1(buffer, schema)
+    buffer = _push_u32_v1(buffer, 0)
+    buffer = _push_u64_v1(buffer, payload.len())
+    val digest = _canonical_sha256_u8_hex_v1(payload)
+    val raw = _digest_hex_to_raw_v1(digest)
+    if raw.len() != 32:
+        val empty: [u8] = []
+        return empty
+    buffer = _append_bytes_v1(buffer, raw)
+    buffer = _append_bytes_v1(buffer, payload)
+    buffer
+
+fn _decode_failure_v1(message: text) -> CanonicalCacheDecodeV1:
+    CanonicalCacheDecodeV1(ok: false, value: nil, error: message)
+
+pub fn canonical_cache_decode_envelope_v1(bytes: [u8]) -> CanonicalCacheDecodeV1:
+    val header = canonical_cache_header_bytes_v1()
+    if bytes.len() < header: return _decode_failure_v1("truncated_envelope")
+    var i = 0
+    val magic = text_to_bytes("SMPLCAV1")
+    while i < 8:
+        if bytes[i] != magic[i]: return _decode_failure_v1("invalid_magic")
+        i = i + 1
+    val flags = _read_le_v1(bytes, 12, 4)
+    if flags != 0: return _decode_failure_v1("reserved_flags_nonzero")
+    val payload_len = _read_le_v1(bytes, 16, 8)
+    if payload_len < 0 or payload_len > canonical_cache_max_payload_bytes_v1():
+        return _decode_failure_v1("payload_bounds_exceeded")
+    if payload_len > bytes.len() - header:
+        return _decode_failure_v1("truncated_payload")
+    if payload_len != bytes.len() - header:
+        return _decode_failure_v1("trailing_bytes")
+    val payload = bytes[header..bytes.len()]
+    val expected = _raw_digest_to_hex_v1(bytes, 24)
+    val actual = _canonical_sha256_u8_hex_v1(payload)
+    if expected != actual: return _decode_failure_v1("payload_digest_mismatch")
+    val object_digest = canonical_cache_object_digest_v1(bytes)
+    val value = CanonicalCacheEnvelopeV1(
+        kind: _read_le_v1(bytes, 8, 2), schema: _read_le_v1(bytes, 10, 2),
+        payload: payload, payload_digest: actual, object_digest: object_digest)
+    CanonicalCacheDecodeV1(ok: true, value: value, error: "")
+
+pub fn canonical_cache_object_digest_v1(envelope: [u8]) -> text:
+    var framed: [u8] = []
+    framed = _append_bytes_v1(framed, text_to_bytes("simple.cas.object.v1\u0000"))
+    framed = _append_bytes_v1(framed, envelope)
+    _canonical_sha256_u8_hex_v1(framed)
+
+fn _domain_digest_v1(domain: text, bytes: [u8]) -> text:
+    var framed = text_to_bytes(domain)
+    framed = _append_bytes_v1(framed, bytes)
+    _canonical_sha256_u8_hex_v1(framed)
+
+pub struct CanonicalTextEncodeV1:
+    ok: bool
+    bytes: [u8]
+    error: text
+
+pub fn canonical_cache_encode_text_v1(value: text) -> CanonicalTextEncodeV1:
+    val bytes = text_to_bytes(value)
+    var buffer: [u8] = []
+    if bytes.len() > canonical_cache_max_text_bytes_v1():
+        return CanonicalTextEncodeV1(ok: false, bytes: buffer, error: "text_bounds_exceeded")
+    buffer = _push_u64_v1(buffer, bytes.len())
+    buffer = _append_bytes_v1(buffer, bytes)
+    CanonicalTextEncodeV1(ok: true, bytes: buffer, error: "")
+
+pub fn canonical_cache_encode_sorted_text_map_v1(keys: [text], values: [text]) -> [u8]:
+    var buffer: [u8] = []
+    if keys.len() != values.len() or keys.len() > canonical_cache_max_entries_v1(): return buffer
+    var indices: [i64] = []
+    var i = 0
+    while i < keys.len():
+        indices.push(i)
+        i = i + 1
+    i = 1
+    while i < indices.len():
+        val held = indices[i]
+        var j = i
+        while j > 0 and keys[held] < keys[indices[j - 1]]:
+            indices[j] = indices[j - 1]
+            j = j - 1
+        indices[j] = held
+        i = i + 1
+    i = 1
+    while i < indices.len():
+        if keys[indices[i - 1]] == keys[indices[i]]:
+            val empty: [u8] = []
+            return empty
+        i = i + 1
+    buffer = _push_u64_v1(buffer, indices.len())
+    for index in indices:
+        val key = canonical_cache_encode_text_v1(keys[index])
+        val value = canonical_cache_encode_text_v1(values[index])
+        if not key.ok or not value.ok: return []
+        buffer = _append_bytes_v1(buffer, key.bytes)
+        buffer = _append_bytes_v1(buffer, value.bytes)
+    buffer
+
+struct CanonicalBufferAppendV1:
+    ok: bool
+    bytes: [u8]
+
+fn _append_digest_v1(buffer: [u8], digest: text) -> CanonicalBufferAppendV1:
+    val raw = _digest_hex_to_raw_v1(digest)
+    if raw.len() != 32: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    CanonicalBufferAppendV1(ok: true, bytes: _append_bytes_v1(buffer, raw))
+
+fn _append_logical_path_v1(buffer: [u8], path: LogicalSourcePathV1) -> CanonicalBufferAppendV1:
+    if not logical_source_path_valid_v1(path): return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    val namespace_result = _append_digest_v1(buffer, path.repository_namespace_digest)
+    if not namespace_result.ok: return namespace_result
+    val path_result = _append_text_v1(namespace_result.bytes, path.module_relative_utf8)
+    if not path_result.ok: return path_result
+    var out = path_result.bytes
+    match path.path_semantics:
+        case PathSemanticsV1.CaseSensitiveNfc: out = _push_u16_v1(out, 1)
+        case PathSemanticsV1.CaseFoldedNfc: out = _push_u16_v1(out, 2)
+    CanonicalBufferAppendV1(ok: true, bytes: out)
+
+pub fn canonical_source_blob_payload_v1(blob: SourceBlobV1) -> [u8]:
+    var buffer: [u8] = []
+    val logical_path_result = _append_logical_path_v1(buffer, blob.logical_path)
+    if not logical_path_result.ok: return []
+    buffer = logical_path_result.bytes
+    if blob.source_bytes.len() > canonical_cache_max_payload_bytes_v1(): return []
+    buffer = _push_u64_v1(buffer, blob.source_bytes.len())
+    buffer = _append_bytes_v1(buffer, blob.source_bytes)
+    val expected = _domain_digest_v1("simple.source.v1\u0000", blob.source_bytes)
+    if blob.source_digest != expected: return []
+    val source_digest_result = _append_digest_v1(buffer, blob.source_digest)
+    if not source_digest_result.ok: return []
+    buffer = source_digest_result.bytes
+    match blob.encoding_policy:
+        case SourceEncodingPolicyV1.Utf8Exact: buffer = _push_u16_v1(buffer, 1)
+    match blob.generated_provenance:
+        case nil: buffer.push(0 as u8)
+        case provenance:
+            buffer.push(1 as u8)
+            val producer_result = _append_digest_v1(buffer, provenance.producer_digest)
+            if not producer_result.ok: return []
+            val manifest_result = _append_digest_v1(producer_result.bytes, provenance.input_manifest_digest)
+            if not manifest_result.ok: return []
+            buffer = manifest_result.bytes
+    buffer
+
+pub fn canonical_source_blob_encode_v1(blob: SourceBlobV1) -> [u8]:
+    val payload = canonical_source_blob_payload_v1(blob)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_source_blob_v1(), 1, payload)
+
+pub fn canonical_source_blob_digest_v1(blob: SourceBlobV1) -> text:
+    val encoded = canonical_source_blob_encode_v1(blob)
+    if encoded.len() == 0: return ""
+    canonical_cache_object_digest_v1(encoded)
+
+fn _append_text_sequence_v1(buffer: [u8], values: [text]) -> CanonicalBufferAppendV1:
+    if values.len() > canonical_cache_max_entries_v1(): return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    var out = _push_u64_v1(buffer, values.len())
+    for value in values:
+        val result = _append_text_v1(out, value)
+        if not result.ok: return result
+        out = result.bytes
+    CanonicalBufferAppendV1(ok: true, bytes: out)
+
+fn _append_candidate_v1(buffer: [u8], candidate: ResolutionCandidateV1) -> CanonicalBufferAppendV1:
+    if candidate.order < 0: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    var out = _push_u64_v1(buffer, candidate.order)
+    val logical_result = _append_text_v1(out, candidate.logical_path)
+    if not logical_result.ok: return logical_result
+    val normalization_result = _append_text_v1(logical_result.bytes, candidate.normalization_key)
+    if not normalization_result.ok: return normalization_result
+    out = normalization_result.bytes
+    # Same-handle identity validates the frozen witness, but is deliberately
+    # excluded from reusable semantic identity across worktrees.
+    if _digest_hex_to_raw_v1(candidate.physical_identity_digest).len() != 32: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    val parent_result = _append_digest_v1(out, candidate.parent_directory_generation_digest)
+    if not parent_result.ok: return parent_result
+    val kind_result = _append_text_v1(parent_result.bytes, candidate.entry_kind)
+    if not kind_result.ok: return kind_result
+    out = kind_result.bytes
+    out.push((if candidate.exists: 1 else: 0) as u8)
+    out.push((if candidate.selected: 1 else: 0) as u8)
+    val content_result = _append_digest_v1(out, candidate.content_digest)
+    if not content_result.ok: return content_result
+    val symlink_result = _append_digest_v1(content_result.bytes, candidate.symlink_chain_digest)
+    if not symlink_result.ok: return symlink_result
+    symlink_result
+
+fn _append_witness_v1(buffer: [u8], witness: ResolutionWitnessV1) -> CanonicalBufferAppendV1:
+    val policy_result = _append_digest_v1(buffer, witness.resolver_policy_digest)
+    if not policy_result.ok: return policy_result
+    val trust_result = _append_digest_v1(policy_result.bytes, witness.root_trust_digest)
+    if not trust_result.ok: return trust_result
+    var out = _push_u64_v1(trust_result.bytes, witness.candidates.len())
+    var i = 0
+    var selected = 0
+    while i < witness.candidates.len():
+        if witness.candidates[i].order != i: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+        if witness.candidates[i].selected: selected = selected + 1
+        val candidate_result = _append_candidate_v1(out, witness.candidates[i])
+        if not candidate_result.ok: return candidate_result
+        out = candidate_result.bytes
+        i = i + 1
+    if witness.selected_index < -1 or witness.selected_index >= witness.candidates.len(): return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    if witness.selected_index == -1 and selected != 0: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    if witness.selected_index >= 0 and (selected != 1 or not witness.candidates[witness.selected_index].selected): return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    out = _push_u64_v1(out, witness.selected_index + 1)
+    val inputs_result = _append_text_sequence_v1(out, witness.generated_input_digests)
+    if not inputs_result.ok: return inputs_result
+    # The live witness digest may bind handle identity for same-handle
+    # validation. Validate it, but never publish it into semantic identity.
+    if _digest_hex_to_raw_v1(witness.witness_digest).len() != 32:
+        return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    inputs_result
+
+fn _path_key_v1(path: LogicalSourcePathV1) -> text:
+    val tag = match path.path_semantics:
+        case PathSemanticsV1.CaseSensitiveNfc: "1"
+        case PathSemanticsV1.CaseFoldedNfc: "2"
+    path.repository_namespace_digest + "\u0000" + path.module_relative_utf8 + "\u0000" + tag
+
+fn _source_key_v1(value: SnapshotSourceEntryV1) -> text: _path_key_v1(value.logical_path)
+fn _witness_key_v1(value: ResolutionWitnessV1) -> text:
+    var key = value.resolver_policy_digest + "\u0000" + value.root_trust_digest
+    for candidate in value.candidates:
+        key = key + "\u0000" + candidate.order.to_text() + "\u0000" + candidate.logical_path +
+            "\u0000" + candidate.normalization_key + "\u0000" + candidate.content_digest +
+            "\u0000" + candidate.symlink_chain_digest
+    for digest in value.generated_input_digests:
+        key = key + "\u0000" + digest
+    key
+fn _negative_key_v1(value: NegativeCandidateV1) -> text:
+    _path_key_v1(value.anchor) + "\u0000" + _path_key_v1(value.logical_candidate)
+fn _generation_key_v1(value: DirectoryGenerationV1) -> text: _path_key_v1(value.anchor_logical_path)
+fn _generated_key_v1(value: GeneratedInputV1) -> text: _path_key_v1(value.logical_path)
+fn _named_key_v1(value: NamedDigestV1) -> text: value.name
+
+fn _snapshot_sources_sorted_v1(values: [SnapshotSourceEntryV1]) -> [SnapshotSourceEntryV1]:
+    var out: [SnapshotSourceEntryV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _source_key_v1(value) < _source_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_witnesses_sorted_v1(values: [ResolutionWitnessV1]) -> [ResolutionWitnessV1]:
+    var out: [ResolutionWitnessV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _witness_key_v1(value) < _witness_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_negatives_sorted_v1(values: [NegativeCandidateV1]) -> [NegativeCandidateV1]:
+    var out: [NegativeCandidateV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _negative_key_v1(value) < _negative_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_generations_sorted_v1(values: [DirectoryGenerationV1]) -> [DirectoryGenerationV1]:
+    var out: [DirectoryGenerationV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _generation_key_v1(value) < _generation_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_generated_sorted_v1(values: [GeneratedInputV1]) -> [GeneratedInputV1]:
+    var out: [GeneratedInputV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _generated_key_v1(value) < _generated_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_named_sorted_v1(values: [NamedDigestV1]) -> [NamedDigestV1]:
+    var out: [NamedDigestV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _named_key_v1(value) < _named_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_sources_duplicate_v1(values: [SnapshotSourceEntryV1]) -> bool:
+    for i in 1..values.len():
+        if _source_key_v1(values[i - 1]) == _source_key_v1(values[i]): return true
+    false
+fn _snapshot_witnesses_duplicate_v1(values: [ResolutionWitnessV1]) -> bool:
+    for i in 1..values.len():
+        if _witness_key_v1(values[i - 1]) == _witness_key_v1(values[i]): return true
+    false
+fn _snapshot_negatives_duplicate_v1(values: [NegativeCandidateV1]) -> bool:
+    for i in 1..values.len():
+        if _negative_key_v1(values[i - 1]) == _negative_key_v1(values[i]): return true
+    false
+fn _snapshot_generations_duplicate_v1(values: [DirectoryGenerationV1]) -> bool:
+    for i in 1..values.len():
+        if _generation_key_v1(values[i - 1]) == _generation_key_v1(values[i]): return true
+    false
+fn _snapshot_generated_duplicate_v1(values: [GeneratedInputV1]) -> bool:
+    for i in 1..values.len():
+        if _generated_key_v1(values[i - 1]) == _generated_key_v1(values[i]): return true
+    false
+fn _snapshot_named_duplicate_v1(values: [NamedDigestV1]) -> bool:
+    for i in 1..values.len():
+        if _named_key_v1(values[i - 1]) == _named_key_v1(values[i]): return true
+    false
+
+pub fn canonical_compile_snapshot_payload_v1(snapshot: CompileSnapshotV1) -> [u8]:
+    var buffer: [u8] = []
+    if snapshot.schema != 1: return buffer
+    buffer = _push_u64_v1(buffer, snapshot.schema)
+    var append_result = _append_digest_v1(buffer, snapshot.repository_namespace_digest)
+    if not append_result.ok: return []
+    append_result = _append_digest_v1(append_result.bytes, snapshot.path_policy_digest)
+    if not append_result.ok: return []
+    buffer = append_result.bytes
+    if (snapshot.source_entries.len() > canonical_cache_max_entries_v1() or
+            snapshot.resolution_witnesses.len() > canonical_cache_max_entries_v1() or
+            snapshot.negative_candidates.len() > canonical_cache_max_entries_v1() or
+            snapshot.directory_generations.len() > canonical_cache_max_entries_v1() or
+            snapshot.generated_inputs.len() > canonical_cache_max_entries_v1() or
+            snapshot.provider_manifests.len() > canonical_cache_max_entries_v1() or
+            snapshot.toolchain_component_digests.len() > canonical_cache_max_entries_v1()): return []
+    val source_entries = _snapshot_sources_sorted_v1(snapshot.source_entries)
+    val witnesses = _snapshot_witnesses_sorted_v1(snapshot.resolution_witnesses)
+    val negatives = _snapshot_negatives_sorted_v1(snapshot.negative_candidates)
+    val generations = _snapshot_generations_sorted_v1(snapshot.directory_generations)
+    val generated_inputs = _snapshot_generated_sorted_v1(snapshot.generated_inputs)
+    val providers = _snapshot_named_sorted_v1(snapshot.provider_manifests)
+    val components = _snapshot_named_sorted_v1(snapshot.toolchain_component_digests)
+    if (_snapshot_sources_duplicate_v1(source_entries) or _snapshot_witnesses_duplicate_v1(witnesses) or
+            _snapshot_negatives_duplicate_v1(negatives) or _snapshot_generations_duplicate_v1(generations) or
+            _snapshot_generated_duplicate_v1(generated_inputs) or _snapshot_named_duplicate_v1(providers) or
+            _snapshot_named_duplicate_v1(components)): return []
+    buffer = _push_u64_v1(buffer, source_entries.len())
+    for entry in source_entries:
+        append_result = _append_logical_path_v1(buffer, entry.logical_path)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, entry.source_blob_digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, witnesses.len())
+    for witness in witnesses:
+        append_result = _append_witness_v1(buffer, witness)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, negatives.len())
+    for negative in negatives:
+        append_result = _append_logical_path_v1(buffer, negative.anchor)
+        if not append_result.ok: return []
+        append_result = _append_logical_path_v1(append_result.bytes, negative.logical_candidate)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, negative.absence_witness_digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, generations.len())
+    for generation in generations:
+        append_result = _append_logical_path_v1(buffer, generation.anchor_logical_path)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, generation.stable_generation_digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, generated_inputs.len())
+    for generated in generated_inputs:
+        append_result = _append_logical_path_v1(buffer, generated.logical_path)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, generated.producer_digest)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, generated.input_manifest_digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    for digest in [snapshot.configuration_digest, snapshot.target_layout_digest, snapshot.compiler_owner_digest, snapshot.runtime_digest]:
+        append_result = _append_digest_v1(buffer, digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, providers.len())
+    for provider in providers:
+        append_result = _append_text_v1(buffer, provider.name)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, provider.digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer = _push_u64_v1(buffer, components.len())
+    for component in components:
+        append_result = _append_text_v1(buffer, component.name)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, component.digest)
+        if not append_result.ok: return []
+        buffer = append_result.bytes
+    buffer
+
+pub fn canonical_compile_snapshot_encode_v1(snapshot: CompileSnapshotV1) -> [u8]:
+    val payload = canonical_compile_snapshot_payload_v1(snapshot)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_compile_snapshot_v1(), 1, payload)
+
+pub fn canonical_compile_snapshot_digest_v1(snapshot: CompileSnapshotV1) -> text:
+    val payload = canonical_compile_snapshot_payload_v1(snapshot)
+    if payload.len() == 0: return ""
+    _domain_digest_v1("simple.compile.snapshot.v1\u0000", payload)
+
+pub fn canonical_file_ast_payload_v1(ast: FileAstV1) -> [u8]:
+    var buffer: [u8] = []
+    if ast.nodes.len() == 0 or ast.nodes.len() > canonical_cache_max_entries_v1(): return buffer
+    if ast.root_node < 0 or ast.root_node >= ast.nodes.len(): return buffer
+    var append_result = _append_digest_v1(buffer, ast.source_blob_digest)
+    if not append_result.ok: return []
+    append_result = _append_digest_v1(append_result.bytes, ast.grammar_digest)
+    if not append_result.ok: return []
+    append_result = _append_digest_v1(append_result.bytes, ast.compiler_owner_digest)
+    if not append_result.ok: return []
+    append_result = _append_text_sequence_v1(append_result.bytes, ast.string_table)
+    if not append_result.ok: return []
+    buffer = _push_u64_v1(append_result.bytes, ast.nodes.len())
+    for node in ast.nodes:
+        if node.kind < 0 or node.flags < 0 or node.source_start < 0 or node.source_end < node.source_start: return []
+        if node.first_child < 0 or node.child_count < 0 or node.first_child > ast.nodes.len() - node.child_count: return []
+        if node.payload_index < -1 or node.payload_index >= ast.payload_tables.len(): return []
+        buffer = _push_u64_v1(buffer, node.kind)
+        buffer = _push_u64_v1(buffer, node.flags)
+        buffer = _push_u64_v1(buffer, node.source_start)
+        buffer = _push_u64_v1(buffer, node.source_end)
+        buffer = _push_u64_v1(buffer, node.first_child)
+        buffer = _push_u64_v1(buffer, node.child_count)
+        buffer = _push_u64_v1(buffer, node.payload_index + 1)
+    append_result = _append_text_sequence_v1(buffer, ast.payload_tables)
+    if not append_result.ok: return []
+    buffer = _push_u64_v1(append_result.bytes, ast.root_node)
+    append_result = _append_digest_v1(buffer, ast.public_summary_digest)
+    if not append_result.ok: return []
+    append_result = _append_digest_v1(append_result.bytes, ast.semantic_read_set_digest)
+    if not append_result.ok: return []
+    buffer = append_result.bytes
+    buffer
+
+pub fn canonical_file_ast_encode_v1(ast: FileAstV1) -> [u8]:
+    val payload = canonical_file_ast_payload_v1(ast)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_file_ast_v1(), 1, payload)
+
+pub struct FileAstDecodeV1:
+    ok: bool
+    value: FileAstV1?
+    error: text
+
+pub fn canonical_file_ast_decode_v1(bytes: [u8]) -> FileAstDecodeV1:
+    val decoded = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded.ok: return FileAstDecodeV1(ok: false, value: nil, error: decoded.error)
+    val envelope = match decoded.value:
+        case value: value
+        case nil: return FileAstDecodeV1(ok: false, value: nil, error: "missing_envelope")
+    if envelope.kind != canonical_cache_kind_file_ast_v1() or envelope.schema != 1:
+        return FileAstDecodeV1(ok: false, value: nil, error: "file_ast_schema_mismatch")
+    val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
+    val source = cursor.read_digest()
+    val grammar = cursor.read_digest()
+    val owner = cursor.read_digest()
+    val strings = cursor.read_texts()
+    val node_count = cursor.read_u64()
+    var nodes: [FileAstNodeV1] = []
+    if node_count <= 0 or node_count > canonical_cache_max_entries_v1(): cursor.failed = true
+    var i = 0
+    while i < node_count and not cursor.failed:
+        nodes.push(FileAstNodeV1(kind: cursor.read_u64(), flags: cursor.read_u64(), source_start: cursor.read_u64(),
+            source_end: cursor.read_u64(), first_child: cursor.read_u64(), child_count: cursor.read_u64(),
+            payload_index: cursor.read_u64() - 1))
+        i = i + 1
+    val payloads = cursor.read_texts()
+    val root = cursor.read_u64()
+    val summary = cursor.read_digest()
+    val read_set = cursor.read_digest()
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return FileAstDecodeV1(ok: false, value: nil, error: "malformed_file_ast")
+    val value = FileAstV1(source_blob_digest: source, grammar_digest: grammar, compiler_owner_digest: owner,
+        string_table: strings, nodes: nodes, payload_tables: payloads, root_node: root,
+        public_summary_digest: summary, semantic_read_set_digest: read_set)
+    if canonical_file_ast_payload_v1(value).len() == 0:
+        return FileAstDecodeV1(ok: false, value: nil, error: "invalid_file_ast_indices")
+    FileAstDecodeV1(ok: true, value: value, error: "")
+
+fn _effect_tag_v1(kind: SemanticEffectKindV1) -> i64:
+    match kind:
+        case SemanticEffectKindV1.Source: 1
+        case SemanticEffectKindV1.GeneratedSource: 2
+        case SemanticEffectKindV1.MacroCtfeInput: 3
+        case SemanticEffectKindV1.EnvironmentFacade: 4
+        case SemanticEffectKindV1.ClockFacade: 5
+        case SemanticEffectKindV1.RandomnessFacade: 6
+        case SemanticEffectKindV1.NetworkFacade: 7
+        case SemanticEffectKindV1.ProcessFacade: 8
+        case SemanticEffectKindV1.Plugin: 9
+        case SemanticEffectKindV1.ToolchainComponent: 10
+
+fn _replay_tag_v1(policy: SemanticReplayPolicyV1) -> i64:
+    match policy:
+        case SemanticReplayPolicyV1.DeclaredReplayable: 1
+        case SemanticReplayPolicyV1.UndeclaredUncacheable: 2
+
+fn _read_entry_key_v1(entry: SemanticReadEntryV1) -> text:
+    _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name
+
+pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u8]:
+    var entries = read_set.entries.copy()
+    var i = 1
+    while i < entries.len():
+        val held = entries[i]
+        var j = i
+        while j > 0 and _read_entry_key_v1(held) < _read_entry_key_v1(entries[j - 1]):
+            entries[j] = entries[j - 1]
+            j = j - 1
+        entries[j] = held
+        i = i + 1
+    var normalized: [SemanticReadEntryV1] = []
+    i = 0
+    while i < entries.len():
+        if i > 0 and _read_entry_key_v1(entries[i - 1]) == _read_entry_key_v1(entries[i]):
+            val previous = entries[i - 1]
+            val current = entries[i]
+            if (previous.provider_id != current.provider_id or
+                    previous.provider_manifest_digest != current.provider_manifest_digest or
+                    previous.value_digest != current.value_digest or
+                    _replay_tag_v1(previous.replay_policy) != _replay_tag_v1(current.replay_policy)):
+                return []
+        else:
+            normalized.push(entries[i])
+        i = i + 1
+    var buffer: [u8] = []
+    buffer = _push_u64_v1(buffer, normalized.len())
+    i = 0
+    while i < normalized.len():
+        val entry = normalized[i]
+        buffer = _push_u16_v1(buffer, _effect_tag_v1(entry.effect_kind))
+        var append_result = _append_text_v1(buffer, entry.logical_name)
+        if not append_result.ok: return []
+        append_result = _append_text_v1(append_result.bytes, entry.provider_id)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, entry.provider_manifest_digest)
+        if not append_result.ok: return []
+        append_result = _append_digest_v1(append_result.bytes, entry.value_digest)
+        if not append_result.ok: return []
+        buffer = _push_u16_v1(append_result.bytes, _replay_tag_v1(entry.replay_policy))
+        i = i + 1
+    val reason_result = _append_text_v1(buffer, read_set.uncacheable_reason)
+    if not reason_result.ok: return []
+    reason_result.bytes
+
+pub fn canonical_semantic_read_set_encode_v1(read_set: SemanticReadSetV1) -> [u8]:
+    val payload = canonical_semantic_read_set_payload_v1(read_set)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_semantic_read_set_v1(), 1, payload)
+
+pub struct SemanticReadSetDecodeV1:
+    ok: bool
+    value: SemanticReadSetV1?
+    error: text
+
+fn _effect_from_tag_v1(tag: i64) -> SemanticEffectKindV1?:
+    match tag:
+        case 1: SemanticEffectKindV1.Source
+        case 2: SemanticEffectKindV1.GeneratedSource
+        case 3: SemanticEffectKindV1.MacroCtfeInput
+        case 4: SemanticEffectKindV1.EnvironmentFacade
+        case 5: SemanticEffectKindV1.ClockFacade
+        case 6: SemanticEffectKindV1.RandomnessFacade
+        case 7: SemanticEffectKindV1.NetworkFacade
+        case 8: SemanticEffectKindV1.ProcessFacade
+        case 9: SemanticEffectKindV1.Plugin
+        case 10: SemanticEffectKindV1.ToolchainComponent
+        case _: nil
+
+fn _replay_from_tag_v1(tag: i64) -> SemanticReplayPolicyV1?:
+    match tag:
+        case 1: SemanticReplayPolicyV1.DeclaredReplayable
+        case 2: SemanticReplayPolicyV1.UndeclaredUncacheable
+        case _: nil
+
+pub fn canonical_semantic_read_set_decode_v1(bytes: [u8]) -> SemanticReadSetDecodeV1:
+    val decoded = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded.ok: return SemanticReadSetDecodeV1(ok: false, value: nil, error: decoded.error)
+    val envelope = match decoded.value:
+        case value: value
+        case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "missing_envelope")
+    if envelope.kind != canonical_cache_kind_semantic_read_set_v1() or envelope.schema != 1:
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "semantic_read_set_schema_mismatch")
+    val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
+    val count = cursor.read_u64()
+    if count < 0 or count > canonical_cache_max_entries_v1():
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "semantic_read_set_bounds")
+    var entries: [SemanticReadEntryV1] = []
+    var i = 0
+    while i < count:
+        if cursor.position > cursor.bytes.len() - 2:
+            return SemanticReadSetDecodeV1(ok: false, value: nil, error: "truncated_effect_tag")
+        val effect_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+        cursor.position = cursor.position + 2
+        val effect = match _effect_from_tag_v1(effect_tag):
+            case value: value
+            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_effect_tag")
+        val logical_name = cursor.read_text()
+        val provider_id = cursor.read_text()
+        val provider_digest = cursor.read_digest()
+        val value_digest = cursor.read_digest()
+        if cursor.position > cursor.bytes.len() - 2:
+            return SemanticReadSetDecodeV1(ok: false, value: nil, error: "truncated_replay_tag")
+        val replay_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+        cursor.position = cursor.position + 2
+        val replay = match _replay_from_tag_v1(replay_tag):
+            case value: value
+            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_replay_tag")
+        entries.push(SemanticReadEntryV1(effect_kind: effect, logical_name: logical_name, provider_id: provider_id,
+            provider_manifest_digest: provider_digest, value_digest: value_digest, replay_policy: replay))
+        i = i + 1
+    val reason = cursor.read_text()
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "malformed_semantic_read_set")
+    val value = SemanticReadSetV1(entries: entries, uncacheable_reason: reason)
+    if canonical_semantic_read_set_payload_v1(value).len() == 0:
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "noncanonical_semantic_read_set")
+    SemanticReadSetDecodeV1(ok: true, value: value, error: "")
+
+class _CanonicalCursorV1:
+    bytes: [u8]
+    position: i64
+    failed: bool
+
+    me fn read_u64() -> i64:
+        if self.failed or self.position > self.bytes.len() - 8:
+            self.failed = true
+            return -1
+        val value = _read_le_v1(self.bytes, self.position, 8)
+        self.position = self.position + 8
+        value
+
+    me fn read_text() -> text:
+        val count = self.read_u64()
+        if count < 0 or count > canonical_cache_max_text_bytes_v1():
+            self.failed = true
+            return ""
+        if self.position > self.bytes.len() - count:
+            self.failed = true
+            return ""
+        val value = bytes_to_text(self.bytes[self.position..(self.position + count)])
+        self.position = self.position + count
+        value
+
+    me fn read_digest() -> text:
+        if self.failed or self.position > self.bytes.len() - 32:
+            self.failed = true
+            return ""
+        val value = _raw_digest_to_hex_v1(self.bytes, self.position)
+        self.position = self.position + 32
+        value
+
+    me fn read_texts() -> [text]:
+        var values: [text] = []
+        val count = self.read_u64()
+        if count < 0 or count > canonical_cache_max_entries_v1():
+            self.failed = true
+            return values
+        var i = 0
+        while i < count:
+            values.push(self.read_text())
+            i = i + 1
+        values
+
+fn _append_text_v1(buffer: [u8], value: text) -> CanonicalBufferAppendV1:
+    val encoded = canonical_cache_encode_text_v1(value)
+    if not encoded.ok: return CanonicalBufferAppendV1(ok: false, bytes: buffer)
+    CanonicalBufferAppendV1(ok: true, bytes: _append_bytes_v1(buffer, encoded.bytes))
+
+fn _summary_entry_less_v1(a: PublicSummaryEntryV1, b: PublicSummaryEntryV1) -> bool:
+    a.stable_symbol_id < b.stable_symbol_id or (a.stable_symbol_id == b.stable_symbol_id and a.canonical_bytes < b.canonical_bytes)
+
+fn _summary_entries_sorted_v1(entries: [PublicSummaryEntryV1]) -> [PublicSummaryEntryV1]:
+    var sorted = entries.copy()
+    var i = 1
+    while i < sorted.len():
+        val held = sorted[i]
+        var j = i
+        while j > 0 and _summary_entry_less_v1(held, sorted[j - 1]):
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = held
+        i = i + 1
+    sorted
+
+fn _summary_entries_conflict_free_v1(entries: [PublicSummaryEntryV1]) -> bool:
+    if entries.len() > canonical_cache_max_entries_v1(): return false
+    var i = 0
+    while i < entries.len():
+        if (text_to_bytes(entries[i].stable_symbol_id).len() > canonical_cache_max_text_bytes_v1() or
+                text_to_bytes(entries[i].canonical_bytes).len() > canonical_cache_max_text_bytes_v1()): return false
+        val dependencies = public_summary_sorted_dependencies_v1(entries[i].dependency_symbol_ids)
+        if dependencies.len() != entries[i].dependency_symbol_ids.len(): return false
+        var j = i + 1
+        while j < entries.len():
+            if entries[i].stable_symbol_id == entries[j].stable_symbol_id and entries[i].canonical_bytes != entries[j].canonical_bytes:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+pub fn canonical_summary_entries_valid_v1(entries: [PublicSummaryEntryV1]) -> bool:
+    _summary_entries_conflict_free_v1(entries)
+
+fn _encode_summary_entries_v1(buffer: [u8], entries: [PublicSummaryEntryV1]) -> CanonicalBufferAppendV1:
+    val sorted = _summary_entries_sorted_v1(entries)
+    var out = _push_u64_v1(buffer, sorted.len())
+    for entry in sorted:
+        var result = _append_text_v1(out, entry.stable_symbol_id)
+        if not result.ok: return result
+        result = _append_text_v1(result.bytes, entry.canonical_bytes)
+        if not result.ok: return result
+        result = _append_text_sequence_v1(result.bytes, public_summary_sorted_dependencies_v1(entry.dependency_symbol_ids))
+        if not result.ok: return result
+        out = result.bytes
+    CanonicalBufferAppendV1(ok: true, bytes: out)
+
+fn _encode_summary_entries_preserved_v1(buffer: [u8], entries: [PublicSummaryEntryV1]) -> CanonicalBufferAppendV1:
+    var out = _push_u64_v1(buffer, entries.len())
+    for entry in entries:
+        var result = _append_text_v1(out, entry.stable_symbol_id)
+        if not result.ok: return result
+        result = _append_text_v1(result.bytes, entry.canonical_bytes)
+        if not result.ok: return result
+        result = _append_text_sequence_v1(result.bytes, public_summary_sorted_dependencies_v1(entry.dependency_symbol_ids))
+        if not result.ok: return result
+        out = result.bytes
+    CanonicalBufferAppendV1(ok: true, bytes: out)
+
+pub fn canonical_public_summary_declaration_graph_digest_v1(summary: PublicSummaryV1) -> text:
+    public_summary_declaration_graph_digest_v1(summary.forward_declarations, summary.declarations)
+
+struct SummaryEntriesDecodeV1:
+    entries: [PublicSummaryEntryV1]
+    position: i64
+    failed: bool
+
+fn _decode_summary_entries_v1(cursor: _CanonicalCursorV1) -> SummaryEntriesDecodeV1:
+    var buffer: [PublicSummaryEntryV1] = []
+    val count = cursor.read_u64()
+    if count < 0 or count > canonical_cache_max_entries_v1():
+        cursor.failed = true
+        return SummaryEntriesDecodeV1(entries: buffer, position: cursor.position, failed: true)
+    var i = 0
+    while i < count:
+        buffer.push(PublicSummaryEntryV1(stable_symbol_id: cursor.read_text(), canonical_bytes: cursor.read_text(),
+            dependency_symbol_ids: cursor.read_texts()))
+        i = i + 1
+    if not canonical_summary_entries_valid_v1(buffer): cursor.failed = true
+    SummaryEntriesDecodeV1(entries: buffer, position: cursor.position, failed: cursor.failed)
+
+pub fn canonical_public_summary_payload_v1(summary: PublicSummaryV1) -> [u8]:
+    var buffer: [u8] = []
+    val valid = canonical_summary_entries_valid_v1(summary.forward_declarations) and
+        canonical_summary_entries_valid_v1(summary.declarations) and
+        canonical_summary_entries_valid_v1(summary.layouts_abi) and
+        canonical_summary_entries_valid_v1(summary.traits_impls_coherence) and
+        canonical_summary_entries_valid_v1(summary.extensions_reexports) and
+        canonical_summary_entries_valid_v1(summary.aop_selectors) and
+        canonical_summary_entries_valid_v1(summary.macro_signatures) and
+        canonical_summary_entries_valid_v1(summary.body_refs) and
+        canonical_summary_entries_valid_v1(summary.reverse_reference_roots)
+    if not valid or summary.schema != 1 or not logical_source_path_valid_v1(summary.logical_path): return buffer
+    if (_digest_hex_to_raw_v1(summary.snapshot_id).len() != 32 or
+            _digest_hex_to_raw_v1(summary.source_blob_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.compiler_owner_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.grammar_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.virtual_text_digest).len() != 32):
+        return buffer
+    if summary.declaration_graph_digest != canonical_public_summary_declaration_graph_digest_v1(summary): return buffer
+    if summary.forward_declarations.len() != summary.declarations.len(): return buffer
+    for forward in summary.forward_declarations:
+        var matched = false
+        for declaration in summary.declarations:
+            if declaration.stable_symbol_id == forward.stable_symbol_id:
+                val forward_signature = public_summary_normalized_signature_v1(forward.canonical_bytes)
+                val declaration_signature = public_summary_normalized_signature_v1(declaration.canonical_bytes)
+                if forward_signature != declaration_signature:
+                    return []
+                matched = true
+        if not matched: return []
+    var append_result = _append_text_v1(buffer, summary.snapshot_id)
+    if not append_result.ok: return []
+    append_result = _append_text_v1(append_result.bytes, summary.logical_path.repository_namespace_digest)
+    if not append_result.ok: return []
+    append_result = _append_text_v1(append_result.bytes, summary.logical_path.module_relative_utf8)
+    if not append_result.ok: return []
+    buffer = append_result.bytes
+    match summary.logical_path.path_semantics:
+        case PathSemanticsV1.CaseSensitiveNfc: buffer = _push_u16_v1(buffer, 1)
+        case PathSemanticsV1.CaseFoldedNfc: buffer = _push_u16_v1(buffer, 2)
+    append_result = _append_text_v1(buffer, summary.source_blob_digest)
+    if not append_result.ok: return []
+    buffer = _push_u64_v1(append_result.bytes, summary.schema)
+    append_result = _append_text_v1(buffer, summary.compiler_owner_digest)
+    if not append_result.ok: return []
+    append_result = _append_text_v1(append_result.bytes, summary.grammar_digest)
+    if not append_result.ok: return []
+    buffer = append_result.bytes
+    # Distinct fixed phases/tags; forward and full declarations never alias.
+    buffer = _push_u16_v1(buffer, 1)
+    append_result = _encode_summary_entries_preserved_v1(buffer, summary.forward_declarations)
+    if not append_result.ok: return []
+    buffer = _push_u16_v1(append_result.bytes, 2)
+    append_result = _encode_summary_entries_v1(buffer, summary.declarations)
+    if not append_result.ok: return []
+    for entries in [summary.layouts_abi, summary.traits_impls_coherence, summary.extensions_reexports,
+            summary.aop_selectors, summary.macro_signatures, summary.body_refs, summary.reverse_reference_roots]:
+        append_result = _encode_summary_entries_v1(append_result.bytes, entries)
+        if not append_result.ok: return []
+    append_result = _append_text_v1(append_result.bytes, summary.declaration_graph_digest)
+    if not append_result.ok: return []
+    append_result = _append_text_v1(append_result.bytes, summary.virtual_text_digest)
+    if not append_result.ok: return []
+    append_result.bytes
+
+pub fn canonical_public_summary_encode_v1(summary: PublicSummaryV1) -> [u8]:
+    val payload = canonical_public_summary_payload_v1(summary)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_public_summary_v1(), 1, payload)
+
+pub struct PublicSummaryDecodeV1:
+    ok: bool
+    value: PublicSummaryV1?
+    error: text
+
+fn _summary_decode_failure_v1(error: text) -> PublicSummaryDecodeV1:
+    PublicSummaryDecodeV1(ok: false, value: nil, error: error)
+
+pub fn canonical_public_summary_decode_v1(bytes: [u8]) -> PublicSummaryDecodeV1:
+    val decoded = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded.ok: return _summary_decode_failure_v1(decoded.error)
+    val envelope = match decoded.value:
+        case value: value
+        case nil: return _summary_decode_failure_v1("missing_envelope")
+    if envelope.kind != canonical_cache_kind_public_summary_v1() or envelope.schema != 1:
+        return _summary_decode_failure_v1("summary_schema_mismatch")
+    val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
+    val snapshot_id = cursor.read_text()
+    val repository_digest = cursor.read_text()
+    val relative = cursor.read_text()
+    if cursor.failed or cursor.position > cursor.bytes.len() - 2: return _summary_decode_failure_v1("truncated_summary")
+    val path_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+    cursor.position = cursor.position + 2
+    val semantics = if path_tag == 1: PathSemanticsV1.CaseSensitiveNfc else: PathSemanticsV1.CaseFoldedNfc
+    if path_tag != 1 and path_tag != 2: return _summary_decode_failure_v1("unknown_path_semantics")
+    val source_digest = cursor.read_text()
+    val schema = cursor.read_u64()
+    val compiler_digest = cursor.read_text()
+    val grammar_digest = cursor.read_text()
+    if cursor.failed or cursor.position > cursor.bytes.len() - 2: return _summary_decode_failure_v1("truncated_forward_tag")
+    val forward_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+    cursor.position = cursor.position + 2
+    if forward_tag != 1: return _summary_decode_failure_v1("unknown_forward_tag")
+    var entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val forwards = entries_decode.entries
+    if cursor.failed or cursor.position > cursor.bytes.len() - 2: return _summary_decode_failure_v1("truncated_declaration_tag")
+    val declaration_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+    cursor.position = cursor.position + 2
+    if declaration_tag != 2: return _summary_decode_failure_v1("unknown_declaration_tag")
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val declarations = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val layouts = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val traits = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val extensions = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val aop = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val macros = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val bodies = entries_decode.entries
+    entries_decode = _decode_summary_entries_v1(cursor)
+    cursor.position = entries_decode.position
+    cursor.failed = entries_decode.failed
+    val reverse_roots = entries_decode.entries
+    val graph_digest = cursor.read_text()
+    val virtual_digest = cursor.read_text()
+    if cursor.failed: return _summary_decode_failure_v1("malformed_summary")
+    if cursor.position != cursor.bytes.len(): return _summary_decode_failure_v1("summary_trailing_bytes")
+    val path = LogicalSourcePathV1(repository_namespace_digest: repository_digest, module_relative_utf8: relative, path_semantics: semantics)
+    val summary = PublicSummaryV1(snapshot_id: snapshot_id, logical_path: path, source_blob_digest: source_digest,
+        schema: schema, compiler_owner_digest: compiler_digest, grammar_digest: grammar_digest,
+        forward_declarations: forwards, declarations: declarations, layouts_abi: layouts,
+        traits_impls_coherence: traits, extensions_reexports: extensions, aop_selectors: aop,
+        macro_signatures: macros, body_refs: bodies, reverse_reference_roots: reverse_roots,
+        declaration_graph_digest: graph_digest, virtual_text_digest: virtual_digest)
+    if canonical_public_summary_payload_v1(summary).len() == 0:
+        return _summary_decode_failure_v1("noncanonical_summary_identity_or_graph")
+    PublicSummaryDecodeV1(ok: true, value: summary, error: "")

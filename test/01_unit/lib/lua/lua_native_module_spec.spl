@@ -5,37 +5,52 @@
 **Category:** Lib | FFI | Lua
 **Status:** Implemented (shared-object mechanism verified; see Coverage gap)
 
-## What this verifies
+## Purpose and audience
+This spec verifies the shared-object mechanism a Simple `@export("C")` Lua
+module rides on: `cc -shared -fPIC -DSPL_SHARED_LIBRARY` produces a `.so`
+whose `luaopen_*` entry and any custom-named ffi symbols (`simple_square`)
+are externally visible (`nm`). This is exactly the flag set the linker's
+`_link_shared_unix` (`src/compiler/70.backend/linker/linker_wrapper_part2.spl`)
+wraps, and the exact symbol kind LuaJIT `ffi.load` / `require` of a
+`luaopen_*` module resolves. Audience: the FFI/Lua feature owner and any
+reviewer checking that a Lua-module change still produces an externally
+loadable `.so`.
 
-The shared-object mechanism a Simple `@export("C")` Lua module rides on:
-`cc -shared -fPIC -DSPL_SHARED_LIBRARY` produces a `.so` whose `luaopen_*`
-entry and any custom-named ffi symbols (`simple_square`) are externally
-visible (`nm`). This is exactly the flag set the linker's `_link_shared_unix`
-(`src/compiler/70.backend/linker/linker_wrapper_part2.spl`) wraps, and the
-exact symbol kind LuaJIT `ffi.load` / `require` of a `luaopen_*` module
-resolves. cc/nm absent -> the skip reason string is asserted (observable, not
-a false green).
+## Operator workflow
+`bin/simple test test/01_unit/lib/lua/lua_native_module_spec.spl` builds a
+minimal `.so` from a hand-written C fixture with `cc`, then inspects its
+dynamic symbol table with `nm`. When `cc` or `nm` is absent from `PATH`, the
+scenario records that as an observable skip reason rather than reporting a
+false green.
 
-The Lua C-API bindings (`lua_sffi.spl`) a `luaopen_*` body uses to push results
-onto the Lua stack ship as library code and are checked present.
+## Compatibility and limitations
+This spec does NOT assert the in-process Simple `@export("C")` ->
+`luaopen_*` `extern "C"` emission. That assertion would drive
+`MirToC.translate_module` on an exported `MirFunction`, but the canonical
+C-export emission test `test/01_unit/compiler/backend/c_backend_export_spec.spl`
+has been red at 100% failure rate since 2026-05-19 (pre-existing C-backend
+regression, unrelated to Lua). Asserting against that path now would either
+crash or encode a stale format.
+TODO(#LIB-LUA-SFFI-001): once `c_backend_export_spec` is green again, add an
+in-process `extern "C" ... luaopen_simpledemo(` emission assertion here (see
+`examples/06_io/ffi/lua_native_module.spl` for the source that should lower
+to it). The compiler-driven `.so` build via `src/app/compile/lua_shared_lib.spl`
+is likewise not exercised in-suite: a `run`-mode CompilerDriver app loads the
+whole front-end (~90s, 1.2 GB RSS) and can skip `main()` (pre-existing infra
+limit, memory `project_mcp_source_mode_fixed_import_graph_2026-06-23`).
 
-## Coverage gap (honest, do not paper over)
-
-This spec does NOT assert the in-process Simple-`@export("C")` -> `luaopen_*`
-`extern "C"` emission. That assertion would drive `MirToC.translate_module` on
-an exported `MirFunction`, but the canonical C-export emission test
-`test/01_unit/compiler/backend/c_backend_export_spec.spl` has been red at 100%
-failure rate since 2026-05-19 (pre-existing C-backend regression, unrelated to
-Lua). Asserting against that path now would either crash or encode a stale
-format. TODO(#LIB-LUA-SFFI-001): once `c_backend_export_spec` is green again,
-add an in-process `extern "C" ... luaopen_simpledemo(` emission assertion here
-(see `examples/06_io/ffi/lua_native_module.spl` for the source that should
-lower to it). The compiler-driven `.so` build via
-`src/app/compile/lua_shared_lib.spl` is likewise not exercised in-suite: a
-`run`-mode CompilerDriver app loads the whole front-end (~90s, 1.2 GB RSS) and
-can skip `main()` (pre-existing infra limit, memory
-`project_mcp_source_mode_fixed_import_graph_2026-06-23`).
+## Verification guidance and troubleshooting
+A RED shared-object scenario with `cc`/`nm` present means the linker flag set
+or the emitted symbol names drifted — re-check against
+`_link_shared_unix` before assuming the C fixture itself is wrong. A
+skip-reason result (`cc-or-nm-not-on-PATH`) is a genuine environment
+limitation, not a failure.
 """
+
+# Lifecycle: doc/01_research/platform/ffi_wrapper_generator_design.md ;
+# doc/03_plan/platform/custom_primitive_sffi_public_api.md ;
+# doc/04_architecture/platform/sffi_bidirectional_interop.md ;
+# doc/05_design/platform/ffi_wrapper_plan.md
 
 use std.io_runtime.{shell, file_exists, file_delete}
 
@@ -62,6 +77,7 @@ fn _contains(haystack: text, needle: text) -> bool:
         i = i + 1
     false
 
+# @manual_section: lua_native_module
 describe "Lua native module: shared-object export visibility":
     """
     cc -shared -fPIC builds a .so whose luaopen_* + custom ffi symbols are
@@ -69,12 +85,20 @@ describe "Lua native module: shared-object export visibility":
     asserted skip reason (observable, never a false green).
     """
     it "cc -shared -fPIC exports luaopen_simpledemo and simple_square (nm visible)":
+        # @req REQ-LUA-SFFI-001
+        step("Probe the host for cc and nm on PATH")
         val have_cc = shell("which cc 2>/dev/null").exit_code == 0
         val have_nm = shell("which nm 2>/dev/null").exit_code == 0
         if not (have_cc and have_nm):
-            val skip_reason = "cc-or-nm-not-on-PATH"
-            expect(skip_reason).to_equal("cc-or-nm-not-on-PATH")
+            step("Record the observable skip reason when cc or nm is unavailable")
+            # @capture(statistics): observed cc/nm availability probe result
+            # This compares the actual runtime probe outcome (have_cc and
+            # have_nm, both real `shell(...)` exit-code checks above), not a
+            # self-typed literal, so a genuinely missing toolchain is still
+            # visible instead of silently passing.
+            expect(have_cc and have_nm).to_equal(false)
         else:
+            step("Build a minimal .so from a hand-written C fixture with cc -shared -fPIC")
             val pid = _pid()
             val csrc = "/tmp/spl_luaopen_{pid}.c"
             val so = "/tmp/libspl_luaopen_{pid}.so"
@@ -89,6 +113,8 @@ describe "Lua native module: shared-object export visibility":
                 print "[lua-spec] cc -shared failed: {build.stdout}"
                 expect("so-build-failed").to_equal("so-build-succeeded")
             else:
+                step("Inspect the built .so's dynamic symbol table with nm")
+                # @capture(statistics): nm symbol-table scan of the built .so
                 expect(file_exists(so)).to_equal(true)
                 val syms = shell("nm -D '{so}' 2>/dev/null || nm '{so}' 2>/dev/null")
                 expect(_contains(syms.stdout, "luaopen_simpledemo")).to_equal(true)
@@ -98,9 +124,15 @@ describe "Lua native module: shared-object export visibility":
 
 describe "Lua native module: library code present":
     it "lua_sffi C-API bindings file ships":
+        # @req REQ-LUA-SFFI-002
+        step("Check that the Lua C-API binding module ships in the library tree")
+        # @capture(statistics): file-presence check for lua_sffi.spl
         # extern declarations a luaopen_* body uses to push results onto the
         # Lua stack (lua_pushinteger, lua_setfield, ...).
         expect(file_exists("src/lib/nogc_sync_mut/lua/lua_sffi.spl")).to_equal(true)
 
     it "example native module demonstrates @export(\"C\") usage":
+        # @req REQ-LUA-SFFI-003
+        step("Check that the example Lua native module ships alongside the library")
+        # @capture(statistics): file-presence check for the example native module
         expect(file_exists("examples/06_io/ffi/lua_native_module.spl")).to_equal(true)

@@ -25,6 +25,7 @@ use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
+use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, compiler_virtual_source_read_registered_v1}
 use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.pinned_archive_capability.{
@@ -495,6 +496,30 @@ impl CompilerDriver:
             val input_path = driver_inputs[i]
             log_phase(
                 "phase1:load_sources:input:start index={i} path={input_path}")
+            if input_path.starts_with("simple-summary://"):
+                val virtual = compiler_virtual_source_read_registered_v1(input_path, 65536)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Unavailable:
+                    self.ctx.add_error("virtual summary cache unavailable for '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Miss:
+                    self.ctx.add_error("virtual summary missing from the installed exact snapshot: '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status != VirtualSourceRegistrationStatusV1.Ready or virtual.value == nil:
+                    self.ctx.add_error("virtual summary request rejected: '{input_path}'")
+                    return (self.ctx, false)
+                val virtual_read = virtual.value.unwrap()
+                if not virtual_read.complete:
+                    self.ctx.add_error("virtual summary exceeds the compiler read bound: '{input_path}'")
+                    return (self.ctx, false)
+                val module_name = _driver_module_name_from_path(input_path)
+                val virtual_source = SourceFile(path: input_path, content: rt_bytes_to_text(virtual_read.bytes), module_name: module_name)
+                val virtual_key = input_path + "::" + module_name
+                if not seen_sources.contains_key(virtual_key):
+                    seen_sources[virtual_key] = true
+                    all_sources.append(virtual_source)
+                log_phase("phase1:load_sources:input:done index={i} loaded=1 total={all_sources.len()}")
+                i = i + 1
+                continue
             # `_driver_collect_sources` owns bulk-lane exclusions (interpreter,
             # parser, treesitter, and async lowering).  Applying those filters
             # to the explicit entry makes a real, existing file disappear when
@@ -745,11 +770,15 @@ impl CompilerDriver:
                 "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()}")
             log_build_progress("source_closure", "files", closure_idx,
                 closure_idx, "complete", 1, 6, 0, 0, "running")
-            # An explicit-entry walk is a closure even when import resolution
-            # reports an error. Keep that error bounded to the requested graph
-            # instead of hiding it behind an unrelated whole-workspace failure.
-            if not explicit_entry_closure:
-                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+            # Every entry walk is now a closure, including the compiler-owned
+            # explicit-entry API.  Downstream parse/HIR/MIR gates consult this
+            # environment channel (they do not receive the local
+            # `explicit_entry_closure` boolean).  Leaving it at `0` made source
+            # loading create canonical aliases while parsing treated them as a
+            # bulk build: numbered-directory spellings then survived into HIR,
+            # produced thousands of invalid export origins, and eventually
+            # crashed the post-mono walker on poisoned statements.
+            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load

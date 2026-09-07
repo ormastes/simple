@@ -8,31 +8,66 @@
 #
 # The full contract suite starts web and TUI-web servers and imports the UI
 # HTTP client, which reaches networking modules that are not parser-clean in
-# the default interpreted system lane. Keep semantic contract markers here;
-# live cross-surface checks remain an opt-in lane.
+# the default interpreted system lane. This smoke therefore exercises the
+# surface-neutral contract substrate directly (semantic_contract) and pins
+# the structured-error contract against shipped source; live cross-surface
+# checks remain an opt-in lane.
+"""
+## Purpose and audience
+Locks the surface-neutral shared UI contract markers — protocol version,
+semantic element identity, structured error shape, and supported actions —
+for the engineering team that owns the web and TUI-web surfaces.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/03_system/gui/ui/shared_ui_contract_spec.spl
+## Compatibility and limitations
+Runs without starting web or TUI-web servers; the HTTP-client cross-surface
+lane is opt-in because those networking modules are not parser-clean in the
+default interpreted system lane. The structured-error marker is pinned
+against shipped source instead of a live request.
+## Verification guidance and troubleshooting
+A failure means the semantic contract substrate no longer preserves element
+identity or actions, the access protocol version moved, or the structured
+error shape lost its machine-readable code. Rerun after any
+src/lib/common/ui contract edit and compare against
+doc/04_architecture/ui/shared_ui_contract.md.
+"""
 
-use std.spec.*
-
-use std.spec.*
+use std.spec.{describe, it, expect}
 use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.common.ui.access_types.{UI_ACCESS_PROTOCOL_VERSION, UiAccessNode}
+use std.common.ui.semantic_contract.{SemanticElementInfo}
 
 describe "Shared UI contract portable smoke":
     # @manual scenario evidence
     it "records protocol version":
-        val protocol_version = "1"
-        expect(protocol_version).to_equal("1")
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): access protocol version pinned for the shared UI contract
+        step("Read the shipped UI access protocol version constant")
+        expect(UI_ACCESS_PROTOCOL_VERSION).to_equal(1)  # oracle: access_types.spl pins UI_ACCESS_PROTOCOL_VERSION = 1 and the shared contract requires every response to carry it
 
     it "records shared element identity":
-        val element_id = "action_btn"
-        val element_kind = "button"
-        expect(element_id).to_equal("action_btn")
-        expect(element_kind).to_equal("button")
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): semantic element identity mapped from the access node
+        step("Map an access node through the semantic element facade")
+        val node = UiAccessNode(canonical_id: "action_btn", surface_id: "main", widget_id: "btn_1", kind: "button", visible: true, focused: false, enabled: true, selected: false, text_value: "OK", props: [], child_ids: [], action_names: ["click"])
+        val element = SemanticElementInfo.from_access(node)
+        expect(element.canonical_id).to_equal("action_btn")  # oracle: from_access must preserve the access node's canonical identity unchanged
+        expect(element.kind).to_equal("button")  # oracle: the contract kind table maps push buttons to kind button
 
     it "records structured error shape":
-        val error_code = "not_found"
-        expect(error_code).to_equal("not_found")
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): structured error code marker pinned from shipped source
+        step("Pin the structured error code shape in the action access surface")
+        val source = file_read("src/lib/common/ui/win_text_access.spl") ?? ""
+        val structured_errors_carry_a_code = source.contains("code: \"target_not_found\"")
+        expect(structured_errors_carry_a_code).to_equal(true)  # oracle: win_text_access.spl:212 returns the structured action result with machine-readable code target_not_found
 
     it "records supported actions":
-        val actions = ["click", "type", "submit"]
-        expect(actions.len()).to_equal(3)
-        expect(actions[0]).to_equal("click")
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): supported action list carried through the semantic facade
+        step("Map the supported action list through the semantic element facade")
+        val node = UiAccessNode(canonical_id: "form", surface_id: "main", widget_id: "form_1", kind: "form", visible: true, focused: false, enabled: true, selected: false, text_value: "", props: [], child_ids: [], action_names: ["click", "type", "submit"])
+        val element = SemanticElementInfo.from_access(node)
+        expect(element.action_names.len()).to_equal(3)  # oracle: the contract action table admits click, type, and submit for interactive elements
+        expect(element.action_names[0]).to_equal("click")  # oracle: click is the first admitted action in the contract table

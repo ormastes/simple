@@ -1,0 +1,191 @@
+#!/bin/sh
+# rt-call-site-census.shs — per-SYMBOL forbidden direct rt_* call sites.
+#
+# check-no-direct-rt.shs already counts direct rt_* call sites and can emit a
+# per-FILE tally (--offenders). It cannot answer "which symbols, and how few
+# group entry points would they collapse into", which is the whole premise of
+# the rt API group policy. This census answers that, deliberately reusing that
+# gate's scanner definitions verbatim so the two agree:
+#
+#   RT_RE     '^[^#]*\brt_[a-z0-9_]*\('       a direct call site line
+#   DECL_RE   '^\s*extern\s+fn\s+rt_[a-z0-9_]*\('  an extern declaration line
+#   allowlist scripts/check/no_direct_rt_allowlist.txt (exact / dir-prefix /
+#             `suffix:` forms), which defines an ALLOWLISTED PROVIDER — a file
+#             permitted to hold direct calls because it IS the boundary.
+#
+# A line matching DECL_RE is a declaration, not a call, and is excluded — the
+# same subtraction check-no-direct-rt.shs performs per file. Because this
+# census attributes per line rather than per file it counts tokens on a line
+# that carries more than one call, so its total is >= that gate's line-based
+# total; the delta is reported in the header rather than papered over.
+#
+# Output: TSV `symbol<TAB>sites` on stdout or --out FILE, sorted by symbol,
+# with a `#`-comment header carrying the roots, totals and allowlist path.
+#
+# Usage: sh scripts/check/rt-call-site-census.shs [--root DIR] [--roots a,b]
+#                                                 [--out FILE]
+# Exit: 0 census produced, 2 nothing was measured (never a silent empty pass).
+
+set -u
+
+ROOT=""
+ROOTS="src"
+OUT=""
+PROV_OUT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --roots) ROOTS="$2"; shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        --provider-out) PROV_OUT="$2"; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+    echo "ERROR — nothing was measured (no repo root)" >&2; exit 2
+fi
+ALLOW="$ROOT/scripts/check/no_direct_rt_allowlist.txt"
+
+command -v rg >/dev/null 2>&1 || {
+    echo "ERROR — nothing was measured (rg not on PATH)" >&2; exit 2; }
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was measured (mktemp)" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+RT_RE='^[^#]*\brt_[a-z0-9_]*\('
+DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
+
+: > "$WORK/hits.txt"
+: > "$WORK/decls.txt"
+ANY=0
+saved_ifs=$IFS
+IFS=,
+set -- $ROOTS
+IFS=$saved_ifs
+for r in "$@"; do
+    [ -n "$r" ] || continue
+    d="$ROOT/$r"
+    [ -d "$d" ] || continue
+    ANY=1
+    rg --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' \
+       --with-filename --line-number --no-heading "$RT_RE" "$d" \
+       >> "$WORK/hits.txt" 2>/dev/null
+    st=$?
+    [ $st -le 1 ] || { echo "ERROR — nothing was measured (scanner error in $r)" >&2; exit 2; }
+    rg --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' \
+       --with-filename --line-number --no-heading --only-matching \
+       "$DECL_RE" "$d" >> "$WORK/decls.txt" 2>/dev/null
+    st=$?
+    [ $st -le 1 ] || { echo "ERROR — nothing was measured (scanner error in $r)" >&2; exit 2; }
+done
+
+if [ "$ANY" -eq 0 ]; then
+    echo "ERROR — nothing was measured (no existing root in '$ROOTS')" >&2; exit 2
+fi
+
+# Allowlist -> awk-consumable classifier input.
+if [ -f "$ALLOW" ]; then cp "$ALLOW" "$WORK/allow.txt"; else : > "$WORK/allow.txt"; fi
+
+# (file:line) keys of declaration lines, so they can be subtracted.
+cut -d: -f1,2 "$WORK/decls.txt" | sort -u > "$WORK/declkeys.txt"
+
+awk -v root="$ROOT/" -v roots="$ROOTS" -v provout="$WORK/prov.tsv" '
+    # Returns the ALLOWLIST ENTRY that covers rel (so the caller learns which
+    # provider claimed the file), or "" when no entry does. The three entry
+    # forms are exactly check-no-direct-rt.shs`s: `suffix:X`, a trailing-slash
+    # directory prefix, and an exact path.
+    function allowed(rel,   i, p, s) {
+        for (i = 1; i <= na; i++) {
+            p = allow[i]
+            if (substr(p, 1, 7) == "suffix:") {
+                s = substr(p, 8)
+                if (length(rel) >= length(s) && substr(rel, length(rel) - length(s) + 1) == s) return p
+            } else if (substr(p, length(p)) == "/") {
+                if (substr(rel, 1, length(p)) == p) return p
+            } else if (rel == p) return p
+        }
+        return ""
+    }
+    FILENAME == ARGV[1] {
+        line = $0
+        sub(/[ \t\r]+$/, "", line)
+        if (line == "" || substr(line, 1, 1) == "#") next
+        allow[++na] = line
+        next
+    }
+    FILENAME == ARGV[2] { declkey[$0] = 1; next }
+    {
+        # rg output: <path>:<lineno>:<text>
+        p1 = index($0, ":");            if (p1 == 0) next
+        path = substr($0, 1, p1 - 1)
+        rest = substr($0, p1 + 1)
+        p2 = index(rest, ":");          if (p2 == 0) next
+        lno = substr(rest, 1, p2 - 1)
+        text = substr(rest, p2 + 1)
+        if ((path ":" lno) in declkey) next
+        rel = path
+        if (substr(rel, 1, length(root)) == root) rel = substr(rel, length(root) + 1)
+        cached = cache[rel]
+        if (cached == "") { cached = allowed(rel); if (cached == "") cached = "-"; cache[rel] = cached }
+        # A `#` starts a comment: RT_RE already refuses a line whose first
+        # rt_ token sits behind one, but a trailing comment on a real call
+        # line must not contribute extra tokens.
+        h = index(text, "#"); if (h > 0) text = substr(text, 1, h - 1)
+        n = 0
+        while (match(text, /rt_[a-z0-9_]*\(/)) {
+            sym = substr(text, RSTART, RLENGTH - 1)
+            text = substr(text, RSTART + RLENGTH)
+            if (cached == "-") { cnt[sym]++; total++ }
+            else { allowedn++; prov[sym SUBSEP cached]++ }
+            n++
+        }
+        if (n > 0) lines++
+    }
+    END {
+        printf "# rt_* forbidden direct call-site census (per symbol)\n"
+        printf "# generated by scripts/check/rt-call-site-census.shs\n"
+        printf "# roots=%s allowlist=scripts/check/no_direct_rt_allowlist.txt\n", roots
+        nsym = 0; for (s in cnt) nsym++
+        printf "# totals: forbidden_sites=%d distinct_symbols=%d allowlisted_sites=%d call_lines=%d\n",
+               total + 0, nsym, allowedn + 0, lines + 0
+        printf "# NOTE: token-counted, so forbidden_sites >= the line-counted total\n"
+        printf "#       reported by check-no-direct-rt.shs for the same roots.\n"
+        for (s in cnt) printf "%s\t%d\n", s, cnt[s]
+        # Side channel: which allowlisted provider entry already serves each
+        # symbol, and how often. This is the evidence a group`s `provider`
+        # column is derived from — it is measured, not declared.
+        for (k in prov) { split(k, kk, SUBSEP); printf "%s\t%s\t%d\n", kk[1], kk[2], prov[k] > provout }
+    }
+' "$WORK/allow.txt" "$WORK/declkeys.txt" "$WORK/hits.txt" > "$WORK/out.tsv"
+RC=$?
+[ $RC -eq 0 ] || { echo "ERROR — nothing was measured (classifier failed)" >&2; exit 2; }
+
+NSYM=$(grep -cv '^#' "$WORK/out.tsv")
+if [ "$NSYM" -eq 0 ]; then
+    echo "ERROR — nothing was measured (0 forbidden call sites found)" >&2; exit 2
+fi
+
+{ grep '^#' "$WORK/out.tsv"; grep -v '^#' "$WORK/out.tsv" | sort; } > "$WORK/sorted.tsv"
+
+if [ -n "$PROV_OUT" ]; then
+    mkdir -p "$(dirname "$PROV_OUT")"
+    if [ -s "$WORK/prov.tsv" ]; then
+        sort "$WORK/prov.tsv" > "$PROV_OUT" || {
+            echo "ERROR — nothing was measured (failed writing $PROV_OUT)" >&2; exit 2; }
+    else
+        echo "ERROR — nothing was measured (0 allowlisted provider call sites)" >&2; exit 2
+    fi
+fi
+
+if [ -n "$OUT" ]; then
+    mkdir -p "$(dirname "$OUT")"
+    cp "$WORK/sorted.tsv" "$OUT" || {
+        echo "ERROR — nothing was measured (failed writing $OUT)" >&2; exit 2; }
+    echo "wrote $OUT ($NSYM symbol(s))"
+else
+    cat "$WORK/sorted.tsv"
+fi
+exit 0

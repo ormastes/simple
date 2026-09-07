@@ -1,3 +1,36 @@
+"""
+## Purpose and audience
+Executable evidence for the engineers who own
+`src/compiler/60.mir_opt/mir_opt/collection_opt.spl`: which collection
+queries count as pure and hoistable, when duplicate reads are reused, when
+mutating calls fence reuse, and why loop hoisting fails closed until a
+preheader/speculatability proof exists. Operators gating an optimizer change
+rerun this spec to catch legality regressions in the collection pass.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/mir_opt/collection_opt_spec.spl`
+from the repo root; each scenario builds a real MIR function from the helpers
+at the top of the file, runs `create_collection_opt_pass` over it, and censuses
+the optimized instructions.
+## Compatibility and limitations
+The scenarios drive the pass API directly on hand-built MIR, so they prove the
+pass's own legality rules, not the driver's pass-pipeline ordering or
+whole-program effects. Pass counters (`pure_queries_reused`,
+`len_queries_reused`, `calls_hoisted`, `scalar_ops_hoisted`,
+`dead_append_arrays_elided`) are part of the asserted surface.
+## Verification guidance and troubleshooting
+A failing census count means the pass retained one call too many or too few —
+compare the scenario's instruction list against the count and check whether a
+mutating call between the duplicates should have fenced the reuse. A failing
+`*_hoisted`/`*_elided` counter means the fail-closed hoisting or dead-array
+elision legality proof changed.
+"""
+# Lifecycle: doc/01_research/domain/runtime_facade_optimization.md ;
+# doc/03_plan/compiler/optimization/simple_optimization_architecture_roadmap_2026-06-01.md ;
+# doc/04_architecture/compiler/optimization/optimization_plugin_jit_hotspot.md ;
+# doc/05_design/compiler/optimization/executable_size_reduction.md
+# @manual_section: mir-collection-optimization
+
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirBlock}
 use compiler.mir_opt.mir_opt.collection_opt.{create_collection_opt_pass}
@@ -149,11 +182,17 @@ fn _co_count_bitcast(block: MirBlock) -> i64:
 
 describe "MIR Collection Optimization":
     it "identifies text pointers without nested enum pattern binding":
+        # @req REQ-MIR-COLLOPT-001
+        # @capture(bit_table): outcome of "identifies text pointers without nested enum pattern binding"
+        step("Identifies text pointers without nested enum pattern binding")
         expect(mir_type_is_text(MirType.ptr(MirType(kind: MirTypeKind.I8), false))).to_equal(true)
         expect(mir_type_is_text(MirType.ptr(MirType.i64(), false))).to_equal(false)
         expect(mir_type_is_text(MirType.i64())).to_equal(false)
 
     it "treats set membership tests as pure hoistable collection queries":
+        # @req REQ-MIR-COLLOPT-002
+        # @capture(bit_table): outcome of "treats set membership tests as pure hoistable collection queries"
+        step("Treats set membership tests as pure hoistable collection queries")
         var opt = create_collection_opt_pass()
 
         expect(opt.is_pure_method("contains")).to_equal(true)
@@ -166,6 +205,9 @@ describe "MIR Collection Optimization":
         expect(opt.is_pure_method("insert")).to_equal(false)
 
     it "reuses repeated pure set relationship query results in a block":
+        # @req REQ-MIR-COLLOPT-003
+        # @capture(bit_table): outcome of "reuses repeated pure set relationship query results in a block"
+        step("Reuses repeated pure set relationship query results in a block")
         val subset1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val subset2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -177,11 +219,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "is_subset")).to_equal(1)
-        expect(_co_count_named_call(block, "is_disjoint")).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(2)
+        expect(_co_count_named_call(block, "is_subset")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "is_subset" call(s)
+        expect(_co_count_named_call(block, "is_disjoint")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "is_disjoint" call(s)
+        expect(opt.pure_queries_reused).to_equal(2)  # oracle: pass counter pins 2 deduplicated pure query read(s)
 
     it "reuses repeated pure has membership query results in a block":
+        # @req REQ-MIR-COLLOPT-004
+        # @capture(bit_table): outcome of "reuses repeated pure has membership query results in a block"
+        step("Reuses repeated pure has membership query results in a block")
         val has1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val has2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -191,10 +236,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "has")).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "has")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "has" call(s)
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "reuses repeated pure set membership query results in a block":
+        # @req REQ-MIR-COLLOPT-005
+        # @capture(bit_table): outcome of "reuses repeated pure set membership query results in a block"
+        step("Reuses repeated pure set membership query results in a block")
         val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -204,10 +252,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "contains")).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "contains")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "contains" call(s)
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "does not reuse pure set membership across mutating collection calls":
+        # @req REQ-MIR-COLLOPT-006
+        # @capture(bit_table): outcome of "does not reuse pure set membership across mutating collection calls"
+        step("Does not reuse pure set membership across mutating collection calls")
         val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
         val insert = MirInst(kind: MirInstKind.Call(nil, _co_func("insert"), [_co_copy(1), _co_copy(3)]), span: nil)
         val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -217,10 +268,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "contains")).to_equal(2)
-        expect(opt.pure_queries_reused).to_equal(0)
+        expect(_co_count_named_call(block, "contains")).to_equal(2)  # oracle: census of the optimized block pins exactly 2 retained "contains" call(s)
+        expect(opt.pure_queries_reused).to_equal(0)  # oracle: pass counter pins 0 deduplicated pure query read(s)
 
     it "reuses repeated runtime collection reads in a block":
+        # @req REQ-MIR-COLLOPT-007
+        # @capture(bit_table): outcome of "reuses repeated runtime collection reads in a block"
+        step("Reuses repeated runtime collection reads in a block")
         val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -230,11 +284,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_get" call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "keeps runtime length reads from fencing repeated runtime collection reads":
+        # @req REQ-MIR-COLLOPT-008
+        # @capture(bit_table): outcome of "keeps runtime length reads from fencing repeated runtime collection reads"
+        step("Keeps runtime length reads from fencing repeated runtime collection reads")
         val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
         val len = MirInst(kind: MirInstKind.Call(_co_lid(20), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -244,12 +301,15 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
-        expect(_co_count_rt_array_len(block)).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_get" call(s)
+        expect(_co_count_rt_array_len(block)).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "reuses repeated typed byte reads in a block":
+        # @req REQ-MIR-COLLOPT-009
+        # @capture(bit_table): outcome of "reuses repeated typed byte reads in a block"
+        step("Reuses repeated typed byte reads in a block")
         val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -259,11 +319,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_typed_bytes_u8_data_at")).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_typed_bytes_u8_data_at")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_typed_bytes_u8_data_at" call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "does not reuse runtime collection reads across append calls":
+        # @req REQ-MIR-COLLOPT-010
+        # @capture(bit_table): outcome of "does not reuse runtime collection reads across append calls"
+        step("Does not reuse runtime collection reads across append calls")
         val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_typed_words_u64_at"), [_co_copy(1), _co_copy(2)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
         val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_typed_words_u64_at"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -273,10 +336,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_typed_words_u64_at")).to_equal(2)
-        expect(opt.pure_queries_reused).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_at")).to_equal(2)  # oracle: census of the optimized block pins exactly 2 retained "rt_typed_words_u64_at" call(s)
+        expect(opt.pure_queries_reused).to_equal(0)  # oracle: pass counter pins 0 deduplicated pure query read(s)
 
     it "reuses repeated runtime array data pointer reads in a block":
+        # @req REQ-MIR-COLLOPT-011
+        # @capture(bit_table): outcome of "reuses repeated runtime array data pointer reads in a block"
+        step("Reuses repeated runtime array data pointer reads in a block")
         val ptr1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_data_ptr"), [_co_copy(1)]), span: nil)
         val use_ptr = MirInst(kind: MirInstKind.GetElementPtr(_co_lid(20), _co_copy(10), [_co_copy(2)]), span: nil)
         val ptr2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_data_ptr"), [_co_copy(1)]), span: nil)
@@ -286,11 +352,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_data_ptr")).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_data_ptr")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_data_ptr" call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "reuses repeated runtime dict lookups in a block":
+        # @req REQ-MIR-COLLOPT-012
+        # @capture(bit_table): outcome of "reuses repeated runtime dict lookups in a block"
+        step("Reuses repeated runtime dict lookups in a block")
         val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_dict_get"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_dict_get"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -300,11 +369,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_dict_get")).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_dict_get")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_dict_get" call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "reuses repeated runtime contains queries in a block":
+        # @req REQ-MIR-COLLOPT-013
+        # @capture(bit_table): outcome of "reuses repeated runtime contains queries in a block"
+        step("Reuses repeated runtime contains queries in a block")
         val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -316,11 +388,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_contains")).to_equal(1)
-        expect(_co_count_named_call(block, "rt_dict_contains_key")).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(2)
+        expect(_co_count_named_call(block, "rt_array_contains")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_contains" call(s)
+        expect(_co_count_named_call(block, "rt_dict_contains_key")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_dict_contains_key" call(s)
+        expect(opt.pure_queries_reused).to_equal(2)  # oracle: pass counter pins 2 deduplicated pure query read(s)
 
     it "reuses repeated runtime array first reads in a block":
+        # @req REQ-MIR-COLLOPT-014
+        # @capture(bit_table): outcome of "reuses repeated runtime array first reads in a block"
+        step("Reuses repeated runtime array first reads in a block")
         val first1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_first"), [_co_copy(1)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
         val first2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_first"), [_co_copy(1)]), span: nil)
@@ -330,11 +405,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_first")).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.pure_queries_reused).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_first")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_first" call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.pure_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated pure query read(s)
 
     it "reuses repeated typed array length queries for adjacent bounds checks":
+        # @req REQ-MIR-COLLOPT-015
+        # @capture(bit_table): outcome of "reuses repeated typed array length queries for adjacent bounds checks"
+        step("Reuses repeated typed array length queries for adjacent bounds checks")
         val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val check1 = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_co_copy(2), _co_copy(10)]), span: nil)
         val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
@@ -345,11 +423,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_rt_array_len(block)).to_equal(1)
-        expect(_co_count_bounds_checks(block)).to_equal(2)
-        expect(opt.len_queries_reused).to_equal(1)
+        expect(_co_count_rt_array_len(block)).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(_co_count_bounds_checks(block)).to_equal(2)  # oracle: census pins 2 bounds_check(s); reuse may fold reads but never delete a check
+        expect(opt.len_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated length query read(s)
 
     it "reuses repeated typed array length queries for traversal compares":
+        # @req REQ-MIR-COLLOPT-016
+        # @capture(bit_table): outcome of "reuses repeated typed array length queries for traversal compares"
+        step("Reuses repeated typed array length queries for traversal compares")
         val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val cmp1 = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Lt, _co_copy(2), _co_copy(10)), span: nil)
         val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
@@ -360,10 +441,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_rt_array_len(block)).to_equal(1)
-        expect(opt.len_queries_reused).to_equal(1)
+        expect(_co_count_rt_array_len(block)).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(opt.len_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated length query read(s)
 
     it "replaces duplicate typed array length calls even when the duplicate has multiple consumers":
+        # @req REQ-MIR-COLLOPT-017
+        # @capture(bit_table): outcome of "replaces duplicate typed array length calls even when the duplicate has multiple consumers"
+        step("Replaces duplicate typed array length calls even when the duplicate has multiple consumers")
         val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Lt, _co_copy(2), _co_copy(11)), span: nil)
@@ -374,11 +458,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_rt_array_len(block)).to_equal(1)
-        expect(_co_count_copy_from(block, 10)).to_equal(1)
-        expect(opt.len_queries_reused).to_equal(1)
+        expect(_co_count_rt_array_len(block)).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)  # oracle: census pins 1 forwarding cop(ies) from the first read's local
+        expect(opt.len_queries_reused).to_equal(1)  # oracle: pass counter pins 1 deduplicated length query read(s)
 
     it "does not reuse typed array length queries across mutating collection calls":
+        # @req REQ-MIR-COLLOPT-018
+        # @capture(bit_table): outcome of "does not reuse typed array length queries across mutating collection calls"
+        step("Does not reuse typed array length queries across mutating collection calls")
         val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(nil, _co_func("push"), [_co_copy(1), _co_copy(2)]), span: nil)
         val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
@@ -388,10 +475,12 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_rt_array_len(block)).to_equal(2)
-        expect(opt.len_queries_reused).to_equal(0)
+        expect(_co_count_rt_array_len(block)).to_equal(2)  # oracle: census of the optimized block pins exactly 2 retained rt_array_len call(s)
+        expect(opt.len_queries_reused).to_equal(0)  # oracle: pass counter pins 0 deduplicated length query read(s)
 
     it "keeps invariant metadata reads in-loop until a true preheader proof exists":
+        # @req REQ-MIR-COLLOPT-019
+        # @capture(bit_table): outcome of "keeps invariant metadata reads in-loop until a true preheader proof exists"
         step("Verify: fail-closed hoisting preserves zero-trip and trapping semantics")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
@@ -400,11 +489,14 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_rt_array_len(optimized[0])).to_equal(1)
-        expect(_co_count_rt_array_len(optimized[1])).to_equal(0)
-        expect(opt.calls_hoisted).to_equal(1)
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained rt_array_len call(s)
+        expect(opt.calls_hoisted).to_equal(1)  # oracle: pass counter pins 1 hoisted invariant call(s)
 
     it "keeps runtime collection metadata reads inside mutating loops":
+        # @req REQ-MIR-COLLOPT-020
+        # @capture(bit_table): outcome of "keeps runtime collection metadata reads inside mutating loops"
+        step("Keeps runtime collection metadata reads inside mutating loops")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -413,11 +505,13 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_rt_array_len(optimized[0])).to_equal(0)
-        expect(_co_count_rt_array_len(optimized[1])).to_equal(1)
-        expect(opt.calls_hoisted).to_equal(0)
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained rt_array_len call(s)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained rt_array_len call(s)
+        expect(opt.calls_hoisted).to_equal(0)  # oracle: pass counter pins 0 hoisted invariant call(s)
 
     it "keeps invariant scalar operations in-loop until speculatability is proven":
+        # @req REQ-MIR-COLLOPT-021
+        # @capture(bit_table): outcome of "keeps invariant scalar operations in-loop until speculatability is proven"
         step("Verify: scalar hoisting fails closed")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
@@ -427,13 +521,15 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(1)
-        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)
-        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)
-        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)
-        expect(opt.scalar_ops_hoisted).to_equal(2)
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(1)  # oracle: census pins exactly 1 retained MirBinOp op(s) in this block
+        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)  # oracle: census pins exactly 1 retained MirBinOp op(s) in this block
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)  # oracle: census pins exactly 0 retained MirBinOp op(s) in this block
+        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)  # oracle: census pins exactly 0 retained MirBinOp op(s) in this block
+        expect(opt.scalar_ops_hoisted).to_equal(2)  # oracle: pass counter pins 2 hoistable scalar op(s)
 
     it "keeps invariant bitcast chains in-loop until speculatability is proven":
+        # @req REQ-MIR-COLLOPT-022
+        # @capture(bit_table): outcome of "keeps invariant bitcast chains in-loop until speculatability is proven"
         step("Verify: bitcast-chain hoisting fails closed")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val casted = MirInst(kind: MirInstKind.Bitcast(_co_lid(10), _co_copy(2), MirType.i64()), span: nil)
@@ -443,13 +539,16 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_bitcast(optimized[0])).to_equal(1)
-        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(1)
-        expect(_co_count_bitcast(optimized[1])).to_equal(0)
-        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(0)
-        expect(opt.scalar_ops_hoisted).to_equal(2)
+        expect(_co_count_bitcast(optimized[0])).to_equal(1)  # oracle: census pins exactly 1 retained bitcast(s) in this block
+        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(1)  # oracle: census pins exactly 1 retained MirBinOp op(s) in this block
+        expect(_co_count_bitcast(optimized[1])).to_equal(0)  # oracle: census pins exactly 0 retained bitcast(s) in this block
+        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(0)  # oracle: census pins exactly 0 retained MirBinOp op(s) in this block
+        expect(opt.scalar_ops_hoisted).to_equal(2)  # oracle: pass counter pins 2 hoistable scalar op(s)
 
     it "keeps scalar operations inside loops when they use loop-defined values":
+        # @req REQ-MIR-COLLOPT-023
+        # @capture(bit_table): outcome of "keeps scalar operations inside loops when they use loop-defined values"
+        step("Keeps scalar operations inside loops when they use loop-defined values")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val next_slot = MirInst(kind: MirInstKind.BinOp(_co_lid(2), MirBinOp.BitXor, _co_copy(2), _co_int(1)), span: nil)
         val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
@@ -458,11 +557,14 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(0)
-        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(1)
-        expect(opt.scalar_ops_hoisted).to_equal(0)
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(0)  # oracle: census pins exactly 0 retained MirBinOp op(s) in this block
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(1)  # oracle: census pins exactly 1 retained MirBinOp op(s) in this block
+        expect(opt.scalar_ops_hoisted).to_equal(0)  # oracle: pass counter pins 0 hoistable scalar op(s)
 
     it "specializes proven array index dispatch to direct array get":
+        # @req REQ-MIR-COLLOPT-024
+        # @capture(bit_table): outcome of "specializes proven array index dispatch to direct array get"
+        step("Specializes proven array index dispatch to direct array get")
         val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
         val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, array_type)])
@@ -471,11 +573,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_index_get")).to_equal(0)
-        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
-        expect(opt.array_index_gets_specialized).to_equal(1)
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_index_get" call(s)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_get" call(s)
+        expect(opt.array_index_gets_specialized).to_equal(1)  # oracle: pass counter pins 1 specialized index dispatch(es)
 
     it "keeps generic index dispatch when receiver type is not array":
+        # @req REQ-MIR-COLLOPT-025
+        # @capture(bit_table): outcome of "keeps generic index dispatch when receiver type is not array"
+        step("Keeps generic index dispatch when receiver type is not array")
         val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
         val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, MirType.i64())])
 
@@ -483,11 +588,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_index_get")).to_equal(1)
-        expect(_co_count_named_call(block, "rt_array_get")).to_equal(0)
-        expect(opt.array_index_gets_specialized).to_equal(0)
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_index_get" call(s)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_get" call(s)
+        expect(opt.array_index_gets_specialized).to_equal(0)  # oracle: pass counter pins 0 specialized index dispatch(es)
 
     it "elides dead append-only capacity arrays":
+        # @req REQ-MIR-COLLOPT-026
+        # @capture(bit_table): outcome of "elides dead append-only capacity arrays"
+        step("Elides dead append-only capacity arrays")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -500,10 +608,13 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_new_with_cap" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_typed_words_u64_push" call(s)
 
     it "elides dead append-only u64 capacity arrays":
+        # @req REQ-MIR-COLLOPT-027
+        # @capture(bit_table): outcome of "elides dead append-only u64 capacity arrays"
+        step("Elides dead append-only u64 capacity arrays")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap_u64"), [_co_copy(2)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -516,11 +627,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap_u64")).to_equal(0)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)
-        expect(opt.dead_append_arrays_elided).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap_u64")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_new_with_cap_u64" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_typed_words_u64_push" call(s)
+        expect(opt.dead_append_arrays_elided).to_equal(1)  # oracle: pass counter pins 1 elided dead capacity array(s)
 
     it "keeps capacity arrays when append result is observed":
+        # @req REQ-MIR-COLLOPT-028
+        # @capture(bit_table): outcome of "keeps capacity arrays when append result is observed"
+        step("Keeps capacity arrays when append result is observed")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
         val push = MirInst(kind: MirInstKind.Call(_co_lid(4), _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -533,11 +647,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(1)
-        expect(opt.dead_append_arrays_elided).to_equal(0)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_new_with_cap" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_typed_words_u64_push" call(s)
+        expect(opt.dead_append_arrays_elided).to_equal(0)  # oracle: pass counter pins 0 elided dead capacity array(s)
 
     it "elides dead write-only capacity arrays":
+        # @req REQ-MIR-COLLOPT-029
+        # @capture(bit_table): outcome of "elides dead write-only capacity arrays"
+        step("Elides dead write-only capacity arrays")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
         val set = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_set"), [_co_copy(1), _co_copy(4), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -555,11 +672,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(0)
-        expect(opt.dead_append_arrays_elided).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_new_with_cap" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_typed_words_u64_set" call(s)
+        expect(opt.dead_append_arrays_elided).to_equal(1)  # oracle: pass counter pins 1 elided dead capacity array(s)
 
     it "keeps write-only capacity arrays when write result is observed":
+        # @req REQ-MIR-COLLOPT-030
+        # @capture(bit_table): outcome of "keeps write-only capacity arrays when write result is observed"
+        step("Keeps write-only capacity arrays when write result is observed")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
         val set = MirInst(kind: MirInstKind.Call(_co_lid(5), _co_func("rt_typed_words_u64_set"), [_co_copy(1), _co_copy(4), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -578,11 +698,14 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(1)
-        expect(opt.dead_append_arrays_elided).to_equal(0)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_array_new_with_cap" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(1)  # oracle: census of the optimized block pins exactly 1 retained "rt_typed_words_u64_set" call(s)
+        expect(opt.dead_append_arrays_elided).to_equal(0)  # oracle: pass counter pins 0 elided dead capacity array(s)
 
     it "elides dead append-only arrays after known data pointer lowering":
+        # @req REQ-MIR-COLLOPT-031
+        # @capture(bit_table): outcome of "elides dead append-only arrays after known data pointer lowering"
+        step("Elides dead append-only arrays after known data pointer lowering")
         val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
         val data_ptr_store = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_store_known_data_at"), [_co_copy(1), _co_copy(5), _co_copy(6), _co_copy(3)]), span: nil)
         val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
@@ -601,6 +724,6 @@ describe "MIR Collection Optimization":
         val optimized = opt.optimize_function(func)
         val block = optimized.blocks[0]
 
-        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
-        expect(_co_count_named_call(block, "rt_typed_words_u64_store_known_data_at")).to_equal(0)
-        expect(opt.dead_append_arrays_elided).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_array_new_with_cap" call(s)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_store_known_data_at")).to_equal(0)  # oracle: census of the optimized block pins exactly 0 retained "rt_typed_words_u64_store_known_data_at" call(s)
+        expect(opt.dead_append_arrays_elided).to_equal(1)  # oracle: pass counter pins 1 elided dead capacity array(s)

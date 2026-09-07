@@ -257,3 +257,21 @@ unmeasurable today. Until this is lifted, no native Option claim can be made.
   `Function 'str.parse_i64' not found` into a silent wrong answer, which is
   strictly worse. Two prior lanes declined for exactly this reason and were
   right to.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE (JIT lane)
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+`parse_i64` keeps its Option on both lanes:
+
+```
+PARSE_IS_SOME=true        # "123".parse_i64().is_some()
+PARSE_BAD_IS_NONE=true    # "zz".parse_i64().is_none()
+```
+
+(identical on interpret and jit). Probe `_scratch/p_opt.spl`. The **native**
+half of this record's title is UNTESTED: `native-build` is unreachable on this
+host, failing with `native-capsule-receipt-invalid` for the unmodified seed too.

@@ -1,11 +1,40 @@
-# UTF-32 Encoding / Decoding Tests
-#
-# Tests for src/lib/common/encoding/utf32.spl
-# Covers: utf32_encode_one, utf32_decode_one, utf32_encode_all,
-#         utf32_decode_all, utf32_to_bytes_le, utf32_to_bytes_be,
-#         utf32_from_bytes_le, utf32_from_bytes_be,
-#         utf32_to_utf8, utf8_to_utf32
+"""
+## Purpose and audience
+Covers the UTF-32 codec in `std.common.encoding.utf32`: single-codepoint
+encode/decode with surrogate and range guarding, bulk encode/decode round
+trips, LE/BE byte serialization, truncated-sequence replacement, and the
+UTF-32 <-> UTF-8 cross-codec conversions. Audience: encoding maintainers and
+operators verifying a build. Every scenario calls the real product functions
+and asserts their returned values.
 
+## Operator workflow
+Run `simple run test/unit/lib/common/encoding/utf32_spec.spl` from the repo
+root and confirm the results line reports 0 failed. Each scenario names the
+requirement it traces to, starts with an imperative step, retains a statistics
+capture, and explains every numeric oracle inline.
+
+## Compatibility and limitations
+Covers only the behavior explicitly asserted below on the current toolchain.
+Invalid input semantics are pinned at the documented replacement character
+U+FFFD (0xFFFD): surrogates D800-DFFF, values above 0x10FFFF, negative
+values, and truncated byte sequences all replace rather than error. Trailing
+incomplete byte groups assert the LE and BE paths only; mixed-endian input is
+not covered.
+
+## Verification guidance and troubleshooting
+Re-run the single spec file and read the first failing step. A U+FFFD failure
+means the validity guard regressed; a byte-layout failure means endianness or
+fixed-width encoding regressed; a cross-codec failure means the UTF-8
+continuation-byte math regressed. Compare against the inline oracle comment
+before bisecting the codec.
+"""
+# Lifecycle: doc/01_research/lib/text_i18n/simple_utf8_internationalized_text_architecture_2026-08-25.md ;
+# doc/03_plan/agent_tasks/utf8_internationalized_text_architecture.md ;
+# doc/04_architecture/lib/text_i18n/utf8_internationalized_text_architecture.md ;
+# doc/05_design/lib/text_i18n/text_encoding_engine.md
+# @manual_section: utf32-codec
+
+use std.spec.step
 use std.common.encoding.utf32.{
     utf32_encode_one, utf32_decode_one,
     utf32_encode_all, utf32_decode_all,
@@ -21,33 +50,51 @@ use std.common.encoding.utf8.{utf8_encode_all, utf8_decode_all}
 
 describe "utf32_encode_one":
     it "passes through valid codepoints":
-        expect(utf32_encode_one(0x41)).to_equal(0x41)
-        expect(utf32_encode_one(0xAC00)).to_equal(0xAC00)
-        expect(utf32_encode_one(0x1F600)).to_equal(0x1F600)
-        expect(utf32_encode_one(0x10FFFF)).to_equal(0x10FFFF)
-        expect(utf32_encode_one(0x00)).to_equal(0x00)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): valid-codepoint pass-through verdicts
+        step("Encode ASCII, Hangul, emoji, the max plane, and NUL")
+        expect(utf32_encode_one(0x41)).to_equal(0x41)  # oracle: ASCII passes through unchanged
+        expect(utf32_encode_one(0xAC00)).to_equal(0xAC00)  # oracle: Hangul inside the BMP passes through unchanged
+        expect(utf32_encode_one(0x1F600)).to_equal(0x1F600)  # oracle: an astral-plane emoji passes through unchanged
+        expect(utf32_encode_one(0x10FFFF)).to_equal(0x10FFFF)  # oracle: the Unicode maximum is the inclusive top of the valid range
+        expect(utf32_encode_one(0x00)).to_equal(0x00)  # oracle: NUL is a valid codepoint and must not be treated as absent
 
     it "replaces surrogates with U+FFFD":
-        expect(utf32_encode_one(0xD800)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDBFF)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDC00)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDFFF)).to_equal(0xFFFD)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): surrogate-guard replacement verdicts
+        step("Encode both surrogate halves at their range edges")
+        expect(utf32_encode_one(0xD800)).to_equal(0xFFFD)  # oracle: D800 opens the surrogate block, which UTF-32 forbids
+        expect(utf32_encode_one(0xDBFF)).to_equal(0xFFFD)  # oracle: DBFF is the last high surrogate
+        expect(utf32_encode_one(0xDC00)).to_equal(0xFFFD)  # oracle: DC00 opens the low-surrogate half
+        expect(utf32_encode_one(0xDFFF)).to_equal(0xFFFD)  # oracle: DFFF is the last surrogate, closing the guarded block
 
     it "replaces out-of-range with U+FFFD":
-        expect(utf32_encode_one(0x110000)).to_equal(0xFFFD)
-        expect(utf32_encode_one(-1)).to_equal(0xFFFD)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): range-guard replacement verdicts
+        step("Encode one value past the maximum and one negative value")
+        expect(utf32_encode_one(0x110000)).to_equal(0xFFFD)  # oracle: 0x110000 is one past the Unicode maximum
+        expect(utf32_encode_one(-1)).to_equal(0xFFFD)  # oracle: negative values name no codepoint and must replace
 
 describe "utf32_decode_one":
     it "passes through valid values":
-        expect(utf32_decode_one(0x41)).to_equal(0x41)
-        expect(utf32_decode_one(0xAC00)).to_equal(0xAC00)
-        expect(utf32_decode_one(0x1F600)).to_equal(0x1F600)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): decode pass-through verdicts
+        step("Decode ASCII, Hangul, and an astral emoji")
+        expect(utf32_decode_one(0x41)).to_equal(0x41)  # oracle: ASCII passes through unchanged
+        expect(utf32_decode_one(0xAC00)).to_equal(0xAC00)  # oracle: BMP Hangul passes through unchanged
+        expect(utf32_decode_one(0x1F600)).to_equal(0x1F600)  # oracle: astral emoji passes through unchanged
 
     it "replaces surrogates with U+FFFD":
-        expect(utf32_decode_one(0xD800)).to_equal(0xFFFD)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): decode surrogate guard
+        step("Decode a high surrogate value")
+        expect(utf32_decode_one(0xD800)).to_equal(0xFFFD)  # oracle: the decode path guards the same surrogate block as encode
 
     it "replaces out-of-range with U+FFFD":
-        expect(utf32_decode_one(0x110000)).to_equal(0xFFFD)
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): decode range guard
+        step("Decode one value past the Unicode maximum")
+        expect(utf32_decode_one(0x110000)).to_equal(0xFFFD)  # oracle: one past the maximum is out of range on decode too
 
 # ============================================================================
 # utf32_encode_all / utf32_decode_all roundtrip
@@ -55,36 +102,51 @@ describe "utf32_decode_one":
 
 describe "utf32_encode_all and utf32_decode_all":
     it "roundtrips valid codepoints":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): mixed-script roundtrip identity
+        step("Roundtrip a mixed ASCII, Hangul, emoji, CJK list")
         val cps = [0x41, 0xAC00, 0x1F600, 0x4F60]
         val encoded = utf32_encode_all(cps)
-        expect(encoded.len()).to_equal(4)
+        expect(encoded.len()).to_equal(4)  # oracle: UTF-32 is fixed-width, so four codepoints encode to four units
         val decoded = utf32_decode_all(encoded)
-        expect(decoded).to_equal(cps)
+        expect(decoded).to_equal(cps)  # oracle: a fixed-width codec roundtrip must be the identity on valid input
 
     it "roundtrips Korean":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): Hangul roundtrip identity
+        step("Roundtrip three Hangul syllables")
         val cps = [0xAC00, 0xB098, 0xB2E4]
         val encoded = utf32_encode_all(cps)
         val decoded = utf32_decode_all(encoded)
-        expect(decoded).to_equal(cps)
+        expect(decoded).to_equal(cps)  # oracle: Hangul is valid BMP content and must survive the roundtrip exactly
 
     it "roundtrips Cyrillic":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): Cyrillic roundtrip identity
+        step("Roundtrip a six-letter Cyrillic word")
         val cps = [0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442]
         val encoded = utf32_encode_all(cps)
         val decoded = utf32_decode_all(encoded)
-        expect(decoded).to_equal(cps)
+        expect(decoded).to_equal(cps)  # oracle: every letter of the word must survive in order
 
     it "handles empty input":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): empty-input bulk behavior
+        step("Encode and decode empty lists")
         val encoded = utf32_encode_all([])
-        expect(encoded.len()).to_equal(0)
+        expect(encoded.len()).to_equal(0)  # oracle: encoding zero codepoints yields zero units
         val decoded = utf32_decode_all([])
-        expect(decoded.len()).to_equal(0)
+        expect(decoded.len()).to_equal(0)  # oracle: decoding zero units yields zero codepoints
 
     it "replaces invalid codepoints in bulk":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): bulk invalid-element isolation
+        step("Bulk-encode a list with one surrogate between valid codepoints")
         val mixed = [0x41, 0xD800, 0x42]
         val encoded = utf32_encode_all(mixed)
-        expect(encoded[0]).to_equal(0x41)
-        expect(encoded[1]).to_equal(0xFFFD)
-        expect(encoded[2]).to_equal(0x42)
+        expect(encoded[0]).to_equal(0x41)  # oracle: the element before the surrogate must be untouched
+        expect(encoded[1]).to_equal(0xFFFD)  # oracle: only the surrogate slot is replaced
+        expect(encoded[2]).to_equal(0x42)  # oracle: the element after the surrogate must be untouched
 
 # ============================================================================
 # UTF-32 LE/BE byte serialization
@@ -92,55 +154,76 @@ describe "utf32_encode_all and utf32_decode_all":
 
 describe "utf32_to_bytes_le":
     it "serializes as little-endian 4 bytes":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): LE byte layout for ASCII
+        step("Serialize ASCII to little-endian bytes")
         # U+0041 -> 41 00 00 00
         val bytes = utf32_to_bytes_le([0x41])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x41)
-        expect(bytes[1]).to_equal(0x00)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x00)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is exactly four bytes per codepoint
+        expect(bytes[0]).to_equal(0x41)  # oracle: least significant byte first in LE, so A leads
+        expect(bytes[1]).to_equal(0x00)  # oracle: the upper three bytes of 0x41 are zero
+        expect(bytes[2]).to_equal(0x00)  # oracle: the upper three bytes of 0x41 are zero
+        expect(bytes[3]).to_equal(0x00)  # oracle: the upper three bytes of 0x41 are zero
 
     it "serializes Hangul as little-endian":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): LE byte layout for Hangul
+        step("Serialize Hangul to little-endian bytes")
         # U+AC00 -> 00 AC 00 00
         val bytes = utf32_to_bytes_le([0xAC00])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x00)
-        expect(bytes[1]).to_equal(0xAC)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x00)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is exactly four bytes per codepoint
+        expect(bytes[0]).to_equal(0x00)  # oracle: 0xAC00 low byte is 0x00
+        expect(bytes[1]).to_equal(0xAC)  # oracle: 0xAC00 high byte 0xAC lands in the second LE slot
+        expect(bytes[2]).to_equal(0x00)  # oracle: the upper two bytes of 0xAC00 are zero
+        expect(bytes[3]).to_equal(0x00)  # oracle: the upper two bytes of 0xAC00 are zero
 
 describe "utf32_to_bytes_be":
     it "serializes as big-endian 4 bytes":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): BE byte layout for ASCII
+        step("Serialize ASCII to big-endian bytes")
         # U+0041 -> 00 00 00 41
         val bytes = utf32_to_bytes_be([0x41])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x00)
-        expect(bytes[1]).to_equal(0x00)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x41)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is exactly four bytes per codepoint
+        expect(bytes[0]).to_equal(0x00)  # oracle: the upper three bytes of 0x41 are zero and BE emits them first
+        expect(bytes[1]).to_equal(0x00)  # oracle: BE emits most significant byte first
+        expect(bytes[2]).to_equal(0x00)  # oracle: BE emits most significant byte first
+        expect(bytes[3]).to_equal(0x41)  # oracle: least significant byte lands last in BE
 
 describe "utf32 bytes roundtrip":
     it "roundtrips LE serialization":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): LE byte roundtrip identity
+        step("Roundtrip a mixed-script list through LE bytes")
         val values = [0x41, 0xAC00, 0x1F600]
         val bytes = utf32_to_bytes_le(values)
         val restored = utf32_from_bytes_le(bytes)
-        expect(restored).to_equal(values)
+        expect(restored).to_equal(values)  # oracle: serialize/parse with the same endianness must be the identity
 
     it "roundtrips BE serialization":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): BE byte roundtrip identity
+        step("Roundtrip a mixed-script list through BE bytes")
         val values = [0x41, 0xAC00, 0x1F600]
         val bytes = utf32_to_bytes_be(values)
         val restored = utf32_from_bytes_be(bytes)
-        expect(restored).to_equal(values)
+        expect(restored).to_equal(values)  # oracle: serialize/parse with the same endianness must be the identity
 
     it "replaces truncated LE byte sequence":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): LE truncation replacement
+        step("Parse six LE bytes — one full unit plus a two-byte tail")
         step("Verify: replaces truncated LE byte sequence")
         val restored = utf32_from_bytes_le([0x41, 0x00, 0x00, 0x00, 0x7A, 0x00])
-        expect(restored).to_equal([0x41, 0xFFFD])
+        expect(restored).to_equal([0x41, 0xFFFD])  # oracle: the complete first unit decodes; the two-byte tail cannot form a unit and becomes U+FFFD
 
     it "replaces truncated BE byte sequence":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): BE truncation replacement
+        step("Parse six BE bytes — one full unit plus a two-byte tail")
         step("Verify: replaces truncated BE byte sequence")
         val restored = utf32_from_bytes_be([0x00, 0x00, 0x00, 0x41, 0x00, 0x7A])
-        expect(restored).to_equal([0x41, 0xFFFD])
+        expect(restored).to_equal([0x41, 0xFFFD])  # oracle: BE mirrors LE — the tail shortage becomes U+FFFD
 
 # ============================================================================
 # Cross-codec: UTF-32 <-> UTF-8
@@ -148,40 +231,58 @@ describe "utf32 bytes roundtrip":
 
 describe "utf32 to utf8 cross-codec":
     it "converts ASCII":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): ASCII cross-codec bytes
+        step("Convert two ASCII codepoints to UTF-8")
         val utf32_values = [0x48, 0x69]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes).to_equal([0x48, 0x69])
+        expect(utf8_bytes).to_equal([0x48, 0x69])  # oracle: ASCII encodes to one identical UTF-8 byte per codepoint
 
     it "converts Korean":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): three-byte UTF-8 Korean layout
+        step("Convert Hangul to UTF-8 and inspect its three bytes")
         val utf32_values = [0xAC00]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes.len()).to_equal(3)
-        expect(utf8_bytes[0]).to_equal(0xEA)
-        expect(utf8_bytes[1]).to_equal(0xB0)
-        expect(utf8_bytes[2]).to_equal(0x80)
+        expect(utf8_bytes.len()).to_equal(3)  # oracle: U+AC00 sits in the three-byte UTF-8 range
+        expect(utf8_bytes[0]).to_equal(0xEA)  # oracle: the three-byte lead byte for plane-0 Hangul is 0xEA
+        expect(utf8_bytes[1]).to_equal(0xB0)  # oracle: the first continuation carries the middle six bits of 0xAC00
+        expect(utf8_bytes[2]).to_equal(0x80)  # oracle: the final continuation carries the low six bits of 0xAC00
 
     it "converts emoji":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): four-byte UTF-8 emoji layout
+        step("Convert an astral emoji to UTF-8 and inspect its four bytes")
         val utf32_values = [0x1F600]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes.len()).to_equal(4)
-        expect(utf8_bytes[0]).to_equal(0xF0)
-        expect(utf8_bytes[1]).to_equal(0x9F)
-        expect(utf8_bytes[2]).to_equal(0x98)
-        expect(utf8_bytes[3]).to_equal(0x80)
+        expect(utf8_bytes.len()).to_equal(4)  # oracle: U+1F600 sits in the four-byte UTF-8 range
+        expect(utf8_bytes[0]).to_equal(0xF0)  # oracle: 0xF0 is the four-byte UTF-8 lead byte
+        expect(utf8_bytes[1]).to_equal(0x9F)  # oracle: the first continuation carries the upper payload bits of 0x1F600
+        expect(utf8_bytes[2]).to_equal(0x98)  # oracle: the middle continuation carries the next six payload bits
+        expect(utf8_bytes[3]).to_equal(0x80)  # oracle: the final continuation carries the low six bits, which are zero here
 
 describe "utf8 to utf32 cross-codec":
     it "converts ASCII":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): ASCII reverse cross-codec
+        step("Convert two ASCII UTF-8 bytes back to UTF-32")
         val utf8_bytes = [0x48, 0x69]
         val utf32_values = utf8_to_utf32(utf8_bytes)
-        expect(utf32_values).to_equal([0x48, 0x69])
+        expect(utf32_values).to_equal([0x48, 0x69])  # oracle: single-byte UTF-8 maps one-to-one back to codepoints
 
     it "converts Korean":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): Korean reverse cross-codec
+        step("Convert a three-byte Hangul UTF-8 sequence back to UTF-32")
         val utf8_bytes = [0xEA, 0xB0, 0x80]
         val utf32_values = utf8_to_utf32(utf8_bytes)
-        expect(utf32_values.len()).to_equal(1)
-        expect(utf32_values[0]).to_equal(0xAC00)
+        expect(utf32_values.len()).to_equal(1)  # oracle: one three-byte sequence is exactly one codepoint
+        expect(utf32_values[0]).to_equal(0xAC00)  # oracle: the continuation bytes must reassemble the original Hangul syllable
 
     it "roundtrips 12-language codepoints":
+        # @req REQ-LIB-ENCODING-001
+        # @capture(statistics): multi-script roundtrip identity
+        step("Roundtrip one representative codepoint from each of thirteen scripts")
         # One representative codepoint from each script
         val cps = [
             0x41,     # Latin A
@@ -200,4 +301,4 @@ describe "utf8 to utf32 cross-codec":
         ]
         val utf8_bytes = utf32_to_utf8(cps)
         val restored = utf8_to_utf32(utf8_bytes)
-        expect(restored).to_equal(cps)
+        expect(restored).to_equal(cps)  # oracle: every script's codepoint must survive the cross-codec roundtrip in order

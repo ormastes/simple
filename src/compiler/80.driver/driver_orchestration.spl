@@ -197,6 +197,13 @@ impl CompilerDriver:
         if compile_mode_text == "aot":
             log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+        if sources_streaming_in_place:
+            # Streaming phase 2 consumes source_contents_owner. The boxed
+            # SourceFile payloads are independent copies needed only through
+            # the AOT fingerprint above; retaining both graphs made them peak
+            # together with parser/surface allocations.
+            val reclaimed_preparse_sources = self.ctx.reclaim_streaming_preparse_source_records()
+            log_phase("phase1:streaming_preparse_source_reclaim:done sources={reclaimed_preparse_sources} owners={self.ctx.source_contents_owner.len()}")
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
         log_build_progress("load_sources", "files", self.ctx.sources.len(),
             self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
@@ -272,7 +279,26 @@ impl CompilerDriver:
         # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
-        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        var analyze_ok_effective = false
+        if hir_streaming_in_place:
+            analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
+        else:
+            val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+            if rt_heap_ref_wellformed(analyzed_ctx):
+                self.ctx = analyzed_ctx
+            # The Stage-2 native tuple ABI can zero the returned CompileContext
+            # and its adjacent success boolean even though lower_and_check_impl
+            # finished the HIR loop and committed no errors. Keep this recovery
+            # deliberately narrow: a malformed returned context, a still-live
+            # retained owner, and exactly zero recorded errors are all required.
+            # Any real diagnostic or well-formed false result stays a failure.
+            analyze_ok_effective = analyze_ok
+            if not analyze_ok and
+               not rt_heap_ref_wellformed(analyzed_ctx) and
+               rt_heap_ref_wellformed(self.ctx) and
+               self.ctx.error_count_value == 0:
+                log_warn("phase 3 recovered zeroed native tuple verdict after a zero-error HIR commit")
+                analyze_ok_effective = true
         # The streaming path is a canonical `me` owner operation and has
         # already committed every field directly to self.ctx. Reassigning its
         # returned whole-context snapshot corrupts adjacent scalar fields under
@@ -290,10 +316,8 @@ impl CompilerDriver:
         # one: it is the context every subsequent error read wants, and the
         # streaming path already declines this assignment for a related
         # transport reason.
-        if not hir_streaming_in_place and rt_heap_ref_wellformed(analyzed_ctx):
-            self.ctx = analyzed_ctx
         log_trace("AFTER phase 3")
-        if not analyze_ok:
+        if not analyze_ok_effective:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
                 val phase3_error_count = self.ctx.errors.len()
@@ -384,7 +408,7 @@ impl CompilerDriver:
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl(analyze_ok)
+        val mono_ok = self.monomorphize_impl(analyze_ok_effective)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,

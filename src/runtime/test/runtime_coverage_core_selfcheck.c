@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+/* Windows has no POSIX setenv(); _putenv_s() is the UCRT equivalent and
+ * returns 0 on success, matching the assertion below. */
+#define setenv(name, value, overwrite) _putenv_s((name), (value))
+#endif
+
 bool rt_coverage_enabled(void);
 void rt_coverage_decision_probe(uint32_t, bool, const char *, uint32_t, uint32_t);
 void rt_coverage_condition_probe(uint32_t, uint32_t, bool, const char *, uint32_t, uint32_t);

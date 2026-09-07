@@ -1,0 +1,274 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.common.cache_contract.semantic_read_set_v1.{
+    SemanticEffectKindV1, SemanticReplayPolicyV1,
+}
+use compiler.common.cache_contract.canonical_cache_codec_v1 (canonical_public_summary_encode_v1)
+use compiler.frontend.cache_artifact.*
+use compiler.core.parser.{parse_module_silent_checked}
+
+fn digest(label: text) -> text:
+    sha256_text(label)
+
+fn logical_path() -> LogicalSourcePathV1:
+    LogicalSourcePathV1(
+        repository_namespace_digest: digest("repo"),
+        module_relative_utf8: "pkg/example.spl",
+        path_semantics: PathSemanticsV1.CaseSensitiveNfc,
+    )
+
+fn ast_a() -> [FrozenFrontendNodeV1]:
+    [
+        FrozenFrontendNodeV1(kind: 10, flags: 0, source_start: 0, source_end: 30,
+            payload: "module", children: [2, 1]),
+        FrozenFrontendNodeV1(kind: 30, flags: 1, source_start: 20, source_end: 30,
+            payload: "beta", children: []),
+        FrozenFrontendNodeV1(kind: 20, flags: 1, source_start: 5, source_end: 19,
+            payload: "alpha", children: []),
+    ]
+
+fn ast_b() -> [FrozenFrontendNodeV1]:
+    [
+        FrozenFrontendNodeV1(kind: 30, flags: 1, source_start: 20, source_end: 30,
+            payload: "beta", children: []),
+        FrozenFrontendNodeV1(kind: 10, flags: 0, source_start: 0, source_end: 30,
+            payload: "module", children: [2, 0]),
+        FrozenFrontendNodeV1(kind: 20, flags: 1, source_start: 5, source_end: 19,
+            payload: "alpha", children: []),
+    ]
+
+fn build_ast(nodes: [FrozenFrontendNodeV1], root: i64):
+    build_file_ast_v1(
+        digest("source"), digest("grammar"), digest("compiler"), 30,
+        ["beta", "alpha", "alpha"], nodes, root,
+        digest("summary"), digest("reads"),
+    ).unwrap()
+
+fn fact(kind: FrontendPublicFactKindV1, symbol: text, bytes: text,
+        public_: bool = true, body: bool = false, private_source: bool = false,
+        dependencies: [text] = []) -> FrozenPublicFactV1:
+    FrozenPublicFactV1(
+        fact_kind: kind,
+        stable_symbol_id: symbol,
+        canonical_bytes: bytes,
+        is_public: public_,
+        contains_executable_body: body,
+        contains_private_source: private_source,
+        dependency_symbol_ids: dependencies,
+    )
+
+fn summary_input(facts: [FrozenPublicFactV1]) -> PublicSummaryProjectionInputV1:
+    PublicSummaryProjectionInputV1(
+        snapshot_id: digest("snapshot"),
+        logical_path: logical_path(),
+        source_blob_digest: digest("source"),
+        compiler_owner_digest: digest("compiler"),
+        grammar_digest: digest("grammar"),
+        facts: facts,
+    )
+
+describe "frontend semantic cache artifact builders":
+    it "assigns stable breadth-first indices independent of input storage order":
+        val a = build_ast(ast_a(), 0)
+        val b = build_ast(ast_b(), 1)
+        expect(a.nodes).to_equal(b.nodes)
+        expect(a.payload_tables).to_equal(["alpha", "beta", "module"])
+        expect(a.string_table).to_equal(["alpha", "beta"])
+        expect(a.nodes[0].first_child).to_equal(1)
+        expect(a.nodes[0].child_count).to_equal(2)
+        expect(a.root_node).to_equal(0)
+
+    it "rejects cycles, multiple parents, bad ranges and unreachable nodes":
+        val multiple_parent = [
+            FrozenFrontendNodeV1(kind: 1, flags: 0, source_start: 0, source_end: 3,
+                payload: "root", children: [1, 2]),
+            FrozenFrontendNodeV1(kind: 2, flags: 0, source_start: 0, source_end: 1,
+                payload: "left", children: [2]),
+            FrozenFrontendNodeV1(kind: 3, flags: 0, source_start: 1, source_end: 2,
+                payload: "right", children: []),
+        ]
+        expect(build_file_ast_v1(digest("s"), digest("g"), digest("c"), 3, [],
+            multiple_parent, 0, digest("p"), digest("r")).is_err()).to_equal(true)
+        val unreachable = ast_a()
+        unreachable[0] = FrozenFrontendNodeV1(kind: 10, flags: 0, source_start: 0,
+            source_end: 30, payload: "module", children: [1])
+        expect(build_file_ast_v1(digest("s"), digest("g"), digest("c"), 30, [],
+            unreachable, 0, digest("p"), digest("r")).is_err()).to_equal(true)
+        val bad_range = ast_a()
+        bad_range[1] = FrozenFrontendNodeV1(kind: 30, flags: 1, source_start: 20,
+            source_end: 31, payload: "beta", children: [])
+        expect(build_file_ast_v1(digest("s"), digest("g"), digest("c"), 30, [],
+            bad_range, 0, digest("p"), digest("r")).is_err()).to_equal(true)
+        expect(build_file_ast_v1("", digest("g"), digest("c"), 30, [], ast_a(), 0,
+            digest("p"), digest("r")).is_err()).to_equal(true)
+        expect(build_file_ast_v1(digest("s"), digest("g"), digest("c"), 30, [], [], 0,
+            digest("p"), digest("r")).is_err()).to_equal(true)
+        val cycle = [
+            FrozenFrontendNodeV1(kind: 1, flags: 0, source_start: 0, source_end: 2,
+                payload: "root", children: [1]),
+            FrozenFrontendNodeV1(kind: 2, flags: 0, source_start: 0, source_end: 1,
+                payload: "child", children: [0]),
+        ]
+        expect(build_file_ast_v1(digest("s"), digest("g"), digest("c"), 2, [], cycle, 0,
+            digest("p"), digest("r")).is_err()).to_equal(true)
+
+    it "renders deterministic grammar-valid public declarations without private facts":
+        val public_a = fact(FrontendPublicFactKindV1.Declaration, "sym:a",
+            "pub extern fn alpha(value: i64) -> i64")
+        val public_b = fact(FrontendPublicFactKindV1.Declaration, "sym:b",
+            "pub extern fn beta() -> text")
+        val forward_a = fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a",
+            "pub extern fn alpha(value: i64) -> i64")
+        val forward_b = fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:b",
+            "pub extern fn beta() -> text")
+        val private_ = fact(FrontendPublicFactKindV1.Declaration, "sym:secret",
+            "pub extern fn secret() -> text", false)
+        val body_ref = fact(FrontendPublicFactKindV1.BodyReference, "sym:a",
+            digest("alpha-body"))
+        val a = project_public_summary_v1(summary_input(
+            [public_b, forward_a, private_, body_ref, forward_b, public_a])).unwrap()
+        val b = project_public_summary_v1(summary_input(
+            [forward_b, public_a, body_ref, forward_a, public_b, private_])).unwrap()
+        val rendered = render_public_summary_tldr_v1(a)
+        expect(rendered).to_equal(render_public_summary_tldr_v1(b))
+        expect(rendered).to_contain("pub extern fn alpha(value: i64) -> i64")
+        expect(rendered).to_contain("pub extern fn beta() -> text")
+        expect(rendered.contains("secret")).to_equal(false)
+        expect(a.virtual_text_digest).to_equal(
+            sha256_text("simple.public.summary.text.v1\u0000" + rendered))
+        expect(parse_module_silent_checked(rendered,
+            "simple-summary/example/_tldr.spl")).to_equal(false)
+
+    it "fails closed when a public projection carries source bodies or private source":
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:bad", "pub fn bad(): 1",
+                true, true, false),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:bad", "pub fn bad(): 1",
+                true, true, false),
+        ])).is_err()).to_equal(true)
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:leak", "private bytes",
+                true, false, true),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:leak", "private bytes",
+                true, false, true),
+        ])).is_err()).to_equal(true)
+
+    it "orders recursive and later public dependencies through forward declarations":
+        val sig_a = "pub extern fn alpha(value: Beta) -> Alpha"
+        val sig_b = "pub extern fn beta(value: Alpha) -> Beta"
+        val sig_later = "pub extern fn later(value: Alpha) -> text"
+        val facts = [
+            fact(FrontendPublicFactKindV1.Declaration, "sym:later", sig_later),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:later", sig_later,
+                dependencies: ["sym:a"]),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:b", sig_b),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:b", sig_b,
+                dependencies: ["sym:a"]),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:a", sig_a),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a", sig_a,
+                dependencies: ["sym:b"]),
+            fact(FrontendPublicFactKindV1.TraitImplCoherence, "sym:trait-default",
+                "trait default generic<T>: Alpha", dependencies: ["sym:a"]),
+        ]
+        val summary = project_public_summary_v1(summary_input(facts)).unwrap()
+        expect(summary.forward_declarations[0].stable_symbol_id).to_equal("sym:a")
+        expect(summary.forward_declarations[1].stable_symbol_id).to_equal("sym:b")
+        expect(summary.forward_declarations[2].stable_symbol_id).to_equal("sym:later")
+        expect(summary.declaration_graph_digest == "").to_equal(false)
+        val rendered = render_public_summary_tldr_v1(summary)
+        expect(rendered.index_of(sig_a) < rendered.index_of("# @declaration"))
+            .to_equal(true)
+        expect(parse_module_silent_checked(rendered,
+            "simple-summary/recursive/_tldr.spl")).to_equal(false)
+
+    it "shares graph identity with the codec across declaration kinds":
+        val function_sig = "pub extern fn make_widget() -> Widget"
+        val class_sig = "pub extern class Widget:\n    fn label() -> text"
+        val summary = project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:widget", class_sig),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:widget", class_sig),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:make", function_sig,
+                dependencies: ["sym:widget"]),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:make", function_sig,
+                dependencies: ["sym:widget"]),
+            fact(FrontendPublicFactKindV1.LayoutAbi, "sym:widget-layout", "Widget:opaque",
+                dependencies: ["sym:widget"]),
+        ])).unwrap()
+        # project_public_summary_v1 has already parsed the exact rendered bytes
+        # and would have returned Err for an invalid declaration-kind surface.
+        expect(canonical_public_summary_encode_v1(summary).len() > 0).to_equal(true)
+
+    it "rejects missing dependencies, missing forwards and signature conflicts":
+        val sig = "pub extern fn alpha() -> i64"
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.Declaration, "sym:a", sig),
+        ])).is_err()).to_equal(true)
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a", sig,
+                dependencies: ["sym:missing"]),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:a", sig),
+        ])).is_err()).to_equal(true)
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a", sig),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:a",
+                "pub extern fn alpha() -> text"),
+        ])).is_err()).to_equal(true)
+        expect(project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a", sig),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:a",
+                "pub extern fn alpha() -> text"),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:a", sig),
+        ])).is_err()).to_equal(true)
+
+    it "records every exceptional body kind in canonical order":
+        val bodies = [
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.AopAdvice,
+                "sym:advice", digest("advice"), "", "", SemanticReplayPolicyV1.DeclaredReplayable),
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.GenericSpecialization,
+                "sym:generic", digest("generic"), "", "", SemanticReplayPolicyV1.DeclaredReplayable),
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.CrossModuleInline,
+                "sym:inline", digest("inline"), "", "", SemanticReplayPolicyV1.DeclaredReplayable),
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.ConstEvaluation,
+                "sym:const", digest("const"), "ctfe", digest("ctfe-provider"),
+                SemanticReplayPolicyV1.DeclaredReplayable),
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.MacroExpansion,
+                "sym:macro", digest("macro"), "macro", digest("macro-provider"),
+                SemanticReplayPolicyV1.DeclaredReplayable),
+            FrozenExceptionalBodyReadV1(ExceptionalBodyKindV1.TraitImplementation,
+                "sym:trait", digest("trait"), "", "", SemanticReplayPolicyV1.DeclaredReplayable),
+        ]
+        val set = build_semantic_read_set_v1([], bodies).unwrap()
+        expect(set.entries.len()).to_equal(6)
+        expect(set.entries[0].logical_name).to_start_with("body:aop_advice:")
+        expect(set.entries[5].logical_name).to_start_with("body:macro:")
+        expect(set.uncacheable_reason).to_equal("")
+
+    it "marks undeclared effects uncacheable and rejects policy conflicts":
+        val undeclared = FrozenSemanticReadV1(
+            SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", digest("env-provider"),
+            digest("debug"), SemanticReplayPolicyV1.UndeclaredUncacheable)
+        val set = build_semantic_read_set_v1([undeclared], []).unwrap()
+        expect(set.uncacheable_reason).to_equal("undeclared semantic effect: env:MODE")
+        val replayable = FrozenSemanticReadV1(
+            SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", digest("env-provider"),
+            digest("debug"), SemanticReplayPolicyV1.DeclaredReplayable)
+        expect(build_semantic_read_set_v1([undeclared, replayable], []).is_err()).to_equal(true)
+        var other_provider = undeclared
+        other_provider.provider_id = "other-env"
+        other_provider.provider_manifest_digest = digest("other-env-provider")
+        expect(build_semantic_read_set_v1([undeclared, other_provider], []).is_err()).to_equal(true)
+        val changed_value = FrozenSemanticReadV1(
+            SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", digest("env-provider"),
+            digest("release"), SemanticReplayPolicyV1.UndeclaredUncacheable)
+        expect(build_semantic_read_set_v1([undeclared, changed_value], []).is_err()).to_equal(true)
+        val missing_manifest = FrozenSemanticReadV1(
+            SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", "",
+            digest("debug"), SemanticReplayPolicyV1.DeclaredReplayable)
+        expect(build_semantic_read_set_v1([missing_manifest], []).is_err()).to_equal(true)
+        val duplicate_set = build_semantic_read_set_v1([undeclared, undeclared], []).unwrap()
+        expect(duplicate_set.entries.len()).to_equal(1)
+        val incomplete = FrozenExceptionalBodyReadV1(
+            ExceptionalBodyKindV1.CrossModuleInline, "", "", "", "",
+            SemanticReplayPolicyV1.DeclaredReplayable)
+        expect(build_semantic_read_set_v1([], [incomplete]).is_err()).to_equal(true)

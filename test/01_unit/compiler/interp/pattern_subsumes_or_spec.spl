@@ -1,4 +1,32 @@
-## Behavioral and source-shape coverage for Or-pattern subsumption.
+"""
+## Purpose and audience
+Behavioral and source-shape coverage for Or-pattern subsumption: the
+interpreter's pattern_subsumes short-circuits across broader and narrower Or
+patterns, recurses through nesting, and preserves wildcard, literal, range,
+enum, tuple, and array behavior; both Or branches evaluate through loops
+without filter allocation. Audience: engineers changing the interpreter
+pattern matcher.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/interp/pattern_subsumes_or_spec.spl
+
+## Compatibility and limitations
+Scenarios call pattern_subsumes directly on PatternRepr fixtures; the loop
+shape contract reads the shipped matcher source because the Or evaluation
+loops have no runtime API, so a matcher reshape must be mirrored here.
+
+## Verification guidance and troubleshooting
+A failing behavioral scenario names the fixture pair whose subsumption verdict
+drifted; a failing loop-shape scenario means an Or branch gained a filter or
+allocation and the diff must be re-reviewed before updating this contract.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: Or-pattern subsumption behavior
 
 use std.spec
 use std.io_runtime.{file_read, file_exists}
@@ -17,6 +45,9 @@ fn or_pattern(patterns: [PatternRepr]) -> PatternRepr:
 
 describe "Or-pattern subsumption short-circuiting":
     it "accepts early and late matches from a broader Or":
+        # @req REQ-INTERP-OR-SUBSUME-001
+        # @capture(statistics): subsumption verdicts for early and late Or arms
+        step("Match the first and last arms of a broader Or")
         val early = or_pattern([int_pattern(1), int_pattern(2)])
         val late = or_pattern([int_pattern(1), int_pattern(2)])
 
@@ -24,6 +55,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(late, int_pattern(2))).to_equal(true)
 
     it "rejects all-false and empty broader Or patterns":
+        # @req REQ-INTERP-OR-SUBSUME-002
+        # @capture(statistics): verdicts for exhausted and empty broader Ors
+        step("Match beyond every arm of failing and empty broader Ors")
         val all_false = or_pattern([int_pattern(1), int_pattern(2)])
         val empty = or_pattern([])
 
@@ -31,6 +65,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(empty, int_pattern(3))).to_equal(false)
 
     it "rejects early and late failures from a narrower Or":
+        # @req REQ-INTERP-OR-SUBSUME-003
+        # @capture(statistics): verdicts for failing narrower Or arm orders
+        step("Check that no single narrower Or arm widens a range")
         val broader = int_range(0, 10)
         val early_failure = or_pattern([int_pattern(99), int_pattern(5)])
         val late_failure = or_pattern([int_pattern(5), int_pattern(99)])
@@ -39,6 +76,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(broader, late_failure)).to_equal(false)
 
     it "accepts all-true and empty narrower Or patterns":
+        # @req REQ-INTERP-OR-SUBSUME-004
+        # @capture(statistics): verdicts for satisfied and empty narrower Ors
+        step("Check that any satisfied narrower Or arm subsumes")
         val broader = int_range(0, 10)
         val all_true = or_pattern([int_pattern(1), int_pattern(9)])
         val empty = or_pattern([])
@@ -47,6 +87,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(broader, empty)).to_equal(true)
 
     it "recurses through nested broader and narrower Or patterns":
+        # @req REQ-INTERP-OR-SUBSUME-005
+        # @capture(statistics): verdicts for nested Or fixtures
+        step("Match through nested Or patterns on both sides")
         val nested_broader = or_pattern([
             int_pattern(0),
             or_pattern([int_pattern(1), int_pattern(2)]),
@@ -60,6 +103,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(int_range(0, 10), nested_narrower)).to_equal(true)
 
     it "preserves wildcard literal range type and enum behavior":
+        # @req REQ-INTERP-OR-SUBSUME-006
+        # @capture(statistics): verdicts across wildcard literal range and enum patterns
+        step("Exercise the non-Or pattern families against Or behavior")
         expect(pattern_subsumes(PatternRepr.Wildcard, int_pattern(99))).to_equal(true)
         expect(pattern_subsumes(PatternRepr.Identifier("item"), int_pattern(99))).to_equal(true)
         expect(pattern_subsumes(int_pattern(4), int_pattern(4))).to_equal(true)
@@ -75,6 +121,9 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(some_one, none)).to_equal(false)
 
     it "preserves tuple and array fallback behavior":
+        # @req REQ-INTERP-OR-SUBSUME-007
+        # @capture(statistics): verdicts across tuple length and array patterns
+        step("Exercise tuple coverage mismatch and array non-subsumption")
         val tuple_broader = PatternRepr.Tuple([int_pattern(1), int_range(0, 10)])
         val tuple_covered = PatternRepr.Tuple([int_pattern(1), int_pattern(5)])
         val tuple_mismatch = PatternRepr.Tuple([int_pattern(2), int_pattern(5)])
@@ -88,12 +137,19 @@ describe "Or-pattern subsumption short-circuiting":
         expect(pattern_subsumes(tuple_broader, array_pattern)).to_equal(false)
 
     it "keeps both Or branches free of filter allocation":
+        # @req REQ-INTERP-OR-SUBSUME-008
+        # @capture(bit_table): loop-shape tokens and forbidden filter calls
+        step("Read the matcher's Or evaluation loops")
         expect(file_exists(PATTERN_SOURCE)).to_equal(true)
         val source = file_read(PATTERN_SOURCE)
         val broader_loop = "case (Or(pats), _):\n            for pat in pats:\n                if pattern_subsumes(pat, narrower):"
         val narrower_loop = "case (_, Or(pats)):\n            for pat in pats:\n                if not pattern_subsumes(broader, pat):"
 
-        expect(source.contains(broader_loop)).to_equal(true)
-        expect(source.contains(narrower_loop)).to_equal(true)
-        expect(source.contains("pats.filter(pattern_subsumes(_, narrower))")).to_equal(false)
-        expect(source.contains("pats.filter(not pattern_subsumes(broader, _))")).to_equal(false)
+        val keeps_broader_branch_loop = source.contains(broader_loop)
+        expect(keeps_broader_branch_loop).to_equal(true)
+        val keeps_narrower_branch_loop = source.contains(narrower_loop)
+        expect(keeps_narrower_branch_loop).to_equal(true)
+        val avoids_broader_filter_allocation = source.contains("pats.filter(pattern_subsumes(_, narrower))")
+        expect(avoids_broader_filter_allocation).to_equal(false)
+        val avoids_narrower_filter_allocation = source.contains("pats.filter(not pattern_subsumes(broader, _))")
+        expect(avoids_narrower_filter_allocation).to_equal(false)

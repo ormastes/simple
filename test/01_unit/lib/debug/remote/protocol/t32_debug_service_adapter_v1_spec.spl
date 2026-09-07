@@ -1,6 +1,29 @@
 # codex-system-test
 # @req REQ-003 REQ-008 REQ-010 REQ-012
-"""TRACE32 uses its existing registry while DebugServiceV1 owns policy and receipts."""
+"""
+## Purpose and audience
+TRACE32 uses its existing registry while DebugServiceV1 owns policy and
+receipts. This file is the executable contract for that harmony adapter:
+registry binding, observe-only policy receipts, action perturbation
+classification, and DAP authorization/outcome recording. Written for the
+remote-debug protocol owners.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/debug/remote/protocol/t32_debug_service_adapter_v1_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+All scenarios run against fixture Trace32Client records on
+fixture.invalid; no TRACE32 instance or network transport is contacted.
+## Verification guidance and troubleshooting
+A failure names the binding, receipt, or classification that diverged;
+re-run the single file and compare against the lifecycle evidence linked
+below before changing adapter or policy code.
+"""
+# Lifecycle: doc/01_research/domain/up_squared_apl_intel_dci_debug.md ;
+# doc/03_plan/agent_tasks/up_squared_apl_intel_dci_debug.md ;
+# doc/04_architecture/up_squared_apl_intel_dci_debug.md ;
+# doc/05_design/up_squared_apl_intel_dci_debug.md
+# @manual_section: TRACE32 DebugServiceV1 harmony adapter
 
 use std.spec.*
 use std.common.debug.contracts_v1.{
@@ -40,6 +63,9 @@ fn require_debug_session(result: Result<DebugSessionId, text>) -> DebugSessionId
 
 describe "TRACE32 DebugServiceV1 harmony adapter":
     it "binds an existing TRACE32 registry resource without creating another device stack":
+        # @req REQ-003
+        # @capture(statistics): bound session graph nodes and identity
+        step("Register a fixture TRACE32 session, bind it, and read the central graph")
         t32_register_session("harmony-bind", "fixture.invalid", 20000, "", "arm", connected_fixture())
         val session_id = require_debug_session(t32_debug_bind_session_v1(
             "harmony-bind",
@@ -51,7 +77,7 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         match graph:
             case Some(value):
                 expect(value.build_id).to_equal("build-t32-harmony")
-                expect(value.nodes.len()).to_equal(1)
+                expect(value.nodes.len()).to_equal(1)  # oracle: one TRACE32 registry resource projects exactly one graph node
                 expect(value.nodes[0].target_id).to_equal("t32://harmony-bind/core/0")
                 expect(value.nodes[0].kind).to_equal("embedded.trace32")
             case None: fail("central debug graph missing for TRACE32 binding")
@@ -60,6 +86,9 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
             case Err(reason): fail("failed to unbind TRACE32 resource: {reason}")
 
     it "receipts passive window inspection but denies mutating PRACTICE under observe policy":
+        # @req REQ-008
+        # @capture(statistics): authorization verdicts and receipt actions
+        step("Authorize a window capture and a mutating PRACTICE action under observe-only policy")
         t32_register_session("harmony-policy", "fixture.invalid", 20001, "", "riscv", connected_fixture())
         val session_id = require_debug_session(t32_debug_bind_session_v1(
             "harmony-policy",
@@ -81,11 +110,17 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         expect(receipts[receipts.len() - 1].action).to_equal("t32.action.PRACTICE DO")
 
     it "classifies reset and flash as mutating while ordinary navigation is cooperative":
+        # @req REQ-010
+        # @capture(bit_table): PRACTICE action perturbation classification
+        step("Classify reset, flash, and step PRACTICE actions into perturbation classes")
         expect(t32_debug_action_perturbation_v1("SYStem.RESet") == DebugPerturbationV1.Mutating).to_equal(true)
         expect(t32_debug_action_perturbation_v1("FLASH.Program image.elf") == DebugPerturbationV1.Mutating).to_equal(true)
         expect(t32_debug_action_perturbation_v1("step") == DebugPerturbationV1.Cooperative).to_equal(true)
 
     it "classifies ordinary DAP inspection, stopping control, probes, and mutation distinctly":
+        # @req REQ-010
+        # @capture(bit_table): DAP action operation and perturbation matrix
+        step("Classify memory.read, single_step, breakpoint.set, and register.write DAP actions")
         val inspect = t32_debug_classify_dap_action_v1("memory.read")
         expect(inspect.operation == DebugRootOperationV1.Inspect).to_equal(true)
         expect(inspect.perturbation == DebugPerturbationV1.Passive).to_equal(true)
@@ -105,6 +140,9 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         expect(mutation.perturbation == DebugPerturbationV1.Mutating).to_equal(true)
 
     it "denies stopping DAP control before an outcome or transport action can be recorded":
+        # @req REQ-012
+        # @capture(statistics): denied authorization and receipt deltas
+        step("Authorize a halt under observe-only policy and inspect the receipt list")
         t32_register_session("harmony-dap-deny", "fixture.invalid", 20002, "", "arm", connected_fixture())
         val session_id = require_debug_session(t32_debug_bind_session_v1(
             "harmony-dap-deny",
@@ -119,9 +157,12 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         val receipts = central_debug_service_v1_receipts(session_id)
         expect(receipts.len()).to_equal(before + 1)
         expect(receipts[receipts.len() - 1].action).to_equal("t32.dap.halt")
-        expect(receipts.filter(_.action == "t32.dap.halt.outcome").len()).to_equal(0)
+        expect(receipts.filter(_.action == "t32.dap.halt.outcome").len()).to_equal(0)  # oracle: a denied halt is never executed, so no outcome receipt exists
 
     it "records successful inspect outcomes without claiming target execution changed":
+        # @req REQ-012
+        # @capture(statistics): inspect authorization and outcome receipt
+        step("Authorize register.read, then record its successful outcome")
         t32_register_session("harmony-dap-outcome", "fixture.invalid", 20003, "", "arm", connected_fixture())
         val session_id = require_debug_session(t32_debug_bind_session_v1(
             "harmony-dap-outcome",
@@ -137,6 +178,9 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         expect(outcome.action).to_equal("t32.dap.register.read.outcome")
 
     it "classifies coverage as passive profiling and records a non-changing outcome":
+        # @req REQ-012
+        # @capture(statistics): coverage classification and outcome receipt
+        step("Classify coverage.collect as profiling, authorize it, and record its outcome")
         val coverage = t32_debug_classify_dap_action_v1("coverage.collect")
         expect(coverage.operation == DebugRootOperationV1.Profile).to_equal(true)
         expect(coverage.perturbation == DebugPerturbationV1.Passive).to_equal(true)
@@ -157,6 +201,9 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         expect(outcome.execution_changed).to_equal(false)
 
     it "denies trace capture before an outcome can be recorded when profiling is forbidden":
+        # @req REQ-012
+        # @capture(statistics): denied trace authorization and receipt deltas
+        step("Disable profiling, then attempt a trace.capture authorization")
         var policy = debug_policy_observe_only_v1()
         policy.allow_profile = false
         t32_register_session("harmony-trace-deny", "fixture.invalid", 20005, "", "arm", connected_fixture())
@@ -171,4 +218,4 @@ describe "TRACE32 DebugServiceV1 harmony adapter":
         expect(denied.reason).to_equal("profile denied by policy")
         val receipts = central_debug_service_v1_receipts(session_id)
         expect(receipts[receipts.len() - 1].action).to_equal("t32.dap.trace.capture")
-        expect(receipts.filter(_.action == "t32.dap.trace.capture.outcome").len()).to_equal(0)
+        expect(receipts.filter(_.action == "t32.dap.trace.capture.outcome").len()).to_equal(0)  # oracle: the denied capture never ran, so no outcome receipt exists

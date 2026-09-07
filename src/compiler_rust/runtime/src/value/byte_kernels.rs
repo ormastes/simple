@@ -71,6 +71,26 @@ pub(crate) fn avx2_byte_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     scalar_byte_rfind(haystack, needle)
 }
 
+pub(crate) fn avx512_byte_find(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            return avx512_byte_find_impl(haystack, needle, start);
+        }
+    }
+    avx2_byte_find(haystack, needle, start)
+}
+
+pub(crate) fn avx512_byte_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            return avx512_byte_rfind_impl(haystack, needle);
+        }
+    }
+    avx2_byte_rfind(haystack, needle)
+}
+
 pub(crate) fn neon_byte_find(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     #[cfg(target_arch = "aarch64")]
     {
@@ -99,7 +119,8 @@ pub(crate) fn byte_split_ranges_for_tier(simd_tier: SimdTier, haystack: &str, de
     }
 
     let find_fn: fn(&[u8], &[u8], usize) -> Option<usize> = match simd_tier {
-        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_find,
+        SimdTier::X86_64Avx512 => avx512_byte_find,
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 => avx2_byte_find,
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_find,
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_find,
     };
@@ -118,7 +139,8 @@ pub(crate) fn byte_split_ranges_for_tier(simd_tier: SimdTier, haystack: &str, de
 
 pub(crate) fn byte_find_for_tier(simd_tier: SimdTier, haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     match simd_tier {
-        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_find(haystack, needle, start),
+        SimdTier::X86_64Avx512 => avx512_byte_find(haystack, needle, start),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 => avx2_byte_find(haystack, needle, start),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_find(haystack, needle, start),
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_find(haystack, needle, start),
     }
@@ -126,7 +148,8 @@ pub(crate) fn byte_find_for_tier(simd_tier: SimdTier, haystack: &[u8], needle: &
 
 pub(crate) fn byte_rfind_for_tier(simd_tier: SimdTier, haystack: &[u8], needle: &[u8]) -> Option<usize> {
     match simd_tier {
-        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_rfind(haystack, needle),
+        SimdTier::X86_64Avx512 => avx512_byte_rfind(haystack, needle),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 => avx2_byte_rfind(haystack, needle),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_rfind(haystack, needle),
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_rfind(haystack, needle),
     }
@@ -201,6 +224,96 @@ unsafe fn avx2_byte_rfind_impl(haystack: &[u8], needle: &[u8]) -> Option<usize> 
                 return Some(candidate);
             }
             mask &= !(1u32 << highest);
+        }
+        if chunk_start == 0 {
+            break;
+        }
+        chunk_end = chunk_start;
+    }
+
+    scalar_byte_rfind(haystack, needle)
+}
+
+// AVX-512 variants of the two kernels above. They scan 64 bytes per step
+// instead of AVX2's 32, and read the comparison result straight out of a
+// `__mmask64` register rather than materializing it with `movemask`.
+//
+// The loads go through `read_unaligned` rather than `_mm512_loadu_si512`
+// deliberately: that intrinsic's pointer type has changed across Rust
+// releases (`*const i32` vs `*const __m512i`), and this compiles to the same
+// `vmovdqu64` under `#[target_feature]` without depending on which spelling
+// the toolchain currently exposes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_byte_find_impl(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    use std::arch::x86_64::{__m512i, _mm512_cmpeq_epi8_mask, _mm512_set1_epi8};
+
+    if needle.is_empty() {
+        return Some(start.min(haystack.len()));
+    }
+    if start > haystack.len() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    let limit = haystack.len() - needle.len();
+    let first = _mm512_set1_epi8(needle[0] as i8);
+    let mut idx = start;
+    while idx <= limit && idx + 64 <= haystack.len() {
+        let chunk = std::ptr::read_unaligned(haystack.as_ptr().add(idx) as *const __m512i);
+        let mut mask = _mm512_cmpeq_epi8_mask(chunk, first);
+        let remaining = limit + 1 - idx;
+        if remaining < 64 {
+            mask &= (1u64 << remaining) - 1;
+        }
+        while mask != 0 {
+            let offset = mask.trailing_zeros() as usize;
+            let candidate = idx + offset;
+            if &haystack[candidate..candidate + needle.len()] == needle {
+                return Some(candidate);
+            }
+            mask &= mask - 1;
+        }
+        idx += 64;
+    }
+
+    // Tail shorter than a 512-bit lane: hand off to the AVX2 kernel, which
+    // has its own 256-bit path and scalar fallback.
+    avx2_byte_find(haystack, needle, idx)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_byte_rfind_impl(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::{__m512i, _mm512_cmpeq_epi8_mask, _mm512_set1_epi8};
+
+    if needle.is_empty() {
+        return Some(haystack.len());
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    if haystack.len() < 64 {
+        return avx2_byte_rfind(haystack, needle);
+    }
+
+    let limit = haystack.len() - needle.len();
+    let first = _mm512_set1_epi8(needle[0] as i8);
+    let mut chunk_end = limit + 1;
+    loop {
+        let chunk_start = chunk_end.saturating_sub(64);
+        let chunk = std::ptr::read_unaligned(haystack.as_ptr().add(chunk_start) as *const __m512i);
+        let mut mask = _mm512_cmpeq_epi8_mask(chunk, first);
+        let valid = chunk_end - chunk_start;
+        if valid < 64 {
+            mask &= (1u64 << valid) - 1;
+        }
+        while mask != 0 {
+            let highest = 63 - mask.leading_zeros() as usize;
+            let candidate = chunk_start + highest;
+            if candidate <= limit && &haystack[candidate..candidate + needle.len()] == needle {
+                return Some(candidate);
+            }
+            mask &= !(1u64 << highest);
         }
         if chunk_start == 0 {
             break;
@@ -302,8 +415,9 @@ unsafe fn neon_byte_rfind_impl(haystack: &[u8], needle: &[u8]) -> Option<usize> 
 #[cfg(test)]
 mod tests {
     use super::{
-        avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
-        scalar_byte_rfind, scalar_byte_split_ranges,
+        avx2_byte_find, avx2_byte_rfind, avx512_byte_find, avx512_byte_rfind, byte_find_for_tier, byte_rfind_for_tier,
+        byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find, scalar_byte_rfind,
+        scalar_byte_split_ranges,
     };
     use simple_simd::SimdTier;
 
@@ -339,5 +453,78 @@ mod tests {
             byte_split_ranges_for_tier(SimdTier::Aarch64Neon, haystack, "--"),
             expected
         );
+        assert_eq!(
+            byte_split_ranges_for_tier(SimdTier::X86_64Avx512, haystack, "--"),
+            expected
+        );
+    }
+
+    // These stay correct on a host without AVX-512: the dispatchers fall back
+    // to the AVX2 kernel, which falls back to scalar. That is the point — the
+    // tier must never change the ANSWER, only how fast it is reached.
+    #[test]
+    fn avx512_kernels_match_scalar_across_lane_boundaries() {
+        // Lengths chosen to straddle the 64-byte lane: under one lane, exactly
+        // one, just over, and several with a partial tail.
+        for filler in [10usize, 63, 64, 65, 127, 128, 200] {
+            let mut haystack = vec![b'a'; filler];
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'b'; 17]);
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'c'; 5]);
+            let needle = b"needle";
+
+            for start in [0usize, 1, 7, filler] {
+                assert_eq!(
+                    avx512_byte_find(&haystack, needle, start),
+                    scalar_byte_find(&haystack, needle, start),
+                    "find mismatch: filler={filler} start={start}"
+                );
+            }
+            assert_eq!(
+                avx512_byte_rfind(&haystack, needle),
+                scalar_byte_rfind(&haystack, needle),
+                "rfind mismatch: filler={filler}"
+            );
+        }
+    }
+
+    #[test]
+    fn avx512_kernels_handle_absent_and_degenerate_needles() {
+        let haystack = vec![b'z'; 300];
+        assert_eq!(avx512_byte_find(&haystack, b"needle", 0), None);
+        assert_eq!(avx512_byte_rfind(&haystack, b"needle"), None);
+        // Needle longer than the haystack.
+        assert_eq!(avx512_byte_find(b"ab", b"abcdef", 0), None);
+        // Empty needle matches the scalar contract at both ends.
+        assert_eq!(
+            avx512_byte_find(&haystack, b"", 5),
+            scalar_byte_find(&haystack, b"", 5)
+        );
+        assert_eq!(avx512_byte_rfind(&haystack, b""), scalar_byte_rfind(&haystack, b""));
+        // Start beyond the end must not panic.
+        assert_eq!(avx512_byte_find(&haystack, b"z", 10_000), None);
+    }
+
+    #[test]
+    fn avx512_tier_dispatch_agrees_with_avx2_tier() {
+        let mut haystack = vec![b'q'; 150];
+        haystack.extend_from_slice(b"target");
+        haystack.extend_from_slice(&vec![b'r'; 80]);
+        let needle = b"target";
+
+        assert_eq!(
+            byte_find_for_tier(SimdTier::X86_64Avx512, &haystack, needle, 0),
+            byte_find_for_tier(SimdTier::X86_64Avx2, &haystack, needle, 0)
+        );
+        assert_eq!(
+            byte_rfind_for_tier(SimdTier::X86_64Avx512, &haystack, needle),
+            byte_rfind_for_tier(SimdTier::X86_64Avx2, &haystack, needle)
+        );
+        assert_eq!(
+            avx512_byte_find(&haystack, needle, 0),
+            avx2_byte_find(&haystack, needle, 0)
+        );
+        assert_eq!(avx512_byte_rfind(&haystack, needle), avx2_byte_rfind(&haystack, needle));
     }
 }

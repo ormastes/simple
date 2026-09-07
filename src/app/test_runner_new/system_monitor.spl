@@ -292,8 +292,15 @@ fn get_macos_cpu_percent() -> f64:
     # Data line: "  0.00  0  0.00    2  1 97"  (us sy id)
     val output = shell_output("iostat -c 2 -w 1 2>/dev/null | tail -1", "")
     if output != "":
-        # Last 3 numbers are: user sys idle
-        val idle_val = shell_int("echo '{output}' | awk '{print $NF}' | cut -d. -f1", -1)
+        # iostat's header is THREE groups (disk / cpu / load average), so the
+        # LAST three fields of a data line are the 1m/5m/15m load averages,
+        # not "us sy id". `$NF` therefore read the 15-minute load average and
+        # the code computed `100 - load15` as CPU-used — a reading that is
+        # above any sane threshold on an idle box and BELOW the truth on a
+        # saturated one. Idle is three fields before the end, whatever the
+        # disk group's width. See the twin in
+        # src/lib/nogc_sync_mut/test_runner/system_monitor.spl.
+        val idle_val = shell_int("echo '{output}' | awk '{print $(NF-3)}' | cut -d. -f1", -1)
         if idle_val >= 0 and idle_val <= 100:
             val used = 100 - idle_val
             return used * 1.0

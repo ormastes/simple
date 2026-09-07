@@ -1,13 +1,30 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+saturating add/subtract emit functions (SQADD/UQADD/SQSUB/UQSUB). Audience:
+the ARM64 backend engineer verifying each emitted instruction matches the
+ARMv8 ARM opcode layout bit-for-bit before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_sat_spec.spl
 
-# test/unit/compiler/backend/neon_sat_spec.spl
-#
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode.
+Unsupported: saturating forms outside the 4 listed here (not implemented by
+the backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+saturating instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 §C7.2.274/277/363/366 and the per-scenario derivation
+comment (`base + Rm*65536 + Rn*32 + Rd`) to locate which register field
+produced the wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-saturating-arith-encoding
+
 # Feature ID: #COMPILER-BACKEND-NATIVE-NEON-SAT
 # Category:   Compiler | Backend | Native | AArch64 SQADD/UQADD/SQSUB/UQSUB Encoding
 #
@@ -19,11 +36,6 @@
 #
 # All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
 # Encoding: base + Rm*65536 + Rn*32 + Rd
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.arm_neon.{emit_neon_sqadd_4s, emit_neon_uqadd_4s, emit_neon_sqsub_4s, emit_neon_uqsub_4s}
 
@@ -34,22 +46,29 @@ use compiler.backend.native.arm_neon.{emit_neon_sqadd_4s, emit_neon_uqadd_4s, em
 
 describe "emit_neon_sqadd_4s — signed saturating add 4 lanes":
     it "SQADD V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-SAT-001
+        step("Encode SQADD V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_neon_sqadd_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x0C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SQADD.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA00C00")
+        expect(b.len()).to_equal(4)  # oracle: SQADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x0C)  # oracle: byte1 = base opcode bits identifying saturating add
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 selects signed SQADD
 
     it "SQADD V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-NEON-SAT-002
+        step("Encode SQADD V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x4EA00C00 + 3*65536 + 2*32 + 1 = 0x4EA30C41
-        # LE bytes: 0x41, 0x0C, 0xA3, 0x4E
         var b = emit_neon_sqadd_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x0C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SQADD.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x4EA30C41")
+        expect(b.len()).to_equal(4)  # oracle: SQADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base 0x00 + Rd(1) + Rn(2)*32(64) folded low byte
+        expect(b[1]).to_equal(0x0C)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # UQADD V0.4S, V0.4S, V0.4S => base 0x6EA00C00
@@ -58,22 +77,29 @@ describe "emit_neon_sqadd_4s — signed saturating add 4 lanes":
 
 describe "emit_neon_uqadd_4s — unsigned saturating add 4 lanes":
     it "UQADD V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-SAT-003
+        step("Encode UQADD V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_neon_uqadd_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x0C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UQADD.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6EA00C00")
+        expect(b.len()).to_equal(4)  # oracle: UQADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x0C)  # oracle: byte1 = base opcode bits identifying saturating add
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects unsigned UQADD
 
     it "UQADD V5.4S, V6.4S, V7.4S encodes register fields correctly":
+        # @req REQ-NEON-SAT-004
+        step("Encode UQADD V5.4S, V6.4S, V7.4S (Rd=5, Rn=6, Rm=7)")
         # word = 0x6EA00C00 + 7*65536 + 6*32 + 5 = 0x6EA70CC5
-        # LE bytes: 0xC5, 0x0C, 0xA7, 0x6E
         var b = emit_neon_uqadd_4s(5, 6, 7)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0xC5)
-        expect(b[1]).to_equal(0x0C)
-        expect(b[2]).to_equal(0xA7)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UQADD.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x6EA70CC5")
+        expect(b.len()).to_equal(4)  # oracle: UQADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0xC5)  # oracle: byte0 = base 0x00 + Rd(5) + Rn(6)*32(192) folded low byte
+        expect(b[1]).to_equal(0x0C)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0xA7)  # oracle: byte2 = base 0xA0 + Rm(7) from the Rm*65536 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # SQSUB V0.4S, V0.4S, V0.4S => base 0x4EA02C00
@@ -82,22 +108,29 @@ describe "emit_neon_uqadd_4s — unsigned saturating add 4 lanes":
 
 describe "emit_neon_sqsub_4s — signed saturating subtract 4 lanes":
     it "SQSUB V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-SAT-005
+        step("Encode SQSUB V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_neon_sqsub_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x2C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SQSUB.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA02C00")
+        expect(b.len()).to_equal(4)  # oracle: SQSUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x2C)  # oracle: byte1 = base opcode bits identifying saturating subtract
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 selects signed SQSUB
 
     it "SQSUB V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-NEON-SAT-006
+        step("Encode SQSUB V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x4EA02C00 + 3*65536 + 2*32 + 1 = 0x4EA32C41
-        # LE bytes: 0x41, 0x2C, 0xA3, 0x4E
         var b = emit_neon_sqsub_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x2C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SQSUB.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x4EA32C41")
+        expect(b.len()).to_equal(4)  # oracle: SQSUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base 0x00 + Rd(1) + Rn(2)*32(64) folded low byte
+        expect(b[1]).to_equal(0x2C)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # UQSUB V0.4S, V0.4S, V0.4S => base 0x6EA02C00
@@ -106,35 +139,50 @@ describe "emit_neon_sqsub_4s — signed saturating subtract 4 lanes":
 
 describe "emit_neon_uqsub_4s — unsigned saturating subtract 4 lanes":
     it "UQSUB V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-SAT-007
+        step("Encode UQSUB V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_neon_uqsub_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x2C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UQSUB.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6EA02C00")
+        expect(b.len()).to_equal(4)  # oracle: UQSUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x2C)  # oracle: byte1 = base opcode bits identifying saturating subtract
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects unsigned UQSUB
 
     it "UQSUB V5.4S, V6.4S, V7.4S encodes register fields correctly":
+        # @req REQ-NEON-SAT-008
+        step("Encode UQSUB V5.4S, V6.4S, V7.4S (Rd=5, Rn=6, Rm=7)")
         # word = 0x6EA02C00 + 7*65536 + 6*32 + 5 = 0x6EA72CC5
-        # LE bytes: 0xC5, 0x2C, 0xA7, 0x6E
         var b = emit_neon_uqsub_4s(5, 6, 7)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0xC5)
-        expect(b[1]).to_equal(0x2C)
-        expect(b[2]).to_equal(0xA7)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UQSUB.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x6EA72CC5")
+        expect(b.len()).to_equal(4)  # oracle: UQSUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0xC5)  # oracle: byte0 = base 0x00 + Rd(5) + Rn(6)*32(192) folded low byte
+        expect(b[1]).to_equal(0x2C)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0xA7)  # oracle: byte2 = base 0xA0 + Rm(7) from the Rm*65536 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # Property: all variants always return exactly 4 bytes
 # ============================================================================
 
 describe "SQADD/UQADD/SQSUB/UQSUB emit output length":
-    it "emit_neon_sqadd_4s always returns 4 bytes":
+    it "emit_neon_sqadd_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-SAT-009
+        step("Encode SQADD V1.4S, V2.4S, V3.4S with non-zero registers")
         var b = emit_neon_sqadd_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): SQADD.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_neon_uqsub_4s always returns 4 bytes":
+    it "emit_neon_uqsub_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-SAT-010
+        step("Encode UQSUB V5.4S, V6.4S, V7.4S with non-zero registers")
         var b = emit_neon_uqsub_4s(5, 6, 7)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): UQSUB.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # Property: signed vs unsigned differ only in byte[3] (U bit = bit29)
@@ -142,19 +190,27 @@ describe "SQADD/UQADD/SQSUB/UQSUB emit output length":
 
 describe "signed vs unsigned byte[3] distinction":
     it "SQADD and UQADD with same registers match bytes 0-2 and differ at byte[3]":
+        # @req REQ-NEON-SAT-011
+        step("Encode SQADD and UQADD with identical registers V1.4S, V2.4S, V3.4S")
         var s = emit_neon_sqadd_4s(1, 2, 3)
         var u = emit_neon_uqadd_4s(1, 2, 3)
+        # @capture(bit_table): SQADD vs UQADD byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(s[0]).to_equal(u[0])
         expect(s[1]).to_equal(u[1])
         expect(s[2]).to_equal(u[2])
         # UQADD has U=1 (bit 29), which raises byte[3] by 0x20
-        expect(u[3] - s[3]).to_equal(0x20)
+        expect(u[3] - s[3]).to_equal(0x20)  # oracle: bit29 (U=1 for unsigned) adds 0x20 to the top byte
 
     it "SQSUB and UQSUB with same registers match bytes 0-2 and differ at byte[3]":
+        # @req REQ-NEON-SAT-012
+        step("Encode SQSUB and UQSUB with identical registers V1.4S, V2.4S, V3.4S")
         var s = emit_neon_sqsub_4s(1, 2, 3)
         var u = emit_neon_uqsub_4s(1, 2, 3)
+        # @capture(bit_table): SQSUB vs UQSUB byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(s[0]).to_equal(u[0])
         expect(s[1]).to_equal(u[1])
         expect(s[2]).to_equal(u[2])
         # UQSUB has U=1 (bit 29), which raises byte[3] by 0x20
-        expect(u[3] - s[3]).to_equal(0x20)
+        expect(u[3] - s[3]).to_equal(0x20)  # oracle: bit29 (U=1 for unsigned) adds 0x20 to the top byte

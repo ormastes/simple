@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Pins the mechanism behind the import-registration half of the 2026-08-21 HIR
+per-module cost work: the explicit dependency sweep is memoized per (surface,
+name), misses stay retryable, registrations never carry across importers, and
+dependency tails run once per importer. Audience: engineers changing
+hir_lowering module import registration or its memo caches.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl
+
+## Compatibility and limitations
+The observable is sweep/skip COUNTERS, not wall clocks, so the spec
+discriminates the algorithm rather than the machine; the SymbolTable.define
+shape contract reads shipped source because the clone counters live in the
+Rust seed and are not reachable from Simple.
+
+## Verification guidance and troubleshooting
+A failing counter expectation names the memo or skip counter to re-check in
+module_import_registration; a failing shape contract names the SymbolTable
+define region, and a rename there must be mirrored here only after review.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: HIR import registration cost mechanism
+
 # @tag: unit, compiler, hir, native-safe
 #
 # Pins the MECHANISM behind the import-registration half of the 2026-08-21 HIR
@@ -67,6 +97,9 @@ fn import_registry() -> ModuleSurfacesByName:
 
 describe("HIR import registration resolution facts", fn():
     it("resolves a qualified type name once per (surface, name), not once per importer", fn():
+        # @req REQ-HIR-DEPTAIL-001
+        # @capture(statistics): explicit-dep sweep count across three importers
+        step("Resolve the same qualified dependency from three importers")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -78,17 +111,20 @@ describe("HIR import registration resolution facts", fn():
         lowering.begin_module("pkg/imp1.spl")
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
-        expect(lowering.explicit_dep_scan_count).to_equal(1)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)  # oracle: the first importer must sweep the declaring surface exactly once
         lowering.begin_module("pkg/imp2.spl")
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
         lowering.begin_module("pkg/imp3.spl")
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
-        expect(lowering.explicit_dep_scan_count).to_equal(1)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)  # oracle: importer two and three must cost a dict probe, not a re-sweep
     )
 
     it("does not repeat a MISS -- the negative result is cached too", fn():
+        # @req REQ-HIR-DEPTAIL-002
+        # @capture(statistics): miss sweep count and negative-memo entry
+        step("Resolve a never-declared dependency twice from one importer")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -99,11 +135,14 @@ describe("HIR import registration resolution facts", fn():
             decl, "NeverDeclared", span, false)
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "NeverDeclared", span, false)
-        expect(lowering.explicit_dep_scan_count).to_equal(1)
-        expect(lowering.explicit_dep_target_memo["pkg.decl NeverDeclared"]).to_equal(-1)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)  # oracle: the repeated MISS must reuse the single negative sweep
+        expect(lowering.explicit_dep_target_memo["pkg.decl NeverDeclared"]).to_equal(-1)  # oracle: -1 is the frozen MISS sentinel recorded by the memo
     )
 
     it("still resolves a different dependency name, and a different surface", fn():
+        # @req REQ-HIR-DEPTAIL-003
+        # @capture(statistics): sweep count for distinct names and surfaces
+        step("Resolve different names and a second surface")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -113,10 +152,13 @@ describe("HIR import registration resolution facts", fn():
             registry.surfaces[0], "Two", span, false)
         lowering.materialize_imported_callable_explicit_dependency(
             registry.surfaces[1], "One", span, false)
-        expect(lowering.explicit_dep_scan_count).to_equal(3)
+        expect(lowering.explicit_dep_scan_count).to_equal(3)  # oracle: each distinct (surface, name) key is a fresh sweep by contract
     )
 
     it("caches only SymbolId-free facts", fn():
+        # @req REQ-HIR-DEPTAIL-004
+        # @capture(statistics): memo sizes and cached item name across begin_module
+        step("Check the memo contents across a module switch")
         # The whole safety argument: the cached value is a registry INDEX plus
         # an item NAME, both stable for the frozen phase. SymbolIds are
         # allocated per module and restart at 0 on `symbols.reset_module()`, so
@@ -129,13 +171,16 @@ describe("HIR import registration resolution facts", fn():
         val span = Span.empty()
         lowering.materialize_imported_callable_explicit_dependency(
             registry.surfaces[0], "Widget", span, false)
-        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)
-        expect(lowering.explicit_dep_item_memo["pkg.decl Widget"]).to_equal("")
+        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)  # oracle: only the one resolved (surface, name) key may be recorded
+        expect(lowering.explicit_dep_item_memo["pkg.decl Widget"]).to_equal("")  # oracle: the cached item name is the registry's own declaring name
         lowering.begin_module("pkg/imp2.spl")
-        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)
+        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)  # oracle: begin_module must leave the SymbolId-free target memo intact
     )
 
     it("leaves the lowered result unchanged: no symbol is defined for an unresolvable name", fn():
+        # @req REQ-HIR-DEPTAIL-005
+        # @capture(statistics): diagnostic counts and lookup validity across importers
+        step("Lower an unresolvable name in two importers")
         # Correctness half. The cache changes only how the answer is FOUND;
         # every importer still runs its own registration against its own table.
         # With no explicit import to follow, no importer gains a symbol and no
@@ -145,15 +190,18 @@ describe("HIR import registration resolution facts", fn():
         val span = Span.empty()
         lowering.materialize_imported_callable_explicit_dependency(
             registry.surfaces[0], "NeverDeclared", span, false)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: pre-cache behavior raised no diagnostic for an unresolvable name
         lowering.begin_module("pkg/imp2.spl")
         lowering.materialize_imported_callable_explicit_dependency(
             registry.surfaces[0], "NeverDeclared", span, false)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: the memo changes lookup cost, never the diagnostic contract
         expect(lowering.symbols.lookup_or_invalid("pkg.decl::NeverDeclared").is_valid()).to_equal(false)
     )
 
     it("keeps SymbolTable.define free of a second owner of the scope dict", fn():
+        # @req REQ-HIR-DEPTAIL-006
+        # @capture(bit_table): define-region owners present and removed
+        step("Read the SymbolTable define region")
         # ALIAS1 (2026-08-21). Measured with a 15-line probe: 8000 successive
         # `define` calls cost 1818 ms for the first 1000 and 8335 ms for the
         # eighth, i.e. per-call cost linear in the table already built -- the
@@ -181,7 +229,7 @@ describe("HIR import registration resolution facts", fn():
         # longer reads a value-type row out and writes it back.
         val source = file_read("src/compiler/20.hir/hir_types.spl")
         val start = source.index_of("me define(name: text, kind: SymbolKind")
-        expect(start).to_be_greater_than(0)
+        expect(start).to_be_greater_than(0)  # oracle: the define region anchors every owner probe that follows
         val body = source.substring(start, source.index_of(
             "me bind_qualified_function(", start))
         expect(body.contains("var scope_syms = scope.symbols")).to_equal(false)
@@ -192,6 +240,9 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("registers one (surface, name, local, enum) tuple once per importer", fn():
+        # @req REQ-HIR-DEPTAIL-007
+        # @capture(statistics): registration skip counter across duplicate calls
+        step("Register the same and varied registration tuples")
         # RISDONE (2026-08-21). `register_imported_symbol` is idempotent within
         # one importer -- every branch re-checks `already_bound` before it
         # writes -- but a repeat still re-ran six surface name scans and
@@ -203,20 +254,23 @@ describe("HIR import registration resolution facts", fn():
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
-        expect(lowering.registered_import_skip_count).to_equal(0)
+        expect(lowering.registered_import_skip_count).to_equal(0)  # oracle: the first registration of a tuple must run, never skip
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
-        expect(lowering.registered_import_skip_count).to_equal(2)
+        expect(lowering.registered_import_skip_count).to_equal(2)  # oracle: each repeated identical tuple skips exactly one descent
         # A different local name, a different imported name, and a different
         # materialize_enum flag are all DIFFERENT registrations: each writes a
         # different binding, so none of them may be skipped.
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "pkg.decl::Widget", span, false)
         lowering.register_imported_symbol(0, "pkg.decl", "Other", "Other", span, false)
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, true)
-        expect(lowering.registered_import_skip_count).to_equal(2)
+        expect(lowering.registered_import_skip_count).to_equal(2)  # oracle: varied local, name, and enum flag each write, so none skips
     )
 
     it("never carries a completed registration across importers", fn():
+        # @req REQ-HIR-DEPTAIL-008
+        # @capture(statistics): registration memo size across begin_module
+        step("Switch importers between duplicate registrations")
         # The safety argument. Unlike `explicit_dep_target_memo` (a pure
         # function of the frozen registry) this memo records work done against
         # ONE importer's symbol table, which `begin_module` wipes. Carrying it
@@ -226,9 +280,9 @@ describe("HIR import registration resolution facts", fn():
         val span = Span.empty()
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
         lowering.begin_module("pkg/imp2.spl")
-        expect(lowering.registered_import_memo.len()).to_equal(0)
+        expect(lowering.registered_import_memo.len()).to_equal(0)  # oracle: begin_module wipes the per-importer registration memo
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
-        expect(lowering.registered_import_skip_count).to_equal(0)
+        expect(lowering.registered_import_skip_count).to_equal(0)  # oracle: importer two must run its own registration, never inherit a skip
     )
 )
 
@@ -245,6 +299,8 @@ describe("HIR dependency-tail memo (DEPTAIL)", fn():
     # the pre-fix code, where `dep_tail_skip_count` did not exist.
 
     it("runs a resolved explicit dependency tail once per importer, not once per call", fn():
+        # @req REQ-HIR-DEPTAIL-009
+        # @capture(statistics): dep-tail skip counter across repeat calls
         step("Verify: a repeated explicit dependency tail is skipped")
         val registry = declaring_registry()
         val decl_index = registry.index_by_name["pkg.decl"]
@@ -254,21 +310,23 @@ describe("HIR dependency-tail memo (DEPTAIL)", fn():
         lowering.begin_module("pkg/imp1.spl")
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
-        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_skip_count).to_equal(0)  # oracle: the first tail must run to publish the binding at all
         # The binding the first tail published is what the repeats would redo.
         expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
-        expect(lowering.dep_tail_skip_count).to_equal(2)
+        expect(lowering.dep_tail_skip_count).to_equal(2)  # oracle: each repeat of a completed tail skips its register/bind tail
         # A different materialize_enum flag is a DIFFERENT tail and must run.
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, true)
-        expect(lowering.dep_tail_skip_count).to_equal(2)
+        expect(lowering.dep_tail_skip_count).to_equal(2)  # oracle: a changed tail key runs again, so the skip count stays at two
     )
 
     it("never carries a completed dependency tail across importers", fn():
+        # @req REQ-HIR-DEPTAIL-010
+        # @capture(statistics): tail memo size and binding validity across importers
         step("Verify: begin_module drops the dependency-tail memo")
         # The safety argument, identical to RISDONE's: the tail calls
         # `bind_qualified_type` into ONE importer's symbol table, which
@@ -283,15 +341,17 @@ describe("HIR dependency-tail memo (DEPTAIL)", fn():
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
         lowering.begin_module("pkg/imp2.spl")
-        expect(lowering.dep_tail_memo.len()).to_equal(0)
+        expect(lowering.dep_tail_memo.len()).to_equal(0)  # oracle: begin_module wipes the tail memo with the symbol table it protects
         lowering.materialize_imported_callable_explicit_dependency(
             decl, "Widget", span, false)
-        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_skip_count).to_equal(0)  # oracle: importer two's first tail runs; no completed tail may be inherited
         # ... and importer 2 really does get its own binding.
         expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
     )
 
     it("never memoizes an UNRESOLVED tail -- it stays retryable", fn():
+        # @req REQ-HIR-DEPTAIL-011
+        # @capture(statistics): unresolved-tail skip count and memo size
         step("Verify: an unresolved dependency is not recorded")
         # A tail that binds nothing must stay retryable within the importer:
         # a later registration can still make the lookup succeed. Only a tail
@@ -306,7 +366,7 @@ describe("HIR dependency-tail memo (DEPTAIL)", fn():
             registry.surfaces[0], "NeverDeclared", span, false)
         lowering.materialize_imported_callable_explicit_dependency(
             registry.surfaces[0], "NeverDeclared", span, false)
-        expect(lowering.dep_tail_skip_count).to_equal(0)
-        expect(lowering.dep_tail_memo.len()).to_equal(0)
+        expect(lowering.dep_tail_skip_count).to_equal(0)  # oracle: unresolved tails stay retryable, so no repeat may be skipped
+        expect(lowering.dep_tail_memo.len()).to_equal(0)  # oracle: only a completed tail with a valid symbol is ever recorded
     )
 )

@@ -5,6 +5,7 @@ use std.spec.{describe, it, expect, step}
 use app.io.mod.{file_read_text}
 
 val ADAPTER_PATH = "src/os/kernel/arch_adapt/x86_port_io.spl"
+val OWNER_PATH = "src/os/kernel/arch/x86/port_io_owner.spl"
 val BOOT_CPU_PATH = "src/os/kernel/boot/cpu.spl"
 val FW_CFG_PATH = "src/os/kernel/fw_cfg/x86_64_named_reader_v1.spl"
 val RAMFB_PATH = "src/os/drivers/framebuffer/ramfb.spl"
@@ -44,36 +45,33 @@ describe "x86 port-I/O compile-time architecture adapter":
         val source = file_read_text(ADAPTER_PATH)
         expect(source).to_equal(EXACT_ADAPTER_SOURCE)
 
-    it "routes every portable consumer only through the adapter":
-        step("Read every portable consumer source")
-        val boot_cpu = file_read_text(BOOT_CPU_PATH)
-        val fw_cfg = file_read_text(FW_CFG_PATH)
-        val ramfb = file_read_text(RAMFB_PATH)
-        val pci = file_read_text(PCI_PATH)
-        val rtc = file_read_text(RTC_PATH)
-        val wm = file_read_text(WM_PATH)
-        val sosix_io = file_read_text(SOSIX_IO_PATH)
-        val sosix_io_rw = file_read_text(SOSIX_IO_RW_PATH)
-        val desktop_e2e = file_read_text(DESKTOP_E2E_PATH)
+    it "keeps the owner's rt_port_* declarations matching the C ABI":
+        # Rewritten 2026-09-06. The previous example asserted that nine named
+        # consumers imported os.kernel.arch_adapt.x86_port_io and did NOT import
+        # os.kernel.arch.x86.port_io_owner. That contract no longer describes the
+        # tree, and it had been failing on main long enough for the decay to go
+        # unnoticed: two of the nine consumers were deleted, two others stopped
+        # doing port I/O entirely, and the rest moved onto the concrete owner --
+        # which the old example forbade outright. Enumerating consumers by name
+        # is also what let the rot spread quietly, because a consumer that
+        # dropped the import merely joined an already-red check.
+        #
+        # The tree-wide invariant that replaces it -- exactly one file under
+        # src/os may declare an rt_port_* extern, and it must be the owner --
+        # belongs in a gate, not here: a spec reads files, a ratchet scans trees.
+        # See scripts/check/check-port-io-single-owner.shs.
+        #
+        # What is checkable here is the thing that actually broke. While each
+        # consumer carried its own declaration, cpu.spl declared
+        # `rt_port_inb(port: u64) -> u64` while rtc.spl declared
+        # `rt_port_inb(port: u16) -> u8`, against a C ABI of
+        # `uint8_t rt_port_inb(uint16_t)`. Two files disagreeing about the ABI of
+        # one symbol is precisely what one-by-one rt_ access produces. With a
+        # single owner there is a single place to pin it.
+        step("Read the single port-I/O owner")
+        val owner = file_read_text(OWNER_PATH)
 
-        step("Require every exact compile-time adapter import")
-        expect(boot_cpu.contains(EXACT_BOOT_IMPORT)).to_equal(true)
-        expect(fw_cfg.contains(EXACT_FW_CFG_IMPORT)).to_equal(true)
-        expect(ramfb.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb, x86_port_outw}}")).to_equal(true)
-        expect(pci.contains("use {ADAPTER_OWNER}.{{x86_port_inl, x86_port_outl}}")).to_equal(true)
-        expect(rtc.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb}}")).to_equal(true)
-        expect(wm.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb}}")).to_equal(true)
-        expect(sosix_io.contains("use {ADAPTER_OWNER}.{{x86_port_inb}}")).to_equal(true)
-        expect(sosix_io_rw.contains("use {ADAPTER_OWNER}.{{x86_port_inb}}")).to_equal(true)
-        expect(desktop_e2e.contains("use {ADAPTER_OWNER}.{{x86_port_outb}}")).to_equal(true)
-
-        step("Reject direct concrete-owner imports from every portable consumer")
-        expect(boot_cpu.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(fw_cfg.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(ramfb.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(pci.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(rtc.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(wm.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(sosix_io.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(sosix_io_rw.contains(CONCRETE_OWNER)).to_equal(false)
-        expect(desktop_e2e.contains(CONCRETE_OWNER)).to_equal(false)
+        step("Ports are u16, byte values u8, and nothing is widened to u64")
+        expect(owner.contains("rt_port_inb(port: u16) -> u8")).to_equal(true)
+        expect(owner.contains("rt_port_outb(port: u16, value: u8)")).to_equal(true)
+        expect(owner.contains("-> u64")).to_equal(false)

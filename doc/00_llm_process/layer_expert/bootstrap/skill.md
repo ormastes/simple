@@ -594,3 +594,98 @@ Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and
 hashed; the bounded push consumer only verifies that retained state.
+
+## 2026-09-06 — the shared checkout cannot bootstrap; operator gotchas
+
+**Stage 2 admits only against content that does not move under it.** In the
+shared working copy a peer editing anything under `src/**` mid-run makes Stage 2
+refuse:
+
+```
+error: refused incomplete Stage 2 admission provenance
+```
+
+emitted at `scripts/bootstrap/bootstrap-from-scratch.sh:2703` and again at
+`:2724` (the post-publication re-snapshot), each setting `stage2_status=4`. The
+admission compares a `bootstrap_stage3_source_snapshot` taken before and after
+the stage; any drift invalidates the private copy, which is deliberate — it
+prevents a stop-after-stage2 false admission.
+
+**Use a private worktree pinned to a commit.** `scripts/bootstrap/bootstrap-in-snapshot.shs`
+exists exactly for this: it materialises COMMITTED content into
+`git worktree add --detach` and runs the bootstrap there. Its header records
+three failures in 70 minutes on 2026-09-05, each with a different error string
+and each looking like a defect in the thing it named (`found TripleLt` from
+transient conflict markers; `parent-stage2-sanity-candidate-mismatch` from the
+Stage-2 binary being rewritten mid-hash; the provenance refusal above from two
+files appearing under `src/compiler/10.frontend/`). Record:
+[bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md](../../../08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md)
+and
+[bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md](../../../08_tracking/bug/bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md).
+Note the semantic: uncommitted edits are NOT built. Commit first.
+
+### Three operator gotchas measured the same day
+
+- **Never symlink `src/compiler_rust/target`.** The seed-input content hash walks
+  those paths; a symlink defeats it and the run dies at
+  `error: failed to fingerprint Rust seed inputs`
+  (`bootstrap-from-scratch.sh:1766`, from `seed_inputs_hash pre` at `:1765`).
+  The message names no path, so it reads as a corrupt tree. Point
+  `CARGO_TARGET_DIR` at the fast disk instead of relinking the tree.
+- **Always capture the bootstrap's own stdout to a file.** The per-phase logs do
+  NOT carry the failure reason — the reason (the two errors above, among others)
+  is printed on the driver's stderr/stdout only. A run whose console output was
+  lost has to be repeated.
+- **Do not trust `bootstrap-progress.log` as a liveness oracle.** Measured on
+  this darwin host, the watcher reported
+  `alive-no-progress cpu_pct=0.0 tree_processes=0` while the build was compiling
+  at full tilt. `scripts/bootstrap/bootstrap-progress-watch.shs:27-31` documents
+  `alive-no-progress` as REPORTED, never acted on (the watcher kills nothing),
+  and `scripts/check/check-bootstrap-progress-watch.shs:235-238` has a selftest
+  asserting a busy tree is NOT reported that way — so this is a host-specific
+  false stall (process-tree enumeration and CPU sampling differ on macOS), not
+  the documented behaviour. Root cause NOT established here; treat a
+  zero-process, zero-CPU sample on darwin as "unknown", never as "dead", and
+  confirm with `ps`/log growth before killing anything. Related:
+  [bootstrap_progress_monitor_reports_live_run_as_dead_2026-09-03.md](../../../08_tracking/bug/bootstrap_progress_monitor_reports_live_run_as_dead_2026-09-03.md).
+
+## Seed-vs-self-hosted PARSER divergence is a real Stage-3 blocker class (2026-09-06)
+
+Stage 3 failed in **parse**, not in HIR/MIR/codegen — an unusual shape for this
+layer, and the first place to look when the Stage-3 log's first error is a
+`[parser_error]` rather than a segfault or an unresolved name:
+
+```
+[parser_error] path src/compiler/driver/driver_source_pipeline_parsing.spl
+line 309:16: expected :, got -> '->'
+```
+
+Stage 3 is compiled BY Stage 2, so a Stage-3 parse error is a statement about
+**Stage 2's parser** (i.e. about `src/compiler/10.frontend/`), never about the
+file it names. The Rust seed parsed the same file fine, which is exactly the
+signal: any construct the seed accepts and the self-hosted frontend does not
+will surface here the moment someone writes it into `src/`.
+
+Diagnosis without a bootstrap. `bin/simple` is the Rust seed and does not read
+`src/compiler/10.frontend/` at all, but the self-hosted parser can still be run
+in-process under it:
+
+```simple
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
+val module = parse_and_build_module(source_text, "probe.spl")
+```
+
+Seconds per file instead of a multi-hour bootstrap, and it takes a whole real
+source file, so "does Stage 2 accept `src/compiler/**/foo.spl`?" is answerable
+directly. Same pattern as `test/01_unit/compiler/frontend/layer_decl_parse_spec.spl`.
+
+Trap found while fixing this one: a new separator token in
+`parse_match_arms_common` is only HALF the work. `token_requires_rhs()`
+(`core/tokens.spl`) makes a trailing `->` suppress the following
+Newline/Indent so a return type may wrap onto the next line, so a block-bodied
+arm silently kept only its FIRST statement and handed the second to the arm
+loop as the next pattern — parsing "cleanly" and wrong. The parser must hand
+the lexer `lex_mark_current_token_as_generic_close()` before advancing past a
+token that looks like a binary operator but opens a block. Record:
+[stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md](../../../08_tracking/bug/stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md).

@@ -1,9 +1,22 @@
-use crate::ast::{extract_fstring_keys, Expr, FStringPart, TypeMeta};
+use crate::ast::{extract_fstring_keys, Argument, Expr, FStringPart, TypeMeta};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::{FStringToken, TokenKind};
 
 impl<'a> Parser<'a> {
+    fn reject_detached_path_suffix(&self) -> Result<(), ParseError> {
+        if matches!(
+            &self.current.kind,
+            TokenKind::Identifier { name, .. } if name == "_path"
+        ) {
+            return Err(ParseError::syntax_error_with_span(
+                "_path suffix must be adjacent to its string literal",
+                self.current.span,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn parse_primary_literal(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             TokenKind::Integer(n) => {
@@ -31,12 +44,14 @@ impl<'a> Parser<'a> {
             TokenKind::String(s) => {
                 let s = s.clone();
                 self.advance();
+                self.reject_detached_path_suffix()?;
                 Ok(Expr::String(s))
             }
             TokenKind::RawString(s) => {
                 // Raw strings are just plain strings with no interpolation
                 let s = s.clone();
                 self.advance();
+                self.reject_detached_path_suffix()?;
                 Ok(Expr::String(s))
             }
             TokenKind::TypedString(s, suffix) => {
@@ -44,6 +59,12 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 let suffix = suffix.clone();
                 self.advance();
+                if suffix == "path" {
+                    return Ok(Expr::Call {
+                        callee: Box::new(Expr::Identifier("Path".to_string())),
+                        args: vec![Argument::new(Some("path".to_string()), Expr::String(s))],
+                    });
+                }
                 Ok(Expr::TypedString(s, suffix))
             }
             TokenKind::TypedRawString(s, suffix) => {
@@ -51,11 +72,18 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 let suffix = suffix.clone();
                 self.advance();
+                if suffix == "path" {
+                    return Ok(Expr::Call {
+                        callee: Box::new(Expr::Identifier("Path".to_string())),
+                        args: vec![Argument::new(Some("path".to_string()), Expr::String(s))],
+                    });
+                }
                 Ok(Expr::TypedString(s, suffix))
             }
             TokenKind::FString(parts) => {
                 let parts = parts.clone();
                 self.advance();
+                self.reject_detached_path_suffix()?;
                 let mut result_parts = Vec::new();
                 let parse_complete_expr = |source: &str| {
                     let mut parser = Parser::new_expression(source);

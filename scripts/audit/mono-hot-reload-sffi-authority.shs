@@ -1,14 +1,59 @@
 #!/bin/sh
 # Static lexical-boundary guard for SMF hot-reload disk operations.
 # This checks source shape only; it does not admit, sign, or verify a provider.
-set -eu
+# Verdict harness (.claude/rules/vcs.md): verdict LAST on stdout, exit 0/1/2,
+# non-vacuity absolute. NOTE: deliberately `set -u` WITHOUT `set -e` — `grep -c`
+# exits 1 on zero matches, and under `-e` that killed this guard silently
+# (exit 1, no output) for the whole time it sat RED.
+set -u
+A_CHECKED=0; A_FAILED=0; A_MSGS=''
+_fail() { A_FAILED=$((A_FAILED+1)); A_MSGS="${A_MSGS}${A_MSGS:+; }$1"; }
+ck() { # ck <desc> <cmd...>  -- status read into a var on the NEXT line, never via a pipe
+    _d=$1; shift
+    "$@" >/dev/null 2>&1
+    _rc=$?
+    A_CHECKED=$((A_CHECKED+1)); [ "$_rc" -eq 0 ] || _fail "$_d"
+}
+cknot() { # cknot <desc> <cmd...>  -- must FAIL
+    _d=$1; shift
+    "$@" >/dev/null 2>&1
+    _rc=$?
+    A_CHECKED=$((A_CHECKED+1)); [ "$_rc" -ne 0 ] || _fail "$_d"
+}
+ckeq() { # ckeq <desc> <actual> <expected>
+    A_CHECKED=$((A_CHECKED+1))
+    [ "$2" = "$3" ] || _fail "$1 (expected $3, actual $2)"
+}
+# grep -c prints 0 and exits 1 on no match; the count is what we want, not the status.
+cnt() { grep -c "$1" "$2" 2>/dev/null; }
+cnte() { grep -Ec "$1" "$2" 2>/dev/null; }
+need_file() { [ -f "$1" ] || { echo "$2: ERROR — nothing was checked (missing $1)"; exit 2; } }
+verdict() {
+    [ "$A_CHECKED" -gt 0 ] || { echo "$1: ERROR — nothing was checked"; exit 2; }
+    [ "$A_FAILED" -eq 0 ] || { echo "$1: FAIL — $A_FAILED of $A_CHECKED assertion(s) failed: $A_MSGS"; exit 1; }
+    echo "$1: PASS — $A_CHECKED assertion(s) checked${VERDICT_EXTRA:-}"
+    exit 0
+}
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 module="$root/src/compiler/40.mono/monomorphize/hot_reload.spl"
+L='Mono hot-reload SFFI authority'
+need_file "$module" "$L"
 
-test "$(grep -c '^@unsafe(reason: "raw SMF hot-reload' "$module")" -eq 4
-test "$(grep -c '^extern fn rt_file_' "$module")" -eq 4
-test "$(grep -c 'unsafe(capabilities: \[ffi\]): rt_file_' "$module")" -eq 4
-test "$(grep -c 'HotReloadResult.IoError' "$module")" -ge 1
+# This module used to declare 4 raw `extern fn rt_file_*` providers. It has
+# since migrated onto the owned stdlib facade `std.nogc_sync_mut.sffi.io`.
+# The guard ratchets the STRONGER invariant: zero raw FFI in the mono layer.
+ckeq 'raw rt_* externs' "$(cnt '^extern fn rt_' "$module")" 0
+ckeq 'raw rt_* call sites' "$(cnt 'rt_[a-z_]*(' "$module")" 0
+ckeq 'unsafe ffi blocks' "$(cnt 'unsafe(capabilities: \[ffi\]):' "$module")" 0
+ckeq '@unsafe annotations' "$(cnt '^@unsafe(' "$module")" 0
 
-echo 'Mono hot-reload SFFI authority: PASS declarations=4 lexical_disk_calls=4 result_error_lifts=present artifact_admission=absent'
+# Positive assertions so an empty or gutted module cannot pass vacuously.
+ck 'owned io facade imported' grep -Fq 'use std.nogc_sync_mut.sffi.io.{file_exists, file_read_text, file_write_text, file_copy}' "$module"
+ck 'optional read helper present' grep -q '^fn file_read_opt(path: text) -> text?:$' "$module"
+ck 'write helper returns bool' grep -q '^fn file_write(path: text, content: text) -> bool:$' "$module"
+ck 'result error lifts present' grep -q 'HotReloadResult.IoError' "$module"
+cknot 'no artifact admission in this layer' grep -Eq 'admit_artifact|verify_signature|dlsym' "$module"
+
+VERDICT_EXTRA=' (raw_declarations=0 raw_call_sites=0 disk_io=owned-facade result_error_lifts=present artifact_admission=absent)'
+verdict "$L"

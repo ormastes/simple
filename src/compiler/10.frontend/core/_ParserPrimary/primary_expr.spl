@@ -35,7 +35,7 @@ use compiler.core.tokens.{TOK_AMP_COLON, TOK_BACKSLASH}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_raw_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_custom_block}
-use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit}
+use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit, expr_call_named}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_array_repeat, expr_method_call, expr_lambda}
 use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
@@ -80,6 +80,36 @@ fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
         kind == "schema" or kind == "style" or kind == "ui" or kind == "music" or
         kind == "bim" or kind == "cad" or kind == "city" or kind == "rtl" or
         kind == "loss" or kind == "lean" or kind == "nograd")
+
+# `_path` is a construction suffix, not an interpolation operator.  Keep the
+# accepted grammar aligned with the Rust bootstrap lexer: escaped/empty braces
+# remain literal text, while a non-empty balanced interpolation region makes
+# the suffixed form unsupported (and therefore an explicit parse error).
+fn parser_path_literal_has_interpolation(value: text) -> bool:
+    var i: i64 = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len() then value[i + 1:i + 2] else ""
+        if ch == "{" and next == "{":
+            i = i + 2
+            continue
+        if ch == "{" and next == "}":
+            i = i + 2
+            continue
+        if ch == "{":
+            var depth: i64 = 1
+            var j: i64 = i + 1
+            while j < value.len():
+                val inner = value[j:j + 1]
+                if inner == "{":
+                    depth = depth + 1
+                elif inner == "}":
+                    depth = depth - 1
+                    if depth == 0:
+                        return true
+                j = j + 1
+        i = i + 1
+    false
 
 # Parses the tail of a `fn` lambda after the `fn` keyword itself has already
 # been consumed by the caller: `(param: Type, ...) -> RetType: body`.
@@ -402,11 +432,44 @@ fn parse_primary_expr() -> i64:
         # Token text excludes delimiters; the source start preserves whether
         # this was ordinary double-quote, single/raw-prefixed, or bare triple.
         val str_start = lex_token_start_get()
+        val str_end = lex_token_end_get()
+        val source_len = lex_source_len()
         val str_first = lex_source_char_at(str_start)
         var no_interp = lex_cur_no_interp_get() or str_first != "\""
-        if str_first == "\"" and lex_source_char_at(str_start + 1) == "\"" and lex_source_char_at(str_start + 2) == "\"":
+        val quoted_triple = (str_start + 2 < source_len and
+            lex_source_char_at(str_start + 1) == str_first and
+            lex_source_char_at(str_start + 2) == str_first and
+            (str_first == "\"" or str_first == "'"))
+        val raw_triple = (str_first == "r" and str_start + 3 < source_len and
+            lex_source_char_at(str_start + 1) == "\"" and
+            lex_source_char_at(str_start + 2) == "\"" and
+            lex_source_char_at(str_start + 3) == "\"")
+        val is_triple = quoted_triple or raw_triple
+        if is_triple:
             no_interp = true
         parser_advance()
+        # A path literal is deliberately lowered to the canonical Path
+        # constructor in the caller's module.  This keeps the language
+        # spelling (`"config/app.toml"_path`) small while preserving the
+        # normal import/type-checking rules for `Path`.
+        # The source positions are part of the grammar: `"x" _path` is two
+        # expressions and must never be accepted as a suffixed literal.
+        if (par_kind_get() == TOK_IDENT and par_text_get() == "_path" and
+                lex_token_start_get() == str_end):
+            parser_advance()
+            if is_triple:
+                parser_error("_path does not support triple-quoted strings")
+                if no_interp:
+                    return expr_raw_string_lit(str_text, 0)
+                return expr_string_lit(str_text, 0)
+            if parser_path_literal_has_interpolation(str_text):
+                parser_error("_path does not support interpolated strings")
+                return expr_string_lit(str_text, 0)
+            return expr_call_named(
+                expr_ident("Path", 0), [expr_string_lit(str_text, 0)], ["path"], 0)
+        if par_kind_get() == TOK_IDENT and par_text_get() == "_path":
+            parser_error("_path suffix must be adjacent to its string literal")
+            parser_advance()
         if str_suffix != "":
             return expr_suffixed_string(str_text, str_suffix, 0)
         if no_interp:

@@ -10,7 +10,9 @@ Admission is bounded to 1..16 processes and rejects the complete batch before
 spawn when it exceeds capacity. A partial spawn is failed closed: the parent
 attempts cleanup of every returned handle and publishes only a
 `launch_rolled_back` state. Poll and stop create replacement manager values;
-only these parent transitions inspect or terminate handles. Terminal stop is
+only these parent transitions inspect or terminate handles. Both `running` and
+`degraded` are pollable ownership states, because a partial team still owns
+live children and must eventually transition to `exited`. Terminal stop is
 idempotent at the manager boundary.
 
 `AgentTmuxEmbed` is derived display state. It copies process identifiers and

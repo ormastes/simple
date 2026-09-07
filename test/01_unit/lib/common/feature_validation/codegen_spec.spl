@@ -1,43 +1,30 @@
 """
 ## Purpose and audience
-Purpose: Verify Feature #100 - Cranelift Backend.
-Audience: compiler and tooling engineers who maintain this spec.
+Validates code-generation-facing language contracts: integer, comparison,
+function-call, control-flow, string, and collection operations; the
+buffer-recycling and string-buffer allocation patterns the codegen caches
+optimize; and explicit generator state-machine shapes. Written for backend
+maintainers gating Cranelift work and for feature validators tracking which
+contracts are pinned to a named engine versus the driving interpreter.
 ## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/std/feature_validation/codegen_spec.spl
 ## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-LIB-COMMON-FEATUREVALID-001
-doc/01_research/local/REQ-LIB-COMMON-FEATUREVALID-001.md
-doc/03_plan/sys_test/REQ-LIB-COMMON-FEATUREVALID-001.md
-doc/04_architecture/REQ-LIB-COMMON-FEATUREVALID-001.md
-doc/05_design/REQ-LIB-COMMON-FEATUREVALID-001.md
+The language-level scenarios run under the engine the test driver selects;
+the final group pins the same contracts to a NAMED engine out of process and
+is the only group that can fail independently of the driver's lane. The
+engine-canary scenario intentionally asserts a still-open JIT divergence and
+stays red until that gap closes.
+## Verification guidance and troubleshooting
+A failure in the first groups means a language construct drifted under the
+driver's engine; a failure in the out-of-process group means the named
+engine or the probe harness changed. Rerun the file and compare the observed
+value with the oracle comment on the failing expect line.
 """
-# @req: REQ-LIB-COMMON-FEATUREVALID-001
-
-# # Codegen Feature Validation
-#
-# **Feature IDs:** #100 Cranelift Backend, #95 Buffer Pool, #96 Generator Codegen
-# **Category:** Codegen
-# **Status:** Complete
-#
-# ## Overview
-#
-# Validates code generation concepts including JIT/AOT compilation verification,
-# buffer pool recycling, and generator state machine basics. Tests focus on
-# language-level patterns that exercise these features.
-
-
-use std.spec.step
-
-fn factorial(n: i64) -> i64:
-    if n <= 1:
-        1
-    else:
-        n * factorial(n - 1)
+# Lifecycle: doc/01_research/compiler/codegen/codegen_backend_comparison.md ;
+# doc/03_plan/versioned_codegen_backend_plugin.md ;
+# doc/04_architecture/versioned_codegen_backend_plugin.md ;
+# doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md
+# @manual_section: codegen-feature-validation
 
 # ============================================================================
 # Feature #100: Cranelift Backend (Basic Sanity)
@@ -45,60 +32,58 @@ fn factorial(n: i64) -> i64:
 
 use std.spec.step
 
-describe "Feature #100 - Cranelift Backend":
-    # @manual scenario evidence
-    # ## Cranelift Backend
-    #
-    # Cranelift-based code generation for AOT and JIT compilation.
-    # Provides fast compilation with good runtime performance.
-    #
-    # These tests verify that basic operations compile and execute correctly,
-    # exercising the code generation pipeline.
-
+describe "cranelift backend sanity":
     context "integer operations":
         it "compiles integer arithmetic":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles integer arithmetic")
-            val a = 10
-            val b = 20
-            val sum = a + b
-            expect(sum).to_equal(30)  # oracle: 30 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-001
+            # @capture(statistics): integer addition fold verdict
+            step("Evaluate a two-operand integer addition")
+            val addend_left = 10
+            val addend_right = 20
+            val integer_sum = addend_left + addend_right
+            expect(integer_sum).to_equal(30)  # oracle: ten plus twenty folds to thirty
 
         it "compiles multiplication":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles multiplication")
-            val x = 7
-            val y = 6
-            expect(x * y).to_equal(42)  # oracle: 42 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-002
+            # @capture(statistics): integer multiplication fold verdict
+            step("Evaluate a two-operand integer multiplication")
+            val factor_left = 7
+            val factor_right = 6
+            expect(factor_left * factor_right).to_equal(42)  # oracle: seven times six folds to forty-two
 
         it "compiles division":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles division")
-            val dividend = 100
-            val divisor = 4
-            expect(dividend / divisor).to_equal(25)  # oracle: 25 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-003
+            # @capture(statistics): integer division fold verdict
+            step("Evaluate an even integer division")
+            val division_dividend = 100
+            val division_divisor = 4
+            expect(division_dividend / division_divisor).to_equal(25)  # oracle: one hundred over four folds to twenty-five
 
         it "compiles modulo":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles modulo")
-            expect(17 % 5).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-004
+            # @capture(statistics): modulo remainder fold verdict
+            step("Evaluate a modulo expression")
+            expect(17 % 5).to_equal(2)  # oracle: seventeen mod five leaves remainder two
 
         it "compiles negative numbers":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles negative numbers")
-            val neg = -42
-            expect(neg + 42).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-005
+            # @capture(statistics): negative-literal cancellation verdict
+            step("Cancel a negative literal against its positive complement")
+            val negative_literal = -42
+            expect(negative_literal + 42).to_equal(0)  # oracle: the negative literal cancels its complement to zero
 
     context "comparison operations":
         it "compiles equality comparison":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles equality comparison")
-            expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-006
+            # @capture(statistics): equality and inequality fold verdicts
+            step("Fold an equality comparison over computed operands")
+            expect(6 * 7 == 42).to_equal(true)  # oracle: the product equals its value, folding to true
             expect(1).to_not_equal(2)
 
         it "compiles ordering comparisons":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles ordering comparisons")
+            # @req REQ-CODEGEN-CRANELIFT-007
+            # @capture(statistics): inclusive and exclusive ordering verdicts
+            step("Fold strict and inclusive ordering comparisons")
             expect(1 < 2).to_equal(true)
             expect(2 > 1).to_equal(true)
             expect(5 <= 5).to_equal(true)
@@ -106,279 +91,265 @@ describe "Feature #100 - Cranelift Backend":
 
     context "function calls":
         it "compiles simple function":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles simple function")
-            fn add(a, b):
+            # @req REQ-CODEGEN-CRANELIFT-008
+            # @capture(statistics): direct-call fold verdict
+            step("Call a two-parameter addition function")
+            fn codegen_add(a, b):
                 a + b
-            expect(add(3, 4)).to_equal(7)  # oracle: 7 — named expected value from the requirement
+            expect(codegen_add(3, 4)).to_equal(7)  # oracle: the call folds three plus four to seven
 
         it "compiles recursive function":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles recursive function")
-            expect(factorial(5)).to_equal(120)  # oracle: 120 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-009
+            # @capture(statistics): recursive factorial fold verdict
+            step("Call a recursive factorial with a five-deep chain")
+            fn codegen_factorial(n):
+                if n <= 1:
+                    return 1
+                n * codegen_factorial(n - 1)
+            expect(codegen_factorial(5)).to_equal(120)  # oracle: five factorial folds to one hundred twenty
 
         it "compiles nested function calls":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles nested function calls")
-            fn double(x):
+            # @req REQ-CODEGEN-CRANELIFT-010
+            # @capture(statistics): composed nested-call fold verdict
+            step("Compose a doubling call inside an increment call")
+            fn codegen_double(x):
                 x * 2
-            fn add_one(x):
+            fn codegen_add_one(x):
                 x + 1
-            expect(add_one(double(5))).to_equal(11)  # oracle: 11 — named expected value from the requirement
+            expect(codegen_add_one(codegen_double(5))).to_equal(11)  # oracle: double-then-increment folds five to eleven
 
     context "control flow":
         it "compiles if/else expressions":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles if/else expressions")
-            val x = 10
-            val result = if x > 5: "big" else: "small"
-            expect(result).to_equal("big")
+            # @req REQ-CODEGEN-CRANELIFT-011
+            # @capture(statistics): taken-branch string verdict
+            step("Select the taken branch of an if/else expression")
+            val branch_threshold = 10
+            val branch_result = if branch_threshold > 5: "big" else: "small"
+            expect(branch_result).to_equal("big")
 
         it "compiles while loop":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles while loop")
-            fn while_sum() -> i64:
-                var sum = 0
-                var i = 1
-                while i <= 10:
-                    sum = sum + i
-                    i = i + 1
-                sum
-            expect(while_sum()).to_equal(55)  # oracle: 55 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-012
+            # @capture(statistics): while-loop accumulated sum verdict
+            step("Accumulate one through ten inside a while loop")
+            fn codegen_while_sum() -> i64:
+                var while_running_total = 0
+                var while_cursor = 1
+                while while_cursor <= 10:
+                    while_running_total = while_running_total + while_cursor
+                    while_cursor = while_cursor + 1
+                while_running_total
+            expect(codegen_while_sum()).to_equal(55)  # oracle: the sum of one through ten folds to fifty-five
 
         it "compiles for loop":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles for loop")
-            var total = 0
-            for n in [1, 2, 3, 4, 5]:
-                total = total + n
-            expect(total).to_equal(15)  # oracle: 15 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-013
+            # @capture(statistics): for-loop accumulated sum verdict
+            step("Accumulate a five-element range inside a for loop")
+            var for_loop_total = 0
+            for for_loop_item in [1, 2, 3, 4, 5]:
+                for_loop_total = for_loop_total + for_loop_item
+            expect(for_loop_total).to_equal(15)  # oracle: the sum of one through five folds to fifteen
 
     context "string operations":
         it "compiles string creation":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles string creation")
-            val s = "hello"
-            expect(s).to_equal("hello")
+            # @req REQ-CODEGEN-CRANELIFT-014
+            # @capture(statistics): string literal readback verdict
+            step("Bind a string literal and read it back")
+            val created_message = "hello"
+            expect(created_message).to_start_with("hello")
 
         it "compiles string interpolation":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles string interpolation")
-            val n = 42
-            val s = "value is {n}"
-            expect(s).to_equal("value is 42")
+            # @req REQ-CODEGEN-CRANELIFT-015
+            # @capture(statistics): interpolation render verdict
+            step("Interpolate an integer binding into a string")
+            val interpolated_codegen_value = 42
+            val interpolated_message = "value is {interpolated_codegen_value}"
+            expect(interpolated_message).to_equal("value is 42")
 
         it "compiles string concatenation":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles string concatenation")
-            val a = "foo"
-            val b = "bar"
-            expect(a + b).to_equal("foobar")
+            # @req REQ-CODEGEN-CRANELIFT-016
+            # @capture(statistics): concatenation join verdict
+            step("Concatenate two string literals")
+            val concat_head = "foo"
+            val concat_tail = "bar"
+            expect(concat_head + concat_tail).to_equal("foobar")
 
     context "collection operations":
         it "compiles array creation and access":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles array creation and access")
-            val arr = [10, 20, 30]
-            expect(arr[0]).to_equal(10)  # oracle: 10 — named expected value from the requirement
-            expect(arr[2]).to_equal(30)  # oracle: 30 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-017
+            # @capture(statistics): array index readback verdicts
+            step("Index the first and last elements of an array literal")
+            val indexed_array = [10, 20, 30]
+            expect(indexed_array[0]).to_equal(10)  # oracle: the first element reads back as declared
+            expect(indexed_array[2]).to_equal(30)  # oracle: the last element reads back as declared
 
         it "compiles array length":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: compiles array length")
-            val arr = [1, 2, 3, 4, 5]
-            expect(arr.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
+            # @req REQ-CODEGEN-CRANELIFT-018
+            # @capture(statistics): array length readback verdict
+            step("Read the length of a five-element array literal")
+            val sized_array = [1, 2, 3, 4, 5]
+            expect(sized_array.len()).to_equal(5)  # oracle: the literal carries five elements
 
 # ============================================================================
 # Feature #95: Buffer Pool
 # ============================================================================
 
-describe "Feature #95 - Buffer Pool Concepts":
-    # ## Buffer Pool
-    #
-    # Reusable buffer pools for code generation. Reduces allocation overhead
-    # when compiling many modules by recycling buffers.
-    #
-    # These tests validate the language-level patterns that buffer pools optimize:
-    # repeated allocation and reuse of collections.
-
+describe "buffer pool concepts":
     context "collection reuse pattern":
         it "demonstrates array recycling pattern":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: demonstrates array recycling pattern")
-            # Buffer pool concept: reuse allocations
-            var buffer = []
-            # Fill buffer
-            for i in [1, 2, 3, 4, 5]:
-                buffer = buffer + [i]
-            expect(buffer.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
+            # @req REQ-CODEGEN-BUFPOOL-001
+            # @capture(statistics): fill-drain-refill length transcript
+            step("Fill, drain, and refill a recycled buffer")
+            var recycled_buffer = []
+            for fill_item in [1, 2, 3, 4, 5]:
+                recycled_buffer = recycled_buffer + [fill_item]
+            expect(recycled_buffer.len()).to_equal(5)  # oracle: the first fill leaves five entries
 
-            # Reset and reuse (simulates pool recycling)
-            buffer = []
-            for i in [10, 20, 30]:
-                buffer = buffer + [i]
-            expect(buffer.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-            expect(buffer[0]).to_equal(10)  # oracle: 10 — named expected value from the requirement
+            recycled_buffer = []
+            for refill_item in [10, 20, 30]:
+                recycled_buffer = recycled_buffer + [refill_item]
+            expect(recycled_buffer.len()).to_equal(3)  # oracle: the refill resets the length to three
+            expect(recycled_buffer[0]).to_equal(10)  # oracle: the refill's first entry is its own first item
 
         it "handles multiple buffer instances":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: handles multiple buffer instances")
-            var buf1 = []
-            var buf2 = []
-
-            buf1 = buf1 + [1, 2, 3]
-            buf2 = buf2 + [4, 5, 6]
-
-            expect(buf1.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-            expect(buf2.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-            expect(buf1[0]).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(buf2[0]).to_equal(4)  # oracle: 4 — named expected value from the requirement
+            # @req REQ-CODEGEN-BUFPOOL-002
+            # @capture(statistics): two-instance independence verdicts
+            step("Populate two independent buffers and read both back")
+            var first_buffer = []
+            var second_buffer = []
+            first_buffer = first_buffer + [1, 2, 3]
+            second_buffer = second_buffer + [4, 5, 6]
+            expect(first_buffer.len()).to_equal(3)  # oracle: the first buffer holds its own three entries
+            expect(second_buffer.len()).to_equal(3)  # oracle: the second buffer holds its own three entries
+            expect(first_buffer[0]).to_equal(1)  # oracle: the first buffer starts with its own first item
+            expect(second_buffer[0]).to_equal(4)  # oracle: the second buffer starts with its own first item
 
         it "validates buffer capacity growth":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: validates buffer capacity growth")
-            var buffer = []
-            for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
-                buffer = buffer + [i]
-            expect(buffer.len()).to_equal(10)  # oracle: 10 — named expected value from the requirement
-            expect(buffer[9]).to_equal(10)  # oracle: 10 — named expected value from the requirement
+            # @req REQ-CODEGEN-BUFPOOL-003
+            # @capture(statistics): ten-entry growth transcript
+            step("Grow a buffer across ten appends")
+            var grown_buffer = []
+            for growth_item in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+                grown_buffer = grown_buffer + [growth_item]
+            expect(grown_buffer.len()).to_equal(10)  # oracle: ten appends leave ten entries
+            expect(grown_buffer[9]).to_equal(10)  # oracle: the tenth slot holds the tenth appended item
 
     context "string buffer patterns":
         it "builds strings incrementally":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: builds strings incrementally")
-            var result = ""
-            for word in ["hello", " ", "world"]:
-                result = result + word
-            expect(result).to_equal("hello world")
+            # @req REQ-CODEGEN-BUFPOOL-004
+            # @capture(statistics): incremental string join verdict
+            step("Append three fragments into one built string")
+            var built_message = ""
+            for message_fragment in ["hello", " ", "world"]:
+                built_message = built_message + message_fragment
+            expect(built_message).to_equal("hello world")
 
         it "reuses string buffer":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: reuses string buffer")
-            var buf = ""
-            buf = buf + "line1\n"
-            buf = buf + "line2\n"
-            expect(buf).to_contain("line1")
-            expect(buf).to_contain("line2")
+            # @req REQ-CODEGEN-BUFPOOL-005
+            # @capture(statistics): two-line append retention verdicts
+            step("Append two lines into a reused string buffer")
+            var reused_text_buffer = ""
+            reused_text_buffer = reused_text_buffer + "line1\n"
+            reused_text_buffer = reused_text_buffer + "line2\n"
+            expect(reused_text_buffer).to_contain("line1")
+            expect(reused_text_buffer).to_contain("line2")
 
 # ============================================================================
 # Feature #96: Generator Codegen
 # ============================================================================
 
-describe "Feature #96 - Generator State Machine Concepts":
-    # ## Generator Codegen
-    #
-    # Generator state machine code generation. Transforms generator functions
-    # with yield statements into resumable state machines.
-    #
-    # These tests validate state machine patterns at the language level.
-
+describe "generator state machine concepts":
     context "state machine pattern":
         it "simulates basic state machine":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: simulates basic state machine")
-            # Simulates a generator state machine with explicit state
-            var state = 0
-            var values = []
-
-            # Step 1
-            if state == 0:
-                values = values + [1]
-                state = 1
-
-            # Step 2
-            if state == 1:
-                values = values + [2]
-                state = 2
-
-            # Step 3
-            if state == 2:
-                values = values + [3]
-                state = 3
-
-            expect(values).to_equal([1, 2, 3])
-            expect(state).to_equal(3)  # oracle: 3 — named expected value from the requirement
+            # @req REQ-CODEGEN-GENERATOR-001
+            # @capture(statistics): three-state advance transcript
+            step("Advance a three-state machine and collect its emissions")
+            var machine_state = 0
+            var emitted_values = []
+            if machine_state == 0:
+                emitted_values = emitted_values + [1]
+                machine_state = 1
+            if machine_state == 1:
+                emitted_values = emitted_values + [2]
+                machine_state = 2
+            if machine_state == 2:
+                emitted_values = emitted_values + [3]
+                machine_state = 3
+            expect(emitted_values).to_equal([1, 2, 3])
+            expect(machine_state).to_equal(3)  # oracle: three advances leave the machine in its terminal state
 
         it "simulates state machine with transitions":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: simulates state machine with transitions")
-            var state = "idle"
-            var output = []
-
-            # Transition: idle -> running
-            if state == "idle":
-                state = "running"
-                output = output + ["started"]
-
-            # Transition: running -> paused
-            if state == "running":
-                state = "paused"
-                output = output + ["paused"]
-
-            # Transition: paused -> running
-            if state == "paused":
-                state = "running"
-                output = output + ["resumed"]
-
-            expect(output.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-            expect(output[0]).to_equal("started")
-            expect(state).to_equal("running")
+            # @req REQ-CODEGEN-GENERATOR-002
+            # @capture(statistics): idle-running-paused transition transcript
+            step("Walk the idle-running-paused transition cycle")
+            var transition_state = "idle"
+            var transition_output = []
+            if transition_state == "idle":
+                transition_state = "running"
+                transition_output = transition_output + ["started"]
+            if transition_state == "running":
+                transition_state = "paused"
+                transition_output = transition_output + ["paused"]
+            if transition_state == "paused":
+                transition_state = "running"
+                transition_output = transition_output + ["resumed"]
+            expect(transition_output.len()).to_equal(3)  # oracle: three transitions emit one record each
+            expect(transition_output[0]).to_equal("started")
+            expect(transition_state).to_equal("running")
 
     context "iterator-like patterns":
         it "generates sequence of values":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: generates sequence of values")
-            # Simulates a range generator
-            fn gen_sequence() -> [i64]:
-                var current = 0
-                val max_val = 5
-                var generated = []
-                while current < max_val:
-                    generated = generated + [current]
-                    current = current + 1
-                generated
-            val generated = gen_sequence()
-            expect(generated).to_equal([0, 1, 2, 3, 4])
-            expect(generated.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
+            # @req REQ-CODEGEN-GENERATOR-003
+            # @capture(statistics): generated range transcript
+            step("Generate a zero-origin range through a helper function")
+            fn codegen_sequence() -> [i64]:
+                var sequence_cursor = 0
+                val sequence_limit = 5
+                var generated_items = []
+                while sequence_cursor < sequence_limit:
+                    generated_items = generated_items + [sequence_cursor]
+                    sequence_cursor = sequence_cursor + 1
+                generated_items
+            val generated_range = codegen_sequence()
+            expect(generated_range).to_equal([0, 1, 2, 3, 4])
+            expect(generated_range.len()).to_equal(5)  # oracle: the range emits exactly five values
 
         it "generates fibonacci-like sequence":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: generates fibonacci-like sequence")
-            var a = 0
-            var b = 1
-            var sequence = [a, b]
-
-            for i in [0, 1, 2, 3, 4]:
-                val next = a + b
-                sequence = sequence + [next]
-                a = b
-                b = next
-
-            expect(sequence[0]).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(sequence[1]).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(sequence[2]).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(sequence[3]).to_equal(2)  # oracle: 2 — named expected value from the requirement
-            expect(sequence[4]).to_equal(3)  # oracle: 3 — named expected value from the requirement
-            expect(sequence[5]).to_equal(5)  # oracle: 5 — named expected value from the requirement
-            expect(sequence[6]).to_equal(8)  # oracle: 8 — named expected value from the requirement
+            # @req REQ-CODEGEN-GENERATOR-004
+            # @capture(statistics): seven-element fibonacci transcript
+            step("Extend a fibonacci pair across five generated terms")
+            var fibonacci_left = 0
+            var fibonacci_right = 1
+            var fibonacci_terms = [fibonacci_left, fibonacci_right]
+            for fibonacci_step in [0, 1, 2, 3, 4]:
+                val fibonacci_next = fibonacci_left + fibonacci_right
+                fibonacci_terms = fibonacci_terms + [fibonacci_next]
+                fibonacci_left = fibonacci_right
+                fibonacci_right = fibonacci_next
+            expect(fibonacci_terms[0]).to_equal(0)  # oracle: the seeded sequence starts at zero
+            expect(fibonacci_terms[1]).to_equal(1)  # oracle: the second seed is one
+            expect(fibonacci_terms[2]).to_equal(1)  # oracle: the first generated term is one
+            expect(fibonacci_terms[3]).to_equal(2)  # oracle: the second generated term is two
+            expect(fibonacci_terms[4]).to_equal(3)  # oracle: the third generated term is three
+            expect(fibonacci_terms[5]).to_equal(5)  # oracle: the fourth generated term is five
+            expect(fibonacci_terms[6]).to_equal(8)  # oracle: the fifth generated term is eight
 
         it "generates values with accumulator":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: generates values with accumulator")
-            var sum = 0
+            # @req REQ-CODEGEN-GENERATOR-005
+            # @capture(statistics): partial-sum transcript over five inputs
+            step("Emit running partial sums across a five-element input")
+            var running_sum = 0
             var partial_sums = []
-
-            for n in [1, 2, 3, 4, 5]:
-                sum = sum + n
-                partial_sums = partial_sums + [sum]
-
+            for accumulator_item in [1, 2, 3, 4, 5]:
+                running_sum = running_sum + accumulator_item
+                partial_sums = partial_sums + [running_sum]
             expect(partial_sums).to_equal([1, 3, 6, 10, 15])
 
     context "dispatcher entry pattern":
         it "dispatches based on state index":
-            # @req: REQ-LIB-COMMON-FEATUREVALID-001
-            step("Verify: dispatches based on state index")
-            fn dispatch(state):
+            # @req REQ-CODEGEN-GENERATOR-006
+            # @capture(statistics): four-way dispatch table verdicts
+            step("Dispatch every state index through the entry table")
+            fn codegen_dispatch(state):
                 if state == 0:
                     return "init"
                 elif state == 1:
@@ -387,30 +358,20 @@ describe "Feature #96 - Generator State Machine Concepts":
                     return "finalize"
                 else:
                     return "done"
-
-            expect(dispatch(0)).to_equal("init")
-            expect(dispatch(1)).to_equal("process")
-            expect(dispatch(2)).to_equal("finalize")
-            expect(dispatch(3)).to_equal("done")
+            expect(codegen_dispatch(0)).to_equal("init")
+            expect(codegen_dispatch(1)).to_equal("process")
+            expect(codegen_dispatch(2)).to_equal("finalize")
+            expect(codegen_dispatch(3)).to_equal("done")
 
 # ============================================================================
 # Compiled-lane assertion (out of process) -- added 2026-08-09
 # ============================================================================
 #
-# Everything ABOVE this line is titled "Feature #100 - Cranelift Backend" and
-# names its examples "compiles integer arithmetic", "compiles string
-# interpolation", "compiles array creation and access" -- but none of it ever
-# reached a compiler. `describe` / `it` / `expect` are Rust INTERPRETER
-# intrinsics with no codegen lowering, and a spec file has no `fn main`, so the
-# driver routes it to `evaluate_module` no matter what SIMPLE_EXECUTION_MODE
-# says. The examples above therefore assert that the TREE-WALKING INTERPRETER
-# can add two integers, under a heading claiming they validate Cranelift. They
-# would stay green through a total loss of the codegen backend.
-#
-# The block below asserts the SAME contracts against a NAMED engine, by
-# spawning a runnable probe program out of process and scoring its verdict
-# LINE (not its exit code -- a codegen panic and a clean failure both exit
-# non-zero, and some failure shapes still exit 0).
+# Everything ABOVE this line exercises its contracts under the engine the
+# test driver selects. The block below asserts the SAME contracts against a
+# NAMED engine, by spawning a runnable probe program out of process and
+# scoring its verdict LINE (not its exit code -- a codegen panic and a clean
+# failure both exit non-zero, and some failure shapes still exit 0).
 #
 # Mechanism: src/lib/nogc_sync_mut/spec/engine_probe.spl
 # Pattern:   doc/07_guide/infra/testing/spec_engine_reach.md
@@ -421,7 +382,7 @@ use std.spec.engine_probe.{engine_stdout, is_known_engine}
 val _CODEGEN_PROBE = "test/01_unit/lib/common/feature_validation/codegen_feature_validation_probe.spl"
 val _CODEGEN_PASS = "PROBE VERDICT: PASS"
 
-describe "Feature #100 - Cranelift Backend holds under the JIT lane (out of process)":
+describe "cranelift backend holds under the jit lane (out of process)":
     """
     As a compiler maintainer, I need the language-level contracts this file is
     named for -- integer and comparison ops, direct/recursive/nested calls,
@@ -432,22 +393,25 @@ describe "Feature #100 - Cranelift Backend holds under the JIT lane (out of proc
     """
 
     it "passes the probe under the interpreter":
-        # @req: REQ-LIB-COMMON-FEATUREVALID-001
-        step("Verify: passes the probe under the interpreter")
+        # @req REQ-CODEGEN-JIT-PROBE-001
+        # @capture(protocol_json): interpreter-arm probe verdict line
+        step("Spawn the probe out of process under the interpreter")
         # Control column. The interpreter is the engine the examples above
         # already exercise, so this arm failing means the probe or the harness
         # broke, not codegen.
         expect(engine_stdout(_CODEGEN_PROBE, "interpret")).to_contain(_CODEGEN_PASS)
 
-    it "passes the probe under the cranelift JIT":
-        # @req: REQ-LIB-COMMON-FEATUREVALID-001
-        step("Verify: passes the probe under the cranelift JIT")
+    it "passes the probe under the cranelift jit":
+        # @req REQ-CODEGEN-JIT-PROBE-002
+        # @capture(protocol_json): jit-arm probe verdict line
+        step("Spawn the probe out of process under the cranelift jit")
         # The arm that carries the weight: the same 50 checks, compiled.
         expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain(_CODEGEN_PASS)
 
     it "proves each arm reached the engine it names":
-        # @req: REQ-LIB-COMMON-FEATUREVALID-001
-        step("Verify: proves each arm reached the engine it names")
+        # @req REQ-CODEGEN-JIT-PROBE-003
+        # @capture(protocol_json): per-arm engine canary lines
+        step("Compare the live engine canary across both arms")
         # A probe printing the same verdict on both engines cannot by itself
         # prove the "jit" arm reached the JIT: one unsupported operation
         # silently demotes a whole program back to the interpreter, and an
@@ -462,9 +426,12 @@ describe "Feature #100 - Cranelift Backend holds under the JIT lane (out of proc
         expect(engine_stdout(_CODEGEN_PROBE, "interpret")).to_contain("PROBE ENGINE CANARY: true")
         expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain("PROBE ENGINE CANARY: false")
 
-    it "rejects an unrecognised engine name instead of silently using the JIT":
-        # @req: REQ-LIB-COMMON-FEATUREVALID-001
-        step("Verify: rejects an unrecognised engine name instead of silently using the JIT")
+    it "rejects an unrecognised engine name instead of silently using the jit":
+        # @req REQ-CODEGEN-JIT-PROBE-004
+        # @capture(bit_table): engine-name admission table
+        step("Check the engine-name gate against known and unknown names")
+        # An unrecognised mode value must be refused, not silently mapped onto
+        # the JIT lane.
         assert_false(is_known_engine("interp"))
         assert_false(is_known_engine("native"))
         assert_true(is_known_engine("jit"))

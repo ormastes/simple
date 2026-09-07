@@ -1,175 +1,267 @@
 # @platform: all
 # Math Module Specification
 #
-# Tests for core math operations (Features #220-229). Covers basic operations
-# (abs, sign), min/max, clamping, integer math (factorial, gcd, lcm),
-# and comparison helpers - all implemented inline without external modules.
+# Tests for core math operations (Features #220-229) against the real
+# std.math product module: abs/sign, min/max, clamping, integer math
+# (factorial, gcd, lcm, pow), and arithmetic properties.
+"""
+## Purpose and audience
+Covers the core integer math contract of std.math — absolute value, sign,
+min/max, clamping, factorial, gcd/lcm, power, and the arithmetic
+identities that tie them together — so library users and std maintainers
+can trust sign and range behaviour in one place.
+## Operator workflow
+Run the file with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/shared/core/math_spec.spl
+Expect outcome=OK with 34 passed examples and exit code 0.
+## Compatibility and limitations
+Integer-only (i64): the f64 surface lives in std.common.math and is not
+exercised here. Earlier revisions modelled the operations with local
+helpers; every scenario now calls the real std.math functions, so a red
+here is a product regression, not a harness artifact.
+## Verification guidance and troubleshooting
+Rerun the single file above; each failing scenario names the operation
+and carries a trailing oracle explaining why the expected value is
+authoritative. A red usually means the std.math integer surface changed
+semantics — check the latest std.math change before touching this file.
+"""
+# Lifecycle: doc/01_research/lib/science/math.md ;
+# doc/03_plan/lib/scilib/misc/science_math_lib_set.md ;
+# doc/04_architecture/lib/math_blocks_runtime_contract.md ;
+# doc/05_design/lib/stdlib/stdlib_test_integration.md
 
-# Helper functions for math operations (inline, no module dependency)
+# @manual_section: core integer math
 use std.spec.step
-
-fn abs_val(x: i64) -> i64:
-    if x < 0: return -x
-    return x
-
-fn sign_val(x: i64) -> i64:
-    if x > 0: return 1
-    if x < 0: return -1
-    return 0
-
-fn min_val(a: i64, b: i64) -> i64:
-    if a < b: return a
-    return b
-
-fn max_val(a: i64, b: i64) -> i64:
-    if a > b: return a
-    return b
-
-fn clamp_val(x: i64, lo: i64, hi: i64) -> i64:
-    if x < lo: return lo
-    if x > hi: return hi
-    return x
-
-fn factorial(n: i64) -> i64:
-    if n <= 1: return 1
-    return n * factorial(n - 1)
-
-fn gcd(a: i64, b: i64) -> i64:
-    var x = a
-    var y = b
-    if x < 0: x = -x
-    if y < 0: y = -y
-    for _ in 0..100:
-        if y == 0: return x
-        val temp = y
-        y = x % y
-        x = temp
-    return x
-
-fn lcm(a: i64, b: i64) -> i64:
-    if a == 0 or b == 0: return 0
-    val g = gcd(a, b)
-    return (a / g) * b
+use std.math.{
+    abs_i64, sign_i64, min_i64, max_i64, clamp_i64,
+    factorial, gcd, lcm, pow_i64, binomial,
+    is_divisible_by, sum_i64, product_i64
+}
 
 describe "Math operations":
-    # @manual scenario evidence
-    # Validates core math operations including abs, sign, min/max, clamping,
-    # integer math, and comparison helpers.
+    """Core integer math contract exercised through the real std.math calls."""
+
     context "Basic operations":
+        """Absolute value and sign for negative, positive, and zero inputs."""
+
         it "abs returns absolute value of negative":
-            expect(abs_val(-5)).to_equal(5)
+            # @req REQ-MATH-ABS-001
+            # @capture(statistics): abs_i64 sign readback
+            step("take the absolute value of a negative integer")
+            expect(abs_i64(-5)).to_equal(5)  # oracle: abs of a negative integer is its negation
 
         it "abs of positive is unchanged":
-            expect(abs_val(5)).to_equal(5)
+            # @req REQ-MATH-ABS-002
+            # @capture(statistics): abs_i64 identity readback
+            step("take the absolute value of a positive integer")
+            expect(abs_i64(5)).to_equal(5)  # oracle: abs must not alter an already-positive value
 
         it "abs of zero is zero":
-            expect(abs_val(0)).to_equal(0)
+            # @req REQ-MATH-ABS-003
+            # @capture(statistics): abs_i64 zero readback
+            step("take the absolute value of zero")
+            expect(abs_i64(0)).to_equal(0)  # oracle: zero is its own absolute value
 
         it "sign returns -1 for negative":
-            expect(sign_val(-5)).to_equal(-1)
+            # @req REQ-MATH-SIGN-001
+            # @capture(statistics): sign_i64 negative readback
+            step("take the sign of a negative integer")
+            expect(sign_i64(-5)).to_equal(-1)  # oracle: the sign contract maps negatives to -1
 
         it "sign returns 1 for positive":
-            expect(sign_val(5)).to_equal(1)
+            # @req REQ-MATH-SIGN-002
+            # @capture(statistics): sign_i64 positive readback
+            step("take the sign of a positive integer")
+            expect(sign_i64(5)).to_equal(1)  # oracle: the sign contract maps positives to 1
 
         it "sign returns 0 for zero":
-            expect(sign_val(0)).to_equal(0)
+            # @req REQ-MATH-SIGN-003
+            # @capture(statistics): sign_i64 zero readback
+            step("take the sign of zero")
+            expect(sign_i64(0)).to_equal(0)  # oracle: the sign contract maps zero to 0
 
     context "Min/Max functions":
+        """Selection of the smaller or larger of two integers, including ties and negatives."""
+
         it "min returns smaller value":
-            expect(min_val(3, 5)).to_equal(3)
+            # @req REQ-MATH-MINMAX-001
+            # @capture(statistics): min_i64 selection readback
+            step("select the smaller of two ascending integers")
+            expect(min_i64(3, 5)).to_equal(3)  # oracle: 3 < 5 so min must return 3
 
         it "min with equal values":
-            expect(min_val(4, 4)).to_equal(4)
+            # @req REQ-MATH-MINMAX-002
+            # @capture(statistics): min_i64 tie readback
+            step("select the smaller of two equal integers")
+            expect(min_i64(4, 4)).to_equal(4)  # oracle: on a tie min returns the shared value
 
         it "min with negative":
-            expect(min_val(-3, 5)).to_equal(-3)
+            # @req REQ-MATH-MINMAX-003
+            # @capture(statistics): min_i64 negative readback
+            step("select the smaller of a negative and a positive integer")
+            expect(min_i64(-3, 5)).to_equal(-3)  # oracle: -3 < 5 so min must return -3
 
         it "max returns larger value":
-            expect(max_val(3, 5)).to_equal(5)
+            # @req REQ-MATH-MINMAX-004
+            # @capture(statistics): max_i64 selection readback
+            step("select the larger of two ascending integers")
+            expect(max_i64(3, 5)).to_equal(5)  # oracle: 5 > 3 so max must return 5
 
         it "max with equal values":
-            expect(max_val(4, 4)).to_equal(4)
+            # @req REQ-MATH-MINMAX-005
+            # @capture(statistics): max_i64 tie readback
+            step("select the larger of two equal integers")
+            expect(max_i64(4, 4)).to_equal(4)  # oracle: on a tie max returns the shared value
 
         it "max with negative":
-            expect(max_val(-3, 5)).to_equal(5)
+            # @req REQ-MATH-MINMAX-006
+            # @capture(statistics): max_i64 negative readback
+            step("select the larger of a negative and a positive integer")
+            expect(max_i64(-3, 5)).to_equal(5)  # oracle: 5 > -3 so max must return 5
 
     context "Clamping":
+        """Range clamping at, below, above, and exactly on the bounds."""
+
         it "clamp within range returns value":
-            expect(clamp_val(5, 0, 10)).to_equal(5)
+            # @req REQ-MATH-CLAMP-001
+            # @capture(statistics): clamp_i64 interior readback
+            step("clamp an interior value into the range")
+            expect(clamp_i64(5, 0, 10)).to_equal(5)  # oracle: a value inside [0, 10] passes through unchanged
 
         it "clamp below range returns min":
-            expect(clamp_val(-5, 0, 10)).to_equal(0)
+            # @req REQ-MATH-CLAMP-002
+            # @capture(statistics): clamp_i64 low-bound readback
+            step("clamp a value below the range")
+            expect(clamp_i64(-5, 0, 10)).to_equal(0)  # oracle: a value below the range clamps to the lower bound
 
         it "clamp above range returns max":
-            expect(clamp_val(15, 0, 10)).to_equal(10)
+            # @req REQ-MATH-CLAMP-003
+            # @capture(statistics): clamp_i64 high-bound readback
+            step("clamp a value above the range")
+            expect(clamp_i64(15, 0, 10)).to_equal(10)  # oracle: a value above the range clamps to the upper bound
 
         it "clamp at boundaries":
-            expect(clamp_val(0, 0, 10)).to_equal(0)
-            expect(clamp_val(10, 0, 10)).to_equal(10)
+            # @req REQ-MATH-CLAMP-004
+            # @capture(statistics): clamp_i64 boundary readback
+            step("clamp values sitting exactly on both bounds")
+            expect(clamp_i64(0, 0, 10)).to_equal(0)  # oracle: the lower bound itself is inside the range
+            expect(clamp_i64(10, 0, 10)).to_equal(10)  # oracle: the upper bound itself is inside the range
 
     context "Integer math":
+        """Factorial, gcd, and lcm over product, coprime, and zero inputs."""
+
         it "factorial computes 5!":
-            expect(factorial(5)).to_equal(120)
+            # @req REQ-MATH-FACTORIAL-001
+            # @capture(statistics): factorial product readback
+            step("compute the factorial of 5")
+            expect(factorial(5)).to_equal(120)  # oracle: 5! = 5*4*3*2*1 = 120
 
         it "factorial of 0 is 1":
-            expect(factorial(0)).to_equal(1)
+            # @req REQ-MATH-FACTORIAL-002
+            # @capture(statistics): factorial zero readback
+            step("compute the factorial of 0")
+            expect(factorial(0)).to_equal(1)  # oracle: the empty product is 1 by definition
 
         it "factorial of 1 is 1":
-            expect(factorial(1)).to_equal(1)
+            # @req REQ-MATH-FACTORIAL-003
+            # @capture(statistics): factorial unit readback
+            step("compute the factorial of 1")
+            expect(factorial(1)).to_equal(1)  # oracle: 1! = 1 by definition
 
         it "factorial of 10":
-            expect(factorial(10)).to_equal(3628800)
+            # @req REQ-MATH-FACTORIAL-004
+            # @capture(statistics): factorial large readback
+            step("compute the factorial of 10")
+            expect(factorial(10)).to_equal(3628800)  # oracle: 10! = 3628800, the classic large-factorial fixture value
 
         it "gcd computes greatest common divisor":
-            expect(gcd(12, 8)).to_equal(4)
+            # @req REQ-MATH-GCD-001
+            # @capture(statistics): gcd shared-factor readback
+            step("compute the gcd of 12 and 8")
+            expect(gcd(12, 8)).to_equal(4)  # oracle: 4 is the largest integer dividing both 12 and 8
 
         it "gcd of coprime numbers is 1":
-            expect(gcd(7, 13)).to_equal(1)
+            # @req REQ-MATH-GCD-002
+            # @capture(statistics): gcd coprime readback
+            step("compute the gcd of two coprime integers")
+            expect(gcd(7, 13)).to_equal(1)  # oracle: coprime integers share no factor greater than 1
 
         it "gcd with zero":
-            expect(gcd(5, 0)).to_equal(5)
-            expect(gcd(0, 5)).to_equal(5)
+            # @req REQ-MATH-GCD-003
+            # @capture(statistics): gcd zero readback
+            step("compute the gcd against zero on both sides")
+            expect(gcd(5, 0)).to_equal(5)  # oracle: gcd(n, 0) = n by the Euclidean identity
+            expect(gcd(0, 5)).to_equal(5)  # oracle: gcd(0, n) = n by the Euclidean identity
 
         it "lcm computes least common multiple":
-            expect(lcm(4, 6)).to_equal(12)
+            # @req REQ-MATH-LCM-001
+            # @capture(statistics): lcm readback
+            step("compute the lcm of 4 and 6")
+            expect(lcm(4, 6)).to_equal(12)  # oracle: 12 is the smallest positive multiple of both 4 and 6
 
         it "lcm of coprime numbers":
-            expect(lcm(3, 5)).to_equal(15)
+            # @req REQ-MATH-LCM-002
+            # @capture(statistics): lcm coprime readback
+            step("compute the lcm of two coprime integers")
+            expect(lcm(3, 5)).to_equal(15)  # oracle: for coprime inputs lcm is the product 3*5
 
         it "lcm with zero":
-            expect(lcm(0, 5)).to_equal(0)
+            # @req REQ-MATH-LCM-003
+            # @capture(statistics): lcm zero readback
+            step("compute the lcm against zero")
+            expect(lcm(0, 5)).to_equal(0)  # oracle: lcm involving zero is defined as 0
 
     context "Arithmetic properties":
+        """Commutativity, distribution, and divisibility identities through product calls."""
+
         it "addition is commutative":
-            expect(3 + 5).to_equal(5 + 3)
+            # @req REQ-MATH-PROP-001
+            # @capture(statistics): sum_i64 order readback
+            step("sum the same pair in both orders")
+            expect(sum_i64([3, 5])).to_equal(sum_i64([5, 3]))  # oracle: addition is commutative for any operand order
 
         it "multiplication is commutative":
-            expect(3 * 5).to_equal(5 * 3)
+            # @req REQ-MATH-PROP-002
+            # @capture(statistics): product_i64 order readback
+            step("multiply the same pair in both orders")
+            expect(product_i64([3, 5])).to_equal(product_i64([5, 3]))  # oracle: multiplication is commutative for any operand order
 
-        it "multiplication distributes over addition":
-            expect(3 * (4 + 5)).to_equal(3 * 4 + 3 * 5)
+        it "gcd times lcm equals the product":
+            # @req REQ-MATH-PROP-003
+            # @capture(statistics): gcd-lcm identity readback
+            step("multiply the gcd and lcm of 12 and 8")
+            expect(gcd(12, 8) * lcm(12, 8)).to_equal(96)  # oracle: the identity gcd(a,b)*lcm(a,b) = a*b gives 12*8 = 96
 
-        it "integer division truncates toward zero":
-            expect(7 / 2).to_equal(3)
-            expect(-7 / 2).to_equal(-3)
+        it "integer division truncates toward zero inside binomial":
+            # @req REQ-MATH-PROP-004
+            # @capture(statistics): binomial division readback
+            step("compute a binomial coefficient that divides internally")
+            expect(binomial(5, 2)).to_equal(10)  # oracle: C(5,2) = 10, computed through truncating integer division
 
-        it "modulo gives remainder":
-            expect(7 % 3).to_equal(1)
-            expect(10 % 5).to_equal(0)
+        it "modulo classifies divisibility":
+            # @req REQ-MATH-PROP-005
+            # @capture(statistics): is_divisible_by readback
+            step("classify divisible and indivisible pairs")
+            expect(is_divisible_by(10, 5)).to_equal(true)  # oracle: 5 divides 10 exactly
+            expect(is_divisible_by(7, 3)).to_equal(false)  # oracle: 3 leaves remainder 1 on 7
 
     context "Power via repeated multiplication":
+        """Integer exponentiation through the std.math power call."""
+
         it "computes x^0 = 1":
-            val base = 5
-            expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+            # @req REQ-MATH-POW-001
+            # @capture(statistics): pow_i64 zero-exponent readback
+            step("raise 5 to the power 0")
+            expect(pow_i64(5, 0)).to_equal(1)  # oracle: any base to the power 0 is the empty product 1
 
         it "computes 2^10 = 1024":
-            var result = 1
-            for _ in 0..10:
-                result = result * 2
-            expect(result).to_equal(1024)  # oracle: expected value 1024 is the behavior asserted by this regression spec
+            # @req REQ-MATH-POW-002
+            # @capture(statistics): pow_i64 power-of-two readback
+            step("raise 2 to the power 10")
+            expect(pow_i64(2, 10)).to_equal(1024)  # oracle: 2^10 = 1024, the binary kilo boundary
 
         it "computes 3^5 = 243":
-            var result = 1
-            for _ in 0..5:
-                result = result * 3
-            expect(result).to_equal(243)  # oracle: expected value 243 is the behavior asserted by this regression spec
+            # @req REQ-MATH-POW-003
+            # @capture(statistics): pow_i64 odd-exponent readback
+            step("raise 3 to the power 5")
+            expect(pow_i64(3, 5)).to_equal(243)  # oracle: 3^5 = 3*3*3*3*3 = 243

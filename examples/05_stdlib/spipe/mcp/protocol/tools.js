@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { releaseCapabilities, releaseContractHash, releaseOperations, releaseSchemas } from "../../src/release/contract.js";
 import { createReleasePlan } from "../../src/release/planner.js";
+import { CompiledInventoryReverseReferenceService } from "./reverse_references.js";
 
 const booleanFields = new Set(["read_only_snapshot", "main_is_independent_trunk", "forward_port_required", "release_first_exception_approved", "reviewed", "main_tests_renewed", "protected_ref_direct_update", "signed_tag", "annotated_tag", "exact_tag_push", "rebuild", "fallback_artifact", "release_authority_approved"]);
 const integerFields = new Set(["attempt", "candidate_attempt", "interval_seconds", "last_scan_epoch", "now_epoch"]);
@@ -39,7 +40,24 @@ export const tools = Object.freeze([
   { name: "spipe_release_candidate_plan", description: "Validate an immutable build-once candidate plan. Performs no candidate creation or build.", inputSchema: releasePlanSchema("candidate") },
   { name: "spipe_release_promotion_plan", description: "Validate exact admitted promotion inputs. Performs no tag, push, delete, rebuild, or publication.", inputSchema: releasePlanSchema("promotion") },
   { name: "spipe_release_main_fix_discovery_plan", description: "Check supplied immutable snapshots for reviewed bug-fix candidates. Never selects or cherry-picks a fix.", inputSchema: releasePlanSchema("main-fix-discovery") },
-  { name: "spipe_release_forward_port_plan", description: "Validate an isolated main forward-port for an approved release-first fix. Never pushes a protected ref.", inputSchema: releasePlanSchema("forward-port") }
+  { name: "spipe_release_forward_port_plan", description: "Validate an isolated main forward-port for an approved release-first fix. Never pushes a protected ref.", inputSchema: releasePlanSchema("forward-port") },
+  {
+    name: "spipe_folder_reverse_references",
+    description: "Query deterministic, bounded reverse references to one target from source artifacts inside a project-relative folder.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        inventory_path: { type: "string", minLength: 1, description: "Server-local path to an immutable compiled inventory JSON file." },
+        target_uid: { type: "string", minLength: 1, description: "Opaque target UID referenced by returned edges." },
+        folder_path: { type: "string", default: "", description: "Canonical project-relative source folder; empty selects the project root." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+        max_work_units: { type: "integer", minimum: 1, maximum: 500000, default: 50000 },
+        cursor: { type: ["string", "null"], default: null, description: "Authenticated cursor returned by the preceding page." }
+      },
+      required: ["inventory_path", "target_uid"],
+      additionalProperties: false
+    }
+  }
 ]);
 
 function text(content) {
@@ -76,7 +94,13 @@ export function readDoc(moduleRoot, path) {
   return readFileSync(abs, "utf8");
 }
 
-export function callTool(moduleRoot, name, args = {}) {
+export function createToolCaller(moduleRoot, { reverseReferenceService = new CompiledInventoryReverseReferenceService() } = {}) {
+  return function call(name, args = {}) {
+    return callTool(moduleRoot, name, args, reverseReferenceService);
+  };
+}
+
+export function callTool(moduleRoot, name, args = {}, reverseReferenceService = new CompiledInventoryReverseReferenceService()) {
   if (name === "spipe_info") {
     return text([
       `module=${moduleRoot}`,
@@ -114,5 +138,8 @@ export function callTool(moduleRoot, name, args = {}) {
     spipe_release_forward_port_plan: "forward-port"
   };
   if (releaseTools[name]) return text(JSON.stringify(createReleasePlan(releaseTools[name], args), null, 2));
+  if (name === "spipe_folder_reverse_references") {
+    return text(JSON.stringify(reverseReferenceService.query(args), null, 2));
+  }
   throw new Error(`unknown tool: ${name}`);
 }

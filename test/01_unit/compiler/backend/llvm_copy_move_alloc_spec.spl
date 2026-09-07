@@ -248,6 +248,57 @@ fn build_declared_undefined_copy_module() -> MirModule:
     functions[fn_.symbol] = fn_
     MirModule(name: "test.llvm.declared_undefined_copy", functions: functions, statics: {}, constants: {}, types: {})
 
+fn build_local_string_print_module() -> MirModule:
+    val ptr_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+    val print_signature = MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 5),
+        name: "local_string_print",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: Some("message"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("hello"), ptr_type), span: nil),
+                    MirInst(kind: MirInstKind.Call(
+                        nil,
+                        MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_print"),
+                            MirType(kind: MirTypeKind.FuncPtr(print_signature))
+                        )),
+                        [mir_operand_copy(LocalId(id: 1))]
+                    ), span: nil)
+                ],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.local_string_print", functions: functions, statics: {}, constants: {}, types: {})
+
 describe "LLVM alloc copy move":
     # @manual scenario evidence
     it "keeps alloc results pointer-typed across copy and move chains":
@@ -288,14 +339,25 @@ describe "LLVM alloc copy move":
         expect(output).to_contain("icmp eq ptr %l0, null")
         expect(output.contains("icmp eq i1 %l0, 0")).to_equal(false)
 
-    it "does not reference declared locals before a definition":
+    it "keeps a missing MIR producer visible so LLVM rejects it":
         # @req REQ-SSPEC-UNIT
-        step("does not reference declared locals before a definition")
+        step("Lower malformed MIR whose copied local has no producer")
         val translator = MirToLlvm.create("test.llvm.declared_undefined_copy", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_declared_undefined_copy_module())
 
-        expect(output).to_contain("%l3 = add i64 undef, 0  ; copy")
-        expect(output.contains("add i64 %l2, 0")).to_equal(false)
+        step("Preserve the missing SSA identity instead of masking it with undef")
+        expect(output).to_contain("%l3 = add i64 %l2, 0  ; copy")
+        expect(output.contains("add i64 undef, 0")).to_equal(false)
+
+    it "passes the defined hello local to rt_print":
+        step("Lower a local hello string followed by its print call")
+        val translator = MirToLlvm.create("test.llvm.local_string_print", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_local_string_print_module())
+
+        step("Keep the local SSA value across the call receiver boundary")
+        expect(output).to_contain("%l1 = getelementptr inbounds")
+        expect(output).to_contain("call void @rt_print(ptr %l1)")
+        expect(output.contains("call void @rt_print(ptr undef)")).to_equal(false)
 
     it "keeps a fresh slotted string constant pointer-typed":
         # @req REQ-SSPEC-UNIT

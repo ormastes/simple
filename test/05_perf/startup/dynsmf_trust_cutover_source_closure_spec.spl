@@ -1,46 +1,101 @@
 # @tag: perf, startup, dynsmf, source-closure
-"""Source-closure and fast-path guard for the production dynSMF trust cutover."""
+"""
+## Purpose and audience
+Source-closure and fast-path guard for the production dynSMF trust cutover:
+the OS trust admission must sit after the empty-args/help/version fast returns
+in the main router, the trust owner must stay free of compiler process and
+directory scans, registry consumers must load only from retained bytes, and
+the hard option terminator must live in the one canonical router. Written for
+engineers touching the startup path or the dynSMF trust registry.
+## Operator workflow
+Run this spec with:
+`./src/compiler_rust/target/bootstrap/simple run test/05_perf/startup/dynsmf_trust_cutover_source_closure_spec.spl`
+and read the trailing SPEC FILE VERDICT line.
+## Compatibility and limitations
+These are source contracts over shipped product files read with file_read_text
+relative to the repo root; they execute no compiled startup path and measure no
+timings. They fail loudly when the guarded source layout drifts — that is the
+intended tripwire, not a harness fault.
+## Verification guidance and troubleshooting
+A failed scenario prints the token that went missing plus the product file it
+was expected in: re-anchor the contract to the new layout only after confirming
+the move was intentional, and re-read doc/04_architecture/compiler/aspect_dynload/
+startup_trust_registry_cutover_2026-08-20.md before weakening any ordering
+assertion in the first scenario.
+"""
+# Lifecycle: doc/01_research/domain/low_dependency_ui_dynsmf.md ;
+# doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_loader_handoff.md ;
+# doc/04_architecture/compiler/aspect_dynload/startup_trust_registry_cutover_2026-08-20.md ;
+# doc/05_design/low_dependency_ui_dynsmf.md
+# @manual_section: dynsmf-trust-cutover
 
 use std.spec.{describe, it, expect}
 use app.io.mod.{file_read_text}
 
 describe "dynSMF trust cutover startup source closure":
     it "places OS trust admission after empty help and version returns":
+        # @req REQ-DYNSMF-CUTOVER-001
+        # @capture(statistics): ordered index positions of the startup fast paths retained for review
+        step("Read the main router and verify the trust admission lands after the fast returns")
         val source = file_read_text("src/app/main.spl")
         val empty_fast_path = source.index_of("if args.len() == 0 and not option_plan.component_configured")
         val help_fast_path = source.index_of("if command == \"--help\"")
         val version_fast_path = source.index_of("if command == \"--version\"")
         val trust_load = source.index_of("val dynsmf_registry = dynsmf_admitted_registry_load")
-        expect(empty_fast_path).to_be_greater_than(0)
-        expect(help_fast_path).to_be_greater_than(empty_fast_path)
-        expect(version_fast_path).to_be_greater_than(help_fast_path)
-        expect(trust_load).to_be_greater_than(version_fast_path)
+        expect(empty_fast_path).to_be_greater_than(0)  # oracle: the empty-args fast return must exist and not sit at offset 0
+        expect(help_fast_path).to_be_greater_than(empty_fast_path)  # oracle: help handling comes after the empty-args guard
+        expect(version_fast_path).to_be_greater_than(help_fast_path)  # oracle: version handling comes after help
+        expect(trust_load).to_be_greater_than(version_fast_path)  # oracle: OS trust admission must follow all cheap returns
 
     it "keeps the OS trust owner free of compiler process and directory scans":
+        # @req REQ-DYNSMF-CUTOVER-002
+        # @capture(statistics): trust-owner dependency source contract retained for review
+        step("Read the trust registry module and verify it imports no app or compiler lanes and runs no scans")
         val source = file_read_text("src/os/smf/dynsmf_trust_registry.spl")
-        expect(source.contains("use app.")).to_equal(false)
-        expect(source.contains("use compiler.")).to_equal(false)
-        expect(source.contains("process_run(")).to_equal(false)
-        expect(source.contains("process_spawn")).to_equal(false)
-        expect(source.contains("directory_entries(")).to_equal(false)
-        expect(source).to_contain("artifact_bytes: rt_file_read_bytes(path)")
+        val keeps_no_app_imports = not source.contains("use app.")
+        expect(keeps_no_app_imports).to_equal(true)
+        val keeps_no_compiler_imports = not source.contains("use compiler.")
+        expect(keeps_no_compiler_imports).to_equal(true)
+        val keeps_no_process_runs = not source.contains("process_run(")
+        expect(keeps_no_process_runs).to_equal(true)
+        val keeps_no_process_spawns = not source.contains("process_spawn")
+        expect(keeps_no_process_spawns).to_equal(true)
+        val keeps_no_directory_scans = not source.contains("directory_entries(")
+        expect(keeps_no_directory_scans).to_equal(true)
+        val loads_only_from_retained_bytes = source.contains("artifact_bytes: rt_file_read_bytes(path)")
+        expect(loads_only_from_retained_bytes).to_equal(true)
 
     it "loads registry consumers only from retained bytes with no legacy loader bypass":
+        # @req REQ-DYNSMF-CUTOVER-003
+        # @capture(statistics): consumer loader source contract over autoload and component wiring retained for review
+        step("Read the startup loaders and verify both consume retained bytes with no legacy bypass")
         val ordinary = file_read_text("src/app/startup/dynsmf_autoload.spl")
         val ordinary_start = ordinary.index_of("fn _dynsmf_startup_load_registry")
         val ordinary_end = ordinary.index_of("fn _dynsmf_startup_queue_missing_without_artifact_read")
         val ordinary_registry_path = ordinary.substring(ordinary_start, ordinary_end)
-        expect(ordinary_registry_path).to_contain("admitted!.artifact_bytes")
-        expect(ordinary_registry_path.contains("file_read_bytes(")).to_equal(false)
-        expect(ordinary_registry_path.contains("dynsmf_session_load_checked(")).to_equal(false)
+        val loads_registry_from_admitted_artifact = ordinary_registry_path.contains("admitted!.artifact_bytes")
+        expect(loads_registry_from_admitted_artifact).to_equal(true)
+        val keeps_no_raw_byte_reads = not ordinary_registry_path.contains("file_read_bytes(")
+        expect(keeps_no_raw_byte_reads).to_equal(true)
+        val keeps_no_legacy_session_load = not ordinary_registry_path.contains("dynsmf_session_load_checked(")
+        expect(keeps_no_legacy_session_load).to_equal(true)
 
         val component = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
-        expect(component).to_contain("retained_registry_bytes = registry_artifact!.artifact_bytes")
-        expect(component).to_contain("if registry == nil:")
-        expect(component.contains("dynsmf_session_load_checked(")).to_equal(false)
+        val component_loads_retained_bytes = component.contains("retained_registry_bytes = registry_artifact!.artifact_bytes")
+        expect(component_loads_retained_bytes).to_equal(true)
+        val component_guards_nil_registry = component.contains("if registry == nil:")
+        expect(component_guards_nil_registry).to_equal(true)
+        val component_keeps_no_legacy_session_load = not component.contains("dynsmf_session_load_checked(")
+        expect(component_keeps_no_legacy_session_load).to_equal(true)
 
     it "keeps the hard option terminator in the one canonical router":
+        # @req REQ-DYNSMF-CUTOVER-004
+        # @capture(statistics): option-terminator source contract over the canonical router retained for review
+        step("Read the canonical option router and verify the hard terminator handling is present")
         val source = file_read_text("src/app/startup/option_router.spl")
-        expect(source).to_contain("if token == \"--\":")
-        expect(source).to_contain("terminated = true")
-        expect(source).to_contain("routed.push(token)")
+        val routes_hard_terminator = source.contains("if token == \"--\":")
+        expect(routes_hard_terminator).to_equal(true)
+        val marks_termination = source.contains("terminated = true")
+        expect(marks_termination).to_equal(true)
+        val preserves_trailing_operands = source.contains("routed.push(token)")
+        expect(preserves_trailing_operands).to_equal(true)

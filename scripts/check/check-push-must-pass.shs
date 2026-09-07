@@ -10,6 +10,7 @@ ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
 }
 LEDGER_REL=${MUST_CHECK_LEDGER_REL:-doc/08_tracking/check/must_check_db.sdn}
 MANIFEST_REL=${MUST_CHECK_MANIFEST_REL:-config/check/must_check_gates.sdn}
+SELF_REL=scripts/check/check-push-must-pass.shs
 ZERO=0000000000000000000000000000000000000000
 MAX_PUSH_REF_ROWS=2
 MAX_EVIDENCE_BYTES=67108864
@@ -155,6 +156,16 @@ validate_ledger_text() {
         function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
         function fail() { bad=1 }
         FNR == NR {
+            # The column layout is PINNED, not inferred. Every field index below
+            # ($3 push_blocking, $5 command, $6 ci_job, $7 inputs) is only
+            # correct for this exact header, so a manifest whose header differs
+            # must be rejected rather than parsed with shifted fields — a
+            # shifted read is how a registry silently stops registering.
+            if ($0 ~ /^must_check_gates[[:space:]]*\|/) {
+                if ($0 != "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|") fail()
+                header_seen=1
+                next
+            }
             if ($0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/) {
                 id=trim($1)
                 if (id in manifest_seen) fail()
@@ -162,6 +173,10 @@ validate_ledger_text() {
                 manifest_order[++manifest_count]=id
                 manifest_blocking[id]=trim($3)
                 manifest_command[id]=unquote($5)
+                # ci_job and inputs are bare tokens; a quote in either means the
+                # description leaked left because a column is missing.
+                if (trim($6) == "" || trim($6) ~ /"/) fail()
+                if (trim($7) == "" || trim($7) ~ /"/) fail()
             }
             next
         }
@@ -186,6 +201,7 @@ validate_ledger_text() {
         }
         END {
             if (schema != "simple.must-check-ledger/v3" || !manifest_count || !ledger_count) fail()
+            if (!header_seen) fail()
             unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
             if (!unpromoted && fingerprint != want_fp) fail()
             if (manifest_count != ledger_count) fail()
@@ -292,11 +308,22 @@ run_manifest_push_gates() {
     _push_rows=$(mktemp) || return 2
     printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
     [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
-    while IFS=, read -r _id _tier _blocking _mode _command _description; do
+    # The manifest carries `ci_job` and `inputs` between `command` and
+    # `description` (see the header of config/check/must_check_gates.sdn). They
+    # are read explicitly rather than swallowed into `_description` so a row
+    # that lost the columns is REJECTED here instead of silently reinterpreted:
+    # a shifted field would make the `$_id:$_mode:$_command` key stop matching
+    # its dispatch case, which lands on the fail-closed `*)` arm and blocks
+    # every push with no explanation.
+    while IFS=, read -r _id _tier _blocking _mode _command _ci_job _inputs _description; do
         _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         _mode=$(printf '%s' "$_mode" | tr -d ' ')
         _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
         [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
+        _ci_job=$(printf '%s' "$_ci_job" | tr -d ' ')
+        _inputs=$(printf '%s' "$_inputs" | tr -d ' ')
+        case "$_ci_job" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
+        case "$_inputs" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
         _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
@@ -306,6 +333,13 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-merge-content-conservation:range:sh scripts/check/check-merge-content-conservation-push.shs --scan-only')
+                # The sibling of push-conflict-markers, for the damage that
+                # leaves NO marker: git auto-merged an add/add against an empty
+                # base and silently dropped a line neither parent deleted
+                # (7d40e71aa9c, session.retain()). Marker text, conflict trees,
+                # file counts and rt_* symbol sets are all blind to it.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-merge-content-conservation-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --scan-only --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref')
@@ -323,50 +357,136 @@ run_manifest_push_gates() {
                 # is honestly RED against this baseline until a lane migrates that debt or
                 # the baseline is deliberately regenerated for the wider scope.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src || { rm -f "$_push_rows"; return 1; } ;;
-            'push-interpreter-extern-registry-gap:tree:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
-            'push-sffi-v2-authority:tree:sh scripts/check/check-sffi-v2-authority.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sffi-v2-authority.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-interpreter-extern-registry-gap:ref:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
+                # declared set, the registry AND the frozen baseline all come
+                # from the pushed sha. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sffi-v2-authority:ref:sh scripts/check/check-sffi-v2-authority.shs --rev')
+                # ref, not tree, since 2026-09-07. The 46 sub-guards each
+                # resolve their own root from $0, so the wrapper materialises
+                # the revision and executes the COPIES INSIDE it — running
+                # $ROOT/scripts/audit/... with only the cwd changed would read
+                # the working copy straight back through $0. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sffi-v2-authority.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-signature-type-import-provenance:tree:sh scripts/check/check-signature-type-import-provenance.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-signature-type-import-provenance.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-type-walk-constructor-parity:tree:sh scripts/check/check-type-walk-constructor-parity.shs --scan-only')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
+            'push-type-walk-constructor-parity:ref:sh scripts/check/check-type-walk-constructor-parity.shs --scan-only --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-perf-regression-tests:tree:sh scripts/check/check-perf-regression-tests.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-use-target-resolves:tree:sh scripts/check/check-use-target-resolves.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-use-target-resolves.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-guard-wiring:tree:sh scripts/check/check-guard-wiring.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-shs-path-conversion-equivalence:tree:sh scripts/check/check-shs-path-conversion-equivalence.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shs-path-conversion-equivalence.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-shs-native-tool-boundary-preserved:tree:sh scripts/check/check-shs-native-tool-boundary-preserved.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shs-native-tool-boundary-preserved.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-guard-wiring:ref:sh scripts/check/check-guard-wiring.shs --rev')
+                # ref, not tree, since 2026-09-07 — but only the CONTENT half.
+                # The wiring graph (guards, roots, edges, opt-out, baseline) is
+                # a property of the pushed commit; "is a hook installed in this
+                # clone" stays on the real repository root, because that is a
+                # property of THIS MACHINE. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-sosix-capsule-boundaries:tree:sh scripts/check/check-sosix-capsule-boundaries.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sosix-capsule-boundaries.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-outline-parse-terminates:tree:sh scripts/check/check-outline-parse-terminates.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-outline-parse-terminates.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-main-test-runnable:ref:sh scripts/check/check-main-test-runnable-push.shs --rev')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-main-test-runnable-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-c-runtime-compiles:ref:sh scripts/check/check-c-runtime-compiles-push.shs --rev')
+                # ref, not tree, since 2026-09-07. Still a TREE check, not a
+                # delta — compilability is a property of a tree — but of the
+                # COMMITTED tree, materialised with git archive so a real
+                # compiler gets real files. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-rt-dual-implementation:tree:sh scripts/check/check-rt-dual-implementation-ratchet.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-dual-implementation:ref:sh scripts/check/check-rt-dual-implementation-ratchet.shs --rev')
+                # ref, not tree, since 2026-09-06. As a tree row this gate scanned
+                # the shared working checkout, so under concurrent agent load it
+                # reported on content that was NOT being pushed while missing the
+                # regression in content that WAS -- see
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-mock-file-system-io:ref:sh scripts/check/check-no-mock-file-system-io.shs --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect the
+                # rt-dual-implementation row was moved off. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-mock-file-system-io.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-dual-run-shadow:tree:sh scripts/check/check-dual-run-shadow.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-dual-run-shadow.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure-tui-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/backend_entry_tui.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui/backend_entry_tui.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure-cli-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-pack-inventory:tree:sh scripts/check/check-ui-slim-pack-inventory.shs src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-pack-inventory.shs" src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl ;;
             'push-parser-source-global-ratchet:tree:sh scripts/check/check-parser-source-global-ratchet.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-parser-source-global-ratchet.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-runtime-source-list-parity:tree:sh scripts/check/check-runtime-source-list-parity.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-source-list-parity.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-source-list-parity:ref:sh scripts/check/check-runtime-source-list-parity.shs --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-source-list-parity.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-lifecycle-reachability:tree:sh scripts/check/check-lifecycle-reachability.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-lifecycle-reachability.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-windows-checkout-damage:range:sh scripts/check/check-windows-checkout-damage-push.shs --scan-only')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs --roots src')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-direct-rt:ref:sh scripts/check/check-no-direct-rt.shs --roots src --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
+                # sources, the allowlist AND the baseline all come from the
+                # pushed sha. Measured at conversion: the working checkout held
+                # 24 untracked .spl the commit does not (16342 vs 16318 files).
+                # See doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-port-io-single-owner:ref:sh scripts/check/check-port-io-single-owner.shs --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect the
+                # rt-dual-implementation row was moved off. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-port-io-single-owner.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')
+                # Advisory by manifest (push_blocking=false): the verifier lands
+                # in a parallel lane, and a blocking row pointing at a file that
+                # does not exist yet would block every push in between. The
+                # selftest is what is pinned here, not a live receipt — CI
+                # verifies receipts, the push tier only proves the verifier's
+                # fail-closed fixtures still discriminate.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/verify-local-ci-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-api-groups:tree:sh scripts/check/check-rt-api-groups.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-api-groups.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-plan-acceptance-swept:tree:sh scripts/check/check-plan-acceptance-swept.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-plan-acceptance-swept.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            *) rm -f "$_push_rows"; return 2 ;;
+            *)
+                # Fail-closed, and never silent: until 2026-09-06 this arm returned
+                # 2 without a word, so the caller reported "one or more gates
+                # failed" after a run in which no blocking gate had failed.
+                echo "push-must-check: manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"
     rm -f "$_push_rows"
+}
+
+# The manifest is read from the COMMIT being pushed, so the dispatch arms must be
+# the ones committed with it. The working tree can sit on another lineage (a
+# detached worktree, a peer session's branch): on 2026-09-06 a push of a commit
+# whose manifest declared push-parser-source-global-ratchet was refused because
+# the checked-out tree predated that gate and had no arm for it. Redefine
+# run_manifest_push_gates from the pushed commit's copy of this script when that
+# copy carries one; an older commit without it keeps the running definition.
+load_committed_dispatcher() {
+    _committed_self=$(git -C "$ROOT" show "$1:$SELF_REL" 2>/dev/null) || return 0
+    _committed_fn=$(printf '%s\n' "$_committed_self" | sed -n '/^run_manifest_push_gates() {$/,/^}$/p')
+    [ -n "$_committed_fn" ] || return 0
+    eval "$_committed_fn"
 }
 
 run_conflict_tree_union() {
@@ -486,8 +606,42 @@ export MUST_CHECK_CONFLICT_UNION_DONE
 
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    # A tag push carries no new commits, and every range-scoped gate below is
+    # therefore vacuous on it: `<predecessor>..<tag>` resolves to 0 commits, the
+    # guards correctly report `ERROR — nothing was checked` (exit 2) rather than
+    # a false pass, and the first blocking row kills the push. Measured
+    # 2026-09-07 pushing `v1.0.1-beta.1`: `BLOCKING gate push-conflict-markers
+    # failed (exit 2)`, on a commit that was already on origin/main and had
+    # already passed these same gates through PR #457 and #458. The release
+    # contract needs to push exactly one tag ref, so this path has to work
+    # without `--no-verify` — a release that routes around the hook protects
+    # nothing, and `--no-verify` disables every gate, not just the vacuous ones.
+    #
+    # Fail-closed, not skipped-by-name: the tag is admitted ONLY when its target
+    # commit is already an ancestor of the push remote's main, i.e. the content
+    # was gated when it landed. A tag pointing at unpublished content is
+    # refused, because that content has never been through the gates and a tag
+    # push is not the place to admit it.
+    case "$_local_ref" in
+        refs/tags/*)
+            _tag_commit=$(git -C "$ROOT" rev-parse --verify --quiet "${_local_sha}^{commit}") ||
+                die "tag $_local_ref does not resolve to a commit"
+            _tag_remote=${MUST_CHECK_PUSH_REMOTE:-}
+            case "$_tag_remote" in
+                ''|*[!A-Za-z0-9._/-]*) die "tag push requires the actual push remote name" ;;
+            esac
+            _tag_base=refs/remotes/$_tag_remote/main
+            git -C "$ROOT" rev-parse --verify --quiet "$_tag_base" >/dev/null ||
+                die "cannot verify $_tag_base; fetch it before pushing a tag"
+            git -C "$ROOT" merge-base --is-ancestor "$_tag_commit" "$_tag_base" ||
+                die "tag $_local_ref points at $_tag_commit, which is not published on $_tag_base; land the commit through a pull request first"
+            echo "push-must-check: tag $_local_ref -> $_tag_commit is already published on $_tag_base; 0 new commits, range gates do not apply"
+            continue
+            ;;
+    esac
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
+    load_committed_dispatcher "$_local_sha"
     _fp=$(fingerprint_rev "$_local_sha") || die "cannot fingerprint $_local_sha"
     EVIDENCE_REV=$_local_sha
     _predecessor=$_remote_sha

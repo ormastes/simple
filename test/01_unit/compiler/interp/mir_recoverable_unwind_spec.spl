@@ -1,4 +1,39 @@
-"""Focused interpreter contract for allocation-free MIR exception edges."""
+"""
+## Purpose and audience
+
+Focused interpreter contract for allocation-free MIR unwind edges, written
+for the compiler engineers who own `compiler.interp.mir_interpreter` and
+for reviewers verifying that recoverable exceptions never alias the normal
+return channel.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+hand-builds a small MIR function set (typed normal callers, throwers,
+resumers, catchers), loads it into a real MirInterpreter function table,
+and executes through `CallTerminator`, asserting which channel -- normal
+result slot or unwind payload/type-tag pair -- carries each value.
+
+## Compatibility and limitations
+
+The fixtures use constant payloads and hand-picked local ids; no allocation
+heavy path is exercised, only the channel-separation and delivery
+contracts of the unwind edge. Uncaught throws are observed through
+`InterpError.Exception`, not through host termination.
+
+## Verification guidance and troubleshooting
+
+If a normal-return scenario fails, the payload slot is aliasing the result
+slot -- check `CallTerminator`'s destination locals first. If the type-tag
+scenario fails, the active exception frame is dropping the tag on
+delivery. If the uncaught-throw scenario fails with a normal value instead
+of an error, the interpreter is misclassifying an unwind as a return.
+"""
+# Lifecycle: research: doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md ; plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md ; architecture: doc/04_architecture/runtime/jit_interpreter_integration.md ; design: doc/05_design/compiler/interpreter/m5_strict_interpreter_mode_design.md
+# @cover src/compiler/interp/mir_interpreter.spl
+# @manual_section: MIR recoverable unwind
+
+use std.spec.step
 
 use std.spec
 use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
@@ -66,7 +101,7 @@ fn uw_catcher(callee: text) -> MirFunction:
     uw_function("catcher", [uw_local(0, LocalKind.Temp), uw_local(1, LocalKind.Temp),
                              uw_local(2, LocalKind.Temp)], [
         uw_block(0, call),
-        uw_block(1, MirTerminator.Ret(Some(mir_operand_const_int(-1)))),
+        uw_block(1, MirTerminator.Ret(Some(mir_operand_copy(normal_result)))),
         uw_block(2, MirTerminator.Ret(Some(mir_operand_copy(payload))))
     ])
 
@@ -80,22 +115,28 @@ fn uw_type_tag_catcher() -> MirFunction:
     uw_function("type_tag_catcher", [uw_local(0, LocalKind.Temp), uw_local(1, LocalKind.Temp),
                                       uw_local(2, LocalKind.Temp)], [
         uw_block(0, call),
-        uw_block(1, MirTerminator.Ret(Some(mir_operand_const_int(-1)))),
+        uw_block(1, MirTerminator.Ret(Some(mir_operand_copy(normal_result)))),
         MirBlock(id: BlockId.new(2), label: nil, instructions: [],
                  terminator: MirTerminator.Ret(Some(mir_operand_copy(type_tag))))
     ])
 
 describe "MIR recoverable unwind":
     it "keeps f64 normal results separate from unwind payload storage":
+        # @req REQ-INTERP-UNWIND-001
+        # @capture(bit_table): normal-result slot vs payload slot for the f64 callee
+        step("execute an f64-typed normal call through CallTerminator")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
         table["normal_callee"] = uw_normal_callee()
         interp.set_function_table(table)
         val result = interp.execute_function(uw_typed_normal_caller(MirType.f64()))
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(777)
+        expect(result[0] ?? -1).to_equal(777)  # oracle: the normal callee retires 777 and nothing may spill into the unwind slot
 
     it "keeps text handles separate from unwind payload storage":
+        # @req REQ-INTERP-UNWIND-001
+        # @capture(bit_table): normal-result slot vs payload slot for the text callee
+        step("execute an opaque text-typed normal call through CallTerminator")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
         table["normal_callee"] = uw_normal_callee()
@@ -103,9 +144,12 @@ describe "MIR recoverable unwind":
         val text_type = MirType(kind: MirTypeKind.Opaque("text"))
         val result = interp.execute_function(uw_typed_normal_caller(text_type))
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(777)
+        expect(result[0] ?? -1).to_equal(777)  # oracle: the normal callee retires 777 and nothing may spill into the unwind slot
 
     it "keeps aggregate handles separate from unwind payload storage":
+        # @req REQ-INTERP-UNWIND-001
+        # @capture(bit_table): normal-result slot vs payload slot for the aggregate callee
+        step("execute a tuple-typed normal call through CallTerminator")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
         table["normal_callee"] = uw_normal_callee()
@@ -113,9 +157,11 @@ describe "MIR recoverable unwind":
         val aggregate_type = MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.i64()]))
         val result = interp.execute_function(uw_typed_normal_caller(aggregate_type))
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(777)
+        expect(result[0] ?? -1).to_equal(777)  # oracle: the normal callee retires 777 and nothing may spill into the unwind slot
 
     it "delivers a thrown payload to the unwind-edge destination":
+        # @req REQ-INTERP-UNWIND-002
+        # @capture(bit_table): payload delivered to the catcher's unwind block
         step("Execute a throwing callee through CallTerminator")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
@@ -123,9 +169,11 @@ describe "MIR recoverable unwind":
         interp.set_function_table(table)
         val result = interp.execute_function(uw_catcher("thrower"))
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(73)
+        expect(result[0] ?? -1).to_equal(73)  # oracle: the thrower's payload constant must surface as the catcher's return value
 
     it "resume preserves the original payload across another frame":
+        # @req REQ-INTERP-UNWIND-002
+        # @capture(bit_table): payload delivered through the resumer frame
         step("Execute a cleanup-pad resumer through CallTerminator")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
@@ -133,9 +181,11 @@ describe "MIR recoverable unwind":
         interp.set_function_table(table)
         val result = interp.execute_function(uw_catcher("resumer"))
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(91)
+        expect(result[0] ?? -1).to_equal(91)  # oracle: the resumer's payload constant must survive the extra frame
 
     it "preserves the explicit exception type tag on the unwind edge":
+        # @req REQ-INTERP-UNWIND-002
+        # @capture(bit_table): type tag delivered to the catcher's unwind block
         step("Read the type tag from the active exception frame")
         var interp = MirInterpreter.create()
         var table: {text: MirFunction} = {}
@@ -143,15 +193,17 @@ describe "MIR recoverable unwind":
         interp.set_function_table(table)
         val result = interp.execute_function(uw_type_tag_catcher())
         expect(result[1]).to_be_nil()
-        expect(result[0] ?? -1).to_equal(1001)
+        expect(result[0] ?? -1).to_equal(1001)  # oracle: the thrower's explicit type-tag constant must ride the unwind edge intact
 
     it "does not misclassify an uncaught exception as a normal return":
+        # @req REQ-INTERP-UNWIND-003
+        # @capture(protocol_json): InterpError payload and type tag for the uncaught throw
         step("Execute a throwing function without an unwind edge")
         var interp = MirInterpreter.create()
         val result = interp.execute_function(uw_thrower())
         expect(result[0]).to_be_nil()
         match result[1]:
             case Some(InterpError.Exception(payload, type_tag)):
-                expect(payload).to_equal(73)
-                expect(type_tag).to_equal(1001)
+                expect(payload).to_equal(73)  # oracle: the uncaught throw's payload constant surfaces verbatim in the error
+                expect(type_tag).to_equal(1001)  # oracle: the uncaught throw's type-tag constant surfaces verbatim in the error
             case _: expect(false).to_equal(true)

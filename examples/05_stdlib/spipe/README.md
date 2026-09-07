@@ -25,8 +25,20 @@ The package exposes two dependency-free Node entrypoints:
 node cli/spipe.js info
 node cli/spipe.js experts
 node cli/spipe.js doctor ../..
+node cli/spipe.js reverse-references inventory.json A-target --cursor-key-file .spipe/reverse-reference.key --folder doc
 node mcp/server.js
 ```
+
+`reverse-references` exposes the snapshot-bound folder index as stable JSON.
+It reads an already compiled inventory and requires a caller-owned cursor-key
+file, allowing authenticated pagination across separate CLI invocations
+without adding a filesystem scan to the query path. See `cli/README.md`.
+
+The MCP server exposes the same compiled-inventory query as
+`spipe_folder_reverse_references`. Its schema requires `inventory_path` and
+`target_uid`; optional `folder_path`, `limit`, `max_work_units`, and
+authenticated `cursor` fields provide deterministic bounded pagination. See
+`mcp/README.md` for cache invalidation and continuation details.
 
 `doctor` checks both reusable SPipe process surfaces and host mount invariants
 such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and

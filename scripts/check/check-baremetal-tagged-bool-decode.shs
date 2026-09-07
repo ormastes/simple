@@ -1,0 +1,220 @@
+#!/bin/sh
+# check-baremetal-tagged-bool-decode.shs
+#
+# Pins the fix for
+# doc/08_tracking/bug/riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md
+#
+# THE DEFECT
+# ----------
+# `rt_value_unbox_int` has a documented contract, implemented by the canonical
+# hosted runtime (src/compiler_rust/runtime/src/value/sffi/value_ops.rs:80-87)
+# and restated in the codegen comments: a TAG_INT decodes, a tagged `true` (11)
+# yields 1, a tagged `false` (19) yields 0, everything else passes through.
+#
+# The riscv64 baremetal port of that name omitted the BOOL arm. It read:
+#
+#     RuntimeValue rt_value_unbox_int(RuntimeValue value)
+#     { return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value); }
+#
+# and `simpleos_raw_or_encoded_int` is `IS_INT(v) ? DECODE_INT(v) : v`, so a
+# tagged `false` came back as the raw 19. Every consumer testing the result for
+# non-zero then read it as TRUE -- and so did `true` (11). BOTH bools answered
+# true. Downstream that hung the in-guest parser: `parse_statement` destructured
+# `try_parse_bare_ident_string_call()`'s `(false, 0)` early exit, read the flag
+# as true, never consumed a token, and spun until the bump arena was gone.
+#
+# WHY THIS IS A PER-DEFINITION GUARD
+# ----------------------------------
+# There are TWO definitions of `rt_value_unbox_int` for freestanding riscv64:
+#   arch/common/boot/freestanding_value_registry_impl.h  -- always had the arm
+#   arch/riscv64/boot/baremetal_runtime_core.inc.c       -- did not
+# A tree-wide grep for "value == 19" finds the first and reports success while
+# the image links the second. That is exactly how this defect survived several
+# investigations. So this guard judges EACH definition body separately and
+# requires every one of them to decode the tagged bool -- a passing run states
+# how many definitions it checked, and checking zero is an ERROR, never a pass.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> definition(s) checked, all decode the tagged bool   exit 0
+#   FAIL  — ...                                                     exit 1
+#   ERROR — nothing was checked                                     exit 2
+#
+# `--selftest` runs before every scan and is fatal.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SEARCH_REL="examples/09_embedded/simple_os"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Print "<file>\t<startline>\t<body>" for every definition of
+# rt_value_unbox_int, delimited by brace depth. A prototype (a line ending in
+# `;` with no `{`) is deliberately NOT a definition and is skipped -- a header
+# declaration decodes nothing and must not be counted as a checked definition.
+extract_defs() {
+    find "$1/$SEARCH_REL" \( -name '*.c' -o -name '*.h' -o -name '*.inc.c' \) -type f 2>/dev/null \
+    | sort \
+    | while IFS= read -r f; do
+        awk -v FNAME="$f" '
+            /rt_value_unbox_int[[:space:]]*\(/ && !/^[[:space:]]*\*/ && !/;[[:space:]]*$/ {
+                if (indef) next
+                indef = 1; depth = 0; body = ""; start = NR; seen_open = 0
+            }
+            indef {
+                body = body " " $0
+                n = gsub(/\{/, "{"); m = gsub(/\}/, "}")
+                depth += n - m
+                if (n > 0) seen_open = 1
+                if (seen_open && depth <= 0) {
+                    print FNAME "\t" start "\t" body
+                    indef = 0
+                }
+                # A line that never opened a brace and already ended the
+                # statement was a call or a prototype, not a definition.
+                if (!seen_open && $0 ~ /;[[:space:]]*$/) indef = 0
+                next
+            }
+        ' "$f"
+    done
+}
+
+# A definition decodes the tagged bool when its body maps BOTH 11 and 19.
+# Accept either the named macros or the bare literals, so the guard does not
+# force one spelling on future call sites.
+judge_def() {
+    body=$1
+    has_true=0
+    has_false=0
+    printf '%s' "$body" | grep -qE 'TAGGED_BOOL_TRUE|==[[:space:]]*11([^0-9]|$)|11[uU]?[lL]*[[:space:]]*==' && has_true=1
+    printf '%s' "$body" | grep -qE 'TAGGED_BOOL_FALSE|==[[:space:]]*19([^0-9]|$)|19[uU]?[lL]*[[:space:]]*==' && has_false=1
+    missing=""
+    [ "$has_true" -eq 1 ] || missing="$missing tagged-true(11)"
+    [ "$has_false" -eq 1 ] || missing="$missing tagged-false(19)"
+    if [ -n "$missing" ]; then
+        echo "does not decode:$missing"
+        return 1
+    fi
+    return 0
+}
+
+scan_tree() {
+    extract_defs "$1" > "$TMP/defs.txt" 2>/dev/null || true
+    checked=0
+    offenders=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        f=${line%%	*}
+        rest=${line#*	}
+        ln=${rest%%	*}
+        body=${rest#*	}
+        checked=$((checked + 1))
+        if reason=$(judge_def "$body"); then
+            :
+        else
+            rel=${f#"$1/"}
+            offenders="$offenders $rel:$ln ($reason);"
+        fi
+    done < "$TMP/defs.txt"
+    EV_CHECKED=$checked
+    EV_OFFENDERS=$offenders
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    st_fail=0
+    fx="$TMP/fx"
+    d="$fx/$SEARCH_REL/arch"
+
+    GOOD='RuntimeValue rt_value_unbox_int(RuntimeValue value)
+{
+    if (value == TAGGED_BOOL_TRUE) return 1;
+    if (value == TAGGED_BOOL_FALSE) return 0;
+    return simpleos_raw_or_encoded_int(value);
+}'
+    BAD='RuntimeValue rt_value_unbox_int(RuntimeValue value)
+{
+    return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
+}'
+
+    # 1. single good definition must PASS
+    rm -rf "$fx"; mkdir -p "$d"; printf '%s\n' "$GOOD" > "$d/a.c"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 1 ] || [ -n "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[1] good definition: expected 1 checked / 0 offenders, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+
+    # 2. incident replay: the exact old body must FAIL
+    rm -rf "$fx"; mkdir -p "$d"; printf '%s\n' "$BAD" > "$d/a.c"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 1 ] || [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[2] incident replay: expected an offender, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+
+    # 3. THE DUPLICATE-DEFINITION CASE, which is the whole point: one good
+    #    definition must NOT excuse a bad sibling. Two files, one of each.
+    rm -rf "$fx"; mkdir -p "$d"
+    printf '%s\n' "$GOOD" > "$d/good.h"
+    printf '%s\n' "$BAD"  > "$d/bad.inc.c"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 2 ] || [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[3] duplicate definitions: expected 2 checked and the bad one flagged, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+    case "$EV_OFFENDERS" in
+        *bad.inc.c*) : ;;
+        *) echo "selftest[3] duplicate definitions: offender should name bad.inc.c, got '$EV_OFFENDERS'"; st_fail=1 ;;
+    esac
+
+    # 4. a prototype alone is not a definition -> 0 checked -> caller ERRORs
+    rm -rf "$fx"; mkdir -p "$d"
+    echo 'RuntimeValue rt_value_unbox_int(RuntimeValue value);' > "$d/proto.h"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[4] prototype only: expected 0 checked, got $EV_CHECKED"; st_fail=1
+    fi
+
+    # 5. half-decoding (11 handled, 19 not) must FAIL -- 19 is the value that
+    #    actually caused the hang, so a partial fix must not pass.
+    rm -rf "$fx"; mkdir -p "$d"
+    printf 'RuntimeValue rt_value_unbox_int(RuntimeValue value)\n{\n    if (value == 11) return 1;\n    return simpleos_raw_or_encoded_int(value);\n}\n' > "$d/a.c"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[5] half-decode: expected FAIL when 19 is unhandled"; st_fail=1
+    fi
+
+    # 6. empty tree -> 0 checked -> caller ERRORs
+    rm -rf "$fx"; mkdir -p "$fx/$SEARCH_REL"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[6] empty tree: expected 0 checked, got $EV_CHECKED"; st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+scan_tree "$REPO_ROOT"
+
+if [ "${EV_CHECKED:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no rt_value_unbox_int definition found under $SEARCH_REL)"
+    exit 2
+fi
+
+off=$(echo "$EV_OFFENDERS" | sed 's/^ *//;s/ *$//')
+if [ -n "$off" ]; then
+    echo "FAIL — $EV_CHECKED definition(s) checked, offending: $off"
+    exit 1
+fi
+
+echo "PASS — $EV_CHECKED definition(s) checked, all decode the tagged bool"
+exit 0

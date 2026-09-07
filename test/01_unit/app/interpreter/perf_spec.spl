@@ -1,46 +1,31 @@
-# @cover src/compiler/70.backend/backend/interpreter.spl
-# # Interpreter Performance Specification
-#
-# **Feature IDs:** #interp-perf-001
-# **Category:** Infrastructure | Runtime
-# **Difficulty:** 3/5
-# **Status:** In Progress
-# **Requirements:** N/A
-# **Plan:** N/A
-# **Design:** N/A
-# **Research:** N/A
-# **Artifacts:** N/A
-#
-# ## Overview
-#
-# Timing micro-benchmarks for the tree-walking HIR interpreter.
-# Covers integer arithmetic loop throughput, function call overhead,
-# and builtin dispatch cost (println / len calls).
-#
-# ## Key Concepts
-#
-# | Concept              | Description                                         |
-# |----------------------|-----------------------------------------------------|
-# | Arithmetic loop      | 1000 int additions — exercises eval_binop hot path  |
-# | Function call loop   | 100 calls to a trivial helper — measures frame cost |
-# | Builtin dispatch     | 100 len() calls — exercises try_call_builtin path   |
-# | Module-cache timing  | Compiled-mode only (see D-8 note below)             |
-#
-# ## D-8 Note (interpreter `it` block limitation)
-#
-# `it` blocks in interpreter mode do not support `return` for early exit.
-# All assertions are structured as single terminal `expect(...)` expressions.
-# Timing elapsed values are computed and stored in `var`; the assertion
-# verifies functional correctness, not wall-clock bounds (interpreter timing
-# is non-deterministic).  Wall-clock assertions belong in compiled-mode specs.
-#
-# ## Module-cache timing note
-#
-# Observing the Rust `module_cache.rs` hit rate requires compiled mode: there
-# is no API to query cache stats from within an `it` body in interpreter mode.
-# This spec covers dispatch and call-overhead proxies instead; a compiled-mode
-# benchmark for module-cache warmup is a follow-up TODO (see 3-arch D-6b).
-
+"""
+## Purpose and audience
+Timing micro-benchmarks plus correctness pins for the tree-walking HIR
+interpreter (`src/compiler/70.backend/backend/interpreter.spl`), for interpreter
+developers: integer arithmetic loop throughput, function call overhead, builtin
+dispatch cost, and the module-cache warm-dispatch proxy. Every timing scenario
+asserts functional correctness only — wall-clock values are recorded, never
+asserted.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/01_unit/app/interpreter/perf_spec.spl`
+from the repo root after any interpreter eval_binop, call, or builtin-dispatch
+change; treat a correctness failure as a regression and a large timing shift as
+a prompt to re-baseline.
+## Compatibility and limitations
+Interpreter mode `it` bodies do not support early `return`, and module-cache
+statistics are not observable from a spec body, so group 4 is a warm-dispatch
+proxy rather than a cache measurement. Wall-clock bounds belong in
+compiled-mode specs; the `elapsed` values here only exercise the timing path.
+## Verification guidance and troubleshooting
+A sum/count failure localizes to the exact eval path named by the scenario
+(binop, counted while, foreach, call, builtin). The former post-loop loop
+variable reads were removed deliberately (see the in-file NOTE blocks) — do not
+reintroduce them; the leaked-binding defect they masked is fixed.
+"""
+# Lifecycle: doc/01_research/compiler/performance/interpreter_speed_optimization_2026-02-15.md ;
+# doc/03_plan/perf/simple_python_bun_interpreter_comparison.md ;
+# doc/04_architecture/runtime/jit_interpreter_integration.md ;
+# doc/05_design/simple_compiler_performance_memory_efficiency.md
 use app.io.time_ops.{time_now_unix_micros}
 
 # ============================================================================
@@ -60,6 +45,7 @@ fn identity(x: i64) -> i64:
 # Test Group 1: Integer arithmetic loop
 # ============================================================================
 
+# @manual_section: interpreter-perf
 describe "Interpreter Perf":
     """
     ## Arithmetic Loop Baseline
@@ -69,17 +55,23 @@ describe "Interpreter Perf":
     Correctness assertion: sum must equal 1 + 2 + ... + 1000 = 500500.
     """
 
+# @manual_section: arithmetic-loop
     describe "arithmetic loop":
         it "1000 int additions produce correct sum":
+            # @req REQ-INTERP-PERF-001
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: 1000 int additions produce correct sum")
             var sum: i64 = 0
             var i: i64 = 1
             for _step in 0..1000:
                 sum = sum + i
                 i = i + 1
             # sum of 1..1000 = 500500
-            expect(sum).to_equal(500500)
+            expect(sum).to_equal(500500)  # oracle: 1 + 2 + ... + 1000 = 500500
 
         it "integer range for sum preserves accumulator":
+            # @req REQ-INTERP-PERF-002
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: integer range for sum preserves accumulator")
             var sum: i64 = 0
             for i in 0..5:
@@ -93,135 +85,180 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "direct counted while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-003
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + i
                 i = i + 1
-            expect(sum).to_equal(10)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(10)  # oracle: i runs 0..4, so 0+1+2+3+4 = 10
+            expect(i).to_equal(5)  # oracle: the counted loop exits with i at the bound 5
 
         it "direct counted while index match count preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-004
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index match count preserves accumulator and final index")
             var count: i64 = 0
             var i: i64 = 0
             while i < 5:
                 if i != -1:
                     count = count + 1
                 i = i + 1
-            expect(count).to_equal(5)
-            expect(i).to_equal(5)
+            expect(count).to_equal(5)  # oracle: the i != -1 guard holds on every one of the five iterations
+            expect(i).to_equal(5)  # oracle: five iterations advance i from 0 to exactly 5
 
         it "direct counted while index modulo match count preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-005
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index modulo match count preserves accumulator and final index")
             var count: i64 = 0
             var i: i64 = 0
             while i < 5:
                 if i % 2 == 0:
                     count = count + 1
                 i = i + 1
-            expect(count).to_equal(3)
-            expect(i).to_equal(5)
+            expect(count).to_equal(3)  # oracle: the modulo match fires on indices 0, 2, 4
+            expect(i).to_equal(5)  # oracle: i ends at the loop bound after the final increment
 
         it "direct counted while modulo sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-006
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while modulo sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i % 2)
                 i = i + 1
-            expect(sum).to_equal(2)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(2)  # oracle: (i%2) over 0..4 sums 0+1+0+1+0 = 2
+            expect(i).to_equal(5)  # oracle: the while condition releases i at 5, its bound
 
         it "direct counted while index times sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-007
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index times sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i * 2)
                 i = i + 1
-            expect(sum).to_equal(20)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(20)  # oracle: (i*2) over 0..4 sums 0+2+4+6+8 = 20
+            expect(i).to_equal(5)  # oracle: i carries the post-increment value 5 out of the loop
 
         it "direct counted while index plus sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-008
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index plus sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i + 1)
                 i = i + 1
-            expect(sum).to_equal(15)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(15)  # oracle: (i+1) over 0..4 sums 1+2+3+4+5 = 15
+            expect(i).to_equal(5)  # oracle: after 0..4 the counter settles at 5
 
         it "direct counted while index minus sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-009
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index minus sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i - 1)
                 i = i + 1
-            expect(sum).to_equal(5)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(5)  # oracle: (i-1) over 0..4 sums -1+0+1+2+3 = 5
+            expect(i).to_equal(5)  # oracle: five passes leave the index at 5
 
         it "direct counted while index bit and sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-010
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index bit and sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i & 1)
                 i = i + 1
-            expect(sum).to_equal(2)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(2)  # oracle: (i&1) over 0..4 sums 0+1+0+1+0 = 2
+            expect(i).to_equal(5)  # oracle: the last body run raises i to the bound 5
 
         it "direct counted while index bit or sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-011
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index bit or sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i | 1)
                 i = i + 1
-            expect(sum).to_equal(13)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(13)  # oracle: (i|1) over 0..4 sums 1+1+3+3+5 = 13
+            expect(i).to_equal(5)  # oracle: the loop bound is reached, leaving i = 5
 
         it "direct counted while index bit xor sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-012
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index bit xor sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i xor 1)
                 i = i + 1
-            expect(sum).to_equal(11)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(11)  # oracle: (i xor 1) over 0..4 sums 1+0+3+2+5 = 11
+            expect(i).to_equal(5)  # oracle: each pass increments i, ending at 5
 
         it "direct counted while index shift right sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-013
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index shift right sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i >> 1)
                 i = i + 1
-            expect(sum).to_equal(4)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(4)  # oracle: (i>>1) over 0..4 sums 0+0+1+1+2 = 4
+            expect(i).to_equal(5)  # oracle: i finishes at 5, one past the last index 4
 
         it "direct counted while index shift left sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-014
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted while index shift left sum preserves accumulator and final index")
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + (i << 1)
                 i = i + 1
-            expect(sum).to_equal(20)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(20)  # oracle: (i<<1) over 0..4 sums 0+2+4+6+8 = 20
+            expect(i).to_equal(5)  # oracle: the counted loop exits with i at the bound 5
 
         it "direct counted float while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-015
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: direct counted float while sum preserves accumulator and final index")
             var sum: f64 = 0.0
             var i: i64 = 0
             while i < 5:
                 sum = sum + 1.0
                 i = i + 1
-            expect(sum).to_equal(5.0)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(5.0)  # oracle: 1.0 accumulated once per iteration, five times
+            expect(i).to_equal(5)  # oracle: five iterations advance i from 0 to exactly 5
 
         it "indexed array while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-016
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: indexed array while sum preserves accumulator and final index")
             val data = [1; 5]
             var sum: i64 = 0
             var i: i64 = 0
             while i < data.len():
                 sum = sum + data[i]
                 i = i + 1
-            expect(sum).to_equal(5)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(5)  # oracle: the array holds five 1s
+            expect(i).to_equal(5)  # oracle: i ends at the loop bound after the final increment
 
         it "indexed integer array while match count preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-017
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: indexed integer array while match count preserves accumulator and final index")
             val data = [1, 2, 1, 3, 1]
             var count: i64 = 0
             var i: i64 = 0
@@ -229,20 +266,26 @@ describe "Interpreter Perf":
                 if data[i] == 1:
                     count = count + 1
                 i = i + 1
-            expect(count).to_equal(3)
-            expect(i).to_equal(5)
+            expect(count).to_equal(3)  # oracle: the fixture holds three 1s at indices 0, 2, 4
+            expect(i).to_equal(5)  # oracle: the while condition releases i at 5, its bound
 
         it "indexed float array while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-018
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: indexed float array while sum preserves accumulator and final index")
             val data = [1.0; 5]
             var sum: f64 = 0.0
             var i: i64 = 0
             while i < data.len():
                 sum = sum + data[i]
                 i = i + 1
-            expect(sum).to_equal(5.0)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(5.0)  # oracle: five 1.0 entries sum to 5.0
+            expect(i).to_equal(5)  # oracle: i carries the post-increment value 5 out of the loop
 
         it "indexed float array while match count preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-019
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: indexed float array while match count preserves accumulator and final index")
             val data = [1.0, 2.0, 1.0, 3.0, 1.0]
             var count: i64 = 0
             var i: i64 = 0
@@ -250,30 +293,38 @@ describe "Interpreter Perf":
                 if data[i] == 1.0:
                     count = count + 1
                 i = i + 1
-            expect(count).to_equal(3)
-            expect(i).to_equal(5)
+            expect(count).to_equal(3)  # oracle: the float fixture holds three 1.0s
+            expect(i).to_equal(5)  # oracle: after 0..4 the counter settles at 5
 
         it "array len while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-020
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: array len while sum preserves accumulator and final index")
             val data = [1; 5]
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + data.len()
                 i = i + 1
-            expect(sum).to_equal(25)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(25)  # oracle: len 5 accumulated over five iterations = 25
+            expect(i).to_equal(5)  # oracle: five passes leave the index at 5
 
         it "dict lookup while sum preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-021
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: dict lookup while sum preserves accumulator and final index")
             val data = {"a": 2}
             var sum: i64 = 0
             var i: i64 = 0
             while i < 5:
                 sum = sum + data["a"]
                 i = i + 1
-            expect(sum).to_equal(10)
-            expect(i).to_equal(5)
+            expect(sum).to_equal(10)  # oracle: the dict value 2 accumulated over five iterations = 10
+            expect(i).to_equal(5)  # oracle: the last body run raises i to the bound 5
 
         it "integer array foreach sum preserves accumulator":
+            # @req REQ-INTERP-PERF-022
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: integer array foreach sum preserves accumulator")
             val data = [1, 2, 3, 4, 5]
             var sum: i64 = 0
@@ -288,6 +339,8 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "float array foreach sum preserves accumulator":
+            # @req REQ-INTERP-PERF-023
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: float array foreach sum preserves accumulator")
             val data = [1.0, 2.0, 3.0, 4.0, 5.0]
             var sum: f64 = 0.0
@@ -302,13 +355,18 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "enumerated integer array foreach index sum preserves accumulator":
+            # @req REQ-INTERP-PERF-024
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: enumerated integer array foreach index sum preserves accumulator")
             val data = [1; 5]
             var sum: i64 = 0
             for enum_idx, enum_item in data:
                 sum = sum + enum_idx
-            expect(sum).to_equal(10)
+            expect(sum).to_equal(10)  # oracle: enumerate indices 0..4 sum to 10
 
         it "enumerated float array foreach index sum preserves accumulator":
+            # @req REQ-INTERP-PERF-025
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: enumerated float array foreach index sum preserves accumulator")
             val data = [1.5, 2.5, 3.5, 4.5, 5.5]
             var sum: i64 = 0
@@ -329,6 +387,8 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "integer array foreach match count preserves accumulator":
+            # @req REQ-INTERP-PERF-026
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: integer array foreach match count preserves accumulator")
             val data = [1, 2, 1, 3, 1]
             var count: i64 = 0
@@ -344,6 +404,8 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "float array foreach match count preserves accumulator":
+            # @req REQ-INTERP-PERF-027
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: float array foreach match count preserves accumulator")
             val data = [1.0, 2.0, 1.0, 3.0, 1.0]
             var count: i64 = 0
@@ -359,6 +421,8 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "string foreach count preserves accumulator":
+            # @req REQ-INTERP-PERF-028
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: string foreach count preserves accumulator")
             val text = "abc"
             var count: i64 = 0
@@ -373,6 +437,8 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "string foreach match count preserves accumulator":
+            # @req REQ-INTERP-PERF-029
+            # @capture(statistics): interpreter benchmark evidence
             step("Verify: string foreach match count preserves accumulator")
             val text = "abca"
             var count: i64 = 0
@@ -388,6 +454,9 @@ describe "Interpreter Perf":
             # doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 
         it "indexed string while match count preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-030
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: indexed string while match count preserves accumulator and final index")
             val text = "abca"
             var count: i64 = 0
             var i: i64 = 0
@@ -395,18 +464,24 @@ describe "Interpreter Perf":
                 if text[i] == "a":
                     count = count + 1
                 i = i + 1
-            expect(count).to_equal(2)
-            expect(i).to_equal(4)
+            expect(count).to_equal(2)  # oracle: "abca" holds two a characters
+            expect(i).to_equal(4)  # oracle: the string length bound is 4
 
         it "1000 int multiplications produce correct product mod":
+            # @req REQ-INTERP-PERF-031
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: 1000 int multiplications produce correct product mod")
             # multiply 1..10 to get factorial(10) = 3628800
             var prod: i64 = 1
             for _step in 0..10:
                 prod = prod * ((_step + 1) + 0)
             # factorial(10) = 3628800
-            expect(prod).to_equal(3628800)
+            expect(prod).to_equal(3628800)  # oracle: factorial(10) = 3628800
 
         it "timing: 1000 additions complete (elapsed recorded, not asserted)":
+            # @req REQ-INTERP-PERF-032
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: timing: 1000 additions complete (elapsed recorded, not asserted)")
             # Wall-clock assertion omitted — interpreter timing is non-deterministic.
             # elapsed is computed to exercise the timing path; correctness asserted instead.
             val t0 = time_now_unix_micros()
@@ -416,12 +491,13 @@ describe "Interpreter Perf":
             val elapsed = time_now_unix_micros() - t0
             # elapsed must be non-negative (time only moves forward)
             expect(elapsed).to_be_greater_than(-1)
-            expect(s).to_equal(499500)
+            expect(s).to_equal(499500)  # oracle: _n runs 0..999, which sums to 499500
 
     # ============================================================================
     # Test Group 2: Function call overhead
     # ============================================================================
 
+# @manual_section: function-call-overhead
     describe "function call overhead":
         """
         ## Function Call Overhead
@@ -431,46 +507,62 @@ describe "Interpreter Perf":
         """
 
         it "100 function calls return correct accumulated value":
+            # @req REQ-INTERP-PERF-033
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: 100 function calls return correct accumulated value")
             var acc: i64 = 0
             for _c in 0..100:
                 acc = add_one(acc)
-            expect(acc).to_equal(100)
+            expect(acc).to_equal(100)  # oracle: add_one applied 100 times to 0
 
         it "while one-argument helper call preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-034
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: while one-argument helper call preserves accumulator and final index")
             var acc: i64 = 0
             var i: i64 = 0
             while i < 5:
                 acc = add_one(acc)
                 i = i + 1
-            expect(acc).to_equal(5)
-            expect(i).to_equal(5)
+            expect(acc).to_equal(5)  # oracle: five calls each add 1
+            expect(i).to_equal(5)  # oracle: the loop bound is reached, leaving i = 5
 
         it "identity function returns its argument unchanged":
+            # @req REQ-INTERP-PERF-035
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: identity function returns its argument unchanged")
             val result = identity(42)
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: identity returns the argument it was given
 
         it "while two-argument helper call preserves accumulator and final index":
+            # @req REQ-INTERP-PERF-036
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: while two-argument helper call preserves accumulator and final index")
             var acc: i64 = 0
             var i: i64 = 0
             while i < 5:
                 acc = add_pair(acc, i)
                 i = i + 1
-            expect(acc).to_equal(10)
-            expect(i).to_equal(5)
+            expect(acc).to_equal(10)  # oracle: add_pair accumulates acc+i over i=0..4, totalling 10
+            expect(i).to_equal(5)  # oracle: each pass increments i, ending at 5
 
         it "timing: 100 function calls complete (elapsed recorded)":
+            # @req REQ-INTERP-PERF-037
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: timing: 100 function calls complete (elapsed recorded)")
             val t0 = time_now_unix_micros()
             var acc: i64 = 0
             for _c in 0..100:
                 acc = identity(acc) + 1
             val elapsed = time_now_unix_micros() - t0
             expect(elapsed).to_be_greater_than(-1)
-            expect(acc).to_equal(100)
+            expect(acc).to_equal(100)  # oracle: 100 identity+1 increments from 0
 
     # ============================================================================
     # Test Group 3: Builtin dispatch (len / list ops)
     # ============================================================================
 
+# @manual_section: builtin-dispatch
     describe "builtin dispatch":
         """
         ## Builtin Dispatch
@@ -481,15 +573,21 @@ describe "Interpreter Perf":
         """
 
         it "100 len() calls on a list return stable value":
+            # @req REQ-INTERP-PERF-038
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: 100 len() calls on a list return stable value")
             val items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             var checks_ok: i64 = 0
             for _k in 0..100:
                 val l = items.len()
                 if l == 10:
                     checks_ok = checks_ok + 1
-            expect(checks_ok).to_equal(100)
+            expect(checks_ok).to_equal(100)  # oracle: all 100 length checks pass
 
         it "timing: 100 len() calls complete (elapsed recorded)":
+            # @req REQ-INTERP-PERF-039
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: timing: 100 len() calls complete (elapsed recorded)")
             val data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             val t0 = time_now_unix_micros()
             var acc: i64 = 0
@@ -497,12 +595,13 @@ describe "Interpreter Perf":
                 acc = acc + data.len()
             val elapsed = time_now_unix_micros() - t0
             expect(elapsed).to_be_greater_than(-1)
-            expect(acc).to_equal(1000)
+            expect(acc).to_equal(1000)  # oracle: 100 len() calls on a 10-element list accumulate 1000
 
     # ============================================================================
     # Test Group 4: Module-cache proxy (warm dispatch, not actual import timing)
     # ============================================================================
 
+# @manual_section: module-cache-proxy
     describe "module cache proxy":
         """
         ## Module Cache Proxy
@@ -517,15 +616,21 @@ describe "Interpreter Perf":
         """
 
         it "first 100 calls produce correct result":
+            # @req REQ-INTERP-PERF-040
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: first 100 calls produce correct result")
             var acc: i64 = 0
             for _i in 0..100:
                 acc = add_one(acc)
-            expect(acc).to_equal(100)
+            expect(acc).to_equal(100)  # oracle: first batch: 100 add_one calls from 0
 
         it "second 100 calls (warm path) produce same correctness":
+            # @req REQ-INTERP-PERF-041
+            # @capture(statistics): interpreter benchmark evidence
+            step("Verify: second 100 calls (warm path) produce same correctness")
             # Same test as above — both batches must give identical results,
             # demonstrating stable warm-path behaviour.
             var acc: i64 = 0
             for _i in 0..100:
                 acc = add_one(acc)
-            expect(acc).to_equal(100)
+            expect(acc).to_equal(100)  # oracle: warm batch: identical 100 add_one calls from 0

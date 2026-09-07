@@ -1,3 +1,37 @@
+"""
+## Purpose and audience
+Pins the cc-style layer-tree host value contracts: LayerTreeImpl starts empty
+and hands out monotonically increasing layer ids, LayerTreeHost tracks
+needs_commit and the source frame number, commit copies the pending tree into
+the active tree, pending and active trees stay independent across further
+mutation, and clone_tree carries over every layer plus the id counter so cloned
+ids never collide and clone/original writes never bleed. Written for engineers
+touching `src/lib/cc/entity/layer_tree_host.spl` and the commit pipeline it
+models.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/cc/layer_tree_host_spec.spl`
+and read the `SPEC FILE VERDICT` line. Every scenario constructs hosts and trees
+through the product constructors; no compositor or GPU device is needed.
+## Compatibility and limitations
+Covers LayerTreeImpl and LayerTreeHost bookkeeping only; it does not draw
+layers, schedule real frames, or exercise any backend compositing. Note the
+comment above the clone_tree describe: on this lane class assignment is itself
+a value copy, so the clone scenarios discriminate a state-losing clone, not
+clone-vs-copy identity.
+## Verification guidance and troubleshooting
+A failing id/counter expectation means layer-id allocation changed; a failing
+needs_commit/frame-number expectation means host state tracking changed; a
+failing pending/active or clone expectation means commit copying or clone_tree
+dropped, reset, or shared tree state. Rerun after any edit to the layer-tree
+entities and compare per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/local/metal_2d_frame_cost_perf.md ;
+# doc/03_plan/agent_tasks/backend_layer_artifact_matrix.md ;
+# doc/04_architecture/ml/compositor_gpu_architecture.md ;
+# doc/05_design/language/forwarding/layer_forwarding_and_layer_eq_types.md
+# @manual_section: cc-layer-tree-host
+
 # @cover src/lib/cc/entity/layer_tree_host.spl 80%
 
 use std.spipe.*
@@ -8,11 +42,17 @@ use std.skia.entity.geometry.{SkRect}
 describe "LayerTreeImpl":
     context "empty":
         it "has 0 layers when created empty":
+            # @req REQ-CC-LAYER-TREE-001
+            # @capture(statistics): layer count of an empty tree
+            step("Build an empty LayerTreeImpl and read its layer count")
             val tree = LayerTreeImpl.empty()
-            expect(tree.layer_count()).to_equal(0)
+            expect(tree.layer_count()).to_equal(0)  # oracle: a fresh tree holds no layers
 
     context "add_layer":
         it "add_layer returns monotonically increasing ids":
+            # @req REQ-CC-LAYER-TREE-002
+            # @capture(statistics): id pair from two consecutive add_layer calls
+            step("Add two layers to one tree and compare the returned ids")
             var tree = LayerTreeImpl.empty()
             val bounds = SkRect.make_xywh(0.0, 0.0, 100.0, 100.0)
             val l1 = Layer.root(bounds)
@@ -22,21 +62,30 @@ describe "LayerTreeImpl":
             expect(id2 > id1).to_equal(true)
 
         it "layer_count grows after add_layer":
+            # @req REQ-CC-LAYER-TREE-001
+            # @capture(statistics): layer count after one add_layer call
+            step("Add one layer to a fresh tree and read the layer count")
             var tree = LayerTreeImpl.empty()
             val bounds = SkRect.make_xywh(0.0, 0.0, 50.0, 50.0)
             val l = Layer.root(bounds)
             tree.add_layer(l)
-            expect(tree.layer_count()).to_equal(1)
+            expect(tree.layer_count()).to_equal(1)  # oracle: exactly one added layer is held
 
 describe "LayerTreeHost":
     context "new":
         it "starts with needs_commit=false and source_frame_number=0":
+            # @req REQ-CC-LAYER-TREE-003
+            # @capture(bit_table): initial needs_commit flag and source frame number
+            step("Create a LayerTreeHost and read its initial commit state")
             val host = LayerTreeHost.new()
             expect(host.needs_commit).to_equal(false)
-            expect(host.source_frame_number).to_equal(0)
+            expect(host.source_frame_number).to_equal(0)  # oracle: no frame has begun on a fresh host
 
     context "set_needs_commit and commit":
         it "set_needs_commit sets flag then commit clears it":
+            # @req REQ-CC-LAYER-TREE-004
+            # @capture(bit_table): needs_commit flag across set and clear
+            step("Raise needs_commit, then commit and watch the flag clear")
             var host = LayerTreeHost.new()
             host.set_needs_commit()
             expect(host.needs_commit).to_equal(true)
@@ -45,24 +94,33 @@ describe "LayerTreeHost":
 
     context "commit copies pending to active":
         it "layer added to pending appears in active after commit":
+            # @req REQ-CC-LAYER-TREE-004
+            # @capture(statistics): active-tree layer count before and after commit
+            step("Add a layer to the pending tree, then commit and read the active count")
             var host = LayerTreeHost.new()
             val bounds = SkRect.make_xywh(0.0, 0.0, 200.0, 200.0)
             val l = Layer.root(bounds)
             host.pending_tree.add_layer(l)
-            expect(host.active_tree.layer_count()).to_equal(0)
+            expect(host.active_tree.layer_count()).to_equal(0)  # oracle: nothing reaches active before commit
             host.commit()
-            expect(host.active_tree.layer_count()).to_equal(1)
+            expect(host.active_tree.layer_count()).to_equal(1)  # oracle: the pending layer lands in active
 
     context "begin_main_frame":
         it "increments source_frame_number each call":
+            # @req REQ-CC-LAYER-TREE-005
+            # @capture(statistics): source frame numbers across two begin_main_frame calls
+            step("Begin two main frames and read the source frame number after each")
             var host = LayerTreeHost.new()
             host.begin_main_frame()
-            expect(host.source_frame_number).to_equal(1)
+            expect(host.source_frame_number).to_equal(1)  # oracle: the first frame numbers itself 1
             host.begin_main_frame()
-            expect(host.source_frame_number).to_equal(2)
+            expect(host.source_frame_number).to_equal(2)  # oracle: the second frame increments to 2
 
     context "tree independence":
         it "changing pending after commit does not mutate active":
+            # @req REQ-CC-LAYER-TREE-006
+            # @capture(statistics): active-tree count after a post-commit pending write
+            step("Commit, then add to pending and confirm active is unchanged")
             var host = LayerTreeHost.new()
             val bounds = SkRect.make_xywh(0.0, 0.0, 64.0, 64.0)
             val l = Layer.root(bounds)
@@ -82,6 +140,8 @@ describe "LayerTreeHost":
 describe "LayerTreeImpl.clone_tree":
     context "state transfer":
         it "carries over every layer and the id counter, so cloned ids never collide":
+            # @req REQ-CC-LAYER-TREE-007
+            # @capture(statistics): clone layer count and the next id a cloned tree issues
             step("Verify: carries over every layer and the id counter, so cloned ids never collide")
             var tree = LayerTreeImpl.empty()
             val bounds = SkRect.make_xywh(0.0, 0.0, 32.0, 32.0)
@@ -97,6 +157,8 @@ describe "LayerTreeImpl.clone_tree":
 
     context "bidirectional independence":
         it "writes to the clone leave the original untouched":
+            # @req REQ-CC-LAYER-TREE-007
+            # @capture(statistics): clone and original layer counts after clone-side writes
             step("Verify: writes to the clone leave the original untouched")
             var tree = LayerTreeImpl.empty()
             val bounds = SkRect.make_xywh(0.0, 0.0, 8.0, 8.0)
@@ -108,6 +170,8 @@ describe "LayerTreeImpl.clone_tree":
             expect(tree.layer_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "writes to the original leave the clone untouched":
+            # @req REQ-CC-LAYER-TREE-007
+            # @capture(statistics): original and clone layer counts after original-side writes
             step("Verify: writes to the original leave the clone untouched")
             var tree = LayerTreeImpl.empty()
             val bounds = SkRect.make_xywh(0.0, 0.0, 8.0, 8.0)
@@ -120,6 +184,8 @@ describe "LayerTreeImpl.clone_tree":
 
     context "commit uses it":
         it "the committed active tree keeps issuing ids after the pending tree left off":
+            # @req REQ-CC-LAYER-TREE-008
+            # @capture(statistics): active-tree count and next id after a two-layer commit
             step("Verify: the committed active tree keeps issuing ids after the pending tree left off")
             var host = LayerTreeHost.new()
             val bounds = SkRect.make_xywh(0.0, 0.0, 16.0, 16.0)

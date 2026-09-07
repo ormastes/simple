@@ -75,3 +75,22 @@ Cross-check against the 61-bit boxed-int bug to determine shared root cause.
 - `doc/08_tracking/bug/jit_option_i64_value3_none_collision` (same family:
   JIT value-representation collisions)
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+`0x7FFFFFFFFFFFFFFF` and its decimal spelling both materialize exactly on both
+lanes:
+
+```
+MAXI64=9223372036854775807   MAXDEC=9223372036854775807   # interpret
+MAXI64=9223372036854775807   MAXDEC=9223372036854775807   # jit
+```
+
+Probe `_scratch/p_int.spl`. `0x8000000000000000` was NOT probed (it is not
+expressible as a positive i64 literal in the probe), so the half of this record
+concerning that specific value is UNTESTED rather than disproven.

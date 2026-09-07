@@ -20,7 +20,7 @@ A box is ticked ONLY when the named acceptance `it`/command passes, with
 
 ## What holds and must not regress (re-measured 2026-09-05 during this work)
 
-- 35 specs in `test/03_system/plan_acceptance/`; `sh scripts/check/check-plan-acceptance-coverage.shs`
+- 36 specs in `test/03_system/plan_acceptance/`; `sh scripts/check/check-plan-acceptance-coverage.shs`
   → `PASS — 36 plan(s) checked, 0 uncovered, 1 exempt` must stay so.
 - Every spec touched here scores SCAN ≥ 90 (table in § B).
 - The scorer's sha proof (`proof analyzer SAME sha256(src)=…`) is printed on every run.
@@ -275,3 +275,164 @@ Direction of each control, stated so red is not misread: scilib REQ-01,
 startup Phase E, depa gate — GREEN normally, plant → RED, restore → GREEN.
 fpga transcript, render A8 — RED-by-design normally, plant → GREEN, corrupt /
 remove → RED.
+
+## Measured sweep runtime — pooled gate reaches a verdict in 17 min; the 4-13 min estimate is still WRONG (2026-09-06)
+
+`scripts/check/check-plan-acceptance-swept.shs` landed advisory partly on an
+estimated "4-13 min serial" cost. It has since been refactored from a serial
+loop to a bounded worker pool (`--jobs N` / `PLAN_ACCEPTANCE_JOBS`, default =
+online CPUs capped at 8). The push row's description in
+`config/check/must_check_gates.sdn` still says `~13 min serial` — stale on
+both counts.
+
+### Superseded history — the SERIAL gate (kept, not deleted)
+
+Measured twice before the pool existed, both timed out at **2400s without
+reaching a verdict line**:
+
+- the gate itself, `PLAN_ACCEPTANCE_RUNNER=<debug seed> SIMPLE_MCDC_MODE=off`
+  — worked alphabetically through the specs, no verdict at 40 min;
+- a direct suite sweep of the same directory — graceful checkpoint shutdown,
+  exit 42, `To resume tests, run: simple test --resume`.
+
+`startup_perf_plan_spec.spl` alone took **287s** in that lane. These numbers
+describe a gate that no longer exists in that form; they are retained so the
+"4-13 min" estimate is never re-derived from them.
+
+### Current — pooled run, 2026-09-06
+
+`--jobs 8`, runner `src/compiler_rust/target/debug/simple` via
+`PLAN_ACCEPTANCE_RUNNER`, `SIMPLE_MCDC_MODE=off`:
+
+- wall **1029s (17m09s)**, rc=1, verdict line reached; selftest 14/14 (fatal
+  before the scan, as designed).
+- `specs_attempted=36`, `specs_loaded_and_ran=32`,
+  `specs_with_example_failures=26`, `in_development_tagged=36`, `coverage=ok`.
+- `FAIL — 36 spec(s) executed ..., 44 failed to load/run or neutralise cleanly`.
+
+The 44 decomposes exactly: 4 genuine 300s per-spec timeouts
+(`excel_to_math_lib_migration`, `excel_to_math_synthesis`,
+`rsa_modexp_montgomery_barrett`, `startup_perf_plan`) + 40 ×
+`load-failure-neutralised` = **every one of the 36 tagged specs** (15 named,
+21 `(no-marker)`), with `N_NEUTR_ASSERT=0`. Read literally, the gate claimed
+that not one tagged spec in the directory neutralised a real assertion — while
+`specs_loaded_and_ran=32` and `specs_with_example_failures=26` in the same
+verdict say most of them loaded, ran, and failed examples. That contradiction
+is the root cause below, not 36 broken specs.
+
+### Root cause — CONFIRMED and FIXED
+
+`ran_verdict_line` (`src/app/test_daemon/light_protocol.spl`) computed
+`executed = passed + failed`. `in_development_adjust` neutralises a tagged
+file to `passed=0, failed=0, skipped=N`, so the aggregating (directory) lane
+printed `outcome=NOT_RUN declared>=0 executed=0` for every neutralised file —
+byte-identical to a file that never loaded. Any sweep that classifies on that
+line must read a correctly-neutralised spec as a load failure. The single-file
+lane was unaffected (it reports the failures as real failures), which is why a
+per-spec run and a directory run of the same file disagreed.
+
+The earlier hypothesis that specs broke because the gate `cp`s them out of the
+repo into a `mktemp -d` shard is **REFUTED**: the confirming probe ran from an
+in-repo directory and reproduced the defect there.
+
+Fix landed: `in_development` — a field that already existed on
+`TestFileResult`, documented as distinct from environment skips — is now set
+by `in_development_adjust`, counted toward `executed`, and emitted as
+`in_development={n}`; the gate classifies on it. Environment skips are
+deliberately still NOT counted, so an all-skipped file cannot greenwash itself
+to `outcome=OK`. Verified through the real runner:
+`NOT_RUN executed=0` → `OK executed=9 in_development=9`, matching the SKIP
+markers' 9 and 8.
+
+Why the selftest never caught it: its fake runner emitted `failed=1` for a
+neutralised file — a shape the real lane never produces — so 14/14 passed
+against a defect the fixture could not exhibit. Corrected: the old classifier
+now fails the selftest that reproduces production exactly, and passes with the
+fix. Lesson for every gate in this plan: **a fixture that cannot exhibit the
+defect is not a test for it.** The A2 selftest evidence bar above is read with
+that in mind.
+
+**PENDING: a full re-run of the gate with the fix is in flight and its result
+is not known at the time of writing.** No post-fix offender count is stated
+here, and none should be inferred from the decomposition above. The 300s cap
+is per-spec wall time and the fix touches verdict-line classification only, so
+the re-run measures both populations afresh; nothing about what count survives
+is known until it lands. Record the verdict line under § Evidence when it lands.
+
+### Per-item status of the § B remains after this measurement
+
+The pooled run reports per-directory counters, not per-spec example lines, so
+it can confirm or contradict § B only where a spec is named in the offender
+list. Everything else in this list is the § B table's own claim, unchanged and
+not re-verified by the sweep.
+
+- **B1 depa W2-A2** — not named as a timeout; no per-spec evidence from the
+  sweep. § B / § Evidence note that an uncommitted parallel edit may already
+  satisfy it; still UNVERIFIED at HEAD. Open.
+- **B2 scilib REQ-06** — not named as a timeout; no per-spec evidence from the
+  sweep. Open, RED-by-design per § B.
+- **B3 render A4 receipt** — not named; no per-spec evidence. Open,
+  RED-by-design (modules absent).
+- **B4 aarch64 darwin staging** — not named; no per-spec evidence. Open,
+  RED-by-design (binary not staged).
+- **B5 fpga OpenOCD transcript** — not named; no per-spec evidence. Open,
+  RED-by-design (no board).
+- **Correction to § B, `excel_to_math_lib_migration_spec.spl`** — the table
+  records `4/5` on this host; under the pooled gate it **timed out at 300s**
+  and produced no verdict. The `4/5` was measured in the single-file lane (line 10),
+  not under the gate's 300s cap, so the two are not contradictory, but the spec cannot currently be swept
+  by the gate as configured. Same for `startup_perf_plan_spec.spl` (table:
+  `2/3`; serial lane 287s; timed out at 300s in the pooled lane). `excel_to_math_synthesis` and
+  `rsa_modexp_montgomery_barrett` are not § B specs but share the fate.
+  Whether the cap should rise, the specs should shrink, or the timeouts should
+  be a separate offender class with their own count is part of the gate-home
+  decision below; not decided here.
+- **A2 / A4** — the load-failure-vs-neutralised-assertion distinction A2 item 1
+  asked for is now the mechanism the gate classifies on, and A4's kb-spec
+  offender should now be reported as a genuine load failure rather than lost
+  among 40 false ones. Neither box is ticked: both wait on the pending re-run's
+  verdict line, and A4 still needs the contract-text decision.
+- **In-development tag coverage** — `in_development_tagged=36`: every spec in
+  the directory is tagged. That is the sweep's premise (a tagged failure is
+  neutralised, not red), and it also means the directory contains zero
+  untagged controls; the only untagged control in this plan remains group (e)
+  of the integration spec (A1).
+
+### Gate home — inputs are now real; the decision is NOT taken
+
+17 min pooled on an 8-way host, with `bin/simple` on most push hosts unable to
+run it at all (the gate ERRORs, exit 2, without a runnable runner — its own header, `check-plan-acceptance-swept.shs:65`, and selftest fixture "missing runner is ERROR not PASS", `:627`).
+`.claude/rules/vcs.md` kept `check-seed-builds-push.shs` out of the push tier
+for exceeding 10 minutes, and records that a guard routed around with
+`--no-verify` protects nothing — a 17-min blocking push gate would be routed
+around on day one.
+
+| home | cost per event | what it actually enforces | honest problems |
+|---|---|---|---|
+| push, blocking | 17 min on an 8-CPU host; ERROR (exit 2) on any host without a runnable runner (script `:65`, selftest `:627`) | every push | over the 10-min bar; blocks binary-less hosts on ERROR; will be `--no-verify`d |
+| push, advisory (**current**) | same 17 min, verdict recorded on stderr only | nothing — an advisory verdict is never a pass, and nothing reads it | the cost is paid and the protection is zero; row description still says `~13 min serial` |
+| bootstrap tier | 17 min once per bootstrap, on a host that by construction has a runnable compiler | the deployed compiler's acceptance sweep | a row `plan-acceptance-swept` already exists at `tier=bootstrap` in `config/check/must_check_gates.sdn` beside the advisory push row; **whether a bootstrap-tier FAIL is gated by a receipt/ledger entry, or is merely recorded, is UNVERIFIED** — read `run_manifest_push_gates` and the bootstrap admission path before relying on it |
+| sampled subset on push | ~17 min × k/36 (k stated in the verdict line, e.g. `k=6` ≈ 3 min) | a rotating slice; full coverage only over ~36/k pushes | a sample that misses the broken spec is a green verdict; k and the seed must be in the verdict line or the run is unauditable; 4 specs exceed the cap and would need exclusion or a raised cap, which must also be recorded |
+
+Recommendation of the plan owner, pending the re-run: **bootstrap tier as the
+enforcing home, push row demoted to a documented no-op or removed**, because
+the gate needs a runnable compiler and 17 min is a bootstrap-scale cost, not a
+push-scale one; a sampled push subset is acceptable ONLY as an addition and
+ONLY with k, seed and the excluded-timeout list printed in the verdict. Before
+that can be enacted: (1) the pending re-run must reach a verdict; (2) the
+bootstrap-tier enforcement question above must be verified, not assumed; (3)
+the stale `~13 min serial` row text must be corrected in the same change. None
+of these has happened. The decision is not taken.
+
+### What the serial sweeps DID establish (still valid)
+
+Even without a verdict line, the serial runs showed the goal's item 1 at suite
+scale rather than fixtures: 8 specs neutralised with distinct per-spec failure
+counts across six unrelated domains — cuda_host_validation,
+scilib_port_math_block, office_cli_tui_ui_access,
+compiler_loader_script_crosslang_perf, excel_to_math_lib_migration,
+excel_to_math_synthesis, unified_compute_stdlib_rollout, perf_checklists —
+plus `IN-DEVELOPMENT UNEXPECTED PASS fat32_atomic_replace_recovery_spec.spl
+(10 example(s) passed) — ready to promote`. The pooled run's
+`specs_with_example_failures=26` is the same phenomenon counted by the gate
+rather than read off the transcript.

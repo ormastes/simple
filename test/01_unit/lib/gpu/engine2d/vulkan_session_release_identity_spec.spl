@@ -1,0 +1,170 @@
+"""
+## Purpose and audience
+Purpose: Prove that `VulkanSession.release()` wipes every device-identity field
+when the reference count reaches zero, so a released session can never be
+mistaken for a live one.
+Audience: GPU/engine2d maintainers who change the session lifecycle.
+"""
+# @req: REQ-LIB-GPU-VKSESSION-001 — stable requirement identity for this spec.
+
+# @cover src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl 25%
+# @tag: unit, engine2d, vulkan, session, lifecycle
+
+"""
+# VulkanSession release — device-identity wipe contract
+
+## Overview
+
+`VulkanSession` is refcounted. `release()` (`vulkan_session.spl:304-311`)
+decrements the count and, only at zero, calls `_cleanup()` (`:486`), which
+clears every field that identifies the GPU the session was bound to
+(`:536-549`): `device`, `instance`, `physical_device`, `queue`,
+`device_name`, `driver_identity`, `device_type`, and `is_initialized`.
+`is_valid()` (`:312`) is defined as `is_initialized and device > 0` — it reads
+exactly two of those fields, so a partial wipe would leave `is_valid()`
+answering "yes" for a session with no device.
+
+Before this spec, **nothing asserted the wipe**. The only artefacts touching it
+were two non-asserting probe scripts under `test/02_integration/rendering/`
+(`vulkan_session_retention_native_probe.spl`,
+`macos_vulkan_session_live_probe.spl`), neither of which is a `_spec.spl` and
+neither of which contains a single assertion.
+
+## Why this is device-free
+
+`VulkanSession.create()` (`:123`) returns a fully zero-initialised session that
+has never touched a driver. This spec assigns the identity fields directly to
+sentinel non-zero values, standing in for what a real `init()` would have
+written. `_cleanup()` guards **every** `vulkan_sffi_destroy_*` call behind a
+`!= 0` test on a shader/pipeline handle, and this spec leaves all shader and
+pipeline handles at zero, so no SFFI call is reached and no Vulkan loader,
+driver, or device is required. The spec therefore runs identically on a
+headless CI box and on a GPU workstation.
+
+What this spec does NOT prove: that a *real* `init()`-populated session's GPU
+objects are actually destroyed by the driver. That needs a device and belongs
+in `test/03_system/`.
+
+## Adjacent spec gaps this file does NOT close
+
+# TODO: [gpu][P2] No spec asserts a SUCCESSFUL Vulkan window present.
+# test/.../engine_vulkan_window_present_spec.spl asserts only the failure
+# path, so a present that silently stopped working would keep it green.
+# Evidence to close: a device spec capturing a real presented frame, plus a
+# device-free spec pinning the success-path return shape.
+
+# TODO: [gpu][P2] No Vulkan shutdown/leak spec exists. This file proves the
+# identity FIELDS are wiped; nothing proves the GPU objects behind them are
+# destroyed, or that repeated init/release cycles do not leak pipelines,
+# shaders or device memory. Evidence to close: a device spec running N
+# init/release cycles and asserting a flat resource count.
+
+# TODO: [gpu][P2] No mask-plane spec exists anywhere in test/. The engine2d
+# mask plane is exercised only incidentally. Evidence to close: a device-free
+# spec pinning mask-plane composition against known pixel values.
+"""
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+
+# Sentinel handles standing in for what a real init() would have written.
+# Distinct values so a wipe that copies one field over another is still caught.
+val FAKE_INSTANCE: i64 = 0x1001
+val FAKE_PHYSICAL: i64 = 0x2002
+val FAKE_DEVICE: i64 = 0x3003
+val FAKE_QUEUE: i64 = 0x4004
+
+fn _bound_session() -> VulkanSession:
+    """A session carrying a full, distinct, fake device identity, refcount 1."""
+    var s = VulkanSession.create()
+    s.instance = FAKE_INSTANCE
+    s.physical_device = FAKE_PHYSICAL
+    s.device = FAKE_DEVICE
+    s.queue = FAKE_QUEUE
+    s.queue_family = 7
+    s.device_name = "fake-adapter-0"
+    s.device_type = "discrete"
+    s.driver_identity = "fake-driver 1.2.3"
+    s.selected_device_index = 0
+    s.is_initialized = true
+    # release() early-returns when ref_count <= 0, so a session that was never
+    # retained would pass every assertion below vacuously. Take the reference.
+    s.retain()
+    s
+
+describe "VulkanSession device-identity wipe on release":
+
+    it "a bound session is valid before release":
+        step("Build a session carrying a fake device identity and retain it")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        val s = _bound_session()
+        assert_true(s.is_valid())  # oracle: is_initialized=true and device=0x3003 > 0
+        expect(s.ref_count).to_equal(1)  # oracle: create()=0, one retain()=1
+
+    it "release at zero refcount clears every device-identity field":
+        step("Release the only reference and inspect each identity field")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = _bound_session()
+        s.release()
+        expect(s.device).to_equal(0)  # oracle: vulkan_session.spl:542 self.device = 0
+        expect(s.instance).to_equal(0)  # oracle: :543 self.instance = 0
+        expect(s.physical_device).to_equal(0)  # oracle: :544 self.physical_device = 0
+        expect(s.queue).to_equal(0)  # oracle: :545 self.queue = 0
+        expect(s.queue_family).to_equal(0)  # oracle: :546 self.queue_family = 0
+        expect(s.device_name).to_equal("")  # oracle: :538 self.device_name = ""
+        expect(s.driver_identity).to_equal("")  # oracle: :539 self.driver_identity = ""
+        expect(s.device_type).to_equal("")  # oracle: :540 self.device_type = ""
+        assert_false(s.is_initialized)  # oracle: :549 self.is_initialized = false
+
+    it "a released session reports itself invalid":
+        step("Confirm is_valid() answers false once the identity is gone")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = _bound_session()
+        s.release()
+        assert_false(s.is_valid())  # oracle: is_initialized=false AND device=0
+
+    it "release below zero refcount is inert and does not wipe again":
+        step("Release twice; the second call must early-return, not re-enter cleanup")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = _bound_session()
+        s.release()
+        expect(s.ref_count).to_equal(0)  # oracle: 1 retain - 1 release
+        s.release()
+        expect(s.ref_count).to_equal(0)  # oracle: :306 `if self.ref_count <= 0: return`
+        assert_false(s.is_valid())
+
+describe "VulkanSession refcount gates the wipe":
+
+    it "a session with two references survives one release":
+        step("Retain twice, release once — identity must be fully intact")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = _bound_session()
+        s.retain()
+        expect(s.ref_count).to_equal(2)  # oracle: 2 retains
+        s.release()
+        expect(s.ref_count).to_equal(1)  # oracle: one outstanding reference
+        assert_true(s.is_valid())  # oracle: cleanup must NOT have run
+        expect(s.device).to_equal(FAKE_DEVICE)  # oracle: identity untouched
+        expect(s.device_name).to_equal("fake-adapter-0")  # oracle: identity untouched
+
+    it "the wipe happens on the release that reaches zero, not before":
+        step("Retain twice, release twice — the second release performs the wipe")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = _bound_session()
+        s.retain()
+        s.release()
+        assert_true(s.is_valid())  # oracle: still one reference outstanding
+        s.release()
+        expect(s.ref_count).to_equal(0)
+        assert_false(s.is_valid())  # oracle: :311 _cleanup() ran at zero
+        expect(s.instance).to_equal(0)
+        expect(s.driver_identity).to_equal("")
+
+    it "a never-retained session is left alone by release":
+        step("create() yields ref_count 0; release() must not underflow it")
+        # @req: REQ-LIB-GPU-VKSESSION-001
+        var s = VulkanSession.create()
+        s.release()
+        expect(s.ref_count).to_equal(0)  # oracle: :306 early return, no decrement to -1
+        assert_false(s.is_valid())  # oracle: create() leaves device=0, is_initialized=false

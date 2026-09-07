@@ -1,97 +1,195 @@
+"""
+## Purpose and audience
+Source-contract pins for the DBFS retained staged-tree materializer v1: bounded
+positioned chunk streaming (each retained file read once, no whole-payload
+buffers), private reservations bound to the retained SHA and exact path, abort
+of private state on pre-publication failure, authoritative three-state
+publication outcomes, empty-directory and parent publication in admitted plan
+order, hosted/unready-device rejection before namespace mutation, an honest
+non-transactional publication model, and package-internal retained-session entry
+points. Written for engineers touching `src/os/installer/dbfs_staged_tree_materializer_v1.spl`
+or the DBFS streaming-ingest driver.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/installer/dbfs_staged_tree_materializer_v1_contract_spec.spl`
+and read the `SPEC FILE VERDICT` line. Every scenario reads shipped source with
+`read_file_text` and asserts on grep-verified tokens; no DBFS device is needed.
+## Compatibility and limitations
+These are source-contract scenarios: they prove shipped source carries the
+load-bearing tokens, not that a live DBFS publishes bytes correctly. They
+currently run RED end to end (0/8) — the pinned tokens do not all match the
+shipped source, which is recorded contract drift, not a harness defect; do not
+soften the assertions to go green.
+## Verification guidance and troubleshooting
+A failing `*_present` expectation means a named token vanished or was renamed in
+the product source; a failing `*_absent` expectation means a forbidden pattern
+(whole-file buffered reads, tree-transaction claims) was reintroduced. Rerun
+after any edit to the materializer or the streaming-ingest driver and compare
+per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/domain/simpleos_nvfs_submodule_migration.md ;
+# doc/03_plan/os/storage/nvfs_dbfs_real_filesystem.md ;
+# doc/04_architecture/os/dbfs_architecture.md ;
+# doc/05_design/os/storage/dbfs_root_mount_seal_v1.md
+# @manual_section: dbfs-staged-tree-materializer-contract
+
 use std.io_runtime.{read_file_text}
-use std.spec
+use std.spec.{step}
 
 describe "DBFS retained staged-tree materializer v1 source contract":
     it "streams each retained file once in bounded positioned chunks":
+        # @req REQ-DBFS-MATERIALIZER-001
+        # @capture(protocol_json): grep-verified bounded-chunk and positioned-read tokens
+        step("Read the DBFS materializer source and verify bounded positioned streaming")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain(
+        val bounds_chunk_size = source.contains(
             "remaining < DBFS_STREAM_INGEST_MAX_CHUNK_BYTES")
-        expect(source).to_contain(
+        val reads_positioned_ranges = source.contains(
             "provider.read_file(provider_lease, offset, count)")
-        expect(source).to_contain(
+        val appends_via_ingest = source.contains(
             "driver.stream_ingest_append(")
-        expect(source.contains("read_file_text(entry.relative_path)")).to_equal(false)
-        expect(source.contains("var payload: [u8]")).to_equal(false)
+        val rereads_whole_files = source.contains("read_file_text(entry.relative_path)")
+        val buffers_whole_payload = source.contains("var payload: [u8]")
+        expect(bounds_chunk_size).to_equal(true)
+        expect(reads_positioned_ranges).to_equal(true)
+        expect(appends_via_ingest).to_equal(true)
+        expect(rereads_whole_files).to_equal(false)
+        expect(buffers_whole_payload).to_equal(false)
 
     it "binds the private DBFS reservation to retained SHA and exact path":
+        # @req REQ-DBFS-MATERIALIZER-002
+        # @capture(protocol_json): grep-verified exact-path and expected-SHA binding tokens
+        step("Read the DBFS materializer source and verify the reservation bindings")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain("val exact_path = \"/\" + entry.relative_path")
-        expect(source).to_contain(
+        val binds_exact_path = source.contains("val exact_path = \"/\" + entry.relative_path")
+        val compares_expected_sha = source.contains(
             "streamed_sha.unwrap() != entry.provider_digest_sha256")
-        expect(source).to_contain("provider.finish_file(")
-        expect(source).to_contain("driver.stream_ingest_finish_outcome_v1(")
-        expect(source).to_contain(
+        val finishes_provider_file = source.contains("provider.finish_file(")
+        val finishes_ingest_outcome = source.contains("driver.stream_ingest_finish_outcome_v1(")
+        val threads_digest_into_lease = source.contains(
             "ingest_lease, entry.provider_digest_sha256")
+        expect(binds_exact_path).to_equal(true)
+        expect(compares_expected_sha).to_equal(true)
+        expect(finishes_provider_file).to_equal(true)
+        expect(finishes_ingest_outcome).to_equal(true)
+        expect(threads_digest_into_lease).to_equal(true)
 
     it "aborts private state on pre-publication failures":
+        # @req REQ-DBFS-MATERIALIZER-003
+        # @capture(protocol_json): grep-verified abort-call and unpublished-outcome tokens
+        step("Read the DBFS materializer source and verify pre-publication aborts")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain("driver.stream_ingest_abort(ingest_lease)")
-        expect(source).to_contain("provider.abort_file(provider_lease)")
-        expect(source).to_contain("published: false")
+        val aborts_ingest_lease = source.contains("driver.stream_ingest_abort(ingest_lease)")
+        val aborts_provider_file = source.contains("provider.abort_file(provider_lease)")
+        val leaves_tree_unpublished = source.contains("published: false")
+        expect(aborts_ingest_lease).to_equal(true)
+        expect(aborts_provider_file).to_equal(true)
+        expect(leaves_tree_unpublished).to_equal(true)
 
     it "uses authoritative publication outcomes and never aborts ambiguity":
+        # @req REQ-DBFS-MATERIALIZER-004
+        # @capture(protocol_json): grep-verified three-state outcome tokens across materializer and driver
+        step("Read the materializer and streaming-ingest sources and verify the authoritative outcomes")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
         val ingest = read_file_text(
             "src/lib/nogc_sync_mut/db/dbfs_driver/streaming_ingest.spl")
-        expect(ingest).to_contain("enum DbfsPublicationStateV1")
-        expect(ingest).to_contain("NotPublished")
-        expect(ingest).to_contain("Published")
-        expect(ingest).to_contain("Indeterminate")
-        expect(ingest).to_contain("dbfs-stream-published-bookkeeping-failed")
-        expect(source).to_contain(
+        val declares_publication_enum = ingest.contains("enum DbfsPublicationStateV1")
+        val has_not_published_state = ingest.contains("NotPublished")
+        val has_published_state = ingest.contains("Published")
+        val has_indeterminate_state = ingest.contains("Indeterminate")
+        val names_bookkeeping_failure = ingest.contains("dbfs-stream-published-bookkeeping-failed")
+        val branches_on_not_published = source.contains(
             "if outcome.publication_state() == DbfsPublicationStateV1.NotPublished:")
-        expect(source).to_contain(
+        val branches_on_indeterminate = source.contains(
             "if outcome.publication_state() == DbfsPublicationStateV1.Indeterminate:")
+        expect(declares_publication_enum).to_equal(true)
+        expect(has_not_published_state).to_equal(true)
+        expect(has_published_state).to_equal(true)
+        expect(has_indeterminate_state).to_equal(true)
+        expect(names_bookkeeping_failure).to_equal(true)
+        expect(branches_on_not_published).to_equal(true)
+        expect(branches_on_indeterminate).to_equal(true)
 
     it "publishes empty directories and parents in admitted plan order":
+        # @req REQ-DBFS-MATERIALIZER-005
+        # @capture(protocol_json): grep-verified directory-publication and receipt-count tokens
+        step("Read the DBFS materializer source and verify directory publication and counters")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain(
+        val branches_on_directory_kind = source.contains(
             "if entry.kind == StagedRootTreeEntryKindV1.Directory:")
-        expect(source).to_contain(
+        val creates_directories_via_outcome = source.contains(
             "driver.mkdir_publication_outcome_v1(")
-        expect(source).to_contain("val exact_directory = \"/\" + entry.relative_path")
-        expect(source).to_contain(
+        val binds_exact_directory = source.contains("val exact_directory = \"/\" + entry.relative_path")
+        val counts_published_directories = source.contains(
             "directories_published = directories_published + 1")
-        expect(source).to_contain(
+        val plans_directory_count = source.contains(
             "directories_planned: plan.directory_count")
-        expect(source).to_contain(
+        val reports_directory_count = source.contains(
             "directories_published: directories_published")
+        expect(branches_on_directory_kind).to_equal(true)
+        expect(creates_directories_via_outcome).to_equal(true)
+        expect(binds_exact_directory).to_equal(true)
+        expect(counts_published_directories).to_equal(true)
+        expect(plans_directory_count).to_equal(true)
+        expect(reports_directory_count).to_equal(true)
 
     it "rejects hosted or unready DBFS before directory namespace mutation":
+        # @req REQ-DBFS-MATERIALIZER-006
+        # @capture(protocol_json): grep-verified device-gate and unpublished/indeterminate outcome tokens
+        step("Read the streaming-ingest source and verify the hosted/unready device gates")
         val ingest = read_file_text(
             "src/lib/nogc_sync_mut/db/dbfs_driver/streaming_ingest.spl")
-        expect(ingest).to_contain("if self.arena_base < 0 or")
-        expect(ingest).to_contain(
+        val gates_on_arena_base = ingest.contains("if self.arena_base < 0 or")
+        val gates_on_namespace_ready = ingest.contains(
             "not dbfs_device_v4_namespace_ready_locked(")
-        expect(ingest).to_contain(
+        val rejects_unavailable_namespace = ingest.contains(
             "_not_published_v1(\"dbfs-mkdir-device-namespace-unavailable\")")
-        expect(ingest).to_contain(
+        val rejects_persist_failure = ingest.contains(
             "_not_published_v1(\"dbfs-mkdir-persist-failed\")")
-        expect(ingest).to_contain(
+        val reports_persist_indeterminate = ingest.contains(
             "_indeterminate_v1(\"dbfs-mkdir-persist-indeterminate\")")
-        expect(ingest).to_contain(
+        val rejects_flush_failure = ingest.contains(
             "_not_published_v1(\"dbfs-mkdir-flush-failed\")")
-        expect(ingest).to_contain(
+        val reports_flush_indeterminate = ingest.contains(
             "_indeterminate_v1(\"dbfs-mkdir-flush-indeterminate\")")
+        expect(gates_on_arena_base).to_equal(true)
+        expect(gates_on_namespace_ready).to_equal(true)
+        expect(rejects_unavailable_namespace).to_equal(true)
+        expect(rejects_persist_failure).to_equal(true)
+        expect(reports_persist_indeterminate).to_equal(true)
+        expect(rejects_flush_failure).to_equal(true)
+        expect(reports_flush_indeterminate).to_equal(true)
 
     it "does not claim a tree transaction DBFS does not provide":
+        # @req REQ-DBFS-MATERIALIZER-007
+        # @capture(protocol_json): grep-verified publication-model and receipt-field tokens
+        step("Read the DBFS materializer source and verify the honest publication model")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain("tree_atomic: false")
-        expect(source).to_contain(
+        val admits_non_atomic_tree = source.contains("tree_atomic: false")
+        val names_per_entry_model = source.contains(
             "publication_model: \"dbfs-per-entry-atomic-v1\"")
-        expect(source).to_contain("files_published: files_published")
-        expect(source).to_contain("error_path: receipt.exact_path")
+        val counts_files_locally = source.contains("files_published: files_published")
+        val reports_error_path = source.contains("error_path: receipt.exact_path")
+        expect(admits_non_atomic_tree).to_equal(true)
+        expect(names_per_entry_model).to_equal(true)
+        expect(counts_files_locally).to_equal(true)
+        expect(reports_error_path).to_equal(true)
 
     it "keeps the retained-session consuming entry points package internal":
+        # @req REQ-DBFS-MATERIALIZER-008
+        # @capture(protocol_json): grep-verified pub(package) visibility tokens
+        step("Read the DBFS materializer source and verify package-internal entry points")
         val source = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain(
+        val keeps_file_entry_internal = source.contains(
             "pub(package) fn dbfs_materialize_retained_file_v1(")
-        expect(source).to_contain(
+        val keeps_tree_entry_internal = source.contains(
             "pub(package) fn image_builder_materialize_retained_tree_to_dbfs_v1(")
+        expect(keeps_file_entry_internal).to_equal(true)
+        expect(keeps_tree_entry_internal).to_equal(true)

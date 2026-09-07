@@ -1,6 +1,41 @@
-# LLM Caret Types Specification
+"""
+## Purpose and audience
+Covers the LLM Caret data types: Message, ChatRequest, ChatResponse,
+StreamEvent, and ProviderConfig, plus their factory functions and the
+role/response predicate helpers. The types are re-declared inline as the
+established import-compatibility pattern for test isolation, so scenarios
+observe the exact record shapes the production code compiles against.
+Audience: llm_caret maintainers and operators verifying a build.
+
+## Operator workflow
+Run `simple run test/unit/app/llm_caret/types_spec.spl` from the repo root and
+confirm the results line reports 0 failed. Each scenario names the requirement
+it traces to, starts with an imperative step, retains a statistics capture,
+and explains every numeric oracle inline.
+
+## Compatibility and limitations
+Covers only the behavior explicitly asserted below on the current toolchain:
+default construction sentinels (empty strings, zero token counts, the 0
+unset-max_turns marker, the -1.0 unset-temperature marker), factory role and
+stop_reason stamps, and the predicate helpers. No network, provider CLI, or
+streaming behavior is exercised — those live in the integration specs.
+
+## Verification guidance and troubleshooting
+Re-run the single spec file and read the first failing step. A sentinel
+failure means a factory default moved — update the factory and its oracle
+comment together. A predicate failure means role comparison or the
+error/content gating regressed. If a field is added to a struct, extend the
+matching defaults scenario in the same change.
+"""
+# Lifecycle: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ;
+# doc/03_plan/agent_tasks/llm_caret_agent_teams.md ;
+# doc/04_architecture/llm_caret_claude_cli_harden.md ;
+# doc/05_design/ui_cli_llm_access.md
+# @manual_section: llm-caret-types
 
 # Re-define types inline for test isolation (import compatibility pattern)
+use std.spec.step
+
 struct Message:
     role: text
     content: text
@@ -203,156 +238,223 @@ fn response_has_content(resp: ChatResponse) -> bool:
 
 describe "Message":
     it "should preserve an explicit role and content":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): explicit-role message field verdicts
         step("Construct a production message with an explicit role")
         val msg: Message = new_message("tool", "result")
-        expect(msg.role).to_equal("tool")
-        expect(msg.content).to_equal("result")
+        expect(msg.role).to_equal("tool")  # oracle: the constructor must stamp the role argument verbatim
+        expect(msg.content).to_equal("result")  # oracle: the constructor must stamp the content argument verbatim
 
     it "creates user message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): user-message factory stamping
+        step("Build a user message through the factory")
         val msg = new_user_message("Hi there")
-        expect(msg.role).to_equal("user")
-        expect(msg.content).to_equal("Hi there")
+        expect(msg.role).to_equal("user")  # oracle: the factory owns the "user" role stamp so callers cannot mistype it
+        expect(msg.content).to_equal("Hi there")  # oracle: the content argument must pass through untouched
 
     it "creates assistant message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): assistant-message factory stamping
+        step("Build an assistant message through the factory")
         val msg = new_assistant_message("I can help")
-        expect(msg.role).to_equal("assistant")
-        expect(msg.content).to_equal("I can help")
+        expect(msg.role).to_equal("assistant")  # oracle: the factory owns the "assistant" role stamp
+        expect(msg.content).to_equal("I can help")  # oracle: the content argument must pass through untouched
 
     it "creates system message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): system-message factory stamping
+        step("Build a system message through the factory")
         val msg = new_system_message("You are helpful")
-        expect(msg.role).to_equal("system")
-        expect(msg.content).to_equal("You are helpful")
+        expect(msg.role).to_equal("system")  # oracle: the factory owns the "system" role stamp
+        expect(msg.content).to_equal("You are helpful")  # oracle: the content argument must pass through untouched
 
     it "detects user message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): user-predicate verdicts
+        step("Run the role predicates against a user message")
         val msg = new_user_message("test")
-        expect(is_user_message(msg)).to_equal(true)
-        expect(is_assistant_message(msg)).to_equal(false)
+        expect(is_user_message(msg)).to_equal(true)  # oracle: the message carries the "user" role
+        expect(is_assistant_message(msg)).to_equal(false)  # oracle: a message has exactly one role, so the others must reject
 
     it "detects assistant message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): assistant-predicate verdicts
+        step("Run the role predicates against an assistant message")
         val msg = new_assistant_message("test")
-        expect(is_assistant_message(msg)).to_equal(true)
-        expect(is_user_message(msg)).to_equal(false)
+        expect(is_assistant_message(msg)).to_equal(true)  # oracle: the message carries the "assistant" role
+        expect(is_user_message(msg)).to_equal(false)  # oracle: a message has exactly one role, so the others must reject
 
     it "detects system message":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): system-predicate verdicts
+        step("Run the role predicates against a system message")
         val msg = new_system_message("test")
-        expect(is_system_message(msg)).to_equal(true)
-        expect(is_user_message(msg)).to_equal(false)
+        expect(is_system_message(msg)).to_equal(true)  # oracle: the message carries the "system" role
+        expect(is_user_message(msg)).to_equal(false)  # oracle: a message has exactly one role, so the others must reject
 
 describe "ChatRequest":
     it "creates empty request with defaults":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): request factory default sentinel table
+        step("Build an empty request and read every default field")
         val req = new_chat_request()
-        expect(req.provider).to_equal("")
-        expect(req.model).to_equal("")
-        expect(req.messages.len()).to_equal(0)
-        expect(req.system_prompt).to_equal("")
-        expect(req.max_tokens).to_equal(0)
-        expect(req.temperature).to_be_less_than(0.0)
-        expect(req.session_id).to_equal("")
-        expect(req.max_turns).to_equal(0)
-        expect(req.stream).to_be(false)
-        expect(req.json_schema).to_equal("")
-        expect(req.tools.len()).to_equal(0)
-        expect(req.extra_args.len()).to_equal(0)
+        expect(req.provider).to_equal("")  # oracle: no provider is selected until the caller names one
+        expect(req.model).to_equal("")  # oracle: no model is selected until the caller names one
+        expect(req.messages.len()).to_equal(0)  # oracle: an empty request starts with no conversation history
+        expect(req.system_prompt).to_equal("")  # oracle: the system prompt is opt-in
+        expect(req.max_tokens).to_equal(0)  # oracle: 0 is the documented unset marker, delegating the cap to the provider
+        expect(req.temperature).to_be_less_than(0.0)  # oracle: -1.0 is the unset marker and must sit below the valid 0.0 floor
+        expect(req.session_id).to_equal("")  # oracle: the runtime assigns the session id later
+        expect(req.max_turns).to_equal(0)  # oracle: 0 is the documented unset marker for turn limiting
+        expect(req.stream).to_be(false)  # oracle: requests default to the non-streaming path
+        expect(req.json_schema).to_equal("")  # oracle: structured output is opt-in
+        expect(req.tools.len()).to_equal(0)  # oracle: tool use is opt-in
+        expect(req.extra_args.len()).to_equal(0)  # oracle: no provider-specific flags until the caller adds them
 
     it "creates request with prompt":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): prompt-seeded request contents
+        step("Build a request seeded with one user prompt")
         val req = new_chat_request_with_prompt("Hello world")
-        expect(req.messages.len()).to_equal(1)
-        expect(req.messages[0].role).to_equal("user")
-        expect(req.messages[0].content).to_equal("Hello world")
+        expect(req.messages.len()).to_equal(1)  # oracle: the factory seeds exactly one message from the prompt
+        expect(req.messages[0].role).to_equal("user")  # oracle: a seeded prompt is by definition from the user
+        expect(req.messages[0].content).to_equal("Hello world")  # oracle: the prompt text must land in the message verbatim
 
     it "has empty tools by default":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): unset-temperature sentinel verdicts
+        step("Read the temperature sentinel on both request factories")
         val req = new_chat_request()
-        expect(req.temperature).to_equal(-1.0)
-        expect(new_chat_request_with_prompt("x").temperature).to_equal(-1.0)
+        expect(req.temperature).to_equal(-1.0)  # oracle: -1.0 is the documented unset marker, below the valid [0,1] range
+        expect(new_chat_request_with_prompt("x").temperature).to_equal(-1.0)  # oracle: seeding a prompt must not disturb the unset temperature
 
     it "should use exactly 0 as the unset-max_turns marker":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): unset-max_turns sentinel verdicts
         step("Pin the sentinel value for turn limiting")
-        expect(new_chat_request().max_turns).to_equal(0)
-        expect(new_chat_request_with_prompt("x").max_turns).to_equal(0)
+        expect(new_chat_request().max_turns).to_equal(0)  # oracle: 0 means "no turn cap" — 1 would wrongly allow a single turn
+        expect(new_chat_request_with_prompt("x").max_turns).to_equal(0)  # oracle: seeding a prompt must not disturb the unset marker
 
 describe "ChatResponse":
     it "creates empty response":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): response factory default sentinel table
+        step("Build an empty response and read every default field")
         val resp = new_chat_response()
-        expect(resp.content).to_equal("")
-        expect(resp.model).to_equal("")
-        expect(resp.provider).to_equal("")
-        expect(resp.session_id).to_equal("")
-        expect(resp.stop_reason).to_equal("")
-        expect(resp.input_tokens).to_equal(0)
-        expect(resp.output_tokens).to_equal(0)
-        expect(resp.error).to_equal("")
+        expect(resp.content).to_equal("")  # oracle: no completion has arrived yet
+        expect(resp.model).to_equal("")  # oracle: the runtime stamps the model on receipt
+        expect(resp.provider).to_equal("")  # oracle: the runtime stamps the provider on receipt
+        expect(resp.session_id).to_equal("")  # oracle: the runtime assigns the session on receipt
+        expect(resp.stop_reason).to_equal("")  # oracle: no stop reason exists before a completion
+        expect(resp.input_tokens).to_equal(0)  # oracle: zero usage until the provider reports
+        expect(resp.output_tokens).to_equal(0)  # oracle: zero usage until the provider reports
+        expect(resp.error).to_equal("")  # oracle: an empty error text means no error
 
     it "creates error response":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): error-response factory stamping
+        step("Build an error response and read its stamped fields")
         val resp = new_error_response("Connection failed")
-        expect(resp.is_error).to_equal(true)
-        expect(resp.error).to_equal("Connection failed")
-        expect(resp.stop_reason).to_equal("error")
-        expect(resp.content).to_equal("")
+        expect(resp.is_error).to_equal(true)  # oracle: the factory exists to flag failures
+        expect(resp.error).to_equal("Connection failed")  # oracle: the error text must pass through verbatim
+        expect(resp.stop_reason).to_equal("error")  # oracle: the factory stamps the "error" stop reason
+        expect(resp.content).to_equal("")  # oracle: a failure carries no completion content
 
     it "creates success response":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): success-response factory stamping
+        step("Build a success response and read its stamped fields")
         val resp = new_success_response("Hello!")
-        expect(resp.content).to_equal("Hello!")
-        expect(resp.is_error).to_equal(false)
-        expect(resp.stop_reason).to_equal("end_turn")
+        expect(resp.content).to_equal("Hello!")  # oracle: the completion text must pass through verbatim
+        expect(resp.is_error).to_equal(false)  # oracle: the success factory must not flag an error
+        expect(resp.stop_reason).to_equal("end_turn")  # oracle: the factory stamps the normal "end_turn" stop reason
 
     it "checks response ok":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): response_ok predicate verdicts
+        step("Gate one success and one error response through response_ok")
         val ok = new_success_response("test")
         val err = new_error_response("fail")
-        expect(response_ok(ok)).to_equal(true)
-        expect(response_ok(err)).to_equal(false)
+        expect(response_ok(ok)).to_equal(true)  # oracle: a non-error response must pass the gate
+        expect(response_ok(err)).to_equal(false)  # oracle: the gate exists to reject error-flagged responses
 
     it "checks response has content":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): response_has_content predicate verdicts
+        step("Gate success, empty, and error responses through response_has_content")
         val ok = new_success_response("hello")
         val empty = new_chat_response()
         val err = new_error_response("fail")
-        expect(response_has_content(ok)).to_equal(true)
-        expect(response_has_content(empty)).to_equal(false)
-        expect(response_has_content(err)).to_equal(false)
+        expect(response_has_content(ok)).to_equal(true)  # oracle: non-empty and non-error satisfies both gate conditions
+        expect(response_has_content(empty)).to_equal(false)  # oracle: empty content must fail the gate even without an error flag
+        expect(response_has_content(err)).to_equal(false)  # oracle: an error flag must fail the gate even with content
 
     it "has zero token counts by default":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): default token counters
+        step("Read both token counters on a fresh response")
         val resp = new_chat_response()
-        expect(resp.input_tokens).to_equal(0)
-        expect(resp.output_tokens).to_equal(0)
+        expect(resp.input_tokens).to_equal(0)  # oracle: zero usage until the provider reports
+        expect(resp.output_tokens).to_equal(0)  # oracle: zero usage until the provider reports
 
 describe "StreamEvent":
     it "creates generic event":
-        val evt = new_stream_event("content_block_start", "")
-        expect(evt.event_type).to_equal("content_block_start")
-        expect(evt.content).to_equal("payload")
-        expect(evt.session_id).to_equal("")
-        expect(evt.model).to_equal("")
-        expect(evt.stop_reason).to_equal("")
-        expect(evt.input_tokens).to_equal(0)
-        expect(evt.output_tokens).to_equal(0)
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): generic stream event field verdicts
+        step("Build a generic stream event and read every field")
+        val evt = new_stream_event("content_block_start", "payload")
+        expect(evt.event_type).to_equal("content_block_start")  # oracle: the event type argument must be stamped verbatim
+        expect(evt.content).to_equal("payload")  # oracle: the content argument must pass through verbatim
+        expect(evt.session_id).to_equal("")  # oracle: stream events carry no session until correlated
+        expect(evt.model).to_equal("")  # oracle: stream events carry no model until correlated
+        expect(evt.stop_reason).to_equal("")  # oracle: only message_stop events carry a stop reason
+        expect(evt.input_tokens).to_equal(0)  # oracle: usage is reported on message_stop, not mid-stream
+        expect(evt.output_tokens).to_equal(0)  # oracle: usage is reported on message_stop, not mid-stream
 
     it "creates text delta":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): text-delta event stamping
+        step("Build a text delta and read its type and content")
         val evt = new_text_delta("Hello ")
-        expect(evt.event_type).to_equal("text_delta")
-        expect(evt.content).to_equal("Hello ")
+        expect(evt.event_type).to_equal("text_delta")  # oracle: the factory owns the "text_delta" stamp
+        expect(evt.content).to_equal("Hello ")  # oracle: the delta text must pass through verbatim, including the trailing space
 
     it "creates message stop":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): message-stop event stamping
+        step("Build a message stop and read its type and reason")
         val evt = new_message_stop("end_turn")
-        expect(evt.event_type).to_equal("message_stop")
-        expect(evt.stop_reason).to_equal("end_turn")
-        expect(evt.content).to_equal("")
+        expect(evt.event_type).to_equal("message_stop")  # oracle: the factory owns the "message_stop" stamp
+        expect(evt.stop_reason).to_equal("end_turn")  # oracle: the stop reason argument must be stamped verbatim
+        expect(evt.content).to_equal("")  # oracle: a stop event carries no content payload
 
     it "has empty defaults":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): stream event default sentinels
+        step("Read the correlation and usage defaults on a generic event")
         val evt = new_stream_event("test", "data")
-        expect(evt.session_id).to_equal("")
-        expect(evt.model).to_equal("")
-        expect(evt.input_tokens).to_equal(0)
+        expect(evt.session_id).to_equal("")  # oracle: correlation fields fill in downstream
+        expect(evt.model).to_equal("")  # oracle: correlation fields fill in downstream
+        expect(evt.input_tokens).to_equal(0)  # oracle: usage is not carried by generic events
 
 describe "ProviderConfig":
     it "creates with provider type":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): provider config type stamping
+        step("Build a provider config and read its identity fields")
         val cfg = new_provider_config("claude_cli")
-        expect(cfg.provider_type).to_equal("claude_cli")
-        expect(cfg.base_url).to_equal("")
-        expect(cfg.api_key).to_equal("")
+        expect(cfg.provider_type).to_equal("claude_cli")  # oracle: the provider type argument must be stamped verbatim
+        expect(cfg.base_url).to_equal("")  # oracle: CLI-backed providers need no base URL until overridden
+        expect(cfg.api_key).to_equal("")  # oracle: CLI-backed providers authenticate outside the config
 
     it "has empty defaults":
+        # @req REQ-LLM-CARET-001
+        # @capture(statistics): provider config default sentinels
+        step("Read every path and collection default on a config")
         val cfg = new_provider_config("openai")
-        expect(cfg.model).to_equal("")
-        expect(cfg.cli_path).to_equal("")
-        expect(cfg.python_path).to_equal("")
-        expect(cfg.model_path).to_equal("")
-        expect(cfg.extra_args.len()).to_equal(0)
+        expect(cfg.model).to_equal("")  # oracle: the model is chosen per request, not per config
+        expect(cfg.cli_path).to_equal("")  # oracle: the runtime resolves the CLI path lazily
+        expect(cfg.python_path).to_equal("")  # oracle: python-backed providers resolve their interpreter lazily
+        expect(cfg.model_path).to_equal("")  # oracle: local-model providers resolve their weights path lazily
+        expect(cfg.extra_args.len()).to_equal(0)  # oracle: no provider-specific flags until the caller adds them

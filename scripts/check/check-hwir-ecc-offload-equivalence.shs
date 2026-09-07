@@ -1,0 +1,180 @@
+#!/bin/sh
+# Gate: the ECC software-to-circuit offload equivalence evidence must hold.
+#
+# What it pins: `ecc_parity_of` (examples/09_embedded/simpleos_nvme_fw/fw/fil_ecc.spl)
+# lowers through the strict MIR->HWIR boundary, and the emitted graph executed by
+# host_evaluator.spl agrees with the software lowering on every vector; plus the
+# width/wraparound semantics of the newly admitted xor/add/sub comb ops and the
+# constructs that must stay rejected. It additionally pins `ecc_xor_index`
+# (fil_ecc.spl:207), whose five calls to `ecc_parity_of` reach hardware only via
+# strict call inlining (src/compiler/50.mir/hwir/strict_inline.spl), together
+# with the inlining refusals (unknown callee, arity mismatch, non-lowerable
+# callee).
+#
+# Verdict convention (repo standard): the verdict is the LAST stdout line.
+#   PASS  — <n> example(s) checked, ...            exit 0
+#   FAIL  — ...                                     exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+# 0 examples checked is ERROR, never PASS. Exit codes of `simple test` are NOT
+# trusted (the runner has been measured exiting 0 with no result line, and
+# `simple run` returns 193 on success) — only the `Results:` line is evidence.
+#
+# --selftest runs FIRST, unconditionally, and is fatal.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SPEC_REL="test/01_unit/compiler/50.mir/hwir_ecc_offload_equivalence_spec.spl"
+# Binary resolution: the deployed binary is gitignored, so a fresh worktree has
+# none. Absence of a runnable binary is ERROR — never a pass.
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ -z "$SIMPLE_BIN" ]; then
+    for _candidate in \
+        "$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple" \
+        "$REPO_ROOT/bin/simple" \
+        "/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple"; do
+        if [ -x "$_candidate" ]; then
+            SIMPLE_BIN="$_candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    printf '%s\n' "ERROR — nothing was checked (no runnable simple binary; set SIMPLE_BIN)"
+    exit 2
+fi
+WORK_REL="build/hwir-ecc-gate"
+WORK="$REPO_ROOT/$WORK_REL"
+
+emit() { printf '%s\n' "$1"; }
+
+# Run one spec (path RELATIVE to the repo root — an absolute path makes the
+# runner a silent no-op) and echo "total passed failed", or nothing at all when
+# no Results line was produced.
+run_spec() {
+    _rel="$1"
+    _log="$2"
+    ( cd "$REPO_ROOT" && SIMPLE_TIMEOUT_SECONDS=0 timeout 900 "$SIMPLE_BIN" test "$_rel" ) >"$_log" 2>&1
+    _line=$(/usr/bin/grep -E '^Results: [0-9]+ total' "$_log" | tail -1)
+    if [ -z "$_line" ]; then
+        return 0
+    fi
+    printf '%s' "$_line" | sed -E 's/^Results: ([0-9]+) total, ([0-9]+) passed, ([0-9]+) failed.*/\1 \2 \3/'
+}
+
+selftest() {
+    mkdir -p "$WORK" || return 1
+    if [ ! -f "$REPO_ROOT/$SPEC_REL" ]; then
+        emit "selftest: spec is absent: $SPEC_REL"
+        return 1
+    fi
+
+    # Fixture 1 (must PASS): a self-contained trivially-green spec. It is
+    # deliberately NOT a copy of the spec under test — using the real spec as
+    # the control made a genuine regression come out as ERROR ("selftest
+    # failed") instead of FAIL, which is the wrong verdict for a real defect.
+    # This fixture proves only that the harness can read a green Results line.
+    cat > "$WORK/control_spec.spl" <<'CONTROL'
+# Gate selftest control fixture — must always be green.
+use std.spec.step
+
+use std.spec.*
+
+describe "gate selftest control":
+    it "should report a green Results line":
+        step("should report a green Results line")
+        expect(1 + 1).to_equal(2)
+CONTROL
+    _r=$(run_spec "$WORK_REL/control_spec.spl" "$WORK/control.log")
+    if [ -z "$_r" ]; then
+        emit "selftest: control fixture produced no Results line"
+        return 1
+    fi
+    set -- $_r
+    if [ "$3" != "0" ] || [ "$1" -lt 1 ]; then
+        emit "selftest: control fixture was not green ($1 total, $3 failed)"
+        return 1
+    fi
+
+    # Fixture 2 (must FAIL): sabotage the equivalence oracle by one bit. If the
+    # gate stays green on this, it is not reading the equivalence at all.
+    sed 's/to_equal(ecc_parity_of_software(vector))/to_equal(ecc_parity_of_software(vector) + 1)/' \
+        "$REPO_ROOT/$SPEC_REL" > "$WORK/sabotage_spec.spl" || return 1
+    if cmp -s "$REPO_ROOT/$SPEC_REL" "$WORK/sabotage_spec.spl"; then
+        emit "selftest: sabotage fixture is byte-identical to the spec (the oracle line moved)"
+        return 1
+    fi
+    _r=$(run_spec "$WORK_REL/sabotage_spec.spl" "$WORK/sabotage.log")
+    if [ -z "$_r" ]; then
+        emit "selftest: sabotage fixture produced no Results line"
+        return 1
+    fi
+    set -- $_r
+    if [ "$3" -lt 1 ]; then
+        emit "selftest: sabotage fixture stayed green — the gate does not read the equivalence oracle"
+        return 1
+    fi
+
+    # Fixture 3 (must FAIL): sabotage the CALL-INLINING oracle by one bit. The
+    # parity sabotage above cannot detect a gate that stopped reading the
+    # inlined `ecc_xor_index` graph, so inlining gets its own must-FAIL fixture.
+    sed 's/to_equal(ecc_xor_index_software(vector))/to_equal(ecc_xor_index_software(vector) + 1)/' \
+        "$REPO_ROOT/$SPEC_REL" > "$WORK/inline_sabotage_spec.spl" || return 1
+    if cmp -s "$REPO_ROOT/$SPEC_REL" "$WORK/inline_sabotage_spec.spl"; then
+        emit "selftest: inline sabotage fixture is byte-identical to the spec (the oracle line moved)"
+        return 1
+    fi
+    _r=$(run_spec "$WORK_REL/inline_sabotage_spec.spl" "$WORK/inline_sabotage.log")
+    if [ -z "$_r" ]; then
+        emit "selftest: inline sabotage fixture produced no Results line"
+        return 1
+    fi
+    set -- $_r
+    if [ "$3" -lt 1 ]; then
+        emit "selftest: inline sabotage fixture stayed green — the gate does not read the ecc_xor_index oracle"
+        return 1
+    fi
+
+    # Fixture 4 (must yield 0 examples): a spec path that does not exist must
+    # produce no Results line, so the caller is forced into ERROR, not PASS.
+    _r=$(run_spec "$WORK_REL/definitely_absent_spec.spl" "$WORK/absent.log")
+    if [ -n "$_r" ]; then
+        set -- $_r
+        if [ "$1" -gt 0 ]; then
+            emit "selftest: an absent spec reported $1 executed example(s)"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+if ! selftest; then
+    emit "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    emit "PASS — 4 selftest fixture(s) checked, selftest only (no scan requested)"
+    exit 0
+fi
+
+RESULT=$(run_spec "$SPEC_REL" "$WORK/scan.log")
+if [ -z "$RESULT" ]; then
+    emit "ERROR — nothing was checked (no Results line from $SPEC_REL)"
+    exit 2
+fi
+set -- $RESULT
+TOTAL=$1
+PASSED=$2
+FAILED=$3
+if [ "$TOTAL" -lt 1 ]; then
+    emit "ERROR — nothing was checked (0 examples executed in $SPEC_REL)"
+    exit 2
+fi
+if [ "$FAILED" -gt 0 ]; then
+    /usr/bin/grep -E '✗' "$WORK/scan.log" | sed 's/\x1b\[[0-9;]*m//g' | head -10
+    emit "FAIL — $TOTAL example(s) checked, $FAILED failed in $SPEC_REL"
+    exit 1
+fi
+emit "PASS — $TOTAL example(s) checked, $PASSED passed, strict HWIR ECC offload equivalence holds"
+exit 0

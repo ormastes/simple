@@ -333,6 +333,35 @@ plant removed, blob back to 340ba81     -> PASS — 1 module(s) checked, 0 drops
 The fence names the offending file, and it was shown to fire on a real tracked
 source file rather than only on its own fixture.
 
+## Re-verification 2026-09-06 (bug-db closeout pass) — the accessor family now compiles cleanly, both lanes
+
+Direct measurement on this host's deployed seed against the exact fixture the
+guard's own `--selftest` uses (`val xs = [1, 2, 3]\nprint xs.length`):
+
+```
+$ bin/simple compile known_bad.spl
+Compiled known_bad.spl -> known_bad.smf        # rc=0, no error at all
+
+$ bin/simple run known_bad.spl
+3                                                # rc=0, no [jit-fallback]/[INFO] message
+```
+
+This is a change from the "compile lane still an open DROP site" reading
+recorded elsewhere in this bug's history: `.length` on an `Array` receiver no
+longer raises `cannot infer field type while lowering ... struct 'Array'
+field 'length'` under `compile` at all, so there is no lowering failure left
+for `run`/JIT to silently swallow. `scripts/check/check-no-jit-module-drop.shs`
+itself is now STALE against this: its `--selftest` (and therefore every real
+scan) errors out with `the known-BAD fixture ('xs.length') was classified
+'CLEAN', not DROP` — the fence's own self-check assumed the old failure mode
+and needs its fixture updated to a still-failing member of the family (if one
+remains) or retirement, as a separate follow-up.
+
+**Conclusion: FIXED-VERIFIED** for the originally-filed defect (paren-less
+`.length`/`.first`/etc. silently dropping the whole module out of JIT) —
+verified directly, not inferred from the guard, since the guard cannot
+currently run.
+
 ## Incidental: `git checkout -- <path>` emptied a tracked file
 
 While reverting the injection plant, `git checkout -- src/lib/bitwise_utils.spl`

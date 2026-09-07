@@ -1,4 +1,3 @@
-# @req: REQ-CHECK-001
 """
 ## Purpose and audience
 Purpose: accepts complete Tauri timing capture and checksum proof
@@ -56,6 +55,23 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   diagnostics.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
+## Operator workflow
+
+Each scenario runs the packaged validator (via `node scripts/check/...` or a
+direct process invocation) against a complete proof document or a proof mutated
+in exactly one field, and asserts the validator exit code and normalized rows.
+
+## Compatibility and limitations
+
+Scenarios that replay a Tauri WebGPU capture need the captured frame log; validator-only scenarios run from a plain repo checkout.
+
+## Verification guidance and troubleshooting
+
+A RED reject scenario is the fail-closed contract working: rerun the scenario and
+inspect the cited validator command with the mutated field restored to confirm the
+regression. A RED accept scenario means the packaged proof itself regressed;
+recapture it with the scripts/check command named in the scenario before shipping.
+
 """
 
 # @tag: system, gui, tauri, webkit, renderer, capture, performance
@@ -66,9 +82,16 @@ use std.spec.*
 fn _proof_command(path: text, mutation: text) -> text:
     "node -e 'const fs=require(\"fs\");const p={status:\"pass\",reason:\"pass\",width:96,height:64,checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_written:true,blur_or_tolerance_used:false,expected_profile:\"webkitgtk\",expected_overlay_pixel_count:12};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
+# Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
+# doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/browser_wasm_webgpu_infra.md
+# @manual_section: proof validators
+
 describe "Tauri Simple Web layout proof validator":
 
     it "accepts complete Tauri timing capture and checksum proof":
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: accepts complete Tauri timing capture and checksum proof")
         # @req: REQ-CHECK-TaurSimpWebLayoProoVali-001
         val root = "build/test-tauri-layout-validator-pass"
@@ -76,7 +99,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized Tauri layout proof rows")
@@ -90,12 +113,14 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
 
     it "accepts macOS WKWebView snapshot producer when the wrapper requires it":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-002
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-macos-producer"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"macos-wkwebview-snapshot\",pixels:Array(96*64).fill(4294967295)}));p.expected_profile=\"none\";p.expected_overlay_pixel_count=0") +
             " && TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect macOS WKWebView ARGB producer provenance")
@@ -105,13 +130,15 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=0")
 
     it "applies macOS WKWebView expected overlay without tolerance":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-003
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-wkwebview-overlay"
         val command = "rm -rf " + root + " && mkdir -p " + root + "/css_box_matrix && " +
             "node -e 'const fs=require(\"fs\");const helper=require(\"./tools/tauri-live-bitmap/webkitgtk_expected_overlays\");const w=96,h=64;const expectedPath=\"" + root + "/css_box_matrix/expected.json\";const base=Array(w*h).fill(4294967295);fs.writeFileSync(expectedPath,JSON.stringify({width:w,height:h,format:\"argb-u32\",producer:\"fixture\",pixels:base}));const pixels=helper.applyTauriExpectedOverlay(expectedPath,base,\"wkwebview\").pixels;const raw=Buffer.alloc(w*h*4);for(let i=0;i<pixels.length;i++){const p=pixels[i]>>>0;raw[i*4]=(p>>>16)&255;raw[i*4+1]=(p>>>8)&255;raw[i*4+2]=p&255;raw[i*4+3]=(p>>>24)&255;}fs.writeFileSync(\"" + root + "/raw.rgba\",raw);' && " +
             "TAURI_CAPTURE_RAW_RGBA=" + root + "/raw.rgba TAURI_CAPTURE_WIDTH=96 TAURI_CAPTURE_HEIGHT=64 TAURI_CAPTURE_OUTPUT=" + root + "/captured.json TAURI_CAPTURE_EXPECTED_ARGB_PATH=" + root + "/css_box_matrix/expected.json TAURI_CAPTURE_EXPECTED_PROFILE=wkwebview TAURI_CAPTURE_PRODUCER=macos-wkwebview-snapshot TAURI_CAPTURE_PROOF_PATH=" + root + "/proof.json TAURI_CAPTURE_FRAME_US=1250 node tools/tauri-live-bitmap/raw_rgba_to_argb.js > " + root + "/convert.env && " +
             "TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         val converted = file_read(root + "/convert.env")
@@ -125,12 +152,14 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 
     it "rejects large checksum values that differ past JavaScript number precision":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-004
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-large-checksum"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.checksum=\"9007199254740993\";p.expected_checksum=\"9007199254740992\";p.weighted_checksum=\"18014398509481985\";p.expected_weighted_checksum=\"18014398509481985\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Assert decimal integer text is preserved for large checksum proof")
@@ -142,12 +171,15 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_simple_weighted_checksum=18014398509481985")
 
     it "rejects malformed Tauri frame timing":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-005
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects malformed Tauri frame timing")
         val root = "build/test-tauri-layout-validator-bad-frame"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
@@ -155,6 +187,9 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=not-a-number")
 
     it "rejects missing capture and malformed WebKit metadata":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-006
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects missing capture and malformed WebKit metadata")
         val root = "build/test-tauri-layout-validator-missing-artifacts"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/capture.json", "p.captured_argb_written=false") +
@@ -164,7 +199,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/overlay.json", "p.expected_overlay_pixel_count=\"bad\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/overlay.json > " + root + "/overlay.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val capture = file_read(root + "/capture.env")
         val profile = file_read(root + "/profile.env")
@@ -175,6 +210,8 @@ describe "Tauri Simple Web layout proof validator":
         expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-expected-overlay-pixel-count")
 
     it "rejects missing and empty captured ARGB files":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-007
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-captured-files"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
@@ -182,7 +219,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val missing = file_read(root + "/missing.env")
         val empty = file_read(root + "/empty.env")
@@ -201,12 +238,14 @@ describe "Tauri Simple Web layout proof validator":
         expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
 
     it "rejects captured ARGB paths that point back at the proof JSON":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-008
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-self-artifact"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.format=\"argb-u32\";p.producer=\"tauri-x11-window-screenshot\";p.pixels=Array(96*64).fill(4294967295)") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm the proof JSON cannot be reused as its own Tauri ARGB artifact")
@@ -219,6 +258,8 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 
     it "rejects symlinked Tauri layout proof and captured ARGB artifacts":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-009
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-symlinks"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof-real.json", "") + " && " +
@@ -227,7 +268,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/argb.json", "fs.renameSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),path.join(path.dirname(process.argv[1]),\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(path.dirname(process.argv[1]),\"captured.json\"))") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val proof = file_read(root + "/proof.env")
         val argb = file_read(root + "/argb.env")
@@ -247,6 +288,8 @@ describe "Tauri Simple Web layout proof validator":
         expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=pass")
 
     it "rejects hardlinked Tauri layout proof and captured ARGB artifacts":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-010
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-hardlinks"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof-real.json", "") + " && " +
@@ -255,7 +298,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/argb.json", "fs.renameSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),path.join(path.dirname(process.argv[1]),\"captured-real.json\"));fs.linkSync(path.join(path.dirname(process.argv[1]),\"captured-real.json\"),path.join(path.dirname(process.argv[1]),\"captured.json\"))") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val proof = file_read(root + "/proof.env")
         val argb = file_read(root + "/argb.env")
@@ -276,6 +319,9 @@ describe "Tauri Simple Web layout proof validator":
         expect(argb).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 
     it "rejects malformed captured ARGB shape and pixel data":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-011
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects malformed captured ARGB shape and pixel data")
         val root = "build/test-tauri-layout-validator-argb-shape"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
@@ -287,7 +333,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(0)}))") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/blank.json > " + root + "/blank.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val malformed = file_read(root + "/malformed.env")
         val viewport = file_read(root + "/viewport.env")
@@ -302,6 +348,8 @@ describe "Tauri Simple Web layout proof validator":
         expect(blank).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=0")
 
     it "rejects captured ARGB pixels that are not JSON uint32 numbers":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-012
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-argb-pixel-types"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/string.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(\"4294967295\")}))") +
@@ -311,7 +359,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/range.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(4294967296)}))") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/range.json > " + root + "/range.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val string_pixels = file_read(root + "/string.env")
         val fractional_pixels = file_read(root + "/fraction.env")
@@ -326,12 +374,15 @@ describe "Tauri Simple Web layout proof validator":
         expect(range_pixels).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-type-mismatch")
 
     it "rejects missing or malformed requested viewport proof":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-013
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects missing or malformed requested viewport proof")
         val root = "build/test-tauri-layout-validator-viewport-proof"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "delete p.width;p.height=64.5") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/missing.env")
         expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
@@ -340,6 +391,8 @@ describe "Tauri Simple Web layout proof validator":
         expect_not(evidence.contains("tauri_simple_web_layout_requested_height=64.5"))
 
     it "rejects stringified Tauri viewport capture timing overlay and mismatch proof rows":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-014
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-string-numeric-proof"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/requested.json", "p.width=\"96\"") +
@@ -353,7 +406,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/mismatch.json", "p.mismatch_count=\"0\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val requested = file_read(root + "/requested.env")
         val argb = file_read(root + "/argb.env")
@@ -383,6 +436,8 @@ describe "Tauri Simple Web layout proof validator":
         expect_not(mismatch.contains("tauri_simple_web_layout_mismatch_count=0"))
 
     it "rejects string booleans without normalizing them as valid diagnostics":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-015
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-string-booleans"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
@@ -390,7 +445,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/blur.json > " + root + "/blur.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val capture = file_read(root + "/capture.env")
         val blur = file_read(root + "/blur.env")
@@ -406,6 +461,9 @@ describe "Tauri Simple Web layout proof validator":
         expect_not(blur.contains("tauri_simple_web_layout_blur_or_tolerance_used=false"))
 
     it "rejects blur tolerance and malformed mismatch counts":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-016
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects blur tolerance and malformed mismatch counts")
         val root = "build/test-tauri-layout-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
@@ -413,7 +471,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val blur = file_read(root + "/blur.env")
         val mismatch = file_read(root + "/mismatch.env")
@@ -422,6 +480,9 @@ describe "Tauri Simple Web layout proof validator":
         expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=bad")
 
     it "rejects checksum and pixel mismatches as non-pass proof":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-017
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects checksum and pixel mismatches as non-pass proof")
         val root = "build/test-tauri-layout-validator-divergent"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/checksum.json", "p.checksum=101") +
@@ -431,7 +492,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/pixel.json", "p.mismatch_count=4") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/pixel.json > " + root + "/pixel.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val checksum = file_read(root + "/checksum.env")
         val weighted = file_read(root + "/weighted.env")
@@ -442,6 +503,8 @@ describe "Tauri Simple Web layout proof validator":
         expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 
     it "rejects checksum rows that do not match captured Tauri ARGB":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-018
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-validator-artifact-checksum"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/checksum.json", "const checksumArgbPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const checksumArgb=JSON.parse(fs.readFileSync(checksumArgbPath,\"utf8\"));checksumArgb.pixels[0]=4294967294;fs.writeFileSync(checksumArgbPath,JSON.stringify(checksumArgb))") +
@@ -449,7 +512,7 @@ describe "Tauri Simple Web layout proof validator":
             _proof_command(root + "/weighted.json", "const weightedArgbPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const weightedArgb={width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(1)};weightedArgb.pixels[0]=2;weightedArgb.pixels[1]=0;fs.writeFileSync(weightedArgbPath,JSON.stringify(weightedArgb));p.checksum=\"6144\";p.expected_checksum=\"6144\";p.weighted_checksum=\"18877440\";p.expected_weighted_checksum=\"18877440\"") +
             " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val checksum = file_read(root + "/checksum.env")
         val weighted = file_read(root + "/weighted.env")
@@ -464,6 +527,9 @@ describe "Tauri Simple Web layout proof validator":
         expect(weighted).to_contain("tauri_simple_web_layout_captured_argb_weighted_checksum=18877439")
 
     it "keeps the live Tauri wrapper wired to validator and divergent mapping":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-019
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: keeps the live Tauri wrapper wired to validator and divergent mapping")
         val script = file_read("scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs")
         expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
         expect(script).to_contain("tauri_simple_web_layout_validation_status")
@@ -482,11 +548,13 @@ describe "Tauri Simple Web layout proof validator":
         expect(converter).to_contain("captured_argb_path: outputPath")
 
     it "keeps Tauri wrapper diagnostics on early missing artifact exits":
+        # @req: REQ-CHECK-TaurSimpWebLayProoVali-020
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-layout-wrapper-early-exit"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md TAURI_LAYOUT_HTML_PATH=" + root + "/missing.html TAURI_LAYOUT_EXPECTED_ARGB_PATH=" + root + "/missing.argb.json sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm unavailable Tauri wrapper evidence preserves validator-shape diagnostics")

@@ -234,7 +234,11 @@ impl MirLowering:
         if not self.global_constants_by_id.contains(symbol_id):
             return nil
         val constant = self.global_constants_by_id[symbol_id]
-        val corrected_type = folded_global_scalar_type(constant)
+        # This is an implicit MirLowering method, not a module-level helper.
+        # A bare call is lowered as an external function import by the flattened
+        # JIT graph, leaving a NULL relocation at finalize time. Keep ownership
+        # explicit so the call resolves to the body in this impl.
+        val corrected_type = self.folded_global_scalar_type(constant)
         var owner = self.builder.module.name
         var visibility = Visibility.Private
         if val symbol_info = self.symbols.get_symbol_raw(symbol_id):
@@ -417,7 +421,7 @@ impl MirLowering:
                 # renderer and llc rejects `'%lN' defined with type 'ptr'
                 # but expected 'i64'` (native_module_val_globals
                 # 2026-07-23). The helper is also the address-storage owner.
-                val const_read_ty = folded_global_scalar_type(mir_const)
+                val const_read_ty = self.folded_global_scalar_type(mir_const)
                 var b_const_read = self.builder
                 val const_dest = b_const_read.new_temp(const_read_ty)
                 b_const_read.emit_const(const_dest, mir_const.value, const_read_ty)
@@ -3888,7 +3892,24 @@ impl MirLowering:
                 if global_addr.?:
                     global_addr.unwrap()
                 else:
-                    val operand_local = self.lower_expr(operand)
+                    # Bug jit_if_nil_takes_true_branch_2026-08-04. `Not` is the
+                    # LOGICAL negation (`BitNot` is the separate bitwise one),
+                    # so its operand sits in CONDITION position and must be
+                    # read the way `if`/`while`/`and`/`or` read theirs. Lowered
+                    # with the plain value dispatcher it kept the raw runtime
+                    # word, and the canonical nil sentinel RT_NIL is the
+                    # NON-ZERO 3 -- so `if not nil:` negated a truthy 3 and took
+                    # the FALSE branch where the presence rule requires TRUE.
+                    # `lower_cond_operand`, not `lower_cond_expr`: the operand
+                    # of a `not` is not itself a decision, and going through
+                    # the probing wrapper would emit a second MC/DC condition
+                    # probe for it. For every operand that is not nil-shaped
+                    # the two are identical, so this is a no-op there.
+                    val is_logical_not = op_disc == _sffi_enum_discriminant(HirUnaryOp.Not)
+                    val operand_local = if is_logical_not:
+                        self.lower_cond_operand(operand)
+                    else:
+                        self.lower_expr(operand)
                     var b = self.builder
                     val operand_type = self.local_mir_type_of(operand_local) ?? MirType.i64()
                     var unary_result: LocalId = 0

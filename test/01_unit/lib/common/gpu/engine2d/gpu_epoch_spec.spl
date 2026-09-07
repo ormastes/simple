@@ -1,0 +1,208 @@
+# @cover src/lib/common/gpu/engine2d/gpu_epoch.spl 80%
+# @tag: unit, gpu, scheduler, epoch, common
+"""
+## Purpose and audience
+The common GPU epoch contract is the single receipt every GPU lane (Vulkan,
+Metal, DirectX) and the no-GC runtime queue hand back. This manual is for the
+engineers wiring a provider: it shows how a request is admitted, how a receipt
+advances phase by phase, and why a receipt can never claim device execution
+without qualifying evidence. Feature IDs: gpu_scheduler_hardening. Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/gpu/engine2d/gpu_epoch_spec.spl
+## Compatibility and limitations
+Pure contract; runs on every host. It proves policy and lifecycle rules only,
+never physical GPU work.
+## Verification guidance and troubleshooting
+A RED here means a provider-neutral rule changed: profile policy, phase order,
+or the non-admission default. Fix the contract or the caller, never the spec.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec.*
+use common.contracts.execution.simple_ring_async_v1.{RingGeneration, RingPayloadLease, RingPayloadOwnership, RingToken}
+use common.gpu.engine2d.gpu_epoch.*
+use common.ui.draw_ir_v3_execution_route.{DRAW_IR_V3_MODE_CPU_REFERENCE, DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU, DRAW_IR_V3_MODE_RESIDENT_GPU, DRAW_IR_V3_REASON_MISSING_CAPABILITY, DRAW_IR_V3_REASON_NO_DEVICE, draw_ir_v3_mode_required_capabilities}
+use common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES, DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS, DRAW_IR_V3_CAP_INDIRECT_DISPATCH}
+
+fn epoch_lease() -> RingPayloadLease:
+    RingPayloadLease(ownership: RingPayloadOwnership.RegisteredLease, owner_id: 3u64, handle: 9u64, generation: RingGeneration(value: 1u64), byte_length: 256u64)
+
+fn epoch_request(profile: text) -> Engine2dGpuEpochRequest:
+    Engine2dGpuEpochRequest(profile: profile, queue_handle: 1, backend_handle: 7, queue_generation: 1u64, operation_generation: 2u64, scene_generation: 3u64, surface_generation: 4u64, arena_generation: 5u64, payload_lease: epoch_lease(), command_count: 4, packet_bytes: 256, content_hash: 77u64)
+
+fn epoch_token() -> RingToken:
+    RingToken(ring_id: 1u64, slot: 0u64, generation: RingGeneration(value: 1u64))
+
+fn qualifying_evidence() -> Engine2dGpuDeviceEvidence:
+    Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: true, device_begin_ticks: 10, device_end_ticks: 20, transfer_bytes: 256, negative_control_passed: true)
+
+fn full_truth() -> Engine2dGpuTruthLabels:
+    Engine2dGpuTruthLabels(semantic_residency: ENGINE2D_GPU_TRUTH_FULL, data_residency: ENGINE2D_GPU_TRUTH_FULL, submission_autonomy: ENGINE2D_GPU_TRUTH_PARTIAL, scheduling_assurance: ENGINE2D_GPU_TRUTH_PARTIAL)
+
+describe "GPU epoch admission":
+    it "admits a balanced request as routing evidence only":
+        # @req REQ-GPU-SCHED-EPOCH-001
+        step("Admit a balanced-profile request with a ring token and a compute-capable device")
+        val receipt = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        step("Read the receipt: queued, not terminal, no device claim")
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(receipt.terminal).to_be(false)
+        expect(receipt.routing_evidence_only).to_be(true)
+        expect(receipt.device_execution_proven).to_be(false)
+        expect(receipt.scene_generation).to_equal(3u64)  # oracle: epoch_request scene_generation
+
+    it "refuses a required profile when the device lacks a capability instead of falling back":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("Admit a gpu_scene_required request against a device with compute but no indirect dispatch")
+        val receipt = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        step("Read the refusal reason and the exact missing bits")
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(receipt.terminal).to_be(true)
+        expect(receipt.reason_code).to_equal(DRAW_IR_V3_REASON_MISSING_CAPABILITY)
+        expect(receipt.missing_capabilities).to_equal(DRAW_IR_V3_CAP_INDIRECT_DISPATCH)  # oracle: resident mode requires compute+indirect
+
+    it "refuses a required profile with no device present":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("Admit a static-pool request with device_available false")
+        val receipt = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL), epoch_token(), false, 0u32)
+        expect(receipt.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+        expect(receipt.diagnostic).to_contain("forbidden")
+        step("A balanced profile is refused too: an epoch has no CPU lane; the route decision does")
+        val balanced = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), false, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(balanced.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(balanced.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+        expect(balanced.diagnostic).to_contain("CPU route")
+
+    it "rejects a request whose generations or handles are zero":
+        # @req REQ-GPU-SCHED-SAFE-001
+        step("Zero the scene generation and validate")
+        val bad = Engine2dGpuEpochRequest(profile: ENGINE2D_GPU_PROFILE_GPU_RENDER, queue_handle: 1, backend_handle: 7, queue_generation: 1u64, operation_generation: 1u64, scene_generation: 0u64, surface_generation: 1u64, arena_generation: 1u64, payload_lease: epoch_lease(), command_count: 1, packet_bytes: 64, content_hash: 1u64)
+        expect(engine2d_gpu_epoch_request_validate(bad)).to_contain("generation")
+        expect(engine2d_gpu_epoch_request_validate(epoch_request(ENGINE2D_GPU_PROFILE_GPU_RENDER))).to_equal("")
+
+    it "rejects when the ring has no token (queue full)":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Admit with a nil token")
+        val receipt = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_GPU_RENDER), nil, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(receipt.diagnostic).to_contain("queue full")
+
+describe "GPU epoch lifecycle":
+    it "advances forward only and proves execution solely with qualifying evidence":
+        # @req REQ-GPU-SCHED-PROOF-001 REQ-GPU-SCHED-LIFE-001
+        step("Queue, then submit with empty evidence")
+        val queued = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        val submitted = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_SUBMITTED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        expect(submitted.phase).to_equal(ENGINE2D_GPU_PHASE_SUBMITTED)
+        expect(submitted.device_execution_proven).to_be(false)
+        step("GPU-finish without evidence stays routing-only; with evidence it is proven")
+        val unproven = engine2d_gpu_epoch_advance(submitted, ENGINE2D_GPU_PHASE_GPU_FINISHED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        expect(unproven.device_execution_proven).to_be(false)
+        val proven = engine2d_gpu_epoch_advance(submitted, ENGINE2D_GPU_PHASE_GPU_FINISHED, qualifying_evidence(), full_truth())
+        expect(proven.device_execution_proven).to_be(true)
+        expect(proven.routing_evidence_only).to_be(false)
+        expect(proven.truth.semantic_residency).to_equal(ENGINE2D_GPU_TRUTH_FULL)
+        step("A backwards move is ignored")
+        val back = engine2d_gpu_epoch_advance(proven, ENGINE2D_GPU_PHASE_QUEUED, qualifying_evidence(), full_truth())
+        expect(back.phase).to_equal(ENGINE2D_GPU_PHASE_GPU_FINISHED)
+
+    it "keeps completion, presentation and retirement distinct and terminal-once":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Try to present before completion")
+        val queued = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        val early = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_PRESENTED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        expect(early.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        val early_display = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_DISPLAYED, qualifying_evidence(), full_truth())
+        expect(early_display.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(early_display.device_execution_proven).to_be(false)
+        step("Complete, retire, then try to move again")
+        val completed = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_COMPLETED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        val retired = engine2d_gpu_epoch_advance(completed, ENGINE2D_GPU_PHASE_RETIRED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        expect(retired.terminal).to_be(true)
+        val again = engine2d_gpu_epoch_advance(retired, ENGINE2D_GPU_PHASE_DISPLAYED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+        expect(again.phase).to_equal(ENGINE2D_GPU_PHASE_RETIRED)
+
+    it "gates autonomous submission on the device-initiated profile and a reported capability":
+        # @req REQ-GPU-SCHED-AUTONOMY-001
+        step("Ask for autonomy under three combinations")
+        expect(engine2d_gpu_profile_allows_autonomous_submission(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, ENGINE2D_GPU_AUTONOMY_CAPABILITIES)).to_be(false)
+        expect(engine2d_gpu_profile_allows_autonomous_submission(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED, 0u32)).to_be(false)
+        expect(engine2d_gpu_profile_allows_autonomous_submission(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED, ENGINE2D_GPU_AUTONOMY_CAPABILITIES)).to_be(true)
+
+    it "disqualifies device evidence with missing identity or non-monotonic timestamps":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Check a blank and a time-reversed evidence record")
+        expect(engine2d_gpu_device_evidence_qualifies(engine2d_gpu_device_evidence_none())).to_be(false)
+        val reversed = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 300, host_complete_ns: 250, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 0, negative_control_passed: true)
+        expect(engine2d_gpu_device_evidence_qualifies(reversed)).to_be(false)
+        step("Host-only facts never qualify: no device timestamps or no transfer bytes")
+        val host_only = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 256, negative_control_passed: true)
+        expect(engine2d_gpu_device_evidence_qualifies(host_only)).to_be(false)
+        val no_bytes = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: true, device_begin_ticks: 10, device_end_ticks: 20, transfer_bytes: 0, negative_control_passed: true)
+        expect(engine2d_gpu_device_evidence_qualifies(no_bytes)).to_be(false)
+        expect(engine2d_gpu_device_evidence_qualifies(qualifying_evidence())).to_be(true)
+
+describe "GPU epoch profile policy":
+    it "recognises exactly the six published profile names and refuses anything else":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("Ask the policy about each of the six published profile names")
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_CPU_REFERENCE)).to_be(true)
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_GPU_RENDER)).to_be(true)
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_SCENE_BALANCED)).to_be(true)
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)).to_be(true)
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL)).to_be(true)
+        expect(engine2d_gpu_profile_known(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)).to_be(true)
+        step("Adverse case: a truncated, an empty and a wrongly-cased name are all unknown")
+        expect(engine2d_gpu_profile_known("gpu_scene")).to_be(false)
+        expect(engine2d_gpu_profile_known("")).to_be(false)
+        expect(engine2d_gpu_profile_known("GPU_RENDER")).to_be(false)
+        step("An unknown name is refused at admission, not silently routed")
+        val refused = engine2d_gpu_epoch_admit(epoch_request("gpu_scene"), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(refused.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(refused.diagnostic).to_contain("unknown profile")
+
+    it "maps every profile to the DrawIR v3 mode that profile actually renders in":
+        # @req REQ-GPU-SCHED-EPOCH-001
+        step("The reference profile stays on the CPU mode")
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_CPU_REFERENCE)).to_equal(DRAW_IR_V3_MODE_CPU_REFERENCE)
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_CPU_REFERENCE)).to_equal(0u16)  # oracle: DRAW_IR_V3_MODE_CPU_REFERENCE = 0
+        step("The two opportunistic GPU profiles share the hybrid vector mode")
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_GPU_RENDER)).to_equal(DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU)
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_SCENE_BALANCED)).to_equal(1u16)  # oracle: DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU = 1
+        step("The three refusing profiles all demand the resident-GPU mode")
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)).to_equal(DRAW_IR_V3_MODE_RESIDENT_GPU)
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL)).to_equal(DRAW_IR_V3_MODE_RESIDENT_GPU)
+        expect(engine2d_gpu_profile_mode(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)).to_equal(2u16)  # oracle: DRAW_IR_V3_MODE_RESIDENT_GPU = 2
+
+    it "requires exactly the capability bits its mode demands, plus device-generated commands for the device-initiated profile":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("A CPU-reference profile requires no device capability at all")
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_CPU_REFERENCE)).to_equal(0u32)  # oracle: the CPU mode requires no capability bits
+        step("The hybrid profiles require compute passes and nothing more")
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_GPU_RENDER)).to_equal(draw_ir_v3_mode_required_capabilities(DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU))
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_SCENE_BALANCED)).to_equal(1u32)  # oracle: DRAW_IR_V3_CAP_COMPUTE_PASSES = 1
+        step("The resident profiles require compute passes and indirect dispatch")
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)).to_equal(draw_ir_v3_mode_required_capabilities(DRAW_IR_V3_MODE_RESIDENT_GPU))
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL)).to_equal(3u32)  # oracle: compute(1) + indirect dispatch(2)
+        step("Only the device-initiated profile additionally requires device-generated commands")
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)).to_equal(draw_ir_v3_mode_required_capabilities(DRAW_IR_V3_MODE_RESIDENT_GPU) + DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS)
+        expect(engine2d_gpu_profile_required_capabilities(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)).to_equal(7u32)  # oracle: compute(1) + indirect dispatch(2) + device-generated commands(4)
+
+    it "marks exactly the three refusing profiles as required":
+        # @req REQ-GPU-SCHED-EPOCH-001
+        step("The reference and opportunistic profiles are not required")
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_CPU_REFERENCE)).to_be(false)
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_GPU_RENDER)).to_be(false)
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_SCENE_BALANCED)).to_be(false)
+        step("The scene-required, static-pool and device-initiated profiles are")
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)).to_be(true)
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL)).to_be(true)
+        expect(engine2d_gpu_profile_is_required(ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)).to_be(true)
+        step("Being required is what turns a capability gap into a refusal rather than a queued epoch")
+        val required_gap = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(required_gap.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        val optional_gap = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_GPU_RENDER), epoch_token(), true, 0u32)
+        expect(optional_gap.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(optional_gap.missing_capabilities).to_equal(DRAW_IR_V3_CAP_COMPUTE_PASSES)  # oracle: hybrid mode needs compute passes and the device reported none

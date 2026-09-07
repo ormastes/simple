@@ -292,12 +292,24 @@ fn get_macos_cpu_percent() -> f64:
     Falls back to top if iostat unavailable.
     """
     # Try iostat first (fast: ~0.1s)
-    # iostat output line: "          disk0       cpu    load average"
-    # Data line: "  0.00  0  0.00    2  1 97"  (us sy id)
+    # iostat header is THREE groups, not two:
+    #     "          disk0       cpu    load average"
+    #     "    KB/t  tps  MB/s  us sy id   1m   5m   15m"
+    # so a data line is "   16.14 5166 81.41  48 17 35  23.79 14.28 11.65".
+    # The LAST three fields are the 1m/5m/15m LOAD AVERAGES, not "us sy id":
+    # `$NF` reads the 15-minute load average and the old code then computed
+    # `100 - load15` as "CPU used". Measured 2026-09-06 on this host at
+    # load15=11.65 with a genuinely saturated CPU (id=0), that yielded
+    # cpu_percent=89 rather than 100, and on an idle box with load15=2 it
+    # yields 98 — i.e. the reading was ALWAYS above any sane threshold,
+    # regardless of real CPU. That is what made system_exceeds_threshold()
+    # degenerate into a memory-only test and abort six of eight
+    # plan-acceptance sweep shards with rc=42 before a single spec ran.
+    # Idle is the field three positions before the end, whatever the disk
+    # group's width (a second disk adds three more leading columns).
     val output = shell_output_default("iostat -c 2 -w 1 2>/dev/null | tail -1", "")
     if output != "":
-        # Last 3 numbers are: user sys idle
-        val idle_val = shell_int("echo '{output}' | awk '{print $NF}' | cut -d. -f1", -1)
+        val idle_val = shell_int("echo '{output}' | awk '{print $(NF-3)}' | cut -d. -f1", -1)
         if idle_val >= 0 and idle_val <= 100:
             val used = 100 - idle_val
             return used * 1.0

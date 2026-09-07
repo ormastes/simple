@@ -1,15 +1,39 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+Dual-run record-compare and replay specification
+
+## Purpose and audience
+Executable specification of the dual-run device-effect modes (record-compare
+and replay) over the VirtualDevice façade, written for the rt(hal) dual-run
+team and migration reviewers who must trust that MMIO behaviour is compared
+effect-by-effect before anything reaches hardware.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/nogc_sync_mut/rt_hal_dual_run_record_compare_spec.spl` from
+the repository root; every runner writes its ledger under
+`build/dual_run/spec_tmp/` and never touches the default ledger.
+
+## Compatibility and limitations
+Record-compare runs both providers against the VirtualDevice façade, compares
+effect logs, and replays the agreed log ONCE; replay answers the candidate's
+reads from a reference recording and never touches hardware. The UART
+fixtures mirror the 16550 init/putc sequences from the riscv startup code.
+
+## Verification guidance and troubleshooting
+An ordering-mismatch failure means the comparator lost write-order
+sensitivity; a poll_collapse failure means spin-loop polls stopped comparing
+equal modulo collapse. Check the receipt `ref_repr`/`cand_repr` strings in
+the failure message — they name the first diverging effect and its address.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+# @manual_section: dual run record compare and replay
 # @req REQ-SSPEC-LIB
-# design: doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md (B.5) ;
-# plan: doc/03_plan/os/hal/asm_to_simple_migration_plan.md (1.8)
-#
-# Device-effect modes: record-compare (both providers run against the
-# VirtualDevice façade, effect logs compared, agreed log replayed ONCE) and
-# replay (reference already ran for real; candidate runs against the
-# recording, reads answered from the trace, writes compared in order, never
-# touches hardware). Temp ledgers only — see the shadow-buffer spec header.
 
 use std.spec
+use std.spec.step
 use std.io_runtime.{mkdir_p, remove_file_if_exists}
 use std.nogc_sync_mut.rt_hal.dual_runner.*
 use std.nogc_sync_mut.rt_hal.virtual_device.*
@@ -56,65 +80,83 @@ fn cand_uart_putc_double_poll(a: DualArgs, dev: VirtualDevice):
 
 describe "VirtualDevice façade":
     it "records ordered (kind, addr, width, value) and answers reads from the script":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): ordered effect log (kind, width, value) for the scripted device
+        step("Write one u32 and read a scripted LSR register three times")
         var dev = VirtualDevice.create([0x00, 0x20])
         dev.write_u32(UART + 8, 0x1FFFF)
-        expect(dev.read_u8(UART + 5)).to_equal(0)
+        expect(dev.read_u8(UART + 5)).to_equal(0)  # oracle: the script's first entry is 0x00, so the first poll must observe a not-ready line
         expect(dev.read_u8(UART + 5)).to_equal(0x20)
         expect(dev.read_u8(UART + 5)).to_equal(0x20)
         val log = dev.log()
-        expect(log.len()).to_equal(4)
+        expect(log.len()).to_equal(4)  # oracle: one write plus three reads is exactly four recorded effects
         expect(log[0].kind).to_equal("w")
-        expect(log[0].width).to_equal(32)
+        expect(log[0].width).to_equal(32)  # oracle: write_u32 must record a 32-bit-wide effect, not the byte width of the bus
         expect(log[0].value).to_equal(0x1FFFF)
         expect(log[3].kind).to_equal("r")
         expect(dev.script_exhausted).to_equal(true)
         expect(effect_record_repr(log[0])).to_equal("w32@0x10000008=0x1ffff")
 
     it "parses a recorded trace and derives its read script":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): parsed effect kinds and derived read-script entries
+        step("Parse a reference trace text and inspect its read script")
         val log = effect_log_from_trace_text("# ref trace\nr8 0x10000005 0x00\nr8 0x10000005 0x20\nw8 0x10000000 0x41\n")
-        expect(log.len()).to_equal(3)
+        expect(log.len()).to_equal(3)  # oracle: the trace carries two reads and one write; the comment line is not an effect
         expect(log[2].kind).to_equal("w")
         expect(log[2].addr).to_equal(UART)
         expect(log[2].value).to_equal(0x41)
         val script = effect_log_read_script(log)
-        expect(script.len()).to_equal(2)
+        expect(script.len()).to_equal(2)  # oracle: the read script holds one entry per read effect, and the trace has two reads
         expect(script[1]).to_equal(0x20)
-        expect(effect_log_writes(log).len()).to_equal(1)
+        expect(effect_log_writes(log).len()).to_equal(1)  # oracle: exactly one write effect exists in the three-entry trace
 
     it "poll_collapse folds repeated polls of one address so spin loops compare equal":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): agree verdicts with and without poll collapse, plus first divergence
+        step("Compare poll-heavy and poll-free traces with collapse off and on")
         val a = effect_log_from_trace_text("r8 0x10000005 0x00\nr8 0x10000005 0x00\nr8 0x10000005 0x20\nw8 0x10000000 0x41")
         val b = effect_log_from_trace_text("r8 0x10000005 0x20\nw8 0x10000000 0x41")
         expect(effect_logs_compare(a, b, false).agree).to_equal(false)
         expect(effect_logs_compare(a, b, true).agree).to_equal(true)
         val c = effect_logs_compare(a, b, false)
-        expect(c.first_diff_index).to_equal(0)
+        expect(c.first_diff_index).to_equal(0)  # oracle: with collapse off the very first poll count differs, so divergence is reported at index 0
 
 describe "dual-run (5) record-compare mode":
     it "two identical MMIO init sequences agree and the plan is committed exactly once":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): receipt verdict and commit counters for the agreeing init pair
+        step("Run matching reference and candidate 16550 inits through record-compare")
         var r = DualRunner.create("uart_init", "record-compare", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("rc_ok"))
         val out = dual_run_record_compare(r, dual_args([arg_i64(3)]), ref_uart_init, cand_uart_init, [], false, false)
         expect(out.receipt.agree).to_equal(true)
         expect(out.receipt.committed).to_equal(true)
-        expect(out.agreed.len()).to_equal(5)
-        expect(out.commit_writes).to_equal(5)
-        expect(r.commit_count).to_equal(1)
+        expect(out.agreed.len()).to_equal(5)  # oracle: the 16550 init issues exactly five MMIO writes (IER, LCR, DLL, DLM, LCR)
+        expect(out.commit_writes).to_equal(5)  # oracle: replaying the agreed plan commits the same five writes
+        expect(r.commit_count).to_equal(1)  # oracle: the agreed plan is committed as one plan application, never write-by-write
         expect(out.hardware_applied).to_equal(false)
 
     it "sequences that differ in ORDER mismatch: nothing replayed, receipt names both logs":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): mismatch receipt naming both write orders and the trap state
+        step("Run the DLAB-reordered init and read the mismatch receipt")
         var r = DualRunner.create("uart_init_reordered", "record-compare", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("rc_bad"))
         val out = dual_run_record_compare(r, dual_args([arg_i64(3)]), ref_uart_init, cand_uart_init_reordered, [], false, false)
         expect(out.receipt.agree).to_equal(false)
         expect(out.receipt.committed).to_equal(false)
         expect(out.receipt.trapped).to_equal(true)
-        expect(out.commit_writes).to_equal(0)
-        expect(r.commit_count).to_equal(0)
+        expect(out.commit_writes).to_equal(0)  # oracle: a mismatched plan must never reach the device, so zero writes are replayed
+        expect(r.commit_count).to_equal(0)  # oracle: the trapped comparison aborted before any commit, so the counter stays at zero
         expect(out.receipt.ref_repr).to_contain("w8@0x10000003=0x80 w8@0x10000000=0x3")
         expect(out.receipt.cand_repr).to_contain("w8@0x10000000=0x3 w8@0x10000003=0x80")
         expect(out.receipt.message).to_contain("effect 1")
 
     it "compares a candidate plan against a RECORDED reference trace (C twin ran elsewhere)":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): agree verdicts for collapsed vs strict comparison of poll counts
+        step("Compare the double-poll candidate against a recorded reference trace")
         var r = DualRunner.create("uart_putc_trace", "record-compare", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("rc_trace"))
         val ref_trace = effect_log_from_trace_text("r8 0x10000005 0x00\nr8 0x10000005 0x20\nw8 0x10000000 0x41")
@@ -122,7 +164,7 @@ describe "dual-run (5) record-compare mode":
         # different poll count; equal only modulo poll_collapse
         val out = dual_run_record_compare_trace(r, dual_args([arg_i64(0x41)]), ref_trace, cand_uart_putc_double_poll, [0x20], true, false)
         expect(out.receipt.agree).to_equal(true)
-        expect(out.commit_writes).to_equal(1)
+        expect(out.commit_writes).to_equal(1)  # oracle: putc commits exactly one THR byte write once the polls are collapsed
         val strict = DualRunner.create("uart_putc_trace_strict", "record-compare", MismatchPolicy.Trap)
         strict.set_ledger(tmp_ledger("rc_trace_strict"))
         val out2 = dual_run_record_compare_trace(strict, dual_args([arg_i64(0x41)]), ref_trace, cand_uart_putc_double_poll, [0x20], false, false)
@@ -131,6 +173,9 @@ describe "dual-run (5) record-compare mode":
 
 describe "dual-run (5) replay mode":
     it "answers the candidate's reads from the reference recording and never applies hardware":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): replay receipt provenance and hardware-application counters
+        step("Replay the recorded putc trace against the reference provider")
         var r = DualRunner.create("uart_putc_replay", "replay", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("replay_ok"))
         val recorded = effect_log_from_trace_text("r8 0x10000005 0x00\nr8 0x10000005 0x20\nw8 0x10000000 0x41")
@@ -139,9 +184,12 @@ describe "dual-run (5) replay mode":
         expect(out.receipt.committed).to_equal(true)
         expect(out.receipt.committed_from).to_equal("ref")
         expect(out.hardware_applied).to_equal(false)
-        expect(r.commit_count).to_equal(0)
+        expect(r.commit_count).to_equal(0)  # oracle: replay mode answers from the recording, so the device commit counter must stay at zero
 
     it "a candidate writing a different byte than the recording mismatches":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): mismatch receipt naming both written byte values
+        step("Replay a trace whose recorded byte differs from the candidate's write")
         var r = DualRunner.create("uart_putc_replay_bad", "replay", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("replay_bad"))
         val recorded = effect_log_from_trace_text("r8 0x10000005 0x20\nw8 0x10000000 0x41")

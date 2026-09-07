@@ -1,0 +1,205 @@
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-006
+# @cover src/compiler/10.frontend/snapshot/compile_snapshot_freezer.spl 85%
+# @cover src/compiler/10.frontend/snapshot/resolution_witness_v1.spl 85%
+# @cover src/compiler/80.driver/cache/cas/verified_cas_store.spl 85%
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io.{dir_remove_all, file_write, file_exists, file_delete}
+use compiler.common.cache_contract.snapshot_contract_v1 (
+    PathSemanticsV1, LogicalSourcePathV1, ResolutionCandidateV1,
+    NegativeCandidateV1, DirectoryGenerationV1
+)
+use compiler.common.cache_contract.canonical_cache_codec_v1 (
+    canonical_cache_encode_envelope_v1, canonical_cache_kind_source_blob_v1
+)
+use compiler.frontend.snapshot.resolution_witness_v1 (
+    make_resolution_witness_v1, resolution_witness_valid_v1
+)
+use compiler.frontend.snapshot.compile_snapshot_freezer (
+    SnapshotSourceObservationV1, SnapshotAttemptV1, SnapshotFreezeMetadataV1,
+    source_blob_digest_v1, snapshot_attempt_stable_v1,
+    freeze_compile_snapshot_v1
+)
+use compiler.driver.cache.cas.verified_cas_store (
+    verified_cas_put_v1, verified_cas_get_v1, verified_cas_object_path_v1
+)
+
+extern fn rt_getpid() -> i64
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+fn logical(path: text) -> LogicalSourcePathV1:
+    LogicalSourcePathV1(repository_namespace_digest: "a".repeat(64),
+        module_relative_utf8: path,
+        path_semantics: PathSemanticsV1.CaseSensitiveNfc)
+
+fn candidate(path: text, digest: text) -> ResolutionCandidateV1:
+    ResolutionCandidateV1(
+        order: 0, logical_path: path, normalization_key: path,
+        physical_identity_digest: "b".repeat(64),
+        parent_directory_generation_digest: "c".repeat(64),
+        entry_kind: "regular", exists: true, selected: true,
+        content_digest: digest, symlink_chain_digest: "d".repeat(64))
+
+fn observation(path: text, source: [u8], identity_after: text,
+               facts_after: text, revalidated_digest: text) -> SnapshotSourceObservationV1:
+    SnapshotSourceObservationV1(
+        logical_path: logical(path), source_bytes: source,
+        generated_provenance: nil,
+        same_anchored_handle_read: true, nofollow_regular: true,
+        physical_identity_before: "b".repeat(64),
+        physical_identity_after: identity_after,
+        stable_facts_before: "stable-1", stable_facts_after: facts_after,
+        bytes_digest_after_read: source_blob_digest_v1(source),
+        bytes_digest_after_revalidation: revalidated_digest)
+
+fn attempt(source: [u8], identity_after: text, facts_after: text,
+           directory_after: text, revalidated_source: [u8]) -> SnapshotAttemptV1:
+    val digest = source_blob_digest_v1(source)
+    val witness = make_resolution_witness_v1(
+        "e".repeat(64), "f".repeat(64), [candidate("pkg/main.spl", digest)], 0, [])
+    SnapshotAttemptV1(
+        root_trust_digest: "f".repeat(64),
+        sources: [observation("pkg/main.spl", source, identity_after, facts_after,
+            source_blob_digest_v1(revalidated_source))],
+        resolution_witnesses: [witness], negative_candidates: [],
+        directory_generations_before: [DirectoryGenerationV1(
+            anchor_logical_path: logical("pkg"), stable_generation_digest: "c".repeat(64))],
+        directory_generations_after: [DirectoryGenerationV1(
+            anchor_logical_path: logical("pkg"), stable_generation_digest: directory_after)],
+        generated_inputs_before: [], generated_inputs_after: [])
+
+fn metadata() -> SnapshotFreezeMetadataV1:
+    SnapshotFreezeMetadataV1(
+        repository_namespace_digest: "a".repeat(64), path_policy_digest: "1".repeat(64),
+        configuration_digest: "2".repeat(64), target_layout_digest: "3".repeat(64),
+        compiler_owner_digest: "4".repeat(64), runtime_digest: "5".repeat(64),
+        provider_manifests: [], toolchain_component_digests: [])
+
+describe "coherent snapshot freezer":
+    it "accepts one anchored same-handle generation":
+        step("Freeze bytes from one anchored handle")
+        val stable = attempt([102, 110, 32, 109, 97, 105, 110],
+            "b".repeat(64), "stable-1", "c".repeat(64),
+            [102, 110, 32, 109, 97, 105, 110])
+        expect(snapshot_attempt_stable_v1(stable)).to_equal(true)
+        val frozen = freeze_compile_snapshot_v1([stable], metadata())
+        expect(frozen.is_ok()).to_equal(true)
+        expect(frozen.unwrap().source_blobs.len()).to_equal(1)
+        expect(frozen.unwrap().accepted_attempt).to_equal(0)
+
+    it "retries once after same-stat content mutation and accepts only the second generation":
+        step("Discard a changed first generation before publication")
+        val changed = attempt([97], "b".repeat(64), "stable-1", "c".repeat(64), [98])
+        val stable = attempt([98], "b".repeat(64), "stable-1", "c".repeat(64), [98])
+        expect(snapshot_attempt_stable_v1(changed)).to_equal(false)
+        val frozen = freeze_compile_snapshot_v1([changed, stable], metadata()).unwrap()
+        expect(frozen.accepted_attempt).to_equal(1)
+        expect(frozen.rejected_attempt_digests.len()).to_equal(1)
+        expect(frozen.source_blobs[0].source_bytes).to_equal([98])
+
+    it "returns source_snapshot_unstable after the second mutation":
+        step("Reject two changing generations")
+        val first = attempt([97], "physical-2", "stable-1", "dir-1", [97])
+        val second = attempt([98], "physical-3", "stable-1", "dir-1", [98])
+        val frozen = freeze_compile_snapshot_v1([first, second], metadata())
+        expect(frozen.is_err()).to_equal(true)
+
+    it "rejects a candidate appearing in an anchored directory":
+        step("Revalidate ordered positive and negative candidates")
+        val changed = attempt([97], "b".repeat(64), "stable-1", "9".repeat(64), [97])
+        expect(snapshot_attempt_stable_v1(changed)).to_equal(false)
+
+    it "rejects case or Unicode normalization alias candidates":
+        step("Reject ambiguous logical resolution candidates")
+        val digest = source_blob_digest_v1([97])
+        val first = candidate("pkg/A.spl", digest)
+        val second = ResolutionCandidateV1(
+            order: 1, logical_path: "pkg/a.spl", normalization_key: "pkg/A.spl",
+            physical_identity_digest: "8".repeat(64),
+            parent_directory_generation_digest: "c".repeat(64), entry_kind: "regular",
+            exists: true, selected: false, content_digest: digest,
+            symlink_chain_digest: "d".repeat(64))
+        val witness = make_resolution_witness_v1(
+            "e".repeat(64), "f".repeat(64), [first, second], 0, [])
+        expect(resolution_witness_valid_v1(witness)).to_equal(false)
+
+    it "rejects root, namespace, duplicate source, and unproved absence mismatches":
+        step("Bind every witness and absence to one root namespace")
+        val stable = attempt([97], "b".repeat(64), "stable-1",
+            "c".repeat(64), [97])
+        val wrong_root = SnapshotAttemptV1(
+            root_trust_digest: "0".repeat(64), sources: stable.sources,
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: stable.negative_candidates,
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(wrong_root)).to_equal(false)
+        val duplicate = SnapshotAttemptV1(
+            root_trust_digest: stable.root_trust_digest,
+            sources: [stable.sources[0], stable.sources[0]],
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: [],
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(duplicate)).to_equal(false)
+        val unproved_absence = SnapshotAttemptV1(
+            root_trust_digest: stable.root_trust_digest, sources: stable.sources,
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: [NegativeCandidateV1(
+                anchor: logical("pkg"), logical_candidate: logical("pkg/missing.spl"),
+                absence_witness_digest: "7".repeat(64))],
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(unproved_absence)).to_equal(false)
+        val wrong_metadata = SnapshotFreezeMetadataV1(
+            repository_namespace_digest: "9".repeat(64),
+            path_policy_digest: "1".repeat(64), configuration_digest: "2".repeat(64),
+            target_layout_digest: "3".repeat(64), compiler_owner_digest: "4".repeat(64),
+            runtime_digest: "5".repeat(64), provider_manifests: [],
+            toolchain_component_digests: [])
+        expect(freeze_compile_snapshot_v1([stable], wrong_metadata).is_err()).to_equal(true)
+
+describe "verified immutable CAS":
+    it "shares identical envelopes across checkout-relative presentation roots":
+        step("Verify content identity excludes checkout location")
+        val base = "build/test-artifacts/coherent-cas-{rt_getpid()}"
+        dir_remove_all(base)
+        val envelope = canonical_cache_encode_envelope_v1(canonical_cache_kind_source_blob_v1(), 1, [1, 2, 3, 0, 255])
+        val first = verified_cas_put_v1("{base}/worktree-a", "source_blob", envelope).unwrap()
+        val second = verified_cas_put_v1("{base}/worktree-b", "source_blob", envelope).unwrap()
+        expect(first).to_equal(second)
+        val loaded = verified_cas_get_v1("{base}/worktree-b", "source_blob", second, 1024).unwrap()
+        expect(loaded.present).to_equal(true)
+        expect(loaded.canonical_envelope).to_equal(envelope)
+        dir_remove_all(base)
+
+    it "quarantines digest corruption instead of serving bytes":
+        step("Reject and quarantine a corrupt immutable object")
+        val base = "build/test-artifacts/coherent-cas-corrupt-{rt_getpid()}"
+        dir_remove_all(base)
+        val envelope = canonical_cache_encode_envelope_v1(canonical_cache_kind_source_blob_v1(), 1, [9, 8, 7])
+        val digest = verified_cas_put_v1(base, "source_blob", envelope).unwrap()
+        val path = verified_cas_object_path_v1(base, "source_blob", digest).unwrap()
+        expect(file_write(path, "00")).to_equal(true)
+        expect(verified_cas_get_v1(base, "source_blob", digest, 1024).is_err()).to_equal(true)
+        expect(file_exists(path)).to_equal(false)
+        dir_remove_all(base)
+
+    it "rejects a final-component symlink without reading its target":
+        step("Reject CAS pathname substitution attacks")
+        val base = "build/test-artifacts/coherent-cas-symlink-{rt_getpid()}"
+        dir_remove_all(base)
+        val envelope = canonical_cache_encode_envelope_v1(canonical_cache_kind_source_blob_v1(), 1, [4, 5, 6])
+        val digest = verified_cas_put_v1(base, "source_blob", envelope).unwrap()
+        val path = verified_cas_object_path_v1(base, "source_blob", digest).unwrap()
+        val target = "{base}/attacker-target"
+        expect(file_write(target, "secret")).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+        expect(rt_package_create_symlink(target, path)).to_equal(0)
+        expect(verified_cas_get_v1(base, "source_blob", digest, 1024).is_err()).to_equal(true)
+        expect(file_exists(target)).to_equal(true)
+        dir_remove_all(base)

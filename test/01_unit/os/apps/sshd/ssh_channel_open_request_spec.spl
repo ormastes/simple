@@ -1,3 +1,38 @@
+"""
+## Purpose and audience
+Executable contract for the bounded SSH channel-open classifier
+(`src/os/apps/sshd/ssh_channel_open_request.spl`) and its wiring into the live
+session-channel admission path. Audience: engineers changing sshd channel
+admission and reviewers of the RFC 4254 rejection-reason wire format.
+
+## Operator workflow
+Run this file with the Simple test runner from the repository root
+(`simple run test/01_unit/os/apps/sshd/ssh_channel_open_request_spec.spl`).
+Scenarios build exact channel-open wire packets, push them through the real
+classifier, and pin the classification, sender retention, and rejection
+payload bytes.
+
+## Compatibility and limitations
+Classification covers session, direct-tcpip-style unsupported types, malformed
+truncations, trailing session bytes, and zero peer packet limits; nested
+channel hierarchy is out of scope for this classifier. The admission-wiring
+scenario is a source contract on `ssh_session_channel.spl` because the live
+admission path needs an active transport.
+
+## Verification guidance and troubleshooting
+A failure names the mis-classified packet shape; replay the packet through
+`ssh_channel_open_request_classify_v1` and compare against the rejection
+reason table before changing the classifier. The admission-wiring scenario is
+expected to stay RED while `_is_live_channel_open_session` remains inline in
+the session-channel source — see the NOTE inside that scenario.
+"""
+# Lifecycle: doc/01_research/os/security/session_subprivilege_hierarchy_research.md ;
+# doc/03_plan/os/clang_over_ssh_2e_design.md ;
+# doc/04_architecture/secure_pure_simple_servers.md ;
+# doc/05_design/os/sshd_rfc4254_channel_open_failure_v1.md
+# @manual_section: sshd channel-open admission
+
+use std.spec.step
 use os.apps.sshd.ssh_channel_open_request.*
 use os.apps.sshd.ssh_channel.{SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE}
 
@@ -25,15 +60,33 @@ fn _open_packet(kind: [u8], sender: u32, tail: [u8]) -> [u8]:
 
 describe "bounded SSH channel-open classification":
     it "routes live admission through bounded classification before allocation":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "routes live admission through bounded classification before allocation"
+        step("Verify: routes live admission through bounded classification before allocation")
         val source = rt_file_read_text("src/os/apps/sshd/ssh_session_channel.spl")
-        expect(source).to_contain("val request = ssh_channel_open_request_classify_v1(payload)")
-        expect(source).to_contain("if ssh_channel_open_transport_must_close_v1(request):")
-        expect(source).to_contain("if request.kind != SshChannelOpenRequestKindV1.Session:")
-        expect(source).to_contain("val rejected = ssh_channel_open_rejection_payload_v1(request)")
-        expect(source).to_contain("self.channels.session_channel_open_response(\n            request.sender_channel, request.initial_window, request.maximum_packet)")
-        expect(source.contains("_is_live_channel_open_session")).to_be(false)
+        val classifies_before_allocation = source.contains("val request = ssh_channel_open_request_classify_v1(payload)")
+        val gates_transport_close = source.contains("if ssh_channel_open_transport_must_close_v1(request):")
+        val gates_session_kind = source.contains("if request.kind != SshChannelOpenRequestKindV1.Session:")
+        val builds_rejection_payload = source.contains("val rejected = ssh_channel_open_rejection_payload_v1(request)")
+        val replies_on_the_peer_channel = source.contains("self.channels.session_channel_open_response(\n            request.sender_channel, request.initial_window, request.maximum_packet)")
+        expect(classifies_before_allocation).to_equal(true)  # oracle: live admission must run the classifier before any channel allocation
+        expect(gates_transport_close).to_equal(true)  # oracle: transport teardown must be gated on the classifier verdict
+        expect(gates_session_kind).to_equal(true)  # oracle: only session-kind opens may proceed to allocation
+        expect(builds_rejection_payload).to_equal(true)  # oracle: rejections must flow through the shared rejection payload builder
+        expect(replies_on_the_peer_channel).to_equal(true)  # oracle: the failure reply must be addressed to the peer sender channel
+        # NOTE (legitimately RED, kept from the baseline run): this contract
+        # requires the live open path to route through the named helper instead
+        # of inlining `_is_live_channel_open_session`; the session-channel
+        # source currently contains that inline name, so this stays RED until
+        # the admission path is refactored. Product-defect record, not a soft
+        # assertion — do not weaken.
+        val inlines_live_open_helper = source.contains("_is_live_channel_open_session")
+        expect(inlines_live_open_helper).to_be(false)  # oracle: the live path must call the bounded classifier, not an inline predicate
 
     it "admits an exact session request without retaining its type":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "admits an exact session request without retaining its type"
+        step("Verify: admits an exact session request without retaining its type")
         val request = ssh_channel_open_request_classify_v1(
             _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 17u32, [])
         )
@@ -42,6 +95,9 @@ describe "bounded SSH channel-open classification":
         expect(request.maximum_packet).to_equal(1024u32)
 
     it "preserves the sender needed for an unsupported-type failure reply":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "preserves the sender needed for an unsupported-type failure reply"
+        step("Verify: preserves the sender needed for an unsupported-type failure reply")
         val request = ssh_channel_open_request_classify_v1(
             _open_packet([0x64u8, 0x69u8, 0x72u8, 0x65u8, 0x63u8, 0x74u8], 23u32, [1u8, 2u8])
         )
@@ -54,6 +110,9 @@ describe "bounded SSH channel-open classification":
         expect(reply[8]).to_equal(SSH_OPEN_UNKNOWN_CHANNEL_TYPE.to_u8())
 
     it "rejects a zero peer packet limit without classifying wire corruption":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "rejects a zero peer packet limit without classifying wire corruption"
+        step("Verify: rejects a zero peer packet limit without classifying wire corruption")
         val request = ssh_channel_open_request_classify_v1(
             _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 31u32, [])
         )
@@ -74,18 +133,27 @@ describe "bounded SSH channel-open classification":
         expect(reply[8]).to_equal(SSH_OPEN_RESOURCE_SHORTAGE.to_u8())
 
     it "rejects truncated fixed fields":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "rejects truncated fixed fields"
+        step("Verify: rejects truncated fixed fields")
         val request = ssh_channel_open_request_classify_v1([90u8, 0u8, 0u8, 0u8, 7u8])
         expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Malformed)
         expect(ssh_channel_open_transport_must_close_v1(request)).to_be(true)
         expect(ssh_channel_open_rejection_payload_v1(request)).to_equal([])
 
     it "rejects trailing session-specific bytes":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "rejects trailing session-specific bytes"
+        step("Verify: rejects trailing session-specific bytes")
         val request = ssh_channel_open_request_classify_v1(
             _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 4u32, [0u8])
         )
         expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Malformed)
 
     it "skips a long unsupported type without retaining or scanning it":
+        # @req REQ-SSHD-CHANNEL-OPEN-001
+        # @capture(protocol_binary): retained evidence for scenario "skips a long unsupported type without retaining or scanning it"
+        step("Verify: skips a long unsupported type without retaining or scanning it")
         var packet: [u8] = [90u8]
         packet = _push_u32_be(packet, 65u32)
         while packet.len() < 70u64:

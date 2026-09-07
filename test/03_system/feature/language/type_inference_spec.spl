@@ -1,4 +1,25 @@
 """
+## Purpose and audience
+Purpose: pins Simple's Hindley-Milner-style type inference behavior across
+literals, arithmetic, control flow, closures, and generics by asserting on
+values genuinely derived from each construct (arithmetic results, indexed
+elements, function call results), not on hand-typed labels standing in for
+the inferred type name.
+Audience: language/type-system engineers who maintain the inference engine
+and anyone extending the surface syntax the inference rules must cover.
+
+## Operator workflow
+bin/simple test test/03_system/feature/language/type_inference_spec.spl
+
+## Compatibility and limitations
+Runs under the interpreter execution path used by the spec runner; genuinely
+unresolved inference gaps are left RED with a # NOTE: rather than softened.
+
+## Verification guidance and troubleshooting
+A failing scenario names the exact expression whose inferred type produced
+the wrong runtime value; compare against the unification rules summarized
+below and in doc/05_design/language/type_system/type_inference.md.
+
 # Type Inference Specification - Test Specification
 
 **Status:** Partial Implementation (Hindley-Milner scaffold working)
@@ -102,138 +123,198 @@ Closure return type inferred from body:
 
     val square = |x: i64| x * x   # (i64) -> i64 — no annotation needed
 """
+# Lifecycle: doc/01_research/language/type_inference/type_inference_initial_observations.md ;
+# doc/03_plan/compiler/type_system/typecheck_burndown.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/type_system/type_inference.md
 
 use std.spec.step
+use std.spec.{describe, it, expect}
 
-use std.spec
-use std.spec.{expect}
-
-use std.spec.step
+# @manual_section: Hindley-Milner inference rules
 
 describe "Type Inference Spec":
-    # @manual scenario evidence
-    it "inference rules - literals":
-        # Integer, float, string, boolean literals infer their types
+
+    it "literal expressions carry the type their runtime operations require":
+        # @req REQ-TYPE-INF-001
+        step("Bind one literal of each primitive kind")
         val x = 42
         val y = 3.14
         val s = "hello"
         val b = true
-        expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
-        expect(y).to_equal(3.14)  # oracle: 3.14 — pinned expected value for this behavior
-        expect(s).to_equal("hello")
-        expect(b).to_equal(true)
+        step("Use each value in an operation only its inferred type supports")
+        val x_plus_one = x + 1
+        val y_above_three = y > 3.0
+        val s_concat = s + " world"
+        val b_negated = not b
+        # @capture: evidence_manifest("type_inference_literals") -> type_inference_spec.evidence.sdn
+        step("Verify each operation produced the value that type implies")
+        expect(x_plus_one).to_equal(43)  # oracle: 42 (i64 literal) + 1
+        expect(y_above_three).to_equal(true)  # oracle: 3.14 (f64 literal) > 3.0
+        expect(s_concat).to_equal("hello world")
+        expect(b_negated).to_equal(false)
 
     it "inference rules - arithmetic":
-        # Operators infer types from operands
+        # @req REQ-TYPE-INF-002
+        step("Add two i64 operands")
         val a = 1 + 2
+        step("Multiply two f64 operands")
         val b = 3.0 * 1.5
+        # @capture: evidence_manifest("type_inference_arithmetic") -> type_inference_spec.evidence.sdn
+        step("Verify the i64 arithmetic propagated the operand type")
         expect(a).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
 
     it "inference rules - comparison":
-        # Comparison operators return bool
+        # @req REQ-TYPE-INF-003
+        step("Compare two i64 literals")
         val cmp = 1 < 2
+        # @capture: evidence_manifest("type_inference_comparison") -> type_inference_spec.evidence.sdn
+        step("Verify the comparison result is bool-typed")
         expect(cmp).to_equal(true)
 
     it "inference rules - logical":
-        # Logical operators return bool
+        # @req REQ-TYPE-INF-004
+        step("Combine two bool literals with 'and'")
         val logic = true and false
+        # @capture: evidence_manifest("type_inference_logical") -> type_inference_spec.evidence.sdn
+        step("Verify the logical operator returns bool")
         expect(logic).to_equal(false)
 
     it "inference rules - bitwise":
-        # Bitwise operators work on integers
+        # @req REQ-TYPE-INF-005
+        step("Shift an i64 literal")
         val bits = 5 << 2
+        # @capture: evidence_manifest("type_inference_bitwise") -> type_inference_spec.evidence.sdn
+        step("Verify bitwise operators stay in the integer domain")
         expect(bits).to_equal(20)  # oracle: 20 — pinned expected value for this behavior
 
     it "inference rules - arrays":
-        # Arrays infer element type from literals
+        # @req REQ-TYPE-INF-006
+        step("Build an array literal from i64 elements")
         val arr = [1, 2, 3]
+        # @capture: evidence_manifest("type_inference_arrays") -> type_inference_spec.evidence.sdn
+        step("Verify the element type propagated to indexed access")
         expect(arr[0]).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
     it "inference rules - tuples":
-        # Tuples can have mixed types
+        # @req REQ-TYPE-INF-007
+        step("Build a tuple with mixed-type members")
         val t = (1, "hi", true)
+        # @capture: evidence_manifest("type_inference_tuples") -> type_inference_spec.evidence.sdn
+        step("Verify each tuple slot kept its own member type")
         expect(t.0).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
         expect(t.1).to_equal("hi")
         expect(t.2).to_equal(true)
 
     it "inference rules - dictionaries":
-        # Dictionaries infer key/value types
+        # @req REQ-TYPE-INF-008
+        step("Build a dictionary with text keys and i64 values")
         val dict = {"a": 1, "b": 2}
+        # @capture: evidence_manifest("type_inference_dictionaries") -> type_inference_spec.evidence.sdn
+        step("Verify key/value types round-trip through lookup")
         expect(dict["a"]).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
         expect(dict["b"]).to_equal(2)  # oracle: 2 — pinned expected value for this behavior
 
     it "inference rules - functions with explicit types":
-        # Functions can have explicit return types
+        # @req REQ-TYPE-INF-009
+        step("Declare a function with explicit i64 parameter and return types")
         fn add(a: i64, b: i64) -> i64:
             a + b
+        step("Call the function")
         val result = add(3, 4)
+        # @capture: evidence_manifest("type_inference_explicit_fn") -> type_inference_spec.evidence.sdn
+        step("Verify the declared types produced the arithmetic result")
         expect(result).to_equal(7)  # oracle: 7 — pinned expected value for this behavior
 
     it "inference rules - lambda types":
-        # Lambda expressions infer from context
+        # @req REQ-TYPE-INF-010
+        step("Bind a lambda inferred from its usage context")
         val double = _1 * 2
+        step("Call the lambda")
         val result = double(5)
+        # @capture: evidence_manifest("type_inference_lambda") -> type_inference_spec.evidence.sdn
+        step("Verify the lambda's inferred parameter type produced the result")
         expect(result).to_equal(10)  # oracle: 10 — pinned expected value for this behavior
 
     it "inference rules - higher-order functions":
-        # Functions can take functions as arguments
+        # @req REQ-TYPE-INF-011
+        step("Declare a function that takes another function as an argument")
         fn apply(f: fn(i64) -> i64, x: i64) -> i64:
             f(x)
 
+        step("Pass a lambda as the function argument")
         val square = _1 * _1
         val result = apply(square, 5)
+        # @capture: evidence_manifest("type_inference_higher_order") -> type_inference_spec.evidence.sdn
+        step("Verify the function-typed parameter dispatched correctly")
         expect(result).to_equal(25)  # oracle: 25 — pinned expected value for this behavior
 
     it "inference rules - if expressions":
-        # If-else expressions infer unified type
+        # @req REQ-TYPE-INF-012
+        step("Branch on a condition where both arms return i64")
         val x = 1
         val v = if x > 0:
             1
         else:
             2
+        # @capture: evidence_manifest("type_inference_if_expr") -> type_inference_spec.evidence.sdn
+        step("Verify the unified branch type produced the taken arm's value")
         expect(v).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
     it "inference rules - loops":
-        # Loops with type-stable variables
-        # Note: Closure variable capture has known limitations
+        # @req REQ-TYPE-INF-013
+        step("Mutate an i64 loop counter across iterations")
         var i = 0
         while i < 3:
             i = i + 1
+        # @capture: evidence_manifest("type_inference_loops") -> type_inference_spec.evidence.sdn
+        step("Verify the counter's type stayed stable across the loop")
         expect(i).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
 
     it "examples - basic iteration":
-        # For loop with array inference
+        # @req REQ-TYPE-INF-014
+        step("Iterate an array of i64 elements accumulating a sum")
         val numbers = [1, 2, 3, 4, 5]
         var sum = 0
         for n in numbers:
             sum = sum + n
+        # @capture: evidence_manifest("type_inference_iteration") -> type_inference_spec.evidence.sdn
+        step("Verify the accumulator's inferred type produced the correct total")
         expect(sum).to_equal(15)  # oracle: 15 — pinned expected value for this behavior
 
     it "examples - map function":
-        # Higher-order function with generics
+        # @req REQ-TYPE-INF-015
+        step("Declare a generic-shaped map helper over [i64]")
         fn map_simple(arr: [i64], f: fn(i64) -> i64) -> [i64]:
             var result = []
             for x in arr:
                 result = result + [f(x)]
             result
 
+        step("Apply the helper with a doubling lambda")
         val numbers = [1, 2, 3]
         val doubled = map_simple(numbers, _1 * 2)
+        # @capture: evidence_manifest("type_inference_map") -> type_inference_spec.evidence.sdn
+        step("Verify each mapped element kept the i64 element type")
         expect(doubled[0]).to_equal(2)  # oracle: 2 — pinned expected value for this behavior
         expect(doubled[1]).to_equal(4)  # oracle: 4 — pinned expected value for this behavior
         expect(doubled[2]).to_equal(6)  # oracle: 6 — pinned expected value for this behavior
 
     it "examples - option type with match":
-        # Option type with pattern matching
+        # @req REQ-TYPE-INF-016
+        step("Declare a search function returning a sentinel on failure")
         fn find_first(arr: [i64], target: i64) -> i64:
             for x in arr:
                 if x == target:
                     return x
             return -1
 
+        step("Search for a present and an absent target")
         val numbers = [10, 20, 30]
         val found = find_first(numbers, 20)
         val not_found = find_first(numbers, 99)
 
+        # @capture: evidence_manifest("type_inference_option_match") -> type_inference_spec.evidence.sdn
+        step("Verify both branches of the unified return type")
         expect(found).to_equal(20)  # oracle: 20 — pinned expected value for this behavior
         expect(not_found).to_equal(-1)  # oracle: -1 — pinned expected value for this behavior

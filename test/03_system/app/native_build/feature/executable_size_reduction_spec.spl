@@ -1,70 +1,154 @@
-# System spec for executable size reduction.
+"""
+## Purpose and audience
+Executable specification for the executable-size-reduction requirements
+(REQ-001 through REQ-014): native runtime archive retention, release size
+guardrails, loader dependency closure, and native-binary dependency audits.
+Audience: native-build and packaging engineers maintaining the linker, the
+workspace manifests, and the release budget scripts this spec pins.
+## Operator workflow
+Run the spec and expect eleven executed, passing examples:
+./src/compiler_rust/target/bootstrap/simple run test/03_system/app/native_build/feature/executable_size_reduction_spec.spl
+## Compatibility and limitations
+Scenarios are source-contract checks: they read shipped linker, manifest,
+script, and requirements-contract text and pin genuinely named tokens.
+Two audit commands (loader dependency closure, native-binary dependency
+closure) are still missing from the product; those scenarios pin the shipped
+requirement contract instead and carry a NOTE naming the gap (tracked in
+doc/08_tracking/bug/specs_assert_against_nonexistent_product_paths_2026-08-10.md).
+## Verification guidance and troubleshooting
+A healthy run reports outcome=OK, executed=11, passed=11. A failure means a
+pinned token vanished from shipped source — check the named local in the
+failing scenario against the file it reads before touching the spec.
+"""
+# Lifecycle: doc/01_research/compiler/optimization/executable_size_reduction.md ;
+# doc/03_plan/compiler/optimization/executable_size_reduction.md ;
+# doc/04_architecture/compiler/optimization/executable_size_reduction.md ;
+# doc/05_design/compiler/optimization/executable_size_reduction.md
 
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+const LINKER_SOURCE = "src/compiler_rust/compiler/src/pipeline/native_project/linker.rs"
+const SIZE_BUDGET_SCRIPT = "scripts/check-executable-size-budgets.shs"
+const RUNTIME_ABI_SOURCE = "src/compiler_rust/runtime_abi/src/lib.rs"
+const LOADER_MANIFEST = "src/compiler_rust/loader/Cargo.toml"
+const DRIVER_MANIFEST = "src/compiler_rust/driver/Cargo.toml"
+const NATIVE_ALL_MANIFEST = "src/compiler_rust/native_all/Cargo.toml"
+const SIZE_REDUCTION_CONTRACT = "doc/02_requirements/compiler/optimization/executable_size_reduction.md"
+
+# @manual_section: executable size reduction
 describe "executable size reduction":
     describe "REQ-001 through REQ-004: native runtime archive retention":
         it "uses explicit runtime roots instead of default ELF whole-archive linking":
             # @req REQ-001
-            # @req REQ-004
-            # @req REQ-005
-            # @req REQ-006
-            # @req REQ-007
-            # @req REQ-010
-            # @req REQ-011
-            # @req REQ-014
-        # @req REQ-001
-        # @req REQ-004
-        # @req REQ-005
-        # @req REQ-006
-        # @req REQ-007
-        # @req REQ-010
-        # @req REQ-011
-        # @req REQ-014
-    # @req REQ-001
-    # @req REQ-004
-            # @req REQ-SSPEC-SYSTEM
-            step("uses explicit runtime roots instead of default ELF whole-archive linking")
-            val link_mode = "explicit-runtime-roots"
-            expect(link_mode).to_equal("explicit-runtime-roots")
+            # @req REQ-002
+            # @req REQ-003
+            # @capture(statistics): linker tokens pinning explicit runtime-root linking
+            step("read the native linker source and pin its whole-archive linking tokens")
+            val linker_source = file_read(LINKER_SOURCE)
+            val pins_whole_archive_override = linker_source.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE")
+            val pins_clang_cl_whole_archive_helper = linker_source.contains("clang_cl_whole_archive_arg")
+            expect(pins_whole_archive_override).to_equal(true)  # oracle: linker.rs gates legacy whole-archive linking on this diagnostic override
+            expect(pins_clang_cl_whole_archive_helper).to_equal(true)  # oracle: linker.rs owns the clang-cl whole-archive argument helper
 
         it "keeps a diagnostic fallback for legacy runtime whole-archive linking":
-            val fallback_env = "SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE"
-            expect(fallback_env).to_equal("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE")
+            # @req REQ-004
+            # @capture(statistics): override token retained as fallback evidence
+            step("read the linker source and pin the diagnostic whole-archive override")
+            val linker_source = file_read(LINKER_SOURCE)
+            val keeps_whole_archive_diagnostic_override = linker_source.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE")
+            expect(keeps_whole_archive_diagnostic_override).to_equal(true)  # oracle: SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 restores legacy whole-archive linking (linker.rs:1128)
 
     describe "REQ-005 and REQ-006: release size guardrails":
         it "strips packaged native MCP binaries":
-            val package_flag = "--strip"
-            expect(package_flag).to_equal("--strip")
+            # @req REQ-005
+            # @capture(statistics): strip handling retained as packaging evidence
+            step("read the size-budget script and pin its strip handling for release artifacts")
+            val budget_script = file_read(SIZE_BUDGET_SCRIPT)
+            val strips_packaged_artifacts = budget_script.contains("strip")
+            expect(strips_packaged_artifacts).to_equal(true)  # oracle: scripts/check-executable-size-budgets.shs strips the release artifacts it budgets
 
         it "checks release executable and runtime archive budgets":
-            val script = "scripts/check/check-executable-size-budgets.shs"
-            expect(script).to_end_with("check-executable-size-budgets.shs")
+            # @req REQ-006
+            # @capture(statistics): budgeted artifact list retained as evidence
+            step("read the size-budget script and pin the runtime archive budget target")
+            val budget_script = file_read(SIZE_BUDGET_SCRIPT)
+            val budgets_the_runtime_archive = budget_script.contains("libsimple_runtime.a")
+            expect(budgets_the_runtime_archive).to_equal(true)  # oracle: the script budgets src/compiler_rust/target/bootstrap/libsimple_runtime.a by name
 
     describe "REQ-007 through REQ-010: loader dependency closure":
         it "owns the runtime symbol ABI in a dedicated crate":
-            val abi_crate = "simple-runtime-abi"
-            expect(abi_crate).to_equal("simple-runtime-abi")
+            # @req REQ-007
+            # @req REQ-008
+            # @capture(statistics): ABI crate exports retained as ownership evidence
+            step("read the runtime ABI crate and pin the shared symbol-table contract exports")
+            val abi_source = file_read(RUNTIME_ABI_SOURCE)
+            val owns_runtime_symbol_names = abi_source.contains("RUNTIME_SYMBOL_NAMES")
+            val owns_abi_version = abi_source.contains("AbiVersion")
+            expect(owns_runtime_symbol_names).to_equal(true)  # oracle: runtime_abi/src/lib.rs exports RUNTIME_SYMBOL_NAMES
+            expect(owns_abi_version).to_equal(true)  # oracle: runtime_abi/src/lib.rs exports AbiVersion
 
         it "audits loader dependency closure with a dedicated script":
-            val script = "scripts/check/check-loader-dependency-closure.shs"
-            expect(script).to_end_with("check-loader-dependency-closure.shs")
+            # @req REQ-009
+            # NOTE (product gap): the repeatable loader dependency audit command is
+            # still missing from the product, so this scenario pins the shipped
+            # requirement contract instead of a script that does not exist.
+            # Tracked: doc/08_tracking/bug/specs_assert_against_nonexistent_product_paths_2026-08-10.md
+            # @capture(statistics): contract clause retained until the audit command ships
+            step("read the shipped requirement contract and pin the loader dependency audit clause")
+            val audit_contract = file_read(SIZE_REDUCTION_CONTRACT)
+            val pins_loader_dependency_audit = audit_contract.contains("loader dependency audit")
+            expect(pins_loader_dependency_audit).to_equal(true)  # oracle: the REQ-009 loader dependency audit clause is shipped in the requirements contract
 
         it "keeps simple-native-loader off simple-runtime normal deps":
-            val runtime_edge = "simple-native-loader -> simple-runtime"
-            expect(runtime_edge).to_contain("simple-runtime")
+            # @req REQ-007
+            # @req REQ-010
+            # @capture(statistics): loader manifest dependency set retained as evidence
+            step("read the loader manifest and pin its dependency set free of runtime and hashing crates")
+            val loader_manifest = file_read(LOADER_MANIFEST)
+            val keeps_runtime_off_loader_deps = not loader_manifest.contains("simple-runtime")
+            val keeps_hashing_off_loader_deps = not loader_manifest.contains("blake3") and not loader_manifest.contains("xxhash")
+            expect(keeps_runtime_off_loader_deps).to_equal(true)  # oracle: loader/Cargo.toml declares no simple-runtime normal dependency
+            expect(keeps_hashing_off_loader_deps).to_equal(true)  # oracle: loader/Cargo.toml declares no hashing crate dependency
 
     describe "REQ-011 through REQ-014: native binary dependency audit":
         it "audits native binary dependency closure with a dedicated script":
-            val script = "scripts/check/check-native-binary-dependency-closure.shs"
-            expect(script).to_end_with("check-native-binary-dependency-closure.shs")
+            # @req REQ-011
+            # NOTE (product gap): the native-binary dependency audit command is
+            # still missing from the product, so this scenario pins the shipped
+            # requirement contract instead of a script that does not exist.
+            # Tracked: doc/08_tracking/bug/specs_assert_against_nonexistent_product_paths_2026-08-10.md
+            # @capture(statistics): contract clause retained until the audit command ships
+            step("read the shipped requirement contract and pin the native-binary dependency audit clause")
+            val audit_contract = file_read(SIZE_REDUCTION_CONTRACT)
+            val pins_native_binary_audit = audit_contract.contains("native-binary dependency audit")
+            expect(pins_native_binary_audit).to_equal(true)  # oracle: the REQ-011 native-binary dependency audit clause is shipped in the requirements contract
 
         it "tracks the CLI root through simple-driver":
-            val cli_root = "simple-driver"
-            expect(cli_root).to_equal("simple-driver")
+            # @req REQ-012
+            # @capture(statistics): driver package identity retained as evidence
+            step("read the driver manifest and pin the simple-driver package name")
+            val driver_manifest = file_read(DRIVER_MANIFEST)
+            val tracks_cli_root_package = driver_manifest.contains("simple-driver")
+            expect(tracks_cli_root_package).to_equal(true)  # oracle: driver/Cargo.toml names the CLI root package simple-driver
 
         it "surfaces simple-native-all overreach into simple-driver":
-            val edge = "simple-native-all -> simple-driver"
-            expect(edge).to_contain("simple-driver")
+            # @req REQ-013
+            # @capture(statistics): declared driver-compat surface retained as evidence
+            step("read the native-all manifest and pin its declared driver-compat overreach surface")
+            val native_all_manifest = file_read(NATIVE_ALL_MANIFEST)
+            val surfaces_driver_overreach = native_all_manifest.contains("driver-compat")
+            expect(surfaces_driver_overreach).to_equal(true)  # oracle: native_all/Cargo.toml declares driver-compat as the named optional overreach surface
 
         it "keeps stale external jj crate deps out of simple-driver":
-            val forbidden = "jj-lib,jj-cli,hostname"
-            expect(forbidden).to_contain("hostname")
+            # @req REQ-014
+            # @capture(statistics): driver dependency exclusions retained as evidence
+            step("read the driver manifest and pin its dependency set free of stale jj crates")
+            val driver_manifest = file_read(DRIVER_MANIFEST)
+            val keeps_jj_lib_off_driver = not driver_manifest.contains("jj-lib")
+            val keeps_jj_cli_off_driver = not driver_manifest.contains("jj-cli")
+            val keeps_hostname_off_driver = not driver_manifest.contains("hostname")
+            expect(keeps_jj_lib_off_driver).to_equal(true)  # oracle: driver/Cargo.toml declares no jj-lib dependency
+            expect(keeps_jj_cli_off_driver).to_equal(true)  # oracle: driver/Cargo.toml declares no jj-cli dependency
+            expect(keeps_hostname_off_driver).to_equal(true)  # oracle: driver/Cargo.toml declares no hostname dependency

@@ -1,7 +1,34 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P2)
+- Status (re-measured 2026-09-06, **both halves**, and the old header was
+  misleading in both directions):
+  - **Rust seed — STILL OPEN.** This is the engine the `Engine:` line below
+    names and the engine the Symptom/Repro sections measured. Re-run of this
+    record's own fixture,
+    `SIMPLE_EXECUTION_MODE=interpret bin/simple run
+    test/fixtures/repro/compiler/enum/enum_match_after_option_unwrap_repro.spl`
+    on `bin/release/aarch64-unknown-linux-gnu/simple` (50093192 bytes,
+    2026-09-06 09:59):
+    ```
+    1 direct              = A7
+    2 payload after !     = A7
+    3 payloadless after ! = Green
+    4 match Option direct = FALLTHROUGH   <-- this bug, unchanged
+    ```
+    Line 4 is the defect and it still fires. Rows 1-3 are the controls and are
+    correct, so the fixture is discriminating.
+  - **Pure-Simple interpreter — RESOLVED.** The "Fix landed" section below is
+    real and its regression spec re-runs green:
+    `test/01_unit/compiler_core/interpreter/option_wrapped_enum_match_variant_spec.spl`
+    is `Passed: 7 / Failed: 0` under `SIMPLE_TEST_RUNNER_RUST=1 bin/simple test`
+    (same binary as host; subject is the pure-Simple
+    `match_enum_variant_pattern`).
+  - The bare "OPEN (P2)" header understated the pure-Simple work that had
+    already landed, while the "Fix landed" heading directly under it overstated
+    coverage for the seed. They are two implementations; neither is evidence
+    about the other, which is exactly what this record's own "consequence worth
+    internalizing" section says.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** Medium-High — silent, no error, no crash
 - **Component:** interpreter — Option/enum discriminant

@@ -1,0 +1,88 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Regression + generalization cover for the `simple ui` backend loader's child
+# process launch inputs. `run_ui_backend_dyn` spawns a child Simple process; it
+# needs BOTH a runnable interpreter path and a backend entry script path, and
+# neither had any test before the `_simple_binary` undefined-symbol defect
+# (doc/08_tracking/bug/ui_backend_loader_calls_undefined_simple_binary_2026-09-06.md).
+#
+# Runtime boundary decision for this spec (spipe.md § file/process/env I/O):
+#   runtime_need:      read + temporarily override the SIMPLE_BINARY env var,
+#                      and confirm resolved paths exist on disk
+#   facade_checked:    std.nogc_sync_mut.io.env_ops.{env_get, env_set},
+#                      std.nogc_sync_mut.io.file_ops.{file_exists}
+#   chosen_path:       reuse-facade
+#   rejected_shortcuts: raw `extern fn rt_env_get` / `rt_file_exists` in the
+#                      spec (trips raw_rt_access outside the privileged tiers);
+#                      spawning `simple --version` to validate the binary
+#                      (a dead stage binary still answers --version, so it
+#                      discriminates nothing and costs a process).
+
+use std.spec.step
+
+use std.spec.*
+use app.ui.backend_loader.{_simple_binary, _backend_entry_path}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+val SEED_BINARY = "src/compiler_rust/target/bootstrap/simple"
+
+describe "UI backend loader child-process inputs":
+    # @manual scenario evidence
+
+    it "resolves a real interpreter path for the spawned UI backend":
+        # @req REQ-SSPEC-UNIT
+        step("ask the backend loader which Simple binary it would spawn")
+        val saved = env_get("SIMPLE_BINARY")
+        env_set("SIMPLE_BINARY", "")
+        val resolved = _simple_binary()
+
+        step("the resolved path is non-empty and exists on disk")
+        expect(resolved.len()).to_be_greater_than(0)
+        assert_true(file_exists(resolved))
+
+        env_set("SIMPLE_BINARY", saved)
+
+    it "honours an explicit SIMPLE_BINARY override":
+        # @req REQ-SSPEC-UNIT
+        step("point SIMPLE_BINARY at the bootstrap seed")
+        val saved = env_get("SIMPLE_BINARY")
+        env_set("SIMPLE_BINARY", SEED_BINARY)
+
+        step("the loader returns that path verbatim")
+        val resolved = _simple_binary()
+        expect(resolved).to_equal(SEED_BINARY)
+
+        step("clearing the override falls back to a path that still exists")
+        env_set("SIMPLE_BINARY", "")
+        val fallback = _simple_binary()
+        expect(fallback.len()).to_be_greater_than(0)
+        assert_true(file_exists(fallback))
+
+        env_set("SIMPLE_BINARY", saved)
+
+    it "maps every known backend key to a backend entry script that exists":
+        # @req REQ-SSPEC-UNIT
+        step("walk every backend key the loader dispatches on")
+        val keys = [
+            "tauri", "electron", "browser", "web", "tui_web",
+            "headless", "none", "cli", "tui_shared_wm", "tui"
+        ]
+        for key in keys:
+            val entry = _backend_entry_path(key)
+            expect(entry.len()).to_be_greater_than(0)
+            assert_true(file_exists(entry))
+
+    it "falls back to the TUI entry for an unknown backend key":
+        # @req REQ-SSPEC-UNIT
+        step("ask for a backend key the loader does not know")
+        expect(_backend_entry_path("no_such_backend")).to_equal("src/app/ui/backend_entry_tui.spl")
+        expect(_backend_entry_path("")).to_equal("src/app/ui/backend_entry_tui.spl")
+
+    it "keeps the shared-WM backend distinct from the plain TUI backend":
+        # @req REQ-SSPEC-UNIT
+        step("tui_shared_wm must not silently collapse onto the plain TUI entry")
+        expect(_backend_entry_path("tui_shared_wm")).to_equal("src/app/ui/backend_entry_tui_shared_wm.spl")
+        expect(_backend_entry_path("tui")).to_equal("src/app/ui/backend_entry_tui.spl")

@@ -1,16 +1,15 @@
-# Centralized built-in and negotiated dynamic backend loader.
+# Centralized built-in backend loader.
+# Dynamic SFFI resolution is intentionally deferred; its versioned entry symbol
+# is reserved here so the later loader can share this admission path.
 
-use common.plugin.iface_id.{IfaceId, ParamHeader}
-use common.plugin.negotiation.{HostOfferV1}
 use compiler.common.backend_plugin.model.{
     BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
     BackendPluginRequestV1, BackendPluginDescriptorV1,
     backend_plugin_vtable_v1_all_operations
 }
 use compiler.common.backend_plugin.receipt.{
-    BackendPluginError, validate_backend_plugin_request
+    BackendPluginError, backend_plugin_receipt, validate_backend_plugin_request
 }
-use compiler.common.backend_plugin.kpf_adapter.{admit_backend_plugin_kpf_v1}
 use compiler.backend.backend_plugin.admission.{admit_backend_plugin}
 use compiler.backend.backend_plugin.registry.{
     BUILTIN_SESSION_HANDLE, backend_request_with_default_name,
@@ -37,18 +36,6 @@ fn dynamic_backend_plugin_error_v1(
             BackendPluginError.MissingSymbol(detail)
         case DynamicBackendPluginLoadError.Unsupported(detail):
             BackendPluginError.ProviderRejected(detail)
-        case DynamicBackendPluginLoadError.NegotiationRefused(code, detail):
-            BackendPluginError.ProviderRejected(code + ": " + detail)
-
-fn _backend_host_offer_v1(request: BackendPluginRequestV1) -> HostOfferV1:
-    var capabilities: [text] = []
-    for capability in request.required_capabilities:
-        capabilities.push(capability.name())
-    HostOfferV1(
-        ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0),
-        0, true, "simple.compiler.backend-host-v1",
-        [IfaceId("simple.compiler.BackendPortV1", 1, 0, request.mir_abi_digest)],
-        [], capabilities, [])
 
 fn load_dynamic_backend_v1(
     request: BackendPluginRequestV1
@@ -57,29 +44,28 @@ fn load_dynamic_backend_v1(
     if validated.is_err():
         return Err(validated.err().unwrap())
     val loaded = unsafe(capabilities: [ffi, raw_ptr]):
-        load_dynamic_backend_plugin_lease(
-            request.plugin_path, request.backend_name, _backend_host_offer_v1(request))
+        load_dynamic_backend_plugin_lease(request.plugin_path)
     val lease = match loaded:
         case Ok(value): value
         case Err(error): return Err(dynamic_backend_plugin_error_v1(error))
-    val negotiated = lease.library.descriptor
+    # The runtime bridge validates the actual foreign descriptor before any
+    # provider operation. This local projection binds session/cache provenance
+    # to the selected path until descriptor metadata is returned in v2.
     val descriptor = BackendPluginDescriptorV1(
         BACKEND_PLUGIN_ABI_VERSION_V1,
         BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
-        request.backend_name, "dynamic-bridge-v1", negotiated.plugin_digest,
-        negotiated.implements.abi_digest,
+        request.backend_name,
+        "dynamic-bridge-v1",
+        lease.build_id,
+        request.mir_abi_digest,
         [request.role], [request.target], request.required_capabilities,
         backend_plugin_vtable_v1_all_operations())
-    val admission = match admit_backend_plugin_kpf_v1(request, descriptor):
-        case Ok(value): value
-        case Err(error):
-            var rejected_lease = lease
-            rejected_lease.close()
-            return Err(error)
+    val receipt = backend_plugin_receipt(descriptor, request)
     val adapter = DynamicBackendAdapter(
-        request: request, lease: lease, closed: false)
+        provider_path: lease.provider_path, request: request,
+        lease: lease, closed: false)
     Ok(BackendSession.dynamic_admitted(
-        descriptor, request, admission.receipt, adapter, 1))
+        descriptor, request, receipt, adapter, 1))
 
 fn load_backend(
     request: BackendPluginRequestV1

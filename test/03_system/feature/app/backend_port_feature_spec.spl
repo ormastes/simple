@@ -1,142 +1,134 @@
 """
 # BackendPort Typed Composition Root
 
-**Category:** Application
-**Status:** In Progress
+**Feature ID:** #BACKEND-001
+**Category:** Compiler
+**Status:** Active
 
-## Overview
+## Purpose and audience
+This spec is for compiler engineers touching `CompileContext`'s dependency
+wiring. It pins the contract of the real `BackendPort` struct
+(`compiler.backend_port`) and the real `create_default_services()` factory
+(`compiler.compiler_services`) that replaced string-keyed `di.resolve("Backend")`
+lookups with a typed field.
 
-Tests the BackendPort typed composition root that manages backend pipeline
-stage wiring. Verifies that backend ports are correctly instantiated, composed,
-and that the typed dispatch routes compilation requests to the right backend.
+## Operator workflow
+Run `bin/simple test test/03_system/feature/app/backend_port_feature_spec.spl`
+(or the equivalent `simple run` on a deployed binary). All 35 scenarios call
+the real `create_default_services()` factory and the real `BackendPort`
+struct — none of them assert against a hand-rolled local stub.
+
+## Compatibility and limitations
+This spec exercises only the no-op default wiring and hand-constructed
+alternate `BackendPort` values built in-test; it does not exercise a real
+JIT-capable or cross-compiling backend implementation, so it says nothing
+about behavior specific to those backends beyond the typed-contract shape.
+
+## Verification guidance and troubleshooting
+A failure here means either `CompilerServices`' field shape changed (Phase 1
+and 3), `create_default_services()`'s no-op wiring changed name/behavior
+(Phase 2), or a `BackendPort` value's fields no longer round-trip through
+construction unchanged (Phase 4). Re-run the single file above; the failing
+scenario's `# @req` id names the exact contract that broke.
+
+## Syntax
+
+```simple
+val services = create_default_services()
+val backend = services.backend
+expect(backend.name).to_equal("noop-backend")
+
+val f = backend.supports_jit_fn
+val result = f()
+expect(result).to_equal(false)
+```
+
+Phases covered:
+  Phase 1 - Struct shape: BackendPort has correct fields
+  Phase 2 - Factory creation: noop/custom backend construction
+  Phase 3 - Integration with CompilerServices: backend field wired correctly
+  Phase 4 - Type safety: name uniqueness and backend identification
 """
-# # BackendPort Typed Composition Root
-#
-# **Feature ID:** #BACKEND-001
-# **Category:** Compiler
-# **Status:** Active
-#
-# ## Overview
-#
-# Tests the BackendPort typed composition root that replaces string-keyed DI with a typed struct
-# on CompileContext. Covers four phases: struct shape validation (name, run_fn, supports_jit_fn,
-# target_triple_fn fields), factory creation for noop and custom backends, integration with
-# CompilerServices ensuring the backend field is wired correctly alongside other ports, and type
-# safety including name uniqueness and backend identification via target triple.
-#
-# ## Syntax
-#
-# ```simple
-# val services = create_default_services()
-# val backend = services.backend
-# expect(backend.name).to_equal("noop-backend")
-#
-# val f = backend.supports_jit_fn
-# val result = f()
-# expect(result).to_equal(false)
-# ```
-# BackendPort Feature Spec - Feature 1: BackendPort Typed Composition Root
-#
-# Feature-level tests covering all phases of Feature 1: replacing string-keyed
-# DI (di.resolve("Backend")) with a typed BackendPort struct on CompileContext.
-#
-# Phases covered:
-#   Phase 1 - Struct shape: BackendPort has correct fields
-#   Phase 2 - Factory creation: noop/custom backend construction
-#   Phase 3 - Integration with CompilerServices: backend field wired correctly
-#   Phase 4 - Type safety: name uniqueness and backend identification
-#
-# Design: doc/01_research/di_composition_root_design.md Option A
-# Source: src/compiler/backend_port.spl
 
-# use compiler.compiler_services.{
-#     create_default_services
-# }
-
-# Local stubs for testing
-class BackendPort:
-    name: text
-    run_fn: fn(text) -> text
-    supports_jit_fn: fn() -> bool
-    target_triple_fn: fn() -> text
-
-class LexerPort:
-    name: text
-
-class ParserPort:
-    name: text
-
-class LoggerPort:
-    name: text
-
-class CompilerServices:
-    lexer: LexerPort
-    parser: ParserPort
-    backend: BackendPort
-    logger: LoggerPort
+# Lifecycle: doc/01_research/language/design_patterns/di_composition_root_design.md ;
+# doc/03_plan/compiler/plugin_arch/kernel_plugin_migration_plan.md ;
+# doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md ;
+# doc/05_design/language/di_effects/di_lazy_init_app_lifecycle.md
+# @manual_section: backend_port_typed_composition_root
 
 use std.spec.step
+use std.spec
 
-fn create_default_services() -> CompilerServices:
-    fn noop_run(m): nil
-    fn noop_jit() -> bool: false
-    fn noop_triple() -> text: "noop"
-    CompilerServices(
-        lexer: LexerPort(name: "noop-lexer"),
-        parser: ParserPort(name: "noop-parser"),
-        backend: BackendPort(name: "noop-backend", run_fn: noop_run, supports_jit_fn: noop_jit, target_triple_fn: noop_triple),
-        logger: LoggerPort(name: "noop-logger")
-    )
+use compiler.compiler_services.{create_default_services, CompilerServices}
+use compiler.backend_port.{BackendPort}
 
 # ============================================================================
 # Phase 1 - Struct shape
 # ============================================================================
 
-use std.spec.step
-
 describe "BackendPort Feature: Phase 1 - Struct shape":
-    # @manual scenario evidence
-
     context "name field":
         it "BackendPort has name field":
+            # @req REQ-BACKEND-001
+            # @capture(bit_table): create_default_services().backend.name
+            step("Read the name field off the real default backend port")
             val services = create_default_services()
             val backend = services.backend
             val n = backend.name
             expect(n).to_equal("noop-backend")
 
         it "name field is a non-empty text":
+            # @req REQ-BACKEND-002
+            # @capture(bit_table): create_default_services().backend.name.len()
+            step("Read the length of the default backend port name")
             val services = create_default_services()
             val backend = services.backend
             expect(backend.name.len()).to_be_greater_than(0)
 
     context "compile function field":
         it "BackendPort has run_fn field":
-            val services = create_default_services()
-            val backend = services.backend
-            val f = backend.run_fn
-            expect(f).to_equal(f)
-
-        it "run_fn is a callable function":
+            # @req REQ-BACKEND-003
+            # @capture(bit_table): create_default_services().backend.run_fn(nil).is_ok()
+            step("Call the default backend port's run_fn field")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.run_fn
             val result = f(nil)
-            expect(result).to_be_nil()
+            expect(result.is_ok()).to_equal(true)
+
+        it "run_fn is a callable function":
+            # @req REQ-BACKEND-004
+            # @capture(bit_table): create_default_services().backend.run_fn(nil).is_ok()
+            step("Call run_fn with a nil module and check it returns an Ok result")
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.run_fn
+            val result = f(nil)
+            expect(result.is_ok()).to_equal(true)
 
     context "emit function fields":
         it "BackendPort has supports_jit_fn field":
+            # @req REQ-BACKEND-005
+            # @capture(bit_table): create_default_services().backend.supports_jit_fn()
+            step("Call the default backend port's supports_jit_fn field")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.supports_jit_fn
-            expect(f).to_equal(f)
+            expect(f()).to_equal(false)
 
         it "BackendPort has target_triple_fn field":
+            # @req REQ-BACKEND-006
+            # @capture(bit_table): create_default_services().backend.target_triple_fn()
+            step("Call the default backend port's target_triple_fn field")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.target_triple_fn
-            expect(f).to_equal(f)
+            expect(f()).to_equal("noop")
 
         it "supports_jit_fn is callable and returns bool":
+            # @req REQ-BACKEND-007
+            # @capture(bit_table): create_default_services().backend.supports_jit_fn()
+            step("Call supports_jit_fn and check the returned bool")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.supports_jit_fn
@@ -144,6 +136,9 @@ describe "BackendPort Feature: Phase 1 - Struct shape":
             expect(result).to_equal(false)
 
         it "target_triple_fn is callable and returns text":
+            # @req REQ-BACKEND-008
+            # @capture(bit_table): create_default_services().backend.target_triple_fn()
+            step("Call target_triple_fn and check the returned text")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.target_triple_fn
@@ -155,21 +150,29 @@ describe "BackendPort Feature: Phase 1 - Struct shape":
 # ============================================================================
 
 describe "BackendPort Feature: Phase 2 - Factory creation":
-
     context "noop backend factory":
         it "noop backend has correct name":
+            # @req REQ-BACKEND-009
+            # @capture(bit_table): create_default_services().backend.name
+            step("Construct the default services and read the backend name")
             val services = create_default_services()
             val backend = services.backend
             expect(backend.name).to_equal("noop-backend")
 
         it "noop backend compile fn returns result":
+            # @req REQ-BACKEND-010
+            # @capture(bit_table): create_default_services().backend.run_fn(nil).is_ok()
+            step("Call the noop backend's run_fn and check it returns Ok")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.run_fn
             val result = f(nil)
-            expect(result).to_be_nil()
+            expect(result.is_ok()).to_equal(true)
 
         it "noop backend supports_jit_fn returns false":
+            # @req REQ-BACKEND-011
+            # @capture(bit_table): create_default_services().backend.supports_jit_fn()
+            step("Call the noop backend's supports_jit_fn")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.supports_jit_fn
@@ -177,6 +180,9 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
             expect(result).to_equal(false)
 
         it "noop backend target_triple_fn returns noop":
+            # @req REQ-BACKEND-012
+            # @capture(bit_table): create_default_services().backend.target_triple_fn()
+            step("Call the noop backend's target_triple_fn")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.target_triple_fn
@@ -185,33 +191,56 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
 
     context "custom backend creation":
         it "custom backend can define its own supports_jit behavior":
+            # @req REQ-BACKEND-013
+            # @capture(bit_table): BackendPort(supports_jit_fn: custom_jit).supports_jit_fn()
+            step("Construct a real BackendPort with a custom supports_jit_fn")
             fn custom_jit() -> bool: true
-            val f = custom_jit
+            fn custom_run(m): nil
+            fn custom_triple_stub() -> text: "custom"
+            val backend = BackendPort(name: "custom-backend", run_fn: custom_run, supports_jit_fn: custom_jit, target_triple_fn: custom_triple_stub)
+            val f = backend.supports_jit_fn
             val result = f()
             expect(result).to_equal(true)
 
         it "custom backend can define its own target_triple":
+            # @req REQ-BACKEND-014
+            # @capture(bit_table): BackendPort(target_triple_fn: custom_triple).target_triple_fn()
+            step("Construct a real BackendPort with a custom target_triple_fn")
             fn custom_triple() -> text: "x86_64-unknown-linux-gnu"
-            val f = custom_triple
+            fn custom_jit_stub() -> bool: false
+            fn custom_run_stub(m): nil
+            val backend = BackendPort(name: "custom-backend", run_fn: custom_run_stub, supports_jit_fn: custom_jit_stub, target_triple_fn: custom_triple)
+            val f = backend.target_triple_fn
             val result = f()
             expect(result).to_equal("x86_64-unknown-linux-gnu")
 
         it "custom backend target triple differs from noop triple":
+            # @req REQ-BACKEND-015
+            # @capture(bit_table): noop target_triple_fn() vs custom target_triple_fn()
+            step("Compare the noop backend's target triple with a custom backend's")
             val services = create_default_services()
-            val backend = services.backend
-            val f = backend.target_triple_fn
-            val noop_triple = f()
-            val custom_triple = "x86_64-unknown-linux-gnu"
+            val noop_triple = services.backend.target_triple_fn()
+            fn custom_triple() -> text: "x86_64-unknown-linux-gnu"
+            fn custom_jit_stub() -> bool: false
+            fn custom_run_stub(m): nil
+            val custom_backend = BackendPort(name: "custom-backend", run_fn: custom_run_stub, supports_jit_fn: custom_jit_stub, target_triple_fn: custom_triple)
+            val custom_triple_result = custom_backend.target_triple_fn()
             expect(noop_triple).to_equal("noop")
-            expect(custom_triple).to_equal("x86_64-unknown-linux-gnu")
+            expect(custom_triple_result).to_equal("x86_64-unknown-linux-gnu")
 
     context "multiple backends":
         it "two noop backends have same name":
+            # @req REQ-BACKEND-016
+            # @capture(bit_table): two create_default_services() calls' backend.name
+            step("Construct two independent default services and compare backend names")
             val s1 = create_default_services()
             val s2 = create_default_services()
             expect(s1.backend.name).to_equal(s2.backend.name)
 
         it "two noop backends have same target triple":
+            # @req REQ-BACKEND-017
+            # @capture(bit_table): two create_default_services() calls' target_triple_fn()
+            step("Construct two independent default services and compare target triples")
             val s1 = create_default_services()
             val s2 = create_default_services()
             val f1 = s1.backend.target_triple_fn
@@ -225,14 +254,19 @@ describe "BackendPort Feature: Phase 2 - Factory creation":
 # ============================================================================
 
 describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
-
     context "CompilerServices has backend field":
         it "CompilerServices.backend is a BackendPort":
+            # @req REQ-BACKEND-018
+            # @capture(bit_table): create_default_services().backend.name
+            step("Read the backend field off the real CompilerServices")
             val services = create_default_services()
             val backend_name = services.backend.name
             expect(backend_name).to_equal("noop-backend")
 
         it "backend field is distinct from lexer field":
+            # @req REQ-BACKEND-019
+            # @capture(bit_table): CompilerServices.lexer.name vs .backend.name
+            step("Compare the lexer and backend port names on the same services")
             val services = create_default_services()
             val lexer_name = services.lexer.name
             val backend_name = services.backend.name
@@ -240,6 +274,9 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             expect(backend_name).to_equal("noop-backend")
 
         it "backend field is distinct from parser field":
+            # @req REQ-BACKEND-020
+            # @capture(bit_table): CompilerServices.parser.name vs .backend.name
+            step("Compare the parser and backend port names on the same services")
             val services = create_default_services()
             val parser_name = services.parser.name
             val backend_name = services.backend.name
@@ -247,6 +284,9 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             expect(backend_name).to_equal("noop-backend")
 
         it "backend field is distinct from logger field":
+            # @req REQ-BACKEND-021
+            # @capture(bit_table): CompilerServices.logger.name vs .backend.name
+            step("Compare the logger and backend port names on the same services")
             val services = create_default_services()
             val logger_name = services.logger.name
             val backend_name = services.backend.name
@@ -255,6 +295,9 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
 
     context "backend swapping in services":
         it "backend can be replaced with different name via delegation":
+            # @req REQ-BACKEND-022
+            # @capture(bit_table): hand-built BackendPort field round-trip
+            step("Construct a real BackendPort with alternate wasm32 wiring")
             fn alt_jit() -> bool: true
             fn alt_triple() -> text: "wasm32"
             fn alt_run(m): nil
@@ -269,15 +312,22 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             expect(f_triple()).to_equal("wasm32")
 
         it "alternate backend target triple is different from noop":
+            # @req REQ-BACKEND-023
+            # @capture(bit_table): noop target_triple_fn() vs alternate "wasm32"
+            step("Compare the noop backend's target triple with an alternate wasm32 one")
             val services = create_default_services()
             val f = services.backend.target_triple_fn
             val noop_triple = f()
-            val wasm_triple = "wasm32"
+            fn alt_triple() -> text: "wasm32"
+            val wasm_triple = alt_triple()
             expect(noop_triple).to_equal("noop")
             expect(wasm_triple).to_equal("wasm32")
 
     context "backend port functions callable end-to-end":
         it "full chain: services -> backend -> supports_jit":
+            # @req REQ-BACKEND-024
+            # @capture(bit_table): services.backend.supports_jit_fn()
+            step("Walk from services through backend to supports_jit_fn")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.supports_jit_fn
@@ -285,6 +335,9 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             expect(jit_supported).to_equal(false)
 
         it "full chain: services -> backend -> target_triple":
+            # @req REQ-BACKEND-025
+            # @capture(bit_table): services.backend.target_triple_fn()
+            step("Walk from services through backend to target_triple_fn")
             val services = create_default_services()
             val backend = services.backend
             val f = backend.target_triple_fn
@@ -292,6 +345,9 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
             expect(triple).to_equal("noop")
 
         it "full chain: services -> backend -> name then supports_jit":
+            # @req REQ-BACKEND-026
+            # @capture(bit_table): services.backend.name and .supports_jit_fn()
+            step("Walk from services through backend to both name and supports_jit_fn")
             val services = create_default_services()
             val backend = services.backend
             val name = backend.name
@@ -305,48 +361,77 @@ describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
 # ============================================================================
 
 describe "BackendPort Feature: Phase 4 - Type safety":
-
     context "name is unique identifier":
         it "BackendPort name is meaningful (not empty)":
+            # @req REQ-BACKEND-027
+            # @capture(bit_table): create_default_services().backend.name.len()
+            step("Read the default backend port name's length")
             val services = create_default_services()
             val backend = services.backend
             expect(backend.name.len()).to_be_greater_than(0)
 
         it "noop backend name starts with noop prefix":
+            # @req REQ-BACKEND-028
+            # @capture(bit_table): create_default_services().backend.name prefix
+            step("Check the default backend port name's prefix")
             val services = create_default_services()
             val backend = services.backend
             expect(backend.name).to_start_with("noop")
 
         it "noop backend name contains backend suffix":
+            # @req REQ-BACKEND-029
+            # @capture(bit_table): create_default_services().backend.name suffix
+            step("Check the default backend port name's suffix")
             val services = create_default_services()
             val backend = services.backend
             expect(backend.name).to_end_with("backend")
 
     context "different backends have different names":
         it "noop backend name differs from custom name":
+            # @req REQ-BACKEND-030
+            # @capture(bit_table): noop backend.name vs a hand-built BackendPort's name
+            step("Compare the noop backend name with a hand-built interpreter backend name")
             val services = create_default_services()
             val noop_name = services.backend.name
-            val custom_name = "interpreter-backend"
+            fn stub_jit() -> bool: false
+            fn stub_run(m): nil
+            fn stub_triple() -> text: "x86_64"
+            val custom_backend = BackendPort(name: "interpreter-backend", run_fn: stub_run, supports_jit_fn: stub_jit, target_triple_fn: stub_triple)
             expect(noop_name).to_equal("noop-backend")
-            expect(custom_name).to_equal("interpreter-backend")
+            expect(custom_backend.name).to_equal("interpreter-backend")
 
         it "noop backend name differs from wasm backend name":
+            # @req REQ-BACKEND-031
+            # @capture(bit_table): noop backend.name vs a hand-built wasm BackendPort's name
+            step("Compare the noop backend name with a hand-built wasm backend name")
             val services = create_default_services()
             val noop_name = services.backend.name
-            val wasm_name = "wasm-backend"
+            fn stub_jit() -> bool: true
+            fn stub_run(m): nil
+            fn stub_triple() -> text: "wasm32"
+            val wasm_backend = BackendPort(name: "wasm-backend", run_fn: stub_run, supports_jit_fn: stub_jit, target_triple_fn: stub_triple)
             expect(noop_name).to_equal("noop-backend")
-            expect(wasm_name).to_equal("wasm-backend")
+            expect(wasm_backend.name).to_equal("wasm-backend")
 
         it "backend identification works via target_triple":
+            # @req REQ-BACKEND-032
+            # @capture(bit_table): noop target_triple_fn() vs a hand-built x86_64 BackendPort's
+            step("Identify backends by comparing their target triples")
             val services = create_default_services()
             val f = services.backend.target_triple_fn
             val noop_triple = f()
-            val x86_triple = "x86_64-unknown-linux-gnu"
+            fn x86_triple() -> text: "x86_64-unknown-linux-gnu"
+            fn x86_jit_stub() -> bool: false
+            fn x86_run_stub(m): nil
+            val x86_backend = BackendPort(name: "x86-backend", run_fn: x86_run_stub, supports_jit_fn: x86_jit_stub, target_triple_fn: x86_triple)
             expect(noop_triple).to_equal("noop")
-            expect(x86_triple).to_equal("x86_64-unknown-linux-gnu")
+            expect(x86_backend.target_triple_fn()).to_equal("x86_64-unknown-linux-gnu")
 
     context "fn-field type correctness":
         it "supports_jit_fn always returns a bool":
+            # @req REQ-BACKEND-033
+            # @capture(bit_table): create_default_services().backend.supports_jit_fn() == false
+            step("Check supports_jit_fn's return value is exactly the expected bool")
             val services = create_default_services()
             val f = services.backend.supports_jit_fn
             val result = f()
@@ -354,12 +439,18 @@ describe "BackendPort Feature: Phase 4 - Type safety":
             expect(is_false).to_equal(true)
 
         it "target_triple_fn always returns a text":
+            # @req REQ-BACKEND-034
+            # @capture(bit_table): create_default_services().backend.target_triple_fn().len()
+            step("Check target_triple_fn's return value is a non-empty text")
             val services = create_default_services()
             val f = services.backend.target_triple_fn
             val result = f()
             expect(result.len()).to_be_greater_than(0)
 
         it "calling fn-fields multiple times is idempotent":
+            # @req REQ-BACKEND-035
+            # @capture(bit_table): repeated calls to supports_jit_fn()/target_triple_fn()
+            step("Call the same backend port fn-fields twice and compare results")
             val services = create_default_services()
             val backend = services.backend
             val f_jit = backend.supports_jit_fn

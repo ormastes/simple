@@ -1,37 +1,80 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Portable smoke evidence for the browser open/snapshot contract: the pure
+Simple web renderer (`simple_web_render_html_to_pixels`) must produce a
+full pixel snapshot for a configured viewport, paint non-background pixels
+for visible text, and do all of it headless — GUI opening stays opt-in
+behind the SIMPLE_GUI_TEST gate and never gates the snapshot pipeline.
+Written for the UI-rendering team that owns the ui_browser lane.
 
-# @tag:system
-#
-# Portable smoke for the browser open/snapshot contract.
+## Operator workflow
+Run this file with the pure-Simple binary, e.g.
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/gui/ui_browser/browser_open_spec.spl`
+and read the per-scenario verdicts. No display server, browser process, or
+network access is required.
 
-use std.spec.*
+## Compatibility and limitations
+The 160x120 viewport render dominates the runtime on the interpreter
+(~1 minute); the remaining scenarios render at 16x16 or smaller. GPU
+backends that fail to resolve are skipped automatically by the backend
+resolver — the CPU path under test here always runs.
+
+## Verification guidance and troubleshooting
+A failure here means the portable snapshot contract moved: re-run the file
+and read the first failing expect. A wrong pixel count points at the
+viewport plumbing; identical text/blank renders point at the paint layer.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: browser portable snapshot smoke
 
 use std.spec.*
 use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
 
 describe "Browser Engine portable snapshot smoke":
-    # @manual scenario evidence
-    it "records snapshot path and format":
-        val snapshot = ".build/ui_browser/test_hello.ppm"
-        val format = "P3"
-        expect(snapshot).to_end_with(".ppm")
-        expect(format).to_equal("P3")
+    it "renders a full pixel snapshot at the configured viewport size":
+        # @req REQ-BROWSER-SNAPSHOT-001
+        # @capture(gui_image): the 160x120 snapshot pixel-count verdict
+        step("Render a small document at 160x120 and count the returned pixels")
+        val html = "<html><body><h1>snapshot smoke</h1></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 160, 120)
+        expect(pixels.len()).to_equal(19200)  # oracle: a 160x120 ARGB snapshot is exactly 19200 pixels
 
-    it "records default snapshot dimensions":
-        val width = 1280
-        val height = 720
-        expect(width).to_equal(1280)
-        expect(height).to_equal(720)
+    it "paints non-background pixels for visible text content":
+        # @req REQ-BROWSER-SNAPSHOT-002
+        # @capture(bit_table): text vs blank render difference verdict at 32x32
+        step("Render a text document and a blank document at 32x32 and compare")
+        val text_pixels = simple_web_render_html_to_pixels("<html><body><p>xxxx xxxx</p></body></html>", 32, 32)
+        val blank_pixels = simple_web_render_html_to_pixels("<html><body></body></html>", 32, 32)
+        var differs = false
+        var i = 0
+        while i < text_pixels.len():
+            if text_pixels[i] != blank_pixels[i]:
+                differs = true
+            i = i + 1
+        expect(differs).to_equal(true)  # oracle: visible text must paint at least one non-background pixel
 
-    it "records non-background paint colors":
-        val panel_rgb = "45 45 45"
-        val text_rgb = "224 224 224"
-        expect(panel_rgb).to_contain("45")
-        expect(text_rgb).to_contain("224")
+    it "renders the 1x1 viewport boundary as exactly one pixel":
+        # @req REQ-BROWSER-SNAPSHOT-003
+        # @capture(bit_table): the boundary-viewport pixel count
+        step("Render a document at the 1x1 boundary viewport")
+        val pixels = simple_web_render_html_to_pixels("<html><body><p>x</p></body></html>", 1, 1)
+        expect(pixels.len()).to_equal(1)  # oracle: the smallest legal viewport yields exactly one pixel
 
-describe "Browser Engine portable GUI gate":
-    it "keeps GUI open behavior opt-in":
-        val env_name = "SIMPLE_GUI_TEST"
-        expect(env_name).to_equal("SIMPLE_GUI_TEST")
+    it "keeps the snapshot pipeline headless so GUI open stays opt-in":
+        # @req REQ-BROWSER-SNAPSHOT-004
+        # @capture(bit_table): repeated-render determinism verdict at 8x8
+        step("Render the same document twice at 8x8 with no display session and compare")
+        val html = "<html><body><p>headless</p></body></html>"
+        val first = simple_web_render_html_to_pixels(html, 8, 8)
+        val second = simple_web_render_html_to_pixels(html, 8, 8)
+        var same = true
+        var j = 0
+        while j < first.len():
+            if first[j] != second[j]:
+                same = false
+            j = j + 1
+        expect(same).to_equal(true)  # oracle: repeated headless renders must be pixel-identical, no GUI session involved

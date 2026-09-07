@@ -1,0 +1,110 @@
+"""
+profile_portability_check — the G5 portability claim, made concrete.
+
+The claim: ONE firmware source, TWO different controllers, DIFFERENT and
+CORRECT configuration, with no firmware edit between them. This check proves
+the "different and correct" half mechanically, and states plainly which half it
+cannot prove today.
+
+Honest scope, stated up front (precedent: fw/nvme_transport_profiles.sdn, whose
+`board` profile carries `bound: 0` and four honestly-failing assertions):
+
+  * SimpleFpgaRv32  is BOUND (bound: 1) — the in-process emulator substrate.
+  * NvmeChaReference is DECLARED BUT UNBOUND (bound: 0) — no KCU105 attached.
+  * CosmosPlusReference is DECLARED BUT UNBOUND and additionally BLOCKED by the
+    source-origin ledger (review_status: pending).
+
+So exactly ONE substrate can be exercised today. This check therefore proves
+CONFIGURATION portability (the profile axes really do drive different, correct
+values off one source) and NOT execution on two substrates. No second substrate
+is faked here.
+
+Run from the REPO ROOT. Verdict is the LAST line; exit codes are not evidence.
+"""
+
+use profile_gen.{Product, load_product, validate, sdn_get, sdn_at, sdn_text, sdn_int, total_pages}
+
+struct Check:
+    passed: i64
+    failed: i64
+    unbound: i64
+
+fn check_new() -> Check:
+    Check(passed: 0, failed: 0, unbound: 0)
+
+fn note(c: Check, ok: bool, label: text) -> Check:
+    if ok:
+        print("  ok   " + label)
+        return Check(passed: c.passed + 1, failed: c.failed, unbound: c.unbound)
+    print("  FAIL " + label)
+    Check(passed: c.passed, failed: c.failed + 1, unbound: c.unbound)
+
+fn note_unbound(c: Check, label: text) -> Check:
+    print("  UNBOUND (honest failure, not a pass) " + label)
+    Check(passed: c.passed, failed: c.failed, unbound: c.unbound + 1)
+
+fn placement(p: Product, unit: text) -> text:
+    sdn_text(sdn_at(p.offload, "units", unit))
+
+fn main() -> ():
+    val a: Product = load_product("SimpleFpgaRv32")
+    val b: Product = load_product("NvmeChaReference")
+    var c: Check = check_new()
+
+    if a.ok == 0 or b.ok == 0:
+        print("ERROR — nothing was checked (profile axes did not load)")
+        return ()
+
+    print("-- both profiles are well-formed --")
+    c = note(c, validate(a).len() == 0, "SimpleFpgaRv32 equations close")
+    c = note(c, validate(b).len() == 0, "NvmeChaReference equations close")
+
+    print("-- the SAME source yields DIFFERENT configuration --")
+    c = note(c, total_pages(a) != total_pages(b),
+             "total_pages differs (" + total_pages(a).to_text() + " vs " + total_pages(b).to_text() + ")")
+    c = note(c, sdn_int(sdn_get(sdn_at(a.controller, "nvme", "queues"), "depth_max")) == 64
+                and sdn_int(sdn_get(sdn_at(b.controller, "nvme", "queues"), "depth_max")) == 64,
+             "depth_max is 64 on both — a value that agrees is still read per-axis")
+    c = note(c, sdn_int(sdn_get(sdn_at(a.controller, "nvme", "queues"), "io_max")) != sdn_int(sdn_get(sdn_at(b.controller, "nvme", "queues"), "io_max")),
+             "io_max differs (1 vs 8)")
+    c = note(c, sdn_int(sdn_at(a.controller, "dma", "max_transfer")) != sdn_int(sdn_at(b.controller, "dma", "max_transfer")),
+             "dma.max_transfer differs (4096 vs 131072)")
+    c = note(c, sdn_text(sdn_get(a.media, "kind")) != sdn_text(sdn_get(b.media, "kind")),
+             "media.kind differs (dram_model vs block_backend)")
+
+    print("-- and the configuration is CORRECT against each profile --")
+    c = note(c, total_pages(a) == 256, "SimpleFpgaRv32 total_pages == 256 (1x1x1x1x16x16)")
+    c = note(c, total_pages(b) == 4096, "NvmeChaReference total_pages == 4096 (1x1x1x1x64x64)")
+    c = note(c, sdn_int(sdn_at(a.controller, "address", "physical_bits")) == 32, "SimpleFpgaRv32 is 32-bit")
+    c = note(c, sdn_int(sdn_at(b.controller, "address", "physical_bits")) == 64, "NvmeChaReference is 64-bit")
+
+    print("-- the OFFLOAD axis inverts with zero firmware edits --")
+    for unit in ["queue_fetch", "prp_walk", "completion_post", "dma_scatter"]:
+        c = note(c, placement(a, unit) == "firmware" and placement(b, unit) == "circuit",
+                 unit + ": firmware on SimpleFpgaRv32, circuit on NvmeChaReference")
+    c = note(c, placement(a, "ecc_encode") == "firmware" and placement(b, "ecc_encode") == "firmware",
+             "ecc_encode: firmware on both (NVMeCHA has no NAND to encode for)")
+
+    print("-- certification levels are honest --")
+    c = note(c, sdn_text(sdn_get(b.board, "evidence_required")) == "C4",
+             "NvmeChaReference caps at C4 — C5 would be a category error (no media)")
+    c = note(c, sdn_text(sdn_get(a.board, "certification_current")) == "C0",
+             "SimpleFpgaRv32 certification_current is C0, not its C3 ceiling")
+
+    print("-- substrate binding (the half this check cannot prove) --")
+    c = note(c, sdn_int(sdn_get(a.board, "bound")) == 1, "SimpleFpgaRv32 has a bound substrate")
+    if sdn_int(sdn_get(b.board, "bound")) == 1:
+        c = note(c, false, "NvmeChaReference claims bound: 1 with no board attached")
+    else:
+        c = note_unbound(c, "NvmeChaReference: config generated, NOT executed (no KCU105)")
+        c = note_unbound(c, "CosmosPlusReference: ledger-blocked AND unbound, NOT executed")
+
+    val total: i64 = c.passed + c.failed
+    if total == 0:
+        print("ERROR — nothing was checked")
+        return ()
+    if c.failed > 0:
+        print("FAIL — " + total.to_text() + " assertion(s) checked, " + c.failed.to_text() + " failed, " + c.unbound.to_text() + " unbound-and-not-executed")
+    else:
+        print("PASS — " + total.to_text() + " assertion(s) checked, 0 failed, " + c.unbound.to_text() + " declared-but-unbound (config only, never executed)")
+    ()

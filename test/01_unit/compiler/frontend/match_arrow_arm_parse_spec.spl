@@ -1,0 +1,225 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Caseless arrow match arms: `pattern -> body`.
+#
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+# @cover src/compiler/10.frontend/core/lexer.spl
+#
+# Bug: doc/08_tracking/bug/stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md
+#
+# The Rust seed has always accepted a caseless arrow arm; the self-hosted
+# `parse_match_arms_common` did not, so a Stage-2 compiler could not parse the
+# Stage-3 sources and self-hosting was blocked at
+#   [parser_error] src/compiler/driver/driver_source_pipeline_parsing.spl
+#   line 309:16: expected :, got -> '->'
+#
+# Exercises the self-hosted frontend DIRECTLY via parse_and_build_module --
+# bin/simple currently resolves to the Rust seed, which does not read
+# src/compiler/10.frontend/ at all, so this in-process call into the flat AST
+# bridge is the only way to observe this parser code running (same pattern as
+# layer_decl_parse_spec.spl and flat_ast_speculative_diagnostics_spec.spl in
+# this directory).
+#
+# Discrimination: with the `elif par_kind_get() == TOK_ARROW:` branch removed
+# from parse_match_arms_common's caseless-arm path, every "arrow" scenario below
+# goes red with exactly `expected :, got -> '->'`, while the `=>` and `:`
+# regression scenarios stay green. Measured 2026-09-06.
+
+use std.spec.step
+
+use std.spec
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
+
+describe "caseless arrow match arms parse in the self-hosted frontend":
+    # @manual scenario evidence
+    it "parses two inline `pattern -> expr` arms":
+        # @req REQ-SSPEC-UNIT
+        step("parses two inline `pattern -> expr` arms")
+        # The 6-line shape from the bug record. An arm that is NOT the last arm
+        # is the load-bearing part: the failure always surfaced at the arm that
+        # follows a successfully-started one.
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0 -> \"zero\"\n        _ -> \"other\"\n"
+        val module = parse_and_build_module(source, "arrow_inline.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "parses an arrow arm whose body is a STATEMENT, not an expression":
+        # @req REQ-SSPEC-UNIT
+        step("parses an arrow arm whose body is a STATEMENT, not an expression")
+        # `Err(message) -> return Err(...)` is line 310 of the file that blocked
+        # Stage 3, and `0 -> return DriverClass.Block` is the shape used 15
+        # times in src/lib/nogc_sync_mut/driver/loader.spl. parse_expr() cannot
+        # accept a `return`; this is why the arrow branch delegates to
+        # parse_block() exactly as the `:` spelling does.
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0 -> return \"zero\"\n        _ -> return \"other\"\n"
+        val module = parse_and_build_module(source, "arrow_stmt.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "parses an arrow arm with an INDENTED block body":
+        # @req REQ-SSPEC-UNIT
+        step("parses an arrow arm with an INDENTED block body")
+        val source = "fn f(n: i64) -> text:\n        match n:\n            0 ->\n                \"zero\"\n            _ ->\n                \"other\"\n"
+        val module = parse_and_build_module(source, "arrow_block.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "keeps EVERY statement of a multi-statement arrow block body":
+        # @req REQ-SSPEC-UNIT
+        step("keeps EVERY statement of a multi-statement arrow block body")
+        # This is the half the parser branch alone does NOT buy.
+        # token_requires_rhs() (core/tokens.spl:554) returns true for TOK_ARROW
+        # so a RETURN type may sit on the next physical line, which makes a
+        # trailing `->` suppress the Newline/Indent after it. Without the
+        # lex_mark_current_token_as_generic_close() handoff at the arm arrow,
+        # this source parses with NO error and silently keeps only
+        # `acc = acc + 1`, handing `acc = acc + 10` to the arm loop as the next
+        # arm's pattern -- so a "parses cleanly" assertion alone would not
+        # detect it. The nested-declaration scenario below is what goes red.
+        val source = "fn f(n: i64) -> i64:\n    var acc = 0\n    match n:\n        0 ->\n            acc = acc + 1\n            acc = acc + 10\n        _ ->\n            acc = acc + 100\n    return acc\n"
+        val module = parse_and_build_module(source, "arrow_multi_stmt.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "parses a nested `fn` declaration inside an arrow block body":
+        # @req REQ-SSPEC-UNIT
+        step("parses a nested `fn` declaration inside an arrow block body")
+        # The discriminating form of the scenario above: when the arm body's
+        # first statement is a block-bodied declaration, truncating the body
+        # after it leaves `g(1)` in ARM position and the parse FAILS loudly
+        # with `expected :, got Newline`. Verified red without the lexer
+        # handoff, green with it, while the `:` twin below is green either way.
+        val source = "fn f(n: i64) -> i64:\n    match n:\n        0 ->\n            fn g(a: i64) -> i64:\n                a + 1\n            g(1)\n        _ -> n\n"
+        val module = parse_and_build_module(source, "arrow_nested_fn.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "control: the `:` twin of the nested-fn arm parses (it always did)":
+        # @req REQ-SSPEC-UNIT
+        step("control: the `:` twin of the nested-fn arm parses (it always did)")
+        val source = "fn f(n: i64) -> i64:\n    match n:\n        0:\n            fn g(a: i64) -> i64:\n                a + 1\n            g(1)\n        _: n\n"
+        val module = parse_and_build_module(source, "colon_nested_fn.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "parses the exact Stage-3 blocker shape: `Ok(()) -> ()` then `Err(m) -> return ...`":
+        # @req REQ-SSPEC-UNIT
+        step("parses the exact Stage-3 blocker shape: `Ok(()) -> ()` then `Err(m) -> return ...`")
+        # Verbatim from src/compiler/80.driver/driver_source_pipeline_parsing.spl
+        # :309-310 -- the two arms the Stage-2 compiler rejected.
+        val source = "fn g() -> Result<i64, text>:\n    match h():\n        Ok(()) -> ()\n        Err(message) -> return Err(\"invalid_profile: \" + message)\n    Ok(1)\n"
+        val module = parse_and_build_module(source, "arrow_stage3_shape.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("g")).to_equal(true)
+
+    it "parses an arrow arm carrying a guard":
+        # @req REQ-SSPEC-UNIT
+        step("parses an arrow arm carrying a guard")
+        # The guard/`as`-binding handling sits BEFORE the separator dispatch, so
+        # the arrow branch has to be reachable after both. The quick reference
+        # documents guards with arrows
+        # (doc/07_guide/quick_reference/syntax_quick_reference.md § Pattern Guards).
+        val source = "fn f(n: i64) -> text:\n    match n:\n        n if n < 0 -> \"negative\"\n        0 -> \"zero\"\n        _ -> \"positive\"\n"
+        val module = parse_and_build_module(source, "arrow_guard.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "parses an arrow arm carrying an `as` pattern binding":
+        # @req REQ-SSPEC-UNIT
+        step("parses an arrow arm carrying an `as` pattern binding")
+        val source = "fn f(n: i64) -> i64:\n    match n:\n        0 as z -> z\n        _ as o -> o\n"
+        val module = parse_and_build_module(source, "arrow_as_binding.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "sabotage: an arrow arm with NO body is still a parse error":
+        # @req REQ-SSPEC-UNIT
+        step("sabotage: an arrow arm with NO body is still a parse error")
+        # The fix must not turn `->` into a token the arm loop simply swallows.
+        # A dangling arrow followed by a DEDENT has no body at all, and
+        # parse_block() must reject it exactly as the `:` and `=>` twins below
+        # do -- Simple has `pass` for a deliberate no-op. Measured: without the
+        # lexer handoff this scenario was GREEN-but-wrong (has_errors=false),
+        # because the suppressed Newline made the dedented `"after"` look like
+        # a same-line body.
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0 ->\n    \"after\"\n"
+        val module = parse_and_build_module(source, "arrow_no_body.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+    it "sabotage parity: the `:` twin of the empty-body arm is also an error":
+        # @req REQ-SSPEC-UNIT
+        step("sabotage parity: the `:` twin of the empty-body arm is also an error")
+        # Pins the sabotage above to LANGUAGE behaviour rather than to an
+        # accident of the arrow path: `:` rejects the identical shape.
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0:\n    \"after\"\n"
+        val module = parse_and_build_module(source, "colon_no_body.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+    it "does not regress: the `=>` arm separator still parses":
+        # @req REQ-SSPEC-UNIT
+        step("does not regress: the `=>` arm separator still parses")
+        # G28's fat-arrow path is the branch the arrow branch was added beside;
+        # this is the guard that adding `->` did not shadow or reorder it.
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0 => \"zero\"\n        _ => \"other\"\n"
+        val module = parse_and_build_module(source, "fatarrow_regression.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "does not regress: the caseless `pattern:` arm separator still parses":
+        # @req REQ-SSPEC-UNIT
+        step("does not regress: the caseless `pattern:` arm separator still parses")
+        val source = "fn f(n: i64) -> text:\n    match n:\n        0: \"zero\"\n        _: \"other\"\n"
+        val module = parse_and_build_module(source, "colon_regression.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "does not regress: `case pattern:` arms still parse":
+        # @req REQ-SSPEC-UNIT
+        step("does not regress: `case pattern:` arms still parse")
+        val source = "fn f(n: i64) -> text:\n    match n:\n        case 0: \"zero\"\n        case _: \"other\"\n"
+        val module = parse_and_build_module(source, "case_regression.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "does not regress: a RETURN-type arrow still continues onto the next line":
+        # @req REQ-SSPEC-UNIT
+        step("does not regress: a RETURN-type arrow still continues onto the next line")
+        # This is the behaviour token_requires_rhs(TOK_ARROW) exists for, and
+        # the reason the arm handoff is scoped to the arm arrow ALONE: a
+        # trailing return arrow must keep suppressing the layout tokens so the
+        # type on the next physical line is still part of the signature.
+        val source = "fn f(a: i64) ->\n        i64:\n    a + 1\n"
+        val module = parse_and_build_module(source, "rettype_wrapped.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)
+
+    it "does not regress: a wrapped return-type arrow INSIDE an arrow arm body":
+        # @req REQ-SSPEC-UNIT
+        step("does not regress: a wrapped return-type arrow INSIDE an arrow arm body")
+        # Both arrow roles in one source: the arm arrow must open a block while
+        # the nested declaration's return arrow, reached from inside that block,
+        # must still continue onto its next line.
+        val source = "fn f(n: i64) -> i64:\n    match n:\n        0 ->\n            fn g(a: i64) ->\n                    i64:\n                a + 1\n            g(1)\n        _ -> n\n"
+        val module = parse_and_build_module(source, "rettype_wrapped_in_arm.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("f")).to_equal(true)

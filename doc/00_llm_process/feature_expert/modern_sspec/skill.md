@@ -287,6 +287,16 @@ Read that section before writing or converting any `*_spec.spl`; the scaffold
   [`doc/08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md`](../../../08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md),
   `test/01_unit/app/sspec_maintain/scorer_loopholes_spec.spl`,
   `test/01_unit/app/sspec_maintain/scorer_loopholes_adjacent_spec.spl`.
+- **Lane-gated skips stopped capping SKIP-clean specs at 49 (2026-09-06,
+  `source_facts.spl`).** `_is_pending` flagged every `skip(...)` call, so a spec
+  that probes an absent lane (GPU, board, QEMU) and reports the documented
+  `skip:` outcome tripped ORA-001 — a rule whose own evidence text says
+  *unconditional* scaffold. A `skip(...)` reached only through an `if`/`elif`/
+  `else:` branch inside a scenario is now exempt; every other marker, an
+  unguarded `skip(...)`, and `real_assertion_count == 0` still fire.
+  Measured on `test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl`:
+  49/100 with 1 blocker → 84/100 with 0. Specs:
+  `test/01_unit/app/sspec_maintain/pending_detection_spec.spl`.
 - **Not changed, deliberately:** MNT-002 (mirror) and MNT-007 (lifecycle links)
   together cost at most 3.5 aggregate on SCAN and are true statements about the
   spec; a 90 is reachable with both outstanding, so neither rule was weakened.
@@ -355,10 +365,73 @@ loop did better than a pure flywheel, and worse than a clean experiment:
   only show the checklist can be tuned until a known file passes — the flywheel
   failure itself — and should not be counted as capability.
 
-So the defensible claim is **14/14 on held-out specs**, not 21/21. Still
-missing: a *standing* held-out partition (the split above is retrospective, not
-enforced), a leak check on the checklist text, and a same-case-exclusion rule
-inside the loop. See `.claude/skills/lib/debug_ladder.md` "Anti-flywheel rules"
-for the three counter-rules (held-out set, no same-case validation, leak
-gate) that a future revision of this loop should apply before trusting its own
-reported gains.
+So the defensible claim is **14/14 on held-out specs**, not 21/21.
+
+**Now standing, not retrospective (2026-09-05, same day).** The three gaps
+this section used to flag are closed:
+
+- **Standing held-out partition:** `.spipe/training/splits.sdn` records all
+  21 specs with `split` = `train` (the 7 same-case files: the 3 round-1
+  files whose 84/78/70 evidence motivated the rewrite — `balance_score_spec`,
+  `admission_verdict_spec`, `graph_source_spec` — plus the 4 that stalled at
+  84/84/84/88 and triggered the 14:00 ORA-003 edit —
+  `diagnostics_registry_spec`, `graph_source_v2_spec`, `link_extraction_spec`,
+  `search_adapter_spec`) or `private_test` (the 14 held-out files: round 2 +
+  the sonnet batch, the blocker batch, and the final near-target batch). File
+  list and derivation method (git log on the checklist commits `bf9cd7b`/
+  `3db4e4e` in `.spipe/spipe`, cross-checked against every landing commit's
+  own score table) are recorded in the splits file's header — no per-spec
+  list existed in prose before this.
+- **Leak checks:** `sh scripts/check/sspec-train.shs --split <name>` reads
+  the splits file and, before scoring a non-`train` split, fail-closed ERRORs
+  (exit 2) if (a) a fresh sha256 of the checklist file no longer equals the
+  `checklist_digest` frozen in the splits file, or (b) any selected spec's
+  path is cited verbatim in the checklist file. Gate (a) went through one
+  correction the same day: an earlier cut compared each held-out spec's OWN
+  git timestamp against a freeze cutoff, which is backwards — fixing a
+  held-out spec to reach target necessarily edits it after the freeze; that
+  is the training step, not a leak. The direction that actually matters is
+  the CHECKLIST changing after it saw a held-out spec's findings, which is
+  what the digest gate now checks. It proves the checklist text is
+  byte-identical to the one frozen at commit `3db4e4e`; it does **not**
+  prove the 14 held-out specs were unseen when `3db4e4e` was written — that
+  provenance claim still rests on the `bf9cd7b`/`3db4e4e` commit-timestamp
+  argument above, which is unenforced by any mechanism.
+- **Same-case exclusion:** built into the split itself — `--split train`
+  only ever scores the 7 tuned-on files, `--split private_test` only the 14
+  that were never used to write the checklist. Both gates above are skipped
+  for `train` on purpose (see the script header): gating deliberately
+  tuned-on rows would make ordinary train scoring ERROR every time the
+  checklist is legitimately edited.
+
+**Measured results (checklist read via `SIMPLE_SSPEC_CHECKLIST` pointed at
+the `.spipe/spipe` submodule checkout, since it is uninitialized in the
+sparse worktree this was run from):**
+
+```
+sspec-train.shs: PASS — 7 fixture(s) checked (selftest only, no real scan requested)
+sspec-train.shs: PASS — 14 checked, split=private_test, target=90
+sspec-train.shs: PASS — 7 checked, split=train, target=90
+```
+
+Unlike the earlier (backwards) temporal gate, `--split private_test` now
+passes cleanly: the checklist at `.spipe/spipe/doc/00_llm_process/spipe/skill.md`
+hashes to `dd830096...` — the content at SPipe `06d7d34`, which is `3db4e4e`
+rebased onto SPipe origin/main and pushed, and which the outer repo's
+`.spipe/spipe` gitlink now pins (the first freeze, `deaf594d...`, was against
+a `3db4e4e` that existed only locally; a fresh clone would have ERRORed — see
+the re-freeze note in the splits file header). Gate (a) clears, and
+none of the 14 held-out paths are cited in it, so gate (b) clears too. Read
+this PASS for exactly what it proves and no more: the checklist has not
+drifted since the split was frozen, and no held-out spec is named in it —
+**not** that the 14 specs were unseen when that checklist text was written.
+That second claim is still the retrospective commit-timestamp argument two
+sections up, unenforced by any mechanism; a future loop revision that wants
+a mechanically-verified version of it needs to freeze the held-out set
+*before* scoring, and record that freeze moment independently of the
+checklist's own content. See `.claude/skills/lib/debug_ladder.md`
+"Anti-flywheel rules" for the general counter-rules this mechanism
+implements.
+
+## Lane docs (2026-09-05)
+- design: `doc/05_design/infra/sspec/sspec_training_heldout_gate_design.md` · plan: `doc/03_plan/infra/sspec/sspec_training_heldout_gate_plan.md` · state: `.spipe/sspec_training_heldout_gate/state.md`

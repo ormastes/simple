@@ -1,5 +1,25 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
+"""
+## Purpose and audience
+For maintainers of the SimpleOS `simplebox` multi-call binary (the
+busybox-style router that dispatches a single executable to many
+applets). Pins the dispatch contract: resolving an applet by `argv[0]`
+basename, by `simplebox`/`busybox` `argv[1]`, and the edge cases (unknown
+applet, `--list`, empty argv).
+## Operator workflow
+Run after touching `os.tools.simplebox.simplebox_dispatch`: `bin/simple
+test test/01_unit/os/tools/simplebox_dispatch_spec.spl`. Each scenario
+calls `simplebox_dispatch`/`simplebox_has_applet`/`simplebox_applet_names`
+directly and checks the returned exit code, boolean, or applet list.
+## Compatibility and limitations
+Interpreter-mode unit tests only: no real process is exec'd and no argv[0]
+symlink resolution from the OS is exercised -- `simplebox_dispatch` is
+called directly with a synthetic argv array.
+## Verification guidance and troubleshooting
+A failing exit-code scenario means the router no longer resolves that
+applet name or edge case to its documented exit status. Re-open
+`simplebox_dispatch.spl`, compare its routing table against the scenario's
+step description, and re-run this file.
+"""
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # Unit spec for simplebox_dispatch multi-call router
@@ -7,101 +27,181 @@ use std.spec
 use os.tools.simplebox.simplebox_dispatch.{simplebox_dispatch, simplebox_applet_names, simplebox_has_applet}
 
 describe "simplebox multi-call dispatcher":
+    # @manual_section: simplebox-dispatch-by-basename
     describe "simplebox_dispatch by argv[0] basename":
         it "dispatches echo via full path basename":
+            # @req REQ-SIMPLEBOX-BASENAME-001
+            # @capture(statistics): dispatch exit code for a full-path echo invocation
+            step("Dispatch argv [/usr/bin/echo, hello]")
             val result = simplebox_dispatch(["/usr/bin/echo", "hello"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: echo succeeds and exits 0
 
         it "dispatches true via bare name":
+            # @req REQ-SIMPLEBOX-BASENAME-002
+            # @capture(statistics): dispatch exit code for a bare-name true invocation
+            step("Dispatch argv [true]")
             val result = simplebox_dispatch(["true"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: true always exits 0
 
         it "dispatches false via bare name":
+            # @req REQ-SIMPLEBOX-BASENAME-003
+            # @capture(statistics): dispatch exit code for a bare-name false invocation
+            step("Dispatch argv [false]")
             val result = simplebox_dispatch(["false"])
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: false always exits 1
 
         it "dispatches pwd via bare name":
+            # @req REQ-SIMPLEBOX-BASENAME-004
+            # @capture(statistics): dispatch exit code for a bare-name pwd invocation
+            step("Dispatch argv [pwd]")
             val result = simplebox_dispatch(["pwd"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: pwd succeeds and exits 0
 
+    # @manual_section: simplebox-dispatch-via-multicall-argv1
     describe "simplebox_dispatch via simplebox/busybox argv[1]":
         it "dispatches echo via simplebox":
+            # @req REQ-SIMPLEBOX-MULTICALL-001
+            # @capture(statistics): dispatch exit code routed through the simplebox multi-call name
+            step("Dispatch argv [simplebox, echo, hello]")
             val result = simplebox_dispatch(["simplebox", "echo", "hello"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: echo succeeds and exits 0
 
         it "dispatches false via simplebox":
+            # @req REQ-SIMPLEBOX-MULTICALL-002
+            # @capture(statistics): dispatch exit code routed through the simplebox multi-call name
+            step("Dispatch argv [simplebox, false]")
             val result = simplebox_dispatch(["simplebox", "false"])
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: false always exits 1
 
         it "dispatches true via busybox":
+            # @req REQ-SIMPLEBOX-MULTICALL-003
+            # @capture(statistics): dispatch exit code routed through the busybox-compatible multi-call name
+            step("Dispatch argv [busybox, true]")
             val result = simplebox_dispatch(["busybox", "true"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: true always exits 0
 
         it "dispatches false via busybox":
+            # @req REQ-SIMPLEBOX-MULTICALL-004
+            # @capture(statistics): dispatch exit code routed through a full-path busybox multi-call name
+            step("Dispatch argv [/bin/busybox, false]")
             val result = simplebox_dispatch(["/bin/busybox", "false"])
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: false always exits 1
 
+    # @manual_section: simplebox-dispatch-edge-cases
     describe "simplebox_dispatch edge cases":
         it "returns 127 for unknown applet via basename":
+            # @req REQ-SIMPLEBOX-EDGE-001
+            # @capture(statistics): dispatch exit code for an unrecognized basename
+            step("Dispatch argv [unknowncmd]")
             val result = simplebox_dispatch(["unknowncmd"])
-            expect(result).to_equal(127)
+            expect(result).to_equal(127)  # oracle: 127 is the shell convention for command-not-found
 
         it "returns 127 for unknown applet via simplebox":
+            # @req REQ-SIMPLEBOX-EDGE-002
+            # @capture(statistics): dispatch exit code for an unrecognized applet name under simplebox
+            step("Dispatch argv [simplebox, unknowncmd]")
             val result = simplebox_dispatch(["simplebox", "unknowncmd"])
-            expect(result).to_equal(127)
+            expect(result).to_equal(127)  # oracle: 127 is the shell convention for command-not-found
 
         it "returns 0 for --list via simplebox":
+            # @req REQ-SIMPLEBOX-EDGE-003
+            # @capture(statistics): dispatch exit code for the --list applet-listing command
+            step("Dispatch argv [simplebox, --list]")
             val result = simplebox_dispatch(["simplebox", "--list"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: listing applets is a successful, side-effect-free operation
 
         it "returns 0 for --list as basename":
+            # @req REQ-SIMPLEBOX-EDGE-004
+            # @capture(statistics): dispatch exit code for --list invoked directly as argv[0]
+            step("Dispatch argv [--list]")
             val result = simplebox_dispatch(["--list"])
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: listing applets is a successful, side-effect-free operation
 
         it "returns 127 for empty argv":
+            # @req REQ-SIMPLEBOX-EDGE-005
+            # @capture(statistics): dispatch exit code for a zero-length argv
+            step("Dispatch an empty argv array")
             val result = simplebox_dispatch([])
-            expect(result).to_equal(127)
+            expect(result).to_equal(127)  # oracle: no argv[0] to resolve is treated as command-not-found
 
         it "returns 127 for simplebox with no applet argv":
+            # @req REQ-SIMPLEBOX-EDGE-006
+            # @capture(statistics): dispatch exit code when the multi-call name has no trailing applet
+            step("Dispatch argv [simplebox] with no applet name following")
             val result = simplebox_dispatch(["simplebox"])
-            expect(result).to_equal(127)
+            expect(result).to_equal(127)  # oracle: no applet name to resolve is treated as command-not-found
 
+    # @manual_section: simplebox-has-applet
     describe "simplebox_has_applet":
         it "returns true for echo":
+            # @req REQ-SIMPLEBOX-HAS-001
+            # @capture(statistics): membership check for the echo applet
+            step("Query whether echo is a known applet")
             expect(simplebox_has_applet("echo")).to_equal(true)
 
         it "returns true for true":
+            # @req REQ-SIMPLEBOX-HAS-002
+            # @capture(statistics): membership check for the true applet
+            step("Query whether true is a known applet")
             expect(simplebox_has_applet("true")).to_equal(true)
 
         it "returns true for false":
+            # @req REQ-SIMPLEBOX-HAS-003
+            # @capture(statistics): membership check for the false applet
+            step("Query whether false is a known applet")
             expect(simplebox_has_applet("false")).to_equal(true)
 
         it "returns true for pwd":
+            # @req REQ-SIMPLEBOX-HAS-004
+            # @capture(statistics): membership check for the pwd applet
+            step("Query whether pwd is a known applet")
             expect(simplebox_has_applet("pwd")).to_equal(true)
 
         it "returns false for unknown":
+            # @req REQ-SIMPLEBOX-HAS-005
+            # @capture(statistics): membership check for an unrecognized applet name
+            step("Query whether unknowncmd is a known applet")
             expect(simplebox_has_applet("unknowncmd")).to_equal(false)
 
         it "returns false for empty string":
+            # @req REQ-SIMPLEBOX-HAS-006
+            # @capture(statistics): membership check for the empty applet name
+            step("Query whether the empty string is a known applet")
             expect(simplebox_has_applet("")).to_equal(false)
 
+    # @manual_section: simplebox-applet-names
     describe "simplebox_applet_names":
         it "returns exactly 8 applets":
+            # @req REQ-SIMPLEBOX-NAMES-001
+            # @capture(statistics): total count of registered applet names
+            step("List the registered applet names")
             val names = simplebox_applet_names()
-            expect(names.len()).to_equal(8)
+            expect(names.len()).to_equal(8)  # oracle: the router currently registers exactly 8 applets
 
         it "first applet is echo":
+            # @req REQ-SIMPLEBOX-NAMES-002
+            # @capture(statistics): applet name at list index 0
+            step("List the registered applet names and read index 0")
             val names = simplebox_applet_names()
             expect(names[0]).to_equal("echo")
 
         it "second applet is true":
+            # @req REQ-SIMPLEBOX-NAMES-003
+            # @capture(statistics): applet name at list index 1
+            step("List the registered applet names and read index 1")
             val names = simplebox_applet_names()
             expect(names[1]).to_equal("true")
 
         it "third applet is false":
+            # @req REQ-SIMPLEBOX-NAMES-004
+            # @capture(statistics): applet name at list index 2
+            step("List the registered applet names and read index 2")
             val names = simplebox_applet_names()
             expect(names[2]).to_equal("false")
 
         it "fourth applet is pwd":
+            # @req REQ-SIMPLEBOX-NAMES-005
+            # @capture(statistics): applet name at list index 3
+            step("List the registered applet names and read index 3")
             val names = simplebox_applet_names()
             expect(names[3]).to_equal("pwd")

@@ -1,12 +1,17 @@
-"""WebGPU Strict Smoke Tests
-
-@tag: rendering, engine2d, webgpu, strict
-@cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl 70%
-@cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
-
+"""
+## Purpose and audience
 Proves that WebGPU backend diagnostics are explicit rather than silent, and
 that a strict webgpu create never hands back a differently-named backend.
+Audience: Engine2D backend engineers touching the webgpu probe, the strict
+create, or the software rasterizer behind it.
 
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/webgpu_strict_spec.spl`). The probe scenarios
+check `Engine2D.probe_backend` self-consistency; the strictness scenarios
+read the CREATE and the READBACK, never a stored probe prediction.
+
+## Compatibility and limitations
 TWO DEFECTS WERE REPAIRED HERE — read both before adding assertions.
 
 (1) THIS SPEC WAS DEAD. It imported `probe_webgpu` from
@@ -51,7 +56,16 @@ WHAT THIS SPEC CANNOT PROVE — the webgpu engine2d backend is SOFTWARE
     false red, not a defect found. What IS binding here is the strictness of the
     name, the honesty of the provenance fields, and pixel-exact software
     rasterization parity — all of which run on every outcome.
+
+@tag: rendering, engine2d, webgpu, strict
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl 70%
+@cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
 """
+
+# Lifecycle: research doc/01_research/domain/browser_wasm_webgpu_infra.md ;
+# plan doc/03_plan/agent_tasks/browser_wasm_webgpu_infra.md ;
+# architecture doc/04_architecture/browser_wasm_webgpu_infra.md ;
+# design doc/05_design/browser_wasm_webgpu_infra.md
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -204,32 +218,48 @@ fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
 # Tests
 # ============================================================================
 
+# @manual_section: webgpu strict smoke
 describe "WebGPU strict smoke tests":
 
     context "probe_webgpu diagnostics":
 
         it "probe returns a typed BackendProbeResult":
+            # @req REQ-WEBGPUSTRICT-001
+            # @capture(bit_table): probe status vocabulary retained
+            step("Probe the webgpu backend and check the result is typed")
             val probe = probe_webgpu_backend()
             val ok = probe.is_ok() or status_is_terminal_failure(probe)
             expect(ok).to_equal(true)
 
         it "probe reports requested_name as webgpu":
+            # @req REQ-WEBGPUSTRICT-002
+            # @capture(statistics): requested backend name retained
+            step("Probe the webgpu backend and read the requested name")
             val probe = probe_webgpu_backend()
             expect(probe.requested_name).to_equal("webgpu")
 
         it "probe on unavailable carries non-empty fallback_reason":
+            # @req REQ-WEBGPUSTRICT-003
+            # @capture(bit_table): failure-path fallback reason retained
+            step("Probe the webgpu backend and read the fallback reason on failure")
             val probe = probe_webgpu_backend()
             if not probe.is_ok():
                 expect(probe.fallback_reason).to_not_equal("")
 
         it "probe diagnostic_text is non-empty":
+            # @req REQ-WEBGPUSTRICT-004
+            # @capture(statistics): probe diagnostic text length retained
+            step("Probe the webgpu backend and read its diagnostic text")
             val probe = probe_webgpu_backend()
             val txt = probe.diagnostic_text()
-            expect(txt.len()).to_be_greater_than(0)
+            expect(txt.len()).to_be_greater_than(0)  # oracle: the probe owes at least a one-character diagnostic on every host
 
     context "default build — webgpu-real feature off":
 
         it "probe status and available flag agree":
+            # @req REQ-WEBGPUSTRICT-005
+            # @capture(bit_table): probe status/available agreement flags retained
+            step("Probe the webgpu backend and cross-check status against the available flag")
             # A claim about the probe OBJECT, not a prediction about any later
             # create, so it stays a hard assertion.
             val probe = probe_webgpu_backend()
@@ -238,6 +268,9 @@ describe "WebGPU strict smoke tests":
             expect(probe.available).to_equal(probe.status == BackendStatus.Initialized)
 
         it "probe never substitutes a different backend under the webgpu name":
+            # @req REQ-WEBGPUSTRICT-006
+            # @capture(statistics): selected backend name retained
+            step("Probe the webgpu backend and hold selected_name to the strict name")
             # engine2d's strict probe passes the canonical requested name
             # through to selected_name. The OLD assertion here demanded
             # selected_name == "cpu" when unavailable, which no code path can
@@ -247,6 +280,9 @@ describe "WebGPU strict smoke tests":
             expect(probe.selected_name == "cpu" or probe.selected_name == "software").to_equal(false)
 
         it "probe on success reports the webgpu api and wgsl shader format":
+            # @req REQ-WEBGPUSTRICT-007
+            # @capture(statistics): success-path shader format retained
+            step("Probe the webgpu backend and read the shader format on success")
             val probe = probe_webgpu_backend()
             if probe.is_ok():
                 expect(probe.selected_name).to_equal("webgpu")
@@ -255,17 +291,23 @@ describe "WebGPU strict smoke tests":
     context "create_with_backend_strict webgpu strictness":
 
         it "never hands back a non-webgpu engine":
+            # @req REQ-WEBGPUSTRICT-008
+            # @capture(bit_table): strict-create outcome flags retained
+            step("Run the strict webgpu create and hold the engine to the strict name")
             # The create is attempted REGARDLESS of any probe. Both outcomes owe
             # a strictness claim, so neither branch is a silent skip.
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if result.is_ok():
                 var engine = result.unwrap()
                 expect(engine.backend_name()).to_equal("webgpu")
-                expect(engine.width()).to_equal(16)
-                expect(engine.height()).to_equal(16)
+                expect(engine.width()).to_equal(16)  # oracle: the strict create is asked for a 16-wide framebuffer
+                expect(engine.height()).to_equal(16)  # oracle: the strict create is asked for a 16-tall framebuffer
                 engine.shutdown()
 
         it "a failed strict create carries a terminal status and the requested name":
+            # @req REQ-WEBGPUSTRICT-009
+            # @capture(bit_table): failure-path diagnostic flags retained
+            step("Force the strict webgpu failure path and check the structured diagnostics")
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if not result.is_ok():
                 val diag = result.unwrap_err()
@@ -276,6 +318,9 @@ describe "WebGPU strict smoke tests":
                 print "[webgpu-gpu] webgpu-typed-error: GPU BRANCH SKIPPED — the strict create succeeded, so the failure path was not exercised; this example proves NOTHING about the failure path"
 
         it "the probe/create divergence is disclosed, never asserted":
+            # @req REQ-WEBGPUSTRICT-010
+            # @capture(bit_table): probe/create gap outcome flags retained
+            step("Measure the probe/create gap and assert only on the create")
             # This is the one example that measures the probe/create gap: the
             # probe answer is DISCLOSED, never asserted. The OLD version of this
             # example asserted `result.is_ok()` MUST be true whenever the probe
@@ -295,6 +340,9 @@ describe "WebGPU strict smoke tests":
     context "off-screen render and readback":
 
         it "readback provenance is honest and a full frame is returned":
+            # @req REQ-WEBGPUSTRICT-011
+            # @capture(gui_image): webgpu readback provenance and frame size retained
+            step("Draw on a strict webgpu engine and check the readback provenance")
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -310,12 +358,15 @@ describe "WebGPU strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                 engine.shutdown()
             else:
                 _assert_strict_failure_is_structured("webgpu-readback", result.unwrap_err())
 
         it "corner pixels are red after clear with red":
+            # @req REQ-WEBGPUSTRICT-012
+            # @capture(gui_image): cleared webgpu framebuffer corner samples retained
+            step("Clear a strict webgpu engine to red and sample both corners")
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -340,6 +391,9 @@ describe "WebGPU strict smoke tests":
                 _assert_strict_failure_is_structured("webgpu-clear", result.unwrap_err())
 
         it "clear then draw_rect_filled matches the CPU reference pixel-for-pixel":
+            # @req REQ-WEBGPUSTRICT-013
+            # @capture(gui_image): full-frame software parity mismatch count retained
+            step("Clear fill a rect on webgpu and diff the whole framebuffer against the CPU reference")
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -364,12 +418,15 @@ describe "WebGPU strict smoke tests":
                         if pixels[ci] != cpu_ref[ci]:
                             mismatch_count = mismatch_count + 1
                         ci = ci + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: the software rasterizer must match the CPU reference on all 256 pixels
                 engine.shutdown()
             else:
                 _assert_strict_failure_is_structured("webgpu-rect-parity", result.unwrap_err())
 
         it "a pixel inside the rect is the fill color and one outside is the background":
+            # @req REQ-WEBGPUSTRICT-014
+            # @capture(gui_image): inside/outside rect samples retained
+            step("Fill a rect on webgpu and sample one pixel inside and one outside it")
             val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
             if result.is_ok():
                 var engine = result.unwrap()

@@ -1,44 +1,91 @@
-# @req REQ-WEB4K-003
+"""
+Web showcase tabs specification
+
+## Purpose and audience
+Executable contract for the tab strip of the 4K web-render showcase
+(`src/lib/gc_async_mut/gpu/browser_engine/web_showcase_tabs.spl`), written for
+the browser-engine team and the showcase-hardening reviewers. It pins the
+default tab set, keyboard focus/activation semantics, pointer activation, and
+the fail-closed behaviour for malformed state.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_showcase_tabs_spec.spl`
+from the repository root; the runner prints one verdict line per scenario.
+
+## Compatibility and limitations
+Runs interpreted on the seed binary; no GPU session is required because the
+tab strip is pure layout/markup state. Markup assertions pin the ARIA roles
+the showcase CSS depends on; visual pixel output is covered by the showcase
+runner, not here.
+
+## Verification guidance and troubleshooting
+A failure in the focus or activation scenarios means `web_showcase_tabs.spl`
+changed index semantics; a markup failure means the ARIA attributes drifted.
+Re-run the single file above and diff the failing expectation against the
+markup builder before touching the showcase page.
+"""
+# Lifecycle: doc/01_research/domain/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+# @manual_section: web showcase tab strip
+
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.web_showcase_tabs.*
 
 describe "Web showcase tabs":
     it "starts with one selected and focused overview tab":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): selected/focused index table for the seven seeded tabs
+        step("Open the showcase and read the initial tab state")
         val state = web_showcase_state()
-        expect(state.tabs.len()).to_equal(7)
-        expect(state.focused_index).to_equal(0)
-        expect(state.selected_index).to_equal(0)
+        expect(state.tabs.len()).to_equal(7)  # oracle: the showcase hardening plan seeds exactly seven demo tabs (overview plus six feature panels)
+        expect(state.focused_index).to_equal(0)  # oracle: the overview tab is the first entry and starts focused
+        expect(state.selected_index).to_equal(0)  # oracle: the overview tab is also the initially selected panel
         val html = web_showcase_tab_markup(state)
         expect(html).to_contain("role=\"tablist\"")
         expect(html).to_contain("role=\"tabpanel\"")
         expect(html).to_contain("aria-selected=\"true\"")
 
     it "moves focus without changing selection and activates by keyboard":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): focused vs selected index after ArrowRight and Enter
+        step("Press ArrowRight, then activate with Enter")
         val initial = web_showcase_state()
         val focused = web_showcase_focus_key(initial, "ArrowRight")
-        expect(focused.focused_index).to_equal(1)
-        expect(focused.selected_index).to_equal(0)
+        expect(focused.focused_index).to_equal(1)  # oracle: ArrowRight moves roving focus exactly one slot forward from 0
+        expect(focused.selected_index).to_equal(0)  # oracle: focus alone must not change which panel is selected
         val active = web_showcase_activate_focused(focused, "Enter")
-        expect(active.selected_index).to_equal(1)
+        expect(active.selected_index).to_equal(1)  # oracle: Enter commits the focused tab, so selection follows focus to slot 1
 
     it "wraps arrow focus and supports Home and End":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): focus index after ArrowLeft, Home, End on the seven-tab strip
+        step("Press ArrowLeft from the first tab, then Home and End")
         val initial = web_showcase_state()
         val left = web_showcase_focus_key(initial, "ArrowLeft")
-        expect(left.focused_index).to_equal(6)
+        expect(left.focused_index).to_equal(6)  # oracle: focus wraps backwards from slot 0 to the last of 7 tabs (index 6)
         val home = web_showcase_focus_key(left, "Home")
-        expect(home.focused_index).to_equal(0)
+        expect(home.focused_index).to_equal(0)  # oracle: Home always returns focus to the first tab
         val last = web_showcase_focus_key(home, "End")
-        expect(last.focused_index).to_equal(6)
+        expect(last.focused_index).to_equal(6)  # oracle: End always lands focus on the last tab, index 6 of 7
 
     it "uses the same selected and focused state for pointer activation":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): focused/selected indices after a pointer click on tab 4
+        step("Click the fifth tab with the pointer")
         val active = web_showcase_activate_pointer(web_showcase_state(), 4)
-        expect(active.focused_index).to_equal(4)
-        expect(active.selected_index).to_equal(4)
+        expect(active.focused_index).to_equal(4)  # oracle: a pointer click focuses the clicked tab, index 4 (fifth of seven)
+        expect(active.selected_index).to_equal(4)  # oracle: pointer activation commits selection to the same clicked tab
         expect(web_showcase_tab_markup(active)).to_contain("panel-forms-media")
 
     it "fails closed for malformed empty or out-of-range state":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): markup and focus results for empty and out-of-range states
+        step("Feed empty and out-of-range states into the markup and focus helpers")
         val empty = WebShowcaseState(tabs: [], focused_index: 9, selected_index: 9)
         expect(web_showcase_tab_markup(empty)).to_equal("")
-        expect(web_showcase_focus_key(empty, "ArrowRight").tabs.len()).to_equal(0)
+        expect(web_showcase_focus_key(empty, "ArrowRight").tabs.len()).to_equal(0)  # oracle: a tab-less state must stay tab-less; focus must not invent a tab
         val invalid = WebShowcaseState(tabs: web_showcase_tabs(), focused_index: 0, selected_index: 99)
         expect(web_showcase_tab_markup(invalid)).to_equal("")

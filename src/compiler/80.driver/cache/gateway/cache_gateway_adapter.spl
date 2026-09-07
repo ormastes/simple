@@ -1,0 +1,137 @@
+use std.common.crypto.sha256 (sha256_text)
+use compiler.common.cache_contract.cache_gateway_v1.*
+use compiler.common.cache_contract.direct_read_pin_v1 (DirectReadPinV1)
+use compiler.common.cache_contract.errors_v1.*
+use compiler.common.cache_contract.virtual_source_store_v1 (VirtualSourceStoreV1)
+use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
+use compiler.driver.cache.summary.summary_store_v1 (VirtualSourceStoreAdapterV1)
+use compiler.driver.cache.cas.verified_cas_store.{verified_cas_get_pinned_v1, VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1}
+use common.cache_host_authority_v1.*
+
+fn _gateway_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
+    CacheErrorV1(code: code, retry: RetryClassV1.Never, severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(telemetry_class: cache_error_telemetry_class_v1(code),
+            safe_context: cache_error_safe_context_v1(code), reason_digest: sha256_text("simple.cache.gateway.reject.v1\u0000" + cache_error_safe_context_v1(code)),
+            bounded_detail: cache_error_safe_context_v1(code)))
+
+pub class CacheGatewayAdapterV1:
+    catalog: CacheCatalogProjectionV1
+    summaries: VirtualSourceStoreAdapterV1
+    cache_root: text
+    process_instance_nonce: text
+    boot_identity_digest: text
+    reader_admission_epoch: i64
+    journal_generation: i64
+    pinned_manifest_digest: text
+    monotonic_now: i64
+    next_pin: i64
+
+    me _pin_valid(pin: DirectReadPinV1) -> bool:
+        if (pin.process_instance_nonce != self.process_instance_nonce or
+                pin.boot_identity_digest != self.boot_identity_digest or
+                pin.reader_admission_epoch != self.reader_admission_epoch or
+                pin.journal_superblock_generation != self.journal_generation or
+                pin.pinned_manifest_digest != self.pinned_manifest_digest):
+            return false
+        val handle = pin.pin_id.to_i64() ?? -1
+        if handle <= 0: return false
+        cache_host_validate_reader_pin_v1(
+            CacheReaderPinAuthorityV1(opaque_handle: handle),
+            pin.reader_admission_epoch, pin.journal_superblock_generation,
+            pin.pinned_manifest_digest, pin.process_instance_nonce,
+            pin.boot_identity_digest, pin.namespace_entry_digest,
+            self.monotonic_now)
+
+    me advance_monotonic(now: i64) -> bool:
+        if now < self.monotonic_now: return false
+        self.monotonic_now = now
+        true
+
+impl CacheGatewayV1 for CacheGatewayAdapterV1:
+    fn begin_direct_read(ttl: i64) -> Result<DirectReadPinV1, CacheErrorV1>:
+        if ttl <= 0 or ttl > 3600000 or self.reader_admission_epoch < 0 or self.reader_admission_epoch % 2 != 0:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
+        val root = cache_host_open_root_v1(self.cache_root)
+        if not cache_host_root_valid_v1(root):
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
+        val namespace = sha256_text("simple.cache.reader.namespace.v1\u0000" +
+            self.cache_root + "\u0000" + self.pinned_manifest_digest)
+        val authority = cache_host_begin_reader_pin_v1(root,
+            self.reader_admission_epoch, self.journal_generation,
+            self.pinned_manifest_digest, self.process_instance_nonce,
+            self.boot_identity_digest, namespace, self.monotonic_now, ttl)
+        _ = cache_host_close_root_v1(root)
+        if authority.opaque_handle <= 0:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
+        self.next_pin = self.next_pin + 1
+        Ok(DirectReadPinV1(pin_id: authority.opaque_handle.to_string(),
+            process_instance_nonce: self.process_instance_nonce,
+            boot_identity_digest: self.boot_identity_digest,
+            reader_admission_epoch: self.reader_admission_epoch,
+            journal_superblock_generation: self.journal_generation,
+            pinned_manifest_digest: self.pinned_manifest_digest,
+            created_monotonic: self.monotonic_now,
+            expires_monotonic: self.monotonic_now + ttl,
+            namespace_entry_digest: namespace))
+
+    fn lookup_verified_action(action_digest: text, pin: DirectReadPinV1) -> Result<CacheLookupV1, CacheErrorV1>:
+        if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
+        val row = match self.catalog.lookup(action_digest):
+            case Ok(value): value
+            case Err(_): return Err(_gateway_error_v1(CacheErrorCodeV1.CacheCorrupt))
+        if row.quarantined: return Err(_gateway_error_v1(CacheErrorCodeV1.CacheNondeterminism))
+        if not row.present:
+            return Ok(CacheLookupV1(present: false, object_kind: "",
+                object_digest: "", canonical_bytes: [], pin: Some(pin)))
+        if row.generation != pin.journal_superblock_generation or row.manifest_digest != pin.pinned_manifest_digest:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
+        self.get_verified(row.object_kind, row.object_digest,
+            CacheLimitsV1(max_bytes: VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1, max_entries: 1), pin)
+
+    fn get_verified(kind: text, digest: text, limits: CacheLimitsV1, pin: DirectReadPinV1) -> Result<CacheLookupV1, CacheErrorV1>:
+        if limits.max_bytes <= 0 or limits.max_entries <= 0:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+        if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
+        val authority = CacheReaderPinAuthorityV1(
+            opaque_handle: pin.pin_id.to_i64() ?? -1)
+        val result = verified_cas_get_pinned_v1(authority, kind, digest,
+            limits.max_bytes, self.monotonic_now)?
+        Ok(CacheLookupV1(present: result.present, object_kind: result.kind,
+            object_digest: result.digest, canonical_bytes: result.canonical_envelope,
+            pin: Some(pin)))
+
+    fn renew_direct_read_pin(pin: DirectReadPinV1) -> Result<DirectReadPinV1, CacheErrorV1>:
+        if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinRenewalFailed))
+        val ttl = pin.expires_monotonic - pin.created_monotonic
+        val authority = CacheReaderPinAuthorityV1(
+            opaque_handle: pin.pin_id.to_i64() ?? -1)
+        val expires = cache_host_renew_reader_pin_v1(authority,
+            self.monotonic_now, ttl)
+        if expires <= self.monotonic_now:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinRenewalFailed))
+        Ok(DirectReadPinV1(pin_id: pin.pin_id,
+            process_instance_nonce: pin.process_instance_nonce,
+            boot_identity_digest: pin.boot_identity_digest,
+            reader_admission_epoch: pin.reader_admission_epoch,
+            journal_superblock_generation: pin.journal_superblock_generation,
+            pinned_manifest_digest: pin.pinned_manifest_digest,
+            created_monotonic: self.monotonic_now,
+            expires_monotonic: expires,
+            namespace_entry_digest: pin.namespace_entry_digest))
+
+    fn release_direct_read_pin(pin: DirectReadPinV1) -> Result<(), CacheErrorV1>:
+        val authority = CacheReaderPinAuthorityV1(
+            opaque_handle: pin.pin_id.to_i64() ?? -1)
+        if cache_host_release_reader_pin_v1(authority,
+                pin.reader_admission_epoch, pin.journal_superblock_generation,
+                pin.pinned_manifest_digest, pin.process_instance_nonce,
+                pin.boot_identity_digest, pin.namespace_entry_digest) < 0:
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
+        Ok(())
+
+    fn virtual_source_store() -> VirtualSourceStoreV1:
+        self.summaries
+
+    fn status() -> Result<GatewayStatusV1, CacheErrorV1>:
+        Ok(GatewayStatusV1(mode: "verified_descriptor_pinned_reads", writer_epoch_digest: "",
+            journal_generation: self.journal_generation))

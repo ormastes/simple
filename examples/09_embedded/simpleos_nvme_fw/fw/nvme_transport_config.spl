@@ -1,0 +1,195 @@
+"""
+nvme_transport_config — the CONFIG SEAM for the host-equivalent NVMe transport.
+
+One test source, two substrates. Everything that differs between "run against
+the in-process emulator" and "run against a real board" lives HERE, as data,
+read from `fw/nvme_transport_profiles.sdn`. The host driver
+(`nvme_host_driver.spl`) and every test written against it are byte-identical
+across profiles; only the profile NAME passed to `transport_profile_load`
+changes.
+
+The SDN path is resolved relative to the REPO ROOT (where `bin/simple run` is
+invoked from). Design note: doc/05_design/hardware/nvme_host_equivalent_transport.md
+"""
+
+use std.fs.{file_read_text}
+use nvme_types.*
+
+val PROFILE_SDN: text = "examples/09_embedded/simpleos_nvme_fw/fw/nvme_transport_profiles.sdn"
+
+# Backends. `emu` is bound to the in-process device; `board` is DECLARED but
+# UNBOUND — attaching to it fails closed rather than pretending to be hardware.
+val BACKEND_EMU:   text = "emu"
+val BACKEND_BOARD: text = "board"
+
+struct TransportProfile:
+    name:            text
+    backend:         text
+    bar_base:        i64
+    sq_base:         i64
+    cq_base:         i64
+    doorbell_base:   i64
+    doorbell_stride: i64
+    reg_base:        i64   # BAR0 offset of the controller property (register) file;
+                           # 0 == this profile declares no property window
+    queue_depth:     i64
+    mem_size:        i64
+    bound:           i64   # 1 = a substrate is wired behind this profile
+    valid:           i64   # 1 = the profile was found and fully populated
+
+fn transport_profile_invalid() -> TransportProfile:
+    TransportProfile(name: "", backend: "", bar_base: 0, sq_base: 0, cq_base: 0, doorbell_base: 0, doorbell_stride: 0, reg_base: 0, queue_depth: 0, mem_size: 0, bound: 0, valid: 0)
+
+# ── Tiny ASCII scanners (no external parser: the file is a fixed 2-level SDN) ──
+fn cfg_digit_val(c: text) -> i64:
+    if c == "0":
+        return 0
+    if c == "1":
+        return 1
+    if c == "2":
+        return 2
+    if c == "3":
+        return 3
+    if c == "4":
+        return 4
+    if c == "5":
+        return 5
+    if c == "6":
+        return 6
+    if c == "7":
+        return 7
+    if c == "8":
+        return 8
+    if c == "9":
+        return 9
+    NULL_IDX
+
+fn cfg_parse_i64(s: text) -> i64:
+    var acc: i64 = 0
+    var seen: i64 = 0
+    var i: i64 = 0
+    while i < s.len():
+        val d: i64 = cfg_digit_val(s[i])
+        if d < 0:
+            return NULL_IDX
+        acc = acc * 10 + d
+        seen = seen + 1
+        i = i + 1
+    if seen == 0:
+        return NULL_IDX
+    acc
+
+# `key: value` -> value, or "" when the line is not that key.
+fn cfg_field(line: text, key: text) -> text:
+    val t: text = line.trim()
+    val pfx: text = key + ":"
+    if not t.starts_with(pfx):
+        return ""
+    t.substring(pfx.len(), t.len()).trim()
+
+"""
+Load one named profile out of the SDN config. Returns a profile with valid==0
+when the name is absent or a field is missing/non-numeric — fail closed, never
+a silently-defaulted profile.
+"""
+fn transport_profile_load(name: text) -> TransportProfile:
+    val body: text = file_read_text(PROFILE_SDN)
+    val lines = body.split("\n")
+    var p: TransportProfile = transport_profile_invalid()
+    p.name = name
+    var inside: bool = false
+    var fields: i64 = 0
+    var i: i64 = 0
+    while i < lines.len():
+        val raw: text = lines[i]
+        val t: text = raw.trim()
+        if t.starts_with("#") or t == "":
+            i = i + 1
+            continue
+        if t == name + ":":
+            inside = true
+            i = i + 1
+            continue
+        if inside:
+            # a sibling profile header ends this block
+            if t.ends_with(":") and not t.contains(" "):
+                inside = false
+                i = i + 1
+                continue
+            val vb: text = cfg_field(t, "backend")
+            if vb != "":
+                p.backend = vb
+                fields = fields + 1
+            val v1: text = cfg_field(t, "bar_base")
+            if v1 != "":
+                p.bar_base = cfg_parse_i64(v1)
+                fields = fields + 1
+            val v2: text = cfg_field(t, "sq_base")
+            if v2 != "":
+                p.sq_base = cfg_parse_i64(v2)
+                fields = fields + 1
+            val v3: text = cfg_field(t, "cq_base")
+            if v3 != "":
+                p.cq_base = cfg_parse_i64(v3)
+                fields = fields + 1
+            val v4: text = cfg_field(t, "doorbell_base")
+            if v4 != "":
+                p.doorbell_base = cfg_parse_i64(v4)
+                fields = fields + 1
+            val v5: text = cfg_field(t, "doorbell_stride")
+            if v5 != "":
+                p.doorbell_stride = cfg_parse_i64(v5)
+                fields = fields + 1
+            val vr: text = cfg_field(t, "reg_base")
+            if vr != "":
+                p.reg_base = cfg_parse_i64(vr)
+                fields = fields + 1
+            val v6: text = cfg_field(t, "queue_depth")
+            if v6 != "":
+                p.queue_depth = cfg_parse_i64(v6)
+                fields = fields + 1
+            val v7: text = cfg_field(t, "mem_size")
+            if v7 != "":
+                p.mem_size = cfg_parse_i64(v7)
+                fields = fields + 1
+            val v8: text = cfg_field(t, "bound")
+            if v8 != "":
+                p.bound = cfg_parse_i64(v8)
+                fields = fields + 1
+        i = i + 1
+    # `reg_base` is OPTIONAL: 9 core fields, or 10 when a profile also declares
+    # a controller property (register) window. A profile without one loads with
+    # reg_base == 0, which `HostNvme.bringup()` refuses — fail closed at the
+    # point of use rather than rejecting queue-only profiles here.
+    if fields < 9 or fields > 10:
+        return transport_profile_invalid()
+    if p.bar_base < 0 or p.sq_base < 0 or p.cq_base < 0 or p.doorbell_base < 0 or p.reg_base < 0:
+        return transport_profile_invalid()
+    if p.doorbell_stride <= 0 or p.queue_depth <= 0 or p.mem_size <= 0 or p.bound < 0:
+        return transport_profile_invalid()
+    p.valid = 1
+    p
+
+fn nvme_transport_config_selftest() -> i64:
+    var f: i64 = 0
+    val e = transport_profile_load(BACKEND_EMU)
+    f = f + expect_eq(e.valid, 1, "emu profile loads")
+    f = f + expect_eq(e.queue_depth, 64, "emu queue_depth==64")
+    f = f + expect_eq(e.sq_base, 0, "emu sq_base==0")
+    f = f + expect_eq(e.cq_base, 4096, "emu cq_base==4096")
+    f = f + expect_eq(e.doorbell_base, 8192, "emu doorbell_base==8192")
+    f = f + expect_eq(e.doorbell_stride, 4, "emu doorbell_stride==4")
+    f = f + expect_eq(e.reg_base, 8208, "emu reg_base==8208 (BAR0 property window)")
+    val a = transport_profile_load("admin_emu")
+    f = f + expect_eq(a.valid, 1, "a profile that omits the optional reg_base still loads")
+    f = f + expect_eq(a.reg_base, 0, "an omitted reg_base means no property window")
+    f = f + expect_eq(e.bound, 1, "emu profile is bound")
+    val b = transport_profile_load(BACKEND_BOARD)
+    f = f + expect_eq(b.valid, 1, "board profile loads")
+    f = f + expect_eq(b.bound, 0, "board profile is declared but UNBOUND")
+    f = f + expect_eq(b.queue_depth, e.queue_depth, "board and emu share queue geometry")
+    val miss = transport_profile_load("no_such_profile")
+    f = f + expect_eq(miss.valid, 0, "unknown profile fails closed")
+    f = f + expect_eq(cfg_parse_i64("4096"), 4096, "cfg_parse_i64 decimal")
+    f = f + expect_eq(cfg_parse_i64("12x"), NULL_IDX, "cfg_parse_i64 rejects non-digits")
+    f

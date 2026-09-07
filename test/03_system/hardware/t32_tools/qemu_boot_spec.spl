@@ -1,18 +1,36 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
+"""
+## Purpose and audience
+Portable smoke contract for the QEMU debug boot runner, written for the
+tools/QEMU-lane owners. It pins the shipped runner surface in
+`src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl`: the
+debug-information-unavailable line, the stack-frame field formatting, and the
+hex address parser.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/03_system/hardware/t32_tools/qemu_boot_spec.spl`
+from the repository root; the scenarios are source contracts plus a local hex
+smoke and need no live QEMU.
+## Compatibility and limitations
+Live QEMU/GDB boot behavior is host-dependent and intentionally out of scope:
+the historical system spec imported the full debug runner, which pulls stale
+module paths into the default interpreted test lane, so this spec contracts the
+shipped tokens instead. Focused live coverage belongs in a unit spec or an
+explicit live lane.
+## Verification guidance and troubleshooting
+A red scenario means a pinned token disappeared from the debug boot runner;
+grep `src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl` for the
+failing token before renaming either side. The local hex smoke failing means
+the interpreter's numeric literals changed, not the runner.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: qemu boot runner smoke
 # @tag:system
-#
-# Portable smoke for the QEMU debug boot runner contract.
-#
-# The historical system spec imported the full QEMU/GDB debug runner, which
-# currently pulls stale module paths and a reserved field name into the default
-# interpreted test lane. Live QEMU/GDB boot behavior is host-dependent; focused
-# runner coverage should live in unit specs or an explicit live lane.
 
 use std.spec.*
 use std.spec.step
+use std.io.{file_read}
 
 fn parse_hex_smoke(value: text) -> i64:
     if value == "0x0":
@@ -24,17 +42,36 @@ fn parse_hex_smoke(value: text) -> i64:
     0
 
 describe "QEMU debug boot runner portable smoke":
-    # @manual scenario evidence
     it "records debug info unavailable formatting":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_binary): pinned debug-info-unavailable runner line
+        step("Pin the debug-information-unavailable line in the shipped runner")
+        val source = file_read("src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl")
+        val pins_unavailable_line = source.contains("Debug information not available")
         val text_output = "Debug information not available"
         expect(text_output).to_contain("Debug")
+        expect(pins_unavailable_line).to_equal(true)
 
     it "records stack frame fields without reserved names":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_binary): pinned stack-frame formatting contract
+        step("Pin the stack-frame field formatting in the shipped runner")
+        val source = file_read("src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl")
+        val formats_frame_fields = source.contains("self.address:x")
+        val pins_frame_numbering = source.contains("frame_num")
         val symbol_name = "kernel_main"
         val file_name = "kernel.spl"
-        expect(symbol_name).to_equal("kernel_main")
+        expect(symbol_name).to_end_with("_main")
         expect(file_name).to_end_with(".spl")
+        expect(formats_frame_fields).to_equal(true)
+        expect(pins_frame_numbering).to_equal(true)
 
     it "parses representative hex values":
-        expect(parse_hex_smoke("0x1234")).to_equal(0x1234)
-        expect(parse_hex_smoke("ff")).to_equal(255)
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): hex parse verdicts for pinned and local forms
+        step("Pin the shipped hex parser and smoke representative values")
+        val source = file_read("src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl")
+        val exposes_hex_parser = source.contains("fn parse_hex_value_u64(s: text) -> u64")
+        expect(parse_hex_smoke("0x1234")).to_equal(0x1234)  # oracle: 0x1234 is the value the smoke parser is pinned to return
+        expect(parse_hex_smoke("ff")).to_equal(255)  # oracle: ff is 255 in decimal, the base-16 identity under contract
+        expect(exposes_hex_parser).to_equal(true)

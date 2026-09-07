@@ -438,7 +438,27 @@ fn module_decl_at(index: i64) -> i64:
             return -1
         return ast_module_decl_slot_get(index)
     val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
-    if env_value != "":
+    # LENGTH test, not `!= ""`. Measured in-guest on riscv64 freestanding under
+    # real OpenSBI fw_payload (2026-09-01): for a MISSING env entry this reads
+    # env_value.len() == 0 and yet `env_value != ""` evaluates TRUE, so every
+    # call took the env arm and returned ast_parse_i64("") == 0 -- i.e.
+    # module_decl_at answered decl 0 for EVERY index, and any module with more
+    # than one top-level declaration converted as N copies of its first one.
+    # That is what made the in-guest build-and-run row report "module has no
+    # main function" while both lowering stages reported zero errors.
+    #
+    # `.len()` is measured CORRECT on the same path in the same boot, so this
+    # asks the question the code actually means and does not depend on text
+    # equality against an empty literal. Semantics are unchanged everywhere the
+    # comparison already worked: a present entry is still non-empty and still
+    # wins over the array, exactly as on the hosted bootstrap path.
+    #
+    # The underlying `text != ""` defect is NOT fixed by this line and is filed
+    # as doc/08_tracking/bug/riscv64_freestanding_text_neq_empty_literal_true_
+    # for_zero_length_2026-09-01.md -- this site is repaired because it is the
+    # one that silently loses declarations; the comparison itself needs a
+    # codegen fix.
+    if env_value.len() > 0:
         return ast_parse_i64(env_value)
     ast_module_decl_slot_get(index)
 

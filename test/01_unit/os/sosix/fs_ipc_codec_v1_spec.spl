@@ -1,4 +1,29 @@
-"""SOSIX filesystem IPC v1 packed-wire contract."""
+"""
+## Purpose and audience
+Pins the SOSIX filesystem IPC v1 packed-wire contract: the exact
+little-endian request and completion layouts, the API/correlation checks
+at the decode boundary, descriptor range overflows, and every malformed
+wire rejection reason. Audience: SOSIX filesystem IPC and kernel-boundary
+engineers.
+## Operator workflow
+Run this spec from the repo root with the Simple runner; scenarios encode
+fixture requests and completions through the production
+sosix_fs_ipc_encode/decode functions, then probe the frozen byte grid and
+every documented rejection reason.
+## Compatibility and limitations
+Covers the v1 wire format only; ABI major/minor bumps must update these
+oracles deliberately. Multibyte expects pin representative bytes, not all
+88 request bytes.
+## Verification guidance and troubleshooting
+A red scenario names the frozen wire rule that moved (layout byte,
+rejection reason, or round-trip field). Compare the failing expect
+against src/os/sosix/fs/ipc_codec_v1.spl before editing oracles.
+"""
+# Lifecycle: doc/01_research/domain/sosix_parallel_qemu_refactor.md ;
+# doc/03_plan/os/misc/sosix_process_sharing.md ;
+# doc/04_architecture/sosix_parallel_qemu_refactor.md ;
+# doc/05_design/sosix_qemu_native_pass_bundle.md
+# @manual_section: fs-ipc-codec-v1
 
 use std.spec.*
 use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
@@ -36,23 +61,25 @@ fn _completion_v1() -> SosixFsIpcCompletionV1:
 describe "SOSIX filesystem IPC v1 wire codec":
     it "freezes the exact request layout and little-endian field order":
         step("Encode one complete read-at request")
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): freezes-the-exact-request-layout-and-little-endian-field-order
         val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_READ_AT))
         expect(encoded.accepted).to_be(true)
-        expect(encoded.bytes.len()).to_equal(88)
+        expect(encoded.bytes.len()).to_equal(88)  # oracle: 48-byte header plus 40-byte fixed body is the frozen v1 request size
 
         step("Check version, sizes, API, and representative multibyte fields")
-        expect(encoded.bytes[0]).to_equal(1)
-        expect(encoded.bytes[1]).to_equal(0)
-        expect(encoded.bytes[2]).to_equal(48)
-        expect(encoded.bytes[3]).to_equal(0)
-        expect(encoded.bytes[4]).to_equal(1)
-        expect(encoded.bytes[5]).to_equal(1)
+        expect(encoded.bytes[0]).to_equal(1)  # oracle: byte 0 is the frozen ABI major version 1
+        expect(encoded.bytes[1]).to_equal(0)  # oracle: byte 1 is the ABI minor 0
+        expect(encoded.bytes[2]).to_equal(48)  # oracle: byte 2 is the 48-byte header size, little-endian low byte
+        expect(encoded.bytes[3]).to_equal(0)  # oracle: the header-size high byte must stay 0
+        expect(encoded.bytes[4]).to_equal(1)  # oracle: byte 4 is the request flag set low byte
+        expect(encoded.bytes[5]).to_equal(1)  # oracle: byte 5 carries the second flag byte
         expect(encoded.bytes[12]).to_equal(0x44)
         expect(encoded.bytes[15]).to_equal(0x11)
         expect(encoded.bytes[20]).to_equal(0x08)
         expect(encoded.bytes[27]).to_equal(0x01)
-        expect(encoded.bytes[44]).to_equal(0)
-        expect(encoded.bytes[47]).to_equal(0)
+        expect(encoded.bytes[44]).to_equal(0)  # oracle: reserved byte 44 must stay zero
+        expect(encoded.bytes[47]).to_equal(0)  # oracle: reserved byte 47 must stay zero
         expect(encoded.bytes[80]).to_equal(0x88)
         expect(encoded.bytes[87]).to_equal(0x81)
 
@@ -71,10 +98,18 @@ describe "SOSIX filesystem IPC v1 wire codec":
         expect(decoded.request.length).to_equal(0x100)
         expect(decoded.request.buffer.slot).to_equal(0x61626364)
         expect(decoded.request.buffer.generation).to_equal(0x71727374)
-        expect(decoded.request.buffer_offset).to_equal(0x8182838485868788)
+        # FIX (spec-authoring defect, 2026-09-06): the raw literal
+        # 0x8182838485868788 sets its top bit, so as an untyped literal it
+        # was read as a negative i64 and the expect compared u64 against
+        # i64. Bind it to an explicitly typed u64 local instead.
+        val expected_buffer_offset: u64 = 0x8182838485868788u64
+        expect(decoded.request.buffer_offset).to_equal(expected_buffer_offset)
 
     it "supports write-at but rejects an API mismatch at the decode boundary":
         val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_WRITE_AT))
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): supports-write-at-but-rejects-an-api-mismatch-at-the-decode-boundary
+        step("supports write-at but rejects an API mismatch at the decode boundary")
         expect(encoded.accepted).to_be(true)
         val wrong_api = sosix_fs_ipc_decode_request_v1(encoded.bytes, SOSIX_FS_READ_AT)
         expect(wrong_api.accepted).to_be(false)
@@ -84,6 +119,9 @@ describe "SOSIX filesystem IPC v1 wire codec":
 
     it "rejects short, long, wrong-version, wrong-header, and reserved request bytes":
         val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_READ_AT))
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): rejects-short-long-wrong-version-wrong-header-and-reserved-request-bytes
+        step("rejects short, long, wrong-version, wrong-header, and reserved request bytes")
         var short = encoded.bytes
         short.pop()
         expect(sosix_fs_ipc_decode_request_v1(short, SOSIX_FS_READ_AT).reason).to_equal("request-size-mismatch")
@@ -102,6 +140,9 @@ describe "SOSIX filesystem IPC v1 wire codec":
 
     it "rejects unknown flags and both descriptor range overflows":
         var unknown_flags = _request_v1(SOSIX_FS_READ_AT)
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): rejects-unknown-flags-and-both-descriptor-range-overflows
+        step("rejects unknown flags and both descriptor range overflows")
         unknown_flags.flags = 0x80000000
         expect(sosix_fs_ipc_encode_request_v1(unknown_flags).reason).to_equal("unknown-request-flags")
 
@@ -145,17 +186,20 @@ describe "SOSIX filesystem IPC v1 wire codec":
 
     it "round-trips a correlated completion with exact payload length":
         val encoded = sosix_fs_ipc_encode_completion_v1(_completion_v1())
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): round-trips-a-correlated-completion-with-exact-payload-length
+        step("round-trips a correlated completion with exact payload length")
         expect(encoded.accepted).to_be(true)
-        expect(encoded.bytes.len()).to_equal(51)
-        expect(encoded.bytes[0]).to_equal(1)
-        expect(encoded.bytes[2]).to_equal(48)
+        expect(encoded.bytes.len()).to_equal(51)  # oracle: 48-byte header plus 3-byte payload is the frozen v1 completion size
+        expect(encoded.bytes[0]).to_equal(1)  # oracle: byte 0 is the completion ABI major 1
+        expect(encoded.bytes[2]).to_equal(48)  # oracle: byte 2 is the 48-byte header size, low byte
         expect(encoded.bytes[12]).to_equal(0x44)
         expect(encoded.bytes[16]).to_equal(0x88)
         expect(encoded.bytes[20]).to_equal(0xfb)
         expect(encoded.bytes[23]).to_equal(0xff)
         expect(encoded.bytes[24]).to_equal(0x18)
         expect(encoded.bytes[31]).to_equal(0x11)
-        expect(encoded.bytes[40]).to_equal(3)
+        expect(encoded.bytes[40]).to_equal(3)  # oracle: byte 40 is the low byte of transferred 3
         expect(encoded.bytes[48]).to_equal(0xaa)
 
         val decoded = sosix_fs_ipc_decode_completion_v1(
@@ -163,15 +207,23 @@ describe "SOSIX filesystem IPC v1 wire codec":
             0x1112131415161718
         )
         expect(decoded.accepted).to_be(true)
-        expect(decoded.completion.status).to_equal(-5)
-        expect(decoded.completion.transferred).to_equal(3)
-        expect(decoded.completion.payload.len()).to_equal(3)
+        expect(decoded.completion.status).to_equal(-5)  # oracle: the fixture completion encodes status -5 verbatim
+        expect(decoded.completion.transferred).to_equal(3)  # oracle: the fixture transferred count 3 round-trips
+        expect(decoded.completion.payload.len()).to_equal(3)  # oracle: the fixture payload is the three bytes aa bb cc
         expect(decoded.completion.payload[2]).to_equal(0xcc)
 
     it "rejects uncorrelated and malformed completion messages":
         val encoded = sosix_fs_ipc_encode_completion_v1(_completion_v1())
+        # @req REQ-SOSIX-FS-IPC-CODEC-V1-001
+        # @capture(statistics): rejects-uncorrelated-and-malformed-completion-messages
+        step("rejects uncorrelated and malformed completion messages")
+        # FIX (spec-authoring defect, 2026-09-06): this call previously
+        # passed only 3 arguments to sosix_fs_ipc_decode_completion_v1
+        # (bytes, api, token), dropping the required slot and generation
+        # correlation parameters. Supply the full 5-arg form; the size
+        # check fires before correlation, so zero slot/generation is fine.
         expect(sosix_fs_ipc_decode_completion_v1(
-            [0], SOSIX_FS_READ_AT, 0x1112131415161718
+            [0], SOSIX_FS_READ_AT, 0, 0, 0
         ).reason).to_equal("completion-too-short")
         expect(sosix_fs_ipc_decode_completion_v1(
             encoded.bytes, SOSIX_FS_WRITE_AT, 0x11223344, 0x55667788,

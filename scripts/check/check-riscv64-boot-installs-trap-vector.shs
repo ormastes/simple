@@ -1,0 +1,239 @@
+#!/bin/sh
+# check-riscv64-boot-installs-trap-vector.shs
+#
+# The riscv64 guest must install an S-mode trap vector on its NORMAL boot path,
+# and that vector must be 4-byte aligned.
+#
+# WHY THIS GUARD EXISTS
+# ---------------------
+# Until 2026-09-01 `examples/09_embedded/simple_os/arch/riscv64/boot/crt0.S`
+# set gp/sp, zeroed .bss and called boot_entry with `stvec` NEVER WRITTEN. The
+# only `csrw stvec` in the tree lived inside the U-mode fs-exec path in
+# baremetal_stubs.c, which rt_riscv_fs_exec_run() fails closed on (returns -13)
+# and no lane reaches. Consequence: every S-mode exception a riscv64 guest took
+# -- a null jump through an unresolved runtime symbol, a bad load, a misaligned
+# access -- vectored to whatever address the firmware happened to leave behind,
+# printed NOTHING, and reached the serial console only as "the guest resets and
+# the entry re-enters from the top". Three sessions of the in-guest interpreter
+# rows were spent reading that silence. See
+# doc/08_tracking/bug/riscv64_in_guest_interp_resets_on_cross_function_call_2026-09-01.md
+#
+# A tree-wide `grep -c csrw.stvec` is exactly the check that would have passed
+# throughout that failure -- the fs-exec hit satisfies it. So this guard is
+# scoped: the write must be reachable from `boot_entry`, the function crt0.S
+# actually calls.
+#
+# THE SECOND CHECK IS NOT DECORATION. stvec's low two bits are the MODE field.
+# Measured while writing the fix: with RVC enabled the assembler emitted a
+# 2-byte c.nop ahead of the vector label and `rv64_boot_trap_vector` landed at
+# section offset 0x2, so installing it would have silently selected VECTORED
+# mode and sent every trap to a garbage base -- reproducing the exact silent
+# fault the vector exists to end. The guard compiles the real TU and reads the
+# real symbol address; it does not trust the `.balign` directive's presence.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) performed, ...   exit 0
+#   FAIL  — ...                           exit 1
+#   ERROR — nothing was checked: ...      exit 2
+# 0 checks performed is an ERROR, never a PASS. A missing riscv64 cross
+# compiler is an ERROR, never a PASS: absence of a compiler is absence of
+# evidence.
+#
+# `--selftest` runs before every real scan and is fatal.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BOOT_DIR=$ROOT/examples/09_embedded/simple_os/arch/riscv64/boot
+
+fail()    { printf 'FAIL — %s\n' "$1"; exit 1; }
+nothing() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+find_cc() {
+    for c in riscv64-linux-gnu-gcc riscv64-unknown-elf-gcc riscv64-elf-gcc; do
+        if command -v "$c" >/dev/null 2>&1; then printf '%s\n' "$c"; return 0; fi
+    done
+    return 1
+}
+find_nm() {
+    for n in riscv64-linux-gnu-nm riscv64-unknown-elf-nm riscv64-elf-nm llvm-nm; do
+        if command -v "$n" >/dev/null 2>&1; then printf '%s\n' "$n"; return 0; fi
+    done
+    return 1
+}
+
+# scan_dir <boot-dir> <outvar-file>
+# Emits, one per line:  SOURCE_INSTALL=yes|no  BOOT_ENTRY_CALLS=yes|no
+#                       VECTOR_SYMBOL=<name>|none  VECTOR_ADDR=<dec>|none
+# Sets EV_CHECKED to the number of checks it actually performed.
+EV_CHECKED=0
+scan_dir() {
+    d=$1
+    be=$d/boot_entry.c
+    [ -f "$be" ] || return 3
+
+    # (1) Does the normal boot path install a vector at all? The installer must
+    #     write stvec and must live OUTSIDE the fail-closed fs-exec block; we
+    #     enforce that by requiring it in boot_entry.c, the TU crt0.S calls.
+    S_INSTALL=no
+    if grep -q 'csrw[[:space:]]*stvec' "$be"; then S_INSTALL=yes; fi
+    EV_CHECKED=$((EV_CHECKED + 1))
+
+    # (2) Is the installer actually reached from boot_entry()? A defined-but-
+    #     uncalled installer is the fail-open this guard is named after.
+    S_CALLED=no
+    if awk '/^void boot_entry\(/{inb=1} inb&&/rv64_boot_install_trap_vector\(\)/{print "HIT"; exit} inb&&/^}/{exit}' "$be" | grep -q HIT; then
+        S_CALLED=yes
+    fi
+    EV_CHECKED=$((EV_CHECKED + 1))
+
+    # (3) Compile it for real and read the real vector address. `.balign` being
+    #     present in the source proves nothing; the emitted offset does.
+    V_NAME=none
+    V_ADDR=none
+    if [ -n "${GUARD_CC:-}" ]; then
+        obj=$WORK/be_$(basename "$d").o
+        cc_rc=0
+        "$GUARD_CC" -march=rv64gc -mabi=lp64d -ffreestanding -nostdlib -fno-builtin \
+            -c "$be" -o "$obj" >"$WORK/cc.log" 2>&1 || cc_rc=$?
+        if [ "$cc_rc" -ne 0 ]; then
+            printf 'CC_FAILED=yes\n'
+            return 0
+        fi
+        line=$("$GUARD_NM" "$obj" 2>/dev/null | grep ' [Tt] rv64_boot_trap_vector$' || true)
+        if [ -n "$line" ]; then
+            V_NAME=rv64_boot_trap_vector
+            V_ADDR=$(printf '%s\n' "$line" | awk '{print $1}')
+        fi
+        EV_CHECKED=$((EV_CHECKED + 1))
+    fi
+
+    printf 'SOURCE_INSTALL=%s\nBOOT_ENTRY_CALLS=%s\nVECTOR_SYMBOL=%s\nVECTOR_ADDR=%s\n' \
+        "$S_INSTALL" "$S_CALLED" "$V_NAME" "$V_ADDR"
+}
+
+# evaluate <scan-output> -> prints offenders, returns 0 clean / 1 offending
+evaluate() {
+    out=$1
+    offenders=
+    grep -q '^CC_FAILED=yes$' "$out" && { printf 'boot_entry.c does not compile for riscv64'; return 1; }
+    grep -q '^SOURCE_INSTALL=yes$' "$out" || offenders="$offenders boot_entry.c-never-writes-stvec"
+    grep -q '^BOOT_ENTRY_CALLS=yes$' "$out" || offenders="$offenders boot_entry-does-not-call-the-installer"
+    vname=$(sed -n 's/^VECTOR_SYMBOL=//p' "$out")
+    vaddr=$(sed -n 's/^VECTOR_ADDR=//p' "$out")
+    if [ -n "${GUARD_CC:-}" ]; then
+        if [ "$vname" = none ]; then
+            offenders="$offenders rv64_boot_trap_vector-not-defined"
+        else
+            dec=$(printf '%d' "0x$vaddr" 2>/dev/null || echo 1)
+            if [ $((dec % 4)) -ne 0 ]; then
+                offenders="$offenders rv64_boot_trap_vector-misaligned(0x$vaddr)"
+            fi
+        fi
+    fi
+    [ -z "$offenders" ] && return 0
+    printf '%s' "${offenders# }"
+    return 1
+}
+
+WORK=${TMPDIR:-/tmp}/rv64-trapvec-guard.$$
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+GUARD_CC=$(find_cc || true)
+GUARD_NM=$(find_nm || true)
+if [ -z "$GUARD_CC" ] || [ -z "$GUARD_NM" ]; then
+    nothing "no riscv64 cross toolchain (need riscv64-*-gcc and riscv64-*-nm); absence of a compiler is absence of evidence"
+fi
+
+# ---------------------------------------------------------------------------
+# Fatal selftest. Fixtures are real boot_entry.c files run through the real
+# scanner and evaluator, never a mocked verdict.
+# ---------------------------------------------------------------------------
+selftest() {
+    sroot=$WORK/selftest
+    rm -rf "$sroot"; mkdir -p "$sroot"
+
+    good=$sroot/good; mkdir -p "$good"
+    cat > "$good/boot_entry.c" <<'FIX'
+void rv64_boot_install_trap_vector(void);
+void boot_entry(unsigned long h, unsigned long d)
+{
+    rv64_boot_install_trap_vector();
+    (void)h; (void)d;
+}
+__asm__(
+".section .text.trap, \"ax\", %progbits\n"
+".option push\n"
+".option norvc\n"
+".balign 16\n"
+".globl rv64_boot_trap_vector\n"
+"rv64_boot_trap_vector:\n"
+"1:\n"
+"  wfi\n"
+"  j 1b\n"
+".option pop\n"
+);
+extern void rv64_boot_trap_vector(void);
+void rv64_boot_install_trap_vector(void)
+{
+    __asm__ volatile("csrw stvec, %0" :: "r"((unsigned long)rv64_boot_trap_vector));
+}
+FIX
+
+    # must-FAIL 1: the incident's exact shape — no stvec write on the boot path.
+    nostvec=$sroot/nostvec; mkdir -p "$nostvec"
+    cat > "$nostvec/boot_entry.c" <<'FIX'
+void boot_entry(unsigned long h, unsigned long d) { (void)h; (void)d; }
+FIX
+
+    # must-FAIL 2: installer exists but boot_entry never calls it (fail-open).
+    uncalled=$sroot/uncalled; mkdir -p "$uncalled"
+    sed 's/^    rv64_boot_install_trap_vector();$//' "$good/boot_entry.c" > "$uncalled/boot_entry.c"
+
+    # must-FAIL 3: RVC leaves the vector at an odd offset -> stvec MODE bits.
+    misal=$sroot/misaligned; mkdir -p "$misal"
+    sed -e 's/^".option norvc\\n"$/"  .2byte 0x0001\\n"/' \
+        -e 's/^".balign 16\\n"$//' "$good/boot_entry.c" > "$misal/boot_entry.c"
+
+    st_checked=0
+    for want in good:0 nostvec:1 uncalled:1 misaligned:1; do
+        name=${want%%:*}; expect=${want##*:}
+        EV_CHECKED=0
+        scan_dir "$sroot/$name" > "$WORK/st.out" 2>/dev/null || true
+        got=0
+        evaluate "$WORK/st.out" >/dev/null 2>&1 || got=1
+        if [ "$got" != "$expect" ]; then
+            printf 'FAIL — selftest fixture %s: expected %s, got %s\n' "$name" "$expect" "$got"
+            exit 1
+        fi
+        st_checked=$((st_checked + 1))
+    done
+    # A fixture directory with no boot_entry.c must be unscannable, so a caller
+    # cannot mistake an empty scan for a pass.
+    EV_CHECKED=0
+    rc=0; scan_dir "$sroot/absent" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 3 ] || { printf 'FAIL — selftest: missing boot_entry.c did not report unscannable\n'; exit 1; }
+    [ "$EV_CHECKED" = 0 ] || { printf 'FAIL — selftest: unscannable fixture still counted checks\n'; exit 1; }
+    st_checked=$((st_checked + 1))
+    printf 'selftest OK — %d fixture(s)\n' "$st_checked"
+}
+
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    printf 'PASS — selftest only, 5 fixture(s) checked\n'
+    exit 0
+fi
+
+EV_CHECKED=0
+rc=0
+scan_dir "$BOOT_DIR" > "$WORK/scan.out" 2>/dev/null || rc=$?
+[ "$rc" = 3 ] && nothing "no boot_entry.c under $BOOT_DIR"
+[ "$EV_CHECKED" -gt 0 ] || nothing "0 checks performed on $BOOT_DIR"
+
+if offenders=$(evaluate "$WORK/scan.out"); then
+    printf 'PASS — %d check(s) performed, riscv64 boot_entry installs a 4-byte-aligned S-mode trap vector\n' "$EV_CHECKED"
+    exit 0
+else
+    fail "$EV_CHECKED check(s) performed on $BOOT_DIR: $offenders"
+fi

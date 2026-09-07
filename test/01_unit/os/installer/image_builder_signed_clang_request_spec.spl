@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Pins the signed Clang/sysroot request admission contract of the image
+builder: the exact nine-row CLI shape, mutual-exclusion, ordering, and
+retained-root rejections, and the per-artifact retained-provider byte
+ceiling. Audience: installer and toolchain-packaging engineers.
+## Operator workflow
+Run this spec from the repo root with the Simple runner; scenarios drive
+the production run_image_builder admission path from
+os.installer.image_builder and the bounds validator contract.
+## Compatibility and limitations
+Known RED on the current tree: run_image_builder fails with `class
+ImageConfig has no field named simple_binary` (defect at
+src/os/installer/image_builder.spl:252), and
+image_builder_signed_clang_bounds_valid_v1 is imported by this spec but
+defined nowhere under src/. The scenarios stay RED until both land.
+## Verification guidance and troubleshooting
+A red scenario names the admission rule that regressed or is missing. If
+failures show the interpreter-fallback warning (VmFlags field type), fix
+the ImageConfig field defect first; the bounds scenario cannot pass until
+the validator is implemented.
+"""
+# Lifecycle: doc/01_research/domain/simpleos_32bit_bootstrap.md ;
+# doc/03_plan/os/in_guest_clang_selfhost_board_plan.md ;
+# doc/04_architecture/os/loader/scr2_native_catalog_policy_v1.md ;
+# doc/05_design/release_process_hardening.md
+# @manual_section: signed-clang-admission
+
 use std.spec
 use os.installer.image_builder.{
     run_image_builder, image_builder_signed_clang_bounds_valid_v1}
@@ -49,6 +77,8 @@ fn exact_signed_simplebox_args(root: text) -> [text]:
 describe "image-builder signed Clang request admission":
     it "defines the complete exact-nine Clang/sysroot CLI shape":
         step("Include nine ordered rows plus the atomic release descriptor identity")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): defines-the-complete-exact-nine-clang-sysroot-cli-shape
         val args = exact_signed_clang_args()
         expect(args).to_contain("--signed-clang-descriptor-leaf=clang-catalog.ccrd")
         expect(args).to_contain("--signed-clang-release-id=release-2026-08-25")
@@ -57,25 +87,33 @@ describe "image-builder signed Clang request admission":
 
     it "rejects a partially specified exact-nine request":
         step("Provide one signed-Clang field without the remaining transaction fields")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-a-partially-specified-exact-nine-request
         expect(run_image_builder([
             "create", "--arch=x86_64", "--signed-clang-root=missing-fields",
         ])).to_equal(1)
 
     it "rejects a target triple that is not bound to the selected image architecture":
         step("Change only the signed bundle target while retaining the exact role set")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-a-target-triple-that-is-not-bound-to-the-selected-image-architecture
         var args = exact_signed_clang_args()
         args[args.len() - 1] = "--signed-clang-target=aarch64-unknown-simpleos"
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: 1 is the CLI exit code for a rejected signed-Clang request
 
     it "rejects reordered canonical roles before reading hosted artifacts":
         step("Substitute the linker and compiler guest destinations")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-reordered-canonical-roles-before-reading-hosted-artifacts
         var args = exact_signed_clang_args()
         args[args.len() - 3] =
             "--signed-clang-canonical-paths=/usr/bin/ld.lld,/usr/bin/clang,/work/hello.elf,/usr/include/.simpleos-sysroot.merkle,/usr/share/simpleos/simpleos.ld,/usr/lib/crt0.o,/usr/lib/libsimpleos_c.a,/usr/lib/libsimple_runtime.a,/usr/lib/libm.a"
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: rejection exits 1 before reading any hosted artifact
 
     it "rejects a per-artifact bound above the retained provider ceiling":
         step("Keep artifact bounds distinct from the 16 MiB transfer chunk")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-a-per-artifact-bound-above-the-retained-provider-ceiling
         expect(image_builder_signed_clang_bounds_valid_v1([
             16777217, 1048576, 1048576, 1048576, 1048576,
             1048576, 1048576, 1048576, 1048576,
@@ -91,30 +129,39 @@ describe "image-builder signed Clang request admission":
 
     it "rejects simultaneous legacy and atomic signed bundle modes":
         step("Present both mutually exclusive Clang publication interfaces")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-simultaneous-legacy-and-atomic-signed-bundle-modes
         var args = exact_signed_clang_args()
         args.push("--clang-bundle-root=legacy")
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: mutually exclusive bundle modes must exit 1
 
     it "rejects a partial primary append before retained-root publication":
         step("Present one field without the remaining five-row external media")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-a-partial-primary-append-before-retained-root-publication
         var args = exact_signed_clang_args()
         for simplebox_arg in exact_signed_simplebox_args(
             "/tmp/simpleos-signed-clang-request"):
             args.push(simplebox_arg)
         args.push("--signed-primary-sources=simplebox,sha256sum,md5sum,grep,ps")
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: a partial primary append is rejected with exit 1
 
     it "rejects partial Clang alongside complete primary before any publication":
         var args: [text] = ["create", "--arch=x86_64"]
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-partial-clang-alongside-complete-primary-before-any-publication
+        step("rejects partial Clang alongside complete primary before any publication")
         for simplebox_arg in exact_signed_simplebox_args(
             "/tmp/simpleos-signed-clang-request"):
             args.push(simplebox_arg)
         for primary_arg in exact_primary_append_args(): args.push(primary_arg)
         args.push("--signed-clang-root=/tmp/simpleos-signed-clang-request")
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: partial Clang plus complete primary still exits 1
 
     it "rejects orphan primary options instead of building an unsigned image":
         step("Request incomplete standalone primary media")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-orphan-primary-options-instead-of-building-an-unsigned-image
         expect(run_image_builder([
             "create", "--arch=x86_64",
             "--signed-primary-sources=simplebox,sha256sum,md5sum,grep,ps",
@@ -122,14 +169,18 @@ describe "image-builder signed Clang request admission":
 
     it "requires the existing signed Simplebox payload and SCR1 for PTRD row zero":
         step("Present all five external rows without the signed Simplebox owner")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): requires-the-existing-signed-simplebox-payload-and-scr1-for-ptrd-row-zero
         var args = exact_signed_clang_args()
         for primary_arg in exact_primary_append_args(): args.push(primary_arg)
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: missing Simplebox owner rejects with exit 1
 
     it "keeps primary append identity ordered and descriptor-explicit":
         step("Name the exact five rows with Simplebox at row zero")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): keeps-primary-append-identity-ordered-and-descriptor-explicit
         val args = exact_primary_append_args()
-        expect(args.len()).to_equal(10)
+        expect(args.len()).to_equal(10)  # oracle: the primary append is exactly ten ordered CLI rows
         expect(args[0]).to_equal(
             "--signed-primary-root=/tmp/simpleos-signed-clang-request")
         expect(args[1]).to_equal(
@@ -139,28 +190,36 @@ describe "image-builder signed Clang request admission":
 
     it "rejects split retained roots before either catalog producer runs":
         step("Bind complete Simplebox and combined rows to different roots")
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-split-retained-roots-before-either-catalog-producer-runs
         var args = exact_signed_clang_args()
         for simplebox_arg in exact_signed_simplebox_args("different-root"):
             args.push(simplebox_arg)
         for primary_arg in exact_primary_append_args(): args.push(primary_arg)
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: split retained roots exit 1 before either producer runs
 
     it "rejects equal primary and Clang bundle outputs before publication":
         var args = exact_signed_clang_args()
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-equal-primary-and-clang-bundle-outputs-before-publication
+        step("rejects equal primary and Clang bundle outputs before publication")
         for simplebox_arg in exact_signed_simplebox_args(
             "/tmp/simpleos-signed-clang-request"):
             args.push(simplebox_arg)
         var primary = exact_primary_append_args()
         primary[2] = "--signed-primary-bundle=clang-toolchain"
         for primary_arg in primary: args.push(primary_arg)
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: colliding bundle outputs must exit 1 pre-publication
 
     it "rejects a primary output overlapping a Clang input before publication":
         var args = exact_signed_clang_args()
+        # @req REQ-SIMPLEOS-INSTALLER-SIGNED-CLANG-001
+        # @capture(statistics): rejects-a-primary-output-overlapping-a-clang-input-before-publication
+        step("rejects a primary output overlapping a Clang input before publication")
         for simplebox_arg in exact_signed_simplebox_args(
             "/tmp/simpleos-signed-clang-request"):
             args.push(simplebox_arg)
         var primary = exact_primary_append_args()
         primary[2] = "--signed-primary-bundle=clang"
         for primary_arg in primary: args.push(primary_arg)
-        expect(run_image_builder(args)).to_equal(1)
+        expect(run_image_builder(args)).to_equal(1)  # oracle: an output overlapping a Clang input exits 1 too

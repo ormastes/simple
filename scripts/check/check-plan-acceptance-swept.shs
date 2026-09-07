@@ -78,9 +78,12 @@
 # A run that fed 0 specs to a runner is ERROR, never a pass. No runner at all is
 # ERROR, never a pass — absence of a runner is absence of evidence.
 #
-# `--selftest` runs before every scan and is fatal (12 fixtures: the original
-# 9 plus the 3 hardening fixtures below — E1034-anywhere, tagged-assertion
-# neutralisation, and tagged-load-failure-vs-neutralisation).
+# `--selftest` runs before every scan and is fatal (14 fixtures: the original
+# 9, the 3 hardening fixtures below — E1034-anywhere, tagged-assertion
+# neutralisation, tagged-load-failure-vs-neutralisation — and the 2 parallelism
+# fixtures (k) and (l) added 2026-09-06, which prove the worker pool attributes
+# an offender to the right spec and that a sharded sweep reads only its own
+# shard's markers).
 #
 # Options (the overrides exist so the selftest can drive the REAL scanner
 # against fixtures instead of re-implementing it):
@@ -90,8 +93,58 @@
 #   --spec-dir DIR        suite directory to sweep
 #   --runner PATH         binary invoked as `PATH run <spec>`
 #   --spec-timeout SECS   per-spec timeout (default 300; needs timeout/gtimeout)
-#   --sweep-timeout SECS  timeout for the single in-development sweep invocation
-#                         over the whole spec dir (default 1800)
+#   --sweep-timeout SECS  timeout for ONE in-development sweep invocation over a
+#                         shard directory (default 1800)
+#   --jobs N              worker-pool size (default: online CPUs, capped at 8;
+#                         PLAN_ACCEPTANCE_JOBS overrides). `--jobs 1` is the old
+#                         fully serial behaviour.
+#
+# PARALLELISM (2026-09-06) — why, and why it is safe
+# ---------------------------------------------------
+# MEASURED, not estimated. On this host (10 cores, loaded), with
+# PLAN_ACCEPTANCE_RUNNER=src/compiler_rust/target/debug/simple:
+#   * a single explicit `runner run <spec>`: 7s / 12s / 38s for three sampled
+#     specs; `startup_perf_plan_spec.spl` alone is 287s.
+#   * the directory-wide neutralisation sweep is dominated by a FIXED cost:
+#     an EMPTY directory costs 249s (the interpreter loading
+#     src/app/test_runner_new/main.spl), 1 spec 435s, 3 specs 326s.
+# Serially, 36 specs x (one explicit run + one slot in a single whole-directory
+# sweep) does not finish inside 2400s — measured twice. The old header's
+# "~13 min serial" was wrong by several times.
+#
+# The fix is a bounded worker pool over BOTH phases at once, and it changes no
+# assertion: every spec is still explicitly run, and every tagged spec is still
+# classified from a DIRECTORY sweep.
+#
+#   * The 249s sweep fixed cost is per-PROCESS, so it can be paid K times in
+#     parallel instead of once serially. The tagged specs are split round-robin
+#     into K shard DIRECTORIES (K = --jobs) and each shard gets its own
+#     `<runner> run .../test_runner_new/main.spl <shard-dir>`. A shard is still
+#     a directory target, so `in_development_explicitly_targeted` still returns
+#     false for every file inside it (it basename-matches requested paths
+#     against FILES; a directory never matches) — the neutralisation semantics
+#     the sweep exists to observe are byte-for-byte the ones a whole-directory
+#     sweep produces. The only suite-level artefact a shard cannot produce is
+#     the SKIP+COUNT summary ROW, which this guard already declares unasserted.
+#   * Shard sweeps are enqueued FIRST (longest pole, largest fixed cost), then
+#     the per-spec runs, into the same pool.
+#
+# ISOLATION AND ATTRIBUTION (the scoring lane's concurrency defect, 2026-09-06:
+# two runs shared one work dir and one silently scored another lane's specs).
+# Three independent mechanisms, none of which relies on ordering:
+#   1. Every job gets a PRIVATE work directory and its own `TMPDIR` and
+#      `SIMPLE_WORKTREE_STORAGE_ROOT` (per .claude/memory: the worktree root is
+#      exactly the "sessions, outputs, temp" root; the reusable-cache root
+#      `SIMPLE_USER_STORAGE_ROOT` is deliberately left shared and read-mostly).
+#      No two jobs can write the same output path.
+#   2. Every per-spec job writes its result as `<abs spec path>\t<class>...`,
+#      and the collector REJECTS a result file whose recorded path is not the
+#      spec that job was launched for — `ERROR — nothing was checked
+#      (result misattributed...)`, never a PASS and never a FAIL blamed on the
+#      wrong spec. Fixture (k) proves this fires.
+#   3. Shard sweeps classify by the SHARD-LOCAL absolute path of each copied
+#      spec, which is unique per shard, not by basename. A marker emitted by
+#      shard 2 cannot be read as evidence for shard 5's copy of anything.
 #
 # HARDENING (2026-09-05, Guide A2)
 # ---------------------------------
@@ -149,9 +202,41 @@ DEF_SPEC_DIR="$ROOT/test/03_system/plan_acceptance"
 MANIFEST=""
 DISPATCHER=""
 SPEC_DIR=""
+# Three names name "which Simple binary should run the specs" across this
+# codebase: PLAN_ACCEPTANCE_RUNNER (this gate's own, historical, name),
+# SIMPLE_BINARY (what the runner's own integration-spec helper and every
+# agent guide set), SIMPLE_RUNTIME (the historical std.test_runner name).
+# Precedence, documented once here and mirrored by resolve_runner() below and
+# by std.test_runner.test_executor_parsing.find_simple_binary() /
+# std.spec.engine_probe.simple_binary(): --runner flag (most specific) >
+# PLAN_ACCEPTANCE_RUNNER (this gate's own name) > SIMPLE_BINARY > SIMPLE_RUNTIME
+# > default candidate search. Honouring only one of the three silently
+# produces a confident WRONG verdict instead of an error -- see doc/08_tracking/bug/
+# three_simple_binary_env_var_names_silent_wrong_verdict_2026-09-06.md
 RUNNER="${PLAN_ACCEPTANCE_RUNNER:-}"
-SPEC_TIMEOUT=300
+RUNNER_SOURCE="PLAN_ACCEPTANCE_RUNNER"
+if [ -z "$RUNNER" ]; then
+    RUNNER="${SIMPLE_BINARY:-}"
+    RUNNER_SOURCE="SIMPLE_BINARY"
+fi
+if [ -z "$RUNNER" ]; then
+    RUNNER="${SIMPLE_RUNTIME:-}"
+    RUNNER_SOURCE="SIMPLE_RUNTIME"
+fi
+[ -n "$RUNNER" ] || RUNNER_SOURCE=""
+# Sized against MEASURED fixed cost, not a round number. Every spec in this
+# suite pays the runner's module-loading startup before executing anything:
+# measured 2026-09-06 at 145-290s under this host's varying load, against
+# per-spec execution of 0.4-1.2s. At the old 300s that left under 10s of
+# headroom and excel_to_math_synthesis landed at 298.93s -- a budget that
+# passes or fails on host load, not on the spec, which is a flaky gate rather
+# than a slow spec. Raised to cover the worst measured startup plus real work.
+# This is NOT a licence to raise it again for a spec that hangs: a hang is a
+# defect, and the three specs that used to hit 300s were fixed by removing
+# nested full-suite `process_run` fan-out (79 child runners), not by this knob.
+SPEC_TIMEOUT="${PLAN_ACCEPTANCE_SPEC_TIMEOUT:-480}"
 SWEEP_TIMEOUT="${PLAN_ACCEPTANCE_SWEEP_TIMEOUT:-1800}"
+JOBS="${PLAN_ACCEPTANCE_JOBS:-}"
 DO_SELFTEST_ONLY=0
 
 while [ $# -gt 0 ]; do
@@ -160,9 +245,10 @@ while [ $# -gt 0 ]; do
         --manifest) MANIFEST=$2; shift 2 ;;
         --dispatcher) DISPATCHER=$2; shift 2 ;;
         --spec-dir) SPEC_DIR=$2; shift 2 ;;
-        --runner) RUNNER=$2; shift 2 ;;
+        --runner) RUNNER=$2; RUNNER_SOURCE="--runner"; shift 2 ;;
         --spec-timeout) SPEC_TIMEOUT=$2; shift 2 ;;
         --sweep-timeout) SWEEP_TIMEOUT=$2; shift 2 ;;
+        --jobs) JOBS=$2; shift 2 ;;
         *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
     esac
 done
@@ -170,6 +256,20 @@ done
 [ -n "$MANIFEST" ] || MANIFEST=$DEF_MANIFEST
 [ -n "$DISPATCHER" ] || DISPATCHER=$DEF_DISPATCHER
 [ -n "$SPEC_DIR" ] || SPEC_DIR=$DEF_SPEC_DIR
+
+# Worker-pool size. Default = online CPUs capped at 8: the pool runs whole
+# interpreter processes, and oversubscribing a loaded box makes the slowest
+# item slower without finishing sooner. `--jobs 1` restores serial behaviour.
+if [ -z "$JOBS" ]; then
+    JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || JOBS=""
+    [ -n "$JOBS" ] || JOBS=$(sysctl -n hw.ncpu 2>/dev/null) || JOBS=""
+    case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
+    [ "$JOBS" -gt 8 ] && JOBS=8
+fi
+case "$JOBS" in
+    ''|*[!0-9]*) echo "ERROR — nothing was checked (--jobs must be a positive integer, got '$JOBS')"; exit 2 ;;
+esac
+[ "$JOBS" -ge 1 ] || { echo "ERROR — nothing was checked (--jobs must be >= 1)"; exit 2; }
 
 # ---------------------------------------------------------------- coverage ---
 # Emits, on stdout, one of:
@@ -223,6 +323,12 @@ runner_supports_run() {
 }
 
 resolve_runner() {
+    # NOTE: called via command substitution ($(resolve_runner)), which forks a
+    # subshell -- any variable assigned in here (e.g. a RUNNER_SOURCE update
+    # for the default-candidate branch) is invisible to the caller. Do not
+    # rely on side-effect variables from this function; the caller derives
+    # its error message from $RUNNER/$RUNNER_SOURCE as they stood BEFORE this
+    # call instead.
     if [ -n "$RUNNER" ]; then
         [ -x "$RUNNER" ] || return 1
         runner_supports_run "$RUNNER" || return 1
@@ -273,6 +379,90 @@ run_one() {
     else
         echo "RAN $_exec $_rc"
     fi
+}
+
+# -------------------------------------------------------------- job pool ---
+# A bounded worker pool in POSIX sh. Completion is tracked by a marker FILE per
+# job, never by `kill -0` on a recorded pid: an unwaited child stays a zombie
+# and `kill -0` keeps succeeding on it, which would deadlock the pool.
+POOL_DONE=""
+POOL_LAUNCHED=0
+
+pool_init() {
+    POOL_DONE=$1
+    mkdir -p "$POOL_DONE" || return 1
+    POOL_LAUNCHED=0
+}
+
+pool_wait_slot() {
+    while :; do
+        _fin=$(find "$POOL_DONE" -type f 2>/dev/null | grep -c .)
+        [ $((POOL_LAUNCHED - _fin)) -lt "$JOBS" ] && return 0
+        sleep 1
+    done
+}
+
+# pool_spawn <done-token> <command...> — runs the command in the background
+# with a private TMPDIR/worktree storage root, then drops its done token.
+pool_spawn() {
+    _token=$1
+    shift
+    pool_wait_slot
+    POOL_LAUNCHED=$((POOL_LAUNCHED + 1))
+    (
+        "$@"
+        : > "$POOL_DONE/$_token"
+    ) &
+}
+
+# job_run_spec <runner> <spec> <jobdir> — one isolated explicit per-spec run.
+# Writes "<abs spec path>\t<class> <executed> <rc>\t<secs>" to <jobdir>/result.
+job_run_spec() {
+    _j_runner=$1
+    _j_spec=$2
+    _j_dir=$3
+    mkdir -p "$_j_dir/tmp" "$_j_dir/wt"
+    TMPDIR="$_j_dir/tmp"
+    SIMPLE_WORKTREE_STORAGE_ROOT="$_j_dir/wt"
+    export TMPDIR SIMPLE_WORKTREE_STORAGE_ROOT
+    _j_t0=$(date +%s)
+    _j_r=$(run_one "$_j_runner" "$_j_spec")
+    _j_t1=$(date +%s)
+    printf '%s\t%s\t%s\n' "$_j_spec" "$_j_r" "$((_j_t1 - _j_t0))" > "$_j_dir/result"
+}
+
+# job_sweep_shard <runner> <entry> <shard-dir> <jobdir> — one directory sweep
+# over a shard. Output to <jobdir>/out, exit status to <jobdir>/rc.
+job_sweep_shard() {
+    _s_runner=$1
+    _s_entry=$2
+    _s_dir=$3
+    _s_job=$4
+    mkdir -p "$_s_job/tmp" "$_s_job/wt"
+    TMPDIR="$_s_job/tmp"
+    SIMPLE_WORKTREE_STORAGE_ROOT="$_s_job/wt"
+    export TMPDIR SIMPLE_WORKTREE_STORAGE_ROOT
+    # --no-self-protect: the runner's self-protection stops a run when system
+    # CPU **and** RAM are both over 75%, saving a checkpoint and exiting 42.
+    # That guard is written for an interactive `simple test` competing with a
+    # machine it does not control. Here THIS GATE is the load: it decides the
+    # concurrency itself via --jobs and starts that many interpreters at once,
+    # so leaving self-protection on makes the gate's own parallelism abort the
+    # gate's own shards. Measured 2026-09-06 (jobs=8): six of eight shards
+    # exited 42 with "Reason: cpu=82.0%>75.0% AND memory=79.0%>75.0%" and
+    # "Completed tests: 0" — none of them ran a single spec, so none of their
+    # specs could emit an IN-DEVELOPMENT marker and all 28 were reported as
+    # per-spec load failures that did not exist. This is not "raising a limit
+    # because it was inconvenient": the shard is a bounded, gate-owned child
+    # whose resource envelope the gate already sets, and an aborted shard is
+    # never silently tolerated — a non-zero shard rc is still an offender, now
+    # labelled `shard-aborted` (see the classifier).
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$SWEEP_TIMEOUT" "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect > "$_s_job/out" 2>&1
+    else
+        "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect > "$_s_job/out" 2>&1
+    fi
+    echo $? > "$_s_job/rc"
 }
 
 # ---------------------------------------------------------------- selftest ---
@@ -348,7 +538,14 @@ case "$_target" in
                     echo "SPEC FILE VERDICT: $_f outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 skipped=0 dropped=0"
                 else
                     echo "IN-DEVELOPMENT SKIP $_f (1 expected failure(s); @tag:in-development)"
-                    echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=1 dropped=0"
+                    # The REAL aggregating lane reports a neutralised file as
+                    # passed=0 failed=0 (its failures became skips) and states
+                    # the count in `in_development=`. This fixture used to emit
+                    # failed=1 -- a shape that lane never produces -- which is
+                    # why 14/14 passed while all 36 tagged specs were being
+                    # misclassified in production. Keep this byte-identical to
+                    # emit_spec_file_verdicts / ran_verdict_line.
+                    echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=0 failed=0 in_development=1 skipped=1 dropped=0"
                 fi
             else
                 echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=1 failed=0 skipped=0 dropped=0"
@@ -365,6 +562,56 @@ case "$_target" in
             echo "Error: Compilation failed: unresolved import"
             exit 1
         fi
+        echo "SPEC FILE VERDICT: $_target outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=0 dropped=0"
+        exit 0
+        ;;
+esac
+RUNNEOF
+    chmod +x "$1"
+}
+
+_mk_runner_shardabort() {
+    # $1 dest, $2 mode — "always" (shard always shuts down) or "unless-flag"
+    # (shard shuts down only when the sweep invocation lacks
+    # --no-self-protect). Reproduces the real runner's graceful resource
+    # shutdown: the shutdown banner, a Reason line and rc=42, with NO
+    # IN-DEVELOPMENT marker for any spec, because it never reached them.
+    cat > "$1" <<RUNNEOF
+#!/bin/sh
+_mode=$2
+RUNNEOF
+    cat >> "$1" <<'RUNNEOF'
+_target=$2
+_flag=0
+for _a in "$@"; do
+    if [ "$_a" = "--no-self-protect" ]; then
+        _flag=1
+    fi
+done
+case "$_target" in
+    */test_runner_new/main.spl)
+        _dir=$3
+        _abort=0
+        if [ "$_mode" = always ]; then
+            _abort=1
+        fi
+        if [ "$_mode" = unless-flag ] && [ "$_flag" = 0 ]; then
+            _abort=1
+        fi
+        if [ "$_abort" = 1 ]; then
+            echo "GRACEFUL SHUTDOWN INITIATED"
+            echo "Reason: cpu=82.0%>75.0% AND memory=79.0%>75.0%"
+            echo "Completed tests: 0"
+            exit 42
+        fi
+        for _f in "$_dir"/*_spec.spl; do
+            [ -f "$_f" ] || continue
+            echo "IN-DEVELOPMENT SKIP $_f (1 expected failure(s); @tag:in-development)"
+            echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=0 failed=0 in_development=1 skipped=1 dropped=0"
+        done
+        exit 0
+        ;;
+    *)
         echo "SPEC FILE VERDICT: $_target outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=0 dropped=0"
         exit 0
         ;;
@@ -502,6 +749,129 @@ run_selftest() {
         --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
         --spec-dir "$_wd/specs_e1034" --runner "$_wd/runner_neutr.sh"
 
+    # ---- parallelism fixtures (2026-09-06). Both drive the REAL pool.
+    #
+    # (k) PER-SPEC ATTRIBUTION UNDER CONCURRENCY. Five specs, exactly one of
+    #     which cannot load, run with --jobs 4. The FAIL must name that ONE
+    #     spec — not a sibling, and not more than one. A pool that shared a
+    #     work directory between workers (the scoring lane's defect, 2026-09-06)
+    #     would either lose a result or attribute it to the wrong slot, and both
+    #     shapes are caught here: the offender count is asserted to be exactly 1
+    #     AND the attempted count to still be all 5.
+    mkdir -p "$_wd/specs_par"
+    for _n in alpha beta gamma delta broken; do
+        echo "# fixture" > "$_wd/specs_par/${_n}_spec.spl"
+    done
+    _mk_runner "$_wd/runner_par.sh" "$_wd/marker_par" "broken_spec.spl"
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_par" --runner "$_wd/runner_par.sh" --jobs 4 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    _nload=$(printf '%s' "$_verdict" | grep -o 'did-not-load' | grep -c . | tr -d ' ')
+    if [ "$_rc" = 1 ] &&
+       printf '%s' "$_verdict" | grep -q 'broken_spec.spl(did-not-load)' &&
+       printf '%s' "$_verdict" | grep -q '5 spec(s) executed' &&
+       printf '%s' "$_verdict" | grep -q 'jobs=4' &&
+       [ "$_nload" = 1 ]; then
+        echo "selftest ok   [parallel pool attributes the offender to the right spec]"
+    else
+        echo "selftest FAIL [parallel pool attributes the offender to the right spec]: exit $_rc, offenders=$_nload — $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
+    # (l) SHARD-LOCAL MARKER ATTRIBUTION. Four tagged specs over --jobs 2, so
+    #     each shard directory holds two of them. The unloadable one is named to
+    #     sort FIRST inside its shard, so a healthy spec's verdict is the LAST
+    #     verdict line in that shard's output. That makes the fixture
+    #     discriminating: if the classifier ever matched with an empty or
+    #     non-shard-local needle, `tail -1` would pick up the healthy sibling's
+    #     `executed=1 failed=1` and silently report a clean PASS. It must FAIL
+    #     and name exactly the unloadable spec.
+    mkdir -p "$_wd/specs_shard"
+    printf '# @tag:in-development\n# LOAD_FAIL_MARKER: unresolved import\nuse std.spec.*\n' \
+        > "$_wd/specs_shard/wip_aa_unloadable_spec.spl"
+    for _n in b c d; do
+        printf '# @tag:in-development\nuse std.spec.*\n\ndescribe "wip":\n    it "not yet":\n        expect(1).to_equal(2)\n' \
+            > "$_wd/specs_shard/wip_${_n}_spec.spl"
+    done
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_shard" --runner "$_wd/runner_neutr.sh" --jobs 2 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    _nneutr=$(printf '%s' "$_verdict" | grep -o 'load-failure-neutralised' | grep -c . | tr -d ' ')
+    if [ "$_rc" = 1 ] &&
+       printf '%s' "$_verdict" | grep -q 'load-failure-neutralised:wip_aa_unloadable_spec.spl' &&
+       printf '%s' "$_verdict" | grep -q '2 sharded directory sweep(s)' &&
+       [ "$_nneutr" = 1 ]; then
+        echo "selftest ok   [sharded sweep reads only its own shard's markers]"
+    else
+        echo "selftest FAIL [sharded sweep reads only its own shard's markers]: exit $_rc, neutr-offenders=$_nneutr — $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
+    # (m) SHARD-ABORT LABELLING. A shard that exits 42 (the runner's graceful
+    #     resource shutdown) emits no marker for any spec it never reached.
+    #     Before 2026-09-06 every such spec was reported as
+    #     `load-failure-neutralised:<spec>(no-marker)` — 33 of 39 offenders in
+    #     a real run — which names a per-spec bug that does not exist. The
+    #     gate must still FAIL (nothing was observed, so nothing is proven),
+    #     but it must name the shard.
+    mkdir -p "$_wd/specs_abort"
+    for _n in p q; do
+        printf '# @tag:in-development\nuse std.spec.*\n\ndescribe "wip":\n    it "not yet":\n        expect(1).to_equal(2)\n' \
+            > "$_wd/specs_abort/wip_${_n}_spec.spl"
+    done
+    _mk_runner_shardabort "$_wd/runner_abort.sh" always
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_abort" --runner "$_wd/runner_abort.sh" --jobs 1 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    _nabort=$(printf '%s' "$_verdict" | grep -o 'shard-aborted' | grep -c . | tr -d ' ')
+    if [ "$_rc" = 1 ] &&
+       printf '%s' "$_verdict" | grep -q 'shard-aborted:wip_p_spec.spl(shard=0,rc=42' &&
+       printf '%s' "$_verdict" | grep -q 'shard-aborted:wip_q_spec.spl(shard=0,rc=42' &&
+       ! printf '%s' "$_verdict" | grep -q 'load-failure-neutralised' &&
+       [ "$_nabort" = 2 ]; then
+        echo "selftest ok   [aborted shard is labelled shard-aborted, not per-spec load failure]"
+    else
+        echo "selftest FAIL [aborted shard is labelled shard-aborted, not per-spec load failure]: exit $_rc, aborts=$_nabort — $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
+    # (n) SELF-PROTECTION IS DISABLED FOR SWEEP SHARDS. This fixture runner
+    #     reproduces the production failure exactly: it shuts down with rc=42
+    #     and no markers UNLESS the sweep invocation carries
+    #     `--no-self-protect`. Without the job_sweep_shard fix this assertion
+    #     FAILS (it sees the shard-aborted FAIL from (m) instead of a PASS),
+    #     which is the point — a fixture that cannot exhibit the defect is not
+    #     a test for it.
+    mkdir -p "$_wd/specs_sp"
+    for _n in r s; do
+        printf '# @tag:in-development\nuse std.spec.*\n\ndescribe "wip":\n    it "not yet":\n        expect(1).to_equal(2)\n' \
+            > "$_wd/specs_sp/wip_${_n}_spec.spl"
+    done
+    _mk_runner_shardabort "$_wd/runner_sp.sh" unless-flag
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_sp" --runner "$_wd/runner_sp.sh" --jobs 1 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    if [ "$_rc" = 0 ] &&
+       printf '%s' "$_verdict" | grep -q 'PASS — 2 spec(s) executed' &&
+       printf '%s' "$_verdict" | grep -q '2 neutralised as genuine assertion failures'; then
+        echo "selftest ok   [sweep shards are launched with self-protection disabled]"
+    else
+        echo "selftest FAIL [sweep shards are launched with self-protection disabled]: exit $_rc — $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
     rm -rf "$_wd"
     if [ "$ST_FAILURES" -ne 0 ]; then
         echo "selftest: $ST_FAILURES of $ST_ASSERTS assertion(s) FAILED — scan not attempted"
@@ -532,8 +902,13 @@ esac
 
 [ -d "$SPEC_DIR" ] || { echo "ERROR — nothing was checked (spec dir not found: $SPEC_DIR)"; exit 2; }
 
+[ -n "$RUNNER" ] || RUNNER_SOURCE="default-candidate-search"
 RUNNER_PATH=$(resolve_runner) || {
-    echo "ERROR — nothing was checked (no runnable Simple binary; set --runner or PLAN_ACCEPTANCE_RUNNER)"
+    if [ -n "$RUNNER" ]; then
+        echo "ERROR — nothing was checked ('$RUNNER' (from $RUNNER_SOURCE) is not usable: not executable, or exists but rejects the 'run' command)"
+    else
+        echo "ERROR — nothing was checked (no runnable Simple binary; set --runner, PLAN_ACCEPTANCE_RUNNER, SIMPLE_BINARY, or SIMPLE_RUNTIME, or place one at bin/simple)"
+    fi
     exit 2
 }
 
@@ -546,17 +921,84 @@ N_FAILEX=0
 OFFENDERS=""
 FAILEX_NAMES=""
 
+TAGGED_LIST=$(grep -l '@tag:in-development' $SPECS 2>/dev/null)
+N_TAGGED=0
+[ -z "$TAGGED_LIST" ] || N_TAGGED=$(printf '%s\n' "$TAGGED_LIST" | grep -c .)
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+pool_init "$WORK/done" || { echo "ERROR — nothing was checked (cannot create pool marker dir)"; exit 2; }
+
+# ------------------------------------------- shard the neutralisation sweep ---
+# Enqueued FIRST: a sweep process pays a ~249s fixed interpreter-startup cost
+# (measured on an EMPTY directory), so it is the longest pole and must start
+# early. Only the specs that actually carry the tag need it (see the HARDENING
+# comment in the header for why a per-spec `run <spec>` can never observe a
+# SKIP/UNEXPECTED PASS marker); untagged specs are fully classified by the
+# per-spec runs below.
+N_SHARDS=0
+SWEEP_ENTRY=""
+if [ -n "$TAGGED_LIST" ]; then
+    SWEEP_ENTRY="$ROOT/src/app/test_runner_new/main.spl"
+    [ -f "$SWEEP_ENTRY" ] || { echo "ERROR — nothing was checked (sweep entry not found: $SWEEP_ENTRY)"; exit 2; }
+    : > "$WORK/shard_map"
+    _si=0
+    for _tspec in $TAGGED_LIST; do
+        _sk=$((_si % JOBS))
+        mkdir -p "$WORK/shard.$_sk/specs" || { echo "ERROR — nothing was checked (cannot create shard dir)"; exit 2; }
+        _slocal="$WORK/shard.$_sk/specs/$(basename "$_tspec")"
+        cp "$_tspec" "$_slocal" || { echo "ERROR — nothing was checked (cannot stage shard copy of $_tspec)"; exit 2; }
+        printf '%s\t%s\t%s\n' "$_tspec" "$_sk" "$_slocal" >> "$WORK/shard_map"
+        _si=$((_si + 1))
+    done
+    _sk=0
+    while [ "$_sk" -lt "$JOBS" ]; do
+        if [ -d "$WORK/shard.$_sk/specs" ]; then
+            N_SHARDS=$((N_SHARDS + 1))
+            pool_spawn "shard.$_sk" job_sweep_shard "$RUNNER_PATH" "$SWEEP_ENTRY" \
+                "$WORK/shard.$_sk/specs" "$WORK/shard.$_sk"
+        fi
+        _sk=$((_sk + 1))
+    done
+fi
+
+# ------------------------------------------------- explicit per-spec runs ---
+SPEC_IDX=0
 for _spec in $SPECS; do
-    N_ATTEMPTED=$((N_ATTEMPTED + 1))
-    _t0=$(date +%s)
-    _r=$(run_one "$RUNNER_PATH" "$_spec")
-    _t1=$(date +%s)
-    _class=$(printf '%s' "$_r" | cut -d' ' -f1)
+    SPEC_IDX=$((SPEC_IDX + 1))
+    printf '%s\n' "$_spec" > "$WORK/expect.$SPEC_IDX"
+    pool_spawn "spec.$SPEC_IDX" job_run_spec "$RUNNER_PATH" "$_spec" "$WORK/job.$SPEC_IDX"
+done
+wait
+
+# ------------------------------------------------------------- collection ---
+_i=0
+while [ "$_i" -lt "$SPEC_IDX" ]; do
+    _i=$((_i + 1))
+    _spec=$(cat "$WORK/expect.$_i")
     _base=$(basename "$_spec")
+    [ -f "$WORK/job.$_i/result" ] || {
+        echo "ERROR — nothing was checked (worker for $_base produced no result file)"
+        exit 2
+    }
+    _line=$(cat "$WORK/job.$_i/result")
+    _got_spec=$(printf '%s' "$_line" | cut -f1)
+    # ATTRIBUTION PROOF. A worker records the absolute path it was handed; if
+    # that is not the spec this slot was launched for, results have crossed
+    # between workers and every count downstream is untrustworthy. That is an
+    # ERROR — never a PASS, and never a FAIL blamed on the wrong spec.
+    if [ "$_got_spec" != "$_spec" ]; then
+        echo "ERROR — nothing was checked (result misattributed: worker slot $_i was launched for $_spec but reported $_got_spec)"
+        exit 2
+    fi
+    _r=$(printf '%s' "$_line" | cut -f2)
+    _secs=$(printf '%s' "$_line" | cut -f3)
+    _class=$(printf '%s' "$_r" | cut -d' ' -f1)
+    N_ATTEMPTED=$((N_ATTEMPTED + 1))
     # One key=value diagnostic line per spec. A multi-minute run that emits
     # nothing between the selftest and the verdict is unreadable, and the
     # slowest-spec number is the input to any later timeout decision.
-    echo "plan_acceptance_spec=$_base class=$_class executed=$(printf '%s' "$_r" | cut -d' ' -f2) rc=$(printf '%s' "$_r" | cut -d' ' -f3) secs=$((_t1 - _t0))"
+    echo "plan_acceptance_spec=$_base class=$_class executed=$(printf '%s' "$_r" | cut -d' ' -f2) rc=$(printf '%s' "$_r" | cut -d' ' -f3) secs=$_secs"
     # E1034 anywhere means imports silently degraded to built-in shims: the
     # whole run's evidence is worthless, not just this one spec's. Exit HERE,
     # in the real script process (never inside run_one's command-substitution
@@ -577,42 +1019,105 @@ done
 
 [ "$N_ATTEMPTED" -gt 0 ] || { echo "ERROR — nothing was checked (0 spec invocations executed)"; exit 2; }
 
-TAGGED_LIST=$(grep -l '@tag:in-development' $SPECS 2>/dev/null)
-N_TAGGED=0
-[ -z "$TAGGED_LIST" ] || N_TAGGED=$(printf '%s\n' "$TAGGED_LIST" | grep -c .)
-
-# ---------------------------------------------------- neutralisation sweep ---
-# Only the specs that actually carry the tag need the second, directory-wide
-# invocation (see the HARDENING comment in the file header for why a
-# per-spec `run <spec>` call can never observe a SKIP/UNEXPECTED PASS
-# marker). Untagged specs are already fully classified by the loop above.
+# ------------------------------------------ neutralisation sweep collection ---
 NEUTR_OFFENDERS=""
 N_NEUTR_ASSERT=0
 N_NEUTR_PASS=0
 if [ -n "$TAGGED_LIST" ]; then
-    SWEEP_ENTRY="$ROOT/src/app/test_runner_new/main.spl"
-    [ -f "$SWEEP_ENTRY" ] || { echo "ERROR — nothing was checked (sweep entry not found: $SWEEP_ENTRY)"; exit 2; }
-    if [ -n "$TIMEOUT_BIN" ]; then
-        SWEEP_OUT=$("$TIMEOUT_BIN" "$SWEEP_TIMEOUT" "$RUNNER_PATH" run "$SWEEP_ENTRY" "$SPEC_DIR" 2>&1)
-    else
-        SWEEP_OUT=$("$RUNNER_PATH" run "$SWEEP_ENTRY" "$SPEC_DIR" 2>&1)
-    fi
-    SWEEP_RC=$?
-    if printf '%s\n' "$SWEEP_OUT" | grep -q 'E1034'; then
-        echo "ERROR — nothing was checked (imports degraded to shims: E1034 detected in the neutralisation sweep of $SPEC_DIR)"
-        exit 2
-    fi
-    echo "plan_acceptance_neutralisation_sweep_rc=$SWEEP_RC"
+    _sk=0
+    while [ "$_sk" -lt "$JOBS" ]; do
+        if [ -d "$WORK/shard.$_sk/specs" ]; then
+            [ -f "$WORK/shard.$_sk/out" ] || {
+                echo "ERROR — nothing was checked (neutralisation sweep shard $_sk produced no output)"
+                exit 2
+            }
+            if grep -q 'E1034' "$WORK/shard.$_sk/out"; then
+                echo "ERROR — nothing was checked (imports degraded to shims: E1034 detected in neutralisation sweep shard $_sk of $SPEC_DIR)"
+                exit 2
+            fi
+            echo "plan_acceptance_neutralisation_sweep_shard=$_sk rc=$(cat "$WORK/shard.$_sk/rc" 2>/dev/null || echo '?') specs=$(find "$WORK/shard.$_sk/specs" -name '*_spec.spl' -type f | grep -c .)"
+        fi
+        _sk=$((_sk + 1))
+    done
 
-    for _tspec in $TAGGED_LIST; do
+    # Fed from the shard map written when the shards were staged: one
+    # `<spec>\t<shard>\t<shard-local path>` triple per tagged spec. Reading
+    # this loop from anywhere else (a plain path list, or stdin) leaves
+    # `_tlocal` empty, and an empty needle makes `grep -F` match EVERY line —
+    # which is precisely the cross-shard misattribution the shard-local path
+    # exists to prevent. Both halves are therefore fail-closed below.
+    [ -s "$WORK/shard_map" ] || {
+        echo "ERROR — nothing was checked (shard map is empty while $N_TAGGED spec(s) carry the tag)"
+        exit 2
+    }
+    while IFS='	' read -r _tspec _tshard _tlocal; do
+        [ -n "$_tspec" ] || continue
+        if [ -z "$_tshard" ] || [ -z "$_tlocal" ]; then
+            echo "ERROR — nothing was checked (shard map row for $_tspec is missing its shard/shard-local path; an empty match needle would attribute another shard's marker to it)"
+            exit 2
+        fi
         _tbase=$(basename "$_tspec")
-        _skip_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT SKIP' | grep -F "$_tbase" | head -1)
-        _pass_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT UNEXPECTED PASS' | grep -F "$_tbase" | head -1)
-        _tverdict=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'SPEC FILE VERDICT:' | grep -F "$_tbase" | tail -1)
+        [ -f "$WORK/shard.$_tshard/out" ] || {
+            echo "ERROR — nothing was checked (no sweep output for shard $_tshard, which owns $_tbase)"
+            exit 2
+        }
+        # TRUTHFUL LABELLING FOR A DEAD SHARD. A shard that exits non-zero
+        # (graceful resource shutdown rc=42, a `timeout` kill rc=124, a crash)
+        # stops emitting markers at that point, so every spec it had not
+        # reached looks marker-less. Reporting those as
+        # `load-failure-neutralised:<spec>(no-marker)` names 28 per-spec bugs
+        # that do not exist and sends the reader chasing each one; the single
+        # real fault is the shard. Still an offender — the gate stays
+        # fail-closed, and a spec whose shard died is NOT evidence of anything
+        # — just labelled with the shard and rc that actually failed.
+        _tshard_rc=$(cat "$WORK/shard.$_tshard/rc" 2>/dev/null || echo '')
+        if [ -z "$_tshard_rc" ]; then
+            echo "ERROR — nothing was checked (no exit status recorded for shard $_tshard, which owns $_tbase)"
+            exit 2
+        fi
+        # DID THE SHARD FINISH? Not the same question as "did it exit 0". The
+        # runner exits 1 (or 2/3) after running everything and reporting
+        # failures — that is a COMPLETED sweep, and a spec with no marker in
+        # such a shard is a genuine per-spec finding that must keep its old
+        # label. A shard is truncated only when the process did not reach the
+        # end of its work: 42 = the runner's own graceful resource shutdown,
+        # 124 = killed by `timeout`, >=128 = killed by a signal. The shutdown
+        # banner is checked too, so a future exit-code change cannot silently
+        # reclassify a dead shard as a healthy one.
+        _tshard_dead=0
+        case "$_tshard_rc" in
+            42|124) _tshard_dead=1 ;;
+            *) if [ "$_tshard_rc" -ge 128 ] 2>/dev/null; then _tshard_dead=1; fi ;;
+        esac
+        if grep -q 'GRACEFUL SHUTDOWN INITIATED' "$WORK/shard.$_tshard/out"; then
+            _tshard_dead=1
+        fi
+        # NOT a blanket "non-zero rc => everything in this shard is aborted":
+        # a shard legitimately exits non-zero when specs inside it fail, and
+        # those specs DO carry markers and must keep their real
+        # classification. The relabel below applies only where the two facts
+        # coincide — this spec produced no marker AND its shard died.
+        SWEEP_OUT=$(cat "$WORK/shard.$_tshard/out")
+        # Match on the SHARD-LOCAL absolute path, which is unique to this
+        # shard, so no marker can be read as evidence for another shard's run.
+        _skip_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT SKIP' | grep -F "$_tlocal" | head -1)
+        _pass_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT UNEXPECTED PASS' | grep -F "$_tlocal" | head -1)
+        _tverdict=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'SPEC FILE VERDICT:' | grep -F "$_tlocal" | tail -1)
         _texec=$(printf '%s\n' "$_tverdict" | sed -n 's/.*executed=\([0-9][0-9]*\).*/\1/p' | tail -1)
-        _tfailed=$(printf '%s\n' "$_tverdict" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+        _tfailed=$(printf '%s\n' "$_tverdict" | sed -n 's/.*[^_]failed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+        # Primary signal. The aggregating lane converts a neutralised file's
+        # failures into skips and reports passed=0 failed=0, so the
+        # executed>=1 && failed>=1 shape below can never fire for it — that is
+        # what made all 36 tagged specs read as load failures. `in_development=`
+        # states the neutralised count directly instead of inferring it.
+        _tindev=$(printf '%s\n' "$_tverdict" | sed -n 's/.*in_development=\([0-9][0-9]*\).*/\1/p' | tail -1)
         if [ -n "$_skip_hit" ]; then
-            if [ -n "$_texec" ] && [ "$_texec" -ge 1 ] && [ -n "$_tfailed" ] && [ "$_tfailed" -ge 1 ]; then
+            if [ -n "$_tindev" ] && [ "$_tindev" -ge 1 ]; then
+                N_NEUTR_ASSERT=$((N_NEUTR_ASSERT + 1))
+            elif [ -n "$_texec" ] && [ "$_texec" -ge 1 ] && [ -n "$_tfailed" ] && [ "$_tfailed" -ge 1 ]; then
+                # Legacy shape: a runner lane that reports the neutralised
+                # failures as real failures (the explicit single-file lane).
+                # Kept so an older runner is classified, not blamed.
                 N_NEUTR_ASSERT=$((N_NEUTR_ASSERT + 1))
             else
                 # classify_in_development neutralises a load/import failure
@@ -626,18 +1131,26 @@ if [ -n "$TAGGED_LIST" ]; then
             fi
         elif [ -n "$_pass_hit" ]; then
             N_NEUTR_PASS=$((N_NEUTR_PASS + 1))
+        elif [ "$_tshard_dead" = 1 ]; then
+            # Neither marker fired AND the owning shard was truncated: the
+            # sweep stopped before it reached this file, so nothing about this
+            # spec was observed. Blaming it as a per-spec load failure is what
+            # turned one dead shard into 28 imaginary spec bugs.
+            NEUTR_OFFENDERS="$NEUTR_OFFENDERS shard-aborted:$_tbase(shard=$_tshard,rc=$_tshard_rc,no-marker)"
         else
-            # Neither marker fired for a tagged file at all: the
-            # neutralisation machinery never classified it.
+            # Neither marker fired for a tagged file at all, and its shard ran
+            # to completion: the neutralisation machinery really never
+            # classified it.
             NEUTR_OFFENDERS="$NEUTR_OFFENDERS load-failure-neutralised:$_tbase(no-marker)"
         fi
-    done
+    done < "$WORK/shard_map"
 fi
 
-DISCLAIMER="@tag:in-development neutralisation verified per-file via a single directory-wide sweep (SKIP-vs-load-failure, UNEXPECTED PASS): $N_TAGGED/$N_ATTEMPTED specs carry the tag, $N_NEUTR_ASSERT neutralised as genuine assertion failures, $N_NEUTR_PASS as unexpected passes; the suite-level SKIP+COUNT summary row semantics are NOT independently re-asserted here (see test/02_integration/test_runner/in_development_tag_runner_spec.spl)"
+PARALLELISM="jobs=$JOBS, every spec explicitly run, neutralisation sweep run as $N_SHARDS sharded directory sweep(s) (no sampling: $N_ATTEMPTED/$N_ATTEMPTED specs run, $N_TAGGED/$N_TAGGED tagged specs classified)"
+DISCLAIMER="@tag:in-development neutralisation verified per-file via $N_SHARDS sharded directory sweep(s) (SKIP-vs-load-failure, UNEXPECTED PASS): $N_TAGGED/$N_ATTEMPTED specs carry the tag, $N_NEUTR_ASSERT neutralised as genuine assertion failures, $N_NEUTR_PASS as unexpected passes; the suite-level SKIP+COUNT summary row semantics are NOT independently re-asserted here (see test/02_integration/test_runner/in_development_tag_runner_spec.spl)"
 
 echo "plan_acceptance_spec_dir=$SPEC_DIR"
-echo "plan_acceptance_runner=$RUNNER_PATH"
+echo "plan_acceptance_runner=$RUNNER_PATH (source: $RUNNER_SOURCE)"
 echo "plan_acceptance_specs_attempted=$N_ATTEMPTED"
 echo "plan_acceptance_specs_loaded_and_ran=$N_RAN"
 echo "plan_acceptance_specs_with_example_failures=$N_FAILEX"
@@ -658,7 +1171,7 @@ if [ -n "$ALL_OFFENDERS" ]; then
     # The wiring status belongs on the FAIL line too. This is the branch the
     # gate actually takes while the suite is red, so omitting it would leave the
     # very property this guard exists to report off the last line of stdout.
-    echo "FAIL — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, $(printf '%s' "$ALL_OFFENDERS" | wc -w | tr -d ' ') failed to load/run or neutralise cleanly:$ALL_OFFENDERS; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
+    echo "FAIL — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, $(printf '%s' "$ALL_OFFENDERS" | wc -w | tr -d ' ') failed to load/run or neutralise cleanly:$ALL_OFFENDERS; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $PARALLELISM; $DISCLAIMER"
     exit 1
 fi
 
@@ -666,6 +1179,6 @@ VERDICT="PASS — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, all $N_RAN l
 if [ "$N_FAILEX" -gt 0 ]; then
     VERDICT="$VERDICT ($N_FAILEX with failing examples:$FAILEX_NAMES)"
 fi
-VERDICT="$VERDICT; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
+VERDICT="$VERDICT; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $PARALLELISM; $DISCLAIMER"
 echo "$VERDICT"
 exit 0

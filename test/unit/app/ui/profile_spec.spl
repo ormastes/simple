@@ -1,9 +1,41 @@
-# UI Layout Profile Tests
-#
-# Tests for orientation detection, size classes, profile resolution,
-# and adaptive builder functions.
+"""
+## Purpose and audience
+Covers the UI layout profile stack: orientation detection, size-class
+classification against default and terminal breakpoints, backend-specific
+breakpoint selection, profile computation, ProfileSet/ProfileResolver
+resolution, adaptive and responsive builders, viewport orientation helpers,
+and UISession profile-set registration. Audience: UI maintainers and operators
+verifying adaptive-layout behavior of a build. Every scenario drives the real
+`common.ui.profile` / `common.ui.builder` product APIs.
+
+## Operator workflow
+Run `simple run test/unit/app/ui/profile_spec.spl` from the repo root and
+confirm the results line reports 0 failed. Each scenario names the requirement
+it traces to, starts with an imperative step, retains a statistics capture,
+and explains every numeric oracle inline.
+
+## Compatibility and limitations
+Covers only the behavior explicitly asserted below on the current toolchain.
+Breakpoint values (600/840 default, 80/160 terminal) are asserted as product
+constants returned by `default_breakpoints()`/`terminal_breakpoints()`, not as
+external standards. UISession scenarios observe only profile-set registration
+counts, not live event dispatch.
+
+## Verification guidance and troubleshooting
+Re-run the single spec file and read the first failing step. A breakpoint
+failure means the constants in `common.ui.profile` moved — update the oracle
+comments together with the product constant. An adaptive-builder failure means
+layout selection (hbox/vbox, sidebar visibility, grid columns, responsive
+variant) regressed for the stated size class.
+"""
+# Lifecycle: doc/01_research/ui/graphics/engine_2d.md ;
+# doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md ;
+# doc/04_architecture/ui/00_ui_architecture.md ;
+# doc/05_design/ui/ui_typed_core_rfc.md
+# @manual_section: ui-layout-profile
 
 use std.spec.{describe, it, expect}
+use std.spec.step
 use common.ui.profile.{
     Orientation, SizeClass, LayoutProfile, Breakpoints, ProfileSet, ProfileResolver,
     detect_orientation, classify, compute_profile, default_profile,
@@ -24,19 +56,34 @@ use common.ui.widget.{UITree, UIEvent}
 
 describe "detect_orientation":
     it "returns Landscape when width > height":
-        expect(detect_orientation(120, 40)).to_equal(Orientation.Landscape)
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation verdict for a wide viewport
+        step("Detect orientation for a 120x40 viewport")
+        expect(detect_orientation(120, 40)).to_equal(Orientation.Landscape)  # oracle: 120 exceeds 40, so the wider axis wins
 
     it "returns Portrait when height > width":
-        expect(detect_orientation(40, 120)).to_equal(Orientation.Portrait)
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation verdict for a tall viewport
+        step("Detect orientation for a 40x120 viewport")
+        expect(detect_orientation(40, 120)).to_equal(Orientation.Portrait)  # oracle: 120 exceeds 40 on the vertical axis
 
     it "returns Square when width == height":
-        expect(detect_orientation(100, 100)).to_equal(Orientation.Square)
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation verdict for equal axes
+        step("Detect orientation for a 100x100 viewport")
+        expect(detect_orientation(100, 100)).to_equal(Orientation.Square)  # oracle: equal axes must classify as the dedicated Square variant
 
     it "returns Landscape for typical terminal 80x24":
-        expect(detect_orientation(80, 24)).to_equal(Orientation.Landscape)
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation verdict for the canonical terminal
+        step("Detect orientation for the canonical 80x24 terminal")
+        expect(detect_orientation(80, 24)).to_equal(Orientation.Landscape)  # oracle: 80 columns exceed 24 rows on every real terminal
 
     it "returns Portrait for tall terminal 40x60":
-        expect(detect_orientation(40, 60)).to_equal(Orientation.Portrait)
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation verdict for a tall console
+        step("Detect orientation for a 40x60 tall console")
+        expect(detect_orientation(40, 60)).to_equal(Orientation.Portrait)  # oracle: 60 rows exceed 40 columns
 
 # =========================================================================
 # Size Class Classification
@@ -44,35 +91,54 @@ describe "detect_orientation":
 
 describe "classify with default breakpoints":
     it "returns Compact below 600":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class just under the default compact cap
+        step("Classify a 599-unit width against default breakpoints")
         val bp = default_breakpoints()
-        expect(classify(599, bp)).to_equal(SizeClass.Compact)
+        expect(classify(599, bp)).to_equal(SizeClass.Compact)  # oracle: 599 is the last width under the 600 compact ceiling
 
     it "returns Regular at 600":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class exactly at the compact boundary
+        step("Classify a 600-unit width against default breakpoints")
         val bp = default_breakpoints()
-        expect(classify(600, bp)).to_equal(SizeClass.Regular)
+        expect(classify(600, bp)).to_equal(SizeClass.Regular)  # oracle: 600 is the inclusive lower bound of the Regular band
 
     it "returns Regular below 840":
-        step("Verify: returns Regular below 840")
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class just under the default regular cap
+        step("Classify an 839-unit width against default breakpoints")
         val bp = default_breakpoints()
-        expect(classify(839, bp)).to_equal(SizeClass.Regular)
+        expect(classify(839, bp)).to_equal(SizeClass.Regular)  # oracle: 839 is the last width under the 840 expanded ceiling
 
     it "returns Expanded at 840":
-        step("Verify: returns Expanded at 840")
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class exactly at the regular boundary
+        step("Classify an 840-unit width against default breakpoints")
         val bp = default_breakpoints()
-        expect(classify(840, bp)).to_equal(SizeClass.Expanded)
+        expect(classify(840, bp)).to_equal(SizeClass.Expanded)  # oracle: 840 is the inclusive lower bound of the Expanded band
 
 describe "classify with terminal breakpoints":
     it "returns Compact below 80":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class just under the terminal compact cap
+        step("Classify a 79-column width against terminal breakpoints")
         val bp = terminal_breakpoints()
-        expect(classify(79, bp)).to_equal(SizeClass.Compact)
+        expect(classify(79, bp)).to_equal(SizeClass.Compact)  # oracle: 79 is the last column count under the 80-column ceiling
 
     it "returns Regular at 80":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class at the terminal regular boundary
+        step("Classify an 80-column width against terminal breakpoints")
         val bp = terminal_breakpoints()
-        expect(classify(80, bp)).to_equal(SizeClass.Regular)
+        expect(classify(80, bp)).to_equal(SizeClass.Regular)  # oracle: 80 columns is the inclusive start of the terminal Regular band
 
     it "returns Expanded at 160":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): size class at the terminal expanded boundary
+        step("Classify a 160-column width against terminal breakpoints")
         val bp = terminal_breakpoints()
-        expect(classify(160, bp)).to_equal(SizeClass.Expanded)
+        expect(classify(160, bp)).to_equal(SizeClass.Expanded)  # oracle: 160 columns is the inclusive start of the terminal Expanded band
 
 # =========================================================================
 # Breakpoints for Backend
@@ -80,16 +146,25 @@ describe "classify with terminal breakpoints":
 
 describe "breakpoints_for_backend":
     it "returns terminal breakpoints for tui":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): tui backend compact ceiling
+        step("Fetch breakpoints for the tui backend")
         val bp = breakpoints_for_backend("tui")
-        expect(bp.compact_max).to_equal(80)
+        expect(bp.compact_max).to_equal(80)  # oracle: terminals classify compact at the 80-column mark
 
     it "returns default breakpoints for web":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): web backend compact ceiling
+        step("Fetch breakpoints for the web backend")
         val bp = breakpoints_for_backend("web")
-        expect(bp.compact_max).to_equal(600)
+        expect(bp.compact_max).to_equal(600)  # oracle: web viewports keep the 600-unit default compact ceiling
 
     it "returns default breakpoints for none":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): unknown-backend compact ceiling fallback
+        step("Fetch breakpoints for an unknown backend name")
         val bp = breakpoints_for_backend("none")
-        expect(bp.compact_max).to_equal(600)
+        expect(bp.compact_max).to_equal(600)  # oracle: an unrecognized backend must fall back to the 600-unit default
 
 # =========================================================================
 # compute_profile
@@ -97,23 +172,32 @@ describe "breakpoints_for_backend":
 
 describe "compute_profile":
     it "computes landscape regular for 80x24 tui":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): full profile for the canonical terminal
+        step("Compute the profile for an 80x24 tui viewport")
         val vp = new_viewport(80, 24, "tui")
         val p = compute_profile(vp)
-        expect(p.orientation).to_equal(Orientation.Landscape)
-        expect(p.horizontal).to_equal(SizeClass.Regular)
-        expect(p.vertical).to_equal(SizeClass.Compact)
+        expect(p.orientation).to_equal(Orientation.Landscape)  # oracle: 80 columns exceed 24 rows
+        expect(p.horizontal).to_equal(SizeClass.Regular)  # oracle: 80 columns land in the terminal Regular band
+        expect(p.vertical).to_equal(SizeClass.Compact)  # oracle: 24 rows sit under the terminal compact ceiling
 
     it "computes portrait compact for 40x60 tui":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): full profile for a tall console
+        step("Compute the profile for a 40x60 tui viewport")
         val vp = new_viewport(40, 60, "tui")
         val p = compute_profile(vp)
-        expect(p.orientation).to_equal(Orientation.Portrait)
-        expect(p.horizontal).to_equal(SizeClass.Compact)
+        expect(p.orientation).to_equal(Orientation.Portrait)  # oracle: 60 rows exceed 40 columns
+        expect(p.horizontal).to_equal(SizeClass.Compact)  # oracle: 40 columns sit under the 80-column compact ceiling
 
     it "computes landscape expanded for 1920x1080 web":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): full profile for a desktop web viewport
+        step("Compute the profile for a 1920x1080 web viewport")
         val vp = new_viewport(1920, 1080, "web")
         val p = compute_profile(vp)
-        expect(p.orientation).to_equal(Orientation.Landscape)
-        expect(p.horizontal).to_equal(SizeClass.Expanded)
+        expect(p.orientation).to_equal(Orientation.Landscape)  # oracle: 1920 exceeds 1080
+        expect(p.horizontal).to_equal(SizeClass.Expanded)  # oracle: 1920 far exceeds the 840-unit expanded threshold
 
 # =========================================================================
 # LayoutProfile Methods
@@ -121,41 +205,56 @@ describe "compute_profile":
 
 describe "LayoutProfile":
     it "is_landscape returns true for Landscape":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): landscape predicate on the default profile
+        step("Query the landscape predicate on the default profile")
         val p = default_profile()
-        expect(p.is_landscape()).to_equal(true)
+        expect(p.is_landscape()).to_equal(true)  # oracle: the default profile is the 80x24 landscape terminal
 
     it "is_landscape returns true for Square":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): landscape predicate on a square profile
+        step("Query the landscape predicate on a square profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular,
             vertical: SizeClass.Regular,
             orientation: Orientation.Square,
             width: 100, height: 100
         )
-        expect(p.is_landscape()).to_equal(true)
+        expect(p.is_landscape()).to_equal(true)  # oracle: Square is treated as landscape-capable so square layouts use the wide path
 
     it "is_portrait returns true for Portrait":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): portrait predicate on a tall profile
+        step("Query the portrait predicate on a tall profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact,
             vertical: SizeClass.Regular,
             orientation: Orientation.Portrait,
             width: 40, height: 120
         )
-        expect(p.is_portrait()).to_equal(true)
+        expect(p.is_portrait()).to_equal(true)  # oracle: the profile was built with the Portrait orientation
 
     it "is_compact returns true for Compact horizontal":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): compact predicate on a compact profile
+        step("Query the compact predicate on a compact profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact,
             vertical: SizeClass.Compact,
             orientation: Orientation.Portrait,
             width: 40, height: 60
         )
-        expect(p.is_compact()).to_equal(true)
+        expect(p.is_compact()).to_equal(true)  # oracle: both axes carry the Compact size class
 
     it "describe includes orientation and size":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): profile description text
+        step("Render the profile description and check its parts")
         val p = default_profile()
         val desc = p.describe()
-        expect(desc).to_contain("landscape")
-        expect(desc).to_contain("80x24")
+        expect(desc).to_contain("landscape")  # oracle: the default profile is landscape, so its description must name it
+        expect(desc).to_contain("80x24")  # oracle: the default profile is the 80x24 terminal, so the dimensions must render
 
 # =========================================================================
 # ProfileSet
@@ -163,52 +262,73 @@ describe "LayoutProfile":
 
 describe "ProfileSet":
     it "resolves to default when no profiles set":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): unresolved-orientation fallback node id
+        step("Resolve a landscape request on an empty ProfileSet")
         val default_node = column("default", [])
         val ps = ProfileSet.new(default_node)
         val resolved = ps.resolve(Orientation.Landscape)
-        expect(resolved.id).to_equal("default")
+        expect(resolved.id).to_equal("default")  # oracle: the constructor node is id "default" and must serve unset orientations
 
     it "resolves landscape profile when set":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): registered landscape node id
+        step("Register a landscape node and resolve it")
         val default_node = column("default", [])
         val h_node = row("landscape", [])
         var ps = ProfileSet.new(default_node)
         ps = ps.with_landscape(h_node)
         val resolved = ps.resolve(Orientation.Landscape)
-        expect(resolved.id).to_equal("landscape")
+        expect(resolved.id).to_equal("landscape")  # oracle: the registered landscape node must win over the default
 
     it "resolves portrait profile when set":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): registered portrait node id
+        step("Register a portrait node and resolve it")
         val default_node = column("default", [])
         val v_node = column("portrait", [])
         var ps = ProfileSet.new(default_node)
         ps = ps.with_portrait(v_node)
         val resolved = ps.resolve(Orientation.Portrait)
-        expect(resolved.id).to_equal("portrait")
+        expect(resolved.id).to_equal("portrait")  # oracle: the registered portrait node must win over the default
 
     it "falls back to default for unset orientation":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): fallback for an orientation with no node
+        step("Resolve a portrait request when only landscape is registered")
         val default_node = column("default", [])
         val h_node = row("landscape", [])
         var ps = ProfileSet.new(default_node)
         ps = ps.with_landscape(h_node)
         val resolved = ps.resolve(Orientation.Portrait)
-        expect(resolved.id).to_equal("default")
+        expect(resolved.id).to_equal("default")  # oracle: with no portrait node registered, resolution must land on the default node
 
     it "resolves Square as Landscape":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): square-to-landscape resolution mapping
+        step("Resolve a square request when only landscape is registered")
         val default_node = column("default", [])
         val h_node = row("landscape", [])
         var ps = ProfileSet.new(default_node)
         ps = ps.with_landscape(h_node)
         val resolved = ps.resolve(Orientation.Square)
-        expect(resolved.id).to_equal("landscape")
+        expect(resolved.id).to_equal("landscape")  # oracle: Square aliases the landscape slot, so the landscape node must serve it
 
     it "has_profile returns false when not set":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): has_profile verdicts on an empty set
+        step("Query has_profile for both orientations on an empty set")
         val ps = ProfileSet.new(column("d", []))
-        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)
-        expect(ps.has_profile(Orientation.Portrait)).to_equal(false)
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)  # oracle: nothing was registered, so both queries must be false
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(false)  # oracle: nothing was registered, so both queries must be false
 
     it "has_profile returns true when set":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): has_profile verdict after registration
+        step("Register a landscape node and query has_profile")
         var ps = ProfileSet.new(column("d", []))
         ps = ps.with_landscape(row("h", []))
-        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)  # oracle: the landscape slot was just registered
 
 # =========================================================================
 # ProfileResolver
@@ -216,26 +336,38 @@ describe "ProfileSet":
 
 describe "ProfileResolver":
     it "starts with landscape orientation for default 80x24":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): resolver initial orientation
+        step("Create a resolver and read its initial orientation")
         val resolver = ProfileResolver.new()
-        expect(resolver.orientation()).to_equal(Orientation.Landscape)
+        expect(resolver.orientation()).to_equal(Orientation.Landscape)  # oracle: the resolver boots on the 80x24 landscape terminal default
 
     it "detects orientation change after update":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): orientation-change detection results
+        step("Update a resolver with a tall viewport and diff orientations")
         var resolver = ProfileResolver.new()
         val old = resolver.orientation()
         resolver.update(new_viewport(40, 60, "tui"))
-        expect(resolver.orientation_changed(old)).to_equal(true)
-        expect(resolver.orientation()).to_equal(Orientation.Portrait)
+        expect(resolver.orientation_changed(old)).to_equal(true)  # oracle: landscape to portrait is a real orientation change
+        expect(resolver.orientation()).to_equal(Orientation.Portrait)  # oracle: 60 rows exceed 40 columns after the update
 
     it "no change when orientation stays same":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): same-orientation update verdict
+        step("Update a resolver with another wide viewport")
         var resolver = ProfileResolver.new()
         val old = resolver.orientation()
         resolver.update(new_viewport(120, 40, "tui"))
-        expect(resolver.orientation_changed(old)).to_equal(false)
+        expect(resolver.orientation_changed(old)).to_equal(false)  # oracle: 120x40 is still landscape, so nothing changed
 
     it "updates size classes on viewport change":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): horizontal class after a wide update
+        step("Update a resolver with a 200-column viewport")
         var resolver = ProfileResolver.new()
         resolver.update(new_viewport(200, 40, "tui"))
-        expect(resolver.horizontal_class()).to_equal(SizeClass.Expanded)
+        expect(resolver.horizontal_class()).to_equal(SizeClass.Expanded)  # oracle: 200 columns exceed the 160-column terminal expanded threshold
 
 # =========================================================================
 # Adaptive Builders
@@ -243,35 +375,50 @@ describe "ProfileResolver":
 
 describe "adaptive":
     it "creates profile set with both orientations":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): adaptive builder registration verdicts
+        step("Build an adaptive set with landscape and portrait nodes")
         val ps = adaptive("main", row("h", []), column("v", []))
-        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)
-        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)  # oracle: adaptive registers the first node as the landscape variant
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)  # oracle: adaptive registers the second node as the portrait variant
 
 describe "with_profile":
     it "creates profile set with one alternate":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): single-alternate registration verdicts
+        step("Build a set with one portrait alternate")
         val ps = with_profile(row("default", []), Orientation.Portrait, column("alt", []))
-        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
-        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)  # oracle: the alternate was registered for portrait
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)  # oracle: with_profile registers only the named alternate, not both orientations
 
 describe "adaptive_stack":
     it "produces hbox layout in landscape":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): landscape stack layout name
+        step("Build an adaptive stack for a landscape profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
             orientation: Orientation.Landscape, width: 120, height: 40
         )
         val node = adaptive_stack("s", [text_widget("a", "hello")], p)
-        expect(node.layout_name()).to_equal("hbox")
+        expect(node.layout_name()).to_equal("hbox")  # oracle: wide layouts stack children horizontally
 
     it "produces vbox layout in portrait":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): portrait stack layout name
+        step("Build an adaptive stack for a portrait profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact, vertical: SizeClass.Regular,
             orientation: Orientation.Portrait, width: 40, height: 120
         )
         val node = adaptive_stack("s", [text_widget("a", "hello")], p)
-        expect(node.layout_name()).to_equal("vbox")
+        expect(node.layout_name()).to_equal("vbox")  # oracle: tall layouts stack children vertically
 
 describe "adaptive_sidebar":
     it "hides sidebar in Compact":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): compact sidebar child count
+        step("Build a sidebar layout for a compact profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
             orientation: Orientation.Portrait, width: 40, height: 60
@@ -280,9 +427,12 @@ describe "adaptive_sidebar":
         val ct = panel("ct", "Main", [])
         val node = adaptive_sidebar("layout", sb, ct, p)
         val children = node.children()
-        expect(children.len()).to_equal(1)
+        expect(children.len()).to_equal(1)  # oracle: compact layouts drop the sidebar, leaving only the content panel
 
     it "shows sidebar in Regular":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): regular sidebar child count
+        step("Build a sidebar layout for a regular profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
             orientation: Orientation.Landscape, width: 120, height: 40
@@ -291,35 +441,47 @@ describe "adaptive_sidebar":
         val ct = panel("ct", "Main", [])
         val node = adaptive_sidebar("layout", sb, ct, p)
         val children = node.children()
-        expect(children.len()).to_equal(2)
+        expect(children.len()).to_equal(2)  # oracle: regular layouts keep both the sidebar and content panels
 
 describe "adaptive_grid":
     it "sets 1 column in Compact":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): compact grid column count
+        step("Build a grid for a compact profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
             orientation: Orientation.Portrait, width: 40, height: 60
         )
         val node = adaptive_grid("g", [text_widget("a", "1")], p)
-        expect(node.get_prop("columns")).to_equal("1")
+        expect(node.get_prop("columns")).to_equal("1")  # oracle: compact width affords a single grid column
 
     it "sets 2 columns in Regular":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): regular grid column count
+        step("Build a grid for a regular profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
             orientation: Orientation.Landscape, width: 120, height: 40
         )
         val node = adaptive_grid("g", [text_widget("a", "1")], p)
-        expect(node.get_prop("columns")).to_equal("2")
+        expect(node.get_prop("columns")).to_equal("2")  # oracle: regular width affords two grid columns
 
     it "sets 3 columns in Expanded":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): expanded grid column count
+        step("Build a grid for an expanded profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Expanded, vertical: SizeClass.Regular,
             orientation: Orientation.Landscape, width: 200, height: 60
         )
         val node = adaptive_grid("g", [text_widget("a", "1")], p)
-        expect(node.get_prop("columns")).to_equal("3")
+        expect(node.get_prop("columns")).to_equal("3")  # oracle: expanded width affords three grid columns
 
 describe "responsive":
     it "picks compact variant":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): responsive variant chosen under compact
+        step("Resolve a responsive node under a compact profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
             orientation: Orientation.Portrait, width: 40, height: 60
@@ -328,9 +490,12 @@ describe "responsive":
         val r = text_widget("r", "regular")
         val e = text_widget("e", "expanded")
         val node = responsive("resp", p, c, r, e)
-        expect(node.id).to_equal("c")
+        expect(node.id).to_equal("c")  # oracle: the compact profile must select the first (compact) variant
 
     it "picks regular variant":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): responsive variant chosen under regular
+        step("Resolve a responsive node under a regular profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
             orientation: Orientation.Landscape, width: 120, height: 40
@@ -339,10 +504,13 @@ describe "responsive":
         val r = text_widget("r", "regular")
         val e = text_widget("e", "expanded")
         val node = responsive("resp", p, c, r, e)
-        expect(node.id).to_equal("r")
+        expect(node.id).to_equal("r")  # oracle: the regular profile must select the second (regular) variant
 
 describe "responsive_if_wide":
     it "picks narrow in Compact":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): narrow pick under compact
+        step("Resolve a wide-aware node under a compact profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
             orientation: Orientation.Portrait, width: 40, height: 60
@@ -350,9 +518,12 @@ describe "responsive_if_wide":
         val n = text_widget("narrow", "n")
         val w = text_widget("wide", "w")
         val node = responsive_if_wide("resp", p, n, w)
-        expect(node.id).to_equal("narrow")
+        expect(node.id).to_equal("narrow")  # oracle: compact width keeps the narrow variant
 
     it "picks wide in Regular":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): wide pick under regular
+        step("Resolve a wide-aware node under a regular profile")
         val p = LayoutProfile(
             horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
             orientation: Orientation.Landscape, width: 120, height: 40
@@ -360,7 +531,7 @@ describe "responsive_if_wide":
         val n = text_widget("narrow", "n")
         val w = text_widget("wide", "w")
         val node = responsive_if_wide("resp", p, n, w)
-        expect(node.id).to_equal("wide")
+        expect(node.id).to_equal("wide")  # oracle: regular width upgrades to the wide variant
 
 # =========================================================================
 # Viewport Orientation Methods
@@ -368,20 +539,32 @@ describe "responsive_if_wide":
 
 describe "Viewport orientation":
     it "is_landscape for wide viewport":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): viewport landscape predicate
+        step("Query is_landscape on a 120x40 viewport")
         val vp = new_viewport(120, 40, "tui")
-        expect(vp.is_landscape()).to_equal(true)
+        expect(vp.is_landscape()).to_equal(true)  # oracle: 120 exceeds 40
 
     it "is_portrait for tall viewport":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): viewport portrait predicate
+        step("Query is_portrait on a 40x120 viewport")
         val vp = new_viewport(40, 120, "tui")
-        expect(vp.is_portrait()).to_equal(true)
+        expect(vp.is_portrait()).to_equal(true)  # oracle: 120 exceeds 40 on the vertical axis
 
     it "orientation returns correct enum":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): viewport orientation enum
+        step("Read the orientation enum of an 80x24 viewport")
         val vp = new_viewport(80, 24, "tui")
-        expect(vp.orientation()).to_equal(Orientation.Landscape)
+        expect(vp.orientation()).to_equal(Orientation.Landscape)  # oracle: 80 columns exceed 24 rows
 
     it "size_class returns Regular for 80-col tui":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): viewport size class
+        step("Read the size class of an 80-column viewport")
         val vp = new_viewport(80, 24, "tui")
-        expect(vp.size_class()).to_equal(SizeClass.Regular)
+        expect(vp.size_class()).to_equal(SizeClass.Regular)  # oracle: 80 columns is the inclusive start of the terminal Regular band
 
 # =========================================================================
 # UISession Profile Integration
@@ -389,22 +572,31 @@ describe "Viewport orientation":
 
 describe "UISession profiles":
     it "creates session with default profile resolver":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): session initial orientation
+        step("Create a session and read its initial orientation")
         val tree = UITree.new(column("root", []))
         val session = new_session(tree)
-        expect(session.current_orientation()).to_equal(Orientation.Landscape)
+        expect(session.current_orientation()).to_equal(Orientation.Landscape)  # oracle: a fresh session boots on the 80x24 landscape default
 
     it "register_profile_set stores profiles":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): profile-set registry size after one insert
+        step("Register one profile set on a fresh session")
         val tree = UITree.new(column("root", []))
         var session = new_session(tree)
         val ps = adaptive("main", row("h", []), column("v", []))
         session.register_profile_set("main", ps)
-        expect(session.profile_sets.len()).to_equal(1)
+        expect(session.profile_sets.len()).to_equal(1)  # oracle: exactly one registration must produce exactly one stored set
 
     it "register_profile_set replaces existing entry":
+        # @req REQ-UI-PROFILE-001
+        # @capture(statistics): profile-set registry size after replacement
+        step("Register two sets under the same key")
         val tree = UITree.new(column("root", []))
         var session = new_session(tree)
         val ps1 = adaptive("main", row("h1", []), column("v1", []))
         val ps2 = adaptive("main", row("h2", []), column("v2", []))
         session.register_profile_set("main", ps1)
         session.register_profile_set("main", ps2)
-        expect(session.profile_sets.len()).to_equal(1)
+        expect(session.profile_sets.len()).to_equal(1)  # oracle: re-registering "main" must replace, not append, keeping the count at one

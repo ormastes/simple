@@ -23,24 +23,58 @@ remote-control bridge, OAuth, or full agent orchestration.
 
 ## Source File Mapping
 
-| Simple source file | LOC | Claude source match | Role |
-|---|---:|---|---|
-| `src/app/llm_caret/chat.spl` | 138 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
-| `src/app/llm_caret/claude_api.spl` | 242 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
-| `src/app/llm_caret/claude_cli.spl` | 328 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive Claude CLI argv and JSON/stream parsing |
-| `src/app/llm_caret/config.spl` | 227 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
-| `src/app/llm_caret/json_helpers.spl` | 196 | Simple-only shared helper | local JSON helper caret utility |
-| `src/app/llm_caret/local_torch.spl` | 98 | Simple-only provider extension | local model provider outside Claude parity |
-| `src/app/llm_caret/mod.spl` | 398 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
-| `src/app/llm_caret/openai_api.spl` | 261 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
-| `src/app/llm_caret/openai_compat.spl` | 206 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
-| `src/app/llm_caret/opencode_cli.spl` | 149 | Simple-only Claude-like CLI provider | OpenCode adapter with Claude-like response shape |
-| `src/app/llm_caret/provider.spl` | 419 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
-| `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
-| `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
+| Simple source file | LOC | Role |
+|---|---:|---|
+| `src/app/llm_caret/agent_discovery.spl` | 85 | Agent capability discovery |
+| `src/app/llm_caret/agent_files.spl` | 23 | Agent file change detection and snapshots |
+| `src/app/llm_caret/agent_mailbox.spl` | 39 | Agent team messaging and coordination |
+| `src/app/llm_caret/agent_manager_view.spl` | 111 | Agent manager UI view rendering |
+| `src/app/llm_caret/agent_plan.spl` | 223 | Agent launch and review planning |
+| `src/app/llm_caret/agent_runtime.spl` | 200 | Agent process execution and monitoring |
+| `src/app/llm_caret/agent_tmux.spl` | 56 | Agent tmux pane integration |
+| `src/app/llm_caret/agent_tui.spl` | 38 | Agent terminal UI components |
+| `src/app/llm_caret/agent_vcs.spl` | 43 | Agent version control operations |
+| `src/app/llm_caret/agent_workspace.spl` | 248 | Agent workspace management |
+| `src/app/llm_caret/chat.spl` | 228 | Conversation history and message JSON |
+| `src/app/llm_caret/chat_tui.spl` | 800 | Chat terminal UI implementation |
+| `src/app/llm_caret/claude_api.spl` | 290 | Anthropic Messages API request/response |
+| `src/app/llm_caret/claude_cli.spl` | 403 | Claude CLI argv and JSON/stream parsing |
+| `src/app/llm_caret/codex_cli.spl` | 111 | Codex CLI integration |
+| `src/app/llm_caret/config.spl` | 528 | Provider config and defaults |
+| `src/app/llm_caret/cs_dashboard.spl` | 427 | Code search integration |
+| `src/app/llm_caret/cs_main.spl` | 139 | Code search integration |
+| `src/app/llm_caret/gui.spl` | 128 | GUI components and layout |
+| `src/app/llm_caret/gui_metal.spl` | 205 | Metal/native GUI rendering backend |
+| `src/app/llm_caret/gui_native_model.spl` | 69 | Native model provider for GUI |
+| `src/app/llm_caret/harness_spec.spl` | 118 | Test harness infrastructure |
+| `src/app/llm_caret/infra_mail.spl` | 504 | SMTP/IMAP mail infrastructure |
+| `src/app/llm_caret/infra_mail_starttls.spl` | 157 | Mail STARTTLS protocol support |
+| `src/app/llm_caret/infra_storage.spl` | 215 | Object storage (S3/MinIO) backend |
+| `src/app/llm_caret/infra_wiki.spl` | 362 | Wiki/documentation backend |
+| `src/app/llm_caret/interface_text.spl` | 11 | Interface definitions |
+| `src/app/llm_caret/json_helpers.spl` | 277 | JSON construction and parsing helpers |
+| `src/app/llm_caret/local_torch.spl` | 90 | Local model provider (Torch/TensorFlow) |
+| `src/app/llm_caret/main.spl` | 1020 | Main entry point and CLI dispatch |
+| `src/app/llm_caret/mod.spl` | 254 | Public API and state management |
+| `src/app/llm_caret/multi_caret_manager.spl` | 133 | Multi-agent orchestration and management |
+| `src/app/llm_caret/openai_api.spl` | 308 | OpenAI-compatible API request/response |
+| `src/app/llm_caret/openai_compat.spl` | 295 | Local/OpenAI-compatible endpoint provider |
+| `src/app/llm_caret/opencode_cli.spl` | 186 | OpenCode adapter with Claude-like response |
+| `src/app/llm_caret/pane_backend.spl` | 190 | Pane/terminal multiplexer backend |
+| `src/app/llm_caret/provider.spl` | 350 | Provider registry and dispatching |
+| `src/app/llm_caret/redact.spl` | 354 | Sensitive data redaction |
+| `src/app/llm_caret/retry.spl` | 188 | Retry logic and backoff strategies |
+| `src/app/llm_caret/server.spl` | 199 | HTTP/MCP-like compatibility server surface |
+| `src/app/llm_caret/session.spl` | 245 | Session management and lifecycle |
+| `src/app/llm_caret/tool_cli.spl` | 69 | Tool CLI interface |
+| `src/app/llm_caret/tools.spl` | 558 | Tool definitions and management |
+| `src/app/llm_caret/tui_input.spl` | 222 | Terminal UI input handling |
+| `src/app/llm_caret/tui_io.spl` | 131 | Terminal UI I/O and output |
+| `src/app/llm_caret/types.spl` | 225 | Request/response/event/config record types |
+| `src/app/llm_caret/workspace_cli.spl` | 210 | Workspace CLI parsing and execution |
 
-Mapped files: 13/13 = 100%, above the required 80%.
-Mapped LOC: 3086/3086 = 100%, above the required 80%.
+Mapped files: 47/47 = 100%, above the required 80%.
+Mapped LOC: 11265/11265 = 100%, above the required 80%.
 
 ## Function Trace
 

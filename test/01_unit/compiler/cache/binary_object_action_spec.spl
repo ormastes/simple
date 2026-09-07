@@ -1,0 +1,231 @@
+use std.spec.*
+use compiler.driver.cache.binary_object_action.*
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put,
+    binary_object_cas_blob_path}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.io_runtime.{getpid, time_now_unix_micros}
+
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+extern fn rt_file_read_text(path: text) -> text
+
+fn action_root(name: text) -> text:
+    val root = "build/tmp/binary_object_action_spec/{name}-{getpid()}-{time_now_unix_micros()}"
+    dir_create_all(root)
+    root
+
+fn h(value: text) -> text:
+    sha256_text(value)
+
+fn object_bytes(tail: i64) -> [u8]:
+    [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8, 0x02_u8, 0x01_u8,
+        0x01_u8, tail.to_u8()]
+
+fn fixture(change: text = "", value: text = "") -> BinaryObjectActionV1:
+    BinaryObjectActionV1(
+        source_digest: if change == "source": h(value) else: h("source"),
+        mir_digest: if change == "mir": h(value) else: h("mir"),
+        dependencies: [BinaryObjectDependencyV1(module_id: "dep",
+            interface_digest: if change == "dep": h(value) else: h("iface"))],
+        name_resolution_digest: if change == "resolution": h(value) else: h("resolution"),
+        type_layout_digest: if change == "layout": h(value) else: h("layout"),
+        target_triple: if change == "target": value else: "x86_64-unknown-linux-gnu",
+        cpu_features: if change == "features": [value] else: ["sse2", "cx16"],
+        storage_abi_mode: if change == "storage": value else: "nogc_sync_mut",
+        optimization_config_digest: if change == "optimizer": h(value) else: h("opt"),
+        debug_config_digest: if change == "debug": h(value) else: h("debug-off"),
+        object_format: if change == "format": value else: "elf",
+        compiler_executable_sha256: if change == "compiler-exe": h(value) else: h("compiler"),
+        compiler_implementation_digest: if change == "compiler-impl": h(value) else: h("compiler-impl"),
+        lowering_owner_digests: if change == "lowering": [h(value)] else: [h("lower-b"), h("lower-a")],
+        codegen_owner_digests: if change == "codegen": [h(value)] else: [h("codegen")],
+        backend_role: if change == "backend": value else: "llvm-aot",
+        provider_abi_version: if change == "provider-abi": value else: "1",
+        provider_capabilities: if change == "capabilities": [value] else: ["object", "llvm"],
+        provider_content_sha256: if change == "provider-content": h(value) else: h("provider-bytes"),
+        provider_configuration_digest: if change == "provider-config": h(value) else: h("provider-config"),
+        runtime_abi_declaration_digest: if change == "runtime-abi": h(value) else: h("runtime-abi"),
+        link_runtime_artifact_digests: if change == "link-runtime": [h(value)] else: [h("runtime.a")],
+        cache_schema_version: if change == "cache-schema": 2 else: 1,
+        action_key_version: if change == "action-version": 2 else: 1,
+        fixed_point_identity: if change == "fixed-point": h(value) else: h("phase-authority"))
+
+fn assert_invalidates(base: text, field: text):
+    expect(binary_object_action_digest_v1(fixture(field, "changed")) == base)
+        .to_equal(false)
+
+describe "BinaryObjectActionV1 shadow cache identity":
+    it "is canonical for set-like fields and dependency order":
+        val a = fixture()
+        val b = BinaryObjectActionV1(
+            source_digest: a.source_digest, mir_digest: a.mir_digest,
+            dependencies: [
+                BinaryObjectDependencyV1(module_id: "z", interface_digest: h("z")),
+                BinaryObjectDependencyV1(module_id: "dep", interface_digest: h("iface"))],
+            name_resolution_digest: a.name_resolution_digest,
+            type_layout_digest: a.type_layout_digest, target_triple: a.target_triple,
+            cpu_features: ["cx16", "sse2"], storage_abi_mode: a.storage_abi_mode,
+            optimization_config_digest: a.optimization_config_digest,
+            debug_config_digest: a.debug_config_digest, object_format: a.object_format,
+            compiler_executable_sha256: a.compiler_executable_sha256,
+            compiler_implementation_digest: a.compiler_implementation_digest,
+            lowering_owner_digests: [h("lower-a"), h("lower-b")],
+            codegen_owner_digests: a.codegen_owner_digests,
+            backend_role: a.backend_role, provider_abi_version: a.provider_abi_version,
+            provider_capabilities: ["llvm", "object"],
+            provider_content_sha256: a.provider_content_sha256,
+            provider_configuration_digest: a.provider_configuration_digest,
+            runtime_abi_declaration_digest: a.runtime_abi_declaration_digest,
+            link_runtime_artifact_digests: a.link_runtime_artifact_digests,
+            cache_schema_version: a.cache_schema_version,
+            action_key_version: a.action_key_version,
+            fixed_point_identity: a.fixed_point_identity)
+        val c = BinaryObjectActionV1(
+            source_digest: b.source_digest, mir_digest: b.mir_digest,
+            dependencies: [b.dependencies[1], b.dependencies[0]],
+            name_resolution_digest: b.name_resolution_digest,
+            type_layout_digest: b.type_layout_digest, target_triple: b.target_triple,
+            cpu_features: b.cpu_features, storage_abi_mode: b.storage_abi_mode,
+            optimization_config_digest: b.optimization_config_digest,
+            debug_config_digest: b.debug_config_digest, object_format: b.object_format,
+            compiler_executable_sha256: b.compiler_executable_sha256,
+            compiler_implementation_digest: b.compiler_implementation_digest,
+            lowering_owner_digests: b.lowering_owner_digests,
+            codegen_owner_digests: b.codegen_owner_digests,
+            backend_role: b.backend_role, provider_abi_version: b.provider_abi_version,
+            provider_capabilities: b.provider_capabilities,
+            provider_content_sha256: b.provider_content_sha256,
+            provider_configuration_digest: b.provider_configuration_digest,
+            runtime_abi_declaration_digest: b.runtime_abi_declaration_digest,
+            link_runtime_artifact_digests: b.link_runtime_artifact_digests,
+            cache_schema_version: b.cache_schema_version,
+            action_key_version: b.action_key_version,
+            fixed_point_identity: b.fixed_point_identity)
+        expect(binary_object_action_digest_v1(b)).to_equal(binary_object_action_digest_v1(c))
+
+    it "invalidates every byte-affecting identity group":
+        val base = binary_object_action_digest_v1(fixture())
+        for field in ["source", "mir", "dep", "resolution", "layout", "target",
+                "features", "storage", "optimizer", "debug", "format",
+                "compiler-exe", "compiler-impl", "lowering", "codegen",
+                "backend", "provider-abi", "capabilities", "provider-content",
+                "provider-config", "runtime-abi", "link-runtime", "cache-schema",
+                "action-version", "fixed-point"]:
+            assert_invalidates(base, field)
+
+    it "binds provider bytes rather than a provider path":
+        val a = fixture()
+        val schema_source = rt_file_read_text(
+            "src/compiler/80.driver/cache/binary_object_action.spl") ?? ""
+        expect(schema_source.contains("provider_path:")).to_equal(false)
+        expect(schema_source.contains("provider_content_sha256:")).to_equal(true)
+        assert_invalidates(binary_object_action_digest_v1(a), "provider-content")
+
+    it "refuses incomplete identities before any shadow lookup":
+        expect(binary_object_action_complete_v1(fixture())).to_equal(true)
+        val incomplete = fixture("action-version", "changed")
+        expect(binary_object_action_complete_v1(incomplete))
+            .to_equal(false)
+        val result = binary_object_shadow_compare(action_root("incomplete"),
+            incomplete, object_bytes(1))
+        expect(result.reason).to_equal("identity_incomplete")
+
+describe "immutable binary object action receipts":
+    it "publishes a verified mapping and compares without serving a hit":
+        binary_object_shadow_reset_counters()
+        val root = action_root("roundtrip")
+        val action = fixture()
+        val object = object_bytes(11)
+        val object_digest = binary_object_cas_put(root, object)
+        expect(binary_object_action_receipt_publish(root, action, object_digest))
+            .to_equal("published")
+        expect(binary_object_shadow_compare(root, action, object).reason).to_equal("shadow_equal")
+        expect(binary_object_shadow_compare(root, action, object_bytes(12)).reason)
+            .to_equal("shadow_mismatch")
+        val counts = binary_object_shadow_counts()
+        expect(counts.equal).to_equal(1)
+        expect(counts.mismatch).to_equal(1)
+
+    it "converges identical publishers and refuses a conflicting winner":
+        val root = action_root("race")
+        val action_digest = binary_object_action_digest_v1(fixture())
+        val a = binary_object_cas_put(root, object_bytes(21))
+        val b = binary_object_cas_put(root, object_bytes(22))
+        expect(binary_object_action_receipt_publish(root, fixture(), a)).to_equal("published")
+        expect(binary_object_action_receipt_publish(root, fixture(), a)).to_equal("race_equal")
+        expect(binary_object_action_receipt_publish(root, fixture(), b)).to_equal("race_conflict")
+        expect(binary_object_action_receipt_read(root, action_digest).unwrap().object_digest)
+            .to_equal(a)
+
+    it "rejects forged and symlinked receipts and corrupt objects":
+        val root = action_root("corrupt")
+        val action = fixture()
+        val action_digest = binary_object_action_digest_v1(action)
+        val object = object_bytes(31)
+        val object_digest = binary_object_cas_put(root, object)
+        val receipt_path = binary_object_action_receipt_path(root, action_digest)
+        val slash = receipt_path.last_index_of("/")
+        dir_create_all(receipt_path.substring(0, slash))
+        val forged = BinaryObjectActionReceiptV1(action_digest: h("wrong"),
+            object_digest: object_digest, schema_version: 1)
+        expect(file_write_bytes(receipt_path,
+            binary_object_action_receipt_encode(forged).bytes())).to_equal(true)
+        expect(binary_object_action_receipt_read(root, action_digest)).to_be_nil()
+
+        val linked_action = fixture("source", "symlink")
+        val linked_digest = binary_object_action_digest_v1(linked_action)
+        val linked_path = binary_object_action_receipt_path(root, linked_digest)
+        val linked_slash = linked_path.last_index_of("/")
+        dir_create_all(linked_path.substring(0, linked_slash))
+        expect(rt_package_create_symlink(receipt_path, linked_path)).to_equal(0)
+        expect(binary_object_action_receipt_read(root, linked_digest)).to_be_nil()
+
+        val clean_root = action_root("object-corrupt")
+        val clean_digest = binary_object_cas_put(clean_root, object)
+        expect(binary_object_action_receipt_publish(clean_root, action, clean_digest))
+            .to_equal("published")
+        expect(file_write_bytes(binary_object_cas_blob_path(clean_root, clean_digest),
+            object_bytes(32))).to_equal(true)
+        expect(binary_object_shadow_compare(clean_root, action, object).reason)
+            .to_equal("object_corrupt")
+
+    it "rejects malformed receipt identity and absent objects":
+        val root = action_root("invalid")
+        expect(binary_object_action_receipt_path(root, "../escape")).to_equal("")
+        expect(binary_object_action_receipt_publish(root,
+            fixture("action-version", "changed"), h("absent")))
+            .to_equal("identity_incomplete")
+        expect(binary_object_action_receipt_publish(root, fixture(), h("absent")))
+            .to_equal("object_missing")
+
+    it "fails closed for truncated unknown-version and oversized receipts":
+        val root = action_root("receipt-bounds")
+        val action_digest = binary_object_action_digest_v1(fixture())
+        val path = binary_object_action_receipt_path(root, action_digest)
+        val slash = path.last_index_of("/")
+        dir_create_all(path.substring(0, slash))
+        expect(file_write_bytes(path, "simple-binary-object-receipt-v1\ntruncated".bytes()))
+            .to_equal(true)
+        expect(binary_object_action_receipt_read(root, action_digest)).to_be_nil()
+
+        val root2 = action_root("receipt-version")
+        val path2 = binary_object_action_receipt_path(root2, action_digest)
+        val slash2 = path2.last_index_of("/")
+        dir_create_all(path2.substring(0, slash2))
+        val object_digest = h("object")
+        val unknown = "simple-binary-object-receipt-v1\n{action_digest}\n{object_digest}\n2"
+        expect(file_write_bytes(path2, unknown.bytes())).to_equal(true)
+        expect(binary_object_action_receipt_read(root2, action_digest)).to_be_nil()
+
+        val root3 = action_root("receipt-oversized")
+        val path3 = binary_object_action_receipt_path(root3, action_digest)
+        val slash3 = path3.last_index_of("/")
+        dir_create_all(path3.substring(0, slash3))
+        var oversized = ""
+        var i = 0
+        while i < 1100:
+            oversized = oversized + "x"
+            i = i + 1
+        expect(file_write_bytes(path3, oversized.bytes())).to_equal(true)
+        expect(binary_object_action_receipt_read(root3, action_digest)).to_be_nil()

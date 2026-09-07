@@ -1,0 +1,41 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_bytes, file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.io_runtime.{file_read}
+use compiler.backend_plugin.dynamic_adapter.{dynamic_backend_publish_object_v1}
+
+describe "dynamic backend scalar object-path transport":
+    it "publishes copied provider payload and preserves explicit diagnostics":
+        val destination = "/tmp/simple-dynamic-object-path-{getpid()}.o"
+        file_delete(destination)
+        val diagnostic_path = destination + ".diagnostic"
+        file_delete(diagnostic_path)
+        val payload: [u8] = [0x7F, 0x45, 0x4C, 0x46, 1, 2, 3, 4]
+        val status = dynamic_backend_publish_object_v1(
+            payload, destination, diagnostic_path)
+        expect(status).to_equal(0)
+        expect(file_exists(destination)).to_equal(true)
+        expect(file_read_bytes(destination) ?? []).to_equal(payload)
+
+        val occupied_status = dynamic_backend_publish_object_v1(
+            payload, destination, diagnostic_path)
+        expect(occupied_status).to_equal(1)
+        expect((file_read_bytes(diagnostic_path) ?? []).len()).to_be_greater_than(0)
+        expect(file_read(diagnostic_path)).to_equal(
+            "AOT object destination already exists")
+        expect(file_read_bytes(destination) ?? []).to_equal(payload)
+        file_delete(destination)
+        file_delete(diagnostic_path)
+
+    it "rejects invalid object magic without publishing":
+        val destination = "/tmp/simple-dynamic-invalid-object-{getpid()}.o"
+        val diagnostic_path = destination + ".diagnostic"
+        file_delete(destination)
+        file_delete(diagnostic_path)
+        val status = dynamic_backend_publish_object_v1(
+            [1, 2, 3, 4, 5], destination, diagnostic_path)
+        expect(status).to_equal(1)
+        expect(file_exists(destination)).to_equal(false)
+        expect(file_read(diagnostic_path)).to_equal(
+            "dynamic backend returned object without recognized magic")
+        file_delete(diagnostic_path)

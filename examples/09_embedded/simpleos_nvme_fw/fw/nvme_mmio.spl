@@ -1,0 +1,371 @@
+"""
+nvme_mmio — real NVMe SQE/CQE byte layout + little-endian memory accessors.
+
+Pure data + free functions (no `impl`), same tier as `nvme_types`. Memory is a
+flat `[i64]` of BYTES; the owner of that array is `HostNvme`
+(`nvme_host_driver.spl`), which mutates it in place — nothing here mutates,
+so passing `mem` in is a copy-on-write read and never deep-copies.
+
+Field offsets are the NVMe 1.4 ones:
+  SQE (64 bytes)
+    +0   CDW0: opcode[7:0], CID[31:16]
+    +4   NSID
+    +24  PRP1 (64-bit)
+    +40  CDW10/11 = SLBA (64-bit)
+    +48  CDW12: NLB[15:0]  (0-based on the wire; carried 0-based here too)
+  CQE (16 bytes)
+    +0   DW0 command-specific result
+    +8   DW2: SQHD[15:0], SQID[31:16]
+    +12  DW3: CID[15:0], PHASE[16], STATUS[31:17]
+
+PRP IS NOW HONORED (plan D11). The SQE has TWO modes, discriminated by
+CDW13 bit 0 (`SQE_FLAG_PRP`):
+
+  * LEGACY mode (flag clear) — PRP1's low dword carries the one-word
+    `NvmeCmd.data` stand-in, exactly as before. Every pre-existing caller
+    (`admin_transport.spl`, the register/ready-gate/host-equivalence checks)
+    is on this path and is bit-for-bit unchanged.
+
+  * PRP mode (flag set) — PRP1/PRP2 are real 64-bit ADDRESSES into the same
+    `mem` byte array, and the payload is NOT in the SQE at all. The device
+    fetches each 4096-byte page out of `mem` at doorbell time
+    (`sqe_fetch_pages`). This is a DMA-shaped transfer: mutating the bytes at
+    the PRP address after the SQE is built but before the doorbell changes
+    what the device sees. Witness: fw/prp_wire_witness_check.spl.
+
+PRP addressing rules implemented (NVMe Base 2.3 §4.1.2, page-aligned, offset 0):
+    nblocks == 1  ->  PRP1 = page 0, PRP2 = 0 (unused)
+    nblocks == 2  ->  PRP1 = page 0, PRP2 = page 1
+    nblocks  > 2  ->  PRP1 = page 0, PRP2 = address of a PRP LIST holding the
+                      addresses of pages 1..nblocks-1, one 64-bit entry each.
+
+NOT IMPLEMENTED, stated plainly: (a) CHAINED PRP lists — the last entry of a
+full list pointing at another list. MDTS is 8 blocks and a 4096-byte list page
+holds 512 entries, so a chain is unreachable on this controller and building
+one would be dead code. (b) NON-ZERO PRP offsets — every buffer this host
+allocates is page-aligned, so PRP1[11:0] is always 0. (c) SGLs.
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use nvme_payload.*
+
+val SQE_BYTES: i64 = 64
+val CQE_BYTES: i64 = 16
+
+val SQE_OFF_CDW0: i64 = 0
+val SQE_OFF_NSID: i64 = 4
+val SQE_OFF_PRP1: i64 = 24
+val SQE_OFF_PRP2: i64 = 32
+val SQE_OFF_SLBA: i64 = 40
+val SQE_OFF_CDW12: i64 = 48
+val SQE_OFF_CDW13: i64 = 52
+
+# CDW13 bit 0 — "this SQE's PRP1/PRP2 are real addresses, not the legacy
+# one-word payload stand-in". A production controller needs no such bit
+# (every NVMe data command is PRP- or SGL-addressed); it exists ONLY so the
+# not-yet-migrated legacy callers keep working over the identical 64-byte
+# frame, and it goes away with the `data: i64` payload field itself.
+val SQE_FLAG_PRP: i64 = 1
+
+# Admin SQEs share the 64-byte submission format. CDW10/CDW11 occupy exactly the
+# bytes an I/O SQE uses for the 64-bit SLBA, so ADMIN_SQE_OFF_CDW10 is an alias
+# of SQE_OFF_SLBA rather than a second layout.
+val ASQE_OFF_CDW10: i64 = 40
+val ASQE_OFF_CDW11: i64 = 44
+val ASQE_OFF_CDW12: i64 = 48
+
+val CQE_OFF_DW0: i64 = 0
+val CQE_OFF_DW2: i64 = 8
+val CQE_OFF_DW3: i64 = 12
+
+val CQE_PHASE_SHIFT:  i64 = 16
+val CQE_STATUS_SHIFT: i64 = 17
+
+# ── Little-endian reads over a byte array ─────────────────────────────────────
+fn mmio_rd8(mem: [i64], addr: i64) -> i64:
+    if addr < 0 or addr >= mem.len():
+        return 0
+    mem[addr] & 0xFF
+
+fn mmio_rd16(mem: [i64], addr: i64) -> i64:
+    mmio_rd8(mem, addr) | (mmio_rd8(mem, addr + 1) << 8)
+
+fn mmio_rd32(mem: [i64], addr: i64) -> i64:
+    mmio_rd16(mem, addr) | (mmio_rd16(mem, addr + 2) << 16)
+
+fn mmio_rd64(mem: [i64], addr: i64) -> i64:
+    mmio_rd32(mem, addr) | (mmio_rd32(mem, addr + 4) << 32)
+
+# ── Encoders: produce the exact wire bytes the host must write ────────────────
+"""64 raw bytes of a NVMe I/O submission-queue entry for `c`."""
+fn sqe_encode(c: NvmeCmd) -> [i64]:
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < SQE_BYTES:
+        b.push(0)
+        i = i + 1
+    val cdw0: i64 = (c.opcode & 0xFF) | ((c.cid & 0xFFFF) << 16)
+    b[SQE_OFF_CDW0]     = cdw0 & 0xFF
+    b[SQE_OFF_CDW0 + 1] = (cdw0 >> 8) & 0xFF
+    b[SQE_OFF_CDW0 + 2] = (cdw0 >> 16) & 0xFF
+    b[SQE_OFF_CDW0 + 3] = (cdw0 >> 24) & 0xFF
+    b[SQE_OFF_NSID]     = c.nsid & 0xFF
+    b[SQE_OFF_NSID + 1] = (c.nsid >> 8) & 0xFF
+    b[SQE_OFF_NSID + 2] = (c.nsid >> 16) & 0xFF
+    b[SQE_OFF_NSID + 3] = (c.nsid >> 24) & 0xFF
+    # PRP1 carries the one-word payload stand-in (see module docstring).
+    b[SQE_OFF_PRP1]     = c.data & 0xFF
+    b[SQE_OFF_PRP1 + 1] = (c.data >> 8) & 0xFF
+    b[SQE_OFF_PRP1 + 2] = (c.data >> 16) & 0xFF
+    b[SQE_OFF_PRP1 + 3] = (c.data >> 24) & 0xFF
+    b[SQE_OFF_SLBA]     = c.lba & 0xFF
+    b[SQE_OFF_SLBA + 1] = (c.lba >> 8) & 0xFF
+    b[SQE_OFF_SLBA + 2] = (c.lba >> 16) & 0xFF
+    b[SQE_OFF_SLBA + 3] = (c.lba >> 24) & 0xFF
+    b[SQE_OFF_CDW12]     = c.nblocks & 0xFF
+    b[SQE_OFF_CDW12 + 1] = (c.nblocks >> 8) & 0xFF
+    b
+
+"""64 raw bytes of a PRP-ADDRESSED I/O SQE: `prp1`/`prp2` are ADDRESSES.
+
+`c` supplies only the command fields (opcode/cid/nsid/lba/nblocks); its
+`pages` are NOT encoded — they must already be in memory at `prp1`/`prp2`.
+Takes the addresses as explicit parameters rather than reading `c.prp1` so no
+caller has to copy a page-carrying struct to set them (nested-array aliasing:
+doc/08_tracking/bug/struct_nested_array_assign_aliases_not_cow_2026-09-01.md).
+"""
+fn sqe_encode_prp(c: NvmeCmd, prp1: i64, prp2: i64) -> [i64]:
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < SQE_BYTES:
+        b.push(0)
+        i = i + 1
+    val cdw0: i64 = (c.opcode & 0xFF) | ((c.cid & 0xFFFF) << 16)
+    var k: i64 = 0
+    while k < 4:
+        b[SQE_OFF_CDW0 + k] = (cdw0 >> (k * 8)) & 0xFF
+        b[SQE_OFF_NSID + k] = (c.nsid >> (k * 8)) & 0xFF
+        b[SQE_OFF_SLBA + k] = (c.lba >> (k * 8)) & 0xFF
+        k = k + 1
+    k = 0
+    while k < 8:
+        b[SQE_OFF_PRP1 + k] = (prp1 >> (k * 8)) & 0xFF
+        b[SQE_OFF_PRP2 + k] = (prp2 >> (k * 8)) & 0xFF
+        k = k + 1
+    b[SQE_OFF_CDW12]     = c.nblocks & 0xFF
+    b[SQE_OFF_CDW12 + 1] = (c.nblocks >> 8) & 0xFF
+    b[SQE_OFF_CDW13]     = SQE_FLAG_PRP
+    b
+
+"""16 raw bytes of a completion-queue entry for `p`, tagged with `phase`."""
+fn cqe_encode(p: NvmeCpl, phase: i64, sq_head: i64) -> [i64]:
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < CQE_BYTES:
+        b.push(0)
+        i = i + 1
+    b[CQE_OFF_DW0]     = p.data & 0xFF
+    b[CQE_OFF_DW0 + 1] = (p.data >> 8) & 0xFF
+    b[CQE_OFF_DW0 + 2] = (p.data >> 16) & 0xFF
+    b[CQE_OFF_DW0 + 3] = (p.data >> 24) & 0xFF
+    b[CQE_OFF_DW2]     = sq_head & 0xFF
+    b[CQE_OFF_DW2 + 1] = (sq_head >> 8) & 0xFF
+    val dw3: i64 = (p.cid & 0xFFFF) | ((phase & 1) << CQE_PHASE_SHIFT) | ((p.status & 0x7FFF) << CQE_STATUS_SHIFT)
+    b[CQE_OFF_DW3]     = dw3 & 0xFF
+    b[CQE_OFF_DW3 + 1] = (dw3 >> 8) & 0xFF
+    b[CQE_OFF_DW3 + 2] = (dw3 >> 16) & 0xFF
+    b[CQE_OFF_DW3 + 3] = (dw3 >> 24) & 0xFF
+    b
+
+# ── Decoders: read a live entry straight out of queue memory ──────────────────
+fn sqe_decode(mem: [i64], base: i64) -> NvmeCmd:
+    val cdw0: i64 = mmio_rd32(mem, base + SQE_OFF_CDW0)
+    val cid:  i64 = (cdw0 >> 16) & 0xFFFF
+    val op:   i64 = cdw0 & 0xFF
+    val nsid: i64 = mmio_rd32(mem, base + SQE_OFF_NSID)
+    val prp1: i64 = mmio_rd64(mem, base + SQE_OFF_PRP1)
+    val lba:  i64 = mmio_rd64(mem, base + SQE_OFF_SLBA)
+    val nlb:  i64 = mmio_rd32(mem, base + SQE_OFF_CDW12) & 0xFFFF
+    if not sqe_is_prp(mem, base):
+        return cmd_make_nsid(cid, nsid, op, lba, nlb, prp1)
+    # PRP mode: the payload is in MEMORY. Fetch it here — this call IS the DMA.
+    #
+    # DIRECTION MATTERS. A write's PRP buffer is a SOURCE and is fetched; a
+    # read's (or a flush's/trim's) is a DESTINATION and must NOT be — fetching
+    # it would hand the controller a payload on a command that forbids one, and
+    # `cmd_validate` rightly answers SC_INVALID_FIELD. Only write-class opcodes
+    # take data from host memory on the way in.
+    # Built as a struct literal rather than through cmd_make_prp, which masks
+    # the PRP entries to `& 0xFF` (it predates real addressing).
+    val prp2: i64 = mmio_rd64(mem, base + SQE_OFF_PRP2)
+    var ps: [PageData] = []
+    if op == OP_WRITE:
+        ps = sqe_fetch_pages(mem, prp1, prp2, nlb)
+    var w0: i64 = 0
+    if ps.len() > 0:
+        w0 = page_word(ps[0], 0)
+    var p0: PageData = page_zero()
+    if ps.len() > 0:
+        p0 = ps[0]
+    NvmeCmd(cid: cid, nsid: nsid, opcode: op, lba: lba, nblocks: nlb, data: w0,
+            page: p0, pages: ps, has_page: ps.len() > 0, prp1: prp1, prp2: prp2)
+
+"""True when the SQE at `base` addresses its data with real PRP entries."""
+fn sqe_is_prp(mem: [i64], base: i64) -> bool:
+    (mmio_rd32(mem, base + SQE_OFF_CDW13) & SQE_FLAG_PRP) == SQE_FLAG_PRP
+
+"""Read one 4096-byte page out of `mem` at `addr` as PAGE_WORDS little-endian words."""
+fn mem_read_page(mem: [i64], addr: i64) -> PageData:
+    var w: [i64] = []
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        w.push(mmio_rd64(mem, addr + i * WORD_BYTES))
+        i = i + 1
+    PageData(words: w)
+
+"""The memory address of block `i`'s page, per the PRP rules in the module docstring."""
+fn prp_page_addr(mem: [i64], prp1: i64, prp2: i64, nblocks: i64, i: i64) -> i64:
+    if i <= 0:
+        return prp1
+    if nblocks <= 2:
+        return prp2
+    mmio_rd64(mem, prp2 + (i - 1) * WORD_BYTES)
+
+"""DEVICE-SIDE DMA FETCH: pull `nblocks` pages out of `mem` via the PRP entries.
+
+This is the whole point of D11 — the data comes from MEMORY, resolved through
+addresses, not from a field of the command struct.
+"""
+fn sqe_fetch_pages(mem: [i64], prp1: i64, prp2: i64, nblocks: i64) -> [PageData]:
+    var ps: [PageData] = []
+    var i: i64 = 0
+    while i < nblocks:
+        # `p` is declared FRESH each iteration on purpose: reusing one var
+        # across pushes can alias the nested `words` array and make every
+        # fetched page identical — a bug that corrupts toward passing.
+        val p: PageData = mem_read_page(mem, prp_page_addr(mem, prp1, prp2, nblocks, i))
+        ps.push(p)
+        i = i + 1
+    ps
+
+fn cqe_phase_of(mem: [i64], base: i64) -> i64:
+    (mmio_rd32(mem, base + CQE_OFF_DW3) >> CQE_PHASE_SHIFT) & 1
+
+fn cqe_decode(mem: [i64], base: i64) -> NvmeCpl:
+    val dw3: i64 = mmio_rd32(mem, base + CQE_OFF_DW3)
+    val cid: i64 = dw3 & 0xFFFF
+    val st:  i64 = (dw3 >> CQE_STATUS_SHIFT) & 0x7FFF
+    cpl_make(cid, st, mmio_rd32(mem, base + CQE_OFF_DW0))
+
+# ── Admin SQE (same 64-byte frame, command-dword payload) ─────────────────────
+"""64 raw bytes of an NVMe ADMIN submission-queue entry for `c`."""
+fn asqe_encode(c: AdminCmd) -> [i64]:
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < SQE_BYTES:
+        b.push(0)
+        i = i + 1
+    val cdw0: i64 = (c.opcode & 0xFF) | ((c.cid & 0xFFFF) << 16)
+    b[SQE_OFF_CDW0]     = cdw0 & 0xFF
+    b[SQE_OFF_CDW0 + 1] = (cdw0 >> 8) & 0xFF
+    b[SQE_OFF_CDW0 + 2] = (cdw0 >> 16) & 0xFF
+    b[SQE_OFF_CDW0 + 3] = (cdw0 >> 24) & 0xFF
+    b[SQE_OFF_NSID]     = c.nsid & 0xFF
+    b[SQE_OFF_NSID + 1] = (c.nsid >> 8) & 0xFF
+    b[SQE_OFF_NSID + 2] = (c.nsid >> 16) & 0xFF
+    b[SQE_OFF_NSID + 3] = (c.nsid >> 24) & 0xFF
+    b[ASQE_OFF_CDW10]     = c.cdw10 & 0xFF
+    b[ASQE_OFF_CDW10 + 1] = (c.cdw10 >> 8) & 0xFF
+    b[ASQE_OFF_CDW10 + 2] = (c.cdw10 >> 16) & 0xFF
+    b[ASQE_OFF_CDW10 + 3] = (c.cdw10 >> 24) & 0xFF
+    b[ASQE_OFF_CDW11]     = c.cdw11 & 0xFF
+    b[ASQE_OFF_CDW11 + 1] = (c.cdw11 >> 8) & 0xFF
+    b[ASQE_OFF_CDW11 + 2] = (c.cdw11 >> 16) & 0xFF
+    b[ASQE_OFF_CDW11 + 3] = (c.cdw11 >> 24) & 0xFF
+    b[ASQE_OFF_CDW12]     = c.cdw12 & 0xFF
+    b[ASQE_OFF_CDW12 + 1] = (c.cdw12 >> 8) & 0xFF
+    b[ASQE_OFF_CDW12 + 2] = (c.cdw12 >> 16) & 0xFF
+    b[ASQE_OFF_CDW12 + 3] = (c.cdw12 >> 24) & 0xFF
+    b
+
+"""Read a live ADMIN SQE straight out of queue memory."""
+fn asqe_decode(mem: [i64], base: i64) -> AdminCmd:
+    val cdw0: i64 = mmio_rd32(mem, base + SQE_OFF_CDW0)
+    admin_cmd_make((cdw0 >> 16) & 0xFFFF, cdw0 & 0xFF, mmio_rd32(mem, base + SQE_OFF_NSID), mmio_rd32(mem, base + ASQE_OFF_CDW10), mmio_rd32(mem, base + ASQE_OFF_CDW11), mmio_rd32(mem, base + ASQE_OFF_CDW12))
+
+fn nvme_mmio_selftest() -> i64:
+    var f: i64 = 0
+    # Round-trip an SQE through a byte buffer using the real offsets.
+    val c = cmd_make(0x1234, OP_WRITE, 0x9ABC, 7, 0xDEAD)
+    val bytes = sqe_encode(c)
+    f = f + expect_eq(bytes.len(), SQE_BYTES, "SQE is 64 bytes")
+    val d = sqe_decode(bytes, 0)
+    f = f + expect_eq(d.cid, 0x1234, "SQE cid round-trips at CDW0[31:16]")
+    f = f + expect_eq(d.opcode, OP_WRITE, "SQE opcode round-trips at CDW0[7:0]")
+    f = f + expect_eq(d.nsid, 1, "SQE nsid round-trips at +4")
+    f = f + expect_eq(d.lba, 0x9ABC, "SQE SLBA round-trips at +40")
+    f = f + expect_eq(d.nblocks, 7, "SQE NLB round-trips at CDW12[15:0]")
+    f = f + expect_eq(d.data, 0xDEAD, "SQE PRP1 carries the payload stand-in at +24")
+    # Byte-level proof the encoder really placed CID where NVMe says it goes.
+    f = f + expect_eq(bytes[2], 0x34, "CDW0 byte2 == CID low byte")
+    f = f + expect_eq(bytes[3], 0x12, "CDW0 byte3 == CID high byte")
+    f = f + expect_eq(bytes[0], OP_WRITE, "CDW0 byte0 == opcode")
+    # CQE phase/status packing.
+    val p = cpl_make(0x0042, SC_MEDIA_ERR, 0x55)
+    val cb1 = cqe_encode(p, 1, 3)
+    f = f + expect_eq(cqe_phase_of(cb1, 0), 1, "CQE phase bit 16 set when phase==1")
+    val cb0 = cqe_encode(p, 0, 3)
+    f = f + expect_eq(cqe_phase_of(cb0, 0), 0, "CQE phase bit 16 clear when phase==0")
+    val dp = cqe_decode(cb1, 0)
+    f = f + expect_eq(dp.cid, 0x0042, "CQE cid round-trips at DW3[15:0]")
+    f = f + expect_eq(dp.status, SC_MEDIA_ERR, "CQE status round-trips at DW3[31:17]")
+    f = f + expect_eq(dp.data, 0x55, "CQE result round-trips at DW0")
+    f = f + expect_eq(mmio_rd16(cb1, CQE_OFF_DW2), 3, "CQE DW2 carries SQHD")
+    # Status must not bleed into the phase bit.
+    val dp0 = cqe_decode(cb0, 0)
+    f = f + expect_eq(dp0.status, SC_MEDIA_ERR, "status decodes identically at either phase")
+    # Little-endian accessors.
+    var m: [i64] = []
+    var i: i64 = 0
+    while i < 8:
+        m.push(0)
+        i = i + 1
+    m[0] = 0x78
+    m[1] = 0x56
+    m[2] = 0x34
+    m[3] = 0x12
+    f = f + expect_eq(mmio_rd32(m, 0), 0x12345678, "mmio_rd32 is little-endian")
+    f = f + expect_eq(mmio_rd8(m, 999), 0, "out-of-range read fails closed to 0")
+    # Admin SQE rides the SAME 64-byte frame; CDW10 aliases the I/O SLBA bytes.
+    val ac = admin_cmd_make(0x0301, ADMIN_CREATE_SQ, 0, 0x00200001, 1, 0)
+    val ab = asqe_encode(ac)
+    f = f + expect_eq(ab.len(), SQE_BYTES, "admin SQE is 64 bytes")
+    val ad = asqe_decode(ab, 0)
+    f = f + expect_eq(ad.cid, 0x0301, "admin SQE cid round-trips at CDW0[31:16]")
+    f = f + expect_eq(ad.opcode, ADMIN_CREATE_SQ, "admin SQE opcode round-trips at CDW0[7:0]")
+    f = f + expect_eq(ad.cdw10, 0x00200001, "admin SQE CDW10 round-trips at +40")
+    f = f + expect_eq(ad.cdw11, 1, "admin SQE CDW11 round-trips at +44")
+    f = f + expect_eq(ad.cdw12, 0, "admin SQE CDW12 round-trips at +48")
+    f = f + expect_eq(ASQE_OFF_CDW10, SQE_OFF_SLBA, "admin CDW10 aliases the I/O SLBA offset (one layout, not two)")
+    f = f + expect_eq(ab[0], ADMIN_CREATE_SQ, "admin CDW0 byte0 == opcode")
+    # PRP mode: the two SQE modes are distinguishable, and a PRP SQE carries
+    # ADDRESSES where a legacy one carries the payload stand-in.
+    f = f + expect_eq(bool_to_int(sqe_is_prp(bytes, 0)), 0, "a legacy SQE is NOT flagged PRP-addressed")
+    val pb = sqe_encode_prp(cmd_make(0x77, OP_WRITE, 0x33, 3, 0), 40000, 50000)
+    f = f + expect_eq(pb.len(), SQE_BYTES, "a PRP SQE is the same 64-byte frame")
+    f = f + expect_eq(bool_to_int(sqe_is_prp(pb, 0)), 1, "a PRP SQE IS flagged PRP-addressed")
+    f = f + expect_eq(mmio_rd64(pb, SQE_OFF_PRP1), 40000, "PRP1 holds a full 64-bit address, unmasked")
+    f = f + expect_eq(mmio_rd64(pb, SQE_OFF_PRP2), 50000, "PRP2 holds a full 64-bit address, unmasked")
+    f = f + expect_eq(mmio_rd32(pb, SQE_OFF_CDW12) & 0xFFFF, 3, "a PRP SQE still carries NLB")
+    # Address resolution: 1 block, 2 blocks, and >2 through a list.
+    var lm: [i64] = []
+    var li: i64 = 0
+    while li < 64:
+        lm.push(0)
+        li = li + 1
+    lm[0] = 0xC8   # 200, little-endian, as PRP list entry 0
+    f = f + expect_eq(prp_page_addr(lm, 100, 0, 1, 0), 100, "1 block: block 0 resolves to PRP1")
+    f = f + expect_eq(prp_page_addr(lm, 100, 300, 2, 1), 300, "2 blocks: block 1 resolves to PRP2 directly")
+    f = f + expect_eq(prp_page_addr(lm, 100, 0, 4, 1), 200, "more than 2 blocks: block 1 resolves THROUGH the PRP list")
+    f

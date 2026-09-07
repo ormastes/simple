@@ -1,0 +1,140 @@
+use std.spec.*
+use std.common.crypto.sha256 (sha256_text)
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.common.cache_contract.virtual_source_store_v1.{SummaryAuthV1, VirtualSourceStoreV1}
+use compiler.common.cache_contract.virtual_source_consumer_v1 (VirtualSourceConsumerAdapterV1)
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1, project_public_summary_v1, render_public_summary_tldr_v1}
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+use compiler.driver.cache.summary.compiler_cli_virtual_source (inject_compiler_cli_virtual_source_v1)
+use app.mcp.virtual_summary_source (inject_mcp_virtual_source_v1)
+use app.simple_lsp_mcp.virtual_summary_source (inject_simple_lsp_mcp_virtual_source_v1)
+use app.spipe.virtual_summary_source (inject_spipe_virtual_source_v1)
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn summary_for(snapshot: text, path: text):
+    val signature = "pub extern fn visible() -> i64"
+    val facts = [
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.ForwardDeclaration,
+            stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+            contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: []),
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.Declaration,
+            stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+            contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: []),
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.Declaration,
+            stable_symbol_id: "sym:private", canonical_bytes: "private material", is_public: false,
+            contains_executable_body: false, contains_private_source: true, dependency_symbol_ids: []),
+    ]
+    project_public_summary_v1(PublicSummaryProjectionInputV1(snapshot_id: snapshot,
+        logical_path: LogicalSourcePathV1(repository_namespace_digest: digest("repo"),
+            module_relative_utf8: path, path_semantics: PathSemanticsV1.CaseSensitiveNfc),
+        source_blob_digest: digest("source:" + path), compiler_owner_digest: digest("compiler"),
+        grammar_digest: digest("grammar"), facts: facts)).unwrap()
+
+fn auth(now: i64 = 10, expiry: i64 = 20) -> SummaryAuthV1:
+    SummaryAuthV1(root_digest: digest("repo"), session_digest: digest("session"),
+        capability_digest: digest("capability"), capability_admission_receipt: digest("admission"),
+        request_epoch: now, expires_epoch: expiry)
+
+describe "DB-backed virtual public summary store":
+    it "gives compiler, MCP, LSP MCP, and SPipe identical bounded snapshot reads":
+        var store = SummaryStoreV1.memory().unwrap()
+        val snapshot = digest("consumer-parity")
+        val summary = summary_for(snapshot, "pkg/parity.spl")
+        store.publish(summary, digest("parity-ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        val consumers: [VirtualSourceConsumerAdapterV1] = [
+            inject_compiler_cli_virtual_source_v1(facade, auth(), snapshot),
+            inject_mcp_virtual_source_v1(facade, auth(), snapshot),
+            inject_simple_lsp_mcp_virtual_source_v1(facade, auth(), snapshot),
+            inject_spipe_virtual_source_v1(facade, auth(), snapshot),
+        ]
+        val uri = "simple-summary://{snapshot}/pkg/parity.spl/_tldr.spl"
+        val expected = render_public_summary_tldr_v1(summary)
+        for consumer in consumers:
+            expect(consumer.list("pkg", 8, nil).unwrap().entries.len()).to_equal(1)
+            expect(consumer.stat(uri).unwrap().value?.provenance).to_equal("generated/untrusted;public-only")
+            expect(consumer.read(uri, 0, 65536).unwrap().value?.bytes.len()).to_equal(expected.to_bytes().len())
+            expect(consumer.page(uri, nil, 4096, 32).unwrap().value?.rendered_text).to_equal(expected)
+            expect(consumer.stat("simple-summary://{snapshot}/pkg/missing.spl/_tldr.spl").unwrap().present).to_equal(false)
+            expect(consumer.stat("pkg/parity.spl").is_err()).to_equal(true)
+
+    it "keeps MCP and SPipe misses exact and never shadows a physical source path":
+        var store = SummaryStoreV1.memory().unwrap()
+        val snapshot = digest("consumer-miss-parity")
+        store.publish(summary_for(snapshot, "pkg/visible.spl"), digest("visible-ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        val consumers: [VirtualSourceConsumerAdapterV1] = [
+            inject_mcp_virtual_source_v1(facade, auth(), snapshot),
+            inject_spipe_virtual_source_v1(facade, auth(), snapshot),
+        ]
+        val missing = "simple-summary://{snapshot}/pkg/missing.spl/_tldr.spl"
+        for consumer in consumers:
+            expect(consumer.stat(missing).unwrap().present).to_equal(false)
+            expect(consumer.read(missing, 0, 64).unwrap().present).to_equal(false)
+            expect(consumer.stat("pkg/visible.spl").is_err()).to_equal(true)
+
+    it "publishes canonical bytes and serves one exact snapshot through bounded facade operations":
+        var store = SummaryStoreV1.memory().unwrap()
+        val snapshot = digest("snapshot-a")
+        val summary = summary_for(snapshot, "pkg/example.spl")
+        store.publish(summary, digest("ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
+        val listed = facade.list(auth(), snapshot, "pkg", 8, nil).unwrap()
+        expect(listed.entries.len()).to_equal(1)
+        expect(listed.entries[0].uri).to_equal(uri)
+        val stat = facade.stat(auth(), snapshot, uri).unwrap()
+        expect(stat.present).to_equal(true)
+        expect(stat.value?.provenance).to_equal("generated/untrusted;public-only")
+        val first = facade.read(auth(), snapshot, uri, 0, 16).unwrap().value?
+        expect(first.bytes.len()).to_equal(16)
+        expect(first.complete).to_equal(false)
+        val page = facade.page(auth(), snapshot, uri, nil, 4096, 32).unwrap().value?
+        expect(page.rendered_text).to_equal(render_public_summary_tldr_v1(summary))
+        expect(page.rendered_text.contains("private material")).to_equal(false)
+
+    it "does not switch snapshots, shadow real paths, or generate a store miss":
+        var store = SummaryStoreV1.memory().unwrap()
+        val snapshot = digest("snapshot-a")
+        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        val other = digest("snapshot-b")
+        val uri = "simple-summary://{other}/pkg/example.spl/_tldr.spl"
+        expect(facade.stat(auth(), other, uri).unwrap().present).to_equal(false)
+        expect(facade.stat(auth(), snapshot, "pkg/example.spl").is_err()).to_equal(true)
+
+    it "binds pagination to auth, snapshot, limits, and expiry":
+        var store = SummaryStoreV1.memory().unwrap()
+        val snapshot = digest("snapshot")
+        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
+        val first = facade.page(auth(), snapshot, uri, nil, 16, 4).unwrap().value?
+        expect(first.continuation != nil).to_equal(true)
+        expect(facade.page(auth(now: 21, expiry: 20), snapshot, uri, first.continuation, 16, 4).is_err()).to_equal(true)
+        expect(facade.page(auth(), snapshot, uri, first.continuation, 17, 4).is_err()).to_equal(true)
+        expect(facade.read(auth(), snapshot, uri, 0, 65537).is_err()).to_equal(true)
+
+    it "keeps projection identities immutable and cleans only bounded stale rows":
+        var store = SummaryStoreV1.memory().unwrap()
+        val live = digest("live")
+        val stale = digest("stale")
+        val live_summary = summary_for(live, "pkg/live.spl")
+        store.publish(live_summary, digest("live-ast"), "generated/untrusted;public-only").unwrap()
+        expect(store.publish(live_summary, digest("live-ast"), "generated/untrusted;public-only").is_ok()).to_equal(true)
+        expect(store.publish(live_summary, digest("different-ast"), "generated/untrusted;public-only").is_err()).to_equal(true)
+        store.publish(summary_for(stale, "pkg/stale.spl"), digest("stale-ast"), "generated/untrusted;public-only").unwrap()
+        expect(store.cleanup_stale([live], 1).unwrap()).to_equal(1)
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        expect(facade.stat(auth(), stale, "simple-summary://{stale}/pkg/stale.spl/_tldr.spl").unwrap().present).to_equal(false)
+        expect(facade.stat(auth(), live, "simple-summary://{live}/pkg/live.spl/_tldr.spl").unwrap().present).to_equal(true)
+
+    it "rejects noncanonical digests, wildcard directories, and unadmitted receipts":
+        var store = SummaryStoreV1.memory().unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        expect(facade.list(auth(), digest("snapshot"), "pkg%", 4, nil).is_err()).to_equal(true)
+        var wrong = auth()
+        wrong.capability_admission_receipt = digest("wrong")
+        expect(facade.list(wrong, digest("snapshot"), "pkg", 4, nil).is_err()).to_equal(true)
+        expect(facade.list(auth(), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "pkg", 4, nil).is_err()).to_equal(true)

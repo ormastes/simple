@@ -5,8 +5,8 @@
 
 use std.spec.*
 
-use common.ui.layout.{compute_layout, find_rect}
-use common.ui.builder.{column, row, panel, text_widget, statusbar, menubar, with_width, with_height, with_flex, with_visible, build_tree}
+use common.ui.layout.{compute_layout, find_rect, find_rect_index, layout_vbox, layout_hbox, layout_grid, layout_fixed, clamp_dim, get_flex, get_fixed_height}
+use common.ui.builder.{column, row, panel, text_widget, statusbar, menubar, grid_layout, scroll, textarea, with_width, with_height, with_flex, with_visible, build_tree}
 use common.ui.widget.{WidgetNode, WidgetRect, UITree}
 
 # ============================================================================
@@ -136,7 +136,7 @@ describe "compute_layout panel":
 describe "compute_layout grid":
 
     it "arranges 4 children into a 2x2 grid":
-        val root = builder.grid("grid1", [
+        val root = grid_layout("grid1", [
             text_widget("g_a", "A"),
             text_widget("g_b", "B"),
             text_widget("g_c", "C"),
@@ -230,3 +230,353 @@ describe "compute_layout menubar":
             expect(rm.h).to_equal(1)
         if rb != nil:
             expect(rb.h).to_equal(21)
+
+# ============================================================================
+# Layout: DPI scale (compute_layout scale_permille)
+# ============================================================================
+
+describe "compute_layout dpi scale":
+
+    it "scales the root rect by a non-identity permille factor":
+        val root = text_widget("s1", "Scaled")
+        val rects = compute_layout(root, 10, 20, 40, 12, 2000)
+        val r = find_rect(rects, "s1")
+        expect(r != nil).to_equal(true)
+        if r != nil:
+            expect(r.x).to_equal(20)
+            expect(r.y).to_equal(40)
+            expect(r.w).to_equal(80)
+            expect(r.h).to_equal(24)
+
+    it "insets the panel border after scaling, not before":
+        val root = column("s_panel", [text_widget("s_child", "C")])
+        val rects = compute_layout(root, 0, 0, 40, 12, 2000)
+        val rc = find_rect(rects, "s_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.x).to_equal(1)
+            expect(rc.w).to_equal(78)
+            expect(rc.h).to_equal(22)
+
+# ============================================================================
+# Layout: early returns
+# ============================================================================
+
+describe "compute_layout early returns":
+
+    it "returns only the root rect when the root itself is invisible":
+        val root = with_visible(column("inv_root", [text_widget("inv_child", "X")]), false)
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        expect(rects.len()).to_equal(1)
+        expect(find_rect_index(rects, "inv_child")).to_equal(-1)
+
+    it "stops when the panel border collapses the inner width":
+        val root = column("tiny", [text_widget("tiny_child", "C")])
+        val rects = compute_layout(root, 0, 0, 2, 24)
+        expect(rects.len()).to_equal(1)
+
+    it "stops when the panel border collapses the inner height":
+        val root = column("tiny_h", [text_widget("tiny_h_child", "C")])
+        val rects = compute_layout(root, 0, 0, 80, 2)
+        expect(rects.len()).to_equal(1)
+
+    it "returns only the root rect for a container with no children":
+        val root = column("empty_root", [])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        expect(rects.len()).to_equal(1)
+
+# ============================================================================
+# Layout: scroll clipping
+# ============================================================================
+
+describe "compute_layout scroll":
+
+    it "clips the child to max_height when the box is taller":
+        val sc = scroll("sc_clip", 5, [text_widget("sc_clip_child", "C")])
+        val rects = compute_layout(sc, 0, 0, 40, 20)
+        val rc = find_rect(rects, "sc_clip_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(5)
+
+    it "does not clip when max_height exceeds the box":
+        val sc = scroll("sc_open", 50, [text_widget("sc_open_child", "C")])
+        val rects = compute_layout(sc, 0, 0, 40, 20)
+        val rc = find_rect(rects, "sc_open_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(20)
+
+    it "treats max_height 0 as unclipped":
+        val sc = scroll("sc_zero", 0, [text_widget("sc_zero_child", "C")])
+        val rects = compute_layout(sc, 0, 0, 40, 20)
+        val rc = find_rect(rects, "sc_zero_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(20)
+
+    it "scales max_height into device units before clipping":
+        val sc = scroll("sc_scaled", 5, [text_widget("sc_scaled_child", "C")])
+        val rects = compute_layout(sc, 0, 0, 40, 20, 2000)
+        val rc = find_rect(rects, "sc_scaled_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(10)
+
+# ============================================================================
+# Layout: vbox overflow and remainder
+# ============================================================================
+
+describe "layout_vbox sizing":
+
+    it "gives flex children zero height when fixed children overflow":
+        val root = column("ov", [
+            with_height(text_widget("ov_a", "A"), 30),
+            text_widget("ov_b", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 10)
+        expect(find_rect_index(rects, "ov_b")).to_equal(-1)
+
+    it "awards the rounding remainder to the last flex child":
+        val root = column("rem", [
+            text_widget("rem_a", "A"),
+            text_widget("rem_b", "B"),
+            text_widget("rem_c", "C")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 12)
+        val ra = find_rect(rects, "rem_a")
+        val rb = find_rect(rects, "rem_b")
+        val rc = find_rect(rects, "rem_c")
+        if ra != nil:
+            expect(ra.h).to_equal(3)
+        if rb != nil:
+            expect(rb.h).to_equal(3)
+        if rc != nil:
+            expect(rc.h).to_equal(4)
+
+    it "uses the rows prop as the fixed height of a textarea":
+        val root = column("ta_root", [
+            textarea("ta", "", "", 4),
+            text_widget("ta_body", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val rt = find_rect(rects, "ta")
+        val rb = find_rect(rects, "ta_body")
+        if rt != nil:
+            expect(rt.h).to_equal(4)
+        if rb != nil:
+            expect(rb.h).to_equal(18)
+
+# ============================================================================
+# Layout: hbox flex weighting
+# ============================================================================
+
+describe "layout_hbox sizing":
+
+    it "weights children by flex and awards the remainder once":
+        val root = row("hb", [
+            with_flex(text_widget("hb_a", "A"), 3),
+            with_flex(text_widget("hb_b", "B"), 0)
+        ])
+        val rects = compute_layout(root, 0, 0, 12, 6)
+        val ra = find_rect(rects, "hb_a")
+        expect(ra != nil).to_equal(true)
+        if ra != nil:
+            expect(ra.w).to_equal(10)
+        expect(find_rect_index(rects, "hb_b")).to_equal(-1)
+
+    it "floors a negative flex weight at zero":
+        val root = row("hb_neg", [
+            with_flex(text_widget("hbn_a", "A"), 2),
+            text_widget("hbn_b", "B").set_prop("flex", "-4")
+        ])
+        val rects = compute_layout(root, 0, 0, 12, 6)
+        val ra = find_rect(rects, "hbn_a")
+        if ra != nil:
+            expect(ra.w).to_equal(10)
+        expect(find_rect_index(rects, "hbn_b")).to_equal(-1)
+
+    it "gives flex children zero width when fixed children overflow":
+        val root = row("hb_ov", [
+            with_width(text_widget("hbo_a", "A"), 100),
+            text_widget("hbo_b", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 20, 6)
+        expect(find_rect_index(rects, "hbo_b")).to_equal(-1)
+
+# ============================================================================
+# Layout: min/max size constraints
+# ============================================================================
+
+describe "layout size constraints":
+
+    it "caps a vbox child at max_height":
+        val root = column("mh_root", [
+            text_widget("mh_child", "A").set_prop("max_height", "4")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val r = find_rect(rects, "mh_child")
+        if r != nil:
+            expect(r.h).to_equal(4)
+
+    it "raises a vbox child to min_height":
+        val root = column("mn_root", [
+            with_height(text_widget("mn_child", "A"), 1).set_prop("min_height", "6")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val r = find_rect(rects, "mn_child")
+        if r != nil:
+            expect(r.h).to_equal(6)
+
+    it "caps an hbox child at max_width and raises another to min_width":
+        val root = row("mw_root", [
+            text_widget("mw_a", "A").set_prop("max_width", "5"),
+            text_widget("mw_b", "B").set_prop("min_width", "40")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 6)
+        val ra = find_rect(rects, "mw_a")
+        val rb = find_rect(rects, "mw_b")
+        if ra != nil:
+            expect(ra.w).to_equal(5)
+        if rb != nil:
+            expect(rb.w).to_equal(40)
+
+# ============================================================================
+# Layout: grid columns and spans
+# ============================================================================
+
+describe "layout_grid columns and spans":
+
+    it "honours an explicit columns prop":
+        val root = grid_layout("g3", [
+            text_widget("g3_a", "A"),
+            text_widget("g3_b", "B"),
+            text_widget("g3_c", "C")
+        ]).set_prop("columns", "3")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val ra = find_rect(rects, "g3_a")
+        val rb = find_rect(rects, "g3_b")
+        val rc = find_rect(rects, "g3_c")
+        if ra != nil:
+            expect(ra.x).to_equal(1)
+            expect(ra.w).to_equal(26)
+        if rb != nil:
+            expect(rb.x).to_equal(27)
+        if rc != nil:
+            expect(rc.x).to_equal(53)
+            expect(rc.w).to_equal(26)
+
+    it "wraps a col_span that overflows the row and clamps an oversized span":
+        val root = grid_layout("gs", [
+            text_widget("gs_a", "A").set_prop("col_span", "2"),
+            text_widget("gs_b", "B").set_prop("col_span", "5"),
+            text_widget("gs_c", "C").set_prop("col_span", "0")
+        ]).set_prop("columns", "2")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val ra = find_rect(rects, "gs_a")
+        val rb = find_rect(rects, "gs_b")
+        val rc = find_rect(rects, "gs_c")
+        if ra != nil:
+            expect(ra.y).to_equal(1)
+            expect(ra.w).to_equal(78)
+        if rb != nil:
+            expect(rb.y).to_equal(ra.y + 7)
+            expect(rb.w).to_equal(78)
+        if rc != nil:
+            expect(rc.y).to_equal(ra.y + 14)
+            expect(rc.w).to_equal(39)
+
+# ============================================================================
+# Layout: fixed (absolute) layout
+# ============================================================================
+
+describe "layout_fixed":
+
+    it "gives every child the parent area unless it declares a size":
+        val root = column("fx_root", [
+            text_widget("fx_a", "A"),
+            with_width(with_height(text_widget("fx_b", "B"), 4), 10)
+        ]).set_layout("fixed")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val ra = find_rect(rects, "fx_a")
+        val rb = find_rect(rects, "fx_b")
+        if ra != nil:
+            expect(ra.w).to_equal(78)
+            expect(ra.h).to_equal(22)
+        if rb != nil:
+            expect(rb.w).to_equal(10)
+            expect(rb.h).to_equal(4)
+
+    it "sizes the first child from its own width and height props":
+        val root = column("fx1_root", [
+            with_width(with_height(text_widget("fx1_a", "A"), 3), 7)
+        ]).set_layout("fixed")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val ra = find_rect(rects, "fx1_a")
+        if ra != nil:
+            expect(ra.w).to_equal(7)
+            expect(ra.h).to_equal(3)
+
+# ============================================================================
+# Layout: primitives called directly
+# ============================================================================
+
+describe "layout primitives":
+
+    it "returns no rects for empty child lists":
+        val none: [WidgetNode] = []
+        expect(layout_vbox(none, 0, 0, 10, 10).len()).to_equal(0)
+        expect(layout_hbox(none, 0, 0, 10, 10).len()).to_equal(0)
+        expect(layout_grid(none, 0, 0, 10, 10, 0).len()).to_equal(0)
+        expect(layout_fixed(none, 0, 0, 10, 10).len()).to_equal(0)
+
+    it "clamp_dim caps at max, floors at min, and never returns a negative":
+        expect(clamp_dim(10, 0, 4)).to_equal(4)
+        expect(clamp_dim(2, 5, -1)).to_equal(5)
+        expect(clamp_dim(7, 0, -1)).to_equal(7)
+        expect(clamp_dim(-3, -10, -1)).to_equal(0)
+
+    it "get_flex defaults to 1 and floors negative weights at 0":
+        expect(get_flex(text_widget("gf_a", "A"))).to_equal(1)
+        expect(get_flex(with_flex(text_widget("gf_b", "B"), 4))).to_equal(4)
+        expect(get_flex(text_widget("gf_c", "C").set_prop("flex", "-2"))).to_equal(0)
+
+    it "get_fixed_height reads props and widget kinds":
+        expect(get_fixed_height(text_widget("gh_a", "A"))).to_equal(0)
+        expect(get_fixed_height(with_height(text_widget("gh_b", "B"), 9))).to_equal(9)
+        expect(get_fixed_height(statusbar("gh_s", "l", "r"))).to_equal(1)
+        expect(get_fixed_height(menubar("gh_m", ["File"]))).to_equal(1)
+
+# ============================================================================
+# Layout: scroll and textarea as sized vbox children
+# ============================================================================
+
+describe "layout_vbox sized children":
+
+    it "uses a scroll child's max_height as its fixed height in a column":
+        val root = column("scv_root", [
+            scroll("scv", 6, [text_widget("scv_child", "C")]),
+            text_widget("scv_body", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val rs = find_rect(rects, "scv")
+        val rb = find_rect(rects, "scv_body")
+        expect(rs != nil).to_equal(true)
+        expect(rb != nil).to_equal(true)
+        if rs != nil:
+            expect(rs.h).to_equal(6)
+        if rb != nil:
+            expect(rb.h).to_equal(16)
+
+    it "treats a scroll with no max_height prop as unsized and unclipped":
+        val bare = scroll("scb", 6, [text_widget("scb_child", "C")]).set_prop("max_height", "")
+        expect(get_fixed_height(bare)).to_equal(0)
+        val rects = compute_layout(bare, 0, 0, 40, 20)
+        val rc = find_rect(rects, "scb_child")
+        expect(rc != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(20)
+
+    it "treats a textarea with no rows prop as unsized":
+        val bare = textarea("tab", "", "", 4).set_prop("rows", "")
+        expect(get_fixed_height(bare)).to_equal(0)

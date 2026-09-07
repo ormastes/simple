@@ -1,8 +1,28 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+## Purpose and audience
+Executable specification evidence for the SimpleOS libc string-search
+surface, for the SimpleOS kernel/libc maintainers. AC-3 vertical slice:
+pure-Simple, musl-shaped string search/span/tokenize/compare core, checked
+against known musl-equivalent outputs (no kernel, no syscall).
+## Operator workflow
+Run this file from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/libc/libc_string_search_spec.spl`.
+Every scenario calls the real `libc_*` implementation from
+`os.libc.simpleos_string_search` and pins the musl-equivalent output.
+## Compatibility and limitations
+Covers strstr, strspn, strcspn, strpbrk, memchr, memrchr, strcasecmp,
+strncasecmp, strerror, and strtok_r on byte arrays. Locale-dependent
+collation and multibyte encodings are out of scope; error strings pin the
+SimpleOS wording, not glibc's.
+## Verification guidance and troubleshooting
+A red scenario here means the pure-Simple implementation drifted from the
+musl-equivalent output pinned in the oracle. Re-run the file, identify the
+failing function family, and compare against the musl reference behaviour
+named in the failing line's oracle before editing it.
+"""
 # @req REQ-SSPEC-OS
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-
+# @manual_section: simpleos-libc-string-search
 
 use std.spec.step
 
@@ -14,7 +34,6 @@ use os.libc.simpleos_string_search.{
     libc_strerror, libc_strtok_r, TokResult
 }
 
-# @req REQ-simpleos-libc-musl-search
 # tag: unit
 #
 # AC-3 vertical slice: pure-Simple, musl-shaped string search/span/tokenize/compare
@@ -25,209 +44,309 @@ describe "SimpleOS libc — musl-shaped string search / span / tokenize / compar
     describe "strstr":
         it "finds substring at start":
             # @req REQ-SSPEC-OS
-            step("finds substring at start")
-            expect(libc_strstr("hello world".bytes(), "hello".bytes())).to_equal(0)
+            # @req REQ-simpleos-libc-musl-search
+            # @capture(statistics): libc_strstr match offsets for the hello-world haystack
+            step("Search for a needle at the start of the haystack")
+            expect(libc_strstr("hello world".bytes(), "hello".bytes())).to_equal(0)  # oracle: musl strstr returns the offset of the first occurrence
         it "finds substring in middle":
-            expect(libc_strstr("hello world".bytes(), "world".bytes())).to_equal(6)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strstr match offsets for the hello-world haystack
+            step("Search for a needle in the middle of the haystack")
+            expect(libc_strstr("hello world".bytes(), "world".bytes())).to_equal(6)  # oracle: "world" starts at offset 6 in "hello world"
         it "returns -1 when not found":
-            expect(libc_strstr("hello world".bytes(), "xyz".bytes())).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strstr miss verdict for an absent needle
+            step("Search for a needle that is absent from the haystack")
+            expect(libc_strstr("hello world".bytes(), "xyz".bytes())).to_equal(-1)  # oracle: musl strstr signals a miss as -1 in this port
         it "returns 0 for empty needle":
-            expect(libc_strstr("hello".bytes(), "".bytes())).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strstr empty-needle verdict
+            step("Search with an empty needle")
+            expect(libc_strstr("hello".bytes(), "".bytes())).to_equal(0)  # oracle: an empty needle matches at the start, per C strstr semantics
         it "returns -1 when needle longer than haystack":
             # @req REQ-SSPEC-OS
-            step("returns -1 when needle longer than haystack")
-            expect(libc_strstr("hi".bytes(), "hello".bytes())).to_equal(-1)
+            # @capture(statistics): libc_strstr overlong-needle verdict
+            step("Search with a needle longer than the haystack")
+            expect(libc_strstr("hi".bytes(), "hello".bytes())).to_equal(-1)  # oracle: a needle that cannot fit can never match, so -1
 
     describe "strspn":
         it "counts leading accepted bytes":
             # @req REQ-SSPEC-OS
-            step("counts leading accepted bytes")
-            expect(libc_strspn("abc123xyz".bytes(), "abc".bytes())).to_equal(3)
+            # @capture(statistics): libc_strspn accepted-prefix lengths
+            step("Count the accepted prefix of a mixed string")
+            expect(libc_strspn("abc123xyz".bytes(), "abc".bytes())).to_equal(3)  # oracle: "abc" is the longest accepted prefix before '1'
         it "returns 0 when first byte not in accept":
-            expect(libc_strspn("123abc".bytes(), "abc".bytes())).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strspn rejected-first-byte verdict
+            step("Count the accepted prefix when the first byte is rejected")
+            expect(libc_strspn("123abc".bytes(), "abc".bytes())).to_equal(0)  # oracle: '1' is not in the accept set, so the span is empty
         it "returns full length when all bytes accepted":
-            expect(libc_strspn("aabbcc".bytes(), "abc".bytes())).to_equal(6)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strspn fully-accepted verdict
+            step("Count the accepted prefix of a fully accepted string")
+            expect(libc_strspn("aabbcc".bytes(), "abc".bytes())).to_equal(6)  # oracle: every byte is accepted, so the span covers the whole string
         it "handles empty string":
-            expect(libc_strspn("".bytes(), "abc".bytes())).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strspn empty-haystack verdict
+            step("Count the accepted prefix of an empty string")
+            expect(libc_strspn("".bytes(), "abc".bytes())).to_equal(0)  # oracle: an empty haystack has a zero-length accepted prefix
         it "handles empty accept":
             # @req REQ-SSPEC-OS
-            step("handles empty accept")
-            expect(libc_strspn("abc".bytes(), "".bytes())).to_equal(0)
+            # @capture(statistics): libc_strspn empty-accept-set verdict
+            step("Count the accepted prefix with an empty accept set")
+            expect(libc_strspn("abc".bytes(), "".bytes())).to_equal(0)  # oracle: nothing is accepted from an empty accept set
 
     describe "strcspn":
         it "counts until first rejected byte":
             # @req REQ-SSPEC-OS
-            step("counts until first rejected byte")
-            expect(libc_strcspn("abc123xyz".bytes(), "123".bytes())).to_equal(3)
+            # @capture(statistics): libc_strcspn prefix lengths before the first reject
+            step("Count the prefix before the first rejected byte")
+            expect(libc_strcspn("abc123xyz".bytes(), "123".bytes())).to_equal(3)  # oracle: the first reject '1' sits at offset 3
         it "returns full length when no rejected bytes":
-            expect(libc_strcspn("abcxyz".bytes(), "123".bytes())).to_equal(6)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcspn no-reject verdict
+            step("Count the prefix when no byte is rejected")
+            expect(libc_strcspn("abcxyz".bytes(), "123".bytes())).to_equal(6)  # oracle: no byte is in the reject set, so the span covers everything
         it "returns 0 when first byte is rejected":
-            expect(libc_strcspn("123abc".bytes(), "123".bytes())).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcspn rejected-first-byte verdict
+            step("Count the prefix when the first byte is rejected")
+            expect(libc_strcspn("123abc".bytes(), "123".bytes())).to_equal(0)  # oracle: '1' is rejected immediately, so the span is empty
         it "handles empty string":
-            expect(libc_strcspn("".bytes(), "123".bytes())).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcspn empty-haystack verdict
+            step("Count the prefix of an empty string")
+            expect(libc_strcspn("".bytes(), "123".bytes())).to_equal(0)  # oracle: an empty haystack has a zero-length span
         it "handles empty reject":
             # @req REQ-SSPEC-OS
-            step("handles empty reject")
-            expect(libc_strcspn("abc".bytes(), "".bytes())).to_equal(3)
+            # @capture(statistics): libc_strcspn empty-reject-set verdict
+            step("Count the prefix with an empty reject set")
+            expect(libc_strcspn("abc".bytes(), "".bytes())).to_equal(3)  # oracle: nothing is rejected from an empty reject set, so the span covers "abc"
 
     describe "strpbrk":
         it "finds first byte from accept set":
             # @req REQ-SSPEC-OS
-            step("finds first byte from accept set")
-            expect(libc_strpbrk("hello world".bytes(), "ol".bytes())).to_equal(2)
+            # @capture(statistics): libc_strpbrk first-match offsets
+            step("Find the first byte from the accept set")
+            expect(libc_strpbrk("hello world".bytes(), "ol".bytes())).to_equal(2)  # oracle: 'l' at offset 2 is the earliest byte in the accept set
         it "returns -1 when no byte from accept found":
-            expect(libc_strpbrk("hello world".bytes(), "xyz".bytes())).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strpbrk miss verdict
+            step("Find a byte from an accept set that never matches")
+            expect(libc_strpbrk("hello world".bytes(), "xyz".bytes())).to_equal(-1)  # oracle: no haystack byte is in the accept set, so -1
         it "finds first matching position":
-            expect(libc_strpbrk("abc123def".bytes(), "123".bytes())).to_equal(3)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strpbrk first-match offsets
+            step("Find the first digit position in a mixed string")
+            expect(libc_strpbrk("abc123def".bytes(), "123".bytes())).to_equal(3)  # oracle: '1' at offset 3 is the first accepted byte
         it "handles empty string":
-            expect(libc_strpbrk("".bytes(), "abc".bytes())).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strpbrk empty-haystack verdict
+            step("Search an empty string for an accepted byte")
+            expect(libc_strpbrk("".bytes(), "abc".bytes())).to_equal(-1)  # oracle: an empty haystack cannot contain an accepted byte
         it "handles empty accept":
             # @req REQ-SSPEC-OS
-            step("handles empty accept")
-            expect(libc_strpbrk("abc".bytes(), "".bytes())).to_equal(-1)
+            # @capture(statistics): libc_strpbrk empty-accept-set verdict
+            step("Search with an empty accept set")
+            expect(libc_strpbrk("abc".bytes(), "".bytes())).to_equal(-1)  # oracle: an empty accept set can never match
 
     describe "memchr":
         it "finds byte within n bytes":
             # @req REQ-SSPEC-OS
-            step("finds byte within n bytes")
-            expect(libc_memchr("hello".bytes(), 108, 5)).to_equal(2)
+            # @capture(statistics): libc_memchr match offsets within the n-byte window
+            step("Find a byte inside the n-byte window")
+            expect(libc_memchr("hello".bytes(), 108, 5)).to_equal(2)  # oracle: 108 is 'l', first occurring at offset 2
         it "returns -1 when byte not in first n":
-            expect(libc_memchr("hello".bytes(), 122, 5)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memchr miss verdict inside the window
+            step("Search for a byte that is absent from the window")
+            expect(libc_memchr("hello".bytes(), 122, 5)).to_equal(-1)  # oracle: 122 is 'z', which never occurs in "hello"
         it "respects n limit":
-            expect(libc_memchr("hello".bytes(), 111, 3)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memchr window-limit behaviour
+            step("Search for a byte just outside the n-byte window")
+            expect(libc_memchr("hello".bytes(), 111, 3)).to_equal(-1)  # oracle: 111 is 'o' at offset 4, outside the first 3 bytes
         it "handles n=0":
-            expect(libc_memchr("hello".bytes(), 104, 0)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memchr zero-length window verdict
+            step("Search a zero-length window")
+            expect(libc_memchr("hello".bytes(), 104, 0)).to_equal(-1)  # oracle: a zero-byte window can never contain a match
         it "finds first occurrence":
             # @req REQ-SSPEC-OS
-            step("finds first occurrence")
-            expect(libc_memchr("aabaa".bytes(), 97, 5)).to_equal(0)
+            # @capture(statistics): libc_memchr repeated-byte first-match behaviour
+            step("Find the first of several matching bytes")
+            expect(libc_memchr("aabaa".bytes(), 97, 5)).to_equal(0)  # oracle: 97 is 'a', first occurring at offset 0
 
     describe "memrchr":
         it "finds last byte within n bytes":
             # @req REQ-SSPEC-OS
-            step("finds last byte within n bytes")
-            expect(libc_memrchr("hello".bytes(), 108, 5)).to_equal(3)
+            # @capture(statistics): libc_memrchr last-match offsets
+            step("Find the last occurrence inside the window")
+            expect(libc_memrchr("hello".bytes(), 108, 5)).to_equal(3)  # oracle: 108 is 'l', last occurring at offset 3
         it "returns -1 when byte not found":
-            expect(libc_memrchr("hello".bytes(), 122, 5)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memrchr miss verdict
+            step("Search for a byte that never occurs")
+            expect(libc_memrchr("hello".bytes(), 122, 5)).to_equal(-1)  # oracle: 122 is 'z', which never occurs in "hello"
         it "respects n limit":
-            expect(libc_memrchr("hello".bytes(), 111, 3)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memrchr window-limit behaviour
+            step("Search for a byte just outside the n-byte window")
+            expect(libc_memrchr("hello".bytes(), 111, 3)).to_equal(-1)  # oracle: 111 is 'o' at offset 4, outside the first 3 bytes
         it "handles n=0":
-            expect(libc_memrchr("hello".bytes(), 104, 0)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_memrchr zero-length window verdict
+            step("Search a zero-length window")
+            expect(libc_memrchr("hello".bytes(), 104, 0)).to_equal(-1)  # oracle: a zero-byte window can never contain a match
         it "finds last occurrence":
             # @req REQ-SSPEC-OS
-            step("finds last occurrence")
-            expect(libc_memrchr("aabaa".bytes(), 97, 5)).to_equal(4)
+            # @capture(statistics): libc_memrchr repeated-byte last-match behaviour
+            step("Find the last of several matching bytes")
+            expect(libc_memrchr("aabaa".bytes(), 97, 5)).to_equal(4)  # oracle: 97 is 'a', last occurring at offset 4
 
     describe "strcasecmp":
         it "compares case-insensitively as equal":
             # @req REQ-SSPEC-OS
-            step("compares case-insensitively as equal")
-            expect(libc_strcasecmp("Hello".bytes(), "hello".bytes())).to_equal(0)
-            expect(libc_strcasecmp("ABC".bytes(), "abc".bytes())).to_equal(0)
+            # @capture(statistics): libc_strcasecmp equality verdicts across letter cases
+            step("Compare two strings that differ only in case")
+            expect(libc_strcasecmp("Hello".bytes(), "hello".bytes())).to_equal(0)  # oracle: case-insensitive comparison of equal strings is 0
+            expect(libc_strcasecmp("ABC".bytes(), "abc".bytes())).to_equal(0)  # oracle: upper vs lower forms of the same word compare equal
         it "returns -1 when a < b":
-            expect(libc_strcasecmp("abc".bytes(), "abd".bytes())).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcasecmp ordering verdicts
+            step("Compare a string that orders before the other")
+            expect(libc_strcasecmp("abc".bytes(), "abd".bytes())).to_equal(-1)  # oracle: 'c' < 'd' at the first differing byte, so a < b
         it "returns 1 when a > b":
-            expect(libc_strcasecmp("abd".bytes(), "abc".bytes())).to_equal(1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcasecmp ordering verdicts
+            step("Compare a string that orders after the other")
+            expect(libc_strcasecmp("abd".bytes(), "abc".bytes())).to_equal(1)  # oracle: 'd' > 'c' at the first differing byte, so a > b
         it "handles different lengths":
-            expect(libc_strcasecmp("ab".bytes(), "abc".bytes())).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strcasecmp length-mismatch verdicts
+            step("Compare strings of different lengths")
+            expect(libc_strcasecmp("ab".bytes(), "abc".bytes())).to_equal(-1)  # oracle: a proper prefix orders before its longer extension
         it "ignores case in comparison":
             # @req REQ-SSPEC-OS
-            step("ignores case in comparison")
-            expect(libc_strcasecmp("AbC".bytes(), "aBc".bytes())).to_equal(0)
+            # @capture(statistics): libc_strcasecmp mixed-case equality verdicts
+            step("Compare two strings with interleaved letter cases")
+            expect(libc_strcasecmp("AbC".bytes(), "aBc".bytes())).to_equal(0)  # oracle: interleaved case must not change the equality verdict
 
     describe "strncasecmp":
         it "compares first n bytes case-insensitively":
             # @req REQ-SSPEC-OS
-            step("compares first n bytes case-insensitively")
-            expect(libc_strncasecmp("Hello World".bytes(), "hello earth".bytes(), 5)).to_equal(0)
+            # @capture(statistics): libc_strncasecmp n-limited equality verdicts
+            step("Compare only the first n bytes across cases")
+            expect(libc_strncasecmp("Hello World".bytes(), "hello earth".bytes(), 5)).to_equal(0)  # oracle: the first 5 bytes are equal ignoring case; the tails differ but are out of range
         it "respects n limit":
-            expect(libc_strncasecmp("ABC".bytes(), "ABX".bytes(), 2)).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strncasecmp window-limit behaviour
+            step("Compare a window that stops before the differing byte")
+            expect(libc_strncasecmp("ABC".bytes(), "ABX".bytes(), 2)).to_equal(0)  # oracle: the first 2 bytes are equal; the difference at index 2 is out of range
         it "returns -1 when a < b within n":
-            expect(libc_strncasecmp("abc".bytes(), "abd".bytes(), 3)).to_equal(-1)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strncasecmp ordering verdicts
+            step("Compare a window containing an ordering difference")
+            expect(libc_strncasecmp("abc".bytes(), "abd".bytes(), 3)).to_equal(-1)  # oracle: 'c' < 'd' inside the window, so a < b
         it "returns 0 when n is 0":
-            expect(libc_strncasecmp("abc".bytes(), "xyz".bytes(), 0)).to_equal(0)
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): libc_strncasecmp zero-length window verdict
+            step("Compare a zero-length window")
+            expect(libc_strncasecmp("abc".bytes(), "xyz".bytes(), 0)).to_equal(0)  # oracle: zero compared bytes are always equal
         it "handles case in comparison":
             # @req REQ-SSPEC-OS
-            step("handles case in comparison")
-            expect(libc_strncasecmp("AbC".bytes(), "aBd".bytes(), 2)).to_equal(0)
+            # @capture(statistics): libc_strncasecmp mixed-case verdicts
+            step("Compare a shared-case prefix across differing tails")
+            expect(libc_strncasecmp("AbC".bytes(), "aBd".bytes(), 2)).to_equal(0)  # oracle: the first 2 bytes are equal ignoring case; the tail is out of range
 
     describe "strerror":
         it "returns messages for standard errno values":
             # @req REQ-SSPEC-OS
-            step("returns messages for standard errno values")
-            expect(libc_strerror(0)).to_equal("Success")
-            expect(libc_strerror(1)).to_equal("Operation not permitted")
-            expect(libc_strerror(2)).to_equal("No such file or directory")
+            # @capture(protocol_json): libc_strerror mappings for errno 0, 1, 2
+            step("Look up the standard errno messages")
+            expect(libc_strerror(0)).to_equal("Success")  # oracle: errno 0 maps to the canonical Success message
+            expect(libc_strerror(1)).to_equal("Operation not permitted")  # oracle: EPERM's canonical message text
+            expect(libc_strerror(2)).to_equal("No such file or directory")  # oracle: ENOENT's canonical message text
         it "returns Unknown error for unmapped values":
             # @req REQ-SSPEC-OS
-            step("returns Unknown error for unmapped values")
-            expect(libc_strerror(999)).to_equal("Unknown error")
+            # @capture(protocol_json): libc_strerror fallback for an unmapped errno
+            step("Look up an errno that has no mapped message")
+            expect(libc_strerror(999)).to_equal("Unknown error")  # oracle: unmapped errno values fall back to the Unknown error text
         it "handles EPERM (1) and ENOENT (2)":
             # @req REQ-SSPEC-OS
-            step("handles EPERM (1) and ENOENT (2)")
-            expect(libc_strerror(1)).to_equal("Operation not permitted")
-            expect(libc_strerror(2)).to_equal("No such file or directory")
+            # @capture(protocol_json): libc_strerror mappings for EPERM and ENOENT
+            step("Look up the EPERM and ENOENT messages")
+            expect(libc_strerror(1)).to_equal("Operation not permitted")  # oracle: EPERM's canonical message text
+            expect(libc_strerror(2)).to_equal("No such file or directory")  # oracle: ENOENT's canonical message text
         it "handles ENOMEM (12)":
             # @req REQ-SSPEC-OS
-            step("handles ENOMEM (12)")
-            expect(libc_strerror(12)).to_equal("Out of memory")
+            # @capture(protocol_json): libc_strerror mapping for ENOMEM
+            step("Look up the ENOMEM message")
+            expect(libc_strerror(12)).to_equal("Out of memory")  # oracle: ENOMEM's canonical message text
         it "handles EACCES (13)":
             # @req REQ-SSPEC-OS
-            step("handles EACCES (13)")
-            expect(libc_strerror(13)).to_equal("Permission denied")
+            # @capture(protocol_json): libc_strerror mapping for EACCES
+            step("Look up the EACCES message")
+            expect(libc_strerror(13)).to_equal("Permission denied")  # oracle: EACCES's canonical message text
 
     describe "strtok_r":
         it "tokenizes simple delimited string":
             # @req REQ-SSPEC-OS
-            step("tokenizes simple delimited string")
+            # @capture(statistics): libc_strtok_r token spans across a three-token scan
+            step("Walk all tokens of a comma-delimited string")
             val tok1 = libc_strtok_r("abc,def,ghi".bytes(), ",".bytes(), 0)
-            expect(tok1.found).to_equal(true)
-            expect(tok1.tok_start).to_equal(0)
-            expect(tok1.tok_end).to_equal(3)
+            expect(tok1.found).to_equal(true)  # oracle: the first call on an undelimited prefix must find a token
+            expect(tok1.tok_start).to_equal(0)  # oracle: the first token starts at offset 0
+            expect(tok1.tok_end).to_equal(3)  # oracle: "abc" ends just before the delimiter at offset 3
 
             val tok2 = libc_strtok_r("abc,def,ghi".bytes(), ",".bytes(), tok1.nextpos)
-            expect(tok2.found).to_equal(true)
-            expect(tok2.tok_start).to_equal(4)
-            expect(tok2.tok_end).to_equal(7)
+            expect(tok2.found).to_equal(true)  # oracle: a second token follows the first delimiter
+            expect(tok2.tok_start).to_equal(4)  # oracle: "def" starts right after the delimiter at offset 3
+            expect(tok2.tok_end).to_equal(7)  # oracle: "def" ends just before the second delimiter at offset 7
 
             val tok3 = libc_strtok_r("abc,def,ghi".bytes(), ",".bytes(), tok2.nextpos)
-            expect(tok3.found).to_equal(true)
-            expect(tok3.tok_start).to_equal(8)
-            expect(tok3.tok_end).to_equal(11)
+            expect(tok3.found).to_equal(true)  # oracle: a third token follows the second delimiter
+            expect(tok3.tok_start).to_equal(8)  # oracle: "ghi" starts right after the second delimiter at offset 7
+            expect(tok3.tok_end).to_equal(11)  # oracle: "ghi" runs to the end of the haystack at offset 11
         it "returns found=false when exhausted":
             # @req REQ-SSPEC-OS
-            step("returns found=false when exhausted")
+            # @capture(statistics): libc_strtok_r exhaustion verdict after the last token
+            step("Continue past the last token of a delimiter-free string")
             val tok = libc_strtok_r("abc".bytes(), ",".bytes(), 0)
             val tok2 = libc_strtok_r("abc".bytes(), ",".bytes(), tok.nextpos)
-            expect(tok2.found).to_equal(false)
+            expect(tok2.found).to_equal(false)  # oracle: after the only token, the scan is exhausted
         it "handles multiple delimiters":
             # @req REQ-SSPEC-OS
-            step("handles multiple delimiters")
+            # @capture(statistics): libc_strtok_r token spans with a two-byte delimiter set
+            step("Walk tokens delimited by either of two bytes")
             val tok1 = libc_strtok_r("a,;b,;c".bytes(), ",;".bytes(), 0)
-            expect(tok1.tok_start).to_equal(0)
-            expect(tok1.tok_end).to_equal(1)
+            expect(tok1.tok_start).to_equal(0)  # oracle: the first token starts at offset 0
+            expect(tok1.tok_end).to_equal(1)  # oracle: "a" ends before the delimiter pair at offset 1
 
             val tok2 = libc_strtok_r("a,;b,;c".bytes(), ",;".bytes(), tok1.nextpos)
-            expect(tok2.tok_start).to_equal(3)
-            expect(tok2.tok_end).to_equal(4)
+            expect(tok2.tok_start).to_equal(3)  # oracle: "b" starts after skipping the ",;" pair
+            expect(tok2.tok_end).to_equal(4)  # oracle: "b" ends before the next delimiter at offset 4
         it "handles leading delimiters":
             # @req REQ-SSPEC-OS
-            step("handles leading delimiters")
+            # @capture(statistics): libc_strtok_r leading-delimiter skip behaviour
+            step("Walk a string that starts with delimiters")
             val tok = libc_strtok_r(",,abc".bytes(), ",".bytes(), 0)
-            expect(tok.tok_start).to_equal(2)
-            expect(tok.tok_end).to_equal(5)
+            expect(tok.tok_start).to_equal(2)  # oracle: leading delimiters are skipped, so the token starts at offset 2
+            expect(tok.tok_end).to_equal(5)  # oracle: "abc" runs to the end of the haystack at offset 5
         it "returns found=false for empty string":
             # @req REQ-SSPEC-OS
-            step("returns found=false for empty string")
+            # @capture(statistics): libc_strtok_r empty-haystack verdict
+            step("Tokenize an empty string")
             val tok = libc_strtok_r("".bytes(), ",".bytes(), 0)
-            expect(tok.found).to_equal(false)
+            expect(tok.found).to_equal(false)  # oracle: an empty haystack contains no token
         it "handles a trailing delimiter (no empty final token)":
             # @req REQ-SSPEC-OS
-            step("handles a trailing delimiter (no empty final token)")
+            # @capture(statistics): libc_strtok_r trailing-delimiter verdict
+            step("Walk a string that ends with a delimiter")
             val tok1 = libc_strtok_r("abc,".bytes(), ",".bytes(), 0)
-            expect(tok1.found).to_equal(true)
-            expect(tok1.tok_start).to_equal(0)
-            expect(tok1.tok_end).to_equal(3)
+            expect(tok1.found).to_equal(true)  # oracle: "abc" is a real token despite the trailing delimiter
+            expect(tok1.tok_start).to_equal(0)  # oracle: the token starts at offset 0
+            expect(tok1.tok_end).to_equal(3)  # oracle: "abc" ends before the trailing delimiter at offset 3
 
             val tok2 = libc_strtok_r("abc,".bytes(), ",".bytes(), tok1.nextpos)
-            expect(tok2.found).to_equal(false)
+            expect(tok2.found).to_equal(false)  # oracle: a trailing delimiter must not produce an empty final token

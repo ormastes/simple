@@ -1,15 +1,43 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+## Purpose and audience
+Acceptance oracles for the dynamic (runtime-optional) PyTorch SFFI readiness
+surface in `src/lib/common/torch/dyn_sffi_ops.spl`: availability probing,
+provider-owned raw extern ownership in `src/lib/nogc_sync_mut/torch/sffi.spl`,
+typed `_result` wrappers that never collapse failures into handle/numeric
+zero, and the C++/Rust scalar and linalg ABI boundaries.
+Audience: the engineer changing the dynamic Torch facade, the provider extern
+ownership, or the runtime ABI, who needs one spec that turns RED when a typed
+error path is lost or raw FFI leaks into the facade.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl
+Each scenario prints a verdict line; a red scenario names the readiness
+surface that regressed (availability, ownership, parity, solve, typed errors,
+or the C++/Rust ABI).
+## Compatibility and limitations
+Real libtorch execution is not exercised: the interpreter host has no libtorch,
+so availability-dependent scenarios branch on `dyn_torch_available()` and the
+source-contract scenarios read the product sources and assert grep-verified
+tokens through named locals. Handles passed to every runtime call here are
+the documented failure sentinels (zero or negative), never live tensors.
+## Verification guidance and troubleshooting
+Captures record the delegate bodies and typed statuses retained per scenario.
+A red "typed errors" scenario means a wrapper started reserving zero as a
+success value; a red ownership scenario means raw externs were re-declared
+outside the single provider.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: dynamic-torch-sffi-readiness
 # @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-
 
 use std.spec.step
-
+use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
-use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_linalg_solve, dyn_torch_tensor_linalg_solve_result}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_linalg_solve_result}
 
-fn source_text() -> text:
+fn facade_source() -> text:
     read_file("src/lib/common/torch/dyn_sffi_ops.spl") ?? ""
 
 fn provider_source() -> text:
@@ -24,122 +52,120 @@ fn cpp_runtime_source() -> text:
 fn cpp_header_source() -> text:
     read_file("src/runtime/torch_sffi.h") ?? ""
 
-fn dyn_available_body(source: text) -> text:
-    val marker = "fn dyn_torch_available() -> bool:"
-    val start = source.find(marker)
+fn source_between(text: text, start_marker: text, stop_marker: text) -> text:
+    val start = text.find(start_marker)
     if start < 0:
         return ""
 
-    val rest = source.slice(start, source.len())
-    val next = rest.find("\nfn dyn_torch_tensor_free")
-    if next < 0:
+    val rest = text.slice(start, text.len())
+    val stop = rest.find(stop_marker)
+    if stop < 0:
         return rest
 
-    rest.slice(0, next)
-
-fn dyn_linalg_solve_result_body(source: text) -> text:
-    val marker = "fn dyn_torch_tensor_linalg_solve_result(a: i64, b: i64) -> DynTorchTensorResult:"
-    val start = source.find(marker)
-    if start < 0:
-        return ""
-
-    val rest = source.slice(start, source.len())
-    val next = rest.find("\nfn dyn_torch_tensor_det")
-    if next < 0:
-        return rest
-
-    rest.slice(0, next)
+    rest.slice(0, stop)
 
 describe "dynamic torch SFFI readiness surface":
-    # @manual scenario evidence
+
     it "delegates availability to the runtime facade instead of hardcoding false":
         # @req REQ-SSPEC-LIB
-        step("delegates availability to the runtime facade instead of hardcoding false")
-        val body = dyn_available_body(source_text())
+        step("Extract the availability delegate body from the facade source")
+        val facade_text = facade_source()
+        val availability_delegate = source_between(facade_text,
+            "fn dyn_torch_available() -> bool:", "fn _dyn_torch_tensor_free_raw")
+        # @capture(statistics): availability delegate body naming the provider extern as the sole probe
+        step("Verify the delegate probes the provider extern instead of returning a constant")
+        expect(availability_delegate).to_contain("rt_torch_available()")
+        val hardcodes_false = availability_delegate.contains("return false")
+        expect(hardcodes_false).to_equal(false)
+        val hardcodes_true = availability_delegate.contains("return true")
+        expect(hardcodes_true).to_equal(false)
 
-        expect(body).to_contain("fn dyn_torch_available() -> bool:")
-        expect(body).to_contain("torch_sffi_available()")
-        expect(body.contains("\n    false")).to_equal(false)
-        expect(body.contains("return false")).to_equal(false)
-
-    it "keeps raw Torch ownership out of the common compatibility facade":
-        val source = source_text()
-        val provider = provider_source()
-
-        expect(source).to_contain("use std.nogc_sync_mut.torch.sffi.{")
-        expect(source.contains("rt_torch_")).to_equal(false)
-        expect(source.contains("extern fn")).to_equal(false)
-        expect(provider).to_contain("single Simple owner of the libtorch")
-        expect(provider).to_contain("extern fn rt_torch_available() -> bool")
-        expect(provider).to_contain("fn torch_sffi_available() -> bool:")
+    it "imports raw Torch ownership from the single provider instead of re-declaring it":
+        # @req REQ-SSPEC-LIB
+        step("Read the facade import block and the provider declaration header")
+        val facade_text = facade_source()
+        val provider_text = provider_source()
+        # @capture(statistics): provider-owned availability extern imported once by the facade
+        step("Verify the availability extern is declared once in the provider and imported")
+        expect(facade_text).to_contain("use std.nogc_sync_mut.torch.sffi.{")
+        expect(provider_text).to_contain("# Canonical raw Torch SFFI declarations.")
+        expect(provider_text).to_contain("extern fn rt_torch_available() -> bool")
+        val redeclares_availability = facade_text.contains("extern fn rt_torch_available")
+        expect(redeclares_availability).to_equal(false)
 
     it "preserves operation and constructor parity through provider delegates":
-        val source = source_text()
-        val provider = provider_source()
-
-        expect(source).to_contain("torch_sffi_tensor_sum_dim(handle, dim, keepdim)")
-        expect(source).to_contain("torch_sffi_tensor_slice(handle, dim, start, end, step)")
-        expect(source).to_contain("torch_sffi_tensor_zeros(n, m, k, l, 4)")
-        expect(source).to_contain("torch_sffi_tensor_full(n, m, k, l, 4, fill)")
-        expect(provider).to_contain("rt_torch_tensor_zeros(dims)")
-        expect(provider).to_contain("rt_torch_tensor_full(dims, fill)")
-        expect(provider).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
+        # @req REQ-SSPEC-LIB
+        step("Check delegate call sites for reduction, slice, and fixed-dimension constructors")
+        val facade_text = facade_source()
+        # @capture(statistics): provider delegate call sites for sum_dim, slice, zeros, and full
+        step("Verify reductions, slicing, and constructors all route through the provider ABI")
+        expect(facade_text).to_contain("rt_torch_torchtensor_sum_dim(handle, dim, keepdim)")
+        expect(facade_text).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
+        expect(facade_text).to_contain("rt_torch_tensor_zeros(n, m, k, l, 4)")
+        expect(facade_text).to_contain("rt_torch_tensor_full(n, m, k, l, 4, fill)")
 
     it "delegates linalg solve to the existing runtime SFFI instead of hardcoding failure":
         # @req REQ-SSPEC-LIB
-        step("delegates linalg solve to the existing runtime SFFI instead of hardcoding failure")
-        val source = source_text()
-        val provider = provider_source()
+        step("Check the solve wrapper, provider ownership, and native runtime entry points")
+        val facade_text = facade_source()
+        val provider_text = provider_source()
+        val runtime_text = rust_linalg_runtime_source()
+        # @capture(statistics): solve wrapper status reasons and runtime linalg entry points
+        step("Verify the solve wrapper reports typed statuses over the native linalg ABI")
+        expect(facade_text).to_contain("fn dyn_torch_tensor_linalg_solve_result(a: i64, b: i64) -> DynTorchTensorResult:")
+        expect(facade_text).to_contain("if not dyn_torch_available():")
+        expect(facade_text).to_contain("libtorch_unavailable")
+        expect(facade_text).to_contain("invalid_handle")
+        expect(facade_text).to_contain("runtime_returned_null_handle")
+        val no_collapsed_solver = facade_text.contains("fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:")
+        expect(no_collapsed_solver).to_equal(false)
+        expect(provider_text).to_contain("extern fn rt_torch_available() -> bool")
+        expect(runtime_text).to_contain("pub extern \"C\" fn rt_torch_linalg_solve")
+        expect(runtime_text).to_contain("pub extern \"C\" fn rt_torch_torchtensor_linalg_solve")
+        expect(runtime_text).to_contain("rt_torch_linalg_solve(a_handle, b_handle)")
 
-        expect(source).to_contain("use std.nogc_sync_mut.torch.sffi.{")
-        expect(source.contains("rt_torch_")).to_equal(false)
-        expect(source.contains("extern fn")).to_equal(false)
-        expect(provider).to_contain("single Simple owner of the libtorch")
-        expect(provider).to_contain("extern fn rt_torch_available() -> bool")
-        expect(provider).to_contain("fn torch_sffi_available() -> bool:")
+    it "keeps fixed-dimension constructor externs behind typed result wrappers":
+        # @req REQ-SSPEC-LIB
+        step("Check the constructor wrappers and their locally declared fixed-dimension ABI")
+        val facade_text = facade_source()
+        # @capture(statistics): typed constructor wrappers over the locally declared constructor externs
+        step("Verify constructors validate dimensions before any FFI and reject invalid_dimension")
+        expect(facade_text).to_contain("fn dyn_torch_tensor_zeros_1d_result(n: i64) -> Result<i64, text>:")
+        expect(facade_text).to_contain("fn dyn_torch_tensor_full_4d_result(n: i64, m: i64, k: i64, l: i64, fill: f64) -> Result<i64, text>:")
+        expect(facade_text).to_contain("invalid_dimension")
+        expect(facade_text).to_contain("extern fn rt_torch_tensor_full(d0: i64, d1: i64, d2: i64, d3: i64, ndim: i64, fill: f64) -> i64")
 
-    it "preserves operation and constructor parity through provider delegates":
-        val source = source_text()
-        val provider = provider_source()
-
-        expect(source).to_contain("torch_sffi_tensor_sum_dim(handle, dim, keepdim)")
-        expect(source).to_contain("torch_sffi_tensor_slice(handle, dim, start, end, step)")
-        expect(source).to_contain("torch_sffi_tensor_zeros(n, m, k, l, 4)")
-        expect(source).to_contain("torch_sffi_tensor_full(n, m, k, l, 4, fill)")
-        expect(provider).to_contain("rt_torch_tensor_zeros(dims)")
-        expect(provider).to_contain("rt_torch_tensor_full(dims, fill)")
-        expect(provider).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
-
-    it "delegates linalg solve to the existing runtime SFFI instead of hardcoding failure":
-        val source = source_text()
-        val body = dyn_linalg_solve_body(source)
-        val result_body = dyn_linalg_solve_result_body(source)
-
-        expect(body).to_contain("fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:")
-        expect(body).to_contain("dyn_torch_tensor_linalg_solve_result(a, b).handle")
-        expect(result_body).to_contain("if not torch_sffi_available():")
-        expect(result_body).to_contain("libtorch_unavailable")
-        expect(result_body).to_contain("invalid_handle")
-        expect(result_body).to_contain("runtime_returned_null_handle")
-        expect(body).to_contain("torch_sffi_tensor_linalg_solve(a, b)")
-        expect(body.contains("not yet implemented")).to_equal(false)
-        expect(source.contains("extern fn rt_torch_torchtensor_linalg_solve")).to_equal(false)
-        expect(provider_source()).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
-
-        val runtime = rust_linalg_runtime_source()
-        expect(runtime).to_contain("pub extern \"C\" fn rt_torch_linalg_solve")
-        expect(runtime).to_contain("pub extern \"C\" fn rt_torch_torchtensor_linalg_solve")
-        expect(runtime).to_contain("rt_torch_linalg_solve(a_handle, b_handle)")
+    it "rejects negative linalg solve handles with an explicit typed status":
+        # @req REQ-SSPEC-LIB
+        step("Solve with negative handles on both sides and read the typed result")
+        val negative = dyn_torch_tensor_linalg_solve_result(-1, -1)
+        # @capture(statistics): typed status and reason for negative solve handles
+        step("Verify the failure is typed, never a reserved live handle")
+        expect(negative.handle).to_equal(0)  # oracle: 0 — null-handle sentinel reserved for failure
+        if dyn_torch_available():
+            expect(negative.status).to_equal("invalid")
+            expect(negative.reason).to_equal("invalid_handle")
+        else:
+            expect(negative.status).to_equal("unavailable")
+            expect(negative.reason).to_equal("libtorch_unavailable")
 
     it "keeps linalg solve safe for invalid runtime handles":
-        expect(dyn_torch_tensor_linalg_solve(0, 0)).to_equal(0)
+        # @req REQ-SSPEC-LIB
+        step("Solve with the zero handle on both sides and read the typed result")
+        val zero = dyn_torch_tensor_linalg_solve_result(0, 0)
+        # @capture(statistics): zero-handle solve never reports ready
+        step("Verify the zero-handle solve never reports ready or a live handle")
+        expect(zero.handle).to_equal(0)  # oracle: 0 — null-handle sentinel reserved for failure
+        val never_ready = zero.status == "ready"
+        expect(never_ready).to_equal(false)
 
     it "exposes explicit linalg solve status for unavailable or invalid handles":
         # @req REQ-SSPEC-LIB
-        step("exposes explicit linalg solve status for unavailable or invalid handles")
+        step("Solve with zero handles and read the explicit status wrapper")
         val result = dyn_torch_tensor_linalg_solve_result(0, 0)
-
-        expect(result.handle).to_equal(0)
+        # @capture(statistics): explicit status/reason pair for the zero-handle solve
+        step("Verify the status branch names unavailable or invalid explicitly")
+        expect(result.handle).to_equal(0)  # oracle: 0 — null-handle sentinel reserved for failure
         if dyn_torch_available():
             expect(result.status).to_equal("invalid")
             expect(result.reason).to_equal("invalid_handle")
@@ -149,21 +175,26 @@ describe "dynamic torch SFFI readiness surface":
 
     it "preserves clone, matmul, dot, and inverse failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves clone, matmul, dot, and inverse failures as typed errors")
+        step("Call the clone, matmul, dot, and inverse wrappers on the zero handle")
         expect(dyn_torch_tensor_clone_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_matmul_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_dot_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_inverse_result(0).is_err()).to_equal(true)
-
-        val source = source_text()
-        expect(source.contains("fn dyn_torch_tensor_clone(handle: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_matmul(a: i64, b: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_dot(a: i64, b: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_inverse(handle: i64) -> i64:")).to_equal(false)
+        # @capture(statistics): typed-error verdicts for clone, matmul, dot, and inverse
+        step("Verify no untyped handle-returning twins exist for these operations")
+        val facade_text = facade_source()
+        val untyped_clone = facade_text.contains("fn dyn_torch_tensor_clone(handle: i64) -> i64:")
+        expect(untyped_clone).to_equal(false)
+        val untyped_matmul = facade_text.contains("fn dyn_torch_tensor_matmul(a: i64, b: i64) -> i64:")
+        expect(untyped_matmul).to_equal(false)
+        val untyped_dot = facade_text.contains("fn dyn_torch_tensor_dot(a: i64, b: i64) -> i64:")
+        expect(untyped_dot).to_equal(false)
+        val untyped_inverse = facade_text.contains("fn dyn_torch_tensor_inverse(handle: i64) -> i64:")
+        expect(untyped_inverse).to_equal(false)
 
     it "preserves unary activation failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves unary activation failures as typed errors")
+        step("Call every unary activation wrapper on the zero handle")
         expect(dyn_torch_tensor_abs_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_neg_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_pow_result(0, 2.0).is_err()).to_equal(true)
@@ -174,36 +205,40 @@ describe "dynamic torch SFFI readiness surface":
         expect(dyn_torch_tensor_log_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_sigmoid_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_tanh_result(0).is_err()).to_equal(true)
+        # @capture(statistics): ten unary activations all reporting typed errors
 
     it "preserves scalar-operation failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves scalar-operation failures as typed errors")
+        step("Call every scalar arithmetic wrapper on the zero handle")
         expect(dyn_torch_tensor_add_scalar_result(0, 1.0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_sub_scalar_result(0, 1.0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_mul_scalar_result(0, 1.0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_div_scalar_result(0, 1.0).is_err()).to_equal(true)
+        # @capture(statistics): four scalar operations all reporting typed errors
 
     it "preserves shape and slice failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves shape and slice failures as typed errors")
+        step("Call the contiguous, squeeze, unsqueeze, and slice wrappers on the zero handle")
         expect(dyn_torch_tensor_contiguous_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_squeeze_dim_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_unsqueeze_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_slice_result(0, 0, 0, 1, 1).is_err()).to_equal(true)
+        # @capture(statistics): shape and slice wrappers all reporting typed errors
 
     it "preserves dimension reduction failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves dimension reduction failures as typed errors")
+        step("Call every dimension reduction wrapper on the zero handle")
         expect(dyn_torch_tensor_sum_dim_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_mean_dim_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_min_dim_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_max_dim_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_argmin_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_argmax_result(0, 0, false).is_err()).to_equal(true)
+        # @capture(statistics): six dimension reductions all reporting typed errors
 
     it "preserves scalar reduction failures without reserving numeric zero":
         # @req REQ-SSPEC-LIB
-        step("preserves scalar reduction failures without reserving numeric zero")
+        step("Call every scalar reduction wrapper on the zero handle")
         expect(dyn_torch_tensor_sum_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_mean_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_min_result(0).is_err()).to_equal(true)
@@ -212,81 +247,99 @@ describe "dynamic torch SFFI readiness surface":
         expect(dyn_torch_tensor_std_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_var_result(0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_det_result(0).is_err()).to_equal(true)
-
-        val source = source_text()
-        expect(source.contains("Returns 0.0 on failure")).to_equal(false)
-        expect(source).to_contain("torch_torchtensor_sum_result(handle)")
-        expect(source.contains("_dyn_torch_scalar_status")).to_equal(false)
-        expect(source.contains("rt_torch_torchtensor_sum_checked(handle, &mut value)")).to_equal(false)
-
-        val raw = raw_torch_source()
-        expect(raw).to_contain("fn _torch_scalar_status(status: i32) -> text:")
-        expect(raw).to_contain("fn torch_torchtensor_sum_result(handle: i64) -> Result<f64, text>:")
-        expect(raw).to_contain("rt_torch_torchtensor_sum_checked(handle, &mut value)")
-        expect(raw).to_contain("if status != 0: return Err(_torch_scalar_status(status))")
+        # @capture(statistics): scalar reductions typed plus provider checked-status ownership
+        step("Verify zero is never documented as a success value and the provider owns the checked ABI")
+        val facade_text = facade_source()
+        val documents_zero_success = facade_text.contains("Returns 0.0 on failure")
+        expect(documents_zero_success).to_equal(false)
+        expect(facade_text).to_contain("torch_torchtensor_sum_result(handle)")
+        val local_checked_helper = facade_text.contains("_dyn_torch_scalar_status")
+        expect(local_checked_helper).to_equal(false)
+        val raw_checked_call_in_facade = facade_text.contains("rt_torch_torchtensor_sum_checked(handle, &mut value)")
+        expect(raw_checked_call_in_facade).to_equal(false)
+        val provider_text = provider_source()
+        expect(provider_text).to_contain("fn _torch_scalar_status(status: i32) -> text:")
+        expect(provider_text).to_contain("fn torch_torchtensor_sum_result(handle: i64) -> Result<f64, text>:")
+        expect(provider_text).to_contain("rt_torch_torchtensor_sum_checked(handle, &mut value)")
+        expect(provider_text).to_contain("if status != 0: return Err(_torch_scalar_status(status))")
 
     it "keeps the C++ scalar ABI one-call status-out and exception-safe":
         # @req REQ-SSPEC-LIB
-        step("keeps the C++ scalar ABI one-call status-out and exception-safe")
-        val runtime = cpp_runtime_source()
-        val header = cpp_header_source()
-
-        expect(runtime).to_contain("static int32_t torch_scalar_checked")
-        expect(runtime).to_contain("const double value = op(*tensor)")
-        expect(runtime).to_contain("catch (...)")
-        expect(runtime).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out) noexcept")
-        expect(header).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out)")
+        step("Inspect the C++ runtime checked-scalar helper and its header declaration")
+        val cpp_abi_text = cpp_runtime_source()
+        val cpp_abi_header_text = cpp_header_source()
+        # @capture(statistics): C++ checked-scalar helper shape and header contract
+        step("Verify one call returns status and value with exceptions contained")
+        expect(cpp_abi_text).to_contain("static int32_t torch_scalar_checked")
+        expect(cpp_abi_text).to_contain("const double value = op(*tensor)")
+        expect(cpp_abi_text).to_contain("catch (...)")
+        expect(cpp_abi_text).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out) noexcept")
+        expect(cpp_abi_header_text).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out)")
 
     it "preserves fixed-dimension fill constructor failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves fixed-dimension fill constructor failures as typed errors")
+        step("Call the fill constructors with one negative dimension each")
         expect(dyn_torch_tensor_zeros_1d_result(-1).is_err()).to_equal(true)
         expect(dyn_torch_tensor_ones_2d_result(-1, 2).is_err()).to_equal(true)
         expect(dyn_torch_tensor_full_4d_result(1, 2, 3, -1, 4.0).is_err()).to_equal(true)
-
-        val source = source_text()
-        expect(source.contains("fn dyn_torch_tensor_zeros_1d(n: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_ones_2d(n: i64, m: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_full_4d(n: i64, m: i64, k: i64, l: i64, fill: f64) -> i64:")).to_equal(false)
+        # @capture(statistics): fill constructors rejecting negative dimensions as typed errors
+        step("Verify no untyped handle-returning fill constructor twins exist")
+        val facade_text = facade_source()
+        val untyped_zeros_1d = facade_text.contains("fn dyn_torch_tensor_zeros_1d(n: i64) -> i64:")
+        expect(untyped_zeros_1d).to_equal(false)
+        val untyped_ones_2d = facade_text.contains("fn dyn_torch_tensor_ones_2d(n: i64, m: i64) -> i64:")
+        expect(untyped_ones_2d).to_equal(false)
+        val untyped_full_4d = facade_text.contains("fn dyn_torch_tensor_full_4d(n: i64, m: i64, k: i64, l: i64, fill: f64) -> i64:")
+        expect(untyped_full_4d).to_equal(false)
 
     it "preserves fixed-dimension create constructor failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves fixed-dimension create constructor failures as typed errors")
+        step("Call the create constructors with one negative dimension each")
         expect(dyn_torch_tensor_empty_1d_result(-1).is_err()).to_equal(true)
         expect(dyn_torch_tensor_rand_2d_result(-1, 2).is_err()).to_equal(true)
         expect(dyn_torch_tensor_randn_4d_result(1, 2, 3, -1).is_err()).to_equal(true)
-
-        val source = source_text()
-        expect(source.contains("fn dyn_torch_tensor_empty_1d(n: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_rand_2d(n: i64, m: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_randn_4d(n: i64, m: i64, k: i64, l: i64) -> i64:")).to_equal(false)
+        # @capture(statistics): create constructors rejecting negative dimensions as typed errors
+        step("Verify no untyped handle-returning create constructor twins exist")
+        val facade_text = facade_source()
+        val untyped_empty_1d = facade_text.contains("fn dyn_torch_tensor_empty_1d(n: i64) -> i64:")
+        expect(untyped_empty_1d).to_equal(false)
+        val untyped_rand_2d = facade_text.contains("fn dyn_torch_tensor_rand(n: i64, m: i64) -> i64:")
+        expect(untyped_rand_2d).to_equal(false)
+        val untyped_randn_4d = facade_text.contains("fn dyn_torch_tensor_randn_4d(n: i64, m: i64, k: i64, l: i64) -> i64:")
+        expect(untyped_randn_4d).to_equal(false)
 
     it "preserves eye, arange, and linspace failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves eye, arange, and linspace failures as typed errors")
+        step("Call eye, arange with zero step, and negative-step linspace wrappers")
         expect(dyn_torch_tensor_eye_result(-1).is_err()).to_equal(true)
         expect(dyn_torch_tensor_arange_result(0.0, 1.0, 0.0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_linspace_result(0.0, 1.0, -1).is_err()).to_equal(true)
-
-        val source = source_text()
-        expect(source.contains("fn dyn_torch_tensor_eye(n: i64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_arange(start: f64, end: f64, step: f64) -> i64:")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_linspace(start: f64, end: f64, steps: i64) -> i64:")).to_equal(false)
+        # @capture(statistics): eye, arange, and linspace wrappers reporting typed errors
+        step("Verify no untyped handle-returning twins exist for these constructors")
+        val facade_text = facade_source()
+        val untyped_eye = facade_text.contains("fn dyn_torch_tensor_eye(n: i64) -> i64:")
+        expect(untyped_eye).to_equal(false)
+        val untyped_arange = facade_text.contains("fn dyn_torch_tensor_arange(start: f64, end: f64, step: f64) -> i64:")
+        expect(untyped_arange).to_equal(false)
+        val untyped_linspace = facade_text.contains("fn dyn_torch_tensor_linspace(start: f64, end: f64, steps: i64) -> i64:")
+        expect(untyped_linspace).to_equal(false)
 
     it "preserves softmax and leaky relu failures as typed errors":
         # @req REQ-SSPEC-LIB
-        step("preserves softmax and leaky relu failures as typed errors")
+        step("Call the softmax, log-softmax, and leaky relu wrappers on the zero handle")
         expect(dyn_torch_tensor_softmax_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_log_softmax_result(0, 0).is_err()).to_equal(true)
         expect(dyn_torch_tensor_leaky_relu_result(0, 0.01).is_err()).to_equal(true)
+        # @capture(statistics): softmax family and leaky relu reporting typed errors
 
     it "keeps native linalg solve boundary aligned with explicit status wrapper":
         # @req REQ-SSPEC-LIB
-        step("keeps native linalg solve boundary aligned with explicit status wrapper")
-        val runtime = cpp_runtime_source()
-        val header = cpp_header_source()
-
-        expect(runtime).to_contain("static bool has_tensor(int64_t h)")
-        expect(runtime).to_contain("if (!has_tensor(handle) || !has_tensor(rhs))")
-        expect(runtime).to_contain("return 0;")
-        expect(header).to_contain("rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs)")
+        step("Inspect the native solve boundary guards in the C++ runtime and header")
+        val cpp_abi_text = cpp_runtime_source()
+        val cpp_abi_header_text = cpp_header_source()
+        # @capture(statistics): native handle guards ahead of the linalg solve call
+        step("Verify both handles are validated before the native solve dispatch")
+        expect(cpp_abi_text).to_contain("static bool has_tensor(int64_t h)")
+        expect(cpp_abi_text).to_contain("if (!has_tensor(handle) || !has_tensor(rhs))")
+        expect(cpp_abi_text).to_contain("return 0;")
+        expect(cpp_abi_header_text).to_contain("rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs)")

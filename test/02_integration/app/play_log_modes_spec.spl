@@ -1,4 +1,32 @@
+"""
+## Purpose and audience
+Purpose: pin the shared CLI log-mode surface of the play command (--log-mode
+and --progress) as observed through real process invocations, including its
+subcommand planning and error JSON envelopes.
+Audience: compiler and tooling engineers who maintain the play app and the
+shared log-option helpers it consumes.
+## Operator workflow
+Run this spec with
+`simple run test/02_integration/app/play_log_modes_spec.spl`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed CLI behavior.
+## Compatibility and limitations
+Covers the play command's shared log options and its json subcommand
+envelopes only; every scenario spawns a real `bin/simple` process and plans
+against the headless play session, so no windowing system is required.
+## Verification guidance and troubleshooting
+A failure names the exact option, subcommand, or mode that regressed; re-run
+this spec and compare the captured stdout in the failing scenario to
+reproduce locally.
+"""
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/pure_simple_cli_completeness.md
+# @manual_section: play-log-modes
+
 use std.spec.{describe, it, expect}
+use std.spec.step
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -11,43 +39,64 @@ fn _run_play(args: [text]) -> (text, text, i64):
 
 describe "play log mode CLI options":
     it "shows shared log options in help":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(tui_grid): play help text listing the shared log options
+        step("Run play --help")
         val (out, err, code) = _run_play(["--help"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for --help
         expect(out).to_contain("Simple Play")
         expect(out).to_contain("--log-mode")
         expect(out).to_contain("--progress")
 
     it "supports log-mode json ready output":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(protocol_json): ready JSON envelope emitted at session start
+        step("Start a headless play session with log-mode json")
         val (out, err, code) = _run_play(["--log-mode=json"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for a ready session
         expect(out).to_contain("\"command\":\"play\"")
         expect(out).to_contain("\"status\":\"ready\"")
 
     it "supports json subcommand planning":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(protocol_json): planned click envelope with subcommand and argument count
+        step("Plan a click subcommand through log-mode json")
         val (out, err, code) = _run_play(["--log-mode=json", "click", "sid-1", "save-button"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for a planned subcommand
         expect(out).to_contain("\"status\":\"planned\"")
         expect(out).to_contain("\"subcommand\":\"click\"")
         expect(out).to_contain("\"args\":2")
 
     it "renders json missing argument output":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(protocol_json): error JSON envelope for a fill call missing its third argument
+        step("Invoke fill with too few arguments through log-mode json")
         val (out, err, code) = _run_play(["--log-mode=json", "fill", "sid-1"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI usage-error exit code for a missing argument
         expect(out).to_contain("\"status\":\"error\"")
         expect(out).to_contain("Subcommand fill requires 3 argument")
 
     it "supports dot progress for help output":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(tui_grid): dot-progress output followed by the play help banner
+        step("Run play --help with dot progress")
         val (out, err, code) = _run_play(["--progress=dot", "--help"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for --help
         expect(out).to_contain(".\nSimple Play")
         expect(out).to_contain("UI automation")
 
     it "rejects invalid log mode":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(tui_grid): usage-error output emitted for an unknown log mode
+        step("Invoke play with an unknown log mode and expect a usage error")
         val (out, err, code) = _run_play(["--log-mode=noisy"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI usage-error exit code for an unknown mode
 
     it "renders json unknown subcommand output":
+        # @req REQ-PLAY-LOGMODE-001
+        # @capture(protocol_json): error JSON envelope for an unknown play subcommand
+        step("Invoke the unknown teleport subcommand through log-mode json")
         val (out, err, code) = _run_play(["--log-mode=json", "teleport"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI usage-error exit code for an unknown subcommand
         expect(out).to_contain("\"status\":\"error\"")
         expect(out).to_contain("Unknown play subcommand: teleport")

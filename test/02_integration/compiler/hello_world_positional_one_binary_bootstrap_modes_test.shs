@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+# Exact regression for the Stage2 positional-entry AOT failure.
+# Supply a pure-Simple compiler; a Rust seed is never accepted.
+compiler=${SIMPLE_TEST_COMPILER:?set SIMPLE_TEST_COMPILER to a pure-Simple compiler}
+case "$compiler" in
+  */compiler_rust/*|*/target/bootstrap/*)
+    echo 'FAIL: Rust/bootstrap seed is not acceptance evidence' >&2
+    exit 2 ;;
+esac
+[ -x "$compiler" ] || { echo 'FAIL: compiler is not executable' >&2; exit 2; }
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+entry="$root/scripts/check/cert/redeploy_gate/fixtures/hello_world.spl"
+# Keep this regression on the exact absolute positional-entry surface that
+# exposed divergent driver/importer module-name normalization.
+case "$entry" in /*) ;; *) echo 'FAIL: positional entry is not absolute' >&2; exit 2 ;; esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-positional-aot.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+
+for bootstrap_mode in 0 1; do
+    output="$work/hello-$bootstrap_mode"
+    log="$work/hello-$bootstrap_mode.log"
+    cache="$work/cache-$bootstrap_mode"
+    if ! env SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" \
+        SIMPLE_BOOTSTRAP_DRIVER="$compiler" SIMPLE_FRONTEND_DELEGATE="$compiler" \
+        SIMPLE_FRONTEND_DELEGATED=1 SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 SIMPLE_BOOTSTRAP="$bootstrap_mode" \
+        SIMPLE_LIB="$root/src" \
+        "$compiler" native-build --backend llvm \
+        --cache-dir "$cache" \
+        --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
+        "$entry" \
+        --output "$output" >"$log" 2>&1; then
+        if grep -Fq '<invalid-heap:' "$log"; then
+            echo "FAIL: bootstrap=$bootstrap_mode leaked invalid Result payload" >&2
+        else
+            echo "FAIL: bootstrap=$bootstrap_mode positional build failed" >&2
+        fi
+        exit 1
+    fi
+    [ -x "$output" ] || { echo "FAIL: bootstrap=$bootstrap_mode produced no executable" >&2; exit 1; }
+    [ "$("$output")" = hello ] || { echo "FAIL: bootstrap=$bootstrap_mode output mismatch" >&2; exit 1; }
+    ! grep -Fq '<invalid-heap:' "$log" || { echo "FAIL: bootstrap=$bootstrap_mode logged invalid heap" >&2; exit 1; }
+done
+
+echo 'hello_world_positional_one_binary_bootstrap_modes_test: PASS'

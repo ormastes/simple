@@ -13,8 +13,7 @@ use os.kernel.log.klog_api.{log_info}
 use common.string_core.{char_from_code}
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
-extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
-extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+use std.io.dma.{dma_raw_sync_for_cpu, dma_raw_sync_for_device}
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
 
@@ -245,8 +244,8 @@ impl NvmeDriver:
         # Zero out queue memory
         self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
         self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
-        rt_dma_sync_for_device(admin_sq_addrs.handle, 2)
-        rt_dma_sync_for_device(admin_cq_addrs.handle, 2)
+        dma_raw_sync_for_device(admin_sq_addrs.handle, 2)
+        dma_raw_sync_for_device(admin_cq_addrs.handle, 2)
 
         # Step 5: Write AQA (admin queue attributes)
         # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
@@ -365,8 +364,8 @@ impl NvmeDriver:
         # Zero the queue memory
         self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
         self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
-        rt_dma_sync_for_device(sq_dma.handle, 2)
-        rt_dma_sync_for_device(cq_dma.handle, 2)
+        dma_raw_sync_for_device(sq_dma.handle, 2)
+        dma_raw_sync_for_device(cq_dma.handle, 2)
 
         # Configure AQA, ASQ, ACQ registers
         val aqa = (31 << 16) | 31  # 32-1 entries each
@@ -487,7 +486,7 @@ impl NvmeDriver:
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify controller timeout")
-        rt_dma_sync_for_cpu(buf.handle, 1)
+        dma_raw_sync_for_cpu(buf.handle, 1)
         val namespace_count = mmio_read32(buf.virt + IDENTITY_CONTROLLER_NN_OFFSET)
         if namespace_count > 0u32:
             self.controller_namespace_count = namespace_count
@@ -527,7 +526,7 @@ impl NvmeDriver:
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify namespace timeout")
-        rt_dma_sync_for_cpu(buf.handle, 1)
+        dma_raw_sync_for_cpu(buf.handle, 1)
 
         val nsze = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
 
@@ -585,7 +584,7 @@ impl NvmeDriver:
         self.io_queue.cq_phys = cq.phys
         self.io_queue.cq_dma_handle = cq.handle
         self.zero_memory(cq.virt, cq_size)
-        rt_dma_sync_for_device(cq.handle, 2)
+        dma_raw_sync_for_device(cq.handle, 2)
 
         self.io_queue.cq_doorbell = nvme_cq_doorbell_addr(self.bar0_virt, 1u16, nvme_dstrd_to_doorbell_stride_bytes(self.db_stride))
 
@@ -618,7 +617,7 @@ impl NvmeDriver:
         self.io_queue.sq_virt = sq.virt
         self.io_queue.sq_phys = sq.phys
         self.zero_memory(sq.virt, sq_size)
-        rt_dma_sync_for_device(sq.handle, 2)
+        dma_raw_sync_for_device(sq.handle, 2)
 
         val io_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
             qid: 1u16,

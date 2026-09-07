@@ -1,6 +1,30 @@
-# Compiler Integration Test for Documentation Warnings
-#
-# Tests the integration of doc warnings into the build pipeline.
+"""
+## Purpose and audience
+Pins the integration of documentation warnings into the build pipeline:
+the scanner's per-file and multi-file checks, the warning formatter, and the
+graceful handling of missing input. Written for the tooling engineers who own
+app.doc_coverage and for operators verifying a build lane.
+## Operator workflow
+Run `simple run test/unit/app/doc_coverage/compiler_integration_spec.spl` and
+read the per-scenario verdict lines; the first failing scenario names the doc
+warning integration that regressed.
+## Compatibility and limitations
+Each scenario writes its fixture file into the current working directory and
+removes it again via the shell; run from a writable directory. Only the behavior
+explicitly asserted below is pinned — warning ordering and wording beyond the
+format contract are covered by the unit specs.
+## Verification guidance and troubleshooting
+Re-run the single spec file; a failure means the named integration changed.
+Leftover test_*.spl fixtures in the working directory point at a cleanup that
+did not run, not at a scanner defect.
+# @manual: primary
+REQ-TOOLING-DOC-COVERAGE-001
+doc/01_research/domain/sspec_documentization_maintenance.md
+doc/03_plan/sspec_modernization_plan.md
+doc/04_architecture/sspec_documentization_maintenance.md
+doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# @manual_section: compiler doc warning integration
 
 use std.spec.{describe, it, expect, step}
 use app.io.mod (file_write, file_read, dir_create, cwd, file_exists, shell)
@@ -10,7 +34,9 @@ use std.string.{NL}
 
 describe "Compiler Documentation Warnings":
     it "checks single file for missing documentation":
-        # Create test file
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): warning count and fixture write verdict for the undocumented fixture
+        step("write an undocumented fixture and scan it")
         val test_file = "test_doc_warn.spl"
         val content = "fn undocumented_function():{NL}    42{NL}"
 
@@ -21,14 +47,15 @@ describe "Compiler Documentation Warnings":
         val warnings = check_file_documentation(test_file)
 
         # Should find warning for undocumented function
-        expect(warnings.len()).to_be_greater_than(0)
+        expect(warnings.len()).to_be_greater_than(0)  # oracle: an undocumented fn must produce at least one warning
 
         # Cleanup
         val cleanup = shell("rm -f {test_file}")
-        pass_do_nothing
 
     it "returns empty warnings for documented file":
-        # Create test file with documentation
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): warning count for the fully documented fixture
+        step("write a documented fixture and expect a clean scan")
         val test_file = "test_doc_ok.spl"
         val content = "# This function is documented{NL}fn documented_function():{NL}    42{NL}"
 
@@ -39,13 +66,15 @@ describe "Compiler Documentation Warnings":
         val warnings = check_file_documentation(test_file)
 
         # Should find no warnings
-        expect(warnings.len()).to_equal(0)
+        expect(warnings.len()).to_equal(0)  # oracle: a commented fn must scan clean
 
         # Cleanup
         val cleanup = shell("rm -f {test_file}")
-        pass_do_nothing
 
     it "formats warning message correctly":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): formatted warning text for the synthetic DocItem
+        step("format a warning for a synthetic undocumented DocItem")
         # Create test DocItem
         val item = DocItem(
             name: "test_fn",
@@ -64,12 +93,15 @@ describe "Compiler Documentation Warnings":
         expect(warning.contains("test_fn")).to_equal(true)
 
         # Should contain file and line
-        expect(warning.contains("test.spl:42")).to_equal(true)
+        expect(warning.contains("test.spl:42")).to_equal(true)  # oracle: the formatter pins file:line location
 
         # Should contain "missing documentation"
         expect(warning.contains("missing documentation")).to_equal(true)
 
     it "checks multiple files":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): per-file warning attribution across the two fixtures
+        step("scan one undocumented and one documented fixture together")
         # Create two test files
         val test_file1 = "test_multi1.spl"
         val test_file2 = "test_multi2.spl"
@@ -90,21 +122,26 @@ describe "Compiler Documentation Warnings":
         val files_with_warnings = result.1
 
         # Should find warnings in first file only
-        expect(files_with_warnings.len()).to_equal(1)
-        expect(all_warnings.len()).to_be_greater_than(0)
+        expect(files_with_warnings.len()).to_equal(1)  # oracle: only the undocumented fixture may be attributed
+        expect(all_warnings.len()).to_be_greater_than(0)  # oracle: the undocumented fixture must yield at least one warning
 
         # Cleanup
         val cleanup1 = shell("rm -f {test_file1}")
         val cleanup2 = shell("rm -f {test_file2}")
-        pass_do_nothing
 
     it "handles non-existent file gracefully":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): scan verdict for a missing input file
+        step("scan a file path that does not exist")
         val warnings = check_file_documentation("nonexistent_file_xyz.spl")
 
         # Should return empty array, not crash
-        expect(warnings.len()).to_equal(0)
+        expect(warnings.len()).to_equal(0)  # oracle: a missing input must scan clean rather than crash
 
     it "detects undocumented struct":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): struct warning count and first message text
+        step("write an undocumented struct fixture and scan it")
         val test_file = "test_struct.spl"
         val content = "struct UndocumentedStruct:{NL}    field: i64{NL}"
 
@@ -114,7 +151,7 @@ describe "Compiler Documentation Warnings":
         val warnings = check_file_documentation(test_file)
 
         # Should find warning for struct
-        expect(warnings.len()).to_be_greater_than(0)
+        expect(warnings.len()).to_be_greater_than(0)  # oracle: an undocumented struct must produce at least one warning
 
         # Check warning mentions struct
         val first_warning = warnings[0]
@@ -122,9 +159,11 @@ describe "Compiler Documentation Warnings":
 
         # Cleanup
         val cleanup = shell("rm -f {test_file}")
-        pass_do_nothing
 
     it "detects undocumented class":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): class warning count for the undocumented fixture
+        step("write an undocumented class fixture and scan it")
         val test_file = "test_class.spl"
         val content = "class UndocumentedClass:{NL}    field: i64{NL}"
 
@@ -134,13 +173,15 @@ describe "Compiler Documentation Warnings":
         val warnings = check_file_documentation(test_file)
 
         # Should find warning for class
-        expect(warnings.len()).to_be_greater_than(0)
+        expect(warnings.len()).to_be_greater_than(0)  # oracle: an undocumented class must produce at least one warning
 
         # Cleanup
         val cleanup = shell("rm -f {test_file}")
-        pass_do_nothing
 
     it "detects undocumented enum":
+        # @req REQ-TOOLING-DOC-COVERAGE-001
+        # @capture(statistics): enum warning count for the undocumented fixture
+        step("write an undocumented enum fixture and scan it")
         val test_file = "test_enum.spl"
         val content = "enum UndocumentedEnum:{NL}    Variant1{NL}    Variant2{NL}"
 
@@ -150,8 +191,7 @@ describe "Compiler Documentation Warnings":
         val warnings = check_file_documentation(test_file)
 
         # Should find warning for enum
-        expect(warnings.len()).to_be_greater_than(0)
+        expect(warnings.len()).to_be_greater_than(0)  # oracle: an undocumented enum must produce at least one warning
 
         # Cleanup
         val cleanup = shell("rm -f {test_file}")
-        pass_do_nothing

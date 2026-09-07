@@ -1,30 +1,36 @@
 # @cover src/compiler_rust/lib/std/src/verification/lean/verification_checker.spl 70%
 """
-# Unsupported Construct Verification Specification
+## Purpose and audience
+Executable contract for unsupported-construct detection in @verify-annotated
+functions: IO effects, unsafe operations, SFFI calls, contract side effects,
+and missing termination proofs must each produce a clear diagnostic rather
+than silently generating incorrect Lean. Owned by the compiler verification
+team; authors of @verify annotations read this to learn what the checker
+rejects and why.
 
-**Feature IDs:** #LEAN-UNSUP-001
-**Category:** Infrastructure
-**Difficulty:** 2/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
+## Operator workflow
+Run this spec after changing the verification checker or its call-classification
+tables:
+`bin/simple test test/00_formal_verification/compiler/unsupported_construct_spec.spl`.
+A failure names the rejection invariant that broke.
 
-## Overview
+## Compatibility and limitations
+Behaviour pinned here: IO functions in verified context produce V-EFFECT-001
+errors; unsafe operations produce V-UNSAFE-001; SFFI calls are detected via
+the `check_unsafe_operation("sffi_call")` path; recursive functions without a
+termination proof produce V-TERM-001; and multiple violations are all reported,
+not just the first. Detection is name-based on literal call names, so a rename
+of a recognised builtin requires updating the checker tables and this spec.
 
-Verifies that the verification checker correctly rejects unsupported constructs
-when used with @verify. Async functions, FFI calls, and unsafe operations must
-produce clear error diagnostics rather than silently generating incorrect Lean.
-
-## Behavior
-
-- IO functions in verified context produce V-EFFECT-001 errors
-- Unsafe operations in verified context produce V-UNSAFE-001 errors
-- SFFI calls are detected via the `check_unsafe_operation("sffi_call")` path
-- Recursive functions without termination proof produce V-TERM-001 errors
-- Multiple violations are all reported (not just the first)
+## Verification guidance and troubleshooting
+Rerun with the single command above. A missing V-EFFECT-001 means the IO call
+table lost an entry; a wrong error count on the multi-violation fixture means
+validate_verified_function stopped reporting every violation class.
 """
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
 
 use verification.lean.verification_checker.{
     VerificationChecker,
@@ -34,14 +40,19 @@ use verification.lean.verification_checker.{
     validate_verified_function
 }
 use verification.lean.verification_diagnostics.{VerificationErrorCode, Span}
+use std.spec.step
 
 # ============================================================================
 # Test Group 1: IO/Effect Violations
 # ============================================================================
 
+# @manual_section: unsupported-construct-detection
 describe "Unsupported Construct Detection":
     context "IO effects in verified context":
         it "rejects verified function calling IO functions":
+            # @req REQ-LEAN-UNSUP-001
+            # @capture(statistics): error count for a verified function with two IO calls
+            step("Validate a verified function that calls two IO helpers")
             val result = validate_verified_function(
                 "my_verified_fn",
                 false,       # not recursive
@@ -50,13 +61,19 @@ describe "Unsupported Construct Detection":
                 false        # no unsafe ops
             )
             expect(result.has_errors()).to_equal(true)
-            expect(result.error_count()).to_equal(2)
+            expect(result.error_count()).to_equal(2)  # oracle: each of the two IO calls raises one error
 
         it "produces V-EFFECT-001 error code for IO violations":
+            # @req REQ-LEAN-UNSUP-002
+            # @capture(protocol_json): classification of print as an IO-in-verified violation
+            step("Classify a print call inside verified code")
             val check = check_call_in_verified("print")
             expect(check).to_equal(Some(VerificationErrorCode.IoInVerified))
 
         it "allows pure functions in verified context":
+            # @req REQ-LEAN-UNSUP-003
+            # @capture(statistics): clean verdict for a pure verified function
+            step("Validate a verified function with no IO and no unsafe calls")
             val result = validate_verified_function(
                 "pure_fn",
                 false,
@@ -68,6 +85,9 @@ describe "Unsupported Construct Detection":
 
     context "unsafe operations in verified context":
         it "rejects verified function with unsafe operations":
+            # @req REQ-LEAN-UNSUP-004
+            # @capture(statistics): error count for a verified function flagged unsafe
+            step("Validate a verified function with the unsafe flag set")
             val result = validate_verified_function(
                 "unsafe_verified_fn",
                 false,
@@ -76,31 +96,46 @@ describe "Unsupported Construct Detection":
                 true         # has unsafe ops
             )
             expect(result.has_errors()).to_equal(true)
-            expect(result.error_count()).to_equal(1)
+            expect(result.error_count()).to_equal(1)  # oracle: the unsafe flag raises exactly one error
 
         it "detects raw pointer dereference as unsafe":
+            # @req REQ-LEAN-UNSUP-005
+            # @capture(protocol_json): classification of a raw pointer dereference
+            step("Classify a raw pointer dereference")
             val check = check_unsafe_operation("raw_pointer_deref")
             expect(check).to_equal(Some(VerificationErrorCode.RawPointerInVerified))
 
         it "detects unsafe cast as violation":
+            # @req REQ-LEAN-UNSUP-006
+            # @capture(protocol_json): classification of an unsafe cast
+            step("Classify an unsafe cast")
             val check = check_unsafe_operation("unsafe_cast")
             expect(check).to_equal(Some(VerificationErrorCode.UnsafeInVerified))
 
     context "FFI calls in verified context":
         it "detects FFI call as unsupported in verified code":
+            # @req REQ-LEAN-UNSUP-007
+            # @capture(protocol_json): classification of an sffi_call
+            step("Classify an SFFI call inside verified code")
             val check = check_unsafe_operation("sffi_call")
             expect(check).to_equal(Some(VerificationErrorCode.FfiInVerified))
 
         it "produces clear FFI error via VerificationChecker":
+            # @req REQ-LEAN-UNSUP-008
+            # @capture(protocol_json): checker result after reporting an SFFI error
+            step("Report an SFFI error through the checker")
             var vc = VerificationChecker.new()
             val span = Span.empty()
             vc.report_sffi_error(span, "extern_crypto_hash")
             val result = vc.get_result()
             expect(result.has_errors()).to_equal(true)
-            expect(result.error_count()).to_equal(1)
+            expect(result.error_count()).to_equal(1)  # oracle: one report_sffi_error call was made
 
     context "recursive functions without termination":
         it "rejects recursive function missing decreases clause":
+            # @req REQ-LEAN-UNSUP-009
+            # @capture(statistics): error count for a recursive function with no termination proof
+            step("Validate a recursive function lacking a termination proof")
             val result = validate_verified_function(
                 "recursive_fn",
                 true,        # is recursive
@@ -109,9 +144,12 @@ describe "Unsupported Construct Detection":
                 false
             )
             expect(result.has_errors()).to_equal(true)
-            expect(result.error_count()).to_equal(1)
+            expect(result.error_count()).to_equal(1)  # oracle: a missing termination proof raises exactly one error
 
         it "allows recursive function with termination proof":
+            # @req REQ-LEAN-UNSUP-010
+            # @capture(statistics): clean verdict for a recursive function with a termination proof
+            step("Validate a recursive function that has a termination proof")
             val result = validate_verified_function(
                 "recursive_fn",
                 true,        # is recursive
@@ -123,6 +161,9 @@ describe "Unsupported Construct Detection":
 
     context "multiple violations":
         it "reports all violations, not just the first":
+            # @req REQ-LEAN-UNSUP-011
+            # @capture(statistics): per-class error tally for the five-violation fixture
+            step("Validate a function violating every class at once")
             val result = validate_verified_function(
                 "bad_fn",
                 true,        # recursive
@@ -132,22 +173,34 @@ describe "Unsupported Construct Detection":
             )
             # 1 termination + 3 IO + 1 unsafe = 5 errors
             expect(result.has_errors()).to_equal(true)
-            expect(result.error_count()).to_equal(5)
+            expect(result.error_count()).to_equal(5)  # oracle: every violation class must be reported, not just the first
 
     context "contract purity":
         it "rejects mutating calls in contract expressions":
+            # @req REQ-LEAN-UNSUP-012
+            # @capture(protocol_json): classification of set_value inside a contract expression
+            step("Reject a mutating call inside a contract expression")
             val check = check_call_in_contract("set_value")
             expect(check).to_equal(Some(VerificationErrorCode.ContractHasSideEffects))
 
         it "allows pure reads in contract expressions":
+            # @req REQ-LEAN-UNSUP-013
+            # @capture(protocol_json): clean classification of get_value inside a contract expression
+            step("Allow a pure read inside a contract expression")
             val check = check_call_in_contract("get_value")
             expect(check).to_equal(nil)
 
     context "allowed operations pass cleanly":
         it "returns nil for unknown operations":
+            # @req REQ-LEAN-UNSUP-014
+            # @capture(protocol_json): clean classification of an unrecognised operation
+            step("Leave an unknown operation unclassified")
             val check = check_unsafe_operation("normal_call")
             expect(check).to_equal(nil)
 
         it "allows non-IO function names":
+            # @req REQ-LEAN-UNSUP-015
+            # @capture(protocol_json): clean classification of a non-IO call
+            step("Allow a non-IO call inside verified code")
             val check = check_call_in_verified("calculate_sum")
             expect(check).to_equal(nil)

@@ -110,7 +110,7 @@ impl Lowerer {
         match expr {
             Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => self.lower_literal(expr),
             Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _) | Expr::TypedString(_, _) => {
-                self.lower_typed_literal(expr)
+                self.lower_typed_literal(expr, ctx)
             }
             Expr::FString { parts, type_meta } => self.lower_fstring(parts, type_meta, ctx),
             Expr::I18nString { name, default_text } => self.lower_i18n_string(name, default_text),
@@ -474,9 +474,7 @@ impl Lowerer {
     /// `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
     fn import_alias_symbol(&self, name: &str) -> String {
         match self.resolve_function_alias(name) {
-            Some(original)
-                if original != name && self.own_declared_function_names.contains(original) =>
-            {
+            Some(original) if original != name && self.own_declared_function_names.contains(original) => {
                 name.to_string()
             }
             Some(original) => original.to_string(),
@@ -899,6 +897,35 @@ impl Lowerer {
         if matches!(method, "unwrap" | "expect") {
             if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(recv_ty) {
                 return *inner;
+            }
+        }
+        // Presence predicates on a flat-nullable `T?` are BOOL, not ANY.
+        //
+        // Same receiver shape and same rationale as the `unwrap`/`expect` rule
+        // directly above: `T?` is `HirType::Pointer { inner: T }`, genuine
+        // `Option`/`Result` ENUM receivers are consumed earlier by
+        // `lower_builtin_method_call`, so the only shape reaching here with an
+        // otherwise-ANY result is the nullable pointer. Typing it ANY made the
+        // JIT print `nil` for `true` and `0` for `false`: with an ANY result the
+        // MIR carries no boxing, and the Cranelift arm for `.is_some()` hands
+        // `rt_is_some`'s RAW C bool straight to `rt_println_value`, where a raw
+        // `1` is `0b001` = TAG_HEAP (renders `nil`) and a raw `0` collides with
+        // boxed integer zero (renders `0`). `.contains()` never showed this
+        // because HIR already types it BOOL, so MIR boxes it.
+        // doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md
+        //
+        // Type-only upgrade: the call stays a dynamic `MethodCall` and the
+        // emitted value is untouched, so `if x.is_some():` keeps consuming the
+        // same raw 0/1 the branch wants.
+        // Scoped to `is_some`/`is_none` ONLY, and measured that way: `is_ok`/
+        // `is_err` are called on genuine `Result<T, E>` receivers, which are
+        // `HirType::Enum` and never reach this Pointer gate — they are handled
+        // earlier by `lower_builtin_method_call` and were verified correct on
+        // both engines before and after this change. Listing them here would be
+        // dead code.
+        if matches!(method, "is_some" | "is_none") {
+            if matches!(self.module.types.get(recv_ty), Some(HirType::Pointer { .. })) {
+                return TypeId::BOOL;
             }
         }
         if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {

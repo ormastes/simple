@@ -1,43 +1,104 @@
+"""
+## Purpose and audience
+Source-contract evidence for the engineers who own the software Engine2D
+backend's in-place blend-span ABI (`backend_software.spl`,
+`simd_native_rows.spl`, `runtime_simd_dispatch.c`,
+`simd_isa_provider.spl`). It pins the public facade, the ISA-neutral dirty
+span, the NEON/RVV runtime branches, and the allocation-free fill path.
+Operators auditing a blend regression or an allocation rebalance rerun this
+spec before touching the span ABI.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/check/backend_software_blend_span_contract_spec.spl`
+from the repo root; every scenario reads the named production sources and
+asserts the wiring tokens in execution order.
+## Compatibility and limitations
+Source-contract only.  It establishes the production call chain and the
+allocation-free ABI shape; it does not prove CPUID/ISA selection, throughput,
+or an 8K performance claim.  Those require native per-ISA execution receipts.
+## Verification guidance and troubleshooting
+A failure names the contract local that went false; grep the cited source file
+for the matching token to see which rename or row-materialization reintroduced
+the removed shape. A `false` on a negative contract means a forbidden symbol
+(row buffers, `rt_` internals, per-arch text) is back in the source.
+"""
+# Lifecycle: doc/01_research/domain/engine2d_four_backend_capture.md ;
+# doc/03_plan/ui/engine2d_gc_tier/plan_2026-07-25.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/engine2d_four_backend_capture.md
+# @manual_section: engine2d-blend-span
+
 use std.spec
 use std.io_runtime.{file_read}
 
-# Source-contract only.  It establishes the production call chain and the
-# allocation-free ABI shape; it does not prove CPUID/ISA selection, throughput,
-# or an 8K performance claim.  Those require native per-ISA execution receipts.
 describe "software backend allocation-free blend span contract":
     it "uses the public in-place span facade for image and constant blend without row materialization":
+        # @req REQ-E2D-BLEND-001
+        # @capture(bit_table): the public span facade tokens and the forbidden row-materialization symbols
+        step("Inspect the software backend for the in-place span facade and the absent row buffers")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
-        expect(source).to_contain("engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32")
-        expect(source).to_contain("self.buf = engine2d_simd_blend_span_u32(")
-        expect(source).to_contain("self.buf = engine2d_simd_blend_const_span_u32(")
-        expect(source.contains("rt_engine2d_simd_blend_span_u32(")).to_equal(false)
-        expect(source.contains("rt_engine2d_simd_blend_const_span_u32(")).to_equal(false)
-        expect(source.contains("var dst_row:")).to_equal(false)
-        expect(source.contains("var src_row:")).to_equal(false)
-        expect(source.contains("engine2d_simd_blend_row_u32")).to_equal(false)
+        val exports_public_span_facades = source.contains("engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32")
+        val blends_images_in_place = source.contains("self.buf = engine2d_simd_blend_span_u32(")
+        val blends_constants_in_place = source.contains("self.buf = engine2d_simd_blend_const_span_u32(")
+        val no_rt_prefixed_image_span = source.contains("rt_engine2d_simd_blend_span_u32(")
+        val no_rt_prefixed_const_span = source.contains("rt_engine2d_simd_blend_const_span_u32(")
+        val no_materialized_dst_row = source.contains("var dst_row:")
+        val no_materialized_src_row = source.contains("var src_row:")
+        val no_row_level_blend_helper = source.contains("engine2d_simd_blend_row_u32")
+        expect(exports_public_span_facades).to_equal(true)  # oracle: the facade pair is the only sanctioned blend entry surface
+        expect(blends_images_in_place).to_equal(true)  # oracle: image blend must write self.buf through the in-place span call
+        expect(blends_constants_in_place).to_equal(true)  # oracle: constant blend must write self.buf through the in-place span call
+        expect(no_rt_prefixed_image_span).to_equal(false)  # oracle: the rt_ symbol is the C boundary, never callable from product code
+        expect(no_rt_prefixed_const_span).to_equal(false)  # oracle: the rt_ symbol is the C boundary, never callable from product code
+        expect(no_materialized_dst_row).to_equal(false)  # oracle: a dst row buffer would reintroduce the per-row allocation this contract forbids
+        expect(no_materialized_src_row).to_equal(false)  # oracle: a src row buffer would reintroduce the per-row allocation this contract forbids
+        expect(no_row_level_blend_helper).to_equal(false)  # oracle: the retired row-level helper must stay gone or the span path is bypassed
 
     it "keeps the production image span ISA-neutral and dirties the exact span":
+        # @req REQ-E2D-BLEND-002
+        # @capture(bit_table): the ISA gate, the dirty-span call, and the forbidden per-arch text
+        step("Inspect the software backend for the ISA gate and the exact-span dirty marking")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
-        expect(source).to_contain("self.native_simd_spans and native_pixel_rows_enabled()")
-        expect(source.contains("active_arch_text() == \"x86_64\"")).to_equal(false)
-        expect(source).to_contain("self.mark_span_dirty(start_x, py, count)")
+        val gates_on_native_spans_flag = source.contains("self.native_simd_spans and native_pixel_rows_enabled()")
+        val no_hardcoded_x86_arch_check = source.contains("active_arch_text() == \"x86_64\"")
+        val dirties_exact_span_only = source.contains("self.mark_span_dirty(start_x, py, count)")
+        expect(gates_on_native_spans_flag).to_equal(true)  # oracle: admission is the runtime feature flag pair, not a compiled-in arch
+        expect(no_hardcoded_x86_arch_check).to_equal(false)  # oracle: an arch string here would fork the backend per ISA and break neutrality
+        expect(dirties_exact_span_only).to_equal(true)  # oracle: exact-span dirtying is what keeps the damage region minimal
 
     it "routes the public facade to the in-place runtime bridge with x86 NEON and RVV branches":
+        # @req REQ-E2D-BLEND-003
+        # @capture(bit_table): the facade-to-bridge call chain and the three ISA branches in the C dispatcher
+        step("Inspect the facade and the C dispatcher for the bridge call and its ISA branches")
         val facade = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl")
         val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
-        expect(facade).to_contain("pub fn engine2d_simd_blend_span_u32")
-        expect(facade).to_contain("rt_engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)")
-        expect(facade).to_contain("pub fn engine2d_simd_blend_const_span_u32")
-        expect(facade).to_contain("rt_engine2d_simd_blend_const_span_u32(dst, offset, count, const_color)")
-        expect(runtime).to_contain("No malloc — matches")
-        expect(runtime).to_contain("engine2d_blend_boxed_block4_x86")
-        expect(runtime).to_contain("engine2d_blend_boxed_block4_neon")
-        expect(runtime).to_contain("engine2d_blend_boxed_block4_rvv")
+        val exports_image_span_facade = facade.contains("pub fn engine2d_simd_blend_span_u32")
+        val bridges_image_span_in_place = facade.contains("rt_engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)")
+        val exports_const_span_facade = facade.contains("pub fn engine2d_simd_blend_const_span_u32")
+        val bridges_const_span_in_place = facade.contains("rt_engine2d_simd_blend_const_span_u32(dst, offset, count, const_color)")
+        val documents_allocation_free_contract = runtime.contains("No malloc — matches")
+        val has_boxed_block4_dispatch = runtime.contains("engine2d_blend_boxed_block4_x86")
+        val has_neon_branch = runtime.contains("engine2d_blend_boxed_block4_neon")
+        val has_rvv_branch = runtime.contains("engine2d_blend_boxed_block4_rvv")
+        expect(exports_image_span_facade).to_equal(true)  # oracle: the public image span facade is the routing entry under test
+        expect(bridges_image_span_in_place).to_equal(true)  # oracle: the in-place argument shape proves no row is materialized at the bridge
+        expect(exports_const_span_facade).to_equal(true)  # oracle: the public constant span facade is the routing entry under test
+        expect(bridges_const_span_in_place).to_equal(true)  # oracle: the in-place argument shape proves no row is materialized at the bridge
+        expect(documents_allocation_free_contract).to_equal(true)  # oracle: the comment is the C side's binding allocation-free declaration
+        expect(has_boxed_block4_dispatch).to_equal(true)  # oracle: the x86 branch is one of the three sanctioned ISA paths
+        expect(has_neon_branch).to_equal(true)  # oracle: the NEON branch is one of the three sanctioned ISA paths
+        expect(has_rvv_branch).to_equal(true)  # oracle: the RVV branch is one of the three sanctioned ISA paths
 
     it "keeps provider fill allocation-free through the in-place span ABI":
+        # @req REQ-E2D-BLEND-004
+        # @capture(bit_table): the provider fill call shape and the forbidden row-level fill
+        step("Inspect the ISA provider for the in-place fill and the absent row-level fill")
         val provider = file_read(
             "src/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider.spl")
-        expect(provider).to_contain("engine2d_simd_fill_span_u32")
-        expect(provider).to_contain(
+        val exports_fill_span_facade = provider.contains("engine2d_simd_fill_span_u32")
+        val fills_in_place = provider.contains(
             "val result = engine2d_simd_fill_span_u32(dst, offset, count")
-        expect(provider.contains("val row = engine2d_simd_fill_row_u32")).to_equal(false)
+        val no_row_level_fill = provider.contains("val row = engine2d_simd_fill_row_u32")
+        expect(exports_fill_span_facade).to_equal(true)  # oracle: the span fill is the provider's sanctioned surface
+        expect(fills_in_place).to_equal(true)  # oracle: the result-bound in-place call proves no row vector is built
+        expect(no_row_level_fill).to_equal(false)  # oracle: a row-bound fill would reintroduce the per-row allocation this contract forbids

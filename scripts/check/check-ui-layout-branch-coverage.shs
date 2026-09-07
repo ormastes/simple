@@ -1,0 +1,152 @@
+#!/bin/sh
+# Fail-closed branch-coverage gate for the SHARED UI layout manager.
+#
+# `src/lib/common/ui/layout.spl` is the single layout engine behind BOTH
+# renderers: `src/app/ui.tui/backend.spl:75` and
+# `src/app/ui.tui_web/backend.spl:75` each call `compute_layout(...)` from
+# `common.ui.layout`. This gate therefore does two things, and both are
+# blocking:
+#
+#   1. the sharing itself — if either backend stops importing
+#      `common.ui.layout.{compute_layout}`, the engines have forked and the
+#      coverage number below stops describing the web renderer at all;
+#   2. decision (branch) coverage of that engine, measured by really running
+#      the spec under the interpreter's `SIMPLE_COVERAGE=1` instrumentation
+#      and requiring BOTH outcomes of every decision it evaluates.
+#
+# Coverage is measured, never asserted: the `decisions` section of the emitted
+# SDN carries `id, file, line, column, true_count, false_count` per decision
+# site, and a site counts as covered only when both counts are > 0.
+#
+# Non-vacuity is absolute. A run that recorded 0 decisions for the file is
+# ERROR (exit 2), never a pass — a spec that silently stopped exercising the
+# engine would otherwise report a clean 100%.
+#
+# Verdict is always the last line of stdout:
+#   PASS  — <n> decision(s) checked, <c> fully covered (<pct>%) >= <min>%   exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked (<reason>)                                 exit 2
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner_rel=src/lib/common/ui/layout.spl
+spec_rel=test/unit/app/ui/layout_spec.spl
+min_pct=90
+selftest=0
+
+for arg in "$@"; do
+    case $arg in
+        --selftest) selftest=1 ;;
+        --min=*) min_pct=${arg#--min=} ;;
+        *) echo "usage: $0 [--selftest] [--min=<pct>]" >&2; exit 2 ;;
+    esac
+done
+
+fail() { echo "FAIL — $1"; exit 1; }
+oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+# Locate a runnable Simple binary. The deployed pure-Simple CLI first, the
+# bootstrap seed only as a fallback; absence of any binary is ERROR, never a
+# pass, because absence of a runner is absence of evidence.
+simple=""
+for cand in "$root/bin/simple" "$root/src/compiler_rust/target/bootstrap/simple"; do
+    if [ -x "$cand" ] && "$cand" run --help >/dev/null 2>&1; then
+        simple=$cand
+        break
+    fi
+done
+[ -n "$simple" ] || {
+    for cand in "$root/bin/simple" "$root/src/compiler_rust/target/bootstrap/simple"; do
+        [ -x "$cand" ] || continue
+        simple=$cand
+        break
+    done
+}
+[ -n "$simple" ] || oops "no runnable simple binary found"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+# Measure one spec file against one owner file. Echoes "<covered> <total>".
+measure() {
+    _spec=$1
+    _owner_abs=$2
+    _out=$work/cov.$$.sdn
+    rm -f "$_out"
+    SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$_out" "$simple" run "$_spec" >"$work/run.log" 2>&1
+    _rc=$?
+    [ -f "$_out" ] || { echo "MISSING $_rc"; return 0; }
+    # macOS resolves /var/... to /private/var/..., so the path recorded in the
+    # SDN need not be byte-identical to the one we passed in. Canonicalise the
+    # /private prefix on both sides before comparing.
+    awk -F', *' -v owner="$_owner_abs" '
+        BEGIN { sub(/^\/private/, "", owner) }
+        {
+            f = $2
+            sub(/^\/private/, "", f)
+            if (f == owner) { total++; if (($5 + 0) > 0 && ($6 + 0) > 0) covered++ }
+        }
+        END { printf "%d %d\n", covered + 0, total + 0 }
+    ' "$_out"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest: fatal, runs before every real scan. Proves the measurement can
+# actually come out RED — a gate that cannot fail is not a gate.
+# ---------------------------------------------------------------------------
+if [ "$selftest" = 1 ] || [ -z "${SKIP_LAYOUT_COV_SELFTEST:-}" ]; then
+    fx=$work/selftest
+    mkdir -p "$fx"
+    cat >"$fx/driver.spl" <<'EOF'
+fn pick(v: i64) -> i64:
+    if v > 0:
+        return 1
+    if v < -100:
+        return 2
+    return 0
+
+print pick(5)
+print pick(0)
+EOF
+    st=$(measure "$fx/driver.spl" "$fx/driver.spl")
+    st_cov=${st%% *}
+    st_tot=${st##* }
+    case $st in
+        MISSING*) oops "selftest produced no coverage output (instrumentation unavailable: $st)" ;;
+    esac
+    [ "$st_tot" -gt 0 ] || oops "selftest recorded 0 decisions (instrumentation unavailable)"
+    # `v > 0` sees both outcomes, `v < -100` only false: a half-covered file
+    # must NOT report full coverage, or the awk above is measuring nothing.
+    [ "$st_cov" -lt "$st_tot" ] || oops "selftest fixture reported full coverage; the measurement is not discriminating"
+fi
+
+# ---------------------------------------------------------------------------
+# Guard 1: the two renderers still share this engine.
+# ---------------------------------------------------------------------------
+for backend in src/app/ui.tui/backend.spl src/app/ui.tui_web/backend.spl; do
+    [ -f "$root/$backend" ] || oops "$backend is missing"
+    grep -q 'use common\.ui\.layout\.{compute_layout}' "$root/$backend" ||
+        fail "$backend no longer imports common.ui.layout.{compute_layout}; the TUI and web layout engines have forked"
+done
+
+# ---------------------------------------------------------------------------
+# Guard 2: decision coverage of the shared engine.
+# ---------------------------------------------------------------------------
+[ -f "$root/$owner_rel" ] || oops "$owner_rel is missing"
+[ -f "$root/$spec_rel" ] || oops "$spec_rel is missing"
+
+result=$(cd "$root" && measure "$root/$spec_rel" "$root/$owner_rel")
+case $result in
+    MISSING*) oops "the spec run emitted no coverage file (see $work/run.log)" ;;
+esac
+covered=${result%% *}
+total=${result##* }
+
+[ "$total" -gt 0 ] || oops "0 decisions recorded for $owner_rel"
+
+pct=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.1f", 100.0 * c / t }')
+below=$(awk -v p="$pct" -v m="$min_pct" 'BEGIN { print (p + 0 < m + 0) ? 1 : 0 }')
+[ "$below" = 0 ] ||
+    fail "$total decision(s) checked in $owner_rel, $covered fully covered ($pct%) < $min_pct%"
+
+echo "PASS — $total decision(s) checked in $owner_rel, $covered fully covered ($pct%) >= $min_pct%, both renderers still share it"

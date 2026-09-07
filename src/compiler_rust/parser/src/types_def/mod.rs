@@ -40,7 +40,7 @@ impl<'a> Parser<'a> {
         self.parse_struct_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_struct_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+    pub(crate) fn parse_struct_with_attrs(&mut self, mut attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
@@ -108,6 +108,16 @@ impl<'a> Parser<'a> {
                 mixins: explicit_mixins,
                 is_value_type: true,
             }));
+        }
+
+        if let Some(trait_name) = &implements_trait {
+            attributes.push(Attribute {
+                span: self.make_span(start_span),
+                name: "implements".to_string(),
+                value: None,
+                args: Some(vec![Expr::Identifier(trait_name.clone())]),
+                named_args: None,
+            });
         }
 
         let struct_def = StructDef {

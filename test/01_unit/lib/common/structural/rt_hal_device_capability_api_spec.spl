@@ -1,5 +1,29 @@
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-016 REQ-017 NFR-005 NFR-006
+"""
+## Purpose and audience
+Executable contract for the mission-critical rt(hal) device capability API:
+generation-bound handle issuance, IRQ mask/acknowledge tokens, caller-owned
+MMIO and DMA regions, three-provider compare execution, and copy-only
+replay. Written for the rt(hal) runtime hardening owners and reviewers.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/structural/rt_hal_device_capability_api_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+Drives the structural capability owners in memory only; no real device or
+interrupt controller participates, and the additive request-shape scenario
+reads shipped source as a source contract rather than executing hardware.
+## Verification guidance and troubleshooting
+A failure names the device status or dispatch receipt that broke; re-run the
+single file and compare against the lifecycle evidence linked below before
+changing authority or comparison-owner code.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/mcdc_rt_hal_hardening.md
+# @manual_section: device capability authority and compare execution
 
 use std.spec.*
 use std.io_runtime.{file_read}
@@ -26,6 +50,8 @@ fn production_executor(acquisition: RtHalDeviceAcquisitionV1,
 
 describe "mission-critical rt(hal) device capability API":
     it "issues generation-bound stable handles from one explicit authority":
+        # @capture(bit_table): handle status and generation sequence
+        step("Grant the same device range twice through one authority owner")
         var authority = rt_hal_device_authority_owner_v1(
             19, 7, 501, 502, 601, 602)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
@@ -33,8 +59,8 @@ describe "mission-critical rt(hal) device capability API":
         val second = authority.grant(full_device_grant(), mask, 10, 20)
 
         expect(first.status).to_equal(RtHalDeviceStatusV1.Ready)
-        expect(first.handle.generation).to_equal(7)
-        expect(second.handle.generation).to_equal(8)
+        expect(first.handle.generation).to_equal(7)  # oracle: the authority owner is constructed with generation 7, so the first handle carries exactly that epoch
+        expect(second.handle.generation).to_equal(8)  # oracle: each successive grant advances the epoch by exactly one
         expect(rt_hal_device_handle_v1_well_formed(first.handle)).to_be(true)
         expect(rt_hal_device_handles_same_identity_v1(
             first.handle, first.handle)).to_be(true)
@@ -42,6 +68,8 @@ describe "mission-critical rt(hal) device capability API":
             first.handle, second.handle)).to_be(false)
 
     it "binds IRQ mask and acknowledge to automatic extraction and one token":
+        # @capture(bit_table): IRQ mask/ack statuses and token consumption counts
+        step("Mask one IRQ line, acknowledge it with a read-once token, then repeat the token")
         val mask = env_opcode_mask_v1(EnvOpcodeV1.InterruptMask)
             | env_opcode_mask_v1(EnvOpcodeV1.InterruptAcknowledge)
         val acquisition = issue_device(full_device_grant(), mask)
@@ -57,11 +85,14 @@ describe "mission-critical rt(hal) device capability API":
         val acknowledged = ack_owner.rt_hal_irq_acknowledge_v1(32, token)
         val duplicate = ack_owner.rt_hal_irq_acknowledge_v1(32, token)
         expect(acknowledged.status).to_equal(RtHalDeviceStatusV1.Planned)
-        expect(acknowledged.instruction.read_once_token).to_equal(1)
+        expect(acknowledged.instruction.read_once_token).to_equal(1)  # oracle: the token was minted with sequence 1, so the sealed instruction must carry that same token
         expect(duplicate.status).to_equal(RtHalDeviceStatusV1.AlreadyConsumed)
-        expect(ack_owner.next_sequence).to_equal(1)
+        expect(ack_owner.next_sequence).to_equal(1)  # oracle: the acknowledged consume advanced the sequence by exactly one from its zero start
 
     it "keeps MMIO and DMA regions caller-owned and rejects stale tokens":
+        # @req REQ-016
+        # @capture(bit_table): MMIO/DMA statuses, region id, result capacity, stale-token verdict
+        step("Perform one caller-owned MMIO read, then poll DMA from another authority with the stale token")
         val opcode_mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
             | env_opcode_mask_v1(EnvOpcodeV1.DmaPoll)
         val acquisition = issue_device(full_device_grant(true), opcode_mask)
@@ -71,8 +102,8 @@ describe "mission-critical rt(hal) device capability API":
         val token = rt_hal_read_once_token_v1(acquisition.handle, 2)
         val read = mmio.rt_hal_mmio_read_v1(4096, 4, region, token)
         expect(read.status).to_equal(RtHalDeviceStatusV1.Planned)
-        expect(read.region.region_id).to_equal(9)
-        expect(read.instruction.environment.result_capacity).to_equal(4)
+        expect(read.region.region_id).to_equal(9)  # oracle: the caller-owned region was constructed with region_id 9 and must be preserved verbatim
+        expect(read.instruction.environment.result_capacity).to_equal(4)  # oracle: the read asked for 4 bytes, so the extracted instruction capacity must be exactly that
 
         var other_authority = rt_hal_device_authority_owner_v1(
             19, 7, 503, 504, 603, 604)
@@ -82,9 +113,11 @@ describe "mission-critical rt(hal) device capability API":
             other, EnvOpcodeV1.DmaPoll, 84)
         val stale = dma.rt_hal_dma_poll_v1(4096, 64, region, token)
         expect(stale.status).to_equal(RtHalDeviceStatusV1.InvalidToken)
-        expect(dma.next_sequence).to_equal(0)
+        expect(dma.next_sequence).to_equal(0)  # oracle: a stale-token poll consumes nothing, so the other authority's sequence never advances from zero
 
     it "supports all additive request shapes without retaining byte arrays":
+        # @capture(bit_table): presence/absence contract rows over the shipped owner source
+        step("Read the shipped capability source and check each additive request shape against it")
         val source = file_read(
             "src/lib/common/structural/environment_instruction/device_capability_api.spl")
         val begin = source.find("class RtHalDeviceAccessOwnerV1:")
@@ -105,6 +138,8 @@ describe "mission-critical rt(hal) device capability API":
         expect(owner.contains("rt_hal_dma_unmap_v1")).to_equal(true)
 
     it "feeds identical caller-owned payloads to Pure C and Rust compare lanes":
+        # @capture(statistics): compare receipt status, commit permission, effect and allocation counters
+        step("Capture one MMIO request as a payload and submit it to all three compare lanes")
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
         val acquisition = issue_device(full_device_grant(true), mask)
         val region = rt_hal_caller_owned_region_v1(12, 0, 4, 4, 705, 706)
@@ -134,9 +169,11 @@ describe "mission-critical rt(hal) device capability API":
             HalDeviceCompareOwnerStatusV1.CommitReady)
         expect(compared.commit_allowed).to_be(true)
         expect(compared.physical_effect).to_be(false)
-        expect(compared.allocation_count).to_equal(0)
+        expect(compared.allocation_count).to_equal(0)  # oracle: comparing identical caller-owned bytes is copy-only and must allocate nothing
 
     it "executes normal mode directly without constructing a compare owner":
+        # @capture(bit_table): dispatch status, applied flag, allocation counter, executed bytes
+        step("Dispatch one preferred execution straight into the seeded device buffer")
         val grant = full_device_grant(true)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
         val acquisition = issue_device(grant, mask)
@@ -159,10 +196,12 @@ describe "mission-critical rt(hal) device capability API":
         expect(dispatched.status).to_equal(
             RtHalDeviceDispatchStatusV1.Executed)
         expect(dispatched.execution.applied).to_be(true)
-        expect(dispatched.execution.allocation_count_after_seal).to_equal(0)
+        expect(dispatched.execution.allocation_count_after_seal).to_equal(0)  # oracle: a sealed direct execution writes into caller buffers and must allocate nothing after the seal
         expect(result).to_equal([1u8, 3u8, 5u8, 7u8])
 
     it "executes and compares all three provider domains before commit":
+        # @capture(bit_table): per-provider dispatch statuses and receipt ordering verdicts
+        step("Publish the preferred execution, replay C and Rust, then duplicate the Rust replay")
         val grant = full_device_grant(true)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
         val acquisition = issue_device(grant, mask)
@@ -199,9 +238,9 @@ describe "mission-critical rt(hal) device capability API":
         expect(compared.status).to_equal(
             HalDeviceCompareOwnerStatusV1.CommitReady)
         expect(compared.commit_allowed).to_be(true)
-        expect(pure.execution.allocation_count_after_seal).to_equal(0)
-        expect(c.execution.allocation_count_after_seal).to_equal(0)
-        expect(rust.execution.allocation_count_after_seal).to_equal(0)
+        expect(pure.execution.allocation_count_after_seal).to_equal(0)  # oracle: the preferred provider executes copy-only into caller buffers, so zero post-seal allocations
+        expect(c.execution.allocation_count_after_seal).to_equal(0)  # oracle: the C replay must stay allocation-free like every compare-lane replay
+        expect(rust.execution.allocation_count_after_seal).to_equal(0)  # oracle: the Rust replay must stay allocation-free like every compare-lane replay
         expect(c.execution.physical_effect).to_be(false)
         expect(rust.execution.physical_effect).to_be(false)
 
@@ -216,6 +255,8 @@ describe "mission-critical rt(hal) device capability API":
         expect(rejected.commit_allowed).to_be(false)
 
     it "freezes preferred metadata and bytes before later device execution":
+        # @capture(bit_table): frozen-reference rejection statuses and received provider masks
+        step("Freeze the preferred execution, then resubstitute its bytes and metadata from a later lane")
         val grant = full_device_grant(true)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
         val acquisition = issue_device(grant, mask)
@@ -251,7 +292,7 @@ describe "mission-critical rt(hal) device capability API":
         expect(substituted_bytes.status).to_equal(
             RtHalDeviceDispatchStatusV1.InvalidReference)
         expect(substituted_bytes.execution.applied).to_be(false)
-        expect(after_bytes.received_provider_mask).to_equal(1)
+        expect(after_bytes.received_provider_mask).to_equal(1)  # oracle: only the preferred PureSimple lane was accepted before the byte substitution, and bit 1 is its slot
         expect(after_bytes.commit_allowed).to_be(false)
 
         var metadata_owner = rt_hal_device_comparison_owner_v1(
@@ -275,10 +316,13 @@ describe "mission-critical rt(hal) device capability API":
         expect(rejected_metadata.status).to_equal(
             RtHalDeviceDispatchStatusV1.InvalidReference)
         expect(rejected_metadata.execution.applied).to_be(false)
-        expect(after_metadata.received_provider_mask).to_equal(1)
+        expect(after_metadata.received_provider_mask).to_equal(1)  # oracle: the substituted metadata is rejected, so only the first preferred lane (bit 1) was ever received
         expect(after_metadata.commit_allowed).to_be(false)
 
     it "replay remains copy-only with no physical effect":
+        # @req REQ-017
+        # @capture(bit_table): replay applied flag, physical effect flag, target byte
+        step("Replay a fabricated physical receipt and inspect the untouched target buffer")
         val grant = full_device_grant(true)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
         val acquisition = issue_device(grant, mask)

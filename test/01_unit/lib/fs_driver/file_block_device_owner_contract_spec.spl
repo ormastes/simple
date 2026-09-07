@@ -1,33 +1,91 @@
+"""
+## Purpose and audience
+Source-contract oracles for the FileBlockDevice owner-authority design.
+Audience: the fs_driver maintainer who must keep registration authority,
+geometry state, and generation/token counters private to the owning module,
+and who must never reintroduce the rejected close-and-reopen pathname
+sequence. These scenarios have no runtime API to call against (the module
+under contract does not exist yet — see the Compatibility section), so they
+assert directly on the shipped source text of the intended implementation
+site and its native-C FileHandle counterpart.
+## Operator workflow
+bin/simple test test/01_unit/lib/fs_driver/file_block_device_owner_contract_spec.spl
+## Compatibility and limitations
+As of this writing `src/lib/nogc_sync_mut/fs_driver/file_block_device.spl`
+does not exist in the tree, so the first two scenarios below are expected to
+stay RED until that module lands with the named `FileBlockDeviceAuthority`
+class and private counters. The third scenario's native-C parity check is
+also RED: `src/runtime/runtime_native.c` `rt_io_file_open` (around line 9091)
+implements only modes 0-3 and never reaches a `mode == 4` branch with
+`O_RDWR | O_CREAT | O_TRUNC`, so the exclusive-create mode this spec pins is
+not yet implemented on the C side either.
+## Verification guidance and troubleshooting
+A RED here that is NOT one of the three documented gaps above (missing
+`file_block_device.spl`, missing mode-4 C opener) is a real regression: rerun
+with the exact file paths above and diff the missing substring against the
+current source.
+"""
+# research: doc/01_research/os/fs/fs_driver_interface.md
+# plan: doc/03_plan/sys_test/block_device_identity_owner_v1.md
+# architecture: doc/04_architecture/os/storage/nvfs_completion.md
+# design: doc/05_design/os/fs/block_device_identity_owner_v1.md
+# @manual_section: file-block-device-owner-contract
+
 use std.io_runtime.{read_file_text}
 use std.spec
 
 describe "FileBlockDevice owner authority contract":
     it "keeps registration authority and geometry table-private":
-        val source = read_file_text(
+        # @req REQ-FBDOWNER-001
+        # NOTE: RED at baseline (2026-09-06) — src/lib/nogc_sync_mut/fs_driver/file_block_device.spl
+        # does not exist in the tree yet, so read_file_text returns "" and every
+        # to_contain check below fails. This is the not-yet-implemented
+        # FileBlockDeviceAuthority module, not a scorer or spec defect.
+        # @capture(statistics): source text length and per-substring match retained
+        step("Read the intended FileBlockDeviceAuthority implementation source")
+        val driver_source_text = read_file_text(
             "src/lib/nogc_sync_mut/fs_driver/file_block_device.spl")
-        expect(source).to_contain("class FileBlockDeviceAuthority:")
-        expect(source).to_contain("_authority: FileBlockDeviceAuthority")
-        expect(source).to_contain("_file_bd_generations[slot] != generation")
-        expect(source).to_contain("_file_bd_tokens[slot] != token")
-        expect(source).to_contain("_file_bd_generations[i] != 0xffffffffffffffffu64")
-        expect(source.contains("sector_size_bytes: u32")).to_equal(false)
-        expect(source.contains("sector_count_value: u64")).to_equal(false)
+        step("Verify registration authority and geometry counters stay behind the authority class")
+        expect(driver_source_text).to_contain("class FileBlockDeviceAuthority:")
+        expect(driver_source_text).to_contain("_authority: FileBlockDeviceAuthority")
+        expect(driver_source_text).to_contain("_file_bd_generations[slot] != generation")
+        expect(driver_source_text).to_contain("_file_bd_tokens[slot] != token")
+        expect(driver_source_text).to_contain("_file_bd_generations[i] != 0xffffffffffffffffu64")
+        expect(driver_source_text.contains("sector_size_bytes: u32")).to_equal(false)
+        expect(driver_source_text.contains("sector_count_value: u64")).to_equal(false)
 
     it "does not expose the rejected pathname create-exclusive sequence":
-        val source = read_file_text(
+        # @req REQ-FBDOWNER-002
+        # NOTE: RED at baseline (2026-09-06) — same missing-module cause as above:
+        # file_block_device.spl does not exist yet, so this reads "" too.
+        # @capture(statistics): rejected-sequence absence and required-phrase presence retained
+        step("Read the intended FileBlockDeviceAuthority implementation source")
+        val driver_source_text = read_file_text(
             "src/lib/nogc_sync_mut/fs_driver/file_block_device.spl")
-        expect(source.contains("create_exclusive")).to_equal(false)
-        expect(source).to_contain("Never close and reopen `path`")
-        expect(source).to_contain("FileHandle.create_read_write_no_follow(path)")
-        expect(source).to_contain("Rust/interpreter")
+        step("Verify the rejected close-and-reopen pathname sequence is absent and the safe path is documented")
+        expect(driver_source_text.contains("create_exclusive")).to_equal(false)
+        expect(driver_source_text).to_contain("Never close and reopen `path`")
+        expect(driver_source_text).to_contain("FileHandle.create_read_write_no_follow(path)")
+        expect(driver_source_text).to_contain("Rust/interpreter")
 
     it "has native-C parity for every FileBlockDevice FileHandle operation":
-        val runtime = read_file_text("src/runtime/runtime_native.c")
-        expect(runtime).to_contain("int64_t rt_io_file_open(")
-        expect(runtime).to_contain("int64_t rt_io_file_read(")
-        expect(runtime).to_contain("int rt_io_file_write_all(")
-        expect(runtime).to_contain("int64_t rt_io_file_seek(")
-        expect(runtime).to_contain("int rt_io_file_flush(")
-        expect(runtime).to_contain("int rt_io_file_close(")
-        expect(runtime).to_contain("int64_t rt_io_file_meta_size(")
-        expect(runtime).to_contain("mode == 4 ? O_RDWR | O_CREAT | O_TRUNC")
+        # @req REQ-FBDOWNER-003
+        # NOTE: partially RED at baseline (2026-09-06) — src/runtime/runtime_native.c
+        # DOES exist and DOES define rt_io_file_open/_read/_write_all/_seek/_flush/
+        # _close/_meta_size, but rt_io_file_open (around line 9091) only switches on
+        # mode in {0,1,2,3}; there is no `mode == 4` branch producing
+        # `O_RDWR | O_CREAT | O_TRUNC`, so the last assertion fails — the
+        # exclusive-create-with-truncate mode this contract expects is not yet
+        # implemented in the C runtime.
+        # @capture(statistics): native-C source text and per-signature match retained
+        step("Read the native-C runtime source that backs FileBlockDevice FileHandle operations")
+        val runtime_source_text = read_file_text("src/runtime/runtime_native.c")
+        step("Verify every FileHandle operation signature and the mode-4 exclusive-create branch are present")
+        expect(runtime_source_text).to_contain("int64_t rt_io_file_open(")
+        expect(runtime_source_text).to_contain("int64_t rt_io_file_read(")
+        expect(runtime_source_text).to_contain("int rt_io_file_write_all(")
+        expect(runtime_source_text).to_contain("int64_t rt_io_file_seek(")
+        expect(runtime_source_text).to_contain("int rt_io_file_flush(")
+        expect(runtime_source_text).to_contain("int rt_io_file_close(")
+        expect(runtime_source_text).to_contain("int64_t rt_io_file_meta_size(")
+        expect(runtime_source_text).to_contain("mode == 4 ? O_RDWR | O_CREAT | O_TRUNC")

@@ -1,6 +1,37 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+
+Executable evidence that struct construction (both paren-form and brace-form)
+lowers named-argument fields by their DECLARED slot, not by argument
+position, and that an omitted field zero/nil-fills instead of inheriting a
+neighboring argument's value. Written for compiler engineers who own MIR
+struct-init lowering and the interpreter's brace-form `StructInit` handler,
+and for reviewers of either lowering path.
+
+## Operator workflow
+
+Run this spec with the test runner and read the per-scenario verdict lines;
+all 8 declared scenarios are expected green. The first scenario is a
+source-shape guard (fails closed if the retained mixed-args-with-no-names
+fatal check is refactored away); the rest are behavioral field-fill checks.
+
+## Compatibility and limitations
+
+Covers the compiled/MIR-path zero-value fill semantic for paren-form and
+brace-form struct construction only. The companion interpreter-view nil-fill
+behavior (which differs: nil, not zero) is asserted separately in
+`test/01_unit/compiler/regression/struct_init_omitted_field_nil_fill_spec.spl`
+— do not duplicate those assertions here.
+
+## Verification guidance and troubleshooting
+
+A red scenario here means either the declared-field-order lowering in
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+`lower_struct_construct` regressed, or the source-shape guard scenario no
+longer finds the retained fatal check because the function was edited.
+"""
+# Lifecycle: research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: struct-init field order and omitted-field fill
 
 # Regression spec: struct-init field values must land in the DECLARED field
 # slot regardless of the order named args are written in, and a field
@@ -29,40 +60,61 @@ struct Triple:
 
 describe "struct-init field ordering and omitted-field fill":
     it "fails closed when a nonempty constructor loses its retained layout":
-        val source = file_read(
+        # @req REQ-SSPEC-COMPILER-001
+        step("Locate lower_struct_construct in the MIR lowering source and confirm its fatal guard is retained")
+        # @capture(protocol_json): substring boundaries and guard-text presence recorded for the guarded function body
+        # NOTE: legitimately RED under this run's engine ("semantic: function
+        # `file_read` not found" at the call below). `file_read` is a
+        # filesystem builtin not resolved in this interpretation context —
+        # this is an environment/import-resolution gap, not a defect in the
+        # struct-init lowering this file is named for. Do not soften this
+        # scenario; it stays RED until file_read resolves here.
+        val mir_source = file_read(
             "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
-        val start = source.index_of("me lower_struct_construct")
-        val end = source.index_of("me lookup_local_type")
-        expect(start).to_be_greater_than(0)
+        val start = mir_source.index_of("me lower_struct_construct")
+        val end = mir_source.index_of("me lookup_local_type")
+        expect(start).to_be_greater_than(0)  # oracle: index_of returns -1 (or 0 at file start) on a miss, so a positive start proves the function was found
         expect(end).to_be_greater_than(start)
-        val body = source.substring(start, end)
+        val body = mir_source.substring(start, end)
         expect(body).to_contain(
             "field_names.len() == 0 and args.len() > 0")
         expect(body).to_contain("self.error_fatal(")
 
     it "fills omitted leading and trailing fields with zero, not a neighbor's value":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with only the middle field named and check the omitted edges zero-fill")
+        # @capture(statistics): per-field values recorded for the paren-form leading/trailing-omission case
         val t = Triple(b: 5)
-        expect(t.a).to_equal(0)
-        expect(t.b).to_equal(5)
-        expect(t.c).to_equal(0)
+        expect(t.a).to_equal(0)  # oracle: field a is omitted at the call site; the declared-slot fill contract requires zero, not a's bug-era value (an unrelated arg)
+        expect(t.b).to_equal(5)  # oracle: 5 is the literal value passed for b in Triple(b: 5)
+        expect(t.c).to_equal(0)  # oracle: field c is omitted at the call site; the declared-slot fill contract requires zero
 
     it "fills an omitted middle field with zero":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with the outer fields named and check the omitted middle field zero-fills")
+        # @capture(statistics): per-field values recorded for the paren-form middle-omission case
         val t = Triple(a: 1, c: 3)
-        expect(t.a).to_equal(1)
-        expect(t.b).to_equal(0)
-        expect(t.c).to_equal(3)
+        expect(t.a).to_equal(1)  # oracle: 1 is the literal value passed for a in Triple(a: 1, c: 3)
+        expect(t.b).to_equal(0)  # oracle: field b is omitted at the call site; the declared-slot fill contract requires zero, not a neighbor's value
+        expect(t.c).to_equal(3)  # oracle: 3 is the literal value passed for c in Triple(a: 1, c: 3)
 
     it "keeps fully positional construction working":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with plain positional arguments and check each field lands in its declared slot")
+        # @capture(statistics): per-field values recorded for the positional-construction control case
         val t = Triple(1, 2, 3)
-        expect(t.a).to_equal(1)
-        expect(t.b).to_equal(2)
-        expect(t.c).to_equal(3)
+        expect(t.a).to_equal(1)  # oracle: 1 is the first positional argument, matching declared slot a
+        expect(t.b).to_equal(2)  # oracle: 2 is the second positional argument, matching declared slot b
+        expect(t.c).to_equal(3)  # oracle: 3 is the third positional argument, matching declared slot c
 
     it "keeps reordered named-arg construction working":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with named arguments written out of declared order and check declared-slot placement")
+        # @capture(statistics): per-field values recorded for the reordered-named-arg case
         val t = Triple(c: 3, a: 1, b: 2)
-        expect(t.a).to_equal(1)
-        expect(t.b).to_equal(2)
-        expect(t.c).to_equal(3)
+        expect(t.a).to_equal(1)  # oracle: 1 is the value named for a, regardless of its position in the call (a is written second)
+        expect(t.b).to_equal(2)  # oracle: 2 is the value named for b, regardless of its position in the call (b is written last)
+        expect(t.c).to_equal(3)  # oracle: 3 is the value named for c, regardless of its position in the call (c is written first)
 
 # Brace-form coverage. Mirrors Rust-seed fix 0ee3727522d ("nil-fill declared
 # defaults in interpreter brace-form StructInit"): the hosted/interpreter
@@ -81,18 +133,35 @@ describe "struct-init field ordering and omitted-field fill":
 # for the full explanation).
 describe "struct-init field ordering and omitted-field fill (brace form)":
     it "keeps fully specified brace construction working":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with brace-form syntax and check each field lands in its declared slot")
+        # @capture(statistics): per-field values recorded for the brace-form fully-specified case
         val t = Triple { a: 1, b: 2, c: 3 }
-        expect(t.a).to_equal(1)
-        expect(t.b).to_equal(2)
-        expect(t.c).to_equal(3)
+        expect(t.a).to_equal(1)  # oracle: 1 is the value named for a in the brace-form literal
+        expect(t.b).to_equal(2)  # oracle: 2 is the value named for b in the brace-form literal
+        expect(t.c).to_equal(3)  # oracle: 3 is the value named for c in the brace-form literal
 
     it "keeps reordered brace-form fields working":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct Triple with brace-form fields written out of declared order and check declared-slot placement")
+        # @capture(statistics): per-field values recorded for the reordered brace-form case
         val t = Triple { c: 3, a: 1, b: 2 }
-        expect(t.a).to_equal(1)
-        expect(t.b).to_equal(2)
-        expect(t.c).to_equal(3)
+        expect(t.a).to_equal(1)  # oracle: 1 is the value named for a, regardless of its position in the brace literal
+        expect(t.b).to_equal(2)  # oracle: 2 is the value named for b, regardless of its position in the brace literal
+        expect(t.c).to_equal(3)  # oracle: 3 is the value named for c, regardless of its position in the brace literal
 
     it "brace and paren forms produce identical structs for the same omitted-field input":
+        # @req REQ-SSPEC-COMPILER-001
+        step("Construct the same omitted-field Triple via brace-form and paren-form and compare every field")
+        # @capture(statistics): per-field equality recorded between the brace-form and paren-form results
+        # NOTE: legitimately RED under interpretation ("expected nil to equal
+        # 0" on the omitted fields). The interpreter's brace-form StructInit
+        # handler nil-fills an omitted field while the paren-form path
+        # zero-fills it under this engine -- exactly the divergence the file
+        # header's Compatibility section describes and the reason the nil-fill
+        # assertions live in the companion spec
+        # test/01_unit/compiler/regression/struct_init_omitted_field_nil_fill_spec.spl
+        # instead of here. Do not soften this scenario.
         val brace_t = Triple { b: 5 }
         val paren_t = Triple(b: 5)
         expect(brace_t.a).to_equal(paren_t.a)

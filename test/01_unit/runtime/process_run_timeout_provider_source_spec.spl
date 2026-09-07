@@ -196,7 +196,7 @@ describe "core C process timeout provider":
         expect(quoting).to_contain("static bool win_cmd_append_str(char* out, size_t cap, size_t* pos, const char* s)")
         expect(quoting).to_contain("static bool win_cmd_append_arg(char* out, size_t cap, size_t* pos, const char* arg)")
         expect(quoting).to_contain("static char* win_cmd_build_line(const char* cmd, const char** args, int64_t arg_count)")
-        expect(quoting.split("static ").len() - 1).to_equal(5)
+        expect(quoting.split("static ").len() - 1).to_equal(11)
         expect(quoting.find("constructor")).to_equal(-1)
         expect(quoting.find(".CRT$")).to_equal(-1)
         expect(quoting).to_contain("if (!s || s[0] == '\\0') return true;")
@@ -205,3 +205,31 @@ describe "core C process timeout provider":
         expect(quoting).to_contain("backslashes * 2")
         expect(quoting).to_contain("if (total > SIZE_MAX - addition) return NULL;")
         expect(seed_tools).to_contain("\"platform/windows_command_line_private.h\",")
+
+    # Regression pin for
+    # doc/08_tracking/bug/windows_cmd_shell_string_mangled_by_argv_quoting_2026-09-02.md
+    # A cmd.exe shell string carrying a `"` used to be escaped as `\"` by the
+    # CommandLineToArgvW quoter above; cmd.exe does not honour `\"`, so the
+    # string arrived mangled and cmd exited 1 without running anything.
+    # Measured round trip on Windows 11 with the real win_cmd_build_line +
+    # real CreateProcessA, 2026-09-06:
+    #   payload  echo hello "a b c" ^^ and & echo second
+    #   before   cmd /C "echo hello \"a b c\" ^^ and & echo second"
+    #            -> hello \"a b c\" ^ and     (quotes corrupted)
+    #   after    cmd /S /C "echo hello "a b c" ^^ and & echo second"
+    #            -> hello "a b c" ^ and / second   (verbatim)
+    it "hands cmd.exe a quoted shell string verbatim via /S":
+        val quoting = rt_file_read_text("src/runtime/platform/windows_command_line_private.h") ?? ""
+        # The /S contract: cmd strips exactly the first and last quote after
+        # /C (or /K) and preserves everything between them byte-for-byte.
+        expect(quoting).to_contain("win_cmd_append_str(out, total, &pos, \" /S \")")
+        expect(quoting).to_contain("win_cmd_append_str(out, total, &pos, payload)")
+        # Narrow trigger: cmd.exe, exactly `<switch> <payload>`, and only when
+        # the payload actually carries a quote. A quote-free payload with
+        # spaces still relies on cmd's two-quote heuristic, which /S disables.
+        expect(quoting).to_contain("arg_count == 2 && args && win_cmd_is_cmd_exe(cmd)")
+        expect(quoting).to_contain("win_cmd_shell_payload_needs_verbatim(args[1])")
+        expect(quoting).to_contain("strchr(s, '\"') != NULL")
+        # Fail closed on a payload that cannot be represented on one command
+        # line, rather than silently running a truncated prefix of it.
+        expect(quoting).to_contain("if (!win_cmd_shell_payload_single_line(args[1])) return NULL;")

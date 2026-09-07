@@ -1049,4 +1049,21 @@ mod tests {
         assert_eq!(&wire[41..], b"fixture-diagnostic");
         let _ = std::fs::remove_file(output);
     }
+
+    #[test]
+    fn f64_bits_boundary_preserves_float_and_int_but_propagates_wrappers_as_errors() {
+        let float = spl_f64_to_bits(&[Value::Float(0.1)]).expect("float boundary");
+        assert_eq!(float, Value::Int(0.1f64.to_bits() as i64));
+
+        let integer = spl_f64_to_bits(&[Value::Int(7)]).expect("integer boundary");
+        assert_eq!(integer, Value::Int((7.0f64).to_bits() as i64));
+
+        let wrapped = Value::Enum {
+            enum_name: "Fixture".to_string(),
+            variant: "Number".to_string(),
+            payload: Some(Box::new(Value::Float(0.1))),
+        };
+        assert!(spl_f64_to_bits(&[wrapped]).is_err());
+        assert!(spl_f64_to_bits(&[Value::Nil]).is_err());
+    }
 }

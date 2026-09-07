@@ -1,16 +1,39 @@
-"""Metal Strict Smoke Tests
+"""
+## Purpose and audience
+Verifies that forcing the Metal backend via create_with_backend_strict()
+produces the correct typed diagnostic on Linux (Unavailable + reason contains
+"macOS") and a working engine on macOS (command queue, compute pipeline,
+dispatch, completion, and CPU readback parity). Audience: Engine2D backend
+engineers hardening the Metal strict-create path.
+
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/metal_strict_spec.spl`). Tests ALWAYS run.
+Platform-conditional assertions are gated on detect_os().
+
+## Compatibility and limitations
+This mac dev host has Metal, but CI Linux hosts do not: on Linux every
+scenario asserts the typed Unavailable/Err diagnostic instead of hardware
+pixels, and never silently passes — the else-branch asserts the OS gate
+itself. No scenario claims GPU parity without a Metal engine actually
+having been created.
+
+## Verification guidance and troubleshooting
+A failure in a Linux-gated scenario means the probe or strict create
+stopped carrying the structured diagnostic (status, requested_name,
+fallback_reason); a failure in a macOS-gated scenario means the engine or
+its readback diverged. Check the scenario name for which platform gate
+broke.
 
 @tag: rendering, engine2d, metal, strict, platform
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 60%
 @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
-
-Verifies that forcing the Metal backend via create_with_backend_strict()
-produces the correct typed diagnostic on Linux (Unavailable + reason contains
-"macOS") and a working engine on macOS (command queue, compute pipeline,
-dispatch, completion, and CPU readback parity).
-
-Tests ALWAYS run. Platform-conditional assertions are gated on detect_os().
 """
+
+# Lifecycle: research doc/01_research/domain/gpu_renderer_processing_backends_metal.md ;
+# plan doc/03_plan/agent_tasks/gpu_renderer_processing_backends_metal.md ;
+# architecture doc/04_architecture/gpu_renderer_processing_backends_metal.md ;
+# design doc/05_design/gpu_renderer_processing_backends_metal.md
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -33,17 +56,24 @@ fn os_is_macos() -> bool:
 # Tests
 # ============================================================================
 
+# @manual_section: metal strict smoke
 describe "Metal strict smoke tests":
 
     context "probe_metal() platform diagnostics":
 
         it "always returns a BackendProbeResult (never panics)":
+            # @req REQ-METALSTRICT-001
+            # @capture(statistics): probe diagnostic text length retained
+            step("Probe the Metal backend and read its diagnostic text")
             val result = probe_metal()
             # Just confirm we got a result — any status is valid
             val status_text = result.diagnostic_text()
-            expect(status_text.len()).to_be_greater_than(0)
+            expect(status_text.len()).to_be_greater_than(0)  # oracle: the probe owes at least a one-character diagnostic on every host
 
         it "on Linux: status is Unavailable":
+            # @req REQ-METALSTRICT-002
+            # @capture(bit_table): probe status flags retained
+            step("Probe Metal on Linux and check the typed status")
             if os_is_linux():
                 val result = probe_metal()
                 expect(result.status == BackendStatus.Unavailable).to_equal(true)
@@ -51,6 +81,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on Linux: reason contains 'macOS'":
+            # @req REQ-METALSTRICT-003
+            # @capture(statistics): fallback reason retained
+            step("Probe Metal on Linux and read the fallback reason")
             if os_is_linux():
                 val result = probe_metal()
                 expect(result.fallback_reason.contains("macOS")).to_equal(true)
@@ -58,6 +91,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on Linux: feature gate is 'macos'":
+            # @req REQ-METALSTRICT-004
+            # @capture(statistics): feature gate token retained
+            step("Probe Metal on Linux and read the feature gate")
             if os_is_linux():
                 val result = probe_metal()
                 expect(result.feature_gate).to_equal("macos")
@@ -65,6 +101,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on Linux: requested_name is 'metal'":
+            # @req REQ-METALSTRICT-005
+            # @capture(statistics): requested backend name retained
+            step("Probe Metal on Linux and read the requested name")
             if os_is_linux():
                 val result = probe_metal()
                 expect(result.requested_name).to_equal("metal")
@@ -72,6 +111,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on macOS: probe_metal returns initialized or failed (not unavailable)":
+            # @req REQ-METALSTRICT-006
+            # @capture(bit_table): probe terminal-status flags retained
+            step("Probe Metal on macOS and check the status is not Unavailable")
             if os_is_macos():
                 val result = probe_metal()
                 val not_unavailable = result.status != BackendStatus.Unavailable
@@ -82,16 +124,22 @@ describe "Metal strict smoke tests":
     context "Engine2D.create_with_backend_strict metal":
 
         it "always returns a Result (never panics)":
+            # @req REQ-METALSTRICT-007
+            # @capture(bit_table): strict-create outcome flags retained
+            step("Run the strict metal create and check either branch is typed")
             val result = Engine2D.create_with_backend_strict(16, 16, "metal")
             if result.is_ok():
                 var engine = result.unwrap()
-                expect(engine.width()).to_equal(16)
+                expect(engine.width()).to_equal(16)  # oracle: the strict create is asked for a 16-wide framebuffer
                 engine.shutdown()
             else:
                 val diag = result.unwrap_err()
                 expect(diag.requested_name).to_equal("metal")
 
         it "on Linux: returns Err":
+            # @req REQ-METALSTRICT-008
+            # @capture(bit_table): strict-create ok/err flag retained
+            step("Run the strict metal create on Linux and require Err")
             if os_is_linux():
                 val result = Engine2D.create_with_backend_strict(16, 16, "metal")
                 expect(result.is_ok()).to_equal(false)
@@ -99,6 +147,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on Linux: Err carries BackendProbeResult with Unavailable status":
+            # @req REQ-METALSTRICT-009
+            # @capture(bit_table): error diagnostic status flag retained
+            step("Run the strict metal create on Linux and read the diagnostic status")
             if os_is_linux():
                 val result = Engine2D.create_with_backend_strict(16, 16, "metal")
                 if not result.is_ok():
@@ -108,6 +159,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on Linux: Err reason contains 'macOS'":
+            # @req REQ-METALSTRICT-010
+            # @capture(statistics): error fallback reason retained
+            step("Run the strict metal create on Linux and read the fallback reason")
             if os_is_linux():
                 val result = Engine2D.create_with_backend_strict(16, 16, "metal")
                 if not result.is_ok():
@@ -117,12 +171,15 @@ describe "Metal strict smoke tests":
                 expect(os_is_linux()).to_equal(false)
 
         it "on macOS: returns Ok or typed failed diagnostic":
+            # @req REQ-METALSTRICT-011
+            # @capture(bit_table): mac strict-create outcome flags retained
+            step("Run the strict metal create on macOS and check the typed outcome")
             if os_is_macos():
                 val result = Engine2D.create_with_backend_strict(16, 16, "metal")
                 if result.is_ok():
                     var engine = result.unwrap()
-                    expect(engine.width()).to_equal(16)
-                    expect(engine.height()).to_equal(16)
+                    expect(engine.width()).to_equal(16)  # oracle: the strict create is asked for a 16-wide framebuffer
+                    expect(engine.height()).to_equal(16)  # oracle: the strict create is asked for a 16-tall framebuffer
                     engine.shutdown()
                 else:
                     val diag = result.unwrap_err()
@@ -133,6 +190,9 @@ describe "Metal strict smoke tests":
     context "macOS Metal rendering smoke (draw + readback)":
 
         it "on macOS: clear sets all pixels to given color":
+            # @req REQ-METALSTRICT-012
+            # @capture(gui_image): cleared 4x4 Metal framebuffer sample retained
+            step("Clear a strict metal engine to red and read back all 16 pixels")
             if os_is_macos():
                 val result = Engine2D.create_with_backend_strict(4, 4, "metal")
                 if result.is_ok():
@@ -156,6 +216,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_macos()).to_equal(false)
 
         it "on macOS: draw_rect_filled produces non-zero pixels in region":
+            # @req REQ-METALSTRICT-013
+            # @capture(gui_image): rect-region Metal framebuffer sample retained
+            step("Fill the top-left quadrant blue on a strict metal engine and sample it")
             if os_is_macos():
                 val result = Engine2D.create_with_backend_strict(16, 16, "metal")
                 if result.is_ok():
@@ -176,6 +239,9 @@ describe "Metal strict smoke tests":
                 expect(os_is_macos()).to_equal(false)
 
         it "on macOS: CPU backend and Metal produce same clear result":
+            # @req REQ-METALSTRICT-014
+            # @capture(gui_image): CPU-vs-Metal clear parity sample retained
+            step("Clear identical CPU and Metal 4x4 engines to green and diff all 16 pixels")
             if os_is_macos():
                 val metal_result = Engine2D.create_with_backend_strict(4, 4, "metal")
                 var cpu_engine = Engine2D.create_with_backend(4, 4, "cpu")

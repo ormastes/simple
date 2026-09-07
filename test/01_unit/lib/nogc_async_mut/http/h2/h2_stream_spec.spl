@@ -1,139 +1,119 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 """
-# H2 Stream Lifecycle Specification
-
-**Feature IDs:** #AC-1-stream
-**Category:** Stdlib
-**Difficulty:** 3/5
-**Status:** Draft
-**Artifacts:** N/A
+## Purpose and audience
+Executable evidence that the RFC 9113 §5 stream state machine and
+flow-control accounting in src/lib/nogc_async_mut/http/h2/h2_stream.spl
+behave as specified: Idle to Open to HalfClosedLocal to Closed transitions,
+RST_STREAM termination, and send-window depletion. Written for the engineers
+who own the HTTP/2 h2 stack and for reviewers confirming stream-lifecycle
+behavior after a change.
+## Operator workflow
+Run:
+    bin/simple test test/01_unit/lib/nogc_async_mut/http/h2/h2_stream_spec.spl
+Every scenario must pass; a failure is a regression in the stream state
+machine or window accounting.
+## Compatibility and limitations
+Covers the per-stream state machine and send-window accounting only. HPACK,
+frame serialization, and connection-level state live in sibling modules and
+are out of scope. Scenarios call the product API h2_stream_new,
+h2_stream_transition, and h2_stream_consume_send_window directly; no stub
+state values are asserted.
+## Verification guidance and troubleshooting
+Each failing scenario names the RFC 9113 section it pins. A transition
+failure means h2_stream_transition mis-mapped an event for the source state;
+compare against the match table in h2_stream.spl. A window failure means
+h2_stream_consume_send_window deducted the wrong amount.
 """
+# Lifecycle: doc/01_research/lib/networking/net_http_sendfile_routing.md ;
+# doc/03_plan/lib/networking/net_tcp_socket_data_path.md ;
+# doc/04_architecture/ui/web/ui_web_http_core_migration.md ;
+# doc/05_design/lib/networking/net_http_sendfile_routing.md
+# @manual_section: h2-stream-lifecycle
 
 use std.spec
 use std.spec.step
-# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
-"""
-## Purpose and audience
+use std.http.h2.h2_stream.{h2_stream_new, h2_stream_transition, h2_stream_consume_send_window, h2_stream_is_open, h2_stream_is_closed, H2StreamState, H2StreamEvent}
 
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
-
-## Operator workflow
-
-1. Run `bin/simple test test/01_unit/lib/nogc_async_mut/http/h2/h2_stream_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
-
-## Compatibility and limitations
-
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
-
-# doc-path: doc/01_research/local/h2_stream_spec.md
-# doc-path: doc/03_plan/sys_test/h2_stream_spec.md
-# doc-path: doc/04_architecture/h2_stream_spec.md
-# doc-path: doc/05_design/h2_stream_spec_oracles.md
-# @manual: primary
-
+fn stream_state_name(state: H2StreamState) -> text:
+    match state:
+        case Idle:
+            return "idle"
+        case Open:
+            return "open"
+        case ReservedLocal:
+            return "reserved_local"
+        case ReservedRemote:
+            return "reserved_remote"
+        case HalfClosedLocal:
+            return "half_closed_local"
+        case HalfClosedRemote:
+            return "half_closed_remote"
+        case Closed:
+            return "closed"
 
 describe "H2 stream lifecycle and flow control":
-    # @manual scenario evidence
     """
-    ## H2Stream State Machine (RFC 9113 §5.1)
+    ## H2Stream state machine (RFC 9113 §5.1) and window accounting (§5.2)
 
-    Validates stream state transitions and flow-control window accounting:
-    - Idle → Open → HalfClosedLocal → Closed
-    - RST_STREAM terminates any state → Closed
-    - Flow control window depletes and rejects data when exhausted
+    Real state-machine evidence: every scenario drives the shipped
+    h2_stream_new / h2_stream_transition / h2_stream_consume_send_window
+    implementations.
     """
 
     it "starts in idle state":
-        """
-        A newly allocated H2Stream for a given stream_id must begin
-        in the Idle state before any frames are sent or received.
-        """
-        # Stub: stream state constants
-        val STATE_IDLE = 0
-        val stream_state = STATE_IDLE
-        expect(stream_state).to_equal(STATE_IDLE)
-        # stream_id must be odd (client-initiated)
-        val stream_id: u32 = 1
-        expect(stream_id % 2).to_equal(1)
+        # @req REQ-LIB-H2_STREAM-001
+        # @capture(protocol_json): initial stream state for a freshly allocated stream
+        step("Allocate a new stream with h2_stream_new")
+        val stream = h2_stream_new(1, 65535)
+        expect(stream_state_name(stream.state)).to_equal("idle")  # oracle: RFC 9113 §5.1 — a new stream begins in Idle
+        expect(stream.id).to_equal(1)  # oracle: the stream keeps the id given at allocation
+        expect(stream.send_window).to_equal(65535)  # oracle: RFC 9113 §5.2 — the initial window default is 65535
 
     it "transitions to open on HEADERS send":
-        """
-        RFC 9113 §5.1 — Sending a HEADERS frame on an Idle stream moves
-        it to the Open state.
-        """
-        val STATE_IDLE = 0
-        val STATE_OPEN = 1
-        var stream_state = STATE_IDLE
-        # Simulate sending HEADERS (no END_STREAM flag)
-        val end_stream = false
-        if !end_stream:
-            stream_state = STATE_OPEN
-        expect(stream_state).to_equal(STATE_OPEN)
+        # @req REQ-LIB-H2_STREAM-001
+        # @capture(protocol_json): stream state after SendHeaders on an idle stream
+        step("Send HEADERS on the idle stream via h2_stream_transition")
+        val idle = h2_stream_new(1, 65535)
+        val opened = h2_stream_transition(idle, H2StreamEvent.SendHeaders)
+        expect(stream_state_name(opened.state)).to_equal("open")  # oracle: RFC 9113 §5.1 — HEADERS on Idle opens the stream
+        expect(h2_stream_is_open(opened)).to_equal(true)  # oracle: an Open stream can carry data frames
 
     it "transitions to half-closed-local on END_STREAM send":
-        """
-        RFC 9113 §5.1 — Sending DATA or HEADERS with END_STREAM set on
-        an Open stream moves it to the Half-Closed (Local) state.
-        """
-        val STATE_OPEN = 1
-        val STATE_HALF_CLOSED_LOCAL = 2
-        var stream_state = STATE_OPEN
-        # Simulate sending DATA with END_STREAM flag
-        val end_stream = true
-        if end_stream:
-            stream_state = STATE_HALF_CLOSED_LOCAL
-        expect(stream_state).to_equal(STATE_HALF_CLOSED_LOCAL)
+        # @req REQ-LIB-H2_STREAM-001
+        # @capture(protocol_json): stream state after SendEndStream on an open stream
+        step("Send END_STREAM on the open stream via h2_stream_transition")
+        val idle = h2_stream_new(1, 65535)
+        val opened = h2_stream_transition(idle, H2StreamEvent.SendHeaders)
+        val half_closed = h2_stream_transition(opened, H2StreamEvent.SendEndStream)
+        expect(stream_state_name(half_closed.state)).to_equal("half_closed_local")  # oracle: RFC 9113 §5.1 — END_STREAM on Open half-closes local
+        expect(h2_stream_is_open(half_closed)).to_equal(true)  # oracle: half-closed-local can still receive
 
     it "transitions to closed on RST_STREAM":
-        """
-        RFC 9113 §5.1 — Receiving or sending RST_STREAM in any non-idle
-        state immediately moves the stream to Closed.
-        """
-        val STATE_OPEN = 1
-        val STATE_CLOSED = 4
-        var stream_state = STATE_OPEN
-        # Simulate RST_STREAM received
-        val rst_received = true
-        if rst_received:
-            stream_state = STATE_CLOSED
-        expect(stream_state).to_equal(STATE_CLOSED)
+        # @req REQ-LIB-H2_STREAM-002
+        # @capture(protocol_json): stream state after SendRstStream on an open stream
+        step("Send RST_STREAM on the open stream via h2_stream_transition")
+        val idle = h2_stream_new(1, 65535)
+        val opened = h2_stream_transition(idle, H2StreamEvent.SendHeaders)
+        val reset = h2_stream_transition(opened, H2StreamEvent.SendRstStream)
+        expect(stream_state_name(reset.state)).to_equal("closed")  # oracle: RFC 9113 §5.1 — RST_STREAM terminates any non-idle state
+        expect(h2_stream_is_closed(reset)).to_equal(true)  # oracle: the reset stream reports closed
 
     it "tracks flow control window credits":
-        """
-        RFC 9113 §5.2 — The send window starts at the initial_window_size
-        from SETTINGS (default 65535). Sending DATA reduces the window by
-        the number of bytes sent.
-        """
-        val initial_window: i32 = 65535
-        var send_window: i32 = initial_window
-        # Send 1000 bytes of data
-        val bytes_sent: i32 = 1000
-        send_window = send_window - bytes_sent
-        expect(send_window).to_equal(64535)
-        # Send another 64535 bytes — window reaches zero
-        send_window = send_window - 64535
-        expect(send_window).to_equal(0)
+        # @req REQ-LIB-H2_STREAM-003
+        # @capture(statistics): send window after each DATA send
+        step("Consume send window with h2_stream_consume_send_window")
+        val stream = h2_stream_new(1, 65535)
+        val after_first = h2_stream_consume_send_window(stream, 1000)
+        expect(after_first.send_window).to_equal(64535)  # oracle: RFC 9113 §5.2 — sending DATA deducts its size from the window
+        val after_second = h2_stream_consume_send_window(after_first, 64535)
+        expect(after_second.send_window).to_equal(0)  # oracle: the window depletes to exactly zero
 
     it "rejects data when flow control window exhausted":
-        """
-        RFC 9113 §5.2 — A sender MUST NOT send DATA frames when the
-        stream-level flow control window is zero or negative.
-        """
-        var send_window: i32 = 0
-        val data_size: i32 = 512
-        # Attempt to send: blocked because window == 0
-        val can_send = send_window >= data_size
-        expect(can_send).to_equal(false)
-        # After WINDOW_UPDATE adds 1024 credits, send is allowed
-        send_window = send_window + 1024
-        val can_send_after_update = send_window >= data_size
-        expect(can_send_after_update).to_equal(true)
+        # @req REQ-LIB-H2_STREAM-003
+        # @capture(statistics): exhausted window state and the caller-side admission gate
+        step("Attempt to send 512 bytes against a zero window")
+        val stream = h2_stream_new(1, 65535)
+        val starved = h2_stream_consume_send_window(stream, 65535)
+        val data_size = 512
+        val can_send = starved.send_window >= data_size
+        expect(can_send).to_equal(false)  # oracle: RFC 9113 §5.2 — a sender MUST NOT send DATA when the window is zero
+        expect(starved.send_window).to_equal(0)  # oracle: the product window is exactly zero after full depletion

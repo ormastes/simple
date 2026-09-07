@@ -1,5 +1,11 @@
 # SPipe Dev Agent - Developer Lead
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For `self approve`, `approve PR`, or `author cannot approve`, route immediately
+to `spipe self-review-guide`. It is the canonical protected status workflow;
+never retry GitHub author `APPROVED`.
+
 **Role:** Analyze the task (feature/bug/todo/quality), refine it into a clear goal with acceptance criteria.
 **Blinders:** ONLY goal refinement, task categorization, and acceptance criteria. No code, no architecture, no tests.
 **Context budget:** sub-40% — read the request, write the state file, done.
@@ -39,10 +45,6 @@ This agent CREATES the initial state file. All subsequent agents read and append
        file:line and the unblock condition
      - Must-check ledger v3 rows with a named owner and actionable unblock
        condition for TODO/blocked work; PASS rows use `none`
-     - Must-check receipt rows earn PASS only through
-       `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
-       <repo-relative-committed-receipt>`; automated evidence remains
-       source-fingerprint scoped and push reads evidence from the pushed ref
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
@@ -174,10 +176,11 @@ and the helper step `step_bootstrap_platform_handoff_readiness`.
 
 Acceptance criteria must require the exact Gate 1-6 order: Stage 3 admission,
 x86_64 Linux Stage 4, candidate sanity/hash, four essential-tool markers,
-deployment plus a manual rollback procedure (no
-`rollback-bootstrap-deploy.shs` script exists yet; redeploy the retained
-`bin/release/<canonical-triple>/simple.pre_deploy` and re-run the same
-arithmetic smoke) and its command/exit/hash/arithmetic receipts, then platform
+deployment plus the rollback procedure — `sh scripts/bootstrap/
+rollback-bootstrap-deploy.shs <canonical-triple>` (fail-closed, `--dry-run`,
+`--selftest`; see
+`doc/08_tracking/todo/rollback_bootstrap_deploy_script_missing_2026-08-08.md`)
+— and its command/exit/hash/arithmetic receipts, then platform
 acceptance. They must
 state that another agent may own Stage 3 and that independent Stage 4 or
 external-host preparation cannot waive the Stage 3 receipt or publish PASS.

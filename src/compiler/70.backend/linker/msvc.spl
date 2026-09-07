@@ -20,16 +20,21 @@ struct MsvcShellResult:
 # `extern fn shell` declared here to shadow ANY same-named local function
 # in ANY module, anywhere in the program (see msvc_shell_naming bug).
 #
-# WARNING -- the `cmd` string passed here MUST NOT CONTAIN A DOUBLE QUOTE.
-# The runtime's Windows argv builder (win_cmd_build_line,
-# src/runtime/platform/windows_command_line_private.h) applies
-# CommandLineToArgvW quoting, escaping every embedded `"` as `\"`. cmd.exe
-# parses its own command line and does not honour `\"`, so such a string is
-# mangled: cmd prints "The filename, directory name, or volume label syntax
-# is incorrect" and exits 1 without running anything. Measured 2026-09-02
-# with a standalone CreateProcessA harness over the real win_cmd_build_line.
-# Only quote-free probes (`where <tool> 2>nul`) are safe on this helper;
-# anything needing a quoted path must use msvc_run_argv below.
+# A quote in the `cmd` string used to be mangled here: the runtime's Windows
+# argv builder (win_cmd_build_line,
+# src/runtime/platform/windows_command_line_private.h) applied
+# CommandLineToArgvW quoting, escaping every embedded `"` as `\"`, which
+# cmd.exe does not honour -- cmd printed "The filename, directory name, or
+# volume label syntax is incorrect" and exited 1 without running anything.
+# FIXED 2026-09-06 at that shared boundary: a cmd.exe `/C <payload>` spawn
+# whose payload contains a quote is now emitted as `cmd /S /C "<payload>"`,
+# which cmd passes through verbatim. Verified on Windows 11 with the real
+# builder + real CreateProcessA; pinned by
+# test/01_unit/runtime/process_run_timeout_provider_source_spec.spl.
+# Still prefer msvc_run_argv below when invoking a tool directly -- no shell
+# means no cmd.exe parsing at all. Note the fix lives in the C runtime, so
+# the Rust bootstrap seed (its own std::process::Command spawn path) still
+# mangles such strings; see the bug record.
 fn msvc_shell(cmd: text) -> MsvcShellResult:
     val (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
     MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
@@ -254,6 +259,17 @@ fn find_visual_studio() -> text?:
     Some(result.stdout.trim())
 
 # Find link.exe in Visual Studio installation
+fn is_msvc_linker_candidate(path: text) -> bool:
+    val normalized = path.trim().replace("\\", "/").lower()
+    if not normalized.ends_with("link.exe"):
+        return false
+    # Git-for-Windows and MSYS ship GNU coreutils `link.exe`.  It creates hard
+    # links and accepts Unix operands, not MSVC `/OUT:` arguments.  `where`
+    # commonly exposes it before the real linker in bootstrap shells.
+    not normalized.ends_with("/usr/bin/link.exe") and
+        not normalized.contains("/mingw32/bin/link.exe") and
+        not normalized.contains("/mingw64/bin/link.exe")
+
 fn find_link_exe() -> text?:
     # Try to find Visual Studio
     val vs_path_opt = find_visual_studio()
@@ -268,7 +284,7 @@ fn find_link_exe() -> text?:
                 val lines = result.stdout.split("\n")
                 for line in lines:
                     val trimmed = line.trim()
-                    if trimmed.ends_with("link.exe") and file_exists(trimmed):
+                    if is_msvc_linker_candidate(trimmed) and file_exists(trimmed):
                         return Some(trimmed)
 
         case nil:
@@ -289,7 +305,17 @@ fn find_link_exe() -> text?:
     if path_result.exit_code == 0:
         for path_line in path_result.stdout.split("\n"):
             val candidate = path_line.trim()
-            if candidate.ends_with("link.exe") and file_exists(candidate):
+            if is_msvc_linker_candidate(candidate) and file_exists(candidate):
+                return Some(candidate)
+
+    # lld-link implements the MSVC command-line and COFF ABI accepted by this
+    # linker wrapper.  Prefer it to accidentally accepting a Unix `link.exe`
+    # when Visual Studio discovery is unavailable in a bootstrap environment.
+    val lld_result = msvc_shell("where lld-link.exe 2>nul")
+    if lld_result.exit_code == 0:
+        for lld_line in lld_result.stdout.split("\n"):
+            val candidate = lld_line.trim()
+            if candidate.ends_with("lld-link.exe") and file_exists(candidate):
                 return Some(candidate)
 
     nil

@@ -1,21 +1,39 @@
-"""Tile paint parity spec (T2 CPU lane gate)
-
+"""
+## Purpose and audience
 Pixel-parity oracle for the CPU tile-render-culling lane: the tiled painter
 must produce a visible region identical to the classic paint() on the same
 pipeline, while the tile counters prove real op-level culling (no
 fabrication: ops_painted/tiles_skipped are recorded by paint_tiled itself).
+Audience: web-renderer engineers changing paint_tiles or the culling gates.
 
-Fixtures: a 95%-offscreen tall scrolling document, a mixed
-text/border/shadow document compared over the FULL framebuffer, and a tall
-document with a full-width opaque overlay driving T3 occlusion.
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/tile_paint_parity_spec.spl`). Fixtures: a
+95%-offscreen tall scrolling document, a mixed text/border/shadow document
+compared over the FULL framebuffer, and a tall document with a full-width
+opaque overlay driving T3 occlusion.
 
-Plan gate: ops-painted <= 30% of baseline on the offscreen/occluded
-fixtures. Plan: doc/03_plan/ui/rendering/tile_render_culling_plan.md
+## Compatibility and limitations
+The parity oracle needs the CLASSIC full-document paint as its reference,
+so the file is expensive by construction (large 256x5120/256x10240
+framebuffers through the interpreter) and carries a raised timeout. Plan
+gate: ops-painted <= 30% of baseline on the offscreen/occluded fixtures.
+The spec exercises the CPU lane only; GPU tile parity is out of scope.
+
+## Verification guidance and troubleshooting
+A nonzero diff count means the tiled painter diverged from the classic
+painter at that scroll position; a culling-gate failure means
+ops_painted exceeded the plan budget or the occlusion counter did not
+credit the fully covered overlay tiles. Check the `[tile-bench]` print
+for the offending fixture's counters.
 
 @tag: rendering, simple-web, tiles, culling, parity
 """
 
-# @req: REQ-RENDERING-TilePainPari-001
+# Lifecycle: research doc/01_research/domain/simple_web_browser_engine_production_hardening.md ;
+# plan doc/03_plan/ui/rendering/tile_render_culling_plan.md ;
+# architecture doc/04_architecture/simple_web_browser_engine_production_hardening.md ;
+# design doc/05_design/simple_web_browser_engine_production_hardening.md
 
 # @timeout_secs 2400
 # Measured 2026-08-09 on the Rust seed: 7 examples, 0 failures in 1108s.
@@ -116,18 +134,31 @@ fn _parity_at(html: text, doc_h: i32, viewport_y: i32) -> i64:
     expect(base.len()).to_equal(tiled.len())
     _diff_rows(base, tiled, DOC_W, viewport_y, viewport_y + VIEW_H)
 
+# @manual_section: tile paint parity
 describe "tile paint parity":
 
     it "matches the classic painter on the 95%-offscreen tall doc at scroll 0":
-        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, 0)).to_equal(0)
+        # @req REQ-RENDERING-TilePainPari-001
+        # @capture(gui_image): top-of-document tiled vs classic diff count retained
+        step("Render the tall document at scroll 0 on both lanes and diff the viewport")
+        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, 0)).to_equal(0)  # oracle: zero differing pixels is the parity contract between the tiled and classic painters
 
     it "matches the classic painter on the tall doc at mid scroll":
-        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, 2432)).to_equal(0)
+        # @req REQ-RENDERING-TilePainPari-001
+        # @capture(gui_image): mid-document tiled vs classic diff count retained
+        step("Render the tall document at mid scroll on both lanes and diff the viewport")
+        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, 2432)).to_equal(0)  # oracle: zero differing pixels is the parity contract between the tiled and classic painters
 
     it "matches the classic painter on the tall doc near the end":
-        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, TALL_DOC_H - VIEW_H)).to_equal(0)
+        # @req REQ-RENDERING-TilePainPari-001
+        # @capture(gui_image): end-of-document tiled vs classic diff count retained
+        step("Render the tall document at the last full viewport on both lanes and diff")
+        expect(_parity_at(_tall_doc_html(50), TALL_DOC_H, TALL_DOC_H - VIEW_H)).to_equal(0)  # oracle: zero differing pixels is the parity contract between the tiled and classic painters
 
     it "is byte-identical over the FULL framebuffer on the mixed document":
+        # @req REQ-RENDERING-TilePainPari-001
+        # @capture(gui_image): full-framebuffer tiled vs classic diff count retained
+        step("Render the mixed text/border/shadow document fully in view on both lanes and diff")
         # Viewport covers the whole (short) document: every tile is live, so
         # any diff would expose a non-conservative cull or a raster change.
         val html = _mixed_doc_html()
@@ -137,14 +168,21 @@ describe "tile paint parity":
         val tiled = simple_web_layout_render_html_software_pixels_tile_lane(
             html, DOC_W, 512, 0, 512, true
         )
-        expect(_diff_rows(base, tiled, DOC_W, 0, 512)).to_equal(0)
+        expect(_diff_rows(base, tiled, DOC_W, 0, 512)).to_equal(0)  # oracle: with every tile live the painters must agree on all 131072 pixels
 
     it "stays pixel-identical while occlusion-culling under the opaque overlay":
-        expect(_parity_at(_occluded_doc_html(), TALL_DOC_H, 1024)).to_equal(0)
+        # @req REQ-RENDERING-TilePainPari-002
+        # @capture(gui_image): occluded-fixture tiled vs classic diff count retained
+        step("Render the overlay document at the occluded scroll position on both lanes and diff")
+        expect(_parity_at(_occluded_doc_html(), TALL_DOC_H, 1024)).to_equal(0)  # oracle: occlusion culling must never change visible pixels
 
+# @manual_section: tile culling effectiveness
 describe "tile culling effectiveness":
 
     it "paints at most 30% of baseline ops on the deep scrolled doc":
+        # @req REQ-RENDERING-TilePainPari-003
+        # @capture(statistics): ops_total vs ops_painted counters retained
+        step("Render the deep scrolled document with the tiled lane and read the tile counters")
         tile_stats_reset()
         val html = _tall_doc_html(100)
         val tiled = simple_web_layout_render_html_software_pixels_tile_lane(
@@ -161,6 +199,9 @@ describe "tile culling effectiveness":
         expect(tile_stats_tiles_skipped() > 0).to_equal(true)
 
     it "occlusion-culls tiles fully covered by the opaque overlay":
+        # @req REQ-RENDERING-TilePainPari-004
+        # @capture(bit_table): occluded and painted tile counters retained
+        step("Render the overlay document with the tiled lane and read the occlusion counters")
         tile_stats_reset()
         val html = _occluded_doc_html()
         val tiled = simple_web_layout_render_html_software_pixels_tile_lane(
@@ -172,5 +213,5 @@ describe "tile culling effectiveness":
         val total = tile_stats_ops_total()
         print "[tile-bench] fixture=occluded_overlay ops_total={total} ops_painted={painted} tiles_occluded={occluded}"
         # The 256x512 overlay fully covers 2 tiles.
-        expect(occluded >= 2).to_equal(true)
+        expect(occluded >= 2).to_equal(true)  # oracle: the 512px-tall overlay exactly covers two 256px tile rows
         expect(painted * 100 <= total * 30).to_equal(true)

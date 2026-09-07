@@ -25,6 +25,7 @@ use compiler.driver.driver_source_loading.{
     _driver_cached_entry_source_scan,
     _driver_collect_sources,
     driver_entry_scan_cache_reset,
+    driver_entry_scan_cache_release,
     driver_entry_scan_cache_read_count,
     driver_entry_scan_cache_scan_count,
     driver_entry_scan_cache_hit_count
@@ -86,14 +87,35 @@ fn check_fast_reject_is_wired() -> text:
         return "could not read driver_source_loading.spl"
     if not loading.contains("if not content.contains(\"use \") and not content.contains(\"import \"):"):
         return "whole-content early-out missing from the import scan"
-    if not loading.contains("val quick = raw_line.trim()"):
-        return "per-line fast reject missing from the import scan"
-    val reject_at = _spec_index_of(loading, "val quick = raw_line.trim()")
+    if not loading.contains("_driver_entry_import_line_needs_materialization"):
+        return "allocation-free per-line fast reject missing from the import scan"
+    if not loading.contains("content.index_of(\"\\n\", start) ?? content.len()"):
+        return "runtime-text newline cursor missing from the import scan"
+    if not loading.contains("var next_triple_quote = content.index_of(\"\\\"\\\"\\\"\", 0) ?? -1"):
+        return "forward triple-quote cursor missing from the import scan"
+    if loading.contains("content.find(\"\\n\", start)") or loading.contains("content.find(\"\\\"\\\"\\\"\","):
+        return "offset scans must use index_of; interpreter find ignores its start argument"
+    val reject_at = _spec_index_of(loading, "if not materialize_line:")
+    val slice_at = _spec_index_of(loading, "val raw_line = content[current_start:line_end]")
     val comment_at = _spec_index_of(loading, "val comment_at = _driver_text_index_of(scan_line, \"#\")")
-    if reject_at < 0 or comment_at < 0:
-        return "could not locate both the fast reject and the comment scan"
-    if reject_at > comment_at:
-        return "fast reject must precede the per-line comment scan"
+    if reject_at < 0 or slice_at < 0 or comment_at < 0:
+        return "could not locate fast reject, source slice, and comment scan"
+    if reject_at > slice_at or slice_at > comment_at:
+        return "fast reject must precede source materialization and comment scan"
+    ""
+
+fn check_formula_imports() -> text:
+    """Regression fixture for the former long non-import-line hot path."""
+    val formula = read_file_text("src/app/office/sheets/formula.spl")
+    if formula == "":
+        return "could not read formula.spl"
+    val joined = "|" + _driver_entry_import_module_paths(formula).join("|") + "|"
+    for wanted in ["app.office.sheets.cell", "app.office.sheets.cell_ref",
+                   "app.office.sheets.spreadsheet", "common.office.number",
+                   "std.math.special", "std.math.financial",
+                   "app.office.sheets.math_bridge", "std.io_runtime"]:
+        if not joined.contains("|" + wanted + "|"):
+            return "formula import '{wanted}' missing in {joined}"
     ""
 
 fn _spec_index_of(haystack: text, needle: text) -> i64:
@@ -110,6 +132,13 @@ describe "entry-closure import scan":
 
     it "rejects non-import lines before doing per-line comment work":
         expect(check_fast_reject_is_wired()).to_equal("")
+
+    it "advances newline and docstring cursors from nonzero offsets":
+        val source = "val prefix = 1\n\"\"\"\nuse std.ignored\n\"\"\"\nuse std.after\n"
+        expect(_driver_entry_import_module_paths(source)).to_equal(["std.after"])
+
+    it "collects the formula module imports across its long non-import body":
+        expect(check_formula_imports()).to_equal("")
 
     it "memoizes repeated physical source scans by normalized path":
         val _ = rt_dir_create("build/test_tmp/closure_scan_memo", true)
@@ -155,6 +184,15 @@ describe "entry-closure import scan":
         expect(driver_entry_scan_cache_read_count()).to_equal(2)
         expect(driver_entry_scan_cache_scan_count()).to_equal(2)
         expect(driver_entry_scan_cache_hit_count()).to_equal(2)
+
+        # Once the closure paths have been materialized, releasing payloads
+        # retains diagnostic counters but forces later parsing to own a fresh
+        # read instead of retaining both closure and parser source graphs.
+        driver_entry_scan_cache_release()
+        expect(_driver_collect_sources(entry).len()).to_be_greater_than(0)
+        expect(driver_entry_scan_cache_read_count()).to_equal(3)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(3)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(2)
         val _reset_env = rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")
 
     it "wires the shared build-local scan cache into both closure BFS walkers":
@@ -164,12 +202,19 @@ describe "entry-closure import scan":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
 
         expect(_native_build_entry_closure("", []).len()).to_equal(1)
-        expect(driver).to_contain("val (_, closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
+        # The cached vector remains immutable; closure-owned synthetic imports
+        # are appended to its explicit mutable copy below.
+        expect(driver).to_contain("val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
+        expect(driver).to_contain("var closure_imports = cached_closure_imports")
         expect(driver).to_not_contain("val closure_imports = _driver_entry_import_module_paths(closure_src.content)")
         expect(native_build).to_contain("val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)")
         expect(native_build).to_not_contain("var import_scan_cache: Dict<text, [text]> = {}")
         expect(native_build).to_not_contain("var sibling_scan_cache: Dict<text, [text]> = {}")
         expect(native_build).to_not_contain("var module_paths = _driver_entry_import_module_paths(content)")
         expect(compile_targets).to_contain("driver_entry_scan_cache_reset()")
+        expect(compile_targets).to_contain("driver_entry_scan_cache_release()")
         expect(loading).to_contain("native_entry = rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")
         expect(loading).to_contain("val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)")
+        expect(loading).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_SCAN_PHASES")
+        expect(loading).to_contain("[closure-scan] phase={phase} path={path}")
+        expect(native_build).to_contain("driver_closure_scan_phase_trace(\"closure_node:start\", f)")

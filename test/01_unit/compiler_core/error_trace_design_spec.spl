@@ -1,71 +1,109 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER_CORE
+"""
+## Purpose and audience
+Acceptance oracles for the planned `?` operator error-propagation trace
+(doc/03_plan/sspec_modernization_plan.md). Audience: the compiler engineer
+implementing source-location trace recording for the `?` operator, who needs
+a spec pinning the expected shape (text entries formatted "file.spl:line",
+one entry per propagation site, empty when nothing propagated) before the
+real trace buffer exists. Today the scenarios simulate that shape with plain
+values so the contract is pinned in executable form ahead of the
+implementation landing.
+## Operator workflow
+bin/simple test test/01_unit/compiler_core/error_trace_design_spec.spl
+## Compatibility and limitations
+No production `?` trace buffer exists yet — every scenario below simulates
+the expected data shape with local values rather than a real trace recorder.
+When the recorder lands, replace the simulated locals with calls into it and
+keep the same oracles.
+## Verification guidance and troubleshooting
+All ten scenarios are expected to stay green: they assert plain-value
+behaviour (nil propagation, text formatting, list length) that already holds
+in the language today. A failure here means a language-level regression in
+nil handling, list `.push`/`.len`, or `text.contains`, not a `?`-trace defect.
+"""
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Error Propagation Trace — Design Specification
-#
-# This is a TDD spec file documenting expected behavior for ? error traces.
-# No actual error trace implementation exists yet — this spec describes the design.
-#
-# The ? operator should propagate nil/error values up the call stack,
-# and optionally record a trace of source locations for debugging.
+# @manual_section: error-trace-design
 
 describe "error propagation trace design":
     it "? operator propagates nil from a function":
-        # When a value is nil, ? should propagate it (simulate nil propagation)
+        # @req REQ-ERRTRACE-001
+        # @capture(statistics): propagated value retained for the nil-passthrough check
+        step("Bind a nil value and simulate ? propagating it unchanged")
         val nil_val = nil
         val propagated = nil_val  # simulates ? propagation
         expect(propagated).to_be_nil()
 
     it "trace buffer records source location as text":
-        # Expected: each ? site records file:line info as a text entry
+        # @req REQ-ERRTRACE-002
+        # @capture(statistics): trace-entry text retained for the format-length check
+        step("Build a simulated trace entry and confirm it is non-empty text")
         val trace_entry = "file.spl:42"
         expect(trace_entry.len() > 0).to_equal(true)
 
     it "trace entry contains filename":
+        # @req REQ-ERRTRACE-003
+        # @capture(statistics): filename-substring result retained
+        step("Check the simulated trace entry names a .spl source file")
         val trace_entry = "parser.spl:100"
         val has_spl = trace_entry.contains(".spl")
         expect(has_spl).to_equal(true)
 
     it "trace entry contains line number":
+        # @req REQ-ERRTRACE-004
+        # @capture(statistics): colon-separator result retained
+        step("Check the simulated trace entry carries a colon-separated line number")
         val trace_entry = "eval.spl:512"
         val has_colon = trace_entry.contains(":")
         expect(has_colon).to_equal(true)
 
     it "multiple ? sites produce multiple trace entries":
-        # Simulated trace buffer (future: populated by ? operator)
+        # @req REQ-ERRTRACE-005
+        # @capture(statistics): trace-buffer length retained after three pushes
+        step("Push three simulated ? sites onto the trace buffer")
         var trace_buf: [text] = []
         trace_buf.push("a.spl:10")
         trace_buf.push("b.spl:20")
         trace_buf.push("c.spl:30")
-        expect(trace_buf.len()).to_equal(3)
+        expect(trace_buf.len()).to_equal(3)  # oracle: exactly three entries were pushed above
 
     it "trace is empty when no errors propagated":
+        # @req REQ-ERRTRACE-006
+        # @capture(statistics): empty-buffer length retained
+        step("Confirm an untouched trace buffer reports zero entries")
         var empty_trace: [text] = []
-        expect(empty_trace.len()).to_equal(0)
+        expect(empty_trace.len()).to_equal(0)  # oracle: nothing was ever pushed onto this buffer
 
     it "propagation stops at top-level handler":
-        # The outermost caller receives the nil value
+        # @req REQ-ERRTRACE-007
+        # @capture(statistics): top-level return value retained
+        step("Call the simulated top-level handler with the non-error path")
         fn maybe_fail(should_fail: bool) -> i64:
             if should_fail:
                 return 0  # represents error case
             42
         val result = maybe_fail(false)
-        expect(result).to_equal(42)
+        expect(result).to_equal(42)  # oracle: maybe_fail(false) always takes the non-error branch returning 42
 
     it "nil propagation preserves the nil value":
+        # @req REQ-ERRTRACE-008
+        # @capture(statistics): captured value retained after reassignment
+        step("Copy a nil value into a var and confirm it is still nil")
         val original = nil
         var captured = original
         expect(captured).to_be_nil()
 
     it "trace format is colon-separated file and line":
-        # Expected trace format: "filename.spl:linenum"
+        # @req REQ-ERRTRACE-009
+        # @capture(statistics): format-substring result retained
+        step("Check the expected trace format string carries .spl: as a separator")
         val expected_format = "module.spl:1"
         val parts_check = expected_format.contains(".spl:")
         expect(parts_check).to_equal(true)
 
     it "error message is preserved through propagation":
-        # When an error carries a message, ? should not discard it
+        # @req REQ-ERRTRACE-010
+        # @capture(statistics): preserved message text retained
+        step("Copy an error message through a simulated propagation step")
         val error_msg = "connection refused"
         val preserved = error_msg
         expect(preserved).to_equal("connection refused")

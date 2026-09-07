@@ -8,7 +8,42 @@
 **Artifacts:** src/lib/nogc_async_mut/http_server/types.spl,
                src/lib/nogc_async_mut/http_server/cors.spl,
                src/lib/nogc_async_mut/http_server/response.spl
+
+## Purpose and audience
+This spec verifies the E7 `PhaseResult.Respond` header-carrying contract: the
+4-argument constructor `(status, reason, headers, body)`, CORS header
+construction (`build_cors_headers`, `cors_handler`, `handle_preflight`), and
+wire-format serialization (`build_phase_response`, `serialize_response`),
+including CRLF/LF header-injection rejection. Audience: the HTTP server
+stdlib owner and any reviewer changing CORS or response-header behavior in
+`std.http_server`.
+
+## Operator workflow
+`bin/simple test test/01_unit/lib/nogc_async_mut/http_server/phase_result_headers_spec.spl`
+constructs `HttpRequestData`/`ServerConfig`/`CorsConfig` fixtures in-process,
+calls the real `cors_handler`/`handle_preflight`/`build_phase_response`
+functions, and asserts on the returned `PhaseResult` and serialized wire
+bytes — no live socket or process is involved.
+
+## Compatibility and limitations
+Coverage is scoped to header placement and wire serialization; it does not
+exercise the socket-accept loop or TLS termination. CRLF/LF injection
+coverage is for header name and value individually — it does not attempt a
+combined name+value injection matrix.
+
+## Verification guidance and troubleshooting
+A RED result on a header-placement scenario means headers are leaking into
+the body string instead of the `PhaseResult.Respond` headers slot — check
+`build_cors_headers`/`cors_handler` first. A RED result on an injection
+scenario means `build_phase_response`/`serialize_response` stopped dropping
+`\\r`/`\\n`-bearing header names or values, which is a request-smuggling
+regression, not a cosmetic one.
 """
+
+# Lifecycle: doc/01_research/lib/networking/net_http_sendfile_routing.md ;
+# doc/03_plan/sys_test/cors_request_header_preflight.md ;
+# doc/04_architecture/secure_pure_simple_servers.md ;
+# doc/05_design/os/server/http_response_copy_efficiency_v1.md
 
 use std.spec
 use std.http_server.types.{PhaseResult}
@@ -74,6 +109,7 @@ fn _make_cors_config() -> CorsConfig:
 # Tests
 # ============================================================================
 
+# @manual_section: http_server_phase_result_headers
 describe "PhaseResult.Respond 4-arg constructor shape":
     """
     ## E7 — PhaseResult.Respond(status, reason, headers, body)
@@ -87,12 +123,16 @@ describe "PhaseResult.Respond 4-arg constructor shape":
         PhaseResult.Respond now takes (i64, text, [(text,text)], text).
         An empty headers list must be accepted without error.
         """
+        # @req REQ-HTTP-PHR-001
+        step("Construct PhaseResult.Respond with an empty headers list")
         val r = PhaseResult.Respond(200, "OK", [], "hello")
         match r:
             PhaseResult.Respond(s, reason, hdrs, body):
-                expect(s).to_equal(200)
+                # @capture(protocol_json): PhaseResult.Respond destructured fields
+                step("Destructure the result and check status, reason, headers, and body")
+                expect(s).to_equal(200)  # oracle: 200 OK is the fixture's own constructor argument, echoed back unchanged
                 expect(reason).to_equal("OK")
-                expect(hdrs.len()).to_equal(0)
+                expect(hdrs.len()).to_equal(0)  # oracle: constructor was given an empty headers list, so the count must round-trip as 0
                 expect(body).to_equal("hello")
             _:
                 expect(false).to_equal(true)
@@ -101,6 +141,8 @@ describe "PhaseResult.Respond 4-arg constructor shape":
         """
         Headers supplied to Respond are preserved in the enum variant.
         """
+        # @req REQ-HTTP-PHR-002
+        step("Construct PhaseResult.Respond with two headers")
         val hdrs: [(text, text)] = [
             ("X-Custom", "value1"),
             ("Cache-Control", "no-store")
@@ -108,8 +150,10 @@ describe "PhaseResult.Respond 4-arg constructor shape":
         val r = PhaseResult.Respond(204, "No Content", hdrs, "")
         match r:
             PhaseResult.Respond(s, reason, h, body):
-                expect(s).to_equal(204)
-                expect(h.len()).to_equal(2)
+                # @capture(protocol_json): PhaseResult.Respond destructured header pairs
+                step("Destructure the result and check both headers round-trip in order")
+                expect(s).to_equal(204)  # oracle: 204 No Content is the fixture's own constructor argument, echoed back unchanged
+                expect(h.len()).to_equal(2)  # oracle: exactly two header pairs were supplied to the constructor
                 expect(h[0].0).to_equal("X-Custom")
                 expect(h[0].1).to_equal("value1")
                 expect(h[1].0).to_equal("Cache-Control")
@@ -127,16 +171,24 @@ describe "build_cors_headers returns header pairs not a string":
     """
 
     it "returns Access-Control-Allow-Origin for non-wildcard origin":
+        # @req REQ-HTTP-PHR-003
+        step("Build CORS headers for a non-wildcard allowed origin")
         val config = _make_cors_config()
         val pairs = build_cors_headers("https://example.com", config)
+        # @capture(protocol_json): build_cors_headers pair list for a non-wildcard origin
+        step("Check the first pair is Access-Control-Allow-Origin echoing the request origin")
         expect(pairs.len() > 0).to_equal(true)
         val first = pairs[0]
         expect(first.0).to_equal("Access-Control-Allow-Origin")
         expect(first.1).to_equal("https://example.com")
 
     it "includes Vary: Origin for non-wildcard origin":
+        # @req REQ-HTTP-PHR-004
+        step("Build CORS headers for a non-wildcard allowed origin")
         val config = _make_cors_config()
         val pairs = build_cors_headers("https://example.com", config)
+        # @capture(protocol_json): build_cors_headers pair list scanned for Vary: Origin
+        step("Scan the pairs for a Vary: Origin entry")
         var found_vary = false
         for p in pairs:
             if p.0 == "Vary" and p.1 == "Origin":
@@ -144,8 +196,12 @@ describe "build_cors_headers returns header pairs not a string":
         expect(found_vary).to_equal(true)
 
     it "does not include Vary: Origin for wildcard origin":
+        # @req REQ-HTTP-PHR-005
+        step("Build CORS headers for the wildcard origin")
         val config = _make_cors_config()
         val pairs = build_cors_headers("*", config)
+        # @capture(protocol_json): build_cors_headers pair list scanned for a Vary header
+        step("Check no Vary header is present for the wildcard origin")
         var found_vary = false
         for p in pairs:
             if p.0 == "Vary":
@@ -153,8 +209,12 @@ describe "build_cors_headers returns header pairs not a string":
         expect(found_vary).to_equal(false)
 
     it "includes expose headers when configured":
+        # @req REQ-HTTP-PHR-006
+        step("Build CORS headers for a config with expose_headers set")
         val config = _make_cors_config()
         val pairs = build_cors_headers("https://example.com", config)
+        # @capture(protocol_json): build_cors_headers pair list scanned for Access-Control-Expose-Headers
+        step("Check Access-Control-Expose-Headers is present in the pairs")
         var found_expose = false
         for p in pairs:
             if p.0 == "Access-Control-Expose-Headers":
@@ -171,12 +231,16 @@ describe "cors_handler places CORS headers in Respond headers slot":
     """
 
     it "normal CORS GET: ACAO header in headers slot, body is empty":
+        # @req REQ-HTTP-PHR-007
+        step("Dispatch a normal CORS GET request through cors_handler")
         val req = _make_request("GET", "https://example.com")
         val srv = _make_server_config()
         val config = _make_cors_config()
         val result = cors_handler(req, srv, config)
         match result:
             PhaseResult.Respond(status, reason, hdrs, body):
+                # @capture(protocol_json): cors_handler PhaseResult.Respond for a normal GET
+                step("Check the body is empty and Access-Control-Allow-Origin is in the headers slot")
                 # Body must be empty — headers belong in the headers slot
                 expect(body).to_equal("")
                 # At least one header: Access-Control-Allow-Origin
@@ -199,13 +263,17 @@ describe "handle_preflight places CORS headers in Respond headers slot":
     """
 
     it "preflight: 204 status with empty body":
+        # @req REQ-HTTP-PHR-008
+        step("Dispatch an OPTIONS preflight request through cors_handler")
         val req = _make_request("OPTIONS", "https://example.com")
         val srv = _make_server_config()
         val config = _make_cors_config()
         val result = cors_handler(req, srv, config)
         match result:
             PhaseResult.Respond(status, reason, hdrs, body):
-                expect(status).to_equal(204)
+                # @capture(protocol_json): cors_handler PhaseResult.Respond for an OPTIONS preflight
+                step("Check the status is 204 with an empty body and a non-empty headers list")
+                expect(status).to_equal(204)  # oracle: RFC 7231 §6.3.5 — a successful preflight response uses 204 No Content
                 expect(body).to_equal("")
                 val hlen = hdrs.len()
                 expect(hlen > 0).to_equal(true)
@@ -213,9 +281,13 @@ describe "handle_preflight places CORS headers in Respond headers slot":
                 expect(false).to_equal(true)
 
     it "preflight: ACAO header in headers list":
+        # @req REQ-HTTP-PHR-009
+        step("Extract the headers list from a preflight response")
         val req = _make_request("OPTIONS", "https://example.com")
         val config = _make_cors_config()
         val hdrs = _preflight_headers(config, "https://example.com")
+        # @capture(protocol_json): preflight headers list scanned for Access-Control-Allow-Origin
+        step("Check Access-Control-Allow-Origin echoes the request origin")
         var found = false
         for h in hdrs:
             if h.0 == "Access-Control-Allow-Origin":
@@ -224,8 +296,12 @@ describe "handle_preflight places CORS headers in Respond headers slot":
         expect(found).to_equal(true)
 
     it "preflight: Vary: Origin present for non-wildcard":
+        # @req REQ-HTTP-PHR-010
+        step("Extract the headers list from a preflight response")
         val config = _make_cors_config()
         val hdrs = _preflight_headers(config, "https://example.com")
+        # @capture(protocol_json): preflight headers list scanned for Vary: Origin
+        step("Check a Vary: Origin entry is present")
         var found_vary = false
         for h in hdrs:
             if h.0 == "Vary" and h.1 == "Origin":
@@ -233,12 +309,16 @@ describe "handle_preflight places CORS headers in Respond headers slot":
         expect(found_vary).to_equal(true)
 
     it "preflight: body does not contain raw header text":
+        # @req REQ-HTTP-PHR-011
+        step("Dispatch an OPTIONS preflight request through cors_handler")
         val req = _make_request("OPTIONS", "https://example.com")
         val srv = _make_server_config()
         val config = _make_cors_config()
         val result = cors_handler(req, srv, config)
         match result:
             PhaseResult.Respond(status, reason, hdrs, body):
+                # @capture(protocol_json): preflight response body checked for leaked header text
+                step("Check the body string does not contain raw Access-Control text")
                 # Body must not contain "Access-Control" — that goes in headers
                 val body_has_acao = body.contains("Access-Control")
                 expect(body_has_acao).to_equal(false)
@@ -255,54 +335,74 @@ describe "build_phase_response serializes extra headers into wire format":
     """
 
     it "extra headers appear in serialized response":
+        # @req REQ-HTTP-PHR-012
+        step("Build a phase response with two extra headers and serialize it")
         val hdrs: [(text, text)] = [
             ("Access-Control-Allow-Origin", "https://example.com"),
             ("Vary", "Origin")
         ]
         val resp = build_phase_response(200, "OK", hdrs, "")
         val wire = serialize_response(resp)
+        # @capture(protocol_binary): serialized wire bytes scanned for the extra header lines
+        step("Check both extra headers appear as separate wire header lines")
         val has_acao = wire.contains("Access-Control-Allow-Origin: https://example.com")
         val has_vary = wire.contains("Vary: Origin")
         expect(has_acao).to_equal(true)
         expect(has_vary).to_equal(true)
 
     it "status line is correct in serialized response":
+        # @req REQ-HTTP-PHR-013
+        step("Build a phase response with a 204 status and serialize it")
         val resp = build_phase_response(204, "No Content", [], "")
         val wire = serialize_response(resp)
+        # @capture(protocol_binary): serialized wire bytes scanned for the status line
+        step("Check the serialized status line reads HTTP/1.1 204 No Content")
         val has_status = wire.contains("HTTP/1.1 204 No Content")
         expect(has_status).to_equal(true)
 
-    it "CRLF injection in header value is dropped":
+    it "rejects CRLF injection in header value":
+        # @req REQ-HTTP-PHR-014
+        step("Build a phase response with a CRLF-bearing header value")
         val hdrs: [(text, text)] = [
             ("X-Safe", "good"),
             ("X-Injected", "bad\r\nX-Evil: injected")
         ]
         val resp = build_phase_response(200, "OK", hdrs, "")
         val wire = serialize_response(resp)
+        # @capture(protocol_binary): serialized wire bytes scanned for the injected header
+        step("Check the safe header survives and the injected header is dropped")
         val has_safe = wire.contains("X-Safe: good")
         val has_evil = wire.contains("X-Evil")
         expect(has_safe).to_equal(true)
         expect(has_evil).to_equal(false)
 
-    it "CRLF injection in header name is dropped":
+    it "rejects CRLF injection in header name":
+        # @req REQ-HTTP-PHR-015
+        step("Build a phase response with a CRLF-bearing header name")
         val hdrs: [(text, text)] = [
             ("X-Safe", "good"),
             ("X-Bad\r\nX-Evil", "injected")
         ]
         val resp = build_phase_response(200, "OK", hdrs, "")
         val wire = serialize_response(resp)
+        # @capture(protocol_binary): serialized wire bytes scanned for the injected header
+        step("Check the safe header survives and the injected header is dropped")
         val has_safe = wire.contains("X-Safe: good")
         val has_evil = wire.contains("X-Evil")
         expect(has_safe).to_equal(true)
         expect(has_evil).to_equal(false)
 
-    it "LF-only injection in header value is dropped":
+    it "rejects LF-only injection in header value":
+        # @req REQ-HTTP-PHR-016
+        step("Build a phase response with an LF-only header value")
         val hdrs: [(text, text)] = [
             ("X-Safe", "good"),
             ("X-Lf", "bad\nvalue")
         ]
         val resp = build_phase_response(200, "OK", hdrs, "")
         val wire = serialize_response(resp)
+        # @capture(protocol_binary): serialized wire bytes scanned for the LF-injected header
+        step("Check the safe header survives and the LF-injected header is dropped")
         val has_safe = wire.contains("X-Safe: good")
         val has_lf = wire.contains("X-Lf")
         expect(has_safe).to_equal(true)

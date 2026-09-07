@@ -1,37 +1,50 @@
 """
-# Dict.get() Miss Returns nil Specification
+## Purpose and audience
 
-**Feature IDs:** #MIR-DICT-GET-MISS
-**Category:** Compiler / MIR lowering
-**Difficulty:** 3/5
-**Status:** In Progress
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md
+Executable evidence that `d.get(k)` yields `nil` for a missing key while a
+stored zero / `false` / empty text stays distinguishable from that miss.
+Written for the compiler engineers who own the MIR dict decode arms and for
+reviewers deciding whether a dict change may land without a compiled-lane
+run.
 
-## Overview
+## Operator workflow
 
-`d.get(k)` must yield `nil` for a key that is not present, and must keep a
-stored zero / `false` distinguishable from that miss.
+Run this spec and confirm the Results line reports exactly 1 failed (the
+documented OPEN f64-miss canary, see Compatibility). The first two
+describes drive real dicts through the interpreter lane; the third describe
+spawns `dict_get_miss_returns_nil_jit_probe.spl` -- a runnable program, so
+it is not subject to the layers that force a spec body onto the
+interpreter -- under each NAMED engine and scores its verdict line.
 
-## Lane coverage -- READ BEFORE TRUSTING A GREEN RUN
+## Compatibility and limitations
 
-The defect these examples describe is **compiled-lane only**. `simple test`
-executes the tree-walking interpreter, which has always been CORRECT here, so
-every `describe` below is green both before and after the MIR fix.
-
-Until 2026-08-09 that was the WHOLE of this file, and this header said so in
-prose: the spec was not a gate for the lane it is named after. The final
-`describe` in this file closes that hole. It spawns
-`dict_get_miss_returns_nil_jit_probe.spl` -- a runnable program, so it is not
-subject to the four layers that force a spec body onto the interpreter -- under
-each NAMED engine and scores its verdict line.
+The defect this file is named for is compiled-lane only: the tree-walking
+interpreter has always been correct here, so interpreter-lane examples are
+green both before and after any MIR fix and cannot gate the native lane by
+themselves. One gap remains deliberately open: `d.get(k)` on a MISS for
+`V = f64` under the JIT decodes to a real float bit pattern instead of nil
+(`rt_value_as_float` cannot round-trip the flat-Option nil sentinel;
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:987-991` excludes
+the F64 decode arm on purpose). The last-but-one scenario pins that gap as
+an engine-reach canary and stays RED until it is fixed.
 
 Mechanism: `src/lib/nogc_sync_mut/spec/engine_probe.spl`
 Pattern:   `doc/07_guide/infra/testing/spec_engine_reach.md`
 Guard:     `scripts/check/check-engine-claiming-specs-use-probe.shs`
+
+## Verification guidance and troubleshooting
+
+If the interpreter control arm fails, the probe or harness broke, not
+codegen. If the JIT arm fails, a decode-arm regression landed. If the
+f64 canary goes green on the JIT arm, the gap was fixed: update that
+scenario to expect `PROBE F64MISS: true` on both engines -- it pins current
+reality, not approval.
 """
+# Lifecycle: research: doc/01_research/language/type_inference/type_inference_architecture.md ; plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ; architecture: doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md ; design: doc/05_design/language/collections/fixed_size_arrays.md
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @manual_section: dict miss vs stored zero
+
+use std.spec.step
 
 use std.spec
 use std.spec.engine_probe.{engine_stdout, is_known_engine}
@@ -52,29 +65,43 @@ describe "Dict.get() miss vs stored zero":
     """
 
     it "returns nil for a missing i64 key":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): get() result for the absent key
+        step("read an absent key from a populated i64 dict")
         var d: Dict<text, i64> = {}
         d["a"] = 7
         expect(d.get("zz") == nil).to_equal(true)
 
     it "keeps a stored zero distinguishable from a miss":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): get() results for the stored-zero and absent keys
+        step("read a stored zero and an absent key from the same dict")
         var d: Dict<text, i64> = {}
         d["zero"] = 0
         expect(d.get("zero") == nil).to_equal(false)
         expect(d.get("absent") == nil).to_equal(true)
 
     it "applies ?? default only on a miss":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): ?? results for the stored-zero and absent keys
+        step("read a stored zero and an absent key through the ?? operator")
         var d: Dict<text, i64> = {}
         d["zero"] = 0
-        expect(d.get("absent") ?? -77).to_equal(-77)
-        expect(d.get("zero") ?? -77).to_equal(0)
+        expect(d.get("absent") ?? -77).to_equal(-77)  # oracle: a miss yields the caller default, so the sentinel shows up verbatim
+        expect(d.get("zero") ?? -77).to_equal(0)  # oracle: a stored zero is a hit, so the default must NOT replace it
 
     it "returns nil for a missing text key":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): get() results for the text-valued dict
+        step("read an absent key from a populated text dict")
         var t: Dict<text, text> = {}
         t["k"] = "yes"
         expect(t.get("zz") == nil).to_equal(true)
         expect(t.get("k") == nil).to_equal(false)
 
     it "applies ?? default only on a miss for text values":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): ?? results for the text-valued dict
         step("Verify: applies ?? default only on a miss for text values")
         var t: Dict<text, text> = {}
         t["k"] = "yes"
@@ -82,6 +109,9 @@ describe "Dict.get() miss vs stored zero":
         expect(t.get("k") ?? "DEFAULT").to_equal("yes")
 
     it "keeps a stored true distinguishable from a miss":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): get() results for the bool-valued dict
+        step("read stored true, stored false and an absent key from a bool dict")
         var b: Dict<text, bool> = {}
         b["t"] = true
         b["f"] = false
@@ -90,17 +120,21 @@ describe "Dict.get() miss vs stored zero":
         expect(b.get("zz") == nil).to_equal(true)
 
     it "returns the correct hit for a struct-valued dict":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): decoded struct payload from the hit
         step("Verify: returns the correct hit for a struct-valued dict")
         var s: Dict<i64, Pt> = {}
         s[1] = Pt(x: 3, y: 4)
         val hit = s.get(1)
         if val hv = hit:
-            expect(hv.x).to_equal(3)
-            expect(hv.y).to_equal(4)
+            expect(hv.x).to_equal(3)  # oracle: the stored payload's x field, uncorrupted by the flat-Option decode
+            expect(hv.y).to_equal(4)  # oracle: the stored payload's y field, uncorrupted by the flat-Option decode
         else:
             assert_true(false, "expected a hit, got nil")
 
     it "reproduces the OPEN f64-miss gap on the native/JIT lane (interpreter-only green here)":
+        # @req REQ-DICT-GET-MISS-001
+        # @capture(protocol_json): f64 miss/hit decode results on the interpreter lane
         step("Verify: reproduces the OPEN f64-miss gap on the native/JIT lane (interpreter-only green here)")
         """
         `d.get(k)` on a MISS for `V = f64` is a documented, still-open gap
@@ -132,16 +166,22 @@ describe "Dict.len() on the native lane":
     """
 
     it "counts a local dict":
+        # @req REQ-DICT-GET-MISS-002
+        # @capture(protocol_json): len() for the two-entry local dict
+        step("count a two-entry local dict")
         var d: Dict<text, i64> = {}
         d["a"] = 7
         d["b"] = 0
-        expect(d.len()).to_equal(2)
+        expect(d.len()).to_equal(2)  # oracle: the dict holds exactly the a and b entries
 
     it "counts a dict passed as a parameter":
+        # @req REQ-DICT-GET-MISS-002
+        # @capture(protocol_json): len() observed across a call boundary
+        step("count the same two-entry dict through a parameter pass")
         var d: Dict<text, i64> = {}
         d["a"] = 7
         d["b"] = 0
-        expect(dict_len_of(d)).to_equal(2)
+        expect(dict_len_of(d)).to_equal(2)  # oracle: the count must survive a call boundary, not just local access
 
 
 fn dict_len_of(d: Dict<text, i64>) -> i64:
@@ -177,12 +217,16 @@ describe "Dict.get() miss decoding holds on the JIT lane (out of process)":
     """
 
     it "passes the probe under the interpreter":
+        # @req REQ-DICT-GET-MISS-003
+        # @capture(protocol_json): interpreter-arm probe verdict line
         step("Verify: passes the probe under the interpreter")
         # Control column. The interpreter was correct throughout, so this arm
         # failing means the probe or the harness broke, not codegen.
         expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
 
     it "passes the probe under the cranelift JIT":
+        # @req REQ-DICT-GET-MISS-003
+        # @capture(protocol_json): JIT-arm probe verdict line
         step("Verify: passes the probe under the cranelift JIT")
         # The arm that carries the weight: stored-zero / stored-false /
         # stored-empty-text must stay distinguishable from a miss, and
@@ -191,20 +235,21 @@ describe "Dict.get() miss decoding holds on the JIT lane (out of process)":
         expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
 
     it "still observes the documented OPEN f64-miss gap under the JIT only":
+        # @req REQ-DICT-GET-MISS-003
+        # @capture(protocol_json): F64MISS verdict lines from both engine arms
         step("Verify: still observes the documented OPEN f64-miss gap under the JIT only")
-        # This is the ENGINE-REACH CANARY, not a wish. `rt_value_as_float`
-        # cannot round-trip the flat-Option nil sentinel (RT_NIL == 3) through
-        # a float bit pattern, so dict_get_preserve_flat_nil
-        # (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:991)
-        # deliberately does NOT guard the F64 decode arm.
-        #
-        # Measured 2026-08-09, same probe, same binary, both engines:
+        # NOTE: legitimate RED by design -- this is the ENGINE-REACH CANARY,
+        # not a wish. The open defect is the unguarded F64 decode arm at
+        # src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:987-991
+        # (rt_value_as_float cannot round-trip the flat-Option nil sentinel
+        # RT_NIL == 3 through a float bit pattern). Measured 2026-08-09, same
+        # probe, same binary, both engines:
         #   interpret -> PROBE F64MISS: true    (correct)
         #   jit       -> PROBE F64MISS: false   (the open gap)
         #
         # Asserting BOTH answers is what proves each arm reached the engine it
         # names. If the "jit" arm ever silently fell back to the interpreter,
-        # this example goes RED instead of quietly going vacuous.
+        # this example goes RED differently instead of quietly going vacuous.
         #
         # When the f64 gap is FIXED, this example must be updated to expect
         # `true` on both arms -- it is a pin on current reality, not approval.
@@ -212,6 +257,8 @@ describe "Dict.get() miss decoding holds on the JIT lane (out of process)":
         expect(engine_stdout(_PROBE, "jit")).to_contain("PROBE F64MISS: false")
 
     it "rejects an unrecognised engine name instead of silently using the JIT":
+        # @req REQ-DICT-GET-MISS-003
+        # @capture(protocol_json): engine-name admission results
         step("Verify: rejects an unrecognised engine name instead of silently using the JIT")
         # SIMPLE_EXECUTION_MODE falls back to the JIT on any unknown value, so
         # a typo like "interp" would make an A/B comparison look like

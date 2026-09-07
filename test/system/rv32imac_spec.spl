@@ -7,6 +7,26 @@
 # RV32IMAC Processor System Tests
 # @req REQ-RV32IMAC
 # @feature rv32imac
+"""## Purpose and audience
+Executable decode, hazard, CSR, M-extension, and A-extension evidence for the
+RV32IMAC core model. Audience: engineers changing riscv_common decode or
+pipeline control helpers.
+## Operator workflow
+Run the spec from the repository root with the bootstrap binary; each scenario
+drives one decode or pipeline helper and pins its field values inline.
+## Compatibility and limitations
+Requires the `hardware.riscv_common` module tree to resolve from the spec's
+project roots; hosts without it fail at load before any scenario executes.
+Expected immediates are hex-encoded instruction encodings, not magic values.
+## Verification guidance and troubleshooting
+A failure names the misdecoded field. Recompute the expected field value from
+the pinned instruction word (e.g. 0x00A00513) with the RISC-V manual before
+touching any assertion.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use spipe.*
 use hardware.riscv_common.core.riscv_compressed.{is_compressed, rvc_reg}
@@ -167,41 +187,62 @@ class Rv32ReservationSet:
 fn create_rv32_reservation_set() -> Rv32ReservationSet:
     Rv32ReservationSet(valid: false, addr: 0)
 
+# @manual_section: rv32imac processor
 describe "RV32IMAC Processor":
     context "instruction decode":
         it "extracts opcode correctly":
+            # @req REQ-RV32IMAC
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): opcode field bits of the pinned instruction word
             step("extracts opcode correctly")
             expect(rv32_decode_opcode(0x00A00513)).to_equal(OP_OP_IMM)
 
         it "extracts rd correctly":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): rd field bits of the pinned instruction word
             step("extracts rd correctly")
-            expect(rv32_decode_rd(0x00A00513)).to_equal(10)
+            expect(rv32_decode_rd(0x00A00513)).to_equal(10)  # oracle: rd field of 0x00A00513 is x10 (a0)
 
         it "extracts rs1 correctly":
-            expect(rv32_decode_rs1(0x00A00513)).to_equal(0)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): rs1 field bits of the pinned instruction word
+            step("extract rs1 from the pinned instruction word")
+            expect(rv32_decode_rs1(0x00A00513)).to_equal(0)  # oracle: rs1 field bits 15..19 of 0x00A00513 are zero
 
         it "extracts funct3 correctly":
-            expect(rv32_decode_funct3(0x00A00513)).to_equal(0)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): funct3 field bits of the pinned instruction word
+            step("extract funct3 from the pinned instruction word")
+            expect(rv32_decode_funct3(0x00A00513)).to_equal(0)  # oracle: funct3 bits 12..14 of 0x00A00513 encode ADDI
 
         it "decodes I-type immediate":
-            expect(rv32_decode_imm_i(0x00A00513)).to_equal(10)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): I-type immediate bits of the pinned instruction word
+            step("decode the I-type immediate field")
+            expect(rv32_decode_imm_i(0x00A00513)).to_equal(10)  # oracle: imm[11:0] of 0x00A00513 is 10
 
         it "decodes negative I-type immediate":
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): sign-extended negative immediate value
+            step("decode a negative I-type immediate")
             expect(rv32_decode_imm_i(0xFFB00513) + 4294967296).to_equal(0xFFFFFFFB)
 
         it "decodes R-type ALU operation":
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): ALU operation selected by funct7
+            step("decode the R-type ALU operation")
             expect(rv32_decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)).to_equal(AluOp.Add)
 
         it "distinguishes ADD from SUB":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): ALU op selection for both funct7 variants
             step("distinguishes ADD from SUB")
             expect(rv32_decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)).to_equal(AluOp.Add)
             expect(rv32_decode_alu_op(OP_OP, F3_ADD_SUB, F7_SUB_SRA)).to_equal(AluOp.Sub)
 
         it "detects RVC instructions and compressed register aliases":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): compressed predicate and rvc register alias
             step("detects RVC instructions and compressed register aliases")
             expect(is_compressed(0x0512)).to_equal(true)
             expect(rvc_reg(2)).to_equal(10)  # oracle: expected value 10 is the behavior asserted by this regression spec
@@ -209,31 +250,37 @@ describe "RV32IMAC Processor":
     context "pipeline hazards":
         it "detects load-use hazard":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): hazard predicate inputs and verdict
             step("detects load-use hazard")
             expect(rv32_detect_load_use_hazard(5, 0, 5, MemOp.Load, true)).to_equal(true)
 
         it "no hazard when EX is not a load":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): hazard predicate with a non-load EX stage
             step("no hazard when EX is not a load")
             expect(rv32_detect_load_use_hazard(5, 0, 5, MemOp.None_, true)).to_equal(false)
 
         it "no hazard when rd is x0":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): hazard predicate with rd = x0
             step("no hazard when rd is x0")
             expect(rv32_detect_load_use_hazard(0, 3, 0, MemOp.Load, true)).to_equal(false)
 
         it "forwards from EX to ID":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): forwarding source selection for the EX hit
             step("forwards from EX to ID")
             expect(rv32_resolve_forward_rs1(5, 5, true, 0, false)).to_equal(ForwardSrc.FromEx)
 
         it "forwards from MEM to ID when EX does not match":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): forwarding source selection for the MEM hit
             step("forwards from MEM to ID when EX does not match")
             expect(rv32_resolve_forward_rs1(5, 3, true, 5, true)).to_equal(ForwardSrc.FromMem)
 
         it "stalls on load-use hazard":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): pipeline control flags under load-use stall
             step("stalls on load-use hazard")
             val ctrl = rv32_pipeline_control(true, false, false)
             expect(ctrl.stall_if).to_equal(true)
@@ -242,6 +289,7 @@ describe "RV32IMAC Processor":
 
         it "flushes on taken branch":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): pipeline control flags on a taken branch
             step("flushes on taken branch")
             val ctrl = rv32_pipeline_control(false, true, false)
             expect(ctrl.flush_if).to_equal(true)
@@ -250,6 +298,7 @@ describe "RV32IMAC Processor":
     context "CSR operations":
         it "reads and writes mstatus correctly":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): mstatus write-read round trip value
             step("reads and writes mstatus correctly")
             var csr = create_rv32_csr_file()
             csr.write(CSR_MSTATUS, 0x00001808)
@@ -257,12 +306,14 @@ describe "RV32IMAC Processor":
 
         it "reads misa correctly":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): pinned misa identity value
             step("reads misa correctly")
             val csr = create_rv32_csr_file()
             expect(csr.read(CSR_MISA)).to_equal(0x40101104)
 
         it "handles CSRRW":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): CSRRW old-value swap result
             step("handles CSRRW")
             var csr = create_rv32_csr_file()
             csr.write(CSR_MSCRATCH, 0x12345678)
@@ -271,6 +322,7 @@ describe "RV32IMAC Processor":
 
         it "handles CSRRS":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): CSRRS set-bits old value
             step("handles CSRRS")
             var csr = create_rv32_csr_file()
             expect(csr.csrrs(CSR_MIE, 0x80)).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
@@ -278,6 +330,7 @@ describe "RV32IMAC Processor":
 
         it "handles CSRRC":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): CSRRC clear-bits old value
             step("handles CSRRC")
             var csr = create_rv32_csr_file()
             csr.write(CSR_MIE, 0xFF)
@@ -286,6 +339,7 @@ describe "RV32IMAC Processor":
 
         it "handles ECALL trap":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): trap frame mepc mcause and mtvec values
             step("handles ECALL trap")
             var csr = create_rv32_csr_file()
             csr.write(CSR_MTVEC, 0x80000100)
@@ -296,6 +350,7 @@ describe "RV32IMAC Processor":
 
         it "returns from trap via mret":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): mepc value observed at trap return
             step("returns from trap via mret")
             var csr = create_rv32_csr_file()
             csr.write(CSR_MTVEC, 0x80000100)
@@ -305,20 +360,26 @@ describe "RV32IMAC Processor":
     context "M extension":
         it "computes MUL correctly":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(statistics): MUL product of the pinned operands
             step("computes MUL correctly")
-            expect(rv32_muldiv_execute("mul", 12, 13)).to_equal(156)
+            expect(rv32_muldiv_execute("mul", 12, 13)).to_equal(156)  # oracle: 12 * 13 = 156, the MUL product of the scenario inputs
 
         it "handles division by zero":
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(statistics): division-by-zero sentinel value
+            step("handles division by zero")
             expect(rv32_muldiv_execute("div", 42, 0)).to_equal(0xFFFFFFFF)
 
         it "handles signed division overflow":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(statistics): signed overflow division sentinel
             step("handles signed division overflow")
             expect(rv32_muldiv_execute("div", 0x80000000, 0xFFFFFFFF)).to_equal(0x80000000)
 
     context "A extension":
         it "LR/SC succeeds on uncontested reservation":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): LR/SC conditional-store success verdict
             step("LR/SC succeeds on uncontested reservation")
             var rs = create_rv32_reservation_set()
             rs.reserve(0x80000000)
@@ -326,6 +387,7 @@ describe "RV32IMAC Processor":
 
         it "SC fails after intervening store":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): LR/SC verdict after a matched invalidation
             step("SC fails after intervening store")
             var rs = create_rv32_reservation_set()
             rs.reserve(0x80000000)
@@ -334,6 +396,7 @@ describe "RV32IMAC Processor":
 
         it "SC fails on address mismatch":
             # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): LR/SC verdict on a misaligned reservation address
             step("SC fails on address mismatch")
             var rs = create_rv32_reservation_set()
             rs.reserve(0x80000000)

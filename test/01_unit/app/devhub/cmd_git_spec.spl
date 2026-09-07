@@ -1,0 +1,94 @@
+# devhub — `git`/`gh` facade command-layer unit tests.
+#
+# Feature: gh `--body-file` resolution + facade dispatch guards
+# Category: DevHub, CLI, GitHub-compat
+# Status: Implemented
+#
+# `--body-file` is the spelling `.claude/rules/vcs.md` prescribes for opening a
+# pull request in this repository, so it is the form most likely to arrive —
+# and it was silently dropped: it matched no rename and no refusal, passed
+# through to the Bitbucket command layer, and was never read. The PR would have
+# been created with an EMPTY body, exit 0.
+#
+# These tests also pin the reason this code reads files through `app.io.mod`
+# rather than `std.nogc_sync_mut.file_system.file_ops`: the latter is a MOCK
+# that answers `true` from `file_exists` for any non-empty path and returns the
+# literal text "mock file content: <path>". See
+# doc/08_tracking/bug/file_ops_mock_answers_for_nonexistent_paths_2026-09-06.md
+#
+# Source: src/app/devhub/cmd_git.spl
+
+use app.devhub.cmd_git.{handle_git, _resolve_body_file}
+use app.io.mod.{file_write, dir_create_all}
+
+
+val FIXTURE_DIR = "build/test-artifacts/01_unit/app/devhub/cmd_git"
+val BODY_PATH = FIXTURE_DIR + "/body.md"
+val BODY_TEXT = "Line one of the body.\nLine two."
+
+
+fn write_body_fixture() -> bool:
+    if not dir_create_all(FIXTURE_DIR):
+        return false
+    file_write(BODY_PATH, BODY_TEXT)
+
+
+describe "devhub gh facade (command layer)":
+
+    describe "--body-file resolution":
+        it "reads the file and rewrites it to an inline --body":
+            expect(write_body_fixture()).to_equal(true)
+            val (ok, argv, err) = _resolve_body_file(["pr", "create", "--title", "T", "--body-file", BODY_PATH])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+            expect(argv.join("")).to_equal(["pr", "create", "--title", "T", "--body", BODY_TEXT].join(""))
+
+        it "accepts gh's -F short form":
+            expect(write_body_fixture()).to_equal(true)
+            val (ok, argv, err) = _resolve_body_file(["-F", BODY_PATH])
+            expect(ok).to_equal(true)
+            expect(argv.join("")).to_equal(["--body", BODY_TEXT].join(""))
+
+        it "refuses a missing file instead of sending an empty body":
+            # The whole point. An empty body that exits 0 is worse than an
+            # error, because nobody notices until the PR is already open.
+            val (ok, argv, err) = _resolve_body_file(["pr", "create", "--body-file", "/definitely/not/here.md"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("cannot read --body-file")
+            expect(err).to_contain("/definitely/not/here.md")
+
+        it "guards against a mock filesystem answering for a missing path":
+            # Regression guard, not paranoia: measured 2026-09-06,
+            # std.nogc_sync_mut.file_system.file_ops.file_exists("/nonexistent")
+            # returns TRUE and its reader returns "mock file content: <path>".
+            # Wiring --body-file through that module opens pull requests whose
+            # body is the literal string "mock file content: ...". If this file
+            # ever switches back to that module, this assertion fails.
+            val (ok, argv, err) = _resolve_body_file(["--body-file", "/nonexistent"])
+            expect(ok).to_equal(false)
+            expect(err).to_not_contain("mock file content")
+
+        it "refuses --body-file with no path argument":
+            val (ok, argv, err) = _resolve_body_file(["pr", "create", "--body-file"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("requires a path")
+
+        it "leaves argv untouched when no --body-file is present":
+            val (ok, argv, err) = _resolve_body_file(["pr", "list", "--state", "open"])
+            expect(ok).to_equal(true)
+            expect(argv.join(" ")).to_equal("pr list --state open")
+
+    describe "dispatch that must answer without resolving a backend":
+        it "prints help for --help, -h and help":
+            # A user asking how to use the command has by definition not
+            # configured it yet, so help must not require a backend.
+            expect(handle_git(["--help"])).to_equal(0)
+            expect(handle_git(["-h"])).to_equal(0)
+            expect(handle_git(["help"])).to_equal(0)
+
+        it "prints help for no arguments":
+            expect(handle_git([])).to_equal(0)
+
+        it "answers --version without touching config or the network":
+            # Tooling probes `gh --version` to decide whether gh exists at all.
+            expect(handle_git(["--version"])).to_equal(0)

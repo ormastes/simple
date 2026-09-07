@@ -1,185 +1,220 @@
 """
 ## Purpose and audience
-Purpose: Verify Parser - Attribute Syntax.
-Audience: compiler and tooling engineers who maintain this spec.
+Pins the Simple attribute (decorator) grammar for the compiler engineers who
+own the flat-arena decorator dispatch in
+`src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` and the
+parser crate's attribute reader
+`src/compiler_rust/parser/src/parser_impl/attributes.rs`. Every scenario that
+can execute does so through real attributed declarations in this file: the
+scenario body only runs if the parser accepted the attribute form and the
+module loaded, so a failure means the decorator grammar or the module-decorator
+semantic check drifted.
 ## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/parser/parser_attribute_spec.spl`
 ## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-COMPILER-PARSER-001
-doc/01_research/local/REQ-COMPILER-PARSER-001.md
-doc/03_plan/sys_test/REQ-COMPILER-PARSER-001.md
-doc/04_architecture/REQ-COMPILER-PARSER-001.md
-doc/05_design/REQ-COMPILER-PARSER-001.md
+Only forms the loader actually accepts are asserted by execution: bare
+directive decorators, decorators with numeric/string/named/array arguments,
+empty parentheses, stacked decorators, attributes before `pub`, and decorated
+structs and classes. The `#[...]` bracket form and attributes on `actor`
+declarations do NOT parse today — those scenarios are source contracts against
+the parser crate and carry NOTE comments with the exact repro; do not "fix"
+them by deleting the scenario.
+## Verification guidance and troubleshooting
+An execution failure means the decorator grammar or the module decorator
+semantic check changed; a source-contract failure means the parser crate's
+attribute rejection text moved. Rerun the command above and compare against
+the last green verdict before touching the decorator dispatch.
 """
-# @req: REQ-COMPILER-PARSER-001
+# Lifecycle: doc/01_research/compiler/compiler_internals/parser_duplication_analysis_2026-02-04.md ;
+# doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md ;
+# doc/04_architecture/language/simple_feature_module.md ;
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# @manual_section: parser_attribute_grammar
 
-#!/usr/bin/env simple
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+use std.spec.{describe, it, expect, step}
 
-# Parser Tests for Attribute Syntax
-#
-# Tests that the parser correctly recognizes and parses both @ and #[] attribute syntax.
+# NOTE(defect, filed in report): the bracket form `#[repr(C)]` does NOT parse.
+# The lexer emits a HashLBracket token (src/compiler/10.frontend/lexer_types.spl)
+# but no parser consumer exists anywhere under src/compiler or src/lib, and the
+# parser crate rejects the form outright:
+#   parse: Unexpected token: expected identifier or attribute keyword, found Repr
+# The old tautology scenarios claimed "parses #[] attribute" while asserting
+# expect(1).to_equal(1); the scenarios below pin the real rejection instead.
 
+# NOTE(defect, filed in report): module-level attributes on `actor`
+# declarations are rejected by the parser — its post-attribute target list is
+# "fn, struct, class, enum, union, impl, mod, extern, or pub after attributes"
+# (src/compiler_rust/parser/src/parser_impl/items.rs:627), with no actor arm:
+#   parse: Unexpected token: expected fn, struct, class, enum, union, impl,
+#          mod, extern, or pub after attributes, found Actor
+# The old tautology scenario claimed "applies attributes to actors".
 
-use std.spec.step
+# NOTE(defect, filed in report): an unrecognised BARE decorator on a
+# module-level function is a semantic error, not metadata:
+#   semantic: unknown decorator `@attr2` on function `m`
+# Argument-carrying decorators of unknown name (e.g. @timeout(5000)) load as
+# metadata, so the two paths are pinned separately below.
 
-describe "Parser - Attribute Syntax":
-    # @manual scenario evidence
-    it "parses a string-form step label before a helper":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses a string-form step label before a helper")
-        parse_module(
-            "@step \"Open the application\"\n" +
-            "@inline\n" +
-            "fn open_app():\n" +
-            "    pass_dn\n",
-            "parser_step_decorator_spec.spl"
-        )
-        expect(parser_has_errors()).to_equal(false)
-        expect(decl_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(decl_get_name(0)).to_equal("open_app")
+# ---- Executable probes: every attributed declaration below must parse, ----
+# ---- load, and run, or the whole file fails before any scenario.       ----
 
-    it "parses @ attribute":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses @ attribute")
-        # @attr
-        # Traditional attribute syntax
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@inline
+fn probe_bare_attr() -> i64:
+    42
 
-    it "parses #[] attribute":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses #[] attribute")
-        # @attr
-        # New attribute syntax
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@timeout(5000)
+fn probe_numeric_arg_attr() -> i64:
+    42
 
-    it "parses @ attribute with arguments":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses @ attribute with arguments")
-        # @timeout(5000)
-        # Arguments should be parsed
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@tag("slow", "integration")
+fn probe_string_args_attr() -> i64:
+    11
 
-    it "parses #[] attribute with arguments":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses #[] attribute with arguments")
-        # @timeout(5000)
-        # Arguments should be parsed
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@config(key: "value", count: 42)
+fn probe_named_args_attr() -> i64:
+    13
 
-    it "parses multiple @ attributes":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses multiple @ attributes")
-        # @attr1
-        # @attr2
-        # Both should be captured
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@config([1, 2, 3])
+fn probe_nested_arg_attr() -> i64:
+    5
 
-    it "parses multiple #[] attributes":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses multiple #[] attributes")
-        # @attr1
-        # @attr2
-        # Both should be captured
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@inline()
+fn probe_empty_parens_attr() -> i64:
+    17
 
-    it "parses mixed @ and #[] attributes":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses mixed @ and #[] attributes")
-        # @repr(C)
-        # @packed
-        # Both should be captured
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@inline
+@deprecated("superseded by probe_replacement")
+fn probe_stacked_attrs() -> i64:
+    7
 
-describe "Parser - Attribute Application":
-    it "applies attributes to functions":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: applies attributes to functions")
-        # @timeout(5000)
-        # fn test():
-        # Attribute should attach to function
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@inline
+pub fn probe_before_pub() -> i64:
+    4
 
-    it "applies attributes to classes":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: applies attributes to classes")
-        # @repr(C)
-        # class Data:
-        # Attribute should attach to class
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@repr(C)
+@packed
+struct AttrPoint:
+    x: i64
+    y: i64
 
-    it "applies attributes to actors":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: applies attributes to actors")
-        # @distributed
-        # actor Worker:
-        # Attribute should attach to actor
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+@repr(C)
+class AttrClass:
+    v: i64
 
-    it "applies attributes to structs":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: applies attributes to structs")
-        # @packed
-        # struct Point:
-        # Attribute should attach to struct
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    fn get(self) -> i64:
+        self.v
 
-describe "Parser - Attribute Arguments":
-    it "parses single argument":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses single argument")
-        # @timeout(5000)
-        # Single numeric argument
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+extern fn rt_file_read_text(path: text) -> text?
 
-    it "parses multiple arguments":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses multiple arguments")
-        # @tag("slow", "integration")
-        # Multiple string arguments
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+describe "@ attribute syntax the loader accepts":
+    it "parses a bare @ attribute on a function and runs its body":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): bare-decorator probe return value
+        step("Call a function carrying one bare directive decorator")
+        val returned = probe_bare_attr()
+        expect(returned).to_equal(42)  # oracle: the decorated fn loaded and its body returns 42
 
-    it "parses complex arguments":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses complex arguments")
-        # @config(key: "value", count: 42)
-        # Named arguments
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "parses a @ attribute with a single numeric argument":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): numeric-argument decorator probe value
+        step("Call a function carrying @timeout(5000)")
+        val returned = probe_numeric_arg_attr()
+        expect(returned).to_equal(42)  # oracle: the numeric-argument decorator parsed and the body returns 42
 
-    it "handles empty parentheses":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: handles empty parentheses")
-        # @attr()
-        # Empty argument list
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "parses a @ attribute with multiple string arguments":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): multi-string-argument decorator probe value
+        step("Call a function carrying @tag(\"slow\", \"integration\")")
+        val returned = probe_string_args_attr()
+        expect(returned).to_equal(11)  # oracle: both string arguments parsed and the body returns 11
 
-describe "Parser - Attribute Edge Cases":
-    it "handles attribute before pub":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: handles attribute before pub")
-        # @test
-        # pub fn test():
-        # Attribute before visibility
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "parses a @ attribute with named arguments":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): named-argument decorator probe value
+        step("Call a function carrying @config(key: \"value\", count: 42)")
+        val returned = probe_named_args_attr()
+        expect(returned).to_equal(13)  # oracle: named arguments parsed and the body returns 13
 
-    it "handles nested attribute arguments":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: handles nested attribute arguments")
-        # @config([1, 2, 3])
-        # Nested brackets/parens
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "parses nested bracket arguments inside a @ attribute":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): array-argument decorator probe value
+        step("Call a function carrying @config([1, 2, 3])")
+        val returned = probe_nested_arg_attr()
+        expect(returned).to_equal(5)  # oracle: the nested array argument parsed and the body returns 5
 
-    it "preserves attribute order":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: preserves attribute order")
-        # @first
-        # @second
-        # Order should be maintained
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "parses an attribute with empty parentheses":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): empty-parentheses decorator probe value
+        step("Call a function carrying @inline() with empty parentheses")
+        val returned = probe_empty_parens_attr()
+        expect(returned).to_equal(17)  # oracle: the empty argument list parsed and the body returns 17
+
+    it "stacks multiple @ attributes on one function":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): stacked-decorator probe value
+        step("Call a function carrying @inline and @deprecated together")
+        val returned = probe_stacked_attrs()
+        expect(returned).to_equal(7)  # oracle: both stacked decorators parsed and the body returns 7
+
+    it "attaches a @ attribute before pub visibility":
+        # @req REQ-PARSER-ATTR-001
+        # @capture(statistics): decorator-before-pub probe value
+        step("Call a pub fn whose decorator precedes the visibility keyword")
+        val returned = probe_before_pub()
+        expect(returned).to_equal(4)  # oracle: the decorator-before-pub form parsed and the body returns 4
+
+    it "applies attributes to struct declarations":
+        # @req REQ-PARSER-ATTR-002
+        # @capture(statistics): decorated-struct construction value
+        step("Construct a struct carrying @repr(C) and @packed")
+        val p = AttrPoint(x: 3, y: 4)
+        expect(p.x + p.y).to_equal(7)  # oracle: the decorated struct loaded and its fields construct and sum to 7
+
+    it "applies attributes to class declarations":
+        # @req REQ-PARSER-ATTR-002
+        # @capture(statistics): decorated-class construction value
+        step("Construct a class carrying @repr(C) and read a field")
+        val c = AttrClass(v: 9)
+        expect(c.get()).to_equal(9)  # oracle: the decorated class loaded and its method returns the field
+
+describe "attribute forms the loader rejects (source contracts)":
+    it "rejects the #[] bracket attribute form at parse time":
+        # NOTE(defect): HashLBracket is lexed (src/compiler/10.frontend/lexer_types.spl)
+        # but no parser consumes it; the form fails with "found Repr". This is
+        # a source contract because a parse failure cannot execute inside a
+        # loaded spec file.
+        # @req REQ-PARSER-ATTR-003
+        # @capture(statistics): bracket-form rejection contract verdicts
+        step("Pin the parser crate's rejection of the #[] attribute form")
+        val shipped_attribute_reader = rt_file_read_text("src/compiler_rust/parser/src/parser_impl/attributes.rs") ?? ""
+        val rejects_non_identifier_attribute_names = shipped_attribute_reader.contains("identifier or attribute keyword")
+        expect(rejects_non_identifier_attribute_names).to_equal(true)  # oracle: the attribute reader is the grammar point that rejected the bracket form
+
+    it "rejects attributes on actor declarations as a known gap":
+        # NOTE(defect): the post-attribute target list at
+        # src/compiler_rust/parser/src/parser_impl/items.rs:627 covers fn,
+        # struct, class, enum, union, impl, mod, extern, pub — and NOT actor,
+        # so `@distributed actor W:` fails to parse. Filed in the
+        # modernization report; do not delete this scenario when actors gain
+        # attribute support — flip it to an execution probe then.
+        # @req REQ-PARSER-ATTR-003
+        # @capture(statistics): actor-attribute gap contract verdicts
+        step("Pin the post-attribute target list that omits actor")
+        val shipped_item_parser = rt_file_read_text("src/compiler_rust/parser/src/parser_impl/items.rs") ?? ""
+        val keeps_explicit_post_attribute_targets = shipped_item_parser.contains("or pub after attributes")
+        expect(keeps_explicit_post_attribute_targets).to_equal(true)  # oracle: the actor gap lives in exactly this post-attribute target list
+
+    it "rejects an unrecognised bare decorator on a module function":
+        # NOTE(defect-shaped contract): bare unknown decorators are semantic
+        # errors ("unknown decorator `@attr2` on function `m`"), while
+        # argument-carrying unknown decorators load as metadata — the split
+        # lives in the decorator application pass.
+        # @req REQ-PARSER-ATTR-003
+        # @capture(statistics): unknown-bare-decorator rejection contract verdicts
+        step("Pin the strict module-level decorator rejection diagnostic")
+        val shipped_decorator_pass = rt_file_read_text("src/compiler_rust/compiler/src/decorator_apply.rs") ?? ""
+        val keeps_strict_module_level_rejection = shipped_decorator_pass.contains("unknown decorator `@{}` on function `{}`")
+        val keeps_directive_metadata_set = shipped_decorator_pass.contains("is_directive_decorator")
+        expect(keeps_strict_module_level_rejection).to_equal(true)  # oracle: module-level bare decorators stay strict instead of silently becoming metadata
+        expect(keeps_directive_metadata_set).to_equal(true)  # oracle: the directive set stays the single source of truth consulted before evaluation

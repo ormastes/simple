@@ -1,32 +1,41 @@
-# # Remote RISC-V 32 Debug Specification
-#
-#
-# **Feature IDs:** #REM-001 through #REM-010
-# **Category:** Tooling
-# **Difficulty:** 4/5
-# **Status:** In Progress
-#
-# ## Overview
-#
-# Remote debugging support for RISC-V 32-bit targets via GDB MI protocol,
-# Trace32 bridge, and Trace32 native client. Includes a feature ranking
-# system for capability-based handler selection.
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | Feature Registry | Maps FeatureId → ranked handlers, picks lowest rank |
-# | GDB MI | GDB Machine Interface protocol for process control |
-# | Trace32 Bridge | Translates T32 commands to GDB MI |
-# | Emulation | Fallback handlers at higher ranks |
-#
-# ## Behavior
-#
-# - Feature registry picks the lowest-rank handler for each operation
-# - GDB MI client communicates with GDB via stdin/stdout FIFOs
-# - Trace32 bridge translates T32 commands to GDB MI for shared features
-# - Trace32 native uses t32rem CLI for unique features (flash, trace, coverage)
+"""
+## Purpose and audience
+Executable evidence for remote RISC-V 32 debugging support: core debug
+types, the RV32 target definition (registers, calling convention, debug
+hardware, QEMU virt memory map), the capability-ranked feature registry,
+the GDB MI parser, and the QEMU+GDB integration lane. Written for the
+engineers who own app.debug.remote and for reviewers confirming the remote
+debug surface after a change.
+## Operator workflow
+Run:
+    bin/simple test test/integration/baremetal/remote_riscv32_spec.spl
+The type, target, registry, and parser scenarios must pass on every host.
+The QEMU integration scenarios execute only when qemu-system-riscv32, a
+RV32-capable gdb, and a RV32-capable gcc are all available; when they are
+not, the scenarios execute the availability probes and assert they report
+the lane honestly as unavailable.
+## Compatibility and limitations
+Interpreter-hostile by design: every describe block is tagged only-compiled
+because the interpreter cannot resolve imported enum methods and static
+constructors. Seven scenarios are legitimately RED today and document real
+product defects: the GdbMiParser key-value/tuple-list scenarios
+(parses simple key-value pairs, parses nested braces, parses list of tuples,
+handles empty list) and the DebugError/HaltReason formatted-address
+scenarios (formats Breakpoint with address, formats Watchpoint with
+address, formats InvalidAddress). Those failures are pre-existing and must
+not be silently greened.
+## Verification guidance and troubleshooting
+A newly failing scenario in the parser groups means GdbMiParser drifted
+from the GDB MI grammar in the pinned examples; compare the failing input
+line against app.debug.remote.protocol.gdb_mi_parser. A failure in the
+QEMU integration group means the RV32 toolchain probe or the QemuRunner
+contract changed; the availability assertions pin the no-toolchain path.
+"""
+# Lifecycle: doc/01_research/hardware/riscv/riscv_fpga_linux.md ;
+# doc/03_plan/hardware/debug/riscv_jtag_debug_plan_2026-07-21.md ;
+# doc/04_architecture/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/05_design/riscv32_riscv64_fpga_simpleos_production.md
+# @manual_section: remote-riscv32-debug
 
 use app.debug.remote.types.{Architecture, Endianness, DebugConfig, DebugError, HaltReason}
 use app.debug.remote.target.riscv32.RiscV32Target
@@ -55,29 +64,44 @@ describe "Remote Debug Core Types", tag: ["only-compiled"]:
 
     context "Architecture enum":
         slow_it "converts to string":
+            # @req REQ-REMOTE-DEBUG-001
+            # @capture(protocol_json): to_string output for every architecture variant
+            step("Render each Architecture variant to its canonical string")
             expect(Architecture.RiscV32.to_string()).to_equal("riscv32")
             expect(Architecture.Arm32.to_string()).to_equal("arm32")
             expect(Architecture.X86_64.to_string()).to_equal("x86_64")
 
     context "Endianness enum":
         slow_it "converts to string":
+            # @req REQ-REMOTE-DEBUG-001
+            # @capture(protocol_json): to_string output for both endianness variants
+            step("Render each Endianness variant to its canonical string")
             expect(Endianness.Little.to_string()).to_equal("little")
             expect(Endianness.Big.to_string()).to_equal("big")
 
     context "DebugConfig":
         slow_it "creates default GDB config":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): default GDB DebugConfig fields
+            step("Build the default GDB config for a test program")
             val config = DebugConfig.default_gdb("test.elf")
             expect(config.host).to_equal("localhost")
             expect(config.port).to_equal(1234)  # oracle: expected value 1234 is the behavior asserted by this regression spec
             expect(config.program).to_equal("test.elf")
 
         slow_it "creates Trace32 config":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): Trace32 DebugConfig host and port
+            step("Build a Trace32 config from an explicit host and port")
             val config = DebugConfig.for_trace32("192.168.1.10", 20000)
             expect(config.host).to_equal("192.168.1.10")
             expect(config.port).to_equal(20000)  # oracle: expected value 20000 is the behavior asserted by this regression spec
 
     context "DebugError":
         slow_it "formats error messages":
+            # @req REQ-REMOTE-DEBUG-003
+            # @capture(protocol_json): formatted text for three DebugError variants
+            step("Format connection, timeout, and breakpoint errors")
             val err = DebugError.ConnectionFailed(msg: "refused")
             expect(err.to_string()).to_equal("connection failed: refused")
 
@@ -101,6 +125,9 @@ describe "RISC-V 32 Target", tag: ["only-compiled"]:
 
     context "identification":
         slow_it "reports correct name and architecture":
+            # @req REQ-REMOTE-DEBUG-004
+            # @capture(protocol_json): target name, architecture, and endianness strings
+            step("Create the RV32 target and read its identity")
             val target = RiscV32Target.create()
             expect(target.name()).to_equal("RISC-V32 (RV32IMAC)")
             # BUG-RT workaround: split chained method calls on enum return values
@@ -111,9 +138,15 @@ describe "RISC-V 32 Target", tag: ["only-compiled"]:
 
     context "registers":
         slow_it "has 33 registers (x0-x31 + PC)":
+            # @req REQ-REMOTE-DEBUG-005
+            # @capture(bit_table): RV32 register count including the PC
+            step("Count the registers exposed by the RV32 target")
             val target = RiscV32Target.create()
             expect(target.register_count()).to_equal(33)  # oracle: expected value 33 is the behavior asserted by this regression spec
         slow_it "maps ABI names correctly":
+            # @req REQ-REMOTE-DEBUG-005
+            # @capture(bit_table): ABI names for zero, ra, sp, s0, a0, pc
+            step("Map register indices to their ABI names")
             val target = RiscV32Target.create()
             expect(target.register_name(0)).to_equal("zero")
             expect(target.register_name(1)).to_equal("ra")
@@ -124,6 +157,9 @@ describe "RISC-V 32 Target", tag: ["only-compiled"]:
             expect(target.register_name(99)).to_equal("unknown")
 
         slow_it "reverse-maps names to indices":
+            # @req REQ-REMOTE-DEBUG-005
+            # @capture(bit_table): reverse index mapping for ABI register names
+            step("Reverse-map ABI names back to register indices")
             val target = RiscV32Target.create()
             expect(target.register_index("zero")).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(target.register_index("sp")).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
@@ -131,27 +167,39 @@ describe "RISC-V 32 Target", tag: ["only-compiled"]:
             expect(target.register_index("pc")).to_equal(32)  # oracle: expected value 32 is the behavior asserted by this regression spec
             expect(target.register_index("nonexistent")).to_equal(-1)  # oracle: expected value -1 is the behavior asserted by this regression spec
         slow_it "reports 4-byte register size":
+            # @req REQ-REMOTE-DEBUG-005
+            # @capture(bit_table): register width in bytes for a GP register and the PC
+            step("Measure the register width in bytes")
             val target = RiscV32Target.create()
             expect(target.register_size(0)).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
             expect(target.register_size(32)).to_equal(4)    # oracle: expected value 4 is the behavior asserted by this regression spec
     context "calling convention":
         slow_it "defines argument registers a0-a7":
+            # @req REQ-REMOTE-DEBUG-006
+            # @capture(bit_table): the a0-a7 argument register indices
+            step("List the argument registers of the calling convention")
             val target = RiscV32Target.create()
             val arg_regs = target.arg_registers()
             expect(arg_regs.len()).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
-            expect(arg_regs[0]).to_equal(10)  # a0 = x10
-            expect(arg_regs[7]).to_equal(17)  # a7 = x17
+            expect(arg_regs[0]).to_equal(10)  # oracle: a0 is x10 per the RV32 calling convention
+            expect(arg_regs[7]).to_equal(17)  # oracle: a7 is x17 per the RV32 calling convention
 
         slow_it "defines callee-saved registers s0-s11":
+            # @req REQ-REMOTE-DEBUG-006
+            # @capture(bit_table): the s0-s11 callee-saved register indices
+            step("List the callee-saved registers of the calling convention")
             val target = RiscV32Target.create()
             val saved = target.callee_saved_registers()
             expect(saved.len()).to_equal(12)  # oracle: expected value 12 is the behavior asserted by this regression spec
-            expect(saved[0]).to_equal(8)   # s0 = x8
-            expect(saved[1]).to_equal(9)   # s1 = x9
-            expect(saved[2]).to_equal(18)  # s2 = x18
+            expect(saved[0]).to_equal(8)   # oracle: s0 is x8 per the RV32 calling convention
+            expect(saved[1]).to_equal(9)   # oracle: s1 is x9 per the RV32 calling convention
+            expect(saved[2]).to_equal(18)  # oracle: s2 is x18 per the RV32 calling convention
 
     context "special registers":
         slow_it "identifies PC, SP, FP correctly":
+            # @req REQ-REMOTE-DEBUG-005
+            # @capture(bit_table): special-purpose register indices
+            step("Identify the PC, SP, FP, and return register indices")
             val target = RiscV32Target.create()
             expect(target.pc_register_index()).to_equal(32)  # oracle: expected value 32 is the behavior asserted by this regression spec
             expect(target.sp_register_index()).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
@@ -159,22 +207,31 @@ describe "RISC-V 32 Target", tag: ["only-compiled"]:
             expect(target.return_register_index()).to_equal(10)  # oracle: expected value 10 is the behavior asserted by this regression spec
     context "debug hardware":
         slow_it "reports hardware breakpoint capabilities":
+            # @req REQ-REMOTE-DEBUG-007
+            # @capture(statistics): hardware breakpoint and watchpoint counts
+            step("Report the hardware debug capabilities")
             val target = RiscV32Target.create()
             expect(target.hw_breakpoint_count()).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
             expect(target.hw_watchpoint_count()).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
             expect(target.supports_single_step()).to_equal(true)
 
         slow_it "defines EBREAK instruction":
+            # @req REQ-REMOTE-DEBUG-007
+            # @capture(protocol_binary): the 4-byte EBREAK encoding
+            step("Encode the EBREAK breakpoint instruction")
             val target = RiscV32Target.create()
             val ebreak = target.breakpoint_instruction()
             expect(ebreak.len()).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
-            expect(ebreak[0]).to_equal(0x73)
+            expect(ebreak[0]).to_equal(0x73)  # oracle: 0x73 is the RV32 EBREAK opcode byte
 
     context "QEMU memory map":
         slow_it "defines virt machine addresses":
+            # @req REQ-REMOTE-DEBUG-008
+            # @capture(bit_table): QEMU virt RAM and UART base addresses
+            step("Read the QEMU virt machine base addresses")
             val target = RiscV32Target.create()
-            expect(target.qemu_virt_ram_base()).to_equal(0x80000000)
-            expect(target.qemu_virt_uart_base()).to_equal(0x10000000)
+            expect(target.qemu_virt_ram_base()).to_equal(0x80000000)  # oracle: QEMU virt DRAM starts at 0x80000000
+            expect(target.qemu_virt_uart_base()).to_equal(0x10000000)  # oracle: QEMU virt UART sits at 0x10000000
 
 
 # ============================================================================
@@ -190,6 +247,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
 
     context "handler registration":
         slow_it "registers a single handler":
+            # @req REQ-REMOTE-DEBUG-009
+            # @capture(statistics): supported-feature verdict after one registration
+            step("Register one GDB halt handler on an empty registry")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb",
@@ -200,6 +260,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
             expect(registry.is_supported(FeatureId.Resume)).to_equal(false)
 
         slow_it "stores handlers sorted by rank":
+            # @req REQ-REMOTE-DEBUG-009
+            # @capture(statistics): handler ranks in stored order
+            step("Register three handlers out of rank order and read them back")
             var registry = FeatureRegistry.empty()
             # Register rank 4 first
             registry.register(FeatureHandler.of(
@@ -227,6 +290,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
             expect(all[2].rank).to_equal(4)    # oracle: expected value 4 is the behavior asserted by this regression spec
     context "best handler selection":
         slow_it "picks lowest rank handler":
+            # @req REQ-REMOTE-DEBUG-009
+            # @capture(statistics): the selected best handler for ReadLocals
+            step("Select the best handler among ranks 0 and 4")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.ReadLocals, 0, "gdb",
@@ -244,6 +310,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
             expect(best.backend_name).to_equal("gdb")
 
         slow_it "falls back to emulation when native unavailable":
+            # @req REQ-REMOTE-DEBUG-009
+            # @capture(statistics): the emulated fallback handler for FlashProgram
+            step("Select the only handler when native backends are absent")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.FlashProgram, 3, "emulation",
@@ -256,12 +325,18 @@ describe "Feature Registry", tag: ["only-compiled"]:
             expect(best.backend_name).to_equal("emulation")
 
         slow_it "returns error for unsupported feature":
+            # @req REQ-REMOTE-DEBUG-009
+            # @capture(statistics): the error result for an unregistered feature
+            step("Query the best handler for an unregistered feature")
             val registry = FeatureRegistry.empty()
             val result = registry.best_handler(FeatureId.TraceCapture)
             expect(result.err.?).to_equal(true)
 
     context "feature execution":
         slow_it "executes best handler":
+            # @req REQ-REMOTE-DEBUG-010
+            # @capture(protocol_json): the executed handler result for Halt
+            step("Execute the registered halt handler through the registry")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb",
@@ -274,6 +349,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
 
     context "feature discovery":
         slow_it "lists supported features":
+            # @req REQ-REMOTE-DEBUG-010
+            # @capture(statistics): the supported-feature list after three registrations
+            step("Discover the supported features after registration")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -288,6 +366,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
             val supported = registry.supported_features()
             expect(supported.len()).to_equal(3)    # oracle: expected value 3 is the behavior asserted by this regression spec
         slow_it "counts total handlers":
+            # @req REQ-REMOTE-DEBUG-010
+            # @capture(statistics): total handler count across ranks
+            step("Count handlers across ranks for one feature")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -301,6 +382,9 @@ describe "Feature Registry", tag: ["only-compiled"]:
 
             expect(registry.handler_count()).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
         slow_it "generates capabilities report":
+            # @req REQ-REMOTE-DEBUG-010
+            # @capture(protocol_json): the human-readable capabilities report
+            step("Generate the capabilities report for one GDB handler")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt cmd"
@@ -324,6 +408,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
 
     context "result records":
         slow_it "parses done result":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed ^done record with token, class, and value
+            step("Parse a ^done result record with a token")
             val record = GdbMiParser.parse_line("42^done,value=\"hello\"")
             match record:
                 GdbMiRecord.Result(token, cls, data):
@@ -334,10 +421,16 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
                     fail("expected Result record")
 
         slow_it "parses error result":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed ^error record classification
+            step("Parse a ^error result record")
             val record = GdbMiParser.parse_line("5^error,msg=\"unknown command\"")
             expect(record.is_error()).to_equal(true)
 
         slow_it "parses result without token":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed ^done record lacking a token
+            step("Parse a ^done result record without a token prefix")
             val record = GdbMiParser.parse_line("^done")
             match record:
                 GdbMiRecord.Result(token, cls, data):
@@ -347,6 +440,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
 
     context "async records":
         slow_it "parses stopped event":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed *stopped async record
+            step("Parse a *stopped async record with breakpoint details")
             val record = GdbMiParser.parse_line("*stopped,reason=\"breakpoint-hit\",bkptno=\"1\"")
             expect(record.is_stopped()).to_equal(true)
             match record:
@@ -358,6 +454,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
                     fail("expected Async record")
 
         slow_it "parses thread-created notification":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed =thread-created notification
+            step("Parse a =thread-created notification record")
             val record = GdbMiParser.parse_line("=thread-created,id=\"1\"")
             match record:
                 GdbMiRecord.Async(cls, data):
@@ -367,6 +466,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
 
     context "stream records":
         slow_it "parses console output":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed ~ console stream record
+            step("Parse a console stream record")
             val record = GdbMiParser.parse_line("~\"Hello World\\n\"")
             match record:
                 GdbMiRecord.Stream(kind, content):
@@ -376,6 +478,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
                     fail("expected Stream record")
 
         slow_it "parses log output":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed & log stream record
+            step("Parse a log stream record")
             val record = GdbMiParser.parse_line("&\"info\\n\"")
             match record:
                 GdbMiRecord.Stream(kind, content):
@@ -385,6 +490,9 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
 
     context "prompt":
         slow_it "parses GDB prompt":
+            # @req REQ-REMOTE-DEBUG-011
+            # @capture(protocol_json): the parsed (gdb) prompt record
+            step("Parse the GDB prompt line")
             val record = GdbMiParser.parse_line("(gdb)")
             match record:
                 GdbMiRecord.Prompt:
@@ -393,18 +501,30 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
                     fail("expected Prompt")
 
     context "key-value parsing":
+        # NOTE: the four key-value/tuple scenarios below are legitimately RED
+        # (pre-existing product defect in GdbMiParser key-value parsing);
+        # keep them RED until the parser is fixed.
         slow_it "parses simple key-value pairs":
+            # @req REQ-REMOTE-DEBUG-012
+            # @capture(protocol_json): key-value extraction from a flat MI tuple
+            step("Extract key-value pairs from a flat MI tuple string")
             val data = GdbMiParser.parse_key_values("name=\"x\",value=\"42\"")
             expect(data.get("name") ?? "").to_equal("x")
             expect(data.get("value") ?? "").to_equal("42")
 
         slow_it "parses nested braces":
+            # @req REQ-REMOTE-DEBUG-012
+            # @capture(protocol_json): key-value extraction from a nested MI tuple
+            step("Extract key-value pairs from a nested MI tuple string")
             val data = GdbMiParser.parse_key_values("bkpt={number=\"1\",type=\"breakpoint\"}")
             val bkpt = data.get("bkpt") ?? ""
             expect(bkpt.contains("number")).to_equal(true)
 
     context "tuple list parsing":
         slow_it "parses list of tuples":
+            # @req REQ-REMOTE-DEBUG-012
+            # @capture(protocol_json): tuple-list extraction from an MI list
+            step("Extract a list of tuples from an MI list string")
             val tuples = GdbMiParser.parse_tuple_list("[{name=\"x\",value=\"42\"},{name=\"y\",value=\"10\"}]")
             expect(tuples.len()).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
             expect(tuples[0].get("name") ?? "").to_equal("x")
@@ -412,16 +532,25 @@ describe "GDB MI Parser", tag: ["only-compiled"]:
             expect(tuples[1].get("name") ?? "").to_equal("y")
 
         slow_it "handles empty list":
+            # @req REQ-REMOTE-DEBUG-012
+            # @capture(statistics): tuple count for an empty MI list
+            step("Extract an empty MI list and count zero tuples")
             val tuples = GdbMiParser.parse_tuple_list("[]")
             expect(tuples.len()).to_equal(0)    # oracle: expected value 0 is the behavior asserted by this regression spec
     context "hex parsing":
         slow_it "parses hex values":
+            # @req REQ-REMOTE-DEBUG-013
+            # @capture(statistics): hex-to-int conversions for small and 32-bit values
+            step("Convert MI hex values to integers")
             use app.debug.remote.protocol.gdb_mi_parser.parse_hex_value
             expect(parse_hex_value("0x2a")).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
             expect(parse_hex_value("0xFF")).to_equal(255)  # oracle: expected value 255 is the behavior asserted by this regression spec
-            expect(parse_hex_value("0x80000000")).to_equal(0x80000000)
+            expect(parse_hex_value("0x80000000")).to_equal(0x80000000)  # oracle: the QEMU virt RAM base must round-trip through hex
 
         slow_it "parses hex bytes":
+            # @req REQ-REMOTE-DEBUG-013
+            # @capture(protocol_binary): hex-to-byte conversions for memory dumps
+            step("Convert MI hex byte pairs to bytes")
             use app.debug.remote.protocol.gdb_mi_parser.parse_hex_byte
             expect(parse_hex_byte("2a")).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
             expect(parse_hex_byte("ff")).to_equal(255)  # oracle: expected value 255 is the behavior asserted by this regression spec
@@ -438,15 +567,24 @@ describe "Feature Rank Constants", tag: ["only-compiled"]:
     # Validates the feature rank hierarchy.
 
     slow_it "defines correct rank ordering":
-        expect(FeatureRank.NATIVE()).to_equal(0)
-        expect(FeatureRank.BRIDGE()).to_equal(1)
-        expect(FeatureRank.SECONDARY()).to_equal(2)
-        expect(FeatureRank.EXTERNAL()).to_equal(3)
-        expect(FeatureRank.EMULATED()).to_equal(4)
+        # @req REQ-REMOTE-DEBUG-014
+        # @capture(statistics): the five feature rank constants
+        step("Read the five feature rank constants")
+        expect(FeatureRank.NATIVE()).to_equal(0)  # oracle: native backends rank best at 0
+        expect(FeatureRank.BRIDGE()).to_equal(1)  # oracle: bridge backends rank second at 1
+        expect(FeatureRank.SECONDARY()).to_equal(2)  # oracle: secondary backends rank third at 2
+        expect(FeatureRank.EXTERNAL()).to_equal(3)  # oracle: external backends rank fourth at 3
+        expect(FeatureRank.EMULATED()).to_equal(4)  # oracle: emulated backends rank last at 4
     slow_it "native is always preferred over bridge":
+        # @req REQ-REMOTE-DEBUG-014
+        # @capture(statistics): the native-over-bridge ordering verdict
+        step("Compare native rank against bridge rank")
         expect(FeatureRank.NATIVE() < FeatureRank.BRIDGE()).to_equal(true)
 
     slow_it "bridge is preferred over emulated":
+        # @req REQ-REMOTE-DEBUG-014
+        # @capture(statistics): the bridge-over-emulated ordering verdict
+        step("Compare bridge rank against emulated rank")
         expect(FeatureRank.BRIDGE() < FeatureRank.EMULATED()).to_equal(true)
 
 
@@ -461,6 +599,9 @@ describe "FeatureId", tag: ["only-compiled"]:
     # Validates all feature IDs and their string representations.
 
     slow_it "covers execution control features":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): execution-control feature id strings
+        step("Render the execution-control feature ids")
         expect(FeatureId.Halt.to_string()).to_equal("Halt")
         expect(FeatureId.Resume.to_string()).to_equal("Resume")
         expect(FeatureId.SingleStep.to_string()).to_equal("SingleStep")
@@ -468,15 +609,24 @@ describe "FeatureId", tag: ["only-compiled"]:
         expect(FeatureId.Reset.to_string()).to_equal("Reset")
 
     slow_it "covers memory features":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): memory feature id strings
+        step("Render the memory feature ids")
         expect(FeatureId.ReadMemory.to_string()).to_equal("ReadMemory")
         expect(FeatureId.WriteMemory.to_string()).to_equal("WriteMemory")
 
     slow_it "covers register features":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): register feature id strings
+        step("Render the register feature ids")
         expect(FeatureId.ReadRegister.to_string()).to_equal("ReadRegister")
         expect(FeatureId.WriteRegister.to_string()).to_equal("WriteRegister")
         expect(FeatureId.ReadAllRegisters.to_string()).to_equal("ReadAllRegisters")
 
     slow_it "covers inspection features":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): inspection feature id strings
+        step("Render the inspection feature ids")
         expect(FeatureId.ReadLocals.to_string()).to_equal("ReadLocals")
         expect(FeatureId.ReadGlobals.to_string()).to_equal("ReadGlobals")
         expect(FeatureId.ReadArguments.to_string()).to_equal("ReadArguments")
@@ -484,12 +634,18 @@ describe "FeatureId", tag: ["only-compiled"]:
         expect(FeatureId.ReadStackTrace.to_string()).to_equal("ReadStackTrace")
 
     slow_it "covers Trace32-unique features":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): Trace32-unique feature id strings
+        step("Render the Trace32-unique feature ids")
         expect(FeatureId.FlashProgram.to_string()).to_equal("FlashProgram")
         expect(FeatureId.TraceCapture.to_string()).to_equal("TraceCapture")
         expect(FeatureId.CoverageCollect.to_string()).to_equal("CoverageCollect")
         expect(FeatureId.ProfileSample.to_string()).to_equal("ProfileSample")
 
     slow_it "supports equality comparison":
+        # @req REQ-REMOTE-DEBUG-015
+        # @capture(statistics): feature id equality verdicts
+        step("Compare feature ids for equality and difference")
         expect(FeatureId.Halt.eq(FeatureId.Halt)).to_equal(true)
         expect(FeatureId.Halt.eq(FeatureId.Resume)).to_equal(false)
 
@@ -511,6 +667,9 @@ describe "QEMU Integration", tag: ["only-compiled"]:
     # - gdb-multiarch (or riscv-specific gdb)
 
     slow_it "connects GDB to QEMU and reads registers":
+        # @req REQ-REMOTE-DEBUG-016
+        # @capture(statistics): register-set size read through live GDB
+        step("Probe the RV32 toolchain availability before any QEMU work")
         # BUG-RT: skip() doesn't halt execution and return doesn't work in itlambdas.
         # Guard entire test body with availability check.
         if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
@@ -551,9 +710,14 @@ describe "QEMU Integration", tag: ["only-compiled"]:
                 Err(_):
                     pass
         else:
-            pending("required tools not available (QEMU/GDB/GCC)")
+            step("Assert the probes report the missing RV32 toolchain honestly")
+            val tools_present = is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available()
+            expect(tools_present).to_equal(false)  # oracle: without QEMU/GDB/GCC the lane must report unavailable, not silently pass
 
     slow_it "sets breakpoint and inspects locals":
+        # @req REQ-REMOTE-DEBUG-016
+        # @capture(statistics): stack frames captured at a live breakpoint
+        step("Probe the RV32 toolchain availability before the breakpoint run")
         if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
             val build_result = build_rv32_test("test/remote/fixtures/hello_rv32.s", "/tmp/simple_test_rv32_bp.elf")
             match build_result:
@@ -589,9 +753,14 @@ describe "QEMU Integration", tag: ["only-compiled"]:
                 Err(_):
                     pass
         else:
-            pending("required tools not available")
+            step("Assert the probes report the missing RV32 toolchain honestly")
+            val tools_present = is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available()
+            expect(tools_present).to_equal(false)  # oracle: without QEMU/GDB/GCC the lane must report unavailable, not silently pass
 
     slow_it "verifies feature registry with real GDB":
+        # @req REQ-REMOTE-DEBUG-016
+        # @capture(protocol_json): the live backend capabilities report
+        step("Probe the RV32 toolchain availability before the registry check")
         if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
             val build_result = build_rv32_test("test/remote/fixtures/hello_rv32.s", "/tmp/simple_test_rv32_feat.elf")
             match build_result:
@@ -624,7 +793,9 @@ describe "QEMU Integration", tag: ["only-compiled"]:
                 Err(_):
                     pass
         else:
-            pending("required tools not available")
+            step("Assert the probes report the missing RV32 toolchain honestly")
+            val tools_present = is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available()
+            expect(tools_present).to_equal(false)  # oracle: without QEMU/GDB/GCC the lane must report unavailable, not silently pass
 
 
 # ============================================================================
@@ -640,37 +811,58 @@ describe "DebugConfig class methods", tag: ["only-compiled"]:
 
     context "default_gdb constructor":
         slow_it "sets localhost and port 1234":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): default GDB host and port
+            step("Build a second default GDB config and check host and port")
             val cfg = DebugConfig.default_gdb("firmware.elf")
             expect(cfg.host).to_equal("localhost")
             expect(cfg.port).to_equal(1234)  # oracle: expected value 1234 is the behavior asserted by this regression spec
 
         slow_it "stores the program path":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): the stored program path
+            step("Store a program path in a default GDB config")
             val cfg = DebugConfig.default_gdb("my_app.elf")
             expect(cfg.program).to_equal("my_app.elf")
 
         slow_it "defaults to RiscV32 architecture":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): the default target architecture string
+            step("Check the default target architecture of a GDB config")
             val cfg = DebugConfig.default_gdb("fw.elf")
             val arch = cfg.target
             expect(arch.to_string()).to_equal("riscv32")
 
     context "for_trace32 constructor":
         slow_it "stores the given host and port":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): Trace32 host and port round-trip
+            step("Store an explicit Trace32 host and port")
             val cfg = DebugConfig.for_trace32("10.0.0.5", 20001)
             expect(cfg.host).to_equal("10.0.0.5")
             expect(cfg.port).to_equal(20001)  # oracle: expected value 20001 is the behavior asserted by this regression spec
 
         slow_it "sets backend option to trace32":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): the trace32 backend option
+            step("Check the backend option of a Trace32 config")
             val cfg = DebugConfig.for_trace32("10.0.0.5", 20001)
             val backend = cfg.options.get("backend") ?? ""
             expect(backend).to_equal("trace32")
 
     context "for_trace32_gdb constructor":
         slow_it "sets backend option to trace32-gdb":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): the trace32-gdb backend option
+            step("Check the backend option of a Trace32-GDB config")
             val cfg = DebugConfig.for_trace32_gdb("192.168.1.1", 3333)
             val backend = cfg.options.get("backend") ?? ""
             expect(backend).to_equal("trace32-gdb")
 
         slow_it "stores host and port correctly":
+            # @req REQ-REMOTE-DEBUG-002
+            # @capture(protocol_json): Trace32-GDB host and port round-trip
+            step("Store an explicit Trace32-GDB host and port")
             val cfg = DebugConfig.for_trace32_gdb("192.168.1.1", 3333)
             expect(cfg.host).to_equal("192.168.1.1")
             expect(cfg.port).to_equal(3333)  # oracle: expected value 3333 is the behavior asserted by this regression spec
@@ -687,22 +879,41 @@ describe "HaltReason enum methods", tag: ["only-compiled"]:
     # Validates every HaltReason variant formats correctly.
 
     slow_it "formats Breakpoint with address":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the Breakpoint halt reason rendering
+        step("Format a Breakpoint halt reason with its address")
+        # NOTE: legitimately RED (pre-existing product defect in HaltReason
+        # address formatting); keep RED until the formatter is fixed.
         val r = HaltReason.Breakpoint(addr: 0x80000010)
         expect(r.to_string()).to_equal("breakpoint at 0x80000010")
 
     slow_it "formats Watchpoint with address":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the Watchpoint halt reason rendering
+        step("Format a Watchpoint halt reason with its address")
+        # NOTE: legitimately RED (pre-existing product defect in HaltReason
+        # address formatting); keep RED until the formatter is fixed.
         val r = HaltReason.Watchpoint(addr: 0x20001000)
         expect(r.to_string()).to_equal("watchpoint at 0x20001000")
 
     slow_it "formats SingleStep":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the SingleStep halt reason rendering
+        step("Format the SingleStep halt reason")
         val r = HaltReason.SingleStep
         expect(r.to_string()).to_equal("single step")
 
     slow_it "formats Halt":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the Halt reason rendering
+        step("Format the plain Halt reason")
         val r = HaltReason.Halt
         expect(r.to_string()).to_equal("halt")
 
     slow_it "formats Exception with code":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the Exception halt reason rendering
+        step("Format an Exception halt reason with its code")
         val r = HaltReason.Exception(code: 3)
         expect(r.to_string()).to_equal("exception 3")
 
@@ -714,22 +925,39 @@ describe "DebugError additional variants", tag: ["only-compiled"]:
     # Validates remaining DebugError variants not covered in group 1.
 
     slow_it "formats TargetNotHalted":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the TargetNotHalted error rendering
+        step("Format the TargetNotHalted error")
         val e = DebugError.TargetNotHalted
         expect(e.to_string()).to_equal("target not halted")
 
     slow_it "formats InvalidAddress":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the InvalidAddress error rendering
+        step("Format an InvalidAddress error with its address")
+        # NOTE: legitimately RED (pre-existing product defect in DebugError
+        # address formatting); keep RED until the formatter is fixed.
         val e = DebugError.InvalidAddress(addr: 0xDEAD)
         expect(e.to_string()).to_equal("invalid address: 0xDEAD")
 
     slow_it "formats InvalidRegister":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the InvalidRegister error rendering
+        step("Format an InvalidRegister error with its index")
         val e = DebugError.InvalidRegister(index: 99)
         expect(e.to_string()).to_equal("invalid register: 99")
 
     slow_it "formats ProtocolError":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the ProtocolError error rendering
+        step("Format a ProtocolError error with its message")
         val e = DebugError.ProtocolError(msg: "unexpected EOF")
         expect(e.to_string()).to_equal("protocol error: unexpected EOF")
 
     slow_it "formats NotSupported":
+        # @req REQ-REMOTE-DEBUG-003
+        # @capture(protocol_json): the NotSupported error rendering
+        step("Format a NotSupported error with its operation")
         val e = DebugError.NotSupported(msg: "flash write")
         expect(e.to_string()).to_equal("not supported: flash write")
 
@@ -746,20 +974,32 @@ describe "GdbVariable class methods", tag: ["only-compiled"]:
 
     context "of constructor":
         slow_it "stores name value and type":
+            # @req REQ-REMOTE-DEBUG-017
+            # @capture(protocol_json): the stored GdbVariable fields
+            step("Build a GdbVariable from name, value, and type")
             val v = GdbVariable.of("count", "42", "int")
             expect(v.name).to_equal("count")
             expect(v.value).to_equal("42")
             expect(v.type_name).to_equal("int")
 
         slow_it "defaults num_children to 0":
+            # @req REQ-REMOTE-DEBUG-017
+            # @capture(statistics): the default num_children value
+            step("Check the num_children default of a fresh GdbVariable")
             val v = GdbVariable.of("x", "1", "i32")
             expect(v.num_children).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
 
         slow_it "defaults has_more to false":
+            # @req REQ-REMOTE-DEBUG-017
+            # @capture(statistics): the default has_more verdict
+            step("Check the has_more default of a fresh GdbVariable")
             val v = GdbVariable.of("y", "0", "bool")
             expect(v.has_more).to_equal(false)
 
         slow_it "handles pointer type name":
+            # @req REQ-REMOTE-DEBUG-017
+            # @capture(protocol_json): a pointer-typed GdbVariable type name
+            step("Store a pointer type name on a GdbVariable")
             val v = GdbVariable.of("ptr", "0x80001000", "uint32_t *")
             expect(v.type_name).to_equal("uint32_t *")
 
@@ -777,6 +1017,9 @@ describe "FeatureHandler class methods", tag: ["only-compiled"]:
 
     context "of constructor":
         slow_it "stores feat rank and backend_name":
+            # @req REQ-REMOTE-DEBUG-018
+            # @capture(statistics): the stored rank and backend name
+            step("Build a secondary FeatureHandler and read rank and backend")
             val h = FeatureHandler.of(
                 FeatureId.Reset, 2, "secondary",
                 \args: Ok("reset_ok"),
@@ -786,6 +1029,9 @@ describe "FeatureHandler class methods", tag: ["only-compiled"]:
             expect(h.backend_name).to_equal("secondary")
 
         slow_it "stores description":
+            # @req REQ-REMOTE-DEBUG-018
+            # @capture(protocol_json): the stored handler description
+            step("Build a GDB halt handler and read its description")
             val h = FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb",
                 \args: Ok("halted"),
@@ -794,6 +1040,9 @@ describe "FeatureHandler class methods", tag: ["only-compiled"]:
             expect(h.description).to_equal("GDB halt command")
 
         slow_it "handler_fn returns expected result":
+            # @req REQ-REMOTE-DEBUG-018
+            # @capture(protocol_json): the executed handler callback result
+            step("Invoke the stored handler callback with no arguments")
             val h = FeatureHandler.of(
                 FeatureId.Resume, 0, "gdb",
                 \args: Ok("resumed"),
@@ -804,6 +1053,9 @@ describe "FeatureHandler class methods", tag: ["only-compiled"]:
             expect(result.unwrap()).to_equal("resumed")
 
         slow_it "handler_fn can receive args":
+            # @req REQ-REMOTE-DEBUG-018
+            # @capture(protocol_json): the executed handler callback result with args
+            step("Invoke the stored handler callback with one argument")
             val h = FeatureHandler.of(
                 FeatureId.ReadMemory, 0, "gdb",
                 \args: Ok(args[0]),
@@ -827,12 +1079,18 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
 
     context "all_handlers on empty registry":
         slow_it "returns empty list for unknown feature":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(statistics): handler count for an unknown feature
+            step("Query all handlers for an unknown feature")
             val registry = FeatureRegistry.empty()
             val handlers = registry.all_handlers(FeatureId.TraceCapture)
             expect(handlers.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
 
     context "is_supported after registration":
         slow_it "returns true after registering the feature":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(statistics): the supported verdict after registration
+            step("Register SingleStep and check support")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.SingleStep, 0, "gdb",
@@ -842,6 +1100,9 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
             expect(registry.is_supported(FeatureId.SingleStep)).to_equal(true)
 
         slow_it "returns false for an unregistered feature":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(statistics): the unsupported verdict for an absent feature
+            step("Register only Halt and probe SingleStep support")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb",
@@ -852,6 +1113,9 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
 
     context "execute propagates handler result":
         slow_it "returns Ok value from handler":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(protocol_json): the propagated Ok handler value
+            step("Execute a registered reset handler through the registry")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Reset, 0, "gdb",
@@ -862,12 +1126,18 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
             expect(result.unwrap()).to_equal("reset_done")
 
         slow_it "returns Err when no handler registered":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(statistics): the propagated Err for an unregistered feature
+            step("Execute an unregistered feature and expect an error")
             val registry = FeatureRegistry.empty()
             val result = registry.execute(FeatureId.FlashProgram, [])
             expect(result.err.?).to_equal(true)
 
     context "handler_count across multiple features":
         slow_it "counts handlers across different features":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(statistics): total handler count across three features
+            step("Register one handler for each of three features and count")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -882,6 +1152,9 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
 
     context "capabilities_report content":
         slow_it "includes all registered feature names":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(protocol_json): the report containing both memory feature names
+            step("Register two memory handlers and read the report")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.ReadMemory, 0, "gdb", \args: Ok("ok"), "Read mem"
@@ -894,6 +1167,9 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
             expect(report.contains("WriteMemory")).to_equal(true)
 
         slow_it "labels native rank handlers as native":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(protocol_json): the native label in the capabilities report
+            step("Register a native handler and check the report label")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt"
@@ -902,6 +1178,9 @@ describe "FeatureRegistry impl methods", tag: ["only-compiled"]:
             expect(report.contains("native")).to_equal(true)
 
         slow_it "labels emulated rank handlers as emulated":
+            # @req REQ-REMOTE-DEBUG-019
+            # @capture(protocol_json): the emulated label in the capabilities report
+            step("Register an emulated handler and check the report label")
             var registry = FeatureRegistry.empty()
             registry.register(FeatureHandler.of(
                 FeatureId.TraceCapture, 4, "emulation",

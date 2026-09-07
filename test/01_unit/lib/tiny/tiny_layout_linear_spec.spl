@@ -1,0 +1,374 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/ui/slim_kernel_plugin/simple_slim_tui_gui_kernel_plugin_design_parallel_plan_2026-09-05.md ;
+# plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ;
+# design: doc/05_design/ui/slim_kernel_plugin/design.md
+# @manual_section: tiny-linear-layout
+
+"""
+## Purpose and audience
+Purpose: Prove that the linear Tiny GUI layout pass resolves byte-identical
+geometry to the historical quadratic algorithm, while performing a bounded
+number of node-scan steps.
+Audience: UI and compiler engineers who maintain `std.tiny.gui.state` and the
+Tiny renderers that consume its per-parent metadata.
+
+The historical algorithm is kept verbatim inside this spec as
+`reference_resolved_panes`; it is the differential oracle. Every geometry
+assertion compares the shipped pass against that reference rather than against
+hand-written constants, so a geometry change cannot be laundered into the
+oracle.
+"""
+# @req: REQ-UI-SLIM-002 — existing state authority and TinyPane relationships preserved.
+# @req: REQ-UI-SLIM-011 — old and new layout routes stay differentially testable.
+
+use std.spec.*
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.gui.component.{tiny_component_metadata, TINY_COMPONENT_FLAG_FOCUSABLE, TINY_COMPONENT_FLAG_SCROLLABLE, TINY_COMPONENT_BUTTON, TINY_COMPONENT_COLUMN, TINY_COMPONENT_LIST, TINY_COMPONENT_PANE, TINY_COMPONENT_ROW, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_STACK, TINY_COMPONENT_TEXT}
+use std.tiny.gui.state.{TinyGuiNode, TinyGuiState, tiny_layout_scan_steps, tiny_layout_scan_reset}
+use std.tiny.pane.model.{TinyResolvedPane, TINY_PANE_VISIBLE, TINY_PANE_ENABLED, TINY_PANE_FOCUSABLE, TINY_PANE_POINTER}
+
+# ---------------------------------------------------------------------------
+# Differential oracle: the historical quadratic algorithm, kept verbatim.
+# ---------------------------------------------------------------------------
+
+var _reference_scan_steps = 0
+
+fn reference_scan_reset() -> i32:
+    """Reset the reference oracle's scan-step counter and return its old value."""
+    val previous = _reference_scan_steps
+    _reference_scan_steps = 0
+    return previous
+
+fn reference_resolved_panes(state: TinyGuiState, viewport: TinyRect) -> [TinyResolvedPane]:
+    """The pre-A04 `resolved_panes` body, unchanged, used as the geometry oracle."""
+    var panes: [TinyResolvedPane] = []
+    var node_index = 0
+    while node_index < state.nodes.len():
+        val node = state.nodes[node_index]
+        var pane_flags = TINY_PANE_VISIBLE + TINY_PANE_ENABLED
+        if val metadata = tiny_component_metadata(node.class_id):
+            if metadata.flags & TINY_COMPONENT_FLAG_FOCUSABLE != 0:
+                pane_flags = pane_flags + TINY_PANE_FOCUSABLE + TINY_PANE_POINTER
+            elif metadata.flags & TINY_COMPONENT_FLAG_SCROLLABLE != 0:
+                pane_flags = pane_flags + TINY_PANE_POINTER
+        var resolved = TinyResolvedPane.root(
+            node.id, node.bounds, viewport, node.id.index,
+            pane_flags,
+            node.id.index,
+        )
+        if node.parent.is_valid():
+            var parent_index = -1
+            var i = 0
+            while i < panes.len():
+                _reference_scan_steps = _reference_scan_steps + 1
+                if panes[i].id.index == node.parent.index and panes[i].id.generation == node.parent.generation:
+                    parent_index = i
+                i = i + 1
+            if parent_index >= 0:
+                val parent_node = state.nodes[node.parent.index]
+                var local = node.bounds
+                if parent_node.class_id == TINY_COMPONENT_STACK:
+                    local = TinyRect(x: node.bounds.x, y: node.bounds.y, width: node.bounds.width, height: node.bounds.height)
+                if parent_node.class_id == TINY_COMPONENT_ROW:
+                    var flow_x = 0
+                    var sibling_index = 0
+                    while sibling_index < node_index:
+                        _reference_scan_steps = _reference_scan_steps + 1
+                        val sibling = state.nodes[sibling_index]
+                        if sibling.parent.is_valid() and sibling.parent.index == node.parent.index and sibling.parent.generation == node.parent.generation:
+                            flow_x = flow_x + sibling.bounds.width
+                        sibling_index = sibling_index + 1
+                    local = TinyRect(x: flow_x, y: 0, width: node.bounds.width, height: node.bounds.height)
+                if parent_node.class_id == TINY_COMPONENT_COLUMN or parent_node.class_id == TINY_COMPONENT_LIST or parent_node.class_id == TINY_COMPONENT_SCROLL_PANE:
+                    var flow_y = 0
+                    var sibling_index = 0
+                    while sibling_index < node_index:
+                        _reference_scan_steps = _reference_scan_steps + 1
+                        val sibling = state.nodes[sibling_index]
+                        if sibling.parent.is_valid() and sibling.parent.index == node.parent.index and sibling.parent.generation == node.parent.generation:
+                            flow_y = flow_y + sibling.bounds.height
+                        sibling_index = sibling_index + 1
+                    val inset_x = if parent_node.class_id == TINY_COMPONENT_LIST: 2 else: 0
+                    local = TinyRect(x: inset_x, y: flow_y, width: node.bounds.width, height: node.bounds.height)
+                val scroll_y = if parent_node.class_id == TINY_COMPONENT_SCROLL_PANE: parent_node.value else: 0
+                resolved = panes[parent_index].resolve_child(
+                    node.id, local, TinyRect.empty(), 0, scroll_y, node.id.index,
+                    pane_flags,
+                    node.id.index,
+                )
+        panes.push(resolved)
+        node_index = node_index + 1
+    panes
+
+fn reference_child_extent_y(state: TinyGuiState, parent_index: i32) -> i32:
+    """The pre-A04 `direct_child_extent_y` body, unchanged, used as the oracle."""
+    if parent_index < 0 or parent_index >= state.nodes.len(): return 0
+    var extent = 0
+    var i = 0
+    while i < state.nodes.len():
+        _reference_scan_steps = _reference_scan_steps + 1
+        val node = state.nodes[i]
+        if node.parent.is_valid() and node.parent.index == parent_index and node.parent.generation == state.nodes[parent_index].id.generation:
+            if node.bounds.height > 2147483647 - extent: return 2147483647
+            extent = extent + node.bounds.height
+        i = i + 1
+    extent
+
+fn rects_equal(a: TinyRect, b: TinyRect) -> bool:
+    a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height
+
+fn panes_equal(a: TinyResolvedPane, b: TinyResolvedPane) -> bool:
+    a.id.index == b.id.index and a.id.generation == b.id.generation
+        and rects_equal(a.absolute, b.absolute)
+        and rects_equal(a.effective_clip, b.effective_clip)
+        and a.z == b.z and a.flags == b.flags and a.content_id == b.content_id
+
+fn first_mismatch(state: TinyGuiState, viewport: TinyRect) -> i32:
+    """Index of the first pane that differs from the oracle, or -1 when identical."""
+    val actual = state.resolved_panes(viewport)
+    val expected = reference_resolved_panes(state, viewport)
+    if actual.len() != expected.len(): return -2
+    var i = 0
+    while i < actual.len():
+        if not panes_equal(actual[i], expected[i]): return i
+        i = i + 1
+    return -1
+
+fn first_extent_mismatch(state: TinyGuiState) -> i32:
+    """Index of the first parent whose child extent differs from the oracle, or -1."""
+    var i = 0
+    while i < state.nodes.len():
+        val actual = state.direct_child_extent_y(i)
+        val expected = reference_child_extent_y(state, i)
+        if actual != expected: return i
+        i = i + 1
+    return -1
+
+# ---------------------------------------------------------------------------
+# Corpus builders
+# ---------------------------------------------------------------------------
+
+fn build_single_root() -> TinyGuiState:
+    var state = TinyGuiState.bounded(1)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_PANE, TinyRect(x: 3, y: 4, width: 20, height: 10), "")
+    state
+
+fn build_flow(class_id: i32, count: i32) -> TinyGuiState:
+    var state = TinyGuiState.bounded(count + 1)
+    state.add(TinyHandle.invalid(), class_id, TinyRect(x: 1, y: 2, width: 40, height: 20), "")
+    var i = 0
+    while i < count:
+        state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 3 + i, height: 1 + i), "item")
+        i = i + 1
+    state
+
+fn build_nested() -> TinyGuiState:
+    var state = TinyGuiState.bounded(8)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_STACK, TinyRect(x: 2, y: 3, width: 60, height: 40), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_COLUMN, TinyRect(x: 1, y: 1, width: 50, height: 30), "")
+    state.add(state.handle_at(1), TINY_COMPONENT_ROW, TinyRect(x: 4, y: 4, width: 40, height: 5), "")
+    state.add(state.handle_at(2), TINY_COMPONENT_TEXT, TinyRect(x: 7, y: 7, width: 6, height: 2), "a")
+    state.add(state.handle_at(2), TINY_COMPONENT_BUTTON, TinyRect(x: 7, y: 7, width: 8, height: 3), "b")
+    state.add(state.handle_at(1), TINY_COMPONENT_ROW, TinyRect(x: 4, y: 4, width: 40, height: 6), "")
+    state.add(state.handle_at(5), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 5, height: 1), "c")
+    state
+
+fn build_list_with_selection() -> TinyGuiState:
+    var state = TinyGuiState.bounded(5)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_LIST, TinyRect(x: 0, y: 0, width: 20, height: 6), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 10, height: 1), "one")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 10, height: 2), "two")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 10, height: 1), "three")
+    state.nodes[0] = TinyGuiNode(id: state.handle_at(0), parent: TinyHandle.invalid(), class_id: TINY_COMPONENT_LIST, bounds: TinyRect(x: 0, y: 0, width: 20, height: 6), flags: 0, text_value: "", value: 1)
+    state
+
+fn build_scroll_pane() -> TinyGuiState:
+    var state = TinyGuiState.bounded(5)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_SCROLL_PANE, TinyRect(x: 1, y: 1, width: 12, height: 4), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 3), "row0")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 3), "row1")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 3), "row2")
+    state.nodes[0] = TinyGuiNode(id: state.handle_at(0), parent: TinyHandle.invalid(), class_id: TINY_COMPONENT_SCROLL_PANE, bounds: TinyRect(x: 1, y: 1, width: 12, height: 4), flags: 0, text_value: "", value: 4)
+    state
+
+fn build_zero_size() -> TinyGuiState:
+    var state = TinyGuiState.bounded(4)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_COLUMN, TinyRect(x: 0, y: 0, width: 0, height: 0), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 0, height: 0), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 0, height: 0), "")
+    state
+
+fn build_saturating() -> TinyGuiState:
+    var state = TinyGuiState.bounded(4)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_COLUMN, TinyRect(x: 2147483647, y: 2147483647, width: 2147483647, height: 2147483647), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 2147483647, y: 2147483647, width: 2147483647, height: 2147483647), "hi")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 4, height: 2147483647), "lo")
+    state
+
+fn build_forward_parent() -> TinyGuiState:
+    """A row of 3 whose second node points at a parent LATER in the array."""
+    var state = build_flow(TINY_COMPONENT_ROW, 3)
+    state.nodes[1] = TinyGuiNode(id: state.handle_at(1), parent: TinyHandle(index: 3, generation: state.handle_at(3).generation), class_id: TINY_COMPONENT_TEXT, bounds: TinyRect(x: 9, y: 9, width: 3, height: 1), flags: 0, text_value: "item", value: 0)
+    state
+
+fn build_dead_generation() -> TinyGuiState:
+    """A column of 3 whose second child names a live index with a dead generation."""
+    var state = build_flow(TINY_COMPONENT_COLUMN, 3)
+    state.nodes[2] = TinyGuiNode(id: state.handle_at(2), parent: TinyHandle(index: 0, generation: 4242), class_id: TINY_COMPONENT_TEXT, bounds: TinyRect(x: 9, y: 9, width: 4, height: 2), flags: 0, text_value: "item", value: 0)
+    state
+
+fn build_deep_chain(depth: i32) -> TinyGuiState:
+    var state = TinyGuiState.bounded(depth)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_COLUMN, TinyRect(x: 1, y: 1, width: 80, height: 80), "")
+    var i = 1
+    while i < depth:
+        state.add(state.handle_at(i - 1), TINY_COMPONENT_COLUMN, TinyRect(x: 1, y: 1, width: 60, height: 60), "")
+        i = i + 1
+    state
+
+val VIEWPORT = TinyRect(x: 0, y: 0, width: 120, height: 80)
+
+describe "Tiny linear layout parity with the historical algorithm":
+    it "resolves the small-tree corpus identically to the reference oracle":
+        # @req REQ-UI-SLIM-002
+        # @capture(bit_table): pane-by-pane parity against the differential oracle
+        step("Resolve single root, row of 5, column of 5 and the nested stack tree")
+        expect(first_mismatch(build_single_root(), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_flow(TINY_COMPONENT_ROW, 5), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_flow(TINY_COMPONENT_COLUMN, 5), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_nested(), VIEWPORT)).to_equal(-1)
+
+    it "resolves list selection scroll offset and clipping identically":
+        # @req REQ-UI-SLIM-002
+        # @capture(bit_table): list and scroll-pane parity against the oracle
+        step("Control: the fixtures really carry a selection and a scroll offset")
+        expect(build_list_with_selection().nodes[0].value).to_equal(1)
+        val scrolled = build_scroll_pane()
+        expect(scrolled.nodes[0].value).to_equal(4)
+        expect(reference_resolved_panes(scrolled, VIEWPORT)[1].absolute.y).to_equal(-3)
+        step("Resolve a LIST with a selection and a SCROLL_PANE with a scroll offset")
+        expect(first_mismatch(build_list_with_selection(), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_scroll_pane(), VIEWPORT)).to_equal(-1)
+        step("Ordinals of the list children are dense and reusable by the renderer")
+        val listed = build_list_with_selection()
+        listed.resolved_panes(VIEWPORT)
+        expect(listed.child_ordinal_of(1)).to_equal(0)
+        expect(listed.child_ordinal_of(3)).to_equal(2)
+        expect(listed.direct_child_count(0)).to_equal(3)
+        step("Clip the scroll pane against a viewport smaller than its content")
+        expect(first_mismatch(build_scroll_pane(), TinyRect(x: 0, y: 0, width: 6, height: 3))).to_equal(-1)
+
+    it "resolves degenerate and saturating geometry identically":
+        # @req REQ-UI-SLIM-002
+        # @capture(bit_table): zero-size and numeric-boundary parity
+        step("Resolve zero-size nodes and nodes that saturate at the i32 boundary")
+        expect(first_mismatch(build_zero_size(), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_saturating(), VIEWPORT)).to_equal(-1)
+        step("Child extents saturate exactly as the historical contract did")
+        expect(first_extent_mismatch(build_saturating())).to_equal(-1)
+        expect(build_saturating().direct_child_extent_y(0)).to_equal(2147483647)
+
+    it "resolves a deep chain and a wide fan-out identically":
+        # @req REQ-UI-SLIM-002
+        # @capture(bit_table): depth-40 chain and 200-child fan-out parity
+        step("Resolve a 40-deep parent chain and a 200-child row fan-out")
+        expect(first_mismatch(build_deep_chain(40), VIEWPORT)).to_equal(-1)
+        expect(first_mismatch(build_flow(TINY_COMPONENT_ROW, 200), VIEWPORT)).to_equal(-1)
+        expect(first_extent_mismatch(build_flow(TINY_COMPONENT_COLUMN, 200))).to_equal(-1)
+
+describe "Tiny linear layout scan-step scaling":
+    it "performs a bounded number of scan steps where the reference is quadratic":
+        # @req REQ-UI-SLIM-011
+        # @capture(statistics): scan steps for the 200-child fan-out, new vs reference
+        step("Resolve a 201-node fan-out and read both scan-step counters")
+        val fan_out = build_flow(TINY_COMPONENT_ROW, 200)
+        val node_count = fan_out.nodes.len()
+        expect(node_count).to_equal(201)
+
+        tiny_layout_scan_reset()
+        fan_out.resolved_panes(VIEWPORT)
+        val linear_steps = tiny_layout_scan_steps()
+
+        reference_scan_reset()
+        reference_resolved_panes(fan_out, VIEWPORT)
+        val reference_steps = reference_scan_reset()
+
+        step("The shipped pass stays within 3 steps per node; the reference does not")
+        expect(linear_steps <= 3 * node_count).to_be(true)
+        expect(reference_steps > 10 * node_count).to_be(true)
+        step("Pin the measured counts so a silent regression cannot hide")
+        # evidence(pinned oracle): 201 clear+probe, 200 parent lookups, 200 flow
+        # accumulations = 601. The reference performs two triangular scans:
+        # 2 * (200 * 201 / 2) = 40200.
+        expect(linear_steps).to_equal(601)
+        expect(reference_steps).to_equal(40200)
+
+    it "reads cached child extents without rescanning every node":
+        # @req REQ-UI-SLIM-011
+        # @capture(statistics): scan steps for a direct_child_extent_y query
+        step("Resolve a 200-child column, then query its child extent")
+        val fan_out = build_flow(TINY_COMPONENT_COLUMN, 200)
+        fan_out.resolved_panes(VIEWPORT)
+        expect(fan_out.metadata_valid()).to_be(true)
+        tiny_layout_scan_reset()
+        val extent = fan_out.direct_child_extent_y(0)
+        val extent_steps = tiny_layout_scan_steps()
+        expect(extent).to_equal(reference_child_extent_y(fan_out, 0))
+        expect(extent_steps).to_equal(1)
+        step("Before any layout pass the metadata is invalid and the reader rescans")
+        val cold = build_flow(TINY_COMPONENT_COLUMN, 200)
+        expect(cold.metadata_valid()).to_be(false)
+        tiny_layout_scan_reset()
+        val cold_extent = cold.direct_child_extent_y(0)
+        expect(cold_extent).to_equal(extent)
+        expect(tiny_layout_scan_steps()).to_equal(201)
+        step("Child ordinals from the same pass are dense and root nodes carry -1")
+        expect(fan_out.child_ordinal_of(0)).to_equal(-1)
+        expect(fan_out.child_ordinal_of(1)).to_equal(0)
+        expect(fan_out.child_ordinal_of(200)).to_equal(199)
+        expect(fan_out.direct_child_count(0)).to_equal(200)
+
+describe "Tiny linear layout invariant sabotage":
+    it "rejects a stale-generation parent at the mutation boundary":
+        # @req REQ-UI-SLIM-002
+        # @capture(protocol_json): rejection receipt for a stale parent handle
+        step("Add a child whose parent handle carries the wrong generation")
+        var state = TinyGuiState.bounded(4)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_ROW, TinyRect(x: 0, y: 0, width: 10, height: 4), "")
+        state.add(TinyHandle(index: 0, generation: 9999), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 3, height: 1), "bad")
+        expect(state.nodes.len()).to_equal(1)
+        step("Add a child whose parent index does not exist yet")
+        state.add(TinyHandle(index: 7, generation: 1), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 3, height: 1), "bad")
+        expect(state.nodes.len()).to_equal(1)
+
+    it "survives a zero-capacity state with empty metadata arrays":
+        # @req REQ-UI-SLIM-002
+        # @capture(protocol_json): zero-capacity construction and layout receipt
+        step("Construct a zero-capacity state and resolve it")
+        var empty = TinyGuiState.bounded(0)
+        expect(empty.nodes.len()).to_equal(0)
+        expect(empty.resolved_panes(VIEWPORT).len()).to_equal(0)
+        expect(empty.direct_child_extent_y(0)).to_equal(0)
+        expect(empty.child_ordinal_of(0)).to_equal(-1)
+        step("A capacity rejection leaves the node array untouched")
+        empty.add(TinyHandle.invalid(), TINY_COMPONENT_PANE, TinyRect(x: 0, y: 0, width: 1, height: 1), "")
+        expect(empty.nodes.len()).to_equal(0)
+
+    it "treats a forward parent reference exactly as the reference oracle does":
+        # @req REQ-UI-SLIM-002
+        # @capture(bit_table): parity when a node's parent index is not yet resolved
+        step("Point a node at a parent that sits later in the array")
+        var state = build_forward_parent()
+        step("Control: the sabotage really landed and the oracle really treats it as a root")
+        expect(state.nodes[1].parent.index).to_equal(3)
+        expect(reference_resolved_panes(state, VIEWPORT)[1].absolute.x).to_equal(9)
+        expect(first_mismatch(state, VIEWPORT)).to_equal(-1)
+        step("Point a node at a live index with a dead generation")
+        var stale = build_dead_generation()
+        step("Control: the sabotage really landed and really changes the oracle")
+        expect(stale.nodes[2].parent.generation).to_equal(4242)
+        expect(reference_child_extent_y(stale, 0)).to_equal(4)
+        expect(first_mismatch(stale, VIEWPORT)).to_equal(-1)
+        expect(stale.direct_child_extent_y(0)).to_equal(4)
+        expect(first_extent_mismatch(stale)).to_equal(-1)

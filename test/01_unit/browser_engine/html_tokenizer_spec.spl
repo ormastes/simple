@@ -1,3 +1,34 @@
+"""
+## Purpose and audience
+Executable WHATWG-tokenizer evidence for the engineers who own
+`src/lib/gc_async_mut/gpu/browser_engine/html_tokenizer.spl`: basic tags,
+attributes, raw-text states, character references, and malformed-markup
+recovery, each asserted through the real tokenizer API. Operators gating a
+tokenizer or web-render change rerun this spec to catch token-stream
+regressions before they reach layout.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/browser_engine/html_tokenizer_spec.spl`
+from the repo root; scenarios drive `html_tokenizer_new`,
+`html_tokenizer_tokenize`, and the `*_with_limit(s)` variants, asserting
+token kinds, names, attribute lists, and limit/truncation behaviour.
+## Compatibility and limitations
+The spec covers the token stage only — tree construction, CSS/JS handling,
+and streaming incremental input are out of scope. The `_shapes` lens renders
+the token stream as a compact string, so a failure shows the diverging shape
+rather than a raw token dump.
+## Verification guidance and troubleshooting
+A failing shape or count means the tokenizer emitted a different token stream:
+re-run the single scenario and compare the expected `_shapes` string against
+the tokenizer's output for that input. Limit scenarios (`truncated`,
+`*_with_limits`) fail when the resource bounds or their EOF terminators drift.
+"""
+# Lifecycle: doc/01_research/domain/chromium_web_renderer_primitive_differential.md ;
+# doc/03_plan/ui/unified_2d_engine/draw_ir_web_renderer_reconciliation_2026-07-31.md ;
+# doc/04_architecture/chromium_web_renderer_primitive_differential.md ;
+# doc/05_design/web_layout_manager.md
+# @manual_section: html-tokenizer
+
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
     HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
@@ -74,34 +105,40 @@ fn _first_char_token_data(html: text) -> text:
 
 describe "HtmlTokenizer basic tags":
     it "AC-1: accepts the exact token limit and truncates the next token":
+        # @req REQ-WEB-TOKENIZER-001
+        # @capture(bit_table): outcome of "AC-1: accepts the exact token limit and truncates the next token"
         step("Tokenize a document at and below its token limit")
         val tokenizer = html_tokenizer_new("<p>x</p>")
         val exact = html_tokenizer_tokenize_with_limit(tokenizer, 3)
         val overflow = html_tokenizer_tokenize_with_limit(tokenizer, 2)
 
         expect(exact.truncated).to_equal(false)
-        expect(exact.tokens.len()).to_equal(4)
+        expect(exact.tokens.len()).to_equal(4)  # oracle: "<p>x</p>" yields StartTag p, Character x, EndTag p, EOF
         expect(overflow.truncated).to_equal(true)
-        expect(overflow.tokens.len()).to_equal(3)
+        expect(overflow.tokens.len()).to_equal(3)  # oracle: the 2-token budget must stop the stream after StartTag and Character, plus the EOF terminator
         expect(
             overflow.tokens[2].token_kind == HtmlTokenKind.Eof
         ).to_equal(true)
 
     it "AC-1: bounds retained attributes before emitting their tag":
+        # @req REQ-WEB-TOKENIZER-002
+        # @capture(bit_table): outcome of "AC-1: bounds retained attributes before emitting their tag"
         step("Tokenize a tag at and beyond its attribute limit")
         val tokenizer = html_tokenizer_new("<p a='1' b='2'>x</p>")
         val exact = html_tokenizer_tokenize_with_limits(tokenizer, 10, 2)
         val overflow = html_tokenizer_tokenize_with_limits(tokenizer, 10, 1)
 
         expect(exact.truncated).to_equal(false)
-        expect(exact.tokens[0].attrs.len()).to_equal(2)
+        expect(exact.tokens[0].attrs.len()).to_equal(2)  # oracle: both attributes fit exactly at the retained-attribute limit
         expect(overflow.truncated).to_equal(true)
-        expect(overflow.tokens.len()).to_equal(1)
+        expect(overflow.tokens.len()).to_equal(1)  # oracle: the 1-attribute budget truncates the tag to its EOF terminator
         expect(
             overflow.tokens[0].token_kind == HtmlTokenKind.Eof
         ).to_equal(true)
 
     it "AC-1: preserves exact limits across raw text and ignored syntax":
+        # @req REQ-WEB-TOKENIZER-003
+        # @capture(bit_table): outcome of "AC-1: preserves exact limits across raw text and ignored syntax"
         step("Tokenize raw text, ignored syntax, and duplicate attributes")
         val raw = html_tokenizer_tokenize_with_limit(
             html_tokenizer_new("<script>x</script>"), 2
@@ -114,29 +151,41 @@ describe "HtmlTokenizer basic tags":
         )
 
         expect(raw.truncated).to_equal(true)
-        expect(raw.tokens.len()).to_equal(3)
+        expect(raw.tokens.len()).to_equal(3)  # oracle: script raw text emits StartTag, one Character run, then the truncating EOF
         expect(
             raw.tokens[1].token_kind == HtmlTokenKind.Character
         ).to_equal(true)
         expect(ignored.truncated).to_equal(false)
-        expect(ignored.tokens.len()).to_equal(2)
+        expect(ignored.tokens.len()).to_equal(2)  # oracle: the bogus processing instruction is dropped, leaving StartTag p plus EOF
         expect(duplicate.truncated).to_equal(false)
-        expect(duplicate.tokens[0].attrs.len()).to_equal(1)
+        expect(duplicate.tokens[0].attrs.len()).to_equal(1)  # oracle: case-insensitive duplicate attributes collapse to one retained attribute
         expect(duplicate.tokens[0].attrs[0].value).to_equal("1")
 
     it "AC-1: emits StartTag token for simple open tag":
+        # @req REQ-WEB-TOKENIZER-004
+        # @capture(bit_table): outcome of "AC-1: emits StartTag token for simple open tag"
+        step("AC-1: emits StartTag token for simple open tag")
         val tok = _first_start_tag("<p>hello</p>")
         expect(tok.tag_name).to_equal("p")
 
     it "AC-1: emits EndTag token for close tag":
+        # @req REQ-WEB-TOKENIZER-005
+        # @capture(bit_table): outcome of "AC-1: emits EndTag token for close tag"
+        step("AC-1: emits EndTag token for close tag")
         val tok = _first_end_tag("<p>hello</p>")
         expect(tok.tag_name).to_equal("p")
 
     it "AC-1: emits EOF as last token":
+        # @req REQ-WEB-TOKENIZER-006
+        # @capture(bit_table): outcome of "AC-1: emits EOF as last token"
+        step("AC-1: emits EOF as last token")
         val result = _has_eof("<p>text</p>")
         expect(result).to_equal(true)
 
     it "AC-1: tokenizes nested tags producing multiple start tokens":
+        # @req REQ-WEB-TOKENIZER-007
+        # @capture(bit_table): outcome of "AC-1: tokenizes nested tags producing multiple start tokens"
+        step("AC-1: tokenizes nested tags producing multiple start tokens")
         val tokens = _tokenize("<div><span>x</span></div>")
         val count = _count_tokens("<div><span>x</span></div>")
         expect(count).to_be_greater_than(3)
@@ -147,24 +196,35 @@ describe "HtmlTokenizer basic tags":
 
 describe "HtmlTokenizer attributes":
     it "AC-1: parses single attribute name and value":
+        # @req REQ-WEB-TOKENIZER-008
+        # @capture(bit_table): outcome of "AC-1: parses single attribute name and value"
+        step("AC-1: parses single attribute name and value")
         val tok = _first_start_tag("<a href=\"http://example.com\">")
         val val_ = _attr_value(tok, "href")
         expect(val_).to_equal("http://example.com")
 
     it "AC-1: parses multiple attributes on one tag":
+        # @req REQ-WEB-TOKENIZER-009
+        # @capture(bit_table): outcome of "AC-1: parses multiple attributes on one tag"
+        step("AC-1: parses multiple attributes on one tag")
         val tok = _first_start_tag("<input type=\"text\" name=\"q\" value=\"\">")
         val t = _attr_value(tok, "type")
         expect(t).to_equal("text")
 
     it "AC-1: parses boolean attribute (no value)":
+        # @req REQ-WEB-TOKENIZER-010
+        # @capture(bit_table): outcome of "AC-1: parses boolean attribute (no value)"
+        step("AC-1: parses boolean attribute (no value)")
         val tok = _first_start_tag("<input disabled>")
         val n = _attr_value(tok, "disabled")
         expect(n).to_equal("")
 
     it "AC-1: discards later duplicate attributes case insensitively":
+        # @req REQ-WEB-TOKENIZER-011
+        # @capture(bit_table): outcome of "AC-1: discards later duplicate attributes case insensitively"
         step("Tokenize a script with duplicate mixed-case source attributes")
         val tok = _first_start_tag("<script src='trusted.spl' SRC='other.spl'>")
-        expect(tok.attrs.len()).to_equal(1)
+        expect(tok.attrs.len()).to_equal(1)  # oracle: the later mixed-case duplicate folds into the first source attribute
         expect(_attr_value(tok, "src")).to_equal("trusted.spl")
 
 # ============================================================================
@@ -173,10 +233,16 @@ describe "HtmlTokenizer attributes":
 
 describe "HtmlTokenizer self-closing tags":
     it "AC-1: sets self_closing flag for XHTML-style self-close":
+        # @req REQ-WEB-TOKENIZER-012
+        # @capture(bit_table): outcome of "AC-1: sets self_closing flag for XHTML-style self-close"
+        step("AC-1: sets self_closing flag for XHTML-style self-close")
         val tok = _first_start_tag("<br/>")
         expect(tok.self_closing).to_equal(true)
 
     it "AC-1: treats <img> as start tag regardless of no end tag":
+        # @req REQ-WEB-TOKENIZER-013
+        # @capture(bit_table): outcome of "AC-1: treats <img> as start tag regardless of no end tag"
+        step("AC-1: treats <img> as start tag regardless of no end tag")
         val tok = _first_start_tag("<img src=\"a.png\">")
         expect(tok.tag_name).to_equal("img")
 
@@ -186,28 +252,46 @@ describe "HtmlTokenizer self-closing tags":
 
 describe "HtmlTokenizer character data":
     it "AC-1: emits Character token for text content":
+        # @req REQ-WEB-TOKENIZER-014
+        # @capture(bit_table): outcome of "AC-1: emits Character token for text content"
+        step("AC-1: emits Character token for text content")
         val found = _has_character_token("<p>hello</p>")
         expect(found).to_equal(true)
 
     it "AC-1: emits Character for &amp; named entity":
+        # @req REQ-WEB-TOKENIZER-015
+        # @capture(bit_table): outcome of "AC-1: emits Character for &amp; named entity"
+        step("AC-1: emits Character for &amp; named entity")
         val txt = _first_char_token_data("<p>&amp;</p>")
         expect(txt).to_equal("&")
 
     it "AC-1: decodes common named entities to Unicode characters":
+        # @req REQ-WEB-TOKENIZER-016
+        # @capture(bit_table): outcome of "AC-1: decodes common named entities to Unicode characters"
+        step("AC-1: decodes common named entities to Unicode characters")
         expect(_first_char_token_data("<p>&copy;</p>")).to_equal(text.from_char_code(169))
         expect(_first_char_token_data("<p>&nbsp;</p>")).to_equal(text.from_char_code(160))
         expect(_first_char_token_data("<p>&mdash;</p>")).to_equal(text.from_char_code(8212))
         expect(_first_char_token_data("<p>&hellip;</p>")).to_equal(text.from_char_code(8230))
 
     it "AC-1: decodes decimal numeric character references":
+        # @req REQ-WEB-TOKENIZER-017
+        # @capture(bit_table): outcome of "AC-1: decodes decimal numeric character references"
+        step("AC-1: decodes decimal numeric character references")
         val txt = _first_char_token_data("<p>&#65;</p>")
         expect(txt).to_equal("A")
 
     it "AC-1: decodes hexadecimal numeric character references":
+        # @req REQ-WEB-TOKENIZER-018
+        # @capture(bit_table): outcome of "AC-1: decodes hexadecimal numeric character references"
+        step("AC-1: decodes hexadecimal numeric character references")
         val txt = _first_char_token_data("<p>&#x41;</p>")
         expect(txt).to_equal("A")
 
     it "AC-1: replaces invalid numeric character references":
+        # @req REQ-WEB-TOKENIZER-019
+        # @capture(bit_table): outcome of "AC-1: replaces invalid numeric character references"
+        step("AC-1: replaces invalid numeric character references")
         val txt = _first_char_token_data("<p>&#0;</p>")
         expect(txt).to_equal(text.from_char_code(65533))
 
@@ -217,6 +301,9 @@ describe "HtmlTokenizer character data":
 
 describe "HtmlTokenizer script and raw text states":
     it "AC-1: treats content of <script> as raw text not tags":
+        # @req REQ-WEB-TOKENIZER-020
+        # @capture(bit_table): outcome of "AC-1: treats content of <script> as raw text not tags"
+        step("AC-1: treats content of <script> as raw text not tags")
         val tokens = _tokenize("<script>var x = '<p>';</script>")
         var inner_start_count = 0
         var i = 0
@@ -226,9 +313,12 @@ describe "HtmlTokenizer script and raw text states":
                 if tok.tag_name == "p":
                     inner_start_count = inner_start_count + 1
             i = i + 1
-        expect(inner_start_count).to_equal(0)
+        expect(inner_start_count).to_equal(0)  # oracle: script bodies are raw text, so the embedded <p> must never emit a StartTag
 
     it "AC-1: treats content of <style> as raw text":
+        # @req REQ-WEB-TOKENIZER-021
+        # @capture(bit_table): outcome of "AC-1: treats content of <style> as raw text"
+        step("AC-1: treats content of <style> as raw text")
         val tokens = _tokenize("<style>a > b { color: red; }</style>")
         var gt_tag_count = 0
         var i = 0
@@ -238,17 +328,26 @@ describe "HtmlTokenizer script and raw text states":
                 if tok.tag_name == "b":
                     gt_tag_count = gt_tag_count + 1
             i = i + 1
-        expect(gt_tag_count).to_equal(0)
+        expect(gt_tag_count).to_equal(0)  # oracle: style bodies are raw text, so the embedded <b> must never emit a StartTag
 
     it "AC-1: keeps raw text open to EOF when the end tag never arrives":
+        # @req REQ-WEB-TOKENIZER-022
+        # @capture(bit_table): outcome of "AC-1: keeps raw text open to EOF when the end tag never arrives"
+        step("AC-1: keeps raw text open to EOF when the end tag never arrives")
         expect(_shapes("<script>a")).to_equal("S[script|] C[|a] F[|]")
 
     it "AC-1: ends raw text only on the real end tag, then resumes data":
+        # @req REQ-WEB-TOKENIZER-023
+        # @capture(bit_table): outcome of "AC-1: ends raw text only on the real end tag, then resumes data"
+        step("AC-1: ends raw text only on the real end tag, then resumes data")
         expect(_shapes("<script>a<b</script>c")).to_equal(
             "S[script|] C[|a<b] E[script|] C[|c] F[|]"
         )
 
     it "AC-1: treats <textarea> and <title> bodies as raw text":
+        # @req REQ-WEB-TOKENIZER-024
+        # @capture(bit_table): outcome of "AC-1: treats <textarea> and <title> bodies as raw text"
+        step("AC-1: treats <textarea> and <title> bodies as raw text")
         expect(_shapes("<textarea><b>x</b></textarea>")).to_equal(
             "S[textarea|] C[|<b>x</b>] E[textarea|] F[|]"
         )
@@ -257,6 +356,8 @@ describe "HtmlTokenizer script and raw text states":
         )
 
     it "AC-1: decodes references in RCDATA with and without leading text":
+        # @req REQ-WEB-TOKENIZER-025
+        # @capture(bit_table): outcome of "AC-1: decodes references in RCDATA with and without leading text"
         step("Tokenize title and textarea bodies carrying character references")
         # RCDATA splits the body at each `&`: the run before the reference is
         # emitted first, then the decoded reference, then the remainder. The
@@ -269,12 +370,16 @@ describe "HtmlTokenizer script and raw text states":
         )
 
     it "AC-1: accepts whitespace between the raw end tag name and its '>'":
+        # @req REQ-WEB-TOKENIZER-026
+        # @capture(bit_table): outcome of "AC-1: accepts whitespace between the raw end tag name and its '>'"
         step("Close a script element with '</script >'")
         expect(_shapes("<script>a</script >")).to_equal(
             "S[script|] C[|a] E[script|] F[|]"
         )
 
     it "AC-1: rejects a raw end tag whose run to '>' hits '<' first":
+        # @req REQ-WEB-TOKENIZER-027
+        # @capture(bit_table): outcome of "AC-1: rejects a raw end tag whose run to '>' hits '<' first"
         step("Tokenize '</script x<b>' inside a script body")
         # `</script x<b>` looks like an end tag until the scan for `>` meets a
         # `<`; the scan restarts there and never finds a close, so the whole
@@ -289,33 +394,57 @@ describe "HtmlTokenizer script and raw text states":
 
 describe "HtmlTokenizer malformed markup":
     it "AC-1: emits a bare '<' as character data when no tag name follows":
+        # @req REQ-WEB-TOKENIZER-028
+        # @capture(bit_table): outcome of "AC-1: emits a bare '<' as character data when no tag name follows"
+        step("AC-1: emits a bare '<' as character data when no tag name follows")
         expect(_shapes("a < b")).to_equal("C[|a ] C[|<] C[| b] F[|]")
         expect(_shapes("<>x")).to_equal("C[|<] C[|>x] F[|]")
 
     it "AC-1: recovers an unterminated tag as character data":
+        # @req REQ-WEB-TOKENIZER-029
+        # @capture(bit_table): outcome of "AC-1: recovers an unterminated tag as character data"
+        step("AC-1: recovers an unterminated tag as character data")
         expect(_shapes("<div class='a")).to_equal(
             "C[|<] C[|div class='a] F[|]"
         )
 
     it "AC-1: drops attributes on an end tag and keeps the tag name":
+        # @req REQ-WEB-TOKENIZER-030
+        # @capture(bit_table): outcome of "AC-1: drops attributes on an end tag and keeps the tag name"
+        step("AC-1: drops attributes on an end tag and keeps the tag name")
         expect(_shapes("</div class='a'>")).to_equal("E[div|] F[|]")
 
     it "AC-1: emits a nameless end tag for '</ >'":
+        # @req REQ-WEB-TOKENIZER-031
+        # @capture(bit_table): outcome of "AC-1: emits a nameless end tag for '</ >'"
+        step("AC-1: emits a nameless end tag for '</ >'")
         expect(_shapes("</ >a")).to_equal("E[|] C[|a] F[|]")
 
     it "AC-1: discards CDATA and other bogus bang constructs":
+        # @req REQ-WEB-TOKENIZER-032
+        # @capture(bit_table): outcome of "AC-1: discards CDATA and other bogus bang constructs"
+        step("AC-1: discards CDATA and other bogus bang constructs")
         expect(_shapes("<![CDATA[x]]>y")).to_equal("C[|y] F[|]")
         expect(_shapes("<!x>y")).to_equal("C[|y] F[|]")
 
     it "AC-1: keeps the doctype root name and drops the public identifier":
+        # @req REQ-WEB-TOKENIZER-033
+        # @capture(bit_table): outcome of "AC-1: keeps the doctype root name and drops the public identifier"
+        step("AC-1: keeps the doctype root name and drops the public identifier")
         expect(_shapes("<!DOCTYPE HTML PUBLIC 'x'>")).to_equal("D[HTML|] F[|]")
 
     it "AC-1: emits an empty comment for the abrupt '<!--->' form":
+        # @req REQ-WEB-TOKENIZER-034
+        # @capture(bit_table): outcome of "AC-1: emits an empty comment for the abrupt '<!--->' form"
+        step("AC-1: emits an empty comment for the abrupt '<!--->' form")
         expect(_shapes("<!-- a -->b<!--->c")).to_equal(
             "M[| a ] C[|b] M[|] C[|c] F[|]"
         )
 
     it "AC-1: lowercases tag and attribute names on a start tag":
+        # @req REQ-WEB-TOKENIZER-035
+        # @capture(bit_table): outcome of "AC-1: lowercases tag and attribute names on a start tag"
+        step("AC-1: lowercases tag and attribute names on a start tag")
         expect(_shapes("<DIV CLASS='A'>x</DIV>")).to_equal(
             "S[div|] C[|x] E[div|] F[|]"
         )
@@ -324,19 +453,27 @@ describe "HtmlTokenizer malformed markup":
         )
 
     it "AC-1: emits a lone trailing '<' as character data":
+        # @req REQ-WEB-TOKENIZER-036
+        # @capture(bit_table): outcome of "AC-1: emits a lone trailing '<' as character data"
         step("Tokenize input whose final character is '<'")
         expect(_shapes("a<")).to_equal("C[|a] C[|<] F[|]")
 
     it "AC-1: emits an empty comment when '>' follows '<!--' directly":
+        # @req REQ-WEB-TOKENIZER-037
+        # @capture(bit_table): outcome of "AC-1: emits an empty comment when '>' follows '<!--' directly"
         step("Tokenize the shortest abrupt comment close")
         # Distinct from '<!--->': here '>' sits immediately after '<!--'.
         expect(_shapes("<!-->x")).to_equal("M[|] C[|x] F[|]")
 
     it "AC-1: closes an unterminated comment at end of input":
+        # @req REQ-WEB-TOKENIZER-038
+        # @capture(bit_table): outcome of "AC-1: closes an unterminated comment at end of input"
         step("Tokenize a comment that never reaches '-->'")
         expect(_shapes("<!--ab")).to_equal("M[|ab] F[|]")
 
     it "AC-1: discards unterminated bang and question constructs":
+        # @req REQ-WEB-TOKENIZER-039
+        # @capture(bit_table): outcome of "AC-1: discards unterminated bang and question constructs"
         step("Tokenize doctype, bogus bang and processing instruction at EOF")
         # Each of these scans for a '>' that never arrives and drops the run.
         expect(_shapes("<!DOCTYPE html")).to_equal("F[|]")
@@ -344,12 +481,17 @@ describe "HtmlTokenizer malformed markup":
         expect(_shapes("<?php")).to_equal("F[|]")
 
     it "AC-1: recovers an unterminated end tag as character data":
+        # @req REQ-WEB-TOKENIZER-040
+        # @capture(bit_table): outcome of "AC-1: recovers an unterminated end tag as character data"
         step("Tokenize '</div' with no closing '>'")
         expect(_shapes("</div")).to_equal("C[|<] C[|/div] F[|]")
 
     it "AC-1: parses quoted, unquoted and valueless attributes together":
+        # @req REQ-WEB-TOKENIZER-041
+        # @capture(bit_table): outcome of "AC-1: parses quoted, unquoted and valueless attributes together"
+        step("AC-1: parses quoted, unquoted and valueless attributes together")
         val tok = _first_start_tag("<a b=\"c d\" e=f g>")
-        expect(tok.attrs.len()).to_equal(3)
+        expect(tok.attrs.len()).to_equal(3)  # oracle: quoted, unquoted and valueless forms each parse into one attribute
         expect(_attr_value(tok, "b")).to_equal("c d")
         expect(_attr_value(tok, "e")).to_equal("f")
         expect(_attr_value(tok, "g")).to_equal("")
@@ -360,23 +502,38 @@ describe "HtmlTokenizer malformed markup":
 
 describe "HtmlTokenizer character reference edges":
     it "AC-1: keeps an unmatched reference tail verbatim":
+        # @req REQ-WEB-TOKENIZER-042
+        # @capture(bit_table): outcome of "AC-1: keeps an unmatched reference tail verbatim"
+        step("AC-1: keeps an unmatched reference tail verbatim")
         expect(_all_character_data("&#x41;&#66;&notit;")).to_equal(
             "AB" + text.from_char_code(172) + "it;"
         )
 
     it "AC-1: applies the legacy no-semicolon form only where allowed":
+        # @req REQ-WEB-TOKENIZER-043
+        # @capture(bit_table): outcome of "AC-1: applies the legacy no-semicolon form only where allowed"
+        step("AC-1: applies the legacy no-semicolon form only where allowed")
         expect(_all_character_data("&amp&lt;")).to_equal("&<")
 
     it "AC-1: replaces null, surrogate and out-of-range code points":
+        # @req REQ-WEB-TOKENIZER-044
+        # @capture(bit_table): outcome of "AC-1: replaces null, surrogate and out-of-range code points"
+        step("AC-1: replaces null, surrogate and out-of-range code points")
         val replacement = text.from_char_code(65533)
         expect(_all_character_data("&#0;")).to_equal(replacement)
         expect(_all_character_data("&#xD800;")).to_equal(replacement)
         expect(_all_character_data("&#x110000;")).to_equal(replacement)
 
     it "AC-1: remaps the windows-1252 C1 range":
+        # @req REQ-WEB-TOKENIZER-045
+        # @capture(bit_table): outcome of "AC-1: remaps the windows-1252 C1 range"
+        step("AC-1: remaps the windows-1252 C1 range")
         expect(_all_character_data("&#x80;")).to_equal(text.from_char_code(8364))
 
     it "AC-1: maps every entry of the windows-1252 C1 table":
+        # @req REQ-WEB-TOKENIZER-046
+        # @capture(bit_table): outcome of "AC-1: maps every entry of the windows-1252 C1 table"
+        step("AC-1: maps every entry of the windows-1252 C1 table")
         val sources = [
             128, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 142,
             145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 158,
@@ -387,8 +544,8 @@ describe "HtmlTokenizer character reference edges":
             338, 381, 8216, 8217, 8220, 8221, 8226, 8211, 8212, 732, 8482,
             353, 8250, 339, 382, 376
         ]
-        expect(sources.len()).to_equal(27)
-        expect(targets.len()).to_equal(27)
+        expect(sources.len()).to_equal(27)  # oracle: the windows-1252 C1 remap table pins 27 source code points
+        expect(targets.len()).to_equal(27)  # oracle: the windows-1252 C1 remap table pins 27 target code points, one per source
         var i = 0
         while i < sources.len():
             expect(_all_character_data(
@@ -397,6 +554,9 @@ describe "HtmlTokenizer character reference edges":
             i = i + 1
 
     it "AC-1: passes through C1 code points the table does not remap":
+        # @req REQ-WEB-TOKENIZER-047
+        # @capture(bit_table): outcome of "AC-1: passes through C1 code points the table does not remap"
+        step("AC-1: passes through C1 code points the table does not remap")
         val unmapped = [129, 141, 143, 144, 157]
         var i = 0
         while i < unmapped.len():
@@ -407,15 +567,21 @@ describe "HtmlTokenizer character reference edges":
             i = i + 1
 
     it "AC-1: keeps a trailing bare '&' as character data":
+        # @req REQ-WEB-TOKENIZER-048
+        # @capture(bit_table): outcome of "AC-1: keeps a trailing bare '&' as character data"
         step("Tokenize input ending in an ampersand with nothing after it")
         expect(_all_character_data("a&")).to_equal("a&")
 
     it "AC-1: keeps a numeric reference that carries no digits":
+        # @req REQ-WEB-TOKENIZER-049
+        # @capture(bit_table): outcome of "AC-1: keeps a numeric reference that carries no digits"
         step("Tokenize '&#;' and '&#x;' with an empty digit run")
         expect(_all_character_data("&#;")).to_equal("&#;")
         expect(_all_character_data("&#x;")).to_equal("&#x;")
 
     it "AC-1: keeps a numeric reference whose digit is multi-byte":
+        # @req REQ-WEB-TOKENIZER-050
+        # @capture(bit_table): outcome of "AC-1: keeps a numeric reference whose digit is multi-byte"
         step("Tokenize '&#' followed by a non-ASCII character")
         # The digit reader works on single bytes, so a multi-byte character
         # terminates the run and the whole reference stays literal.
@@ -424,15 +590,22 @@ describe "HtmlTokenizer character reference edges":
         )
 
     it "AC-1: clamps a numeric reference that overflows the code space":
+        # @req REQ-WEB-TOKENIZER-051
+        # @capture(bit_table): outcome of "AC-1: clamps a numeric reference that overflows the code space"
         step("Tokenize decimal and hex references far past U+10FFFF")
         val replacement = text.from_char_code(65533)
         expect(_all_character_data("&#99999999;")).to_equal(replacement)
         expect(_all_character_data("&#x7FFFFFFFFF;")).to_equal(replacement)
 
     it "AC-1: decodes lowercase hexadecimal reference digits":
+        # @req REQ-WEB-TOKENIZER-052
+        # @capture(bit_table): outcome of "AC-1: decodes lowercase hexadecimal reference digits"
         step("Tokenize a hex reference written with lowercase a-f")
         expect(_all_character_data("&#xe9;")).to_equal(text.from_char_code(233))
 
     it "AC-1: decodes references inside attribute values":
+        # @req REQ-WEB-TOKENIZER-053
+        # @capture(bit_table): outcome of "AC-1: decodes references inside attribute values"
+        step("AC-1: decodes references inside attribute values")
         val tok = _first_start_tag("<a href='?x=1&amp;y=2&notit;'>")
         expect(_attr_value(tok, "href")).to_equal("?x=1&y=2&notit;")

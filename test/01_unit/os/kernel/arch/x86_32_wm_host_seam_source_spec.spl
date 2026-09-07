@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Pins the x86_32 WM host-seam source-ownership contract: the host seam entry
+drives the shared framebuffer and portable WM owners without copied
+rendering; the multiboot WM lane is a distinct acceptance target; Multiboot
+RGB scanout facts are captured at the boot owner; and generic kernel MMIO
+reads stay distinct from the bounded WM scanout readback. Written for the
+x86_32 baremetal bring-up and WM lane owners.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/kernel/arch/x86_32_wm_host_seam_source_spec.spl`
+and read the SPEC FILE VERDICT line; scenarios read the shipped seam entry,
+platform targets, crt0, and baremetal stubs, binding each ownership rule to
+a named check.
+## Compatibility and limitations
+Source-contract scenarios over examples/09_embedded and src/os/port
+artifacts; they hold without booting x86_32 hardware or QEMU. The C stubs
+are read as text, not compiled here.
+## Verification guidance and troubleshooting
+A failing named check names the exact symbol or ordering rule that regressed
+in the cited file (wm_host_seam_entry.spl, x86_platform_targets.spl, crt0.s,
+or baremetal_stubs.c). The ordering scenario reports index positions inside
+the stubs source; grep the cited file for the failing token.
+"""
+# Lifecycle: doc/01_research/os/x86_desktop/x86_dual_arch_qemu_boot.md ;
+# doc/03_plan/os/wm/shared_wm_renderer_unification.md ;
+# doc/04_architecture/os/shared_wm_stack.md ;
+# doc/05_design/os/kernel/x86_32_authenticated_mapping_owner_v1.md
+# @manual_section: x86-32-wm-host-seam
+
 use std.spec.{describe, it, expect}
 use app.io.mod.{file_read_text}
 
@@ -8,56 +38,102 @@ val STUBS = "examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c"
 
 describe "x86_32 WM host seam source ownership":
     it "uses the shared framebuffer and portable WM owners without copied rendering":
-        val source = file_read_text(ENTRY)
-        expect(source.contains("FramebufferDriver.from_scanout_raw")).to_equal(true)
-        expect(source.contains("wm_host_2d_simpleos(framebuffer)")).to_equal(true)
-        expect(source.contains("wm_host_2d_frame(routed")).to_equal(true)
-        expect(source.contains("rt_x86_32_wm_scanout_read_pixel")).to_equal(true)
-        expect(source.contains("framebuffer.read_pixel")).to_equal(false)
-        expect(source.contains("draw_rect")).to_equal(false)
-        expect(source.contains("input=unclaimed")).to_equal(true)
-        expect(source.contains("input=ready")).to_equal(false)
+        # @req REQ-OS-WMSEAM-001
+        # @capture(bit_table): ownership rows for scanout, host frames, and the unclaimed-input contract
+        step("Read the seam entry and bind each no-copied-rendering rule to a named check")
+        val entry_src = file_read_text(ENTRY)
+        val scanout_comes_from_the_framebuffer_driver = entry_src.contains("FramebufferDriver.from_scanout_raw")
+        val wm_host_runs_on_the_simpleos_target = entry_src.contains("wm_host_2d_simpleos(framebuffer)")
+        val wm_host_frames_route_through_the_shared_owner = entry_src.contains("wm_host_2d_frame(routed")
+        val readback_uses_the_bounded_scanout_helper = entry_src.contains("rt_x86_32_wm_scanout_read_pixel")
+        val framebuffer_is_never_read_pixel_directly = entry_src.contains("framebuffer.read_pixel") == false
+        val entry_draws_no_rectangles_itself = entry_src.contains("draw_rect") == false
+        val input_starts_unclaimed = entry_src.contains("input=unclaimed")
+        val input_is_never_pre_marked_ready = entry_src.contains("input=ready") == false
+        expect(scanout_comes_from_the_framebuffer_driver).to_equal(true)
+        expect(wm_host_runs_on_the_simpleos_target).to_equal(true)
+        expect(wm_host_frames_route_through_the_shared_owner).to_equal(true)
+        expect(readback_uses_the_bounded_scanout_helper).to_equal(true)
+        expect(framebuffer_is_never_read_pixel_directly).to_equal(true)
+        expect(entry_draws_no_rectangles_itself).to_equal(true)
+        expect(input_starts_unclaimed).to_equal(true)
+        expect(input_is_never_pre_marked_ready).to_equal(true)
 
     it "registers a distinct lane without replacing smoke or filesystem acceptance":
-        val source = file_read_text(TARGETS)
-        expect(source.contains("x86_32-smoke")).to_equal(true)
-        expect(source.contains("x86_32-initrd-fat32-smf")).to_equal(true)
-        expect(source.contains("x86_32-multiboot-wm-host-seam")).to_equal(true)
-        expect(source.contains("simpleos_x86_32_wm_host_seam.elf")).to_equal(true)
+        # @req REQ-OS-WMSEAM-002
+        # @capture(bit_table): the x86_32 target rows showing smoke, fat32-smf, and the WM seam lane
+        step("Read the platform target table and bind the distinct-lane rule to named checks")
+        val targets_src = file_read_text(TARGETS)
+        val keeps_the_smoke_lane = targets_src.contains("x86_32-smoke")
+        val keeps_the_initrd_fat32_smf_lane = targets_src.contains("x86_32-initrd-fat32-smf")
+        val adds_the_multiboot_wm_host_seam_lane = targets_src.contains("x86_32-multiboot-wm-host-seam")
+        val names_the_seam_elf_artifact = targets_src.contains("simpleos_x86_32_wm_host_seam.elf")
+        expect(keeps_the_smoke_lane).to_equal(true)
+        expect(keeps_the_initrd_fat32_smf_lane).to_equal(true)
+        expect(adds_the_multiboot_wm_host_seam_lane).to_equal(true)
+        expect(names_the_seam_elf_artifact).to_equal(true)
 
     it "requests and captures Multiboot RGB scanout facts at the boot owner":
-        val boot = file_read_text(BOOT)
-        val stubs = file_read_text(STUBS)
-        expect(boot.contains(".set MB_FLAGS, 0x00000007")).to_equal(true)
-        expect(boot.contains(".long 0xE4524FF7")).to_equal(true)
-        expect(stubs.contains("x86_32_capture_multiboot_framebuffer(multiboot_magic, multiboot_info)")).to_equal(true)
-        expect(stubs.contains("flags & (1U << 12)")).to_equal(true)
-        expect(stubs.contains("mbi[109U]")).to_equal(true)
-        expect(stubs.contains("mbi[110U]")).to_equal(true)
-        expect(stubs.contains("mbi[115U]")).to_equal(true)
-        expect(stubs.contains("RuntimeValue rt_x86_32_wm_bind_scanout(uint64_t address, uint64_t width,")).to_equal(true)
-        expect(stubs.contains("RuntimeValue rt_gui_fill4(uint64_t xy, uint64_t wh, uint64_t color, uint64_t unused)")).to_equal(true)
-        expect(stubs.contains("RuntimeValue rt_x86_32_wm_scanout_read_pixel(uint64_t x, uint64_t y)")).to_equal(true)
-        expect(stubs.contains("x >= x86_32_gui_fb_width || y >= x86_32_gui_fb_height")).to_equal(true)
-        expect(stubs.contains("offset > x86_32_gui_fb_span - 4U")).to_equal(true)
+        # @req REQ-OS-WMSEAM-003
+        # @capture(protocol_binary): the Multiboot header words and the mbi framebuffer fields captured
+        step("Read crt0 and the baremetal stubs and bind each scanout-capture rule to a named check")
+        val boot_src = file_read_text(BOOT)
+        val stubs_src = file_read_text(STUBS)
+        val multiboot_flags_request_vga_and_memory = boot_src.contains(".set MB_FLAGS, 0x00000007")
+        val multiboot_magic_is_the_canonical_constant = boot_src.contains(".long 0xE4524FF7")
+        val capture_helper_is_installed = stubs_src.contains("x86_32_capture_multiboot_framebuffer(multiboot_magic, multiboot_info)")
+        val capture_checks_the_framebuffer_flag_bit = stubs_src.contains("flags & (1U << 12)")
+        val capture_reads_the_framebuffer_addr_field = stubs_src.contains("mbi[109U]")
+        val capture_reads_the_framebuffer_width_field = stubs_src.contains("mbi[110U]")
+        val capture_reads_the_framebuffer_bpp_field = stubs_src.contains("mbi[115U]")
+        val bind_scanout_validates_before_install = stubs_src.contains("RuntimeValue rt_x86_32_wm_bind_scanout(uint64_t address, uint64_t width,")
+        val fill4_routes_through_the_runtime_surface = stubs_src.contains("RuntimeValue rt_gui_fill4(uint64_t xy, uint64_t wh, uint64_t color, uint64_t unused)")
+        val scanout_read_helper_is_exported = stubs_src.contains("RuntimeValue rt_x86_32_wm_scanout_read_pixel(uint64_t x, uint64_t y)")
+        val scanout_rejects_coordinates_past_the_width_or_height = stubs_src.contains("x >= x86_32_gui_fb_width || y >= x86_32_gui_fb_height")
+        val scanout_rejects_offsets_past_the_frame_span = stubs_src.contains("offset > x86_32_gui_fb_span - 4U")
+        expect(multiboot_flags_request_vga_and_memory).to_equal(true)
+        expect(multiboot_magic_is_the_canonical_constant).to_equal(true)
+        expect(capture_helper_is_installed).to_equal(true)
+        expect(capture_checks_the_framebuffer_flag_bit).to_equal(true)
+        expect(capture_reads_the_framebuffer_addr_field).to_equal(true)
+        expect(capture_reads_the_framebuffer_width_field).to_equal(true)
+        expect(capture_reads_the_framebuffer_bpp_field).to_equal(true)
+        expect(bind_scanout_validates_before_install).to_equal(true)
+        expect(fill4_routes_through_the_runtime_surface).to_equal(true)
+        expect(scanout_read_helper_is_exported).to_equal(true)
+        expect(scanout_rejects_coordinates_past_the_width_or_height).to_equal(true)
+        expect(scanout_rejects_offsets_past_the_frame_span).to_equal(true)
 
     it "keeps generic kernel MMIO distinct from bounded WM readback":
-        val stubs = file_read_text(STUBS)
+        # @req REQ-OS-WMSEAM-004
+        # @capture(bit_table): the raw-MMIO and bounded-readback isolation rows
+        step("Bind the raw volatile read body and the bounded scanout body to named checks")
+        val stubs_src = file_read_text(STUBS)
         val raw_read = "RuntimeValue rt_volatile_read_u32(uint64_t address)\n" +
             "{\n" +
             "    return (RuntimeValue)*(volatile const uint32_t *)(uintptr_t)(uint32_t)address;\n" +
             "}"
-        expect(stubs.contains(raw_read)).to_equal(true)
-        expect(stubs.contains("RuntimeValue rt_x86_32_wm_scanout_read_pixel(uint64_t x, uint64_t y)")).to_equal(true)
-        expect(raw_read.contains("x86_32_gui_fb_")).to_equal(false)
+        val raw_mmio_read_stays_unbounded = stubs_src.contains(raw_read)
+        val wm_readback_is_the_bounded_helper = stubs_src.contains("RuntimeValue rt_x86_32_wm_scanout_read_pixel(uint64_t x, uint64_t y)")
+        val raw_read_touches_no_framebuffer_state = raw_read.contains("x86_32_gui_fb_") == false
+        expect(raw_mmio_read_stays_unbounded).to_equal(true)
+        expect(wm_readback_is_the_bounded_helper).to_equal(true)
+        expect(raw_read_touches_no_framebuffer_state).to_equal(true)
 
     it "revokes the retained scanout before accepting or rejecting a rebind":
-        val stubs = file_read_text(STUBS)
-        val bind_start = stubs.index_of("RuntimeValue rt_x86_32_wm_bind_scanout")
-        val revoke = stubs.index_of_from("x86_32_gui_fb_span = 0;", bind_start)
-        val first_reject = stubs.index_of_from("if (address == 0U", bind_start)
-        val install = stubs.index_of_from("x86_32_gui_fb_addr = (uint32_t)address;", bind_start)
-        expect(bind_start >= 0).to_equal(true)
-        expect(revoke > bind_start).to_equal(true)
-        expect(revoke < first_reject).to_equal(true)
-        expect(first_reject < install).to_equal(true)
+        # @req REQ-OS-WMSEAM-005
+        # @capture(statistics): the source-order indexes of bind, revoke, first reject, and install
+        step("Locate the bind, revoke, reject, and install sites and assert their source order")
+        val stubs_src = file_read_text(STUBS)
+        val bind_start = stubs_src.index_of("RuntimeValue rt_x86_32_wm_bind_scanout")
+        val revoke = stubs_src.index_of_from("x86_32_gui_fb_span = 0;", bind_start)
+        val first_reject = stubs_src.index_of_from("if (address == 0U", bind_start)
+        val install = stubs_src.index_of_from("x86_32_gui_fb_addr = (uint32_t)address;", bind_start)
+        val bind_site_exists = bind_start >= 0
+        val revoke_lands_after_the_bind = revoke > bind_start
+        val revoke_lands_before_the_first_reject = revoke < first_reject
+        val install_lands_after_the_first_reject = first_reject < install
+        expect(bind_site_exists).to_equal(true)
+        expect(revoke_lands_after_the_bind).to_equal(true)
+        expect(revoke_lands_before_the_first_reject).to_equal(true)
+        expect(install_lands_after_the_first_reject).to_equal(true)

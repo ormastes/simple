@@ -1,21 +1,47 @@
-# @tag: rendering, engine2d, draw_ir, embedded_surface
-# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
-# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 30%
 """
-# Engine2D Embedded Render Surface (Lane A: CPU embedded render target)
-
-Proves the 2D renderer's real internal embedded render target: an offscreen
-Engine2D can be drawn to independently and then
-stitched into a parent Engine2D as one blit (`draw_engine`/
+## Purpose and audience
+Proves the 2D renderer's real internal embedded render target (Lane A: CPU
+embedded render target): an offscreen Engine2D can be drawn to independently
+and then stitched into a parent Engine2D as one blit (`draw_engine`/
 `draw_engine_opacity`), and the Draw IR executor activates this same offscreen
 path automatically for any batch whose `embedding.surface_id` is non-empty —
 while batches that never set a surface_id keep the exact legacy
-translate+clip behavior (no regression for existing callers).
+translate+clip behavior (no regression for existing callers). Audience:
+Engine2D and Draw IR engineers changing the embedded-surface or
+device-composition paths.
 
-CPU scenarios are headless/deterministic. A Vulkan parent uses a transparent
-child framebuffer retained from the same session and admits only checked
-device readback plus checked parent compositing.
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/engine2d_embedded_surface_spec.spl`). CPU
+scenarios are headless/deterministic; device scenarios request vulkan/metal
+backends and assert the checked device-readback contract when the create
+succeeds.
+
+## Compatibility and limitations
+A Vulkan parent uses a transparent child framebuffer retained from the same
+session and admits only checked device readback plus checked parent
+compositing — anything unpreflighted (opacity below 1000 milli, transparent
+sources, unresolved text, mixed compositions) must be rejected with
+readback_source "preflight_rejected" before rendering. On hosts without a
+device backend the `Err` arm asserts the failure states a reason instead of
+passing vacuously. Pixel contracts are byte-exact CPU-oracle comparisons.
+
+## Verification guidance and troubleshooting
+A pixel mismatch names the primitive whose embedded-surface blit diverged
+from the CPU oracle; a `preflight_rejected` mismatch means the device gate
+admitted or rejected the wrong composition class; a Vulkan/Metal session
+failure means the shared-device child did not join the parent's session
+(check ref_count and generation assertions).
+
+@tag: rendering, engine2d, draw_ir, embedded_surface
+@cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+@cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 30%
 """
+
+# Lifecycle: research doc/01_research/domain/engine2d_four_backend_capture.md ;
+# plan doc/03_plan/agent_tasks/engine2d_four_backend_capture.md ;
+# architecture doc/04_architecture/engine2d_four_backend_capture.md ;
+# design doc/05_design/engine2d_four_backend_capture.md
 
 use std.spec.{describe, context, it, expect, step}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -60,11 +86,15 @@ val BG: u32 = rgb(0, 0, 0)
 val RED: u32 = rgb(255, 0, 0)
 val GREEN: u32 = rgb(0, 255, 0)
 
+# @manual_section: engine2d embedded render surface
 describe "Engine2D embedded render surface":
 
     context "create_offscreen + draw_engine (engine.spl primitives)":
 
         it "composites child pixels at the right offset and leaves untouched child pixels transparent":
+            # @req REQ-EMBEDSURF-001
+            # @capture(gui_image): child-into-parent blit sample pixels retained
+            step("Blit a small offscreen child onto a cleared parent and sample inside and outside the child box")
             var parent = Engine2D.create_with_backend(20, 20, "cpu")
             parent.clear(BG)
             var child = Engine2D.create_offscreen(6, 4)
@@ -90,6 +120,9 @@ describe "Engine2D embedded render surface":
     context "Draw IR batch embedding.surface_id activates the offscreen path":
 
         it "renders offscreen and blits at (x,y), clipped to the surface's own bounds":
+            # @req REQ-EMBEDSURF-002
+            # @capture(gui_image): embedded-surface blit and crop sample pixels retained
+            step("Dispatch a batch with an embedded surface_id and sample the blitted and cropped regions")
             var engine = Engine2D.create_with_backend(20, 20, "cpu")
             engine.clear(BG)
             val embedding = draw_ir_embedding_config("surf-b", "win-b", 4, 3, 8, 6, 0, 1000, true)
@@ -118,6 +151,9 @@ describe "Engine2D embedded render surface":
             engine.shutdown()
 
         it "opacity_milli=500 blends the embedded surface at ~50% over the background":
+            # @req REQ-EMBEDSURF-003
+            # @capture(statistics): blended pixel channel values retained
+            step("Blend a half-opacity embedded surface over an opaque background and read the resulting channel values")
             var engine = Engine2D.create_with_backend(4, 4, "cpu")
             engine.clear(BG)
             val embedding = draw_ir_embedding_config("surf-c", "win-c", 0, 0, 4, 4, 0, 500, false)
@@ -131,13 +167,16 @@ describe "Engine2D embedded render surface":
             # Opaque RED (alpha 255) scaled by opacity_milli=500 -> alpha 127,
             # then Porter-Duff src-over onto opaque BG (black): the integer
             # math resolves to exactly rgba(127, 0, 0, 255) — ~50% red.
-            expect(color_a(p)).to_equal(255)
-            expect(color_r(p)).to_equal(127)
-            expect(color_g(p)).to_equal(0)
-            expect(color_b(p)).to_equal(0)
+            expect(color_a(p)).to_equal(255)  # oracle: src-over onto an opaque background yields an opaque pixel
+            expect(color_r(p)).to_equal(127)  # oracle: alpha 255 scaled by opacity_milli 500 truncates to 127
+            expect(color_g(p)).to_equal(0)  # oracle: pure red contributes no green channel
+            expect(color_b(p)).to_equal(0)  # oracle: pure red contributes no blue channel
             engine.shutdown()
 
         it "composites a canonical offset translucent WM window on shared Vulkan and Metal sessions":
+            # @req REQ-EMBEDSURF-004
+            # @capture(gui_image): canonical WM window composition sample retained
+            step("Build the canonical WM scene dispatch it on CPU Vulkan and Metal and compare the compositions")
             val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
             val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
             val taskbar = empty_taskbar_model()
@@ -153,34 +192,34 @@ describe "Engine2D embedded render surface":
             for batch in composition.batches:
                 if batch.batch_id == "window-win":
                     window_batches = window_batches + 1
-                    expect(batch.embedding.x).to_equal(10)
-                    expect(batch.embedding.y).to_equal(36)
-                    expect(batch.embedding.width).to_equal(125)
-                    expect(batch.embedding.height).to_equal(84)
-                    expect(batch.embedding.opacity_milli).to_equal(930)
+                    expect(batch.embedding.x).to_equal(10)  # oracle: the canonical window sits at x=10 in the fixed 160x120 scene
+                    expect(batch.embedding.y).to_equal(36)  # oracle: the canonical window sits at y=36 below the titlebar
+                    expect(batch.embedding.width).to_equal(125)  # oracle: the window body embeds 120 wide plus the 5px shadow margin
+                    expect(batch.embedding.height).to_equal(84)  # oracle: the window body embeds 80 high plus the 4px shadow margin
+                    expect(batch.embedding.opacity_milli).to_equal(930)  # oracle: the canonical translucent window carries 930 milli opacity
                     expect(batch.embedding.clip).to_be(true)
                     expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
-                    expect((batch.commands[0].color >> 24) & 0xFFu32).to_equal(0x33u32)
-                    expect(batch.commands[1].width).to_equal(120)
-                    expect(batch.commands[1].height).to_equal(80)
-                    expect(batch.commands[1].hit_rect.width).to_equal(120)
-                    expect(batch.commands[1].hit_rect.height).to_equal(80)
+                    expect((batch.commands[0].color >> 24) & 0xFFu32).to_equal(0x33u32)  # oracle: the window body color carries alpha 0x33
+                    expect(batch.commands[1].width).to_equal(120)  # oracle: the content command spans the window's 120px client width
+                    expect(batch.commands[1].height).to_equal(80)  # oracle: the content command spans the window's 80px client height
+                    expect(batch.commands[1].hit_rect.width).to_equal(120)  # oracle: the hit rect matches the client width
+                    expect(batch.commands[1].hit_rect.height).to_equal(80)  # oracle: the hit rect matches the client height
                     var resolved_text = 0
                     for command in batch.commands:
                         if command.kind == DRAW_IR_COMMAND_TEXT and command.computed_style.len() > 0:
                             resolved_text = resolved_text + 1
-                    expect(resolved_text).to_be_greater_than(0)
+                    expect(resolved_text).to_be_greater_than(0)  # oracle: the canonical window must emit at least one font-resolved text command
                 if batch.batch_id == "content-win":
                     content_batches = content_batches + 1
-                    expect(batch.embedding.x).to_equal(10)
-                    expect(batch.embedding.y).to_equal(64)
-                    expect(batch.embedding.width).to_equal(120)
-                    expect(batch.embedding.height).to_equal(52)
-                    expect(batch.commands.len()).to_equal(1)
+                    expect(batch.embedding.x).to_equal(10)  # oracle: the content frame shares the window's x=10 origin
+                    expect(batch.embedding.y).to_equal(64)  # oracle: the content frame sits at y=64 below the 28px titlebar
+                    expect(batch.embedding.width).to_equal(120)  # oracle: the content frame is the full 120px client width
+                    expect(batch.embedding.height).to_equal(52)  # oracle: the content frame is the full 52px client height
+                    expect(batch.commands.len()).to_equal(1)  # oracle: a content frame batch is exactly one image command
                     expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_IMAGE)
                     expect(batch.commands[0].image_uri).to_equal(content_image.image_uri)
-            expect(window_batches).to_equal(1)
-            expect(content_batches).to_equal(1)
+            expect(window_batches).to_equal(1)  # oracle: exactly one batch per named window in the canonical scene
+            expect(content_batches).to_equal(1)  # oracle: exactly one content batch per window with content
             val body_dispatch = shared_wm_dispatch_pointer(scene, taskbar, 129, 70, "left", "down", 1000, "09:41", 0)
             val shadow_dispatch = shared_wm_dispatch_pointer(scene, taskbar, 130, 70, "left", "down", 1000, "09:41", 0)
             expect(body_dispatch.action).to_equal("focus_window")
@@ -189,7 +228,7 @@ describe "Engine2D embedded render surface":
 
             var cpu = Engine2D.create_with_backend(160, 120, "cpu")
             val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [content_image])
-            expect(expected.skipped_command_count).to_equal(0)
+            expect(expected.skipped_command_count).to_equal(0)  # oracle: the CPU oracle composes every command of the canonical scene
             val shadow_pixel = expected.pixels[70 * 160 + 130]
             val after_shadow = expected.pixels[70 * 160 + 135]
             expect(color_r(shadow_pixel)).to_be_less_than(color_r(after_shadow))
@@ -198,7 +237,7 @@ describe "Engine2D embedded render surface":
             expect(after_shadow).to_equal(scene.background.color)
             match Engine2D.create_requested_backend(160, 120, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(engine):
                     val parent_backend = engine.vulkan_backend
                     expect(parent_backend != nil).to_be(true)
@@ -207,7 +246,7 @@ describe "Engine2D embedded render surface":
                         val refs_before = parent.session.ref_count
                         match engine.create_shared_vulkan_offscreen(2, 2):
                             Err(reason):
-                                expect(reason.len()).to_equal(0)
+                                expect(reason.len()).to_equal(0)  # oracle: a shared offscreen create on a live parent must succeed with no error
                             Ok(child):
                                 val child_backend = child.vulkan_backend
                                 expect(child_backend != nil).to_be(true)
@@ -223,21 +262,21 @@ describe "Engine2D embedded render surface":
                                 val alpha_result = engine2d_draw_ir_adv_batch(child, alpha_batch, true)
                                 expect(alpha_result.fallback_required).to_be(false)
                                 expect(alpha_result.readback_source).to_equal("device_readback")
-                                expect(alpha_result.backend_handle).to_be_greater_than(0)
-                                expect(alpha_result.pixels[0]).to_equal(0x33330000u32)
+                                expect(alpha_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
+                                expect(alpha_result.pixels[0]).to_equal(0x33330000u32)  # oracle: alpha src-over onto the opaque 2x2 red clear yields exactly alpha 0x33 red
                                 child.shutdown()
                                 expect(parent.session.ref_count).to_equal(refs_before)
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])
                     expect(result.fallback_required).to_be(false)
-                    expect(result.skipped_command_count).to_equal(0)
+                    expect(result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(result.rendered_command_count).to_equal(expected.rendered_command_count)
                     expect(result.readback_source).to_equal("device_readback")
-                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(result.pixels).to_equal(expected.pixels)
                     engine.shutdown()
             match Engine2D.create_requested_backend(160, 120, "metal"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(engine):
                     val parent_backend = engine.metal_backend
                     expect(parent_backend != nil).to_be(true)
@@ -246,7 +285,7 @@ describe "Engine2D embedded render surface":
                         val refs_before = parent.session.ref_count
                         match engine.create_shared_metal_offscreen(2, 2):
                             Err(reason):
-                                expect(reason.len()).to_equal(0)
+                                expect(reason.len()).to_equal(0)  # oracle: a shared offscreen create on a live parent must succeed with no error
                             Ok(child):
                                 val child_backend = child.metal_backend
                                 expect(child_backend != nil).to_be(true)
@@ -257,21 +296,24 @@ describe "Engine2D embedded render surface":
                                     expect(parent.session.ref_count).to_equal(refs_before + 1)
                                 val child_readback = child.read_pixels_with_source()
                                 expect(child_readback.source).to_equal("device_readback")
-                                expect(child_readback.backend_handle).to_be_greater_than(0)
-                                expect(child_readback.pixels.len()).to_equal(4)
+                                expect(child_readback.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
+                                expect(child_readback.pixels.len()).to_equal(4)  # oracle: the shared 2x2 offscreen surface readback is its full 4-pixel surface
                                 child.shutdown()
                                 expect(parent.session.ref_count).to_equal(refs_before)
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])
                     expect(result.fallback_required).to_be(false)
-                    expect(result.skipped_command_count).to_equal(0)
+                    expect(result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(result.rendered_command_count).to_equal(expected.rendered_command_count)
                     expect(result.readback_source).to_equal("device_readback")
-                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(result.pixels).to_equal(expected.pixels)
                     engine.shutdown()
             cpu.shutdown()
 
         it "nested embedding depth 2: an embedded surface can itself display another embedded render's output":
+            # @req REQ-EMBEDSURF-005
+            # @capture(gui_image): nested depth-2 composition sample retained
+            step("Render an offscreen target feed it as an image into a second embedded batch and sample the composition")
             # Level 1 (innermost): an independent offscreen render target, built
             # directly with the engine.spl primitives from task 1.
             var inner = Engine2D.create_offscreen(4, 4)
@@ -300,10 +342,13 @@ describe "Engine2D embedded render surface":
             # inner image local (2,2)-(6,6) inside the outer 10x10 surface ->
             # global (5+2,5+2)=(7,7) .. (5+6,5+6)=(11,11)
             expect(pixels[8 * 20 + 8]).to_equal(GREEN)
-            expect(result.rendered_command_count).to_equal(1)
+            expect(result.rendered_command_count).to_equal(1)  # oracle: the outer batch carries exactly one image command
             parent.shutdown()
 
         it "preserves transparent-image blending on the general embedded path":
+            # @req REQ-EMBEDSURF-006
+            # @capture(gui_image): transparent-image blend sample retained
+            step("Blit an image with a fully transparent pixel through the embedded path and check the transparent cell")
             val transparent = rgba(0, 255, 0, 0)
             var fallback_parent = Engine2D.create_with_backend(5, 3, "cpu")
             fallback_parent.clear(RED)
@@ -314,10 +359,13 @@ describe "Engine2D embedded render surface":
             ])
             val fallback_result = engine2d_draw_ir_adv_batch_with_images(fallback_parent, fallback_batch, false, [fallback_image])
             expect(fallback_result.pixels[1 * 5 + 2]).to_equal(RED)
-            expect(fallback_result.rendered_command_count).to_equal(1)
+            expect(fallback_result.rendered_command_count).to_equal(1)  # oracle: the fallback batch carries exactly one image command
             fallback_parent.shutdown()
 
         it "uses the Vulkan device path only for preflighted root and named-child compositions":
+            # @req REQ-EMBEDSURF-007
+            # @capture(gui_image): device-path admitted and preflight-rejected composition samples retained
+            step("Drive the Vulkan device gate through admitted scaled blended clipped and rejected compositions")
             val embedding = draw_ir_embedding_config("surf-device", "win-device", 0, 0, 3, 1, 0, 1000, true)
             val batch = draw_ir_batch("batch-device", "gpu", embedding, [
                 draw_ir_rect("device-background", 0, 0, 3, 1, BG),
@@ -327,15 +375,15 @@ describe "Engine2D embedded render surface":
             val transparent = engine2d_resolved_draw_ir_image("image://device", 2, 1, [rgba(0, 255, 0, 128), rgba(0, 255, 0, 0)])
             match Engine2D.create_requested_backend(3, 1, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(engine):
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [transparent])
                     expect(result.readback_source).to_equal("device_readback")
-                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(result.fallback_required).to_be(false)
-                    expect(result.rendered_command_count).to_equal(2)
-                    expect(result.skipped_command_count).to_equal(0)
-                    expect(result.pixels.len()).to_equal(3)
+                    expect(result.rendered_command_count).to_equal(2)  # oracle: the batch carries exactly two commands: background rect and content
+                    expect(result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
+                    expect(result.pixels.len()).to_equal(3)  # oracle: the composition target is the full 3-pixel-wide surface
                     expect(result.pixels[0]).to_equal(BG)
                     expect(result.pixels[1]).to_equal(rgba(0, 128, 0, 255))
                     expect(result.pixels[2]).to_equal(BG)
@@ -349,12 +397,12 @@ describe "Engine2D embedded render surface":
             val exact_image = engine2d_resolved_draw_ir_image("image://exact", 2, 1, [GREEN, RED])
             match Engine2D.create_requested_backend(2, 1, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(exact_engine):
                     val exact_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(exact_engine, exact_composition, [exact_image])
                     expect(exact_result.readback_source).to_equal("device_readback")
-                    expect(exact_result.backend_handle).to_be_greater_than(0)
-                    expect(exact_result.rendered_command_count).to_equal(1)
+                    expect(exact_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
+                    expect(exact_result.rendered_command_count).to_equal(1)  # oracle: the exact batch carries exactly one image command
                     expect(exact_result.pixels).to_equal([GREEN, RED])
                     exact_engine.shutdown()
 
@@ -370,14 +418,14 @@ describe "Engine2D embedded render surface":
             expect(scaled_expected.pixels).to_equal([RED, RED, GREEN])
             match Engine2D.create_requested_backend(3, 1, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(scaled_engine):
                     val scaled_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_engine, scaled_composition, [scaled_image])
                     expect(scaled_result.readback_source).to_equal("device_readback")
-                    expect(scaled_result.backend_handle).to_be_greater_than(0)
+                    expect(scaled_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(scaled_result.fallback_required).to_be(false)
-                    expect(scaled_result.rendered_command_count).to_equal(1)
-                    expect(scaled_result.skipped_command_count).to_equal(0)
+                    expect(scaled_result.rendered_command_count).to_equal(1)  # oracle: the scaled batch carries exactly one image command
+                    expect(scaled_result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(scaled_result.pixels).to_equal(scaled_expected.pixels)
                     scaled_engine.shutdown()
             scaled_cpu.shutdown()
@@ -415,14 +463,14 @@ describe "Engine2D embedded render surface":
             expect(scaled_blend_expected.pixels).to_equal(scaled_blend_oracle)
             match Engine2D.create_requested_backend(4, 1, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(scaled_blend_engine):
                     val scaled_blend_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_blend_engine, scaled_blend_composition, [scaled_blend_image])
                     expect(scaled_blend_result.readback_source).to_equal("device_readback")
-                    expect(scaled_blend_result.backend_handle).to_be_greater_than(0)
+                    expect(scaled_blend_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(scaled_blend_result.fallback_required).to_be(false)
-                    expect(scaled_blend_result.rendered_command_count).to_equal(3)
-                    expect(scaled_blend_result.skipped_command_count).to_equal(0)
+                    expect(scaled_blend_result.rendered_command_count).to_equal(3)  # oracle: the composition carries root rect, child rect, and child image commands
+                    expect(scaled_blend_result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(scaled_blend_result.pixels).to_equal(scaled_blend_oracle)
                     expect(scaled_blend_result.pixels).to_equal(scaled_blend_expected.pixels)
                     scaled_blend_engine.shutdown()
@@ -439,19 +487,19 @@ describe "Engine2D embedded render surface":
             val clipped_image = engine2d_resolved_draw_ir_image("image://clipped", 2, 2, [RED, RED, RED, GREEN])
             var clipped_cpu = Engine2D.create_with_backend(3, 3, "cpu")
             val clipped_expected = engine2d_draw_ir_adv_composition_with_images(clipped_cpu, clipped_composition, false, [clipped_image])
-            expect(clipped_expected.rendered_command_count).to_equal(2)
-            expect(clipped_expected.skipped_command_count).to_equal(0)
+            expect(clipped_expected.rendered_command_count).to_equal(2)  # oracle: the CPU oracle composes both the root and child batches
+            expect(clipped_expected.skipped_command_count).to_equal(0)  # oracle: the CPU oracle composes every command
             expect(clipped_expected.pixels[1 * 3 + 1]).to_equal(GREEN)
             match Engine2D.create_requested_backend(3, 3, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(clipped_engine):
                     val clipped_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(clipped_engine, clipped_composition, [clipped_image])
                     expect(clipped_result.readback_source).to_equal("device_readback")
-                    expect(clipped_result.backend_handle).to_be_greater_than(0)
+                    expect(clipped_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(clipped_result.fallback_required).to_be(false)
-                    expect(clipped_result.rendered_command_count).to_equal(2)
-                    expect(clipped_result.skipped_command_count).to_equal(0)
+                    expect(clipped_result.rendered_command_count).to_equal(2)  # oracle: the composition carries both the root and child batches
+                    expect(clipped_result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(clipped_result.pixels).to_equal(clipped_expected.pixels)
                     clipped_engine.shutdown()
             clipped_cpu.shutdown()
@@ -462,9 +510,9 @@ describe "Engine2D embedded render surface":
             var opacity_engine = Engine2D.create_with_backend(3, 1, "cpu")
             val opacity_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(opacity_engine, opacity_composition, [transparent])
             expect(opacity_result.readback_source).to_equal("preflight_rejected")
-            expect(opacity_result.rendered_command_count).to_equal(0)
-            expect(opacity_result.skipped_command_count).to_equal(1)
-            expect(opacity_result.backend_handle).to_equal(0)
+            expect(opacity_result.rendered_command_count).to_equal(0)  # oracle: a preflight rejection renders no command
+            expect(opacity_result.skipped_command_count).to_equal(1)  # oracle: a preflight rejection skips exactly the one submitted batch
+            expect(opacity_result.backend_handle).to_equal(0)  # oracle: a rejected composition never carries a backend handle
             opacity_engine.shutdown()
 
             val first_transparent_batch = draw_ir_batch("first-transparent", "gpu", scaled_embedding, [
@@ -475,10 +523,10 @@ describe "Engine2D embedded render surface":
             var first_transparent_engine = Engine2D.create_with_backend(3, 1, "cpu")
             val first_transparent_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(first_transparent_engine, first_transparent_composition, [first_transparent_image])
             expect(first_transparent_result.readback_source).to_equal("preflight_rejected")
-            expect(first_transparent_result.rendered_command_count).to_equal(0)
-            expect(first_transparent_result.skipped_command_count).to_equal(1)
-            expect(first_transparent_result.pixels.len()).to_equal(0)
-            expect(first_transparent_result.backend_handle).to_equal(0)
+            expect(first_transparent_result.rendered_command_count).to_equal(0)  # oracle: a preflight rejection renders no command
+            expect(first_transparent_result.skipped_command_count).to_equal(1)  # oracle: a preflight rejection skips exactly the one submitted batch
+            expect(first_transparent_result.pixels.len()).to_equal(0)  # oracle: a preflight rejection produces no pixels
+            expect(first_transparent_result.backend_handle).to_equal(0)  # oracle: a rejected composition never carries a backend handle
             first_transparent_engine.shutdown()
 
             val partial_embedding = draw_ir_embedding_config("surf-partial", "win-partial", 1, 1, 2, 1, 0, 1000, true)
@@ -489,13 +537,16 @@ describe "Engine2D embedded render surface":
             var partial_engine = Engine2D.create_with_backend(5, 3, "cpu")
             val opaque = engine2d_resolved_draw_ir_image("image://device", 2, 1, [GREEN, RED])
             val partial_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(partial_engine, partial_composition, [opaque])
-            expect(partial_result.rendered_command_count).to_equal(0)
-            expect(partial_result.skipped_command_count).to_equal(1)
-            expect(partial_result.pixels.len()).to_equal(0)
+            expect(partial_result.rendered_command_count).to_equal(0)  # oracle: a preflight rejection renders no command
+            expect(partial_result.skipped_command_count).to_equal(1)  # oracle: a preflight rejection skips exactly the one submitted batch
+            expect(partial_result.pixels.len()).to_equal(0)  # oracle: a preflight rejection produces no pixels
             expect(partial_result.readback_source).to_equal("preflight_rejected")
             partial_engine.shutdown()
 
         it "composites preflighted resolved text through checked Vulkan image blending":
+            # @req REQ-EMBEDSURF-008
+            # @capture(gui_image): resolved-text device composition sample retained
+            step("Composite resolved text through the Vulkan device path and diff against the CPU oracle")
             val metrics = resolve_font_metrics("Noto Sans Mono", "A", 20)
             expect(metrics.valid).to_be(true)
             val embedding = draw_ir_embedding_config("surf-device-text", "win-device-text", 0, 0, 32, 40, 0, 1000, true)
@@ -512,18 +563,18 @@ describe "Engine2D embedded render surface":
             for pixel in expected.pixels:
                 if pixel != BG:
                     changed = changed + 1
-            expect(changed).to_be_greater_than(0)
+            expect(changed).to_be_greater_than(0)  # oracle: the resolved text must move at least one pixel off the background
 
             match Engine2D.create_requested_backend(32, 40, "vulkan"):
                 Err(reason):
-                    expect(reason.len()).to_be_greater_than(0)
+                    expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
                 Ok(engine):
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [])
                     expect(result.readback_source).to_equal("device_readback")
-                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
                     expect(result.fallback_required).to_be(false)
-                    expect(result.rendered_command_count).to_equal(2)
-                    expect(result.skipped_command_count).to_equal(0)
+                    expect(result.rendered_command_count).to_equal(2)  # oracle: the batch carries exactly two commands: background rect and content
+                    expect(result.skipped_command_count).to_equal(0)  # oracle: an admitted composition skips no command
                     expect(result.pixels).to_equal(expected.pixels)
                     engine.shutdown()
             cpu.shutdown()
@@ -537,7 +588,7 @@ describe "Engine2D embedded render surface":
             rejected.clear(RED)
             val rejected_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(rejected, unresolved_composition, [])
             expect(rejected_result.readback_source).to_equal("preflight_rejected")
-            expect(rejected_result.rendered_command_count).to_equal(0)
+            expect(rejected_result.rendered_command_count).to_equal(0)  # oracle: a preflight rejection renders no command
             expect(rejected.read_pixels()[0]).to_equal(RED)
             rejected.shutdown()
 
@@ -556,6 +607,9 @@ describe "Engine2D embedded render surface":
             off_target_engine.shutdown()
 
         it "rejects mixed fresh-device compositions before rendering":
+            # @req REQ-EMBEDSURF-009
+            # @capture(statistics): mixed-composition rejection counters retained
+            step("Submit a composition mixing device image and mirror rect and require the typed rejection")
             val embedding = draw_ir_embedding_config("surf-mixed", "win-mixed", 0, 0, 2, 1, 0, 1000, true)
             val batch = draw_ir_batch("batch-mixed", "gpu", embedding, [
                 draw_ir_image_command("mixed-image", 0, 0, 2, 1, "image://mixed", []),
@@ -566,17 +620,20 @@ describe "Engine2D embedded render surface":
             var engine = Engine2D.create_with_backend(2, 1, "cpu")
             engine.clear(RED)
             val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [image])
-            expect(result.rendered_command_count).to_equal(0)
-            expect(result.skipped_command_count).to_equal(1)
-            expect(result.pixels.len()).to_equal(0)
+            expect(result.rendered_command_count).to_equal(0)  # oracle: a preflight rejection renders no command
+            expect(result.skipped_command_count).to_equal(1)  # oracle: a preflight rejection skips exactly the one submitted batch
+            expect(result.pixels.len()).to_equal(0)  # oracle: a preflight rejection produces no pixels
             expect(result.readback_source).to_equal("preflight_rejected")
-            expect(result.backend_handle).to_equal(0)
+            expect(result.backend_handle).to_equal(0)  # oracle: a rejected composition never carries a backend handle
             expect(engine.read_pixels()).to_equal([RED, RED])
             engine.shutdown()
 
     context "batch WITHOUT surface_id keeps the exact legacy translate+clip behavior":
 
         it "renders at embedding.x + command.x / embedding.y + command.y with no offscreen surface involved":
+            # @req REQ-EMBEDSURF-010
+            # @capture(gui_image): legacy translate+clip sample pixels retained
+            step("Dispatch a surface-less batch and verify the direct translate+clip behavior is unchanged")
             var engine = Engine2D.create_with_backend(20, 20, "cpu")
             engine.clear(BG)
             val embedding = draw_ir_embedding_config("", "win-legacy", 4, 5, 8, 6, 0, 1000, true)
@@ -592,5 +649,5 @@ describe "Engine2D embedded render surface":
             expect(pixels[8 * 20 + 8]).to_equal(RED)
             # Outside the clip rect entirely.
             expect(pixels[0 * 20 + 0]).to_equal(BG)
-            expect(result.rendered_command_count).to_equal(1)
+            expect(result.rendered_command_count).to_equal(1)  # oracle: the legacy batch carries exactly one rect command
             engine.shutdown()

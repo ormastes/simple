@@ -1,0 +1,182 @@
+"""
+nvme_registers_check — proof that this controller has a real BAR0 property
+(register) file and that a host can bring it up THROUGH THOSE REGISTERS:
+write AQA/ASQ/ACQ, set CC.EN, observe CSTS.RDY go 0 -> 1; clear CC.EN, observe
+the Controller Reset take it back to 0.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_registers_check.spl
+
+Verdict token on the last line: NVME REGISTERS OK | NVME REGISTERS FAIL (n)
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+
+The NON-VACUITY witness is section C: CSTS.RDY must still be 0 after AQA/ASQ/ACQ
+are written and before CC.EN is written. Without it the handshake assertion in
+section D would pass on a controller that was simply always ready.
+"""
+
+use nvme_types.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_reg_defs.*
+use nvme_reg_file.*
+use nvme_host_driver.*
+
+fn main():
+    var fail: i64 = 0
+
+    print "-- module selftests --"
+    fail = fail + nvme_reg_defs_selftest()
+    fail = fail + nvme_reg_file_selftest()
+    fail = fail + nvme_transport_config_selftest()
+
+    print "-- A. the property window exists in BAR0 memory --"
+    var h = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(h.attach()), 1, "emu transport attaches")
+    fail = fail + expect_eq(bool_to_int(h.regs_present()), 1, "profile declares a BAR0 property window that fits in memory")
+    fail = fail + expect_eq(h.reg_addr(REG_CC), h.cfg.reg_base + 0x14, "CC is addressed at reg_base+14h")
+
+    print "-- B. CAP and VS are readable at power-on, before any host write --"
+    val cap_lo: i64 = h.reg_read32(REG_CAP)
+    val cap_hi: i64 = h.reg_read32(REG_CAP + 4)
+    fail = fail + expect_eq(cap_mqes_of(cap_lo), h.cfg.queue_depth - 1, "CAP.MQES is 0-based and agrees with the queue depth")
+    fail = fail + expect_eq(bf_get(cap_lo, bf_cap_to()), CAP_TO_UNITS, "CAP.TO is readable at bits 31:24")
+    fail = fail + expect_eq(bf_get(cap_lo, bf_cap_cqr()), 1, "CAP.CQR reports contiguous queues required")
+    fail = fail + expect_eq(1 << (2 + bf_get(cap_hi, bf_cap_dstrd())), h.cfg.doorbell_stride, "CAP.DSTRD decodes to the profile's doorbell stride")
+    fail = fail + expect_eq(bf_get(cap_hi, bf_cap_css()), CAP_CSS_NVM, "CAP.CSS advertises the NVM command set")
+    fail = fail + expect_eq(h.reg_read32(REG_VS), 0x00010400, "VS reads 1.4.0")
+    # The bytes really are little-endian in the same array as the queues.
+    fail = fail + expect_eq(mmio_rd32(h.mem, h.cfg.reg_base + REG_VS), 0x00010400, "VS reads identically through the raw mmio accessor")
+    fail = fail + expect_eq(h.mem[h.cfg.reg_base + REG_VS + 2], 1, "VS byte 2 holds the major version -- registers are real bytes")
+
+    print "-- C. NON-VACUITY: RDY does NOT go 1 before CC.EN is written --"
+    fail = fail + expect_eq(h.reg_read32(REG_CC), 0, "CC reset value is 0")
+    fail = fail + expect_eq(h.reg_read32(REG_CSTS), 0, "CSTS reset value is 0")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "CSTS.RDY is 0 at power-on")
+    val aqa_ok: i64 = aqa_for_depth(h.cfg.queue_depth)
+    h.reg_write32(RegWrite(off: REG_AQA, value: aqa_ok))
+    h.reg_write32(RegWrite(off: REG_ASQ, value: h.cfg.sq_base))
+    h.reg_write32(RegWrite(off: REG_ACQ, value: h.cfg.cq_base))
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_AQA), bf_aqa_asqs()), h.cfg.queue_depth - 1, "AQA.ASQS reads back what the host wrote")
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_AQA), bf_aqa_acqs()), h.cfg.queue_depth - 1, "AQA.ACQS reads back what the host wrote")
+    fail = fail + expect_eq(h.reg_read32(REG_ACQ), h.cfg.cq_base, "ACQ base reads back what the host wrote")
+    h.controller_step()
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "WITNESS: admin queues configured, CC.EN still 0 -- RDY is STILL 0")
+    h.controller_step()
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "WITNESS: a second step with EN=0 still does not make it ready")
+
+    print "-- D. the enable handshake: CC.EN 0->1 drives CSTS.RDY 0->1 --"
+    val cce: i64 = cc_enable_value()
+    h.reg_write32(RegWrite(off: REG_CC, value: cce))
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_CC), bf_cc_en()), 1, "CC.EN reads back as 1")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "RDY is not instant: still 0 immediately after the CC write")
+    fail = fail + expect_eq(bool_to_int(h.controller_step()), 1, "the controller step reports a state change")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 1, "CSTS.RDY is now 1 -- the controller is enabled")
+    fail = fail + expect_eq(bool_to_int(h.controller_fatal()), 0, "CSTS.CFS stays clear on a good bring-up")
+    fail = fail + expect_eq(bool_to_int(h.controller_step()), 0, "a settled controller reports no further change")
+
+    print "-- E. a CC write that lands mid-transition is ignored (defined behaviour) --"
+    var m = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(m.attach()), 1, "second transport attaches")
+    m.reg_write32(RegWrite(off: REG_AQA, value: aqa_ok))
+    m.reg_write32(RegWrite(off: REG_CC, value: cce))
+    # EN=1, RDY=0: the transition is pending and CC is closed to writes.
+    m.reg_write32(RegWrite(off: REG_CC, value: 0))
+    fail = fail + expect_eq(bf_get(m.reg_read32(REG_CC), bf_cc_en()), 1, "CC write during the EN->RDY transition is ignored")
+    m.controller_step()
+    fail = fail + expect_eq(bool_to_int(m.controller_ready()), 1, "the pending transition still completed")
+    m.reg_write32(RegWrite(off: REG_CC, value: 0))
+    fail = fail + expect_eq(bf_get(m.reg_read32(REG_CC), bf_cc_en()), 0, "the same CC write lands once the transition has settled")
+
+    print "-- F. access rules are ENFORCED, not assumed --"
+    # RO: CAP and VS refuse every write.
+    h.reg_write32(RegWrite(off: REG_CAP, value: 0xFFFFFFFF))
+    fail = fail + expect_eq(h.reg_read32(REG_CAP), cap_lo, "CAP is RO: an all-ones host write changes nothing")
+    h.reg_write32(RegWrite(off: REG_VS, value: 0))
+    fail = fail + expect_eq(h.reg_read32(REG_VS), 0x00010400, "VS is RO: a host write of 0 changes nothing")
+    # RO within a mixed register: CSTS.RDY cannot be cleared by the host.
+    h.reg_write32(RegWrite(off: REG_CSTS, value: 0))
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 1, "CSTS.RDY is RO: the host cannot clear it by writing CSTS")
+    # RW1C: CSTS.NSSRO clears on write-1 and only on write-1.
+    val csts_now: i64 = h.reg_read32(REG_CSTS)
+    val csts_nssro: i64 = bf_put(csts_now, bf_csts_nssro(), 1)
+    h.reg_raw_store(RegWrite(off: REG_CSTS, value: csts_nssro))
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_CSTS), bf_csts_nssro()), 1, "the controller can set CSTS.NSSRO")
+    h.reg_write32(RegWrite(off: REG_CSTS, value: 0))
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_CSTS), bf_csts_nssro()), 1, "RW1C: writing 0 does NOT clear CSTS.NSSRO")
+    h.reg_write32(RegWrite(off: REG_CSTS, value: bf_mask(bf_csts_nssro())))
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_CSTS), bf_csts_nssro()), 0, "RW1C: writing 1 clears CSTS.NSSRO")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 1, "clearing NSSRO did not disturb the RO CSTS.RDY beside it")
+    # Reserved bits read zero and ignore writes.
+    val cc_before: i64 = h.reg_read32(REG_CC)
+    h.reg_write32(RegWrite(off: REG_CC, value: 0xFFFFFFFF))
+    val cc_all_ones: i64 = h.reg_read32(REG_CC)
+    fail = fail + expect_eq(cc_all_ones, 0x00FFFFF1, "CC reserved bits 3:1 and 31:24 read zero after an all-ones write")
+    fail = fail + expect_eq((cc_all_ones >> 1) & 0x7, 0, "CC bits 3:1 are reserved and read zero")
+    h.reg_write32(RegWrite(off: REG_AQA, value: 0xFFFFFFFF))
+    fail = fail + expect_eq(h.reg_read32(REG_AQA), 0x0FFF0FFF, "AQA reserved bits 15:12 and 31:28 read zero")
+    h.reg_write32(RegWrite(off: REG_ASQ, value: 0xFFFFFFFF))
+    fail = fail + expect_eq(h.reg_read32(REG_ASQ), 0xFFFFF000, "ASQ ignores writes to the reserved 4 KiB alignment bits")
+
+    print "-- G. controller reset: CC.EN 1->0 discards state, keeps admin queue properties --"
+    var r = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(r.attach()), 1, "reset-case transport attaches")
+    fail = fail + expect_eq(bool_to_int(r.bringup()), 1, "bringup() drives the whole sequence through the registers")
+    # Do real I/O so there is queue state worth discarding.
+    val w = cmd_make(21, OP_WRITE, 12, 1, 0xA7)
+    val wc = r.exec_io(w)
+    fail = fail + expect_eq(wc.status, SC_SUCCESS, "an I/O completes while the controller is enabled")
+    fail = fail + expect_eq(r.sq_tail, 1, "the shadow SQ tail advanced")
+    val aqa_before: i64 = r.reg_read32(REG_AQA)
+    val acq_before: i64 = r.reg_read32(REG_ACQ)
+    fail = fail + expect_eq(bool_to_int(r.controller_disable()), 1, "clearing CC.EN takes CSTS.RDY back to 0")
+    fail = fail + expect_eq(bool_to_int(r.controller_ready()), 0, "CSTS.RDY is 0 after the Controller Reset")
+    fail = fail + expect_eq(r.reg_read32(REG_CSTS), 0, "CSTS returns to its reset value")
+    fail = fail + expect_eq(r.sq_tail, 0, "DISCARDED: the shadow SQ tail is back to 0")
+    fail = fail + expect_eq(r.cq_head, 0, "DISCARDED: the shadow CQ head is back to 0")
+    fail = fail + expect_eq(r.cq_phase, 1, "DISCARDED: the expected phase tag is back to 1")
+    fail = fail + expect_eq(r.peek32(r.sq_db_addr()), 0, "DISCARDED: SQ0TDBL is back to 0")
+    fail = fail + expect_eq(r.reg_read32(REG_AQA), aqa_before, "PRESERVED: AQA is not affected by a Controller Reset")
+    fail = fail + expect_eq(r.reg_read32(REG_ACQ), acq_before, "PRESERVED: ACQ is not affected by a Controller Reset")
+    # And it can be brought up again through the registers alone.
+    fail = fail + expect_eq(bool_to_int(r.bringup()), 1, "the controller re-enables after a reset")
+    val w2 = cmd_make(22, OP_WRITE, 13, 1, 0xB8)
+    val wc2 = r.exec_io(w2)
+    fail = fail + expect_eq(wc2.cid, 22, "I/O works again after the re-enable")
+
+    print "-- H. NEGATIVE: enabling with an invalid AQA must FAIL, not silently succeed --"
+    var n = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(n.attach()), 1, "negative-case transport attaches")
+    # AQA of 0 means a 1-entry admin queue; the minimum is 2. ASQ/ACQ are fine.
+    n.reg_write32(RegWrite(off: REG_AQA, value: 0))
+    n.reg_write32(RegWrite(off: REG_ASQ, value: n.cfg.sq_base))
+    n.reg_write32(RegWrite(off: REG_ACQ, value: n.cfg.cq_base))
+    fail = fail + expect_eq(n.reg_read32(REG_AQA), 0, "the invalid AQA really is stored")
+    n.reg_write32(RegWrite(off: REG_CC, value: cce))
+    n.controller_step()
+    fail = fail + expect_eq(bool_to_int(n.controller_ready()), 0, "NEGATIVE: CSTS.RDY stays 0 for an invalid AQA")
+    fail = fail + expect_eq(bool_to_int(n.controller_fatal()), 1, "NEGATIVE: the controller reports the refusal via CSTS.CFS")
+    n.controller_step()
+    fail = fail + expect_eq(bool_to_int(n.controller_ready()), 0, "NEGATIVE: further steps do not rescue it")
+    # An AQA above CAP.MQES is refused the same way.
+    var n2 = host_nvme_open(BACKEND_EMU)
+    n2.attach()
+    n2.reg_write32(RegWrite(off: REG_AQA, value: aqa_for_depth(4096)))
+    n2.reg_write32(RegWrite(off: REG_CC, value: cce))
+    n2.controller_step()
+    fail = fail + expect_eq(bool_to_int(n2.controller_ready()), 0, "NEGATIVE: an AQA larger than CAP.MQES is refused")
+    fail = fail + expect_eq(bool_to_int(n2.controller_fatal()), 1, "NEGATIVE: CSTS.CFS is set for an over-large AQA")
+
+    print "-- I. a profile with no property window refuses bring-up, it does not fake it --"
+    var a = host_nvme_open("admin_emu")
+    fail = fail + expect_eq(a.cfg.valid, 1, "the admin_emu profile is valid config")
+    fail = fail + expect_eq(a.cfg.reg_base, 0, "admin_emu declares no property window")
+    fail = fail + expect_eq(bool_to_int(a.regs_present()), 0, "regs_present() is false with no window")
+    a.attach()
+    fail = fail + expect_eq(bool_to_int(a.bringup()), 0, "bringup() fails closed with no property window")
+    fail = fail + expect_eq(bool_to_int(a.controller_ready()), 0, "and it never reports ready")
+
+    if fail == 0:
+        print "NVME REGISTERS OK"
+    else:
+        print "NVME REGISTERS FAIL ({fail})"

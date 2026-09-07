@@ -1,0 +1,223 @@
+#!/bin/sh
+# check-nvme-profile-core-untouched.shs — the G5 gate.
+#
+# CLAIM UNDER TEST: adding a controller requires a profile, a BSP, a media
+# profile, an offload profile and evidence — and ZERO edits to the host/FTL/NAND
+# core. That is a property testable by diff, which is what makes "supports many
+# controllers" a property rather than a claim.
+#
+# MECHANISM. For a commit range whose changed set contains a NEW
+# spec/profiles/board/*.sdn (a "profile-addition range"), every enumerated core
+# path must be BYTE-IDENTICAL at both endpoints. Byte-identity is compared on
+# git BLOB IDs read from committed content (`git rev-parse <rev>:<path>`), never
+# the working copy — so a whitespace-only or comment-only core edit is still a
+# FAIL. A name-only diff is not enough: that is exactly how the old
+# `nvme_fw_target_config` if-chain would grow back unnoticed.
+#
+# Core paths come from scripts/check/nvme_core_paths.txt — ENUMERATED, never
+# inferred. There is no escape flag.
+#
+# VERDICT is the LAST line of stdout:
+#   PASS  — <n> ... checked                                exit 0
+#   FAIL  — ...                                            exit 1
+#   ERROR — nothing was checked                            exit 2
+# 0 items checked is ERROR, never PASS. `--selftest` runs FIRST,
+# unconditionally, and is fatal.
+#
+#   sh scripts/check/check-nvme-profile-core-untouched.shs [BASE..NEW]
+#   sh scripts/check/check-nvme-profile-core-untouched.shs --selftest-only
+
+set -u
+
+CORE_LIST="${CORE_LIST:-scripts/check/nvme_core_paths.txt}"
+BOARD_DIR="spec/profiles/board"
+
+# scan REPO BASE NEW CORE_LIST -> prints detail lines, sets verdict on stdout
+scan() {
+    _repo="$1"; _base="$2"; _new="$3"; _list="$4"
+    ( cd "$_repo" || exit 2
+
+      changed=$(git diff --name-only "$_base" "$_new" 2>/dev/null)
+      rc_diff=$?
+      if [ $rc_diff -ne 0 ]; then
+          echo "ERROR — nothing was checked (bad range $_base..$_new)"
+          exit 2
+      fi
+      if [ -z "$changed" ]; then
+          echo "ERROR — nothing was checked (empty range $_base..$_new)"
+          exit 2
+      fi
+
+      # A profile-addition range adds a board profile that did NOT exist at BASE.
+      added_boards=""
+      for f in $changed; do
+          case "$f" in
+              "$BOARD_DIR"/*.sdn)
+                  if ! git rev-parse "$_base:$f" >/dev/null 2>&1; then
+                      added_boards="$added_boards $f"
+                  fi
+                  ;;
+          esac
+      done
+      if [ -z "$added_boards" ]; then
+          echo "ERROR — nothing was checked (no new $BOARD_DIR/*.sdn in $_base..$_new)"
+          exit 2
+      fi
+
+      prefixes=$(grep -v '^#' "$_list" 2>/dev/null | grep -v '^[[:space:]]*$')
+      if [ -z "$prefixes" ]; then
+          echo "ERROR — nothing was checked (core path list $_list is empty)"
+          exit 2
+      fi
+
+      # Enumerate every tracked core file at BOTH endpoints, then blob-compare.
+      files=$( { git ls-tree -r --name-only "$_base"; git ls-tree -r --name-only "$_new"; } \
+               | sort -u \
+               | while read -r p; do
+                     for pre in $prefixes; do
+                         case "$p" in "$pre"*) echo "$p"; break ;; esac
+                     done
+                 done )
+      if [ -z "$files" ]; then
+          echo "ERROR — nothing was checked (no core files matched $_list)"
+          exit 2
+      fi
+
+      checked=0
+      offenders=""
+      for p in $files; do
+          a=$(git rev-parse "$_base:$p" 2>/dev/null || echo ABSENT)
+          b=$(git rev-parse "$_new:$p"  2>/dev/null || echo ABSENT)
+          checked=$((checked + 1))
+          if [ "$a" != "$b" ]; then
+              offenders="$offenders $p"
+              echo "  CORE CHANGED $p  ($a -> $b)"
+          fi
+      done
+
+      boards=$(echo "$added_boards" | wc -w | tr -d ' ')
+      if [ -n "$offenders" ]; then
+          echo "FAIL — profile addition$added_boards touched core:$offenders"
+          exit 1
+      fi
+      echo "PASS — $boards profile-addition(s) checked, $checked core file(s) verified byte-identical"
+      exit 0 )
+}
+
+# ── selftest ────────────────────────────────────────────────────────────────
+ST_ROOT=""
+st_cleanup() { [ -n "$ST_ROOT" ] && rm -rf "$ST_ROOT"; }
+
+st_fixture() {
+    # $1 = dir name. Builds a repo with a core file and a first board profile.
+    d="$ST_ROOT/$1"
+    mkdir -p "$d" && cd "$d" || exit 2
+    git init -q . 2>/dev/null
+    git config user.email t@t; git config user.name t
+    mkdir -p examples/09_embedded/simpleos_nvme_fw/fw spec/profiles/board scripts/check
+    echo "fn ftl_map() -> i64: 1" > examples/09_embedded/simpleos_nvme_fw/fw/ftl_map.spl
+    echo "fn nvme_ctrl() -> i64: 1" > examples/09_embedded/simpleos_nvme_fw/fw/nvme_controller.spl
+    echo "board:\n  id: First" > spec/profiles/board/first.sdn
+    cp "$ST_LIST" scripts/check/core_paths.txt
+    git add -A >/dev/null 2>&1; git commit -qm base >/dev/null 2>&1
+    cd - >/dev/null || exit 2
+}
+
+st_run() {
+    # $1 fixture dir, $2 expected verdict word, $3 label
+    d="$ST_ROOT/$1"
+    out=$(scan "$d" "$(cd "$d" && git rev-parse HEAD~1)" "$(cd "$d" && git rev-parse HEAD)" \
+                "$d/scripts/check/core_paths.txt" 2>&1)
+    rc=$?
+    v=$(printf '%s\n' "$out" | tail -1)
+    case "$v" in
+        "$2"*) echo "  selftest ok   [$3] -> $v" ;;
+        *) echo "  selftest FAIL [$3] expected $2, got: $v"; ST_FAIL=$((ST_FAIL + 1)) ;;
+    esac
+    ST_N=$((ST_N + 1))
+}
+
+selftest() {
+    ST_ROOT=$(mktemp -d)
+    trap st_cleanup EXIT
+    ST_LIST="$ST_ROOT/core_paths.txt"
+    cat > "$ST_LIST" <<'EOF2'
+examples/09_embedded/simpleos_nvme_fw/fw/ftl
+examples/09_embedded/simpleos_nvme_fw/fw/nvme_
+EOF2
+    ST_N=0; ST_FAIL=0
+
+    # 1. clean profile addition -> PASS
+    st_fixture clean
+    ( cd "$ST_ROOT/clean" && printf 'board:\n  id: Second\n' > spec/profiles/board/second.sdn \
+      && git add -A >/dev/null && git commit -qm "add board" >/dev/null )
+    st_run clean PASS "clean profile addition"
+
+    # 2. same addition + ONE COMMENT edit to a core file -> FAIL naming it
+    st_fixture comment
+    ( cd "$ST_ROOT/comment" && printf 'board:\n  id: Second\n' > spec/profiles/board/second.sdn \
+      && printf '# harmless comment\nfn ftl_map() -> i64: 1\n' > examples/09_embedded/simpleos_nvme_fw/fw/ftl_map.spl \
+      && git add -A >/dev/null && git commit -qm "add board + comment" >/dev/null )
+    out=$(scan "$ST_ROOT/comment" "$(cd "$ST_ROOT/comment" && git rev-parse HEAD~1)" \
+               "$(cd "$ST_ROOT/comment" && git rev-parse HEAD)" \
+               "$ST_ROOT/comment/scripts/check/core_paths.txt" 2>&1)
+    v=$(printf '%s\n' "$out" | tail -1)
+    ST_N=$((ST_N + 1))
+    case "$v" in
+        FAIL*ftl_map.spl*) echo "  selftest ok   [comment-only core edit] -> $v" ;;
+        *) echo "  selftest FAIL [comment-only core edit] expected FAIL naming ftl_map.spl, got: $v"; ST_FAIL=$((ST_FAIL + 1)) ;;
+    esac
+
+    # 3. core file DELETED alongside the addition -> FAIL
+    st_fixture deleted
+    ( cd "$ST_ROOT/deleted" && printf 'board:\n  id: Second\n' > spec/profiles/board/second.sdn \
+      && git rm -q examples/09_embedded/simpleos_nvme_fw/fw/nvme_controller.spl \
+      && git add -A >/dev/null && git commit -qm "add board + delete core" >/dev/null )
+    st_run deleted FAIL "core file deleted"
+
+    # 4. range with NO new board profile -> ERROR (never a vacuous pass)
+    st_fixture noboard
+    ( cd "$ST_ROOT/noboard" && echo "# doc" > README.md \
+      && git add -A >/dev/null && git commit -qm docs >/dev/null )
+    st_run noboard ERROR "no board addition"
+
+    # 5. empty range -> ERROR
+    d="$ST_ROOT/clean"
+    h=$(cd "$d" && git rev-parse HEAD)
+    out=$(scan "$d" "$h" "$h" "$d/scripts/check/core_paths.txt" 2>&1)
+    v=$(printf '%s\n' "$out" | tail -1)
+    ST_N=$((ST_N + 1))
+    case "$v" in
+        ERROR*) echo "  selftest ok   [empty range] -> $v" ;;
+        *) echo "  selftest FAIL [empty range] expected ERROR, got: $v"; ST_FAIL=$((ST_FAIL + 1)) ;;
+    esac
+
+    echo "  selftest: $ST_N fixture(s), $ST_FAIL failure(s)"
+    if [ "$ST_FAIL" -ne 0 ] || [ "$ST_N" -eq 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed: $ST_FAIL of $ST_N)"
+        exit 2
+    fi
+}
+
+echo "-- selftest (fatal) --"
+selftest
+
+if [ "${1:-}" = "--selftest-only" ]; then
+    echo "PASS — $ST_N selftest fixture(s) checked, 0 failures (no range scanned)"
+    exit 0
+fi
+
+RANGE="${1:-}"
+if [ -z "$RANGE" ]; then
+    echo "ERROR — nothing was checked (no BASE..NEW range given; this gate is invoked by the profile contributor, not the always-on pre-push chain)"
+    exit 2
+fi
+BASE=$(echo "$RANGE" | sed 's/\.\..*//')
+NEW=$(echo "$RANGE" | sed 's/.*\.\.//')
+if [ -z "$BASE" ] || [ -z "$NEW" ] || [ "$BASE" = "$NEW" ] && [ "$RANGE" = "$BASE" ]; then
+    echo "ERROR — nothing was checked (range must be BASE..NEW, got '$RANGE')"
+    exit 2
+fi
+echo "-- scan $BASE..$NEW --"
+scan "." "$BASE" "$NEW" "$CORE_LIST"
+exit $?

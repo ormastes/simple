@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner=$repo/scripts/check/lib/bootstrap-stage3-shared-runner.pl
+
+perl - "$runner" <<'PERL'
+use strict;
+use warnings;
+
+my ($runner) = @ARGV;
+open my $source_fh, '<', $runner or die "open runner: $!\n";
+local $/;
+my $source = <$source_fh>;
+close $source_fh or die "close runner: $!\n";
+$source =~ /(sub validate_verification_text \{.*?\n\})(?=\nsub validate_parent_authentication_text)/s
+    or die "verification parser not found\n";
+my $function = $1;
+{
+    no strict 'vars';
+    eval $function;
+    die $@ if $@;
+}
+
+our %o = (
+    run_id => 'receipt_test_001',
+    candidate_provenance => '/trusted/output/provenance.env',
+    provenance_verifier_sha256 => '9' x 64,
+);
+our %artifact_identity = (
+    source_snapshot => { sha256 => '3' x 64 },
+    runtime_snapshot => { sha256 => '4' x 64 },
+    tool_snapshot => { sha256 => '5' x 64 },
+    git_receipt => { sha256 => '6' x 64 },
+);
+my $provenance = { sha256 => '1' x 64 };
+my $candidate = { sha256 => '2' x 64 };
+my $authority_map = { sha256 => '7' x 64 };
+my $descriptor_map = { sha256 => '8' x 64 };
+my @row = (
+    'schema=simple-stage3-provenance-verification-v1',
+    'run_id=receipt_test_001',
+    'provenance_sha256=' . ('1' x 64),
+    'bound_artifact_authority_map_path=/trusted/output/provenance.env.authority-map.env',
+    'bound_artifact_authority_map_sha256=' . ('7' x 64),
+    'candidate_sha256=' . ('2' x 64),
+    'source_snapshot_sha256=' . ('3' x 64),
+    'runtime_snapshot_sha256=' . ('4' x 64),
+    'tool_snapshot_sha256=' . ('5' x 64),
+    'git_receipt_sha256=' . ('6' x 64),
+    'verifier_sha256=' . ('9' x 64),
+    'status=pass',
+);
+sub accepts {
+    my (@candidate_row) = @_;
+    return eval {
+        validate_verification_text(join("\n", @candidate_row) . "\n",
+            $provenance, $candidate, $authority_map);
+        1;
+    } ? 1 : 0;
+}
+accepts(@row) or die "valid receipt rejected\n";
+my @missing = @row; splice @missing, 3, 1;
+accepts(@missing) and die "missing map path accepted\n";
+my @reordered = @row; @reordered[3, 4] = @reordered[4, 3];
+accepts(@reordered) and die "reordered map rows accepted\n";
+my @bad_path = @row;
+$bad_path[3] = 'bound_artifact_authority_map_path=/external/map.env';
+accepts(@bad_path) and die "tampered map path accepted\n";
+my @bad_sha = @row;
+$bad_sha[4] = 'bound_artifact_authority_map_sha256=' .
+    $descriptor_map->{sha256};
+accepts(@bad_sha) and die "descriptor-map sha accepted as authority map\n";
+print "PASS: Stage3 verification receipt parser binds authority map\n";
+PERL

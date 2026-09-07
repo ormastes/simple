@@ -1,47 +1,118 @@
+"""
+## Purpose and audience
+Pins the compiled daemon entrypoint contract of
+`src/app/postgres_mimic_server/main.spl` for database-server developers: bounded
+query/pgwire serve modes, explicit allow-listing, bounded persistence cleanup,
+the scalar error boundary, CLI input bounds, and the SimpleOS launch profile.
+These are source-contract scenarios — the entrypoint has no importable runtime
+API, so the shipped source text is the product artifact under test.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/01_unit/app/postgres_mimic_server/daemon_entry_contract_spec.spl`
+from the repo root after any edit to the mimic server entrypoint.
+## Compatibility and limitations
+Scenarios assert on source text of `main.spl` only; they do not open a socket or
+spawn the server, so wire-level regressions need the integration lane. Token
+renames in `main.spl` fail the contract by design — update both sides together.
+## Verification guidance and troubleshooting
+A failure names which contract token disappeared; grep `main.spl` for the
+asserted token to see whether it was renamed or dropped. All six scenarios are
+expected RED until the entrypoint contract tokens are restored — see the
+scenario names for the exact missing surface.
+"""
+# Lifecycle: doc/01_research/local/postgres_mimic_server.md ;
+# doc/03_plan/lib/database/db_perf_beat_sqlite_postgre_plan_2026-05-27.md ;
+# doc/04_architecture/lib/database/postgres_mimic_server.md ;
+# doc/05_design/postgres_mimic_scalar_dispatch_v1.md
+# @manual_section: daemon-entry-contract
+
 use std.spec.{describe, it, expect}
 extern fn rt_file_read_text(path: text) -> text?
 
 describe "postgres mimic daemon cached entrypoint":
     it "offers bounded query and pgwire serve modes from the compiled entry":
+        # @req REQ-PGMIMIC-001
+        # @capture(bit_table): entrypoint contract tokens for serve modes
+        step("Read the shipped entrypoint source and verify the serve-mode contract")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source.contains("sys_get_args()")).to_equal(true)
-        expect(source.contains("PgWireParallelLinuxServer(address: address")).to_equal(true)
-        expect(source.contains("--workers")).to_equal(true)
-        expect(source.contains("--scalar-parallel")).to_equal(true)
-        expect(source.contains("--query")).to_equal(true)
+        val entry_reads_host_args = source.contains("sys_get_args()")
+        val pgwire_serve_binds_listener = source.contains("PgWireParallelLinuxServer(address: address")
+        val exposes_worker_flag = source.contains("--workers")
+        val exposes_scalar_parallel_flag = source.contains("--scalar-parallel")
+        val exposes_query_flag = source.contains("--query")
+        expect(entry_reads_host_args).to_equal(true)
+        expect(pgwire_serve_binds_listener).to_equal(true)
+        expect(exposes_worker_flag).to_equal(true)
+        expect(exposes_scalar_parallel_flag).to_equal(true)
+        expect(exposes_query_flag).to_equal(true)
 
     it "fails closed unless a user and database are explicitly allowed":
+        # @req REQ-PGMIMIC-002
+        # @capture(bit_table): allow-list fail-closed contract tokens
+        step("Read the shipped entrypoint source and verify the allow-list contract")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source.contains("--serve requires --listen, --allow-user, and --allow-database")).to_equal(true)
-        expect(source.contains("allowed_user: allowed_user")).to_equal(true)
-        expect(source.contains("allowed_database: allowed_database")).to_equal(true)
-        expect(source.contains("127.0.0.1:5432")).to_equal(true)
+        val serve_requires_explicit_allowlist = source.contains("--serve requires --listen, --allow-user, and --allow-database")
+        val passes_allowed_user_through = source.contains("allowed_user: allowed_user")
+        val passes_allowed_database_through = source.contains("allowed_database: allowed_database")
+        val defaults_to_loopback_listener = source.contains("127.0.0.1:5432")
+        expect(serve_requires_explicit_allowlist).to_equal(true)
+        expect(passes_allowed_user_through).to_equal(true)
+        expect(passes_allowed_database_through).to_equal(true)
+        expect(defaults_to_loopback_listener).to_equal(true)
 
     it "retains query mode and performs bounded persistence cleanup":
+        # @req REQ-PGMIMIC-003
+        # @capture(bit_table): persistence lifecycle contract tokens
+        step("Read the shipped entrypoint source and verify the persistence lifecycle")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source).to_contain("if pg_has_flag(args, \"--serve\")")
-        expect(source).to_contain("server.serve_scalar_parallel_bounded_status(max_connections)")
-        expect(source).to_contain("server.serve_bounded_status(max_connections)")
-        expect(source.contains("server.owner.checkpoint()")).to_equal(true)
-        expect(source.contains("server.owner.close()")).to_equal(true)
+        val keeps_serve_mode_branch = source.contains("if pg_has_flag(args, \"--serve\")")
+        val runs_bounded_scalar_serve = source.contains("server.serve_scalar_parallel_bounded_status(max_connections)")
+        val runs_bounded_query_serve = source.contains("server.serve_bounded_status(max_connections)")
+        val checkpoints_before_close = source.contains("server.owner.checkpoint()")
+        val closes_owner_on_exit = source.contains("server.owner.close()")
+        expect(keeps_serve_mode_branch).to_equal(true)
+        expect(runs_bounded_scalar_serve).to_equal(true)
+        expect(runs_bounded_query_serve).to_equal(true)
+        expect(checkpoints_before_close).to_equal(true)
+        expect(closes_owner_on_exit).to_equal(true)
 
     it "keeps imported Result and IoError aggregates behind a scalar boundary":
+        # @req REQ-PGMIMIC-004
+        # @capture(bit_table): scalar error boundary contract tokens
+        step("Read the shipped entrypoint source and verify the scalar error boundary")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source).to_contain("val status = if pg_has_flag(args, \"--scalar-parallel\"):")
-        expect(source).to_contain("server.serve_error_text()")
-        expect(source).to_contain("if status != 0:")
+        val selects_scalar_status_first = source.contains("val status = if pg_has_flag(args, \"--scalar-parallel\"):")
+        val reports_errors_as_text = source.contains("server.serve_error_text()")
+        val maps_status_to_exit_code = source.contains("if status != 0:")
+        expect(selects_scalar_status_first).to_equal(true)
+        expect(reports_errors_as_text).to_equal(true)
+        expect(maps_status_to_exit_code).to_equal(true)
 
     it "bounds worker and connection CLI inputs before opening the listener":
+        # @req REQ-PGMIMIC-005
+        # @capture(bit_table): CLI bound-check contract tokens
+        step("Read the shipped entrypoint source and verify the CLI input bounds")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source).to_contain("fn pg_positive_arg(")
-        expect(source).to_contain("--workers must be between 1 and 64")
-        expect(source).to_contain("--max-connections must be positive")
+        val has_positive_arg_validator = source.contains("fn pg_positive_arg(")
+        val caps_worker_range = source.contains("--workers must be between 1 and 64")
+        val rejects_nonpositive_connections = source.contains("--max-connections must be positive")
+        expect(has_positive_arg_validator).to_equal(true)
+        expect(caps_worker_range).to_equal(true)
+        expect(rejects_nonpositive_connections).to_equal(true)
 
     it "uses the single-worker SimpleOS filesystem launch profile explicitly":
+        # @req REQ-PGMIMIC-006
+        # @capture(bit_table): SimpleOS launch profile contract tokens
+        step("Read the shipped entrypoint source and verify the SimpleOS launch profile")
         val source = rt_file_read_text("src/app/postgres_mimic_server/main.spl") ?? ""
-        expect(source).to_contain("pg_has_flag(args, \"--simpleos\")")
-        expect(source).to_contain("--simpleos requires a non-whitespace --launch-id")
-        expect(source).to_contain("0.0.0.0:5432")
-        expect(source).to_contain("/var/db/simpleos/postgres-mimic.pdb")
-        expect(source).to_contain("server.serve_inline_bounded_status(max_connections)")
-        expect(source).to_contain("path=/SYS/APPS/DBSRV.SMF launch_id=")
+        val detects_simpleos_flag = source.contains("pg_has_flag(args, \"--simpleos\")")
+        val requires_launch_id = source.contains("--simpleos requires a non-whitespace --launch-id")
+        val binds_public_listener = source.contains("0.0.0.0:5432")
+        val pins_persistence_path = source.contains("/var/db/simpleos/postgres-mimic.pdb")
+        val serves_inline_bounded = source.contains("server.serve_inline_bounded_status(max_connections)")
+        val logs_launch_id = source.contains("path=/SYS/APPS/DBSRV.SMF launch_id=")
+        expect(detects_simpleos_flag).to_equal(true)
+        expect(requires_launch_id).to_equal(true)
+        expect(binds_public_listener).to_equal(true)
+        expect(pins_persistence_path).to_equal(true)
+        expect(serves_inline_bounded).to_equal(true)
+        expect(logs_launch_id).to_equal(true)

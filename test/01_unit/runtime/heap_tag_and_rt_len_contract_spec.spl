@@ -1,0 +1,167 @@
+"""
+## Purpose and audience
+Acceptance oracles for the two facts a caller of `rt_len` depends on: the
+`rt_len` dispatch admits exactly four collection tags and answers -1 for
+everything else, and the Rust runtime and the C runtime number their heap tags
+in INDEPENDENT spaces that must never be assumed to match. Audience: anyone
+editing `src/compiler_rust/runtime/src/value/heap.rs`,
+`src/compiler_rust/runtime/src/value/collections.rs`, or the tag block in
+`src/runtime/runtime_native.c`.
+
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/runtime/heap_tag_and_rt_len_contract_spec.spl
+
+## Evidence class of each scenario
+The first four scenarios are SOURCE-INVARIANT drift detectors: they read the
+two runtime sources and assert the tag numbering and the dispatch arms, so a
+silent renumbering on either side turns them red. They prove the declared
+contract, never the compiled behaviour. The last scenario is BEHAVIOURAL and
+runs in the interpreter lane: it establishes the collection baseline that the
+reported closure defect violates.
+
+## Compatibility and limitations
+The reported failure mode — a hosted closure answering its capture count
+instead of -1, which makes an emptiness query answer true for a non-capturing
+lambda — lives in Cranelift codegen inlining. It is NOT reproducible in the
+interpreter lane and is NOT reproduced here; reproducing it needs a native
+build, which this lane deliberately does not perform. Treat the behavioural
+half of that report as unproven by this spec.
+
+## Verification guidance and troubleshooting
+A red numbering scenario means a tag value moved. Check whether the move was
+intended, then update the pinned value in the same change as the runtime edit
+rather than relaxing the assertion.
+"""
+# doc-path: src/compiler_rust/runtime/src/value/collections.rs
+# @manual_section: runtime-heap-tags
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val rust_heap_path = "src/compiler_rust/runtime/src/value/heap.rs"
+val rust_collections_path = "src/compiler_rust/runtime/src/value/collections.rs"
+val c_runtime_path = "src/runtime/runtime_native.c"
+
+fn strip_trailing(value: text, cut: text) -> text:
+    if value.ends_with(cut): return value.slice(0, value.len() - cut.len())
+    value
+
+fn rust_tag_of(source: text, name: text) -> text:
+    # `    Closure = 0x06,` inside `#[repr(u8)] enum HeapObjectType`.
+    val prefix = name + " = "
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not line.starts_with(prefix): continue
+        return strip_trailing(line.slice(prefix.len(), line.len()), ",")
+    "NOT-FOUND"
+
+fn c_define_of(source: text, name: text) -> text:
+    # `#define RT_VALUE_HEAP_CLOSURE 0x03U`
+    val prefix = "#define " + name + " "
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not line.starts_with(prefix): continue
+        return line.slice(prefix.len(), line.len()).trim()
+    "NOT-FOUND"
+
+fn rt_len_has_sentinel_arm(source: text) -> bool:
+    # The catch-all arm, scoped to the rt_len match body. A file-wide search
+    # would match any other function's sentinel and overclaim.
+    var inside = false
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("pub extern \"C\" fn rt_len("): inside = true
+        if not inside: continue
+        if line == "}": return false
+        if line == "_ => -1,": return true
+    false
+
+fn rt_len_dispatch_arms(source: text) -> [text]:
+    # Every `Some(HeapObjectType::X) =>` arm reachable from the rt_len match.
+    var arms: [text] = []
+    var inside = false
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("pub extern \"C\" fn rt_len("): inside = true
+        if not inside: continue
+        if line == "}" and arms.len() > 0: return arms
+        if not line.starts_with("Some(HeapObjectType::"): continue
+        val rest = line.slice("Some(HeapObjectType::".len(), line.len())
+        for part in rest.split(")"):
+            arms = arms.push(part)
+            break
+    arms
+
+describe "rt_len contract — four collection tags answer a length, everything else answers -1":
+
+    it "dispatches on exactly the four collection heap tags":
+        # @req REQ-RTLEN-DISPATCH-001
+        step("Read the Rust runtime collections module that defines rt_len")
+        val source = file_read(rust_collections_path)
+        step("Collect the heap tags rt_len dispatches on")
+        # @capture(statistics): the dispatch arm list is retained
+        val arms = rt_len_dispatch_arms(source)
+        step("Verify the admitted set is Array, String, Tuple and Dict, in source order")
+        expect(arms).to_equal(["Array", "String", "Tuple", "Dict"])
+
+    it "rejects any non-collection heap tag with the -1 sentinel rather than a length":
+        # @req REQ-RTLEN-DISPATCH-002
+        step("Read the Rust runtime collections module")
+        val source = file_read(rust_collections_path)
+        step("Verify the catch-all arm inside the rt_len match answers the documented sentinel")
+        expect(rt_len_has_sentinel_arm(source)).to_equal(true)
+        step("Verify the documented contract sentence is still attached to rt_len")
+        expect(source).to_contain("Returns -1 for non-collection types")
+        step("Verify Closure is not among the admitted tags, so a closure takes the sentinel arm")
+        # @capture(statistics): the dispatch arm list is retained for comparison
+        val arms = rt_len_dispatch_arms(source)
+        expect(arms).to_contain("Array")
+        expect(arms.len()).to_equal(4)  # oracle: collections.rs rt_len has four Some(HeapObjectType::_) arms; Closure is absent by design
+
+describe "heap tag numbering — the Rust and C runtimes use independent tag spaces":
+
+    it "numbers Closure and Dict oppositely in the two runtimes":
+        # @req REQ-HEAPTAG-INDEPENDENCE-001
+        step("Read the Rust heap-tag enum")
+        val rust = file_read(rust_heap_path)
+        step("Read the C runtime tag defines")
+        val c = file_read(c_runtime_path)
+        # @capture(bit_table): both runtimes' Closure and Dict tag values are retained
+        step("Pin the Rust numbering")
+        expect(rust_tag_of(rust, "Closure")).to_equal("0x06")
+        expect(rust_tag_of(rust, "Dict")).to_equal("0x03")
+        step("Pin the C numbering")
+        expect(c_define_of(c, "RT_VALUE_HEAP_CLOSURE")).to_equal("0x03U")
+        expect(c_define_of(c, "RT_VALUE_HEAP_DICT")).to_equal("0x06U")
+        step("Verify the two schemes genuinely disagree, so no code may assume parity")
+        expect(rust_tag_of(rust, "Closure")).to_equal("0x06")
+        expect(c_define_of(c, "RT_VALUE_HEAP_CLOSURE")).to_start_with("0x03")
+
+    it "keeps Array as the one tag both runtimes happen to share, which is a coincidence and not a contract":
+        # @req REQ-HEAPTAG-INDEPENDENCE-002
+        step("Read both runtime tag tables")
+        val rust = file_read(rust_heap_path)
+        val c = file_read(c_runtime_path)
+        # @capture(bit_table): the Array tag from each runtime is retained
+        step("Verify the shared Array value is still what both sides declare")
+        expect(rust_tag_of(rust, "Array")).to_equal("0x02")
+        expect(c_define_of(c, "RT_VALUE_HEAP_ARRAY")).to_equal("0x02U")
+        step("Verify the C runtime's string tag is a magic word and not a small ordinal")
+        expect(c_define_of(c, "RT_VALUE_HEAP_STRING")).to_equal("0x53545231U")
+        step("Verify the Rust runtime's string tag is the small ordinal instead")
+        expect(rust_tag_of(rust, "String")).to_equal("0x01")
+
+describe "collection length baseline (behavioural)":
+
+    it "answers a real length for a collection in the interpreter lane":
+        # @req REQ-RTLEN-BASELINE-001
+        step("Build an empty and a populated array")
+        val empty: [i64] = []
+        val filled = [10, 20, 30]
+        # @capture(statistics): observed lengths and emptiness answers are retained
+        step("Verify the lengths are the collection sizes and not a capture count")
+        expect(empty.len()).to_equal(0)  # oracle: an array literal with no elements has length 0
+        expect(filled.len()).to_equal(3)  # oracle: the literal above declares three elements
+        step("Verify emptiness follows the length")
+        expect(empty.is_empty()).to_equal(true)
+        expect(filled.is_empty()).to_equal(false)

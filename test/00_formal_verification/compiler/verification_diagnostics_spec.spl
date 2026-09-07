@@ -1,28 +1,68 @@
-use verification.lean.verification_diagnostics as diag
+"""
+## Purpose and audience
+Executable contract for the verification diagnostics model: the stable
+error-code table (VerificationErrorCode), Span coordinates, per-diagnostic
+formatting with context and location, collector aggregation, and the helper
+constructors that build common diagnostics. Owned by the compiler verification
+team; every verify-mode error message the tool prints flows through this model.
 
+## Operator workflow
+Run this spec after touching the diagnostics module or the error-code table:
+`bin/simple test test/00_formal_verification/compiler/verification_diagnostics_spec.spl`.
+A failure names the diagnostics invariant that broke.
+
+## Compatibility and limitations
+The code strings (V-AOP-001, M-INTRO-001, ...) are part of the public operator
+contract and are asserted verbatim; renaming a code is a breaking change, not a
+refactor. All scenarios run in memory; no Lean toolchain is required.
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A code mismatch means the error-code
+table changed — update the table and every consumer together. A formatting
+failure points at VerificationDiagnostic.format; a helper mismatch at the
+constructor wrappers at the bottom of the module.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
+use verification.lean.verification_diagnostics as diag
+use std.spec.step
+
+# @manual_section: verification-diagnostics-model
 describe "Verification Diagnostics":
     context "VerificationErrorCode":
         it "returns stable codes and help text":
-            expect(diag.VerificationErrorCode.AopNonGhostTargetsVerified.code()).to_equal("V-AOP-001")
-            expect(diag.VerificationErrorCode.MacroUndeclaredIntroduction.code()).to_equal("M-INTRO-001")
-            expect(diag.VerificationErrorCode.MissingTermination.code()).to_equal("V-TERM-001")
+            # @req REQ-VDIAG-001
+            # @capture(protocol_json): stable code strings and help text for five error codes
+            step("Read code and help text off five error codes")
+            expect(diag.VerificationErrorCode.AopNonGhostTargetsVerified.code()).to_equal("V-AOP-001")  # oracle: operator-facing code string is frozen
+            expect(diag.VerificationErrorCode.MacroUndeclaredIntroduction.code()).to_equal("M-INTRO-001")  # oracle: operator-facing code string is frozen
+            expect(diag.VerificationErrorCode.MissingTermination.code()).to_equal("V-TERM-001")  # oracle: operator-facing code string is frozen
             expect(diag.VerificationErrorCode.UnsafeInVerified.message()).to_contain("unsafe")
             expect(diag.VerificationErrorCode.MissingTermination.help()).to_contain("decreases")
             expect(diag.VerificationErrorCode.FfiInVerified.help()).to_contain("@trusted")
 
     context "Span":
         it "creates spans":
+            # @req REQ-VDIAG-002
+            # @capture(protocol_json): Span coordinates for a constructed and an empty span
+            step("Construct a span and compare it to the empty span")
             val span = diag.Span.new(10, 20, 5, 3)
-            expect(span.start).to_equal(10)
-            expect(span.end).to_equal(20)
-            expect(span.line).to_equal(5)
-            expect(span.column).to_equal(3)
+            expect(span.start).to_equal(10)  # oracle: the span was built with start=10
+            expect(span.end).to_equal(20)  # oracle: the span was built with end=20
+            expect(span.line).to_equal(5)  # oracle: the span was built with line=5
+            expect(span.column).to_equal(3)  # oracle: the span was built with column=3
             val empty = diag.Span.empty()
-            expect(empty.start).to_equal(0)
-            expect(empty.end).to_equal(0)
+            expect(empty.start).to_equal(0)  # oracle: the empty span is zero-initialised
+            expect(empty.end).to_equal(0)  # oracle: the empty span is zero-initialised
 
     context "VerificationDiagnostic":
         it "formats context and location":
+            # @req REQ-VDIAG-003
+            # @capture(protocol_json): formatted diagnostic carrying code, item, file, and context
+            step("Format a diagnostic with item, file, and context attached")
             val span = diag.Span.new(0, 10, 1, 1)
             var d = diag.VerificationDiagnostic.new(
                 diag.VerificationErrorCode.MissingTermination,
@@ -37,6 +77,9 @@ describe "Verification Diagnostics":
 
     context "VerificationDiagnostics":
         it "collects and formats diagnostics":
+            # @req REQ-VDIAG-004
+            # @capture(statistics): collector emptiness and count around two pushes
+            step("Push two diagnostics and read the collector state")
             var collector = diag.VerificationDiagnostics.new()
             expect(collector.is_empty()).to_equal(true)
 
@@ -45,11 +88,14 @@ describe "Verification Diagnostics":
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.FfiInVerified, span))
 
             expect(collector.is_empty()).to_equal(false)
-            expect(collector.error_count()).to_equal(2)
-            expect(collector.format_all().len()).to_equal(2)
+            expect(collector.error_count()).to_equal(2)  # oracle: two diagnostics were pushed
+            expect(collector.format_all().len()).to_equal(2)  # oracle: one formatted line per pushed diagnostic
 
     context "Helper functions":
         it "builds common diagnostics":
+            # @req REQ-VDIAG-005
+            # @capture(protocol_json): codes produced by the four helper constructors
+            step("Build one diagnostic per helper constructor")
             val span = diag.Span.new(0, 10, 1, 1)
             expect(diag.missing_termination_error(span, "factorial").code.code()).to_equal("V-TERM-001")
             expect(diag.io_in_verified_error(span, "read_file").code.code()).to_equal("V-EFFECT-001")

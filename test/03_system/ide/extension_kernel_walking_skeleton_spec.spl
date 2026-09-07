@@ -1,3 +1,32 @@
+"""
+## Purpose and audience
+Purpose: end-to-end proof that the extension kernel's landed pieces (manifest
+SDN decoder, ExtensionHost, CommandRegistry) compose into the walking skeleton
+the parallel-lane plan requires, using the real hello fixture extension.
+Audience: maintainers of the IDE extension kernel and reviewers of the S5 lane.
+
+## Operator workflow
+
+Run the spec through the runner's `run` command. Scenarios load the fixture
+manifest from `test/fixtures/ide_extensions/hello/`, drive the host's lazy
+activation contract in-process, and decode a deliberately broken manifest to
+check diagnostics.
+
+## Compatibility and limitations
+
+External-process entrypoint execution is future L6 work; the fixture's
+activation code is registered programmatically, exactly as a real host would
+after running the entry module. Only the fixture's decoded values and the
+host's registration/activation state are pinned.
+
+## Verification guidance and troubleshooting
+
+A failed lazy-activation scenario means the host activated eagerly or lost
+registrations — compare the captured state rows against the contract table in
+the overview. A failed diagnostics scenario means the decoder dropped line
+info; never soften the broken-manifest fixture text.
+"""
+
 # @cover src/lib/editor/extensions/host.spl 60%
 # @cover src/lib/editor/extensions/manifest_sdn.spl 60%
 # @req REQ-IDE-EXT-KERNEL-S5
@@ -41,7 +70,12 @@ as a real extension host would after running the entry module.
 - [lifecycle_spec.spl](../../01_unit/lib/editor/extensions/lifecycle_spec.spl) — host lifecycle unit coverage
 """
 
-use std.spec
+# Lifecycle: doc/01_research/app/editor/ide_office_plugin_suite.md ;
+# doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md ;
+# doc/04_architecture/ide_plugin_architecture.md ;
+# doc/05_design/sci_cli_extension_authority_v2.md
+
+use std.spec.{step}
 use std.editor.extensions.host.*
 use std.editor.extensions.manifest.*
 use std.editor.extensions.manifest_sdn.*
@@ -109,31 +143,37 @@ fn Then_dispatch_err_contains(result: Result<text, text>, needle: text):
 # Primary Scenarios
 # ============================================================================
 
+# @manual_section: IDE extension kernel walking skeleton
+
 describe "IDE extension kernel walking skeleton: fixture.hello":
 
     it "fixture manifest loads clean, with commands/keybindings/themes decoded":
         # @req REQ-SSPEC-SYSTEM
+        # @req REQ-IDE-EXT-KERNEL-S5
+        # @capture(protocol_json): decoded fixture manifest command, keybinding, theme, and activation rows
         step("fixture manifest loads clean, with commands/keybindings/themes decoded")
         val load = load_fixture_manifest()
         expect(load.ok).to_equal(true)
-        expect(load.issues.len()).to_equal(0)
+        expect(load.issues.len()).to_equal(0)  # oracle: a clean fixture manifest must produce zero decoder diagnostics
         val m = load.manifest
         expect(m.name).to_equal(FIXTURE_EXTENSION_NAME)
         expect(m.host).to_equal("in_process")
-        expect(m.contributes_commands.len()).to_equal(1)
+        expect(m.contributes_commands.len()).to_equal(1)  # oracle: the hello fixture contributes exactly one command, hello.greet
         expect(m.contributes_commands[0].id).to_equal(FIXTURE_COMMAND_ID)
         expect(m.contributes_commands[0].title).to_equal("Hello: Greet")
-        expect(m.contributes_languages.len()).to_equal(0)
-        expect(m.contributes_keybindings.len()).to_equal(1)
+        expect(m.contributes_languages.len()).to_equal(0)  # oracle: the fixture declares no language contributions
+        expect(m.contributes_keybindings.len()).to_equal(1)  # oracle: one keybinding is bound, to the fixture's single command
         expect(m.contributes_keybindings[0].command).to_equal(FIXTURE_COMMAND_ID)
         expect(m.contributes_keybindings[0].key).to_equal("ctrl+shift+h")
-        expect(m.contributes_themes.len()).to_equal(1)
+        expect(m.contributes_themes.len()).to_equal(1)  # oracle: the fixture ships exactly the hello-light theme
         expect(m.contributes_themes[0].id).to_equal("hello-light")
         expect(m.contributes_themes[0].ui_theme).to_equal("light")
-        expect(m.activation_events.len()).to_equal(1)
+        expect(m.activation_events.len()).to_equal(1)  # oracle: lazy activation is driven by exactly the one onCommand event
         expect(m.activation_events[0]).to_equal("onCommand:hello.greet")
 
     it "activates lazily on dispatch, runs the real handler, then tears down cleanly on deactivate":
+        # @capture(protocol_json): host activation and teardown state rows across dispatch and deactivate
+        step("Build the fixture host and dispatch through lazy activation")
         val host = build_fixture_host()
 
         # (b) handlers register eagerly; the owning extension is not active yet.
@@ -144,17 +184,19 @@ describe "IDE extension kernel walking skeleton: fixture.hello":
         val first = dispatch_greet(host, "world")
         Then_dispatch_ok(first, "hello:world")
         expect(host.is_active(FIXTURE_EXTENSION_NAME)).to_equal(true)
-        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(1)
+        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(1)  # oracle: one handler registration means exactly one lifetime-owned disposable
 
         # (e) deactivate disposes every registration; a second dispatch fails,
         # not crashes.
         expect(host.deactivate(FIXTURE_EXTENSION_NAME)).to_equal(true)
-        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(0)
+        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(0)  # oracle: deactivate must dispose every registration the lifetime owns
         expect(host.command_handler_registered(FIXTURE_COMMAND_ID)).to_equal(false)
         val second = dispatch_greet(host, "again")
         Then_dispatch_err_contains(second, "no handler registered")
 
     it "a duplicate registration of hello.greet loses to the first registrant":
+        # @capture(protocol_json): command-conflict diagnostic and post-conflict dispatch rows
+        step("Register a conflicting handler for hello.greet")
         val host = build_fixture_host()
         val conflict = register_conflicting_handler(host)
         expect(conflict.kind).to_equal("command-conflict")
@@ -164,6 +206,8 @@ describe "IDE extension kernel walking skeleton: fixture.hello":
         Then_dispatch_ok(result, "hello:still-owned")
 
     it "a builtin obeys the same index -> lazy activate -> tear down contract as the fixture":
+        # @capture(protocol_json): builtin registry activation and teardown state rows
+        step("Exercise the builtin lazy activation contract")
         # The disk fixture above proves the contract for discovered extensions.
         # Builtins get the identical contract from the indexed constructor;
         # extension_host_with_builtins() is now the same lazy contract (the
@@ -171,11 +215,11 @@ describe "IDE extension kernel walking skeleton: fixture.hello":
         # capabilities are no longer already-active before any event fires).
         # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
         val host = extension_host_with_builtins_indexed()
-        expect(host.extension_count()).to_be_greater_than(2)
-        expect(host.active_count()).to_equal(0)
+        expect(host.extension_count()).to_be_greater_than(2)  # oracle: the builtin registry ships the markdown suite plus core builtins, so more than 2
+        expect(host.active_count()).to_equal(0)  # oracle: the lazy contract means nothing is active before any event fires
         expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
 
-        expect(host.activate_command("markdown.toggle_bold")).to_equal(1)
+        expect(host.activate_command("markdown.toggle_bold")).to_equal(1)  # oracle: exactly one builtin owns toggle_bold, so activation returns 1
         expect(host.is_active("markdown-language")).to_equal(true)
         expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
         expect(host.find_language_for_ext(".md")).to_equal("markdown")
@@ -187,11 +231,13 @@ describe "IDE extension kernel walking skeleton: fixture.hello":
         # extension_host_with_builtins() (the shipped constructor) shares the
         # identical lazy contract with the indexed constructor above.
         val shipped = extension_host_with_builtins()
-        expect(shipped.active_count()).to_equal(0)
-        expect(shipped.activate_command("markdown.toggle_bold")).to_equal(1)
+        expect(shipped.active_count()).to_equal(0)  # oracle: the shipped constructor shares the same lazy nothing-active contract
+        expect(shipped.activate_command("markdown.toggle_bold")).to_equal(1)  # oracle: exactly one builtin owns toggle_bold on the shipped constructor too
         expect(shipped.is_active("markdown-language")).to_equal(true)
 
     it "a broken manifest missing extension.id reports a diagnostic with line info":
+        # @capture(protocol_json): decoder diagnostic rows carrying line info for the broken manifest
+        step("Decode a broken manifest and read its diagnostics")
         # No '{' in this fixture text, so plain double-quoted concatenation
         # is safe (the raw '...' landmine only bites once braces appear —
         # see the fixture's inline command/keybinding/theme maps above).
@@ -217,4 +263,4 @@ describe "IDE extension kernel walking skeleton: fixture.hello":
                 dup_found = true
                 dup_line = issue.line
         expect(dup_found).to_equal(true)
-        expect(dup_line).to_equal(4)
+        expect(dup_line).to_equal(4)  # oracle: the second `version:` key sits on line 4 of the broken fixture text

@@ -386,6 +386,18 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
     return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_readback_u32_checksum (vulkan_graphics_runtime_buffer.rs): the
+ * core C runtime has no Vulkan device, so it is always the unavailable
+ * fallback. -1 is the documented failure sentinel there (a real checksum is
+ * in [0, 2^31-2]); a Vulkan-featured provider overrides this weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data, int64_t pixel_count, int64_t handle, int64_t offset) {
+    (void)data; (void)pixel_count; (void)handle; (void)offset;
+    return -1;
+}
 #endif
 
 /*
@@ -1117,6 +1129,8 @@ static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
 static _Thread_local uint32_t rt_core_transient_array_scope_id = 0;
 static _Thread_local int rt_core_transient_array_scope_active = 0;
 static _Thread_local int rt_core_transient_array_scope_paused = 0;
+static _Thread_local uint8_t rt_core_transient_scope_thread_token = 0;
+static _Atomic uintptr_t rt_core_transient_scope_owner = 0;
 static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
 static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
 static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
@@ -1354,6 +1368,11 @@ int64_t rt_heap_registry_count(void) {
 int8_t rt_transient_array_scope_begin(void) {
     if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
         rt_core_transient_raw_alloc_len != 0) return 0;
+    uintptr_t thread_token = (uintptr_t)&rt_core_transient_scope_thread_token;
+    uintptr_t expected_owner = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &rt_core_transient_scope_owner, &expected_owner, thread_token,
+            memory_order_acq_rel, memory_order_acquire)) return 0;
     uint32_t next_id =
         atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
     while (next_id != 0) {
@@ -1364,9 +1383,15 @@ int8_t rt_transient_array_scope_begin(void) {
             break;
         }
     }
-    if (next_id == 0) return 0;
+    if (next_id == 0) {
+        atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
+        return 0;
+    }
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (!rt_transient_raw_scope_begin()) return 0;
+    if (!rt_transient_raw_scope_begin()) {
+        atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
+        return 0;
+    }
 #endif
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
@@ -1375,7 +1400,9 @@ int8_t rt_transient_array_scope_begin(void) {
 }
 
 int8_t rt_transient_array_scope_pause(void) {
-    if (!rt_core_transient_array_scope_active) return 0;
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     if (!rt_transient_raw_scope_pause()) return 0;
 #endif
@@ -1384,7 +1411,9 @@ int8_t rt_transient_array_scope_pause(void) {
 }
 
 int8_t rt_transient_array_scope_end(void) {
-    if (!rt_core_transient_array_scope_active) return 0;
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     const uint32_t scope_id = rt_core_transient_array_scope_id;
     rt_core_transient_array_scope_active = 0;
     rt_core_transient_array_scope_paused = 0;
@@ -1395,6 +1424,7 @@ int8_t rt_transient_array_scope_end(void) {
 #else
     rt_core_reclaim_transient_raw();
 #endif
+    atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
     return 1;
 }
 
@@ -1551,6 +1581,34 @@ static void rt_core_transient_raw_erase(void* ptr) {
     entry->bytes = 0;
     rt_core_transient_raw_alloc_len--;
     rt_core_transient_raw_alloc_tombs++;
+}
+
+int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes) {
+    if (bytes > (uint64_t)RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
+    return rt_core_transient_raw_register(ptr, (size_t)bytes) ? 1 : 0;
+}
+
+int8_t rt_transient_raw_owner_register_state(void* ptr, uint64_t bytes, int8_t owned) {
+    if (bytes > (uint64_t)RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
+    return rt_core_transient_raw_register_state(ptr, (size_t)bytes, owned != 0) ? 1 : 0;
+}
+
+int8_t rt_transient_raw_owner_query(void* ptr, uint64_t* bytes, int8_t* owned) {
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!entry) return 0;
+    if (bytes) *bytes = (uint64_t)(entry->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK);
+    if (owned) *owned = (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+    return 1;
+}
+
+void rt_transient_raw_owner_unregister(void* ptr) {
+    rt_core_transient_raw_erase(ptr);
+}
+
+int8_t rt_transient_raw_owner_thread_allows(void) {
+    uintptr_t owner = atomic_load_explicit(
+        &rt_core_transient_scope_owner, memory_order_acquire);
+    return owner == 0 || owner == (uintptr_t)&rt_core_transient_scope_thread_token;
 }
 
 static void rt_core_transient_raw_clear(void) {
@@ -5544,20 +5602,32 @@ void rt_eprintln_value(int64_t value) {
     fflush(stderr);
 }
 
+SPL_WEAK bool rt_math_is_nan(double value) {
+    return isnan(value);
+}
+
+SPL_WEAK bool rt_math_is_inf(double value) {
+    return isinf(value);
+}
+
+SPL_WEAK bool rt_math_is_finite(double value) {
+    return isfinite(value);
+}
+
 static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
 static char** rt_core_filtered_argv = NULL;
 
-__attribute__((weak)) void spl_init_args(int argc, char** argv) {
+SPL_WEAK void spl_init_args(int argc, char** argv) {
     rt_core_argc = simple_runtime_filter_startup_args(
         argc, argv, &rt_core_filtered_argv, &rt_core_argv);
 }
 
-__attribute__((weak)) int64_t spl_arg_count(void) {
+SPL_WEAK int64_t spl_arg_count(void) {
     return (int64_t)rt_core_argc;
 }
 
-__attribute__((weak)) const char* spl_get_arg(int64_t idx) {
+SPL_WEAK const char* spl_get_arg(int64_t idx) {
     if (idx < 0 || idx >= rt_core_argc) return "";
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
@@ -5593,7 +5663,7 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
 #if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
 #else
-__attribute__((weak)) void rt_set_args(int argc, char** argv) {
+SPL_WEAK void rt_set_args(int argc, char** argv) {
 #endif
     spl_init_args(argc, argv);
 }
@@ -5641,11 +5711,11 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
 }
 #endif /* _WIN32 */
 
-__attribute__((weak)) int32_t rt_get_argc(void) {
+SPL_WEAK int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-__attribute__((weak)) SplArray* rt_get_args(void) {
+SPL_WEAK SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -5653,11 +5723,11 @@ __attribute__((weak)) SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-__attribute__((weak)) SplArray* sys_get_args(void) {
+SPL_WEAK SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-__attribute__((weak)) SplArray* rt_cli_get_args(void) {
+SPL_WEAK SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
     if (!args) return (SplArray*)rt_core_nil();
@@ -5669,11 +5739,11 @@ __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     return args;
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+SPL_WEAK int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
+SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return rt_string_new(NULL, 0);
     }
@@ -6167,7 +6237,14 @@ void rt_volatile_write_u64(int64_t addr, int64_t value) {
 }
 
 void rt_memory_barrier(void) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    /* cl.exe has no __atomic_* builtins. MemoryBarrier() (windows.h, included
+     * above on _WIN32) is the documented full seq-cst fence and is defined for
+     * every MSVC target arch; clang/gcc keep the builtin byte-identically. */
+    MemoryBarrier();
+#else
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
 }
 
 /*
@@ -6215,7 +6292,7 @@ int64_t rt_black_box(int64_t value) {
     return rt_black_box_sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
-__attribute__((weak)) int64_t rt_black_box(int64_t value) {
+SPL_WEAK int64_t rt_black_box(int64_t value) {
     __asm__ __volatile__("" : "+r"(value) : : "memory");
     return value;
 }
@@ -6357,13 +6434,21 @@ int64_t rt_dma_phys_of(int64_t handle) {
 void rt_dma_sync_for_device(int64_t handle, int32_t dir_raw) {
     (void)handle;
     (void)dir_raw;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _ReadWriteBarrier();  /* compiler barrier only */
+#else
     __asm__ volatile ("" ::: "memory");  /* compiler barrier only */
+#endif
 }
 
 void rt_dma_sync_for_cpu(int64_t handle, int32_t dir_raw) {
     (void)handle;
     (void)dir_raw;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _ReadWriteBarrier();
+#else
     __asm__ volatile ("" ::: "memory");
+#endif
 }
 
 int64_t rt_dma_cache_line_size(void) {
@@ -7177,6 +7262,28 @@ int64_t rt_array_get(SplArray* a, int64_t idx) {
         return (int64_t)((uint8_t*)array->data)[idx];
     }
     return ((int64_t*)array->data)[idx];
+}
+
+/* C twin of the Rust lane's rt_vulkan_copy_u32_slots
+ * (vulkan_graphics_runtime_buffer.rs): copy `count` leading SLOTS from `src`
+ * into the caller-owned `dst`, never raw u32 bytes, so the destination keeps
+ * the tagging the source already has. Fails closed (-1) rather than copying a
+ * partial prefix — a short copy would leave the tail holding an earlier frame,
+ * the silent-stale-pixels failure the readback path exists to avoid. Both
+ * arrays must share one element representation for a slot copy to mean the
+ * same thing on both sides, so differing BYTES/packed flags are refused. */
+int64_t rt_vulkan_copy_u32_slots(int64_t dst, int64_t src, int64_t count) {
+    if (count < 0) return -1;
+    if (count == 0) return 0;
+    RtCoreArray* dst_array = rt_core_as_array(dst);
+    RtCoreArray* src_array = rt_core_as_array(src);
+    if (!dst_array || !src_array || !dst_array->data || !src_array->data) return -1;
+    if (dst_array->len < count || src_array->len < count) return -1;
+    if (dst_array->flags != src_array->flags) return -1;
+    if (dst_array->data == src_array->data) return count;
+    size_t slot = (dst_array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : sizeof(int64_t);
+    memcpy(dst_array->data, src_array->data, (size_t)count * slot);
+    return count;
 }
 
 int64_t rt_array_get_text(SplArray* a, int64_t idx) {
@@ -8100,17 +8207,11 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
-/* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
- * Some-tagged Option whose payload word was 0: every discriminant/nil guard
- * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
- * tagged pointer outside the zero page; this answers exactly that, with no
- * registry probe -- a FORMATION check, not a liveness proof, so it can never
- * false-reject a live object. Call sites own the payload-type contract
- * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
- * design and report 0 here). */
+/* Formation-only check for a plausible object reference. Native class
+ * references may be raw untagged pointers, so requiring RT_VALUE_TAG_HEAP
+ * false-rejects live objects. Masking tags while retaining the zero-page
+ * floor catches the original zero-payload incident without that false red. */
 int8_t rt_heap_ref_wellformed(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
     return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 
@@ -11511,6 +11612,52 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
     return rename(old_path, new_path) == 0;
 }
 
+int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                           const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
+    HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
+    BCryptGenRandomFn fill = lib ? (BCryptGenRandomFn)GetProcAddress(lib, "BCryptGenRandom") : NULL;
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
+    FreeLibrary(lib); char suffix[33];
+    for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
+    int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
+    HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
+    ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
+    BOOL created = CreateDirectoryA(path, &attributes);
+    LocalFree(descriptor); FreeLibrary(advapi);
+    if (!created) return rt_string_new(NULL, 0);
+#else
+    int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
+    if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
+    if (chmod(path, 0700) != 0) { rmdir(path); return rt_string_new(NULL, 0); }
+#endif
+    return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+}
+
+int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
+    char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
+#if defined(_WIN32)
+    if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
+    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+#else
+#if defined(__linux__) && defined(SYS_renameat2)
+    if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
+    if (errno == EEXIST) return 0;
+    if (errno != ENOSYS && errno != EINVAL) return -1;
+#endif
+    if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
+    (void)unlink(staged);
+    return 1;
+#endif
+}
+
 /* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
 int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
@@ -12052,7 +12199,7 @@ void panic(int64_t msg) {
 }
 
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((weak))
+SPL_WEAK
 #endif
 int64_t spl_str_ptr(const char* value) {
     int64_t raw = (int64_t)(uintptr_t)value;
@@ -13087,7 +13234,7 @@ void __simple_runtime_shutdown(void) {
  * plausible-looking value for the third case:
  *
  *   (1) Real semantics, taken from the Rust runtime (`src/compiler_rust/
- *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/*.spl`.
+ *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/<module>.spl`.
  *   (2) A NAMED LOUD TRAP -- `rt_trap_unimplemented("rt_x")` prints the symbol
  *       to stderr and aborts. This is a STUB, not an implementation. It is
  *       strictly better than address 0 (you learn WHICH call died) and strictly

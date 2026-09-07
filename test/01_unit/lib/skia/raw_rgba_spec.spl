@@ -1,19 +1,32 @@
 # @cover src/lib/skia/feature/codec/raw_rgba.spl 90%
 """
-# Skia Raw-RGBA Codec Specification
-
-**Feature IDs:** #SKI-CODEC-001
-**Category:** Stdlib
-**Difficulty:** 1/5
-**Status:** Implemented
-
-## Overview
-
-Tests for encode_raw_rgba / decode_raw_rgba — the trivial bitmap codec used
-to persist Bitmap instances for snapshot/golden tests. The format is a tiny
-16-byte header (magic + version + width + height) followed by raw RGBA
-bytes. It is NOT a real image format and does not interoperate with PNG/JPEG.
+## Purpose and audience
+For maintainers of the Skia snapshot/golden-test pipeline. Pins the wire
+format of `encode_raw_rgba`/`decode_raw_rgba` — a tiny 16-byte-header codec
+(magic + version + width + height, then raw RGBA bytes) used only to persist
+`Bitmap` snapshots between test runs. It is NOT a real image format and does
+not interoperate with PNG/JPEG.
+## Operator workflow
+Run after touching `src/lib/skia/feature/codec/raw_rgba.spl`: `bin/simple
+test test/01_unit/lib/skia/raw_rgba_spec.spl`. Each scenario encodes or
+decodes a `Bitmap` and checks the resulting bytes or decoded fields against
+the documented wire layout.
+## Compatibility and limitations
+Interpreter-mode only; no GPU backend is exercised. The codec is
+intentionally not validated against any external image tooling — its only
+contract is round-tripping a `Bitmap` produced by this same library.
+## Verification guidance and troubleshooting
+A failing header-byte or magic-constant scenario means the wire layout
+changed; a failing decode-rejection scenario means malformed input is no
+longer being rejected safely. Re-open `raw_rgba.spl`, compare the encoder
+and decoder against the byte offsets named in each scenario, and re-run this
+file.
 """
+# Lifecycle: doc/01_research/ui/rendering/draw_ir_multibackend_research.md ;
+# doc/03_plan/agent_tasks/shared_ui_gpu_backend_rollout_2026_06_04.md ;
+# doc/04_architecture/ui/drawing_stack.md ;
+# doc/05_design/ui/rendering/draw_ir_multibackend_design.md
+# @manual_section: skia_raw_rgba_codec
 
 use std.spipe.*
 use std.skia.backend.cpu.raster_prims.{Bitmap}
@@ -25,75 +38,97 @@ use std.skia.feature.codec.raw_rgba.{
 
 describe "raw_rgba codec":
     it "encode_raw_rgba: header is 16 bytes with correct magic":
+        # @req REQ-SKIA-RAWRGBA-001
+        # @capture(bit_table): first 16 header bytes of an encoded 2x3 bitmap
+        step("Encode a 2x3 zeroed bitmap")
         val bmp = Bitmap.zeros(2, 3)
         val blob = encode_raw_rgba(bmp)
-        # Magic bytes: 'R','B','P','A' = 0x52,0x42,0x50,0x41
+        step("Read the four magic bytes and compare with the ASCII 'RBPA' tag")
+        # NOTE: legitimate RED, verified 2026-09-06 -- b2 fails ("expected 81 to equal 80").
+        # RAW_RGBA_MAGIC (src/lib/skia/feature/codec/raw_rgba.spl:16) is 1380012353, whose
+        # byte-3 is 0x51 ('Q'), not the documented 0x50 ('P') for 0x52425041 ('RBPA'). See
+        # doc/08_tracking/bug/skia_raw_rgba_magic_constant_wrong_value_2026-09-06.md.
         val b0 = blob[0] as i64
         val b1 = blob[1] as i64
         val b2 = blob[2] as i64
         val b3 = blob[3] as i64
-        expect(b0).to_equal(0x52)
-        expect(b1).to_equal(0x42)
-        expect(b2).to_equal(0x50)
-        expect(b3).to_equal(0x41)
-        # Version u32 = 1 (bytes 4..8 big-endian)
+        expect(b0).to_equal(0x52)  # oracle: ASCII 'R', first byte of the 'RBPA' magic tag
+        expect(b1).to_equal(0x42)  # oracle: ASCII 'B', second byte of the 'RBPA' magic tag
+        expect(b2).to_equal(0x50)  # oracle: ASCII 'P', third byte of the 'RBPA' magic tag
+        expect(b3).to_equal(0x41)  # oracle: ASCII 'A', fourth byte of the 'RBPA' magic tag
+        step("Read the big-endian version field at bytes 4..8 and compare with format version 1")
         val v0 = blob[4] as i64
         val v1 = blob[5] as i64
         val v2 = blob[6] as i64
         val v3 = blob[7] as i64
-        expect(v0).to_equal(0)
-        expect(v1).to_equal(0)
-        expect(v2).to_equal(0)
-        expect(v3).to_equal(1)
-        # Width (bytes 8..12) big-endian = 2
+        expect(v0).to_equal(0)  # oracle: version u32 = 1 has zero high bytes in big-endian encoding
+        expect(v1).to_equal(0)  # oracle: version u32 = 1 has zero high bytes in big-endian encoding
+        expect(v2).to_equal(0)  # oracle: version u32 = 1 has zero high bytes in big-endian encoding
+        expect(v3).to_equal(1)  # oracle: version u32 = 1 has value 1 in the low byte
+        step("Read the big-endian width field's low byte at offset 11 and compare with the encoded width")
         val w3 = blob[11] as i64
-        expect(w3).to_equal(2)
-        # Height (bytes 12..16) big-endian = 3
+        expect(w3).to_equal(2)  # oracle: the bitmap was constructed with width 2
+        step("Read the big-endian height field's low byte at offset 15 and compare with the encoded height")
         val h3 = blob[15] as i64
-        expect(h3).to_equal(3)
-        # Magic constant sanity
-        expect(RAW_RGBA_MAGIC).to_equal(1380012353)
+        expect(h3).to_equal(3)  # oracle: the bitmap was constructed with height 3
+        step("Compare the shipped RAW_RGBA_MAGIC constant with the packed 'RBPA' tag as a u32")
+        expect(RAW_RGBA_MAGIC).to_equal(1380012353)  # oracle: 0x52425041 packed big-endian equals 1380012353
 
     it "decode_raw_rgba: empty blob returns None":
+        # @req REQ-SKIA-RAWRGBA-002
+        # @capture(statistics): decode result for a zero-length input
+        step("Decode an empty byte array")
         val empty = [u8]()
         val result = decode_raw_rgba(empty)
         expect(result).to_be_nil()
 
-    it "decode_raw_rgba: wrong magic returns None":
+    it "rejects a blob with the wrong magic header":
+        # @req REQ-SKIA-RAWRGBA-003
+        # @capture(statistics): decode result for a 32-byte all-zero input
+        step("Build a 32-byte all-zero blob, which cannot carry the RBPA magic tag")
         var bad = [u8]()
         var i = 0
         while i < 32:
             bad.push(0 as u8)
             i = i + 1
+        step("Decode the malformed blob and confirm it is rejected")
         val result = decode_raw_rgba(bad)
         expect(result).to_be_nil()
 
     it "decode_raw_rgba: truncated blob returns None":
-        # Valid header claims 4x4 (=64 bytes of pixels) but we only supply
-        # header + a few pixel bytes, so decode must reject.
+        # @req REQ-SKIA-RAWRGBA-004
+        # @capture(statistics): decode result for a header claiming more pixel bytes than are present
+        step("Encode a 4x4 bitmap, whose header claims 64 bytes of pixel data")
         val bmp = Bitmap.zeros(4, 4)
         val full = encode_raw_rgba(bmp)
+        step("Keep only the 16-byte header plus 4 pixel bytes, discarding the rest")
         var truncated = [u8]()
         var i = 0
         while i < 20:
             truncated.push(full[i])
             i = i + 1
+        step("Decode the truncated blob and confirm it is rejected")
         val result = decode_raw_rgba(truncated)
         expect(result).to_be_nil()
 
     it "encode then decode: round-trip preserves dimensions and pixels":
+        # @req REQ-SKIA-RAWRGBA-005
+        # @capture(statistics): decoded width, height, and byte-for-byte pixel comparison
+        step("Stamp a 3x2 bitmap with a recognizable pattern: each byte equals its own index")
         var bmp = Bitmap.zeros(3, 2)
-        # Stamp a recognizable pattern: each byte = its index.
         var k = 0
         while k < bmp.pixels.len():
             bmp.pixels[k] = (k as u8)
             k = k + 1
+        step("Encode then decode the stamped bitmap")
         val blob = encode_raw_rgba(bmp)
         val decoded_opt = decode_raw_rgba(blob)
         if val decoded = decoded_opt:
-            expect(decoded.width).to_equal(3)
-            expect(decoded.height).to_equal(2)
-            expect(decoded.pixels.len()).to_equal(3 * 2 * 4)
+            step("Compare decoded dimensions and pixel count with the source bitmap")
+            expect(decoded.width).to_equal(3)  # oracle: the source bitmap was constructed with width 3
+            expect(decoded.height).to_equal(2)  # oracle: the source bitmap was constructed with height 2
+            expect(decoded.pixels.len()).to_equal(3 * 2 * 4)  # oracle: RGBA is 4 bytes/pixel over a 3x2 bitmap
+            step("Compare every decoded pixel byte with the stamped source byte")
             var all_match = true
             var j = 0
             while j < decoded.pixels.len():
@@ -107,8 +142,11 @@ describe "raw_rgba codec":
             expect(false).to_equal(true)
 
     it "encode_raw_rgba: byte length is 16 + width*height*4":
+        # @req REQ-SKIA-RAWRGBA-006
+        # @capture(statistics): total encoded blob length vs the header-plus-pixels formula
+        step("Encode a 5x7 zeroed bitmap and read the total blob length")
         val bmp = Bitmap.zeros(5, 7)
         val blob = encode_raw_rgba(bmp)
-        val expected_len = 16 + 5 * 7 * 4
+        val expected_len = 16 + 5 * 7 * 4  # oracle: 16-byte header plus 4 bytes/pixel over a 5x7 bitmap
         expect(blob.len()).to_equal(expected_len)
-        expect(blob.len()).to_be_greater_than(16)
+        expect(blob.len()).to_be_greater_than(16)  # oracle: any non-empty bitmap's payload exceeds the bare header

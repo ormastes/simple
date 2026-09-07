@@ -2,11 +2,27 @@
 """
 # Database SDN Table Import/Export
 
-## Overview
-
+## Purpose and audience
 Simple DB supports reading and writing table data as SDN named tables.
 The SDN file is human-readable and uses the table's column names as fields.
-
+Audience: std.database maintainers and anyone storing tabular snapshots in
+SDN who needs the export/import pair to round-trip losslessly, including
+quoted values that contain commas.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/stdlib/database/db_sdn_spec.spl`.
+Each scenario builds a table, exports or parses it through `SdnTable`, and
+asserts the observed SDN text or the re-imported row values.
+## Compatibility and limitations
+The SdnTable implementation under test is declared inline in this file to
+avoid module import issues on the bootstrap binary, so the scenarios exercise
+this copy rather than a shared std module. Values containing newlines or
+embedded quotes are out of scope.
+## Verification guidance and troubleshooting
+A failure means export or parse drifted from the SDN format below: compare
+the emitted text against the fence example and check `split_sdn_row` quote
+handling first. Round-trip failures indicate an asymmetry between
+`to_sdn()` quoting and `parse()` unquoting.
 ## SDN Format
 ```sdn
 users |id, name, active|
@@ -14,6 +30,11 @@ users |id, name, active|
     2, "Bob", false
 ```
 """
+# Lifecycle: doc/01_research/lib/database/database_ecosystem_overview_2026-01-21.md ;
+# doc/03_plan/lib/database/db_perf_beat_sqlite_postgre_plan_2026-05-27.md ;
+# doc/04_architecture/format/note_sdn_index.md ;
+# doc/05_design/lib/db/unified_database_design.md
+# @manual_section: SDN table export and import
 
 use std.spec
 use std.spec.{check, check_msg}
@@ -160,9 +181,12 @@ fn quote_if_needed(value: text) -> text:
 # ============================================================================
 
 describe "Database SDN table export":
+    # @manual_section: SDN export
     it "exports table with simple values to SDN":
-        step("Verify: exports table with simple values to SDN")
         # @req: REQ-STDLIB-DbSdn-001
+        # @req: REQ-STDLIB-001
+        # @capture(protocol_json): exported SDN text retained for review
+        step("Export a two-row users table to SDN text")
         val table = SdnTable.new("users", ["id", "name", "active"])
         val row1 = SdnRow.empty()
         row1.set("id", "1")
@@ -182,6 +206,9 @@ describe "Database SDN table export":
         expect(exported).to_contain("Bob")
 
     it "exports table with quoted values containing commas":
+        # @req: REQ-STDLIB-DbSdn-001
+        # @capture(protocol_json): quoted comma value retained for review
+        step("Export a description value that contains a comma")
         val table = SdnTable.new("data", ["id", "description"])
         val row = SdnRow.empty()
         row.set("id", "1")
@@ -193,16 +220,22 @@ describe "Database SDN table export":
 
 describe "Database SDN table import":
     it "imports table from SDN text":
+        # @req: REQ-STDLIB-DbSdn-001
+        # @capture(protocol_json): parsed table shape retained for review
+        step("Parse a two-row SDN table from text")
         val sdn_text = "users |id, name, active|{NL}    1, Alice, true{NL}    2, Bob, false"
         val table = SdnTable.parse(sdn_text)
         expect(table != nil).to_equal(true)
 
         val t = table.unwrap()
         expect(t.name).to_equal("users")
-        expect(t.columns.len()).to_equal(3)
-        expect(t.rows.len()).to_equal(2)
+        expect(t.columns.len()).to_equal(3)  # oracle: the header declares exactly id, name, active
+        expect(t.rows.len()).to_equal(2)  # oracle: the SDN text carries exactly two data rows
 
     it "imports and reads row values":
+        # @req: REQ-STDLIB-DbSdn-001
+        # @capture(protocol_json): first-row cell values retained for review
+        step("Read row cells back from the parsed table")
         val sdn_text = "users |id, name|{NL}    1, Alice{NL}    2, Bob"
         val table = SdnTable.parse(sdn_text)
         val t = table.unwrap()
@@ -212,6 +245,9 @@ describe "Database SDN table import":
 
 describe "Database SDN round-trip":
     it "round-trips simple table through export and import":
+        # @req: REQ-STDLIB-DbSdn-001
+        # @capture(protocol_json): round-trip row values retained for review
+        step("Export a projects table and re-import the emitted text")
         # Create table
         val table = SdnTable.new("projects", ["id", "name", "status"])
         val row = SdnRow.empty()
@@ -227,12 +263,15 @@ describe "Database SDN round-trip":
 
         val t = reimported.unwrap()
         expect(t.name).to_equal("projects")
-        expect(t.rows.len()).to_equal(1)
+        expect(t.rows.len()).to_equal(1)  # oracle: the source table holds exactly one row
         val r = t.rows[0]
         expect(r.get("name")).to_equal(Some("Simple"))
         expect(r.get("status")).to_equal(Some("active"))
 
     it "round-trips quoted values with commas":
+        # @req: REQ-STDLIB-DbSdn-001
+        # @capture(protocol_json): quoted round-trip value retained for review
+        step("Round-trip a note text that contains commas")
         val table = SdnTable.new("notes", ["id", "text"])
         val row = SdnRow.empty()
         row.set("id", "1")

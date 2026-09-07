@@ -1,38 +1,38 @@
-# @req: REQ-COMP-TYPE001-NONEXISTENT-TYPE-001 — stable requirement identity for this spec.
 """
 ## Purpose and audience
-Purpose: Prove that TYPE001/TYPE002 fire on source the compiler rejects outright.
-Audience: COMP maintainers who read this spec to confirm the behavior still holds.
-"""
 
-"""
-# Non-Existent Type / Global Lint Rules Specification
-
-**Feature IDs:** #TYPE001 #TYPE002
-**Category:** Tooling / Lint
-**Difficulty:** 2/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
-
-## Overview
-
+Prove that TYPE001/TYPE002 fire on source the compiler rejects outright, for
+COMP/lint maintainers who read this spec to confirm the behavior still holds.
 Pins the two defect classes found live in `src/app/mcp` by the 2026-08-24
-slice-C compile sweep. Both are source constructs the compiler rejects at HIR
-lowering — `unresolved type: int` and `unresolved name: range` — and both were
-previously invisible until a full closure lowering ran, minutes of work for a
-defect a line scan finds instantly.
+slice-C compile sweep: `unresolved type: int` and `unresolved name: range`,
+both source constructs the compiler rejects at HIR lowering and both
+previously invisible until a full closure lowering ran.
 
-## Key Concepts
+## Operator workflow
 
-| Concept | Description |
-|---------|-------------|
-| TYPE001 | Cast to a name that is not a Simple type (`int`, `long`, `double`, `uint`) |
-| TYPE002 | `for x in range(a, b):` — `range` is not a resolvable global |
-| Empirical set | Only names the compiler was observed to reject are flagged; `float`/`str` resolve and are not flagged |
+Run this spec with the repo test runner and confirm zero failed scenarios.
+Each scenario builds a small source fragment, runs it through
+`Linter.check_nonexistent_types`, and asserts the returned lint results.
+
+## Compatibility and limitations
+
+TYPE001 fires on a cast to a name that is not a Simple type (`int`, `long`,
+`double`, `uint`); TYPE002 fires on `for x in range(a, b):`, since `range` is
+not a resolvable global. The flagged name set is empirical — only names the
+compiler was observed to reject are flagged; `float`/`str` resolve and are
+not flagged. The final two scenarios read the lint rule's own source to pin
+its cursor-based scanning shape, not linter output.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to `nonexistent_type_lints.spl` or `Linter`. A
+failure in the first two describe blocks means a name was added to or
+dropped from the observed-rejected set; a failure in the source-reading
+scenario means the cursor-based scan regressed toward the old
+infinite-rescan defect (doc/08_tracking/bug/text_find_ignores_start_offset_2026-08-27.md).
 """
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: lint nonexistent-type and range rules
 
 use compiler.tools.lint.main.{Linter}
 use std.spec.step
@@ -45,78 +45,99 @@ extern fn rt_file_read_text(path: text) -> text?
 
 describe "TYPE001 — nonexistent type in a cast":
     it "fires on `as int`":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a single `as int` cast retained
         step("Verify: fires on `as int`")
-        # @req: REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as int\n")
-        expect(linter.results.len()).to_equal(1)
+        expect(linter.results.len()).to_equal(1)  # oracle: exactly one `as int` cast in the fixture
 
     it "result carries code TYPE001":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): first lint result's code field retained
         step("Verify: result carries code TYPE001")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as int\n")
         expect(linter.results[0].lint.code).to_equal("TYPE001")
 
     it "fires on `as long`, `as double` and `as uint`":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for three distinct nonexistent-type casts retained
         step("Verify: fires on the other three observed-rejected names")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "val a = x as long\nval b = x as double\nval c = x as uint\n")
-        expect(linter.results.len()).to_equal(3)
+        expect(linter.results.len()).to_equal(3)  # oracle: three distinct nonexistent-type casts in the fixture
 
     it "does not fire on `as i64` (a real Simple type)":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a real Simple type cast retained
         step("Verify: does not fire on a real type")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as i64\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: i64 is a real Simple type, never flagged
 
     it "does not fire on `as float` or `as str`, which the compiler resolves":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for compiler-resolved cast names retained
         step("Verify: the flagged set stays empirical")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "val a = x as float\nval b = x as str\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: float and str both resolve, neither is in the observed-rejected set
 
     it "does not fire when the name is only a prefix of a longer identifier":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a prefix-only identifier retained
         step("Verify: word-boundary guard holds")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "val a = x as integer_thing\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: `integer_thing` is not the exact name `int`, so no match
 
     it "does not fire on a comment line":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a comment-only line retained
         step("Verify: comments are skipped")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "# do not write `x as int` here\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: the only occurrence is inside a comment line
 
     it "scans rejected prefixes without changing whole-word behavior":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count and code across repeated prefix-like casts retained
         step("Verify: rejected cast prefixes retain whole-word behavior")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "val x = a as integer_thing + b as integer_thing + " +
             "c as integer_thing + d as integer_thing + e as int\n")
-        expect(linter.results.len()).to_equal(1)
+        expect(linter.results.len()).to_equal(1)  # oracle: only the trailing `as int` is an exact nonexistent-type name
         expect(linter.results[0].lint.code).to_equal("TYPE001")
 
     it "reports one warning per bad name even when an exact cast repeats":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): deduplicated lint result count for repeated exact casts retained
         step("Verify: repeated exact casts retain one warning per name and line")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "val x = a as int + b as int + c as int\n")
-        expect(linter.results.len()).to_equal(1)
+        expect(linter.results.len()).to_equal(1)  # oracle: `int` repeats on one line, deduplicated to one warning
 
     it "retains canonical bad-name order independent of source order":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): canonical bad-name ordering across four distinct casts retained
         step("Verify: bad-name diagnostics retain canonical order")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "val x = a as uint + b as double + c as long + d as int\n")
-        expect(linter.results.len()).to_equal(4)
+        expect(linter.results.len()).to_equal(4)  # oracle: four distinct nonexistent-type names in the fixture
         expect(linter.results[0].lint.message).to_contain("`int`")
         expect(linter.results[1].lint.message).to_contain("`long`")
         expect(linter.results[2].lint.message).to_contain("`double`")
         expect(linter.results[3].lint.message).to_contain("`uint`")
 
     it "keeps TYPE001 rejection scanning cursor-based":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): cursor-based scan substrings retained from the rule's own source
         step("Verify: TYPE001 rejection scanning uses an absolute cursor")
         val source = rt_file_read_text(
             "src/compiler/90.tools/lint/_LintMain/nonexistent_type_lints.spl") ?? ""
@@ -131,7 +152,8 @@ describe "TYPE001 — nonexistent type in a cast":
         # `not_to_contain` is not a matcher std.spec defines (see the matcher
         # list in src/lib/nogc_sync_mut/spec.spl) — the call resolved against
         # nothing and errored the example. Negate through the real API instead.
-        expect(source.contains("rest = rest[at + 1:]")).to_be_false()
+        val still_slices_rest_by_hand = source.contains("rest = rest[at + 1:]")
+        expect(still_slices_rest_by_hand).to_be_false()
 
 # ============================================================================
 # TYPE002 — `for ... in range(...)`
@@ -139,28 +161,36 @@ describe "TYPE001 — nonexistent type in a cast":
 
 describe "TYPE002 — for-loop over range()":
     it "fires on `for i in range(0, n):`":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a `for/range` shape retained
         step("Verify: fires on the for/range shape")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "    for i in range(0, n):\n")
-        expect(linter.results.len()).to_equal(1)
+        expect(linter.results.len()).to_equal(1)  # oracle: exactly one `for ... in range(...)` shape in the fixture
 
     it "result carries code TYPE002":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): first lint result's TYPE002 code field retained
         step("Verify: result carries code TYPE002")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "    for i in range(0, n):\n")
         expect(linter.results[0].lint.code).to_equal("TYPE002")
 
     it "does not fire on the range-expression form `for i in 0..n:`":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for the accepted range-expression form retained
         step("Verify: the correct form is accepted")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "    for i in 0..n:\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: `0..n` is the accepted range-expression form, never flagged
 
     it "does not fire on a method named range outside a for loop":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for a range() method call outside a for-loop retained
         step("Verify: `vec.range(...)` is not flagged")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "    val sub = vec.range(0, n)\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: a method call named range outside a for-loop is not the TYPE002 shape
 
 # ============================================================================
 # Regression fixtures — the exact live shapes found in src/app/mcp
@@ -168,15 +198,19 @@ describe "TYPE002 — for-loop over range()":
 
 describe "regression — the live src/app/mcp shapes":
     it "flags the debug_eval.spl shape (as int + for/range together)":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): combined TYPE001+TYPE002 result count on the pre-fix shape retained
         step("Verify: both codes fire on the real pre-fix source shape")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "fn eval_is_alpha(ch) -> Bool:\n    val code = ch as int\n    for _i in range(0, length):\n        pass\n")
-        expect(linter.results.len()).to_equal(2)
+        expect(linter.results.len()).to_equal(2)  # oracle: one `as int` cast plus one `for/range` shape, both flagged
 
     it "reports nothing on the post-fix source shape":
+        # @req REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        # @capture(statistics): lint result count for the post-fix source shape retained
         step("Verify: the landed fix is clean under this rule")
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl",
             "fn eval_is_alpha(ch) -> Bool:\n    val code = ch as i64\n    for _i in 0..length:\n        pass\n")
-        expect(linter.results.len()).to_equal(0)
+        expect(linter.results.len()).to_equal(0)  # oracle: i64 and 0..length are both the accepted forms

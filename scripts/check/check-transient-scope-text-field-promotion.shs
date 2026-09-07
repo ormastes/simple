@@ -1,0 +1,184 @@
+#!/bin/sh
+# Guard: every scalar TEXT field that `module_surfaces_freeze` re-assigns inside
+# the phase-2 registry retention scope must be explicitly promoted by
+# `module_surfaces_promote`.
+#
+# Why this exists: the surface's own raw allocation belongs to the older,
+# already-ended per-file parse scope, so the graph walk inside
+# rt_transient_heap_promote(registry) cannot reach a child allocated in the
+# registry scope. `module_surfaces_promote` already enumerates ~24 ARRAYS per
+# surface for exactly that reason; the four scalar texts (logical_name,
+# canonical_name, package_name, preferred_registry_name) were omitted, so ending
+# the scope free()d all 771 of them. 69 minutes later the freed logical_name
+# arrived in `validation_module_keys`, `validate_value_struct_layouts`
+# concatenated nil/garbage node keys out of it, and the dictionary miss was
+# dereferenced as a HirStruct: a bare SIGSEGV with no diagnostic. See
+# doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md
+#
+# Tier 1 (STATIC, always runs, needs no compiler): the promotion ratchet above.
+# Tier 2 (NATIVE, opt-in): builds and runs
+#   test/fixture/transient_scope/text_field_promotion.spl, which exercises BOTH
+#   shapes in one process — the unpromoted field must be observed corrupt and the
+#   promoted one intact. Requires SIMPLE_NATIVE_COMPILER and
+#   SIMPLE_NATIVE_RUNTIME_PATH; the rt_transient_* externs are inert under an
+#   interpreter, so tier 2 is native-only and its absence is reported, never
+#   counted as a pass.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> field(s) checked, ...                 exit 0
+#   FAIL  — ...                                       exit 1
+#   ERROR — nothing was checked (<reason>)            exit 2
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+types_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_types.spl"
+freeze_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl"
+promote_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+fixture_rel="test/fixture/transient_scope/text_field_promotion.spl"
+
+for f in "$types_file" "$freeze_file" "$promote_file"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked (missing source file: $f)"
+        exit 2
+    fi
+done
+
+# --- Tier 1: static promotion ratchet -------------------------------------
+
+# Scalar `text` fields declared on `class ModuleSurface`.
+text_fields=$(awk '
+    /^class ModuleSurface:/ { inclass = 1; next }
+    inclass && /^[A-Za-z]/  { inclass = 0 }
+    inclass && $0 ~ /^    [a-z_]+: text$/ {
+        name = $1; sub(":", "", name); print name
+    }
+' "$types_file")
+
+if [ -z "$text_fields" ]; then
+    echo "ERROR — nothing was checked (no scalar text fields found on class ModuleSurface in $types_file)"
+    exit 2
+fi
+
+# Of those, the ones `module_surfaces_freeze` re-assigns. Those assignments run
+# inside the registry retention scope, so their right-hand sides are strings born
+# in that scope.
+reassigned=""
+for field in $text_fields; do
+    if awk -v f="$field" '
+        /^pub\(package\) fn module_surfaces_freeze\(/ { infn = 1; next }
+        infn && /^pub|^fn |^impl / { infn = 0 }
+        infn && index($0, "surface." f " =") > 0 { found = 1 }
+        END { exit found ? 0 : 1 }
+    ' "$freeze_file"; then
+        reassigned="$reassigned $field"
+    fi
+done
+
+reassigned=$(echo "$reassigned" | tr -s ' ' '\n' | grep -v '^$')
+if [ -z "$reassigned" ]; then
+    echo "ERROR — nothing was checked (module_surfaces_freeze re-assigns no scalar text field; the guard's subject is gone, re-derive it before deleting this check)"
+    exit 2
+fi
+
+checked=0
+missing=""
+for field in $reassigned; do
+    checked=$((checked + 1))
+    if ! grep -q "rt_transient_heap_promote(surface\.$field)" "$promote_file"; then
+        missing="$missing $field"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no freeze-scope text field resolved)"
+    exit 2
+fi
+
+if [ -n "$missing" ]; then
+    echo "FAIL — $checked freeze-scope text field(s) checked, not promoted by module_surfaces_promote:$missing"
+    echo "  Ending the registry retention scope free()s these while every ModuleSurface still holds the handle."
+    exit 1
+fi
+
+# --- Tier 2: native fixture (opt-in) --------------------------------------
+
+compiler=${SIMPLE_NATIVE_COMPILER:-}
+runtime_path=${SIMPLE_NATIVE_RUNTIME_PATH:-}
+
+if [ -z "$compiler" ] || [ -z "$runtime_path" ]; then
+    echo "PASS — $checked freeze-scope text field(s) checked, all promoted (tier 2 not run: set SIMPLE_NATIVE_COMPILER and SIMPLE_NATIVE_RUNTIME_PATH to also execute $fixture_rel natively)"
+    exit 0
+fi
+
+if [ ! -x "$compiler" ] || [ ! -d "$runtime_path" ]; then
+    echo "ERROR — nothing was checked (SIMPLE_NATIVE_COMPILER is not executable, or SIMPLE_NATIVE_RUNTIME_PATH is not a directory)"
+    exit 2
+fi
+
+if [ ! -f "$repo_root/$fixture_rel" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $fixture_rel)"
+    exit 2
+fi
+
+target=${SIMPLE_NATIVE_TARGET:-aarch64-unknown-linux-gnu}
+workdir=${SIMPLE_TRANSIENT_CHECK_WORKDIR:-${TMPDIR:-/tmp}/transient-text-field-check.$$}
+mkdir -p "$workdir" || {
+    echo "ERROR — nothing was checked (cannot create work directory $workdir)"
+    exit 2
+}
+binary="$workdir/text_field_promotion.bin"
+build_log="$workdir/build.log"
+run_log="$workdir/run.log"
+
+cd "$repo_root" || {
+    echo "ERROR — nothing was checked (cannot enter repo root $repo_root)"
+    exit 2
+}
+
+"$compiler" native-build "$fixture_rel" \
+    --target "$target" \
+    --backend llvm \
+    --runtime-bundle core-c-bootstrap \
+    --threads 2 \
+    --cache-dir "$workdir/cache" \
+    --mode dynload \
+    --runtime-path "$runtime_path" \
+    -o "$binary" > "$build_log" 2>&1
+build_status=$?
+
+if [ "$build_status" -ne 0 ] || [ ! -x "$binary" ]; then
+    echo "ERROR — nothing was checked (tier 1 passed, but native-build of the fixture failed with status $build_status; see $build_log)"
+    exit 2
+fi
+
+"$binary" > "$run_log" 2>&1
+run_status=$?
+
+if [ "$run_status" -ge 124 ]; then
+    echo "FAIL — $checked field(s) checked and 2 native case(s) attempted; the fixture itself crashed (status $run_status), see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: REPRODUCED and FIXED' "$run_log"; then
+    echo "PASS — $checked freeze-scope text field(s) checked, all promoted; 2 native case(s) executed, pre-fix shape corrupts and the fix survives"
+    exit 0
+fi
+
+if grep -q 'RESULT: NOT REPRODUCED' "$run_log"; then
+    echo "FAIL — $checked field(s) checked; the unpromoted field survived, so the fixture no longer reproduces the defect and tier 2 is vacuous; see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: FIX INEFFECTIVE' "$run_log"; then
+    echo "FAIL — $checked field(s) checked; the explicitly promoted field was still freed; see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: INCONCLUSIVE' "$run_log"; then
+    echo "ERROR — nothing was checked (tier 1 passed, but the transient scope API refused to open a scope on this runtime; see $run_log)"
+    exit 2
+fi
+
+echo "ERROR — nothing was checked (tier 1 passed, but the fixture printed no RESULT line, status $run_status; see $run_log)"
+exit 2

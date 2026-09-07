@@ -588,6 +588,11 @@ pub fn compile_function_body<M: Module>(
     function_return_types: &HashMap<String, TypeId>,
     enum_defs: &std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     tag_runtime_pool_join_result: bool,
+    // True when the compilation target is freestanding/baremetal
+    // (`Target::is_baremetal()`). Threaded into `InstrContext` so the inline
+    // `.len()` fast path only applies freestanding heap tags on freestanding
+    // targets -- those tag numbers collide with hosted `HeapObjectType`s.
+    baremetal: bool,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -1031,6 +1036,7 @@ pub fn compile_function_body<M: Module>(
                     fn_arities,
                     enum_defs,
                     tag_runtime_pool_join_result,
+                    baremetal,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -1072,6 +1078,7 @@ pub fn compile_function_body<M: Module>(
                     fn_arities,
                     enum_defs,
                     tag_runtime_pool_join_result,
+                    baremetal,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)

@@ -1,57 +1,129 @@
+"""
+## Purpose and audience
+Source-contract pins for the NVFS retained staged-tree materializer v1: it must
+reuse the committed DBFS streaming bridge (no second ingest implementation, no
+whole-tree retention), report the DBFS-backed provider identity and non-atomic
+tree counts, preserve the typed publication-ambiguity enum in the NVFS driver,
+and inherit the bounded expected-SHA bridge rather than cloning it. Written for
+engineers modifying `src/os/installer/nvfs_staged_tree_materializer_v1.spl`, the
+shared DBFS materializer, or the NVFS driver publication states.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/installer/nvfs_staged_tree_materializer_v1_contract_spec.spl`
+and read the `SPEC FILE VERDICT` line. Every scenario reads shipped source with
+`read_file_text` and asserts on grep-verified tokens; no device or VM is needed.
+## Compatibility and limitations
+These are source-contract scenarios: they prove shipped source carries the
+load-bearing tokens, not that a mounted NVFS publishes bytes correctly. They
+currently run RED end to end (0/4) — the pinned tokens do not all match the
+shipped source, which is a recorded contract drift, not a harness defect; do
+not soften the assertions to go green.
+## Verification guidance and troubleshooting
+A failing `*_present` expectation means a named token vanished or was renamed in
+the product source; a failing `*_absent` expectation means a forbidden pattern
+(whole-tree retention, buffered payload) was reintroduced. Rerun after any edit
+to the materializer or driver and compare the per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/domain/simpleos_nvfs_submodule_migration.md ;
+# doc/03_plan/os/storage/nvfs_dbfs_real_filesystem.md ;
+# doc/04_architecture/os/storage/nvfs_completion.md ;
+# doc/05_design/simpleos_nvfs_submodule_migration.md
+# @manual_section: nvfs-staged-tree-materializer-contract
+
 use std.io_runtime.{read_file_text}
-use std.spec
+use std.spec.{step}
 
 describe "NVFS retained staged-tree materializer v1 source contract":
     it "reuses the committed DBFS streaming bridge without retaining a tree":
+        # @req REQ-NVFS-MATERIALIZER-001
+        # @capture(protocol_json): grep-verified bridge-binding and retention-avoidance tokens
+        step("Read the NVFS and shared DBFS materializer sources and verify the bridge bindings")
         val source = read_file_text(
             "src/os/installer/nvfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain(
+        val binds_shared_sink = source.contains(
             "StagedTreePublicationSinkV1.Nvfs(driver: driver)")
-        expect(source).to_contain(
+        val delegates_shared_bridge = source.contains(
             "materialize_retained_tree_with_sink_v1(")
-        expect(source.contains("for entry in plan.entries")).to_equal(false)
-        expect(source.contains("var payload: [u8]")).to_equal(false)
+        val rewalks_retained_entries = source.contains("for entry in plan.entries")
+        val buffers_whole_payload = source.contains("var payload: [u8]")
         val shared = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(shared).to_contain("NvfsStreamIngestLeaseV1")
-        expect(shared).to_contain("driver.stream_ingest_begin_v1(")
-        expect(shared).to_contain("driver.stream_ingest_append_v1(")
-        expect(shared).to_contain("driver.stream_ingest_finish_outcome_v1(")
-        expect(shared).to_contain("driver.stream_ingest_abort_v1(")
+        val shares_stream_ingest_lease = shared.contains("NvfsStreamIngestLeaseV1")
+        val shares_ingest_begin = shared.contains("driver.stream_ingest_begin_v1(")
+        val shares_ingest_append = shared.contains("driver.stream_ingest_append_v1(")
+        val shares_ingest_finish = shared.contains("driver.stream_ingest_finish_outcome_v1(")
+        val shares_ingest_abort = shared.contains("driver.stream_ingest_abort_v1(")
+        expect(binds_shared_sink).to_equal(true)
+        expect(delegates_shared_bridge).to_equal(true)
+        expect(rewalks_retained_entries).to_equal(false)
+        expect(buffers_whole_payload).to_equal(false)
+        expect(shares_stream_ingest_lease).to_equal(true)
+        expect(shares_ingest_begin).to_equal(true)
+        expect(shares_ingest_append).to_equal(true)
+        expect(shares_ingest_finish).to_equal(true)
+        expect(shares_ingest_abort).to_equal(true)
 
     it "reports the DBFS-backed NVFS identity and non-atomic tree counts":
+        # @req REQ-NVFS-MATERIALIZER-002
+        # @capture(protocol_json): grep-verified provider identity and receipt field tokens
+        step("Read the NVFS materializer source and verify its provider identity and receipt fields")
         val source = read_file_text(
             "src/os/installer/nvfs_staged_tree_materializer_v1.spl")
-        expect(source).to_contain("NVFS_STREAM_INGEST_PROVIDER_V1")
-        expect(source).to_contain(
+        val declares_stream_provider = source.contains("NVFS_STREAM_INGEST_PROVIDER_V1")
+        val declares_dbfs_backed_identity = source.contains(
             "nvfs-dbfs-backed-per-entry-atomic-v1")
-        expect(source).to_contain("tree_atomic: false")
-        expect(source).to_contain("files_published: receipt.files_published")
-        expect(source).to_contain(
+        val admits_non_atomic_tree = source.contains("tree_atomic: false")
+        val counts_files_from_receipt = source.contains("files_published: receipt.files_published")
+        val counts_directories_from_receipt = source.contains(
             "directories_published: receipt.directories_published")
-        expect(source).to_contain("bytes_published: receipt.bytes_published")
+        val counts_bytes_from_receipt = source.contains("bytes_published: receipt.bytes_published")
+        expect(declares_stream_provider).to_equal(true)
+        expect(declares_dbfs_backed_identity).to_equal(true)
+        expect(admits_non_atomic_tree).to_equal(true)
+        expect(counts_files_from_receipt).to_equal(true)
+        expect(counts_directories_from_receipt).to_equal(true)
+        expect(counts_bytes_from_receipt).to_equal(true)
 
     it "preserves typed publication ambiguity in the NVFS adapter":
+        # @req REQ-NVFS-MATERIALIZER-003
+        # @capture(protocol_json): grep-verified publication-state enum and outcome-call tokens
+        step("Read the NVFS driver source and verify the three-state publication enum and outcome calls")
         val source = read_file_text(
             "src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl")
-        expect(source).to_contain("enum NvfsPublicationStateV1")
-        expect(source).to_contain("NotPublished")
-        expect(source).to_contain("Published")
-        expect(source).to_contain("Indeterminate")
-        expect(source).to_contain("stream_ingest_finish_outcome_v1(")
-        expect(source).to_contain("mkdir_publication_outcome_v1(")
-        expect(source).to_contain(
+        val declares_publication_enum = source.contains("enum NvfsPublicationStateV1")
+        val has_not_published_state = source.contains("NotPublished")
+        val has_published_state = source.contains("Published")
+        val has_indeterminate_state = source.contains("Indeterminate")
+        val exposes_stream_finish_outcome = source.contains("stream_ingest_finish_outcome_v1(")
+        val exposes_mkdir_outcome = source.contains("mkdir_publication_outcome_v1(")
+        val tags_stream_provider = source.contains(
             "provider: NVFS_STREAM_INGEST_PROVIDER_V1")
+        expect(declares_publication_enum).to_equal(true)
+        expect(has_not_published_state).to_equal(true)
+        expect(has_published_state).to_equal(true)
+        expect(has_indeterminate_state).to_equal(true)
+        expect(exposes_stream_finish_outcome).to_equal(true)
+        expect(exposes_mkdir_outcome).to_equal(true)
+        expect(tags_stream_provider).to_equal(true)
 
     it "inherits the bounded expected-SHA bridge instead of cloning it":
+        # @req REQ-NVFS-MATERIALIZER-004
+        # @capture(protocol_json): grep-verified bounded-chunk and SHA-comparison tokens in the shared bridge
+        step("Read the shared DBFS materializer source and verify the bounded expected-SHA bridge")
         val shared = read_file_text(
             "src/os/installer/dbfs_staged_tree_materializer_v1.spl")
-        expect(shared).to_contain(
+        val bounds_chunk_size = shared.contains(
             "remaining < DBFS_STREAM_INGEST_MAX_CHUNK_BYTES")
-        expect(shared).to_contain(
+        val compares_streamed_sha = shared.contains(
             "streamed_sha.unwrap() != entry.provider_digest_sha256")
-        expect(shared).to_contain("sink, ingest_lease,")
-        expect(shared).to_contain("entry.provider_digest_sha256")
-        expect(shared).to_contain(
+        val threads_sink_and_lease = shared.contains("sink, ingest_lease,")
+        val carries_provider_digest = shared.contains("entry.provider_digest_sha256")
+        val names_unsupported_kind = shared.contains(
             "dbfs-materializer-unsupported-entry-kind")
-        expect(shared).to_contain("tree_atomic: false")
+        val admits_non_atomic_tree = shared.contains("tree_atomic: false")
+        expect(bounds_chunk_size).to_equal(true)
+        expect(compares_streamed_sha).to_equal(true)
+        expect(threads_sink_and_lease).to_equal(true)
+        expect(carries_provider_digest).to_equal(true)
+        expect(names_unsupported_kind).to_equal(true)
+        expect(admits_non_atomic_tree).to_equal(true)

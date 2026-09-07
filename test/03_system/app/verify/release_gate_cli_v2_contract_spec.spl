@@ -1,15 +1,34 @@
 # @cover src/app/verify/main.spl 0%
 # codex-system-test
 # @req REQ-FV2-RELEASE-001 NFR-FV2-RELEASE-003
-"""# FV2 release CLI V2 dispatch contract
-
-The release CLI is an evidence boundary.  A document declaring V2 must enter
-the policy-bound reducer directly; it must never be downgraded through the V1
-compatibility parser.  Both its signed artifact and every materialized receipt
-must be regular, no-follow files before their hashes are trusted.
 """
+## Purpose and audience
+The release CLI is an evidence boundary. A document declaring V2 must enter
+the policy-bound reducer directly; it must never be downgraded through the
+V1 compatibility parser. Both its signed artifact and every materialized
+receipt must be regular, no-follow files before their hashes are trusted.
+Audience: release-gate and formal-verification engineers maintaining the
+V2 dispatch contract.
+## Operator workflow
+Run the spec and expect four executed, passing examples:
+./src/compiler_rust/target/bootstrap/simple run test/03_system/app/verify/release_gate_cli_v2_contract_spec.spl
+## Compatibility and limitations
+Scenarios are source-contract checks over the shipped release CLI and its
+public entry point; they pin dispatch ordering and no-follow validation
+tokens rather than executing a signed bundle. A token rename in
+release_gate_cli.spl or main.spl fails the matching scenario by design.
+## Verification guidance and troubleshooting
+A healthy run reports outcome=OK, executed=4, passed=4. A failure means a
+pinned token moved or vanished — read the named local in the failing
+scenario and re-check release_gate_cli.spl before editing this spec.
+"""
+# Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md ;
+# doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md ;
+# doc/04_architecture/test/00_test_architecture.md ;
+# doc/05_design/infra/verification_improvements_plan.md
 
 use std.spec.*
+use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 const RELEASE_CLI = "src/app/verify/release_gate_cli.spl"
@@ -22,41 +41,71 @@ fn _between(source: text, start: text, end: text) -> text:
     if last < 0: return ""
     source.slice(first, last)
 
+# @manual_section: FV2 release CLI V2 dispatch contract
 describe "REQ-FV2-RELEASE-001: V2 release CLI evidence boundary":
     it "routes the public release command through the dedicated gate CLI":
+        # @req REQ-FV2-RELEASE-001
+        # @req NFR-FV2-RELEASE-003
+        # @capture(statistics): routing tokens retained as dispatch-boundary evidence
+        step("read the verify CLI entry point and pin its release routing to the gate CLI")
         val source = file_read(VERIFY_MAIN)
-        expect(source.contains("simple verify release BUNDLE.sdn")).to_equal(true)
-        expect(source.contains("src/app/verify/release_gate_cli.spl")).to_equal(true)
-        expect(source.contains('elif sub == "release":')).to_equal(true)
-        expect(source.contains("return run_release_gate(args[1:])")).to_equal(true)
+        val routes_release_through_gate_cli = source.contains("simple verify release BUNDLE.sdn")
+        val invokes_dedicated_gate_cli = source.contains("src/app/verify/release_gate_cli.spl")
+        val guards_release_subcommand = source.contains('elif sub == "release":')
+        val delegates_to_release_gate = source.contains("return run_release_gate(args[1:])")
+        expect(routes_release_through_gate_cli).to_equal(true)  # oracle: main.spl documents the public release command shape
+        expect(invokes_dedicated_gate_cli).to_equal(true)  # oracle: main.spl routes release to the dedicated gate CLI source
+        expect(guards_release_subcommand).to_equal(true)  # oracle: main.spl dispatches the release subcommand in its own branch
+        expect(delegates_to_release_gate).to_equal(true)  # oracle: main.spl hands release arguments to run_release_gate
 
     it "dispatches a declared V2 bundle before V1 compatibility parsing":
+        # @req REQ-FV2-RELEASE-001
+        # @capture(statistics): dispatch-order offsets retained as ordering evidence
+        step("read the gate CLI and pin the V2-before-V1 dispatch ordering offsets")
         val source = file_read(RELEASE_CLI)
         val dispatch = source.find('if bundle_source.contains("simple.formal.release-bundle.v2"):')
         val v2_return = source.find("return admit_v2_bundle(bundle_source, policy_source)")
         val v1_parse = source.find("match parse_release_bundle_sdn_v1(bundle_source):")
-        expect(dispatch).to_be_greater_than(-1)
-        expect(v2_return).to_be_greater_than(dispatch)
-        expect(v1_parse).to_be_greater_than(v2_return)
+        expect(dispatch).to_be_greater_than(-1)  # oracle: find() returns -1 only when the V2 dispatch marker is absent
+        expect(v2_return).to_be_greater_than(dispatch)  # oracle: the V2 admission return must follow the V2 dispatch branch
+        expect(v1_parse).to_be_greater_than(v2_return)  # oracle: V1 compatibility parsing must come after the V2 branch
 
     it "keeps the V2 branch policy-bound and free of V1 admission":
+        # @req REQ-FV2-RELEASE-001
+        # @capture(statistics): V2 branch tokens retained as policy-bound evidence
+        step("read the gate CLI V2 branch and pin its policy-bound, V1-free reducer tokens")
         val source = file_read(RELEASE_CLI)
         val v2 = _between(source, "fn admit_v2_bundle(", "fn main() -> i64:")
-        expect(v2 == "").to_equal(false)
-        expect(v2.contains("parse_release_bundle_sdn_v2(bundle_source)")).to_equal(true)
-        expect(v2.contains("admit_loaded_release_delivery_v2(bundle,")).to_equal(true)
-        expect(v2.contains("FV2-RELEASE-ADMITTED-V2")).to_equal(true)
-        expect(v2.contains("parse_release_bundle_sdn_v1(")).to_equal(false)
-        expect(v2.contains("admit_loaded_release_delivery_v1(")).to_equal(false)
+        val v2_branch_exists = v2 == ""
+        val parses_declared_v2_bundle = v2.contains("parse_release_bundle_sdn_v2(bundle_source)")
+        val admits_through_v2_delivery = v2.contains("admit_loaded_release_delivery_v2(bundle,")
+        val stamps_v2_admission = v2.contains("FV2-RELEASE-ADMITTED-V2")
+        val leaks_v1_parser_into_v2 = v2.contains("parse_release_bundle_sdn_v1(")
+        val leaks_v1_admission_into_v2 = v2.contains("admit_loaded_release_delivery_v1(")
+        expect(v2_branch_exists).to_equal(false)  # oracle: the admit_v2_bundle branch must be present in the shipped gate CLI
+        expect(parses_declared_v2_bundle).to_equal(true)  # oracle: the V2 branch parses via the V2 bundle parser
+        expect(admits_through_v2_delivery).to_equal(true)  # oracle: the V2 branch admits through the V2 delivery reducer
+        expect(stamps_v2_admission).to_equal(true)  # oracle: the V2 branch stamps FV2-RELEASE-ADMITTED-V2
+        expect(leaks_v1_parser_into_v2).to_equal(false)  # oracle: the V2 branch must never invoke the V1 parser
+        expect(leaks_v1_admission_into_v2).to_equal(false)  # oracle: the V2 branch must never invoke the V1 admission reducer
 
     it "requires no-follow artifact and receipt materialization in both paths":
+        # @req NFR-FV2-RELEASE-003
+        # @capture(statistics): no-follow validation tokens retained for both paths
+        step("read both admission paths and pin the no-follow artifact and receipt checks")
         val source = file_read(RELEASE_CLI)
         val v2 = _between(source, "fn admit_v2_bundle(", "fn main() -> i64:")
         val v1_start = source.find("match parse_release_bundle_sdn_v1(bundle_source):")
         val v1 = if v1_start < 0: "" else: source.slice(v1_start, source.len())
-        expect(v2.contains("file_is_regular_no_follow(artifact_path)")).to_equal(true)
-        expect(v2.contains("file_is_regular_no_follow(path)")).to_equal(true)
-        expect(v1.contains("file_is_regular_no_follow(artifact_path)")).to_equal(true)
-        expect(v1.contains("file_is_regular_no_follow(path)")).to_equal(true)
-        expect(v2.contains("validate_release_artifact_identity_v1(")).to_equal(true)
-        expect(v2.contains("required_release_receipt_hashes_v1(")).to_equal(true)
+        val v2_checks_artifact_no_follow = v2.contains("file_is_regular_no_follow(artifact_path)")
+        val v2_checks_receipt_no_follow = v2.contains("file_is_regular_no_follow(path)")
+        val v1_checks_artifact_no_follow = v1.contains("file_is_regular_no_follow(artifact_path)")
+        val v1_checks_receipt_no_follow = v1.contains("file_is_regular_no_follow(path)")
+        val v2_validates_artifact_identity = v2.contains("validate_release_artifact_identity_v1(")
+        val v2_requires_receipt_hashes = v2.contains("required_release_receipt_hashes_v1(")
+        expect(v2_checks_artifact_no_follow).to_equal(true)  # oracle: the V2 path stats the artifact without following symlinks
+        expect(v2_checks_receipt_no_follow).to_equal(true)  # oracle: the V2 path stats each receipt without following symlinks
+        expect(v1_checks_artifact_no_follow).to_equal(true)  # oracle: the V1 path stats the artifact without following symlinks
+        expect(v1_checks_receipt_no_follow).to_equal(true)  # oracle: the V1 path stats each receipt without following symlinks
+        expect(v2_validates_artifact_identity).to_equal(true)  # oracle: the V2 path validates the signed artifact identity
+        expect(v2_requires_receipt_hashes).to_equal(true)  # oracle: the V2 path requires the pinned receipt hash set

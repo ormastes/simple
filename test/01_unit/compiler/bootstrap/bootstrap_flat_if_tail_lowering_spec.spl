@@ -1,4 +1,37 @@
-"""Regression coverage for bootstrap-flat expression-if tail preservation."""
+"""
+## Purpose and audience
+Regression coverage for bootstrap-flat expression-if tail preservation: the
+Stage-3 bootstrap HIR lowering must keep if/elif/else chains as
+value-producing `HirExprKind.IfChain` expressions, retain typed locals,
+loop scope shadowing, labeled continue payloads, and fail closed on
+unsupported tags, cycles, out-of-range owners, and exhausted recursion
+budgets. Audience: HIR-lowering and bootstrap-lane maintainers.
+
+## Operator workflow
+Run the file with the self-hosted runner from the repo root:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/bootstrap/bootstrap_flat_if_tail_lowering_spec.spl`.
+Scenarios parse small fixture modules into the flat arena and lower them
+through the real `HirLowering` bootstrap-flat entry points.
+
+## Compatibility and limitations
+The first scenario is a source-contract on the bootstrap owner
+(`module_declarations_bootstrap.spl`) pinning structure that has no runtime
+API; the rest exercise the real lowering over freshly parsed arenas. Under
+the bare `run` lane most scenarios are currently RED — the flat lowering
+holds a real defect recorded against the bootstrap lane; do not weaken them.
+
+## Verification guidance and troubleshooting
+A failure means the flat lowering dropped a tail, fabricated or lost an else
+block, or failed to fail closed. The failing scenario names the exact HIR
+kind it required; re-run the single file and compare against
+`lower_bootstrap_flat_*` in `src/compiler/20.hir/hir_lowering/_Items/`
+before touching the fixtures.
+"""
+# Lifecycle: doc/01_research/compiler/bootstrap/bootstrap_strategy_research_2026-02-23.md ;
+# doc/03_plan/compiler/bootstrap/bootstrap_lane_plan_2026-08-19.md ;
+# doc/04_architecture/compiler/bootstrap_build_modes.md ;
+# doc/05_design/compiler/bootstrap/pure_simple_full_cli_bootstrap_recovery.md
+# @manual_section: bootstrap-flat-if-tail-lowering
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -18,6 +51,9 @@ use std.spec.step
 
 describe "bootstrap-flat if tail lowering":
     it "uses typed raw Expr payload decoding and fails closed on unsupported tags":
+        # @req REQ-COMPILER-HIR-FLATIF-001
+        # @capture(bit_table): retained verdict for scenario 'uses typed raw Expr payload decoding and fails closed on unsupported tags'
+        step("Verify: uses typed raw Expr payload decoding and fails closed on unsupported tags")
         val lowering = source("src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
         expect(lowering).to_contain("extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr")
         expect(lowering).to_contain("val expr: HirExpr = rt_enum_payload(stmt.kind)")
@@ -36,6 +72,8 @@ describe "bootstrap-flat if tail lowering":
         expect(lowering).to_contain("stmt_count() + expr_count() + elif_count() + 1")
 
     it "preserves if and elif arms as a value-producing HIR expression":
+        # @req REQ-COMPILER-HIR-FLATIF-002
+        # @capture(bit_table): retained verdict for scenario 'preserves if and elif arms as a value-producing HIR expression'
         step("Read the bootstrap-flat HIR lowering owner")
         val lowering = source("src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
 
@@ -46,6 +84,8 @@ describe "bootstrap-flat if tail lowering":
         expect(lowering).to_contain("HirBlock(stmts: body.stmts, has: true")
 
     it "keeps the bootstrap output parser as a non-unit if-chain tail":
+        # @req REQ-COMPILER-HIR-FLATIF-003
+        # @capture(bit_table): retained verdict for scenario 'keeps the bootstrap output parser as a non-unit if-chain tail'
         step("Pin the Stage3 reproducer shape")
         val entry = source("src/app/cli/bootstrap_main.spl")
 
@@ -54,6 +94,8 @@ describe "bootstrap-flat if tail lowering":
         expect(entry).to_contain("bootstrap_output_from_args(args, i + 1)")
 
     it "lowers explicit else branch values through the real flat arena":
+        # @req REQ-COMPILER-HIR-FLATIF-004
+        # @capture(bit_table): retained verdict for scenario 'lowers explicit else branch values through the real flat arena'
         step("Parse an if/elif/else tail into the flat arena")
         ast_reset()
         parser_init_with_path("fn choose() -> text:\n    if true:\n        \"first\"\n    elif false:\n        \"second\"\n    else:\n        \"fallback\"\n", "bootstrap_if_tail.spl")
@@ -68,7 +110,7 @@ describe "bootstrap-flat if tail lowering":
             case HirStmtKind.Expr(expr):
                 match expr.kind:
                     case HirExprKind.IfChain(arms, else_):
-                        expect(arms.len()).to_equal(2)
+                        expect(arms.len()).to_equal(2)  # oracle: the fixture if/elif chain has exactly two value arms
                         match arms[0].then_.value.kind:
                             case HirExprKind.StringLit(value, _): expect(value).to_equal("first")
                             case _: fail("first arm must retain its text tail")
@@ -85,6 +127,8 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "does not fabricate an else block for the flat EXPR_UNIT sentinel":
+        # @req REQ-COMPILER-HIR-FLATIF-005
+        # @capture(bit_table): retained verdict for scenario 'does not fabricate an else block for the flat EXPR_UNIT sentinel'
         step("Parse a no-else expression-if into the flat arena")
         ast_reset()
         parser_init_with_path("fn maybe() -> text:\n    if true:\n        \"present\"\n", "bootstrap_if_no_else.spl")
@@ -98,7 +142,7 @@ describe "bootstrap-flat if tail lowering":
             case HirStmtKind.Expr(expr):
                 match expr.kind:
                     case HirExprKind.IfChain(arms, else_):
-                        expect(arms.len()).to_equal(1)
+                        expect(arms.len()).to_equal(1)  # oracle: the no-else fixture has exactly one if arm
                         expect(else_ == nil).to_equal(true)
                     case _:
                         fail("flat STMT_IF must lower to HirExprKind.IfChain")
@@ -107,6 +151,8 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "preserves the target output-parser indexes, method arguments, and conjunctions":
+        # @req REQ-COMPILER-HIR-FLATIF-006
+        # @capture(bit_table): retained verdict for scenario 'preserves the target output-parser indexes, method arguments, and conjunctions'
         step("Parse the Stage3 blocker shape into the flat arena")
         ast_reset()
 
@@ -128,7 +174,7 @@ describe "bootstrap-flat if tail lowering":
             case HirStmtKind.Expr(expr):
                 match expr.kind:
                     case HirExprKind.IfChain(arms, else_):
-                        expect(arms.len()).to_equal(5)
+                        expect(arms.len()).to_equal(5)  # oracle: the Stage3 output parser fixture has exactly five elif arms
                         match arms[1].cond.kind:
                             case HirExprKind.Binary(HirBinOp.And, left_and, _):
                                 match left_and.kind:
@@ -136,7 +182,7 @@ describe "bootstrap-flat if tail lowering":
                                         match starts_call.kind:
                                             case HirExprKind.MethodCall(receiver, method, args, _):
                                                 expect(method).to_equal("starts_with")
-                                                expect(args.len()).to_equal(1)
+                                                expect(args.len()).to_equal(1)  # oracle: the retained call takes exactly its source argument
                                                 match receiver.kind:
                                                     case HirExprKind.Index(_, _): pass
                                                     case _: fail("starts_with receiver must retain args[i]")
@@ -149,18 +195,18 @@ describe "bootstrap-flat if tail lowering":
                         match arms[2].then_.value.kind:
                             case HirExprKind.MethodCall(receiver, method, args, _):
                                 expect(method).to_equal("substring")
-                                expect(args.len()).to_equal(1)
+                                expect(args.len()).to_equal(1)  # oracle: the retained call takes exactly its source argument
                                 match receiver.kind:
                                     case HirExprKind.Index(_, _): pass
                                     case _: fail("substring receiver must retain args[i]")
                                 match args[0].value.kind:
-                                    case HirExprKind.IntLit(value, _): expect(value).to_equal(2)
+                                    case HirExprKind.IntLit(value, _): expect(value).to_equal(2)  # oracle: substring offset must remain the literal 2
                                     case _: fail("substring argument must retain 2")
                             case _: fail("third arm must retain substring call")
                         if val fallback = else_:
                             match fallback.value.kind:
                                 case HirExprKind.Call(_, args, _):
-                                    expect(args.len()).to_equal(2)
+                                    expect(args.len()).to_equal(2)  # oracle: the recursive else call keeps args and i
                                     match args[1].value.kind:
                                         case HirExprKind.Binary(HirBinOp.Add, _, _): pass
                                         case _: fail("recursive index must retain i + 1")
@@ -172,6 +218,8 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "fails closed on an out-of-range flat if-chain owner":
+        # @req REQ-COMPILER-HIR-FLATIF-007
+        # @capture(bit_table): retained verdict for scenario 'fails closed on an out-of-range flat if-chain owner'
         step("Lower a malformed root index through the real bootstrap owner")
         ast_reset()
 
@@ -183,7 +231,7 @@ describe "bootstrap-flat if tail lowering":
         val lowered = lowering.lower_bootstrap_flat_if_stmt(malformed_root, Span.empty())
 
         step("Require a diagnostic and explicit HIR error marker, never Unit NilLit")
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: the malformed input must produce exactly one diagnostic
         match lowered.kind:
             case HirStmtKind.Expr(expr):
                 match expr.kind:
@@ -193,11 +241,14 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "fails closed on a valid but unsupported flat statement tag":
+        # @req REQ-COMPILER-HIR-FLATIF-008
+        # @capture(bit_table): retained verdict for scenario 'fails closed on a valid but unsupported flat statement tag'
+        step("Verify: fails closed on a valid but unsupported flat statement tag")
         ast_reset()
         val unsupported = stmt_alloc(STMT_DEFER, 0)
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_stmt(unsupported)
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: the malformed input must produce exactly one diagnostic
         match lowered.kind:
             case HirStmtKind.Expr(expr):
                 match expr.kind:
@@ -207,6 +258,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "preserves typed locals loop scope shadowing and continue":
+        # @req REQ-COMPILER-HIR-FLATIF-009
+        # @capture(bit_table): retained verdict for scenario 'preserves typed locals loop scope shadowing and continue'
+        step("Verify: preserves typed locals loop scope shadowing and continue")
         ast_reset()
         parser_init_with_path(
             "fn scan(args: [text]) -> text:\n" +
@@ -220,19 +274,19 @@ describe "bootstrap-flat if tail lowering":
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_block(
             decl_get_body(module_get_decls()[0]))
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: the well-formed fixture must lower without diagnostics
         expect(lowered.has).to_equal(true)
         match lowered.stmts[0].kind:
             case HirStmtKind.Let(_, declared, _):
                 match declared.kind:
-                    case HirTypeKind.Int(bits, _): expect(bits).to_equal(64)
+                    case HirTypeKind.Int(bits, _): expect(bits).to_equal(64)  # oracle: the annotated local must retain its i64 width
                     case _: fail("annotated outer local must retain i64")
             case _: fail("outer declaration must lower to Let")
         match lowered.stmts[1].kind:
             case HirStmtKind.Expr(loop_expr):
                 match loop_expr.kind:
                     case HirExprKind.While(_, body, _):
-                        expect(body.stmts.len()).to_equal(1)
+                        expect(body.stmts.len()).to_equal(1)  # oracle: the while body holds exactly the continue statement
                         expect(body.has).to_equal(true)
                         match body.value.kind:
                             case HirExprKind.Continue(_): pass
@@ -242,6 +296,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "fails closed when the scalar recursive budget is exhausted":
+        # @req REQ-COMPILER-HIR-FLATIF-010
+        # @capture(bit_table): retained verdict for scenario 'fails closed when the scalar recursive budget is exhausted'
+        step("Verify: fails closed when the scalar recursive budget is exhausted")
         ast_reset()
         parser_init_with_path("fn bounded() -> text:\n    \"ok\"\n", "bootstrap_flat_budget.spl")
         parse_module_body()
@@ -249,11 +306,14 @@ describe "bootstrap-flat if tail lowering":
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_block_bounded(
             decl_get_body(module_get_decls()[0]), 999999)
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: the malformed input must produce exactly one diagnostic
         expect(lowered.has).to_equal(false)
         ast_reset()
 
     it "distinguishes unlabeled and labeled continue payloads":
+        # @req REQ-COMPILER-HIR-FLATIF-011
+        # @capture(bit_table): retained verdict for scenario 'distinguishes unlabeled and labeled continue payloads'
+        step("Verify: distinguishes unlabeled and labeled continue payloads")
         ast_reset()
         val plain_idx = stmt_continue_stmt(0)
         val named_idx = stmt_continue_labeled("outer", 0)
@@ -280,6 +340,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "resolves a for iterable before shadowing it with the iterator":
+        # @req REQ-COMPILER-HIR-FLATIF-012
+        # @capture(bit_table): retained verdict for scenario 'resolves a for iterable before shadowing it with the iterator'
+        step("Verify: resolves a for iterable before shadowing it with the iterator")
         ast_reset()
         val init = expr_int_lit(1, 0)
         val outer_decl = stmt_val_decl("x", 0, init, 0)
@@ -301,6 +364,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "keeps an expression-block tail in the scope of its preceding Let":
+        # @req REQ-COMPILER-HIR-FLATIF-013
+        # @capture(bit_table): retained verdict for scenario 'keeps an expression-block tail in the scope of its preceding Let'
+        step("Verify: keeps an expression-block tail in the scope of its preceding Let")
         ast_reset()
         val decl = stmt_val_decl("inside", 0, expr_int_lit(1, 0), 0)
         val block_idx = expr_block([decl], expr_ident("inside", 0), 0)
@@ -319,6 +385,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "bounds an indirect statement expression-block cycle":
+        # @req REQ-COMPILER-HIR-FLATIF-014
+        # @capture(bit_table): retained verdict for scenario 'bounds an indirect statement expression-block cycle'
+        step("Verify: bounds an indirect statement expression-block cycle")
         ast_reset()
         val cyclic_stmt = stmt_alloc(STMT_EXPR, 0)
         val cyclic_expr = expr_block([cyclic_stmt], -1, 0)
@@ -326,30 +395,36 @@ describe "bootstrap-flat if tail lowering":
         stmt_i64_set(cyclic_stmt, "EXPR", cyclic_expr)
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_stmt(cyclic_stmt)
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: the malformed input must produce exactly one diagnostic
         match lowered.kind:
             case HirStmtKind.Expr(_): pass
             case _: fail("cycle must terminate through an error expression")
         ast_reset()
 
     it "accepts repeated references to one shared expression DAG node":
+        # @req REQ-COMPILER-HIR-FLATIF-015
+        # @capture(bit_table): retained verdict for scenario 'accepts repeated references to one shared expression DAG node'
+        step("Verify: accepts repeated references to one shared expression DAG node")
         ast_reset()
         val shared = expr_int_lit(7, 0)
         val first = stmt_expr_stmt(shared, 0)
         val second = stmt_expr_stmt(shared, 0)
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_block([first, second])
-        expect(lowering.errors.len()).to_equal(0)
-        expect(lowered.stmts.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: the well-formed fixture must lower without diagnostics
+        expect(lowered.stmts.len()).to_equal(1)  # oracle: one shared DAG node lowers to exactly one statement
         expect(lowered.has).to_equal(true)
         ast_reset()
 
     it "fails closed on tuple for iterator names":
+        # @req REQ-COMPILER-HIR-FLATIF-016
+        # @capture(bit_table): retained verdict for scenario 'fails closed on tuple for iterator names'
+        step("Verify: fails closed on tuple for iterator names")
         ast_reset()
         val loop_stmt = stmt_for_stmt("(left,right)", expr_int_lit(1, 0), [], 0)
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_stmt(loop_stmt)
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: the malformed input must produce exactly one diagnostic
         match lowered.kind:
             case HirStmtKind.Expr(expr):
                 match expr.kind:
@@ -359,6 +434,9 @@ describe "bootstrap-flat if tail lowering":
         ast_reset()
 
     it "fails closed on negative required expression operands":
+        # @req REQ-COMPILER-HIR-FLATIF-017
+        # @capture(bit_table): retained verdict for scenario 'fails closed on negative required expression operands'
+        step("Verify: fails closed on negative required expression operands")
         ast_reset()
         val good = expr_int_lit(1, 0)
         val required = [
@@ -370,23 +448,26 @@ describe "bootstrap-flat if tail lowering":
         for expr_idx in required:
             var lowering = HirLowering.new()
             val lowered = lowering.lower_bootstrap_flat_expr(expr_idx)
-            expect(lowering.errors.len()).to_be_greater_than(0)
+            expect(lowering.errors.len()).to_be_greater_than(0)  # oracle: a negative required operand must always diagnose
         var assign_lowering = HirLowering.new()
         val bad_assign = stmt_assign_stmt(-1, good, 0)
         val assign_hir = assign_lowering.lower_bootstrap_flat_stmt(bad_assign)
-        expect(assign_lowering.errors.len()).to_be_greater_than(0)
+        expect(assign_lowering.errors.len()).to_be_greater_than(0)  # oracle: a negative assign target must diagnose
         var while_lowering = HirLowering.new()
         val bad_while = stmt_while_stmt(-1, [], 0)
         val while_hir = while_lowering.lower_bootstrap_flat_stmt(bad_while)
-        expect(while_lowering.errors.len()).to_be_greater_than(0)
+        expect(while_lowering.errors.len()).to_be_greater_than(0)  # oracle: a negative while condition must diagnose
         ast_reset()
 
     it "preserves a bare flat expression return as Return nil":
+        # @req REQ-COMPILER-HIR-FLATIF-018
+        # @capture(bit_table): retained verdict for scenario 'preserves a bare flat expression return as Return nil'
+        step("Verify: preserves a bare flat expression return as Return nil")
         ast_reset()
         val bare = expr_return_expr(-1, 0)
         var lowering = HirLowering.new()
         val lowered = lowering.lower_bootstrap_flat_expr(bare)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: the well-formed fixture must lower without diagnostics
         match lowered.kind:
             case HirExprKind.Return(value): expect(value == nil).to_equal(true)
             case _: fail("bare expression return must remain Return(nil)")

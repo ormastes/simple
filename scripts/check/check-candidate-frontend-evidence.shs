@@ -1,0 +1,116 @@
+#!/bin/sh
+# Regression coverage for candidate frontend raw status and durable evidence.
+
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+helper=$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/candidate-frontend-evidence.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT
+owner_pid=$$
+exec 6<"$work" \
+  7<"$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
+  8<"$(command -v perl)" || exit 2
+
+cat >"$work/candidate" <<'STUB'
+#!/bin/sh
+case ${STUB_MODE:-pass} in
+  timeout) sleep 30; exit 0 ;;
+  failure) echo 'error: E-FRONTEND-FIXTURE first compiler error' >&2; exit 42 ;;
+esac
+[ "${1:-}" = native-build ] || exit 1
+shift
+entry=
+output=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --entry) entry=$2; shift 2 ;;
+    --output|-o) output=$2; shift 2 ;;
+    *.spl) [ -n "$entry" ] || entry=$1; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$entry" ] && [ -n "$output" ] || exit 2
+[ "${STUB_MODE:-pass}" != hello-failure ] || {
+  case "$entry" in
+    *hello_world.spl)
+      echo 'error: E-HELLO-WORLD-POSITIONAL late probe error' >&2
+      exit 43
+      ;;
+  esac
+}
+case "$entry" in
+  *p2_add.spl) value=5 ;;
+  *stage2_mir_retention.spl) value=3 ;;
+  *stage2_module_path_naming.spl) value='app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main' ;;
+  *hello_world.spl) value=hello ;;
+  *) exit 3 ;;
+esac
+[ "${STUB_MODE:-pass}" != no-output ] || {
+  case "$entry" in *hello_world.spl) exit 0 ;; esac
+}
+{
+  echo '#!/bin/sh'
+  printf "printf '%s\\n' '%b'\n" "$value"
+} >"$output"
+chmod +x "$output"
+STUB
+chmod +x "$work/candidate"
+
+run_case() {
+  name=$1
+  mode=$2
+  budget=$3
+  STUB_MODE=$mode \
+  COMPILER_BUILD_TIMEOUT_SECONDS=$budget \
+  COMPILER_EXEC_TIMEOUT_SECONDS=2 \
+  COMPILER_CHECK_KILL_GRACE_SECONDS=1 \
+  CANDIDATE_FRONTEND_ROOT=$root \
+  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$owner_pid/fd/8 \
+  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$owner_pid/fd/7 \
+  CANDIDATE_FRONTEND_LOG_PATH=/proc/$owner_pid/fd/6/$name.log \
+  CANDIDATE_FRONTEND_LOG_DISPLAY_PATH=$work/$name.log \
+  CANDIDATE_FRONTEND_STATUS_PATH=/proc/$owner_pid/fd/6/$name.status \
+    sh -c '. "$1"; candidate_frontend_smoke "$2"' _ "$helper" "$work/candidate" \
+      >"$work/$name.stdout" 2>"$work/$name.stderr"
+}
+
+failures=0
+
+run_case forced-timeout timeout 1
+timeout_rc=$?
+[ "$timeout_rc" -eq 124 ] || { echo "FAIL: timeout rc=$timeout_rc, want 124"; failures=$((failures + 1)); }
+grep -q '^raw_status=124$' "$work/forced-timeout.status" || { echo 'FAIL: timeout raw status missing'; failures=$((failures + 1)); }
+grep -q '^probe=p2_add-build$' "$work/forced-timeout.status" || { echo 'FAIL: timeout probe missing'; failures=$((failures + 1)); }
+[ -f "$work/forced-timeout.log" ] && [ -f "$work/forced-timeout.log.bounded.env" ] || { echo 'FAIL: timeout log/collector receipt not durable'; failures=$((failures + 1)); }
+
+run_case forced-failure failure 5
+failure_rc=$?
+[ "$failure_rc" -eq 42 ] || { echo "FAIL: compiler failure rc=$failure_rc, want 42"; failures=$((failures + 1)); }
+grep -q '^raw_status=42$' "$work/forced-failure.status" || { echo 'FAIL: failure raw status missing'; failures=$((failures + 1)); }
+grep -q 'E-FRONTEND-FIXTURE first compiler error' "$work/forced-failure.log" || { echo 'FAIL: compiler diagnostic not retained'; failures=$((failures + 1)); }
+
+run_case pass pass 5
+pass_rc=$?
+[ "$pass_rc" -eq 0 ] || { echo "FAIL: pass rc=$pass_rc"; failures=$((failures + 1)); }
+grep -q '^result=pass$' "$work/pass.status" || { echo 'FAIL: pass receipt missing'; failures=$((failures + 1)); }
+grep -q '^probe=complete$' "$work/pass.status" || { echo 'FAIL: pass completion probe missing'; failures=$((failures + 1)); }
+grep -q '^hello_world_positional_raw_status=0$' "$work/pass.status" || { echo 'FAIL: pass receipt lacks final probe status'; failures=$((failures + 1)); }
+
+run_case forced-no-output no-output 5
+no_output_rc=$?
+[ "$no_output_rc" -ne 0 ] || { echo 'FAIL: exit-0 build without hello executable was admitted'; failures=$((failures + 1)); }
+grep -q '^probe=hello-world-positional-output-missing$' "$work/forced-no-output.status" || { echo 'FAIL: no-output probe identity missing'; failures=$((failures + 1)); }
+grep -q '^result=fail$' "$work/forced-no-output.status" || { echo 'FAIL: no-output failure receipt missing'; failures=$((failures + 1)); }
+
+run_case forced-hello-failure hello-failure 5
+hello_failure_rc=$?
+[ "$hello_failure_rc" -eq 43 ] || { echo "FAIL: hello failure rc=$hello_failure_rc, want 43"; failures=$((failures + 1)); }
+grep -q '^probe=hello-world-positional-build$' "$work/forced-hello-failure.status" || { echo 'FAIL: hello failure probe missing'; failures=$((failures + 1)); }
+grep -q 'E-HELLO-WORLD-POSITIONAL late probe error' "$work/forced-hello-failure.stderr" || { echo 'FAIL: failed late-probe diagnostic not surfaced'; failures=$((failures + 1)); }
+
+default=$(sed -n 's/^COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-\([0-9][0-9]*\)}$/\1/p' "$helper")
+[ -n "$default" ] && [ "$default" -ge 180 ] || { echo "FAIL: default timeout '$default' is below 180"; failures=$((failures + 1)); }
+
+[ "$failures" -eq 0 ] || exit 1
+echo 'PASS — candidate frontend timeout, failure, pass, and durable evidence contracts'

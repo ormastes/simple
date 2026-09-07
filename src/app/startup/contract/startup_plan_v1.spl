@@ -88,12 +88,24 @@ pub struct StartupPlanV1:
     load_policy: text
     cache_policy: text
     strictness: text
+    required_capsules: [text]
+    forbidden_capsules: [text]
+    provider_manifest_digests: [text]
+    capsule_effect_summary_digests: [text]
+    plan_schema: i64
+    forbidden_receipt_count: i64
+    forbidden_loaded_count: i64
+    plan_digest: text
     plan_hash: text
 
 pub fn startup_plan_zero() -> StartupPlanV1:
     val none: [i64] = []
     val none2: [i64] = []
     val none3: [i64] = []
+    val no_text: [text] = []
+    val no_text2: [text] = []
+    val no_text3: [text] = []
+    val no_text4: [text] = []
     StartupPlanV1(
         route_kind: "",
         command_id: "",
@@ -109,6 +121,14 @@ pub fn startup_plan_zero() -> StartupPlanV1:
         load_policy: "",
         cache_policy: "",
         strictness: "",
+        required_capsules: no_text,
+        forbidden_capsules: no_text2,
+        provider_manifest_digests: no_text3,
+        capsule_effect_summary_digests: no_text4,
+        plan_schema: 1,
+        forbidden_receipt_count: 0,
+        forbidden_loaded_count: 0,
+        plan_digest: "",
         plan_hash: "")
 
 fn _route_kind_for(entry_kind: i64) -> text:
@@ -147,7 +167,14 @@ pub fn startup_plan_from_request(request: StartupRequestV1) -> StartupPlanV1:
 # sealed; an unsealed plan fails `startup_plan_decode` round-trip.
 pub fn startup_plan_sealed(plan: StartupPlanV1) -> StartupPlanV1:
     var sealed = plan
-    sealed.plan_hash = startup_plan_hash(plan)
+    sealed.required_capsules = _sorted_unique_text_values(plan.required_capsules)
+    sealed.forbidden_capsules = _sorted_unique_text_values(plan.forbidden_capsules)
+    sealed.provider_manifest_digests = _sorted_unique_text_values(plan.provider_manifest_digests)
+    sealed.capsule_effect_summary_digests = _sorted_unique_text_values(plan.capsule_effect_summary_digests)
+    if not startup_plan_cache_sets_valid(sealed): return startup_plan_zero()
+    val digest = startup_plan_hash(sealed)
+    sealed.plan_digest = digest
+    sealed.plan_hash = digest
     sealed
 
 # ------------------------------------------------------------------- hash
@@ -191,6 +218,52 @@ fn _join_ids(ids: [i64]) -> text:
         i = i + 1
     out
 
+fn _join_text_values(values: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if values[i].contains(",") or values[i].contains("\n"):
+            return ""
+        if i > 0: out = out + ","
+        out = out + values[i]
+        i = i + 1
+    out
+
+fn _sorted_unique_text_values(values: [text]) -> [text]:
+    var sorted = values.copy()
+    var i = 1
+    while i < sorted.len():
+        val held = sorted[i]
+        var j = i
+        while j > 0 and held < sorted[j - 1]:
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = held
+        i = i + 1
+    var unique: [text] = []
+    for value in sorted:
+        if unique.len() == 0 or unique[unique.len() - 1] != value:
+            unique.push(value)
+    unique
+
+fn _text_set_valid(values: [text]) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == "" or values[i].contains(",") or values[i].contains("\n"):
+            return false
+        if i > 0 and values[i - 1] >= values[i]: return false
+        i = i + 1
+    true
+
+pub fn startup_plan_cache_sets_valid(plan: StartupPlanV1) -> bool:
+    if not _text_set_valid(plan.required_capsules) or not _text_set_valid(plan.forbidden_capsules): return false
+    if not _text_set_valid(plan.provider_manifest_digests) or not _text_set_valid(plan.capsule_effect_summary_digests): return false
+    var i = 0
+    while i < plan.required_capsules.len():
+        if plan.forbidden_capsules.contains(plan.required_capsules[i]): return false
+        i = i + 1
+    plan.forbidden_receipt_count == plan.forbidden_capsules.len() and plan.forbidden_loaded_count >= 0
+
 fn _line(key: text, value: text) -> text:
     key + ": " + value + "\n"
 
@@ -212,10 +285,17 @@ fn _plan_body(plan: StartupPlanV1) -> text:
     out = out + _line("load_policy", plan.load_policy)
     out = out + _line("cache_policy", plan.cache_policy)
     out = out + _line("strictness", plan.strictness)
+    out = out + _line("required_capsules", _join_text_values(plan.required_capsules))
+    out = out + _line("forbidden_capsules", _join_text_values(plan.forbidden_capsules))
+    out = out + _line("provider_manifest_digests", _join_text_values(plan.provider_manifest_digests))
+    out = out + _line("capsule_effect_summary_digests", _join_text_values(plan.capsule_effect_summary_digests))
+    out = out + _line("plan_schema", plan.plan_schema.to_text())
+    out = out + _line("forbidden_receipt_count", plan.forbidden_receipt_count.to_text())
+    out = out + _line("forbidden_loaded_count", plan.forbidden_loaded_count.to_text())
     out
 
 pub fn startup_plan_encode(plan: StartupPlanV1) -> text:
-    _plan_body(plan) + _line("plan_hash", plan.plan_hash)
+    _plan_body(plan) + _line("plan_digest", plan.plan_digest) + _line("plan_hash", plan.plan_hash)
 
 # ---------------------------------------------------------------- decoding
 
@@ -261,6 +341,14 @@ fn _plan_keys() -> [text]:
     keys.push("load_policy")
     keys.push("cache_policy")
     keys.push("strictness")
+    keys.push("required_capsules")
+    keys.push("forbidden_capsules")
+    keys.push("provider_manifest_digests")
+    keys.push("capsule_effect_summary_digests")
+    keys.push("plan_schema")
+    keys.push("forbidden_receipt_count")
+    keys.push("forbidden_loaded_count")
+    keys.push("plan_digest")
     keys.push("plan_hash")
     keys
 
@@ -307,6 +395,12 @@ fn _parse_ids(s: text) -> [i64]:
             return out
         out.push(v)
     out
+
+fn _parse_text_values(s: text) -> [text]:
+    if s == "":
+        val empty: [text] = []
+        return empty
+    s.split(",")
 
 fn _ids_bad(ids: [i64]) -> bool:
     var i = 0
@@ -366,6 +460,11 @@ pub fn startup_plan_decode(content: text) -> StartupPlanDecodeV1:
     if values[1] == "":
         return _decode_error(startup_plan_error_malformed(),
             "empty route_kind")
+    val plan_schema = _parse_int(values[19])
+    val forbidden_receipts = _parse_int(values[20])
+    val forbidden_loaded = _parse_int(values[21])
+    if plan_schema != 1 or forbidden_receipts < 0 or forbidden_loaded < 0:
+        return _decode_error(startup_plan_error_malformed(), "invalid cache capsule receipt fields")
     var plan = StartupPlanV1(
         route_kind: values[1],
         command_id: values[2],
@@ -381,9 +480,19 @@ pub fn startup_plan_decode(content: text) -> StartupPlanDecodeV1:
         load_policy: values[12],
         cache_policy: values[13],
         strictness: values[14],
-        plan_hash: values[15])
+        required_capsules: _parse_text_values(values[15]),
+        forbidden_capsules: _parse_text_values(values[16]),
+        provider_manifest_digests: _parse_text_values(values[17]),
+        capsule_effect_summary_digests: _parse_text_values(values[18]),
+        plan_schema: plan_schema,
+        forbidden_receipt_count: forbidden_receipts,
+        forbidden_loaded_count: forbidden_loaded,
+        plan_digest: values[22],
+        plan_hash: values[23])
+    if not startup_plan_cache_sets_valid(plan):
+        return _decode_error(startup_plan_error_malformed(), "noncanonical or conflicting capsule sets")
     val expected = startup_plan_hash(plan)
-    if expected != plan.plan_hash:
+    if expected != plan.plan_digest or expected != plan.plan_hash:
         return _decode_error(startup_plan_error_hash(),
             "plan_hash " + plan.plan_hash + " != computed " + expected)
     StartupPlanDecodeV1(plan: plan, ok: true, error_kind: "", error: "")

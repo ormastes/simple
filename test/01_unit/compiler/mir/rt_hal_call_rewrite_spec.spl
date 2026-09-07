@@ -1,5 +1,30 @@
+"""
+## Purpose and audience
+Executable spec of the resolved `@rt(hal)` MIR call-rewrite pass for the
+MIR and runtime-HAL maintainers who own `src/compiler/50.mir/rt_hal_call_rewrite`.
+Scope: exact raw-symbol replacement per manifest operation, NormalDirect
+versus SealedCompare binding, metadata-only non-rewrites, device planning
+rejection, and the transactional device-execution ABI signature check.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/mir/rt_hal_call_rewrite_spec.spl — helpers build one-call
+MirFunction fixtures and feed them through
+rt_hal_rewrite_function_calls_v1 under a pipe-delimited manifest.
+## Compatibility and limitations
+Fixtures are hand-built MIR (not lowered source), so the spec pins the
+rewriter's contract, not the frontend's ability to produce these calls. The
+manifest text format is pinned by CLOCK_MANIFEST below.
+## Verification guidance and troubleshooting
+A failure means the rewriter matched a symbol it must not, dropped a rewrite
+it must perform, lost the diagnostic, or mis-bound SealedCompare. The last
+scenario also pins signature-shape rejection (E-RT-HAL-BIND-002).
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/rt_hal_typed_exit_protocol.md
 # @feature mcdc_hal_runtime_hardening
-# @req REQ-009 REQ-010 REQ-014
+# @manual_section: rt-hal-call-rewrite
 
 use std.spec.*
 use compiler.mir.*
@@ -58,67 +83,82 @@ val CLOCK_MANIFEST = "rt-hal-v1|operation=io.clock.monotonic_nanos.v1|providers=
 
 describe "resolved @rt(hal) MIR call rewrite":
     it "replaces the exact raw clock leaf in normal mode":
+        # @req REQ-009
+        # @capture(statistics): rewrite count and raw/selected symbol pair
+        step("Rewrite the clock wrapper under the clock manifest in NormalDirect")
         val before = clock_wrapper_call()
         expect(call_name(before)).to_equal("hal_clock_monotonic_nanos_v1")
         val rewritten = rt_hal_rewrite_function_calls_v1(
             before, CLOCK_MANIFEST, RtHalCallModeV1.NormalDirect)
         expect(rewritten.diagnostic).to_equal("")
-        expect(rewritten.rewritten_calls).to_equal(1)
+        expect(rewritten.rewritten_calls).to_equal(1)  # oracle: the fixture carries exactly one raw HAL call, so one rewrite is complete coverage
         expect(rewritten.raw_symbol).to_equal("hal_clock_monotonic_nanos_v1")
         expect(rewritten.selected_symbol).to_equal("rt_time_now_nanos")
         expect(call_name(rewritten.function)).to_equal("rt_time_now_nanos")
 
     it "binds sealed comparison to the zero-argument init-owned leaf":
+        # @req REQ-009
+        # @capture(statistics): rewrite count and selected compare symbol
+        step("Rewrite the clock wrapper under SealedCompare and read the bound leaf")
         val compared = rt_hal_rewrite_function_calls_v1(
             clock_wrapper_call(), CLOCK_MANIFEST,
             RtHalCallModeV1.SealedCompare)
-        expect(compared.rewritten_calls).to_equal(1)
+        expect(compared.rewritten_calls).to_equal(1)  # oracle: SealedCompare must rewrite the same single call, only to the compare leaf
         expect(call_name(compared.function)).to_equal(
             "rt_hal_clock_dispatch_compare_v2")
         expect(compared.diagnostic).to_equal("")
 
     it "leaves metadata-only direct bindings unchanged":
+        # @req REQ-010
+        # @capture(statistics): rewrite count for the non-matching manifest
+        step("Rewrite the clock wrapper against an unrelated manifest operation")
         val compared = rt_hal_rewrite_function_calls_v1(
             clock_wrapper_call(),
             "rt-hal-v1|operation=io.environment.get.v1|providers=1",
             RtHalCallModeV1.NormalDirect)
-        expect(compared.rewritten_calls).to_equal(0)
+        expect(compared.rewritten_calls).to_equal(0)  # oracle: the manifest names a different operation, so no call may be touched
         expect(compared.diagnostic).to_equal("")
 
     it "rejects a device planning leaf in every execution mode":
+        # @req REQ-014
+        # @capture(statistics): rewrite counts and diagnostics per execution mode
+        step("Offer a planning-only safe-read manifest in both execution modes")
         val manifest =
             "rt-hal-v1|operation=io.mmio.read.safe.v1|providers=1"
         val direct = rt_hal_rewrite_function_calls_v1(
             clock_wrapper_call(), manifest, RtHalCallModeV1.NormalDirect)
         val compared = rt_hal_rewrite_function_calls_v1(
             clock_wrapper_call(), manifest, RtHalCallModeV1.SealedCompare)
-        expect(direct.rewritten_calls).to_equal(0)
-        expect(compared.rewritten_calls).to_equal(0)
+        expect(direct.rewritten_calls).to_equal(0)  # oracle: a planning leaf must never compile as an executed call
+        expect(compared.rewritten_calls).to_equal(0)  # oracle: SealedCompare is equally barred from executing a planning leaf
         expect(direct.diagnostic).to_contain(
             "must not compile as executed HAL")
         expect(compared.diagnostic).to_contain(
             "must not compile as executed HAL")
 
     it "routes the exact device execution ABI transactionally":
+        # @req REQ-014
+        # @capture(statistics): rewrite counts, selected symbols, and rejection diagnostics
+        step("Rewrite the exec-ABI fixture in both modes, then an invalid signature")
         val manifest =
             "rt-hal-v1|operation=io.mmio.read.exec.v1|providers=1"
         val direct = rt_hal_rewrite_function_calls_v1(
             device_exec_wrapper_call(), manifest, RtHalCallModeV1.NormalDirect)
         val compared = rt_hal_rewrite_function_calls_v1(
             device_exec_wrapper_call(), manifest, RtHalCallModeV1.SealedCompare)
-        expect(direct.rewritten_calls).to_equal(1)
+        expect(direct.rewritten_calls).to_equal(1)  # oracle: the fixture carries one exec call and the ABI matches exactly
         expect(direct.selected_symbol).to_equal(
             "rt_hal_mmio_read_exec_direct_v1")
         expect(call_name(direct.function)).to_equal(
             "rt_hal_mmio_read_exec_direct_v1")
-        expect(compared.rewritten_calls).to_equal(1)
+        expect(compared.rewritten_calls).to_equal(1)  # oracle: SealedCompare routes the same exec call to its compare twin
         expect(call_name(compared.function)).to_equal(
             "rt_hal_mmio_read_exec_compare_v1")
 
         val invalid = device_exec_wrapper_call(false)
         val rejected = rt_hal_rewrite_function_calls_v1(
             invalid, manifest, RtHalCallModeV1.NormalDirect)
-        expect(rejected.rewritten_calls).to_equal(0)
+        expect(rejected.rewritten_calls).to_equal(0)  # oracle: a non-mutable result pointer breaks the ABI, so the rewrite must be withheld entirely
         expect(rejected.diagnostic).to_contain("E-RT-HAL-BIND-002")
         expect(call_name(rejected.function)).to_equal(
             "_hal_mmio_read_exec_v1_raw")

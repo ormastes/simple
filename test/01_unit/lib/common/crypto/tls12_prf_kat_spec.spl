@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Known-answer-test (KAT) evidence for the pure-Simple TLS 1.2 PRF/P_hash
+implementation in src/lib/common/crypto/tls12_prf.spl. Audience: the crypto
+maintainer verifying RFC 5246 §5/§6.3/§7.4.9/§8.1 conformance (P_hash
+A-chain, master_secret, key_block, Finished verify_data) against an attested
+public test vector, without needing to re-derive the reference bytes.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/crypto/tls12_prf_kat_spec.spl
+## Compatibility and limitations
+RFC 5246 itself ships no bundled algorithm test vectors; this spec uses the
+IETF-tls mailing-list P_SHA-256 vector reproduced widely (mbed TLS, Botan,
+OpenSSL test data) as the primary oracle, plus self-consistency checks
+(prefix relationships across output lengths, PRF-wrapper composition,
+cross-PRF determinism) for shapes the reference vector alone cannot pin.
+Interpreter-mode test runs verify file load; `it` bodies execute the same
+compiled path as any other spec here.
+## Verification guidance and troubleshooting
+A failure on the primary reference-vector scenario means the P_hash/HMAC
+A-chain implementation itself regressed — recheck against the vector
+transcribed in the scenario body. A failure on a self-consistency scenario
+(prefix, determinism, cross-PRF difference) usually means an off-by-one in
+iteration/truncation logic rather than a wrong hash primitive.
+"""
+# research: doc/01_research/lib/crypto/security_crypto_protocol_catalog_2026-06-15.md
+# plan: doc/03_plan/lib/crypto/tls_baremetal_ed25519_verify_remaining_2026-04-18.md
+# architecture: doc/04_architecture/infra/misc/tls13_stack_survey.md
+# design: doc/05_design/infra/security_convention_first_architecture.md
+# @manual_section: tls12-prf-kat
+
 # TLS 1.2 PRF KAT — RFC 5246 §5 / §6.3 / §7.4.9 / §8.1
 #
 # Verifies the pure-Simple P_hash + TLS 1.2 PRF implementation in
@@ -93,20 +123,29 @@ fn _ones32() -> list:
 describe "TLS 1.2 P_SHA-256 — IETF reference vector":
 
     it "P_SHA256(secret, 'test label'||seed, 100) matches the IETF reference output":
+        # @req REQ-TLS12PRF-001
         # The full 100-byte expected OKM.
         # This forces 4 iterations of the HMAC A-chain (4*32=128, truncated to 100)
         # so both "multi-iteration" and "truncation" edges are exercised.
+        # @capture(statistics): full 100-byte OKM hex retained against the IETF vector
+        step("Run P_SHA256 over the IETF secret and label||seed for a 100-byte output")
         expect(bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 100))).to_equal(
             "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
         )
 
     it "tls12_prf_sha256 wrapper composes correctly":
+        # @req REQ-TLS12PRF-002
         # tls12_prf_sha256(secret, "test label", seed, 100) == p_hash_sha256(secret, "test label"||seed, 100)
+        # @capture(statistics): wrapper OKM hex retained against the same reference vector
+        step("Run the tls12_prf_sha256 wrapper over separate label and seed arguments")
         expect(bytes_to_hex(tls12_prf_sha256(_ietf_secret(), "test label", _ietf_seed(), 100))).to_equal(
             "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
         )
 
     it "tls12_prf(use_sha384=false) equals tls12_prf_sha256":
+        # @req REQ-TLS12PRF-003
+        # @capture(statistics): both PRF-dispatch outputs retained for the equality check
+        step("Call the dispatching tls12_prf with use_sha384=false and compare to the direct SHA-256 wrapper")
         val a = bytes_to_hex(tls12_prf(_ietf_secret(), "test label", _ietf_seed(), 64, false))
         val b = bytes_to_hex(tls12_prf_sha256(_ietf_secret(), "test label", _ietf_seed(), 64))
         expect(a).to_equal(b)
@@ -118,10 +157,16 @@ describe "TLS 1.2 P_SHA-256 — IETF reference vector":
 describe "TLS 1.2 P_hash boundary behavior":
 
     it "P_SHA256 with output_len=12 (truncation < HashLen=32) returns 12 bytes":
+        # @req REQ-TLS12PRF-004
         # 12 is the verify_data length used by Finished — common truncation case.
-        expect(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 12).len()).to_equal(12)
+        # @capture(statistics): truncated output length retained
+        step("Request a 12-byte P_SHA256 output, shorter than the 32-byte HashLen")
+        expect(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 12).len()).to_equal(12)  # oracle: RFC 5246 Finished verify_data length is fixed at 12 bytes
 
     it "P_SHA256 with output_len=12 prefix matches output_len=32 prefix":
+        # @req REQ-TLS12PRF-005
+        # @capture(statistics): 12-byte and 32-byte prefixes retained for comparison
+        step("Compare the 12-byte output against the first 12 bytes of the 32-byte output")
         val short = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 12))
         val long32 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 32))
         # First 24 hex chars (12 bytes) of the 32-byte result must equal the 12-byte result.
@@ -133,7 +178,10 @@ describe "TLS 1.2 P_hash boundary behavior":
         expect(short).to_equal(prefix)
 
     it "P_SHA256 with output_len=64 prefix matches output_len=32 prefix":
+        # @req REQ-TLS12PRF-006
         # output_len=64 = 2 HMAC blocks; first 32 must equal output_len=32 single block.
+        # @capture(statistics): 64-byte and 32-byte prefixes retained for comparison
+        step("Compare the first 32 bytes of a 64-byte output against the full 32-byte output")
         val len32 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 32))
         val len64 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 64))
         var prefix = ""
@@ -143,15 +191,24 @@ describe "TLS 1.2 P_hash boundary behavior":
             i = i + 1
         expect(prefix).to_equal(len32)
 
-    it "P_SHA256 with output_len=0 returns empty":
-        expect(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 0).len()).to_equal(0)
+    it "P_SHA256 with output_len=0 (boundary case) returns an empty byte string":
+        # @req REQ-TLS12PRF-007
+        # @capture(statistics): zero-length output length retained
+        step("Request a zero-length P_SHA256 output")
+        expect(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 0).len()).to_equal(0)  # oracle: a zero-length request must yield a zero-length result
 
     it "P_SHA384 with output_len=96 (= 2 * HashLen=48) produces 96 bytes":
+        # @req REQ-TLS12PRF-008
         # SHA-384 HashLen=48; output_len=96 forces 2 A-chain iterations exactly.
-        expect(p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 96).len()).to_equal(96)
+        # @capture(statistics): SHA-384 output length retained
+        step("Request a 96-byte P_SHA384 output spanning exactly two A-chain iterations")
+        expect(p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 96).len()).to_equal(96)  # oracle: 2 * HashLen(SHA-384)=48 is exactly 96, the 2-iteration boundary
 
     it "P_SHA384 with output_len=24 (truncation < HashLen=48) returns 24 bytes":
-        expect(p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 24).len()).to_equal(24)
+        # @req REQ-TLS12PRF-009
+        # @capture(statistics): truncated SHA-384 output length retained
+        step("Request a 24-byte P_SHA384 output, shorter than the 48-byte HashLen")
+        expect(p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 24).len()).to_equal(24)  # oracle: requested output length must be returned exactly, even truncated
 
 # ============================================================================
 # RFC 5246 §8.1 master_secret — length + cross-PRF determinism
@@ -160,27 +217,42 @@ describe "TLS 1.2 P_hash boundary behavior":
 describe "TLS 1.2 master_secret (RFC 5246 §8.1)":
 
     it "master_secret is exactly 48 bytes for SHA-256 PRF":
+        # @req REQ-TLS12PRF-010
+        # @capture(statistics): master_secret length retained
+        step("Derive master_secret with the SHA-256 PRF and measure its length")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
-        expect(ms.len()).to_equal(48)
+        expect(ms.len()).to_equal(48)  # oracle: RFC 5246 §8.1 fixes master_secret at 48 bytes
 
     it "master_secret is exactly 48 bytes for SHA-384 PRF":
+        # @req REQ-TLS12PRF-011
+        # @capture(statistics): master_secret length retained
+        step("Derive master_secret with the SHA-384 PRF and measure its length")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true)
-        expect(ms.len()).to_equal(48)
+        expect(ms.len()).to_equal(48)  # oracle: RFC 5246 §8.1 fixes master_secret at 48 bytes regardless of PRF hash
 
     it "master_secret is deterministic":
+        # @req REQ-TLS12PRF-012
+        # @capture(statistics): two independently-derived master_secret values retained
+        step("Derive master_secret twice from identical inputs and compare")
         val a = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
         val b = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
         expect(a).to_equal(b)
 
     it "master_secret SHA-384 differs from SHA-256 for same inputs":
+        # @req REQ-TLS12PRF-013
+        # @capture(statistics): SHA-256 and SHA-384 master_secret values retained
+        step("Derive master_secret with both PRF hashes from identical inputs")
         val sha256 = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
         val sha384 = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true))
         # Two independent PRFs must produce different outputs with overwhelming probability.
         expect(sha256 == sha384).to_equal(false)
 
     it "master_secret swapping client/server randoms changes output":
+        # @req REQ-TLS12PRF-014
         # "master secret" PRF concatenates client_random || server_random, so
         # swapping the two operands must change the result.
+        # @capture(statistics): master_secret values for both random orderings retained
+        step("Derive master_secret with client/server randoms swapped and compare")
         val a = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
         val b = bytes_to_hex(tls12_master_secret(_ietf_secret(), _ones32(), _zeros32(), false))
         expect(a == b).to_equal(false)
@@ -192,14 +264,20 @@ describe "TLS 1.2 master_secret (RFC 5246 §8.1)":
 describe "TLS 1.2 key_block (RFC 5246 §6.3)":
 
     it "key_block returns the requested length (104 bytes — typical AES-128-SHA256 sizing)":
+        # @req REQ-TLS12PRF-015
         # 2 * (mac_key=32 + enc_key=16 + iv=4) = 104 for AES_128_GCM_SHA256.
+        # @capture(statistics): key_block length retained
+        step("Derive a 104-byte key_block sized for AES-128-SHA256 and measure its length")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val kb = tls12_key_block(ms, _ones32(), _zeros32(), 104, false)
-        expect(kb.len()).to_equal(104)
+        expect(kb.len()).to_equal(104)  # oracle: AES_128_GCM_SHA256 needs 2*(mac_key=32+enc_key=16+iv=4)=104 bytes
 
     it "key_block uses server_random || client_random ordering (different from master_secret)":
+        # @req REQ-TLS12PRF-016
         # master_secret uses (client_random, server_random); key_block uses
         # (server_random, client_random). Swap operands and verify they differ.
+        # @capture(statistics): key_block values for both random orderings retained
+        step("Derive key_block with server/client randoms swapped and compare")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val kb1 = bytes_to_hex(tls12_key_block(ms, _ones32(), _zeros32(), 64, false))
         val kb2 = bytes_to_hex(tls12_key_block(ms, _zeros32(), _ones32(), 64, false))
@@ -212,32 +290,47 @@ describe "TLS 1.2 key_block (RFC 5246 §6.3)":
 describe "TLS 1.2 Finished verify_data (RFC 5246 §7.4.9)":
 
     it "client_finished verify_data is exactly 12 bytes":
-        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        # @req REQ-TLS12PRF-017
         # transcript_hash is the 32-byte SHA-256 digest of the handshake record;
         # we fake it here with an attested 32-byte input.
+        # @capture(statistics): client Finished verify_data length retained
+        step("Derive the client Finished verify_data and measure its length")
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val vd = tls12_finished_verify_data(ms, _ietf_label_seed(), true, false)
-        expect(vd.len()).to_equal(12)
+        expect(vd.len()).to_equal(12)  # oracle: RFC 5246 §7.4.9 fixes verify_data at 12 bytes
 
     it "server_finished verify_data is exactly 12 bytes":
+        # @req REQ-TLS12PRF-018
+        # @capture(statistics): server Finished verify_data length retained
+        step("Derive the server Finished verify_data and measure its length")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val vd = tls12_finished_verify_data(ms, _ietf_label_seed(), false, false)
-        expect(vd.len()).to_equal(12)
+        expect(vd.len()).to_equal(12)  # oracle: RFC 5246 §7.4.9 fixes verify_data at 12 bytes for both roles
 
     it "client_finished and server_finished produce different verify_data":
+        # @req REQ-TLS12PRF-019
         # The labels "client finished" vs "server finished" must yield distinct
         # output for the same master_secret + transcript_hash.
+        # @capture(statistics): client and server verify_data values retained
+        step("Derive Finished verify_data for both roles from the same master_secret and compare")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val client_vd = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
         val server_vd = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), false, false))
         expect(client_vd == server_vd).to_equal(false)
 
     it "verify_data is deterministic":
+        # @req REQ-TLS12PRF-020
+        # @capture(statistics): two independently-derived verify_data values retained
+        step("Derive client Finished verify_data twice from identical inputs and compare")
         val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val a = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
         val b = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
         expect(a).to_equal(b)
 
     it "SHA-384 PRF Finished differs from SHA-256 PRF Finished":
+        # @req REQ-TLS12PRF-021
+        # @capture(statistics): SHA-256-PRF and SHA-384-PRF verify_data values retained
+        step("Derive Finished verify_data under both PRF hashes and compare")
         val ms256 = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
         val ms384 = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true)
         val vd256 = bytes_to_hex(tls12_finished_verify_data(ms256, _ietf_label_seed(), true, false))

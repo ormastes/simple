@@ -1,28 +1,33 @@
 # @cover src/compiler_rust/lib/std/src/verification/lean/proof_ref.spl 80%
 """
-# Proof Reference Resolution Specification
+## Purpose and audience
+Executable contract for proof-reference resolution: ProofReference identity,
+ProofRefResult found/not_found/ambiguous states, ProofRefResolver registration
+and resolution, and generated-vs-handwritten theorem collision detection with
+origin attribution. Owned by the compiler verification team; authors of
+@verify annotations read this to learn how their theorem names resolve.
 
-**Feature IDs:** #LEAN-PROOF-REF
-**Category:** Verification
-**Difficulty:** 3/5
-**Status:** In Progress
-**Requirements:** N/A
-**Plan:** doc/03_plan/lean_verification_contract.md
+## Operator workflow
+Run this spec after touching the proof-ref resolver or anything that emits
+theorem names:
+`bin/simple test test/00_formal_verification/compiler/proof_reference_spec.spl`.
+A failure names the resolution or collision invariant that broke.
 
-## Overview
+## Compatibility and limitations
+All scenarios run resolver logic in memory against literal search paths; no
+on-disk .lean corpus and no Lean toolchain are required. CollisionError
+messages are asserted on their stable substrings, not their full grammar.
 
-Verifies that proof references from @verify annotations resolve correctly
-to external .lean files, and that collision detection between generated
-and handwritten theorems works as expected.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| ProofReference | Maps a Simple symbol to a Lean theorem name |
-| ProofRefResolver | Searches directories for .lean files containing proofs |
-| CollisionError | Detects duplicate theorem names with origin info |
+## Verification guidance and troubleshooting
+Rerun with the single command above. A not_found/ambiguous mismatch means the
+resolver's status classification changed — check ProofRefResolver.resolve_all
+first. A collision-count failure usually means check_collisions started
+comparing the wrong tuple element.
 """
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
 
 use std.spipe.*
 use verification.lean.proof_ref as proof_ref
@@ -32,8 +37,12 @@ use verification.lean.proof_ref as proof_ref
 # Test Group 1: ProofReference Model
 # ============================================================================
 
+# @manual_section: lean-proof-reference
 describe "ProofReference Model":
     it "creates a reference with source symbol and theorem name":
+        # @req REQ-LEAN-PROOFREF-001
+        # @capture(protocol_json): ProofReference field values for a symbol-to-theorem mapping
+        step("Create a proof reference for my_function")
         val ref = proof_ref.ProofReference.create("my_function", "my_function_correct")
         expect(ref.source_symbol).to_equal("my_function")
         expect(ref.theorem_name).to_equal("my_function_correct")
@@ -47,6 +56,9 @@ describe "ProofReference Model":
 
 describe "CollisionError":
     it "creates error with both origin sources":
+        # @req REQ-LEAN-PROOFREF-002
+        # @capture(protocol_json): CollisionError message carrying generated and handwritten origins
+        step("Build a collision error from two origin locations")
         val err = proof_ref.CollisionError.create(
             "theorem_x",
             "generated.spl:42",
@@ -67,6 +79,9 @@ describe "CollisionError":
 
 describe "ProofRefResult":
     it "creates found result with path":
+        # @req REQ-LEAN-PROOFREF-003
+        # @capture(protocol_json): Found result carrying its resolved .lean path
+        step("Resolve fn_a to an existing proof file")
         val ref = proof_ref.ProofReference.create("fn_a", "fn_a_safe")
         val result = proof_ref.ProofRefResult.found(ref, "proofs/fn_a.lean")
         expect(result.status).to_equal(proof_ref.ProofRefStatus.Found)
@@ -74,6 +89,9 @@ describe "ProofRefResult":
         expect(result.error_message).to_be_nil()
 
     it "creates not_found result with error message":
+        # @req REQ-LEAN-PROOFREF-004
+        # @capture(protocol_json): NotFound result listing the searched directories and the missing theorem
+        step("Fail resolution of fn_b against two empty search paths")
         val ref = proof_ref.ProofReference.create("fn_b", "fn_b_safe")
         val result = proof_ref.ProofRefResult.not_found(ref, ["proofs/", "lib/proofs/"])
         expect(result.status).to_equal(proof_ref.ProofRefStatus.NotFound)
@@ -82,10 +100,13 @@ describe "ProofRefResult":
         expect(result.error_message.? ?? "").to_contain("fn_b_safe")
 
     it "creates ambiguous result with candidates":
+        # @req REQ-LEAN-PROOFREF-005
+        # @capture(protocol_json): Ambiguous result carrying both candidate proof paths
+        step("Report ambiguity when two proof files define fn_c_thm")
         val ref = proof_ref.ProofReference.create("fn_c", "fn_c_thm")
         val result = proof_ref.ProofRefResult.ambiguous(ref, ["a/proof.lean", "b/proof.lean"])
         expect(result.status).to_equal(proof_ref.ProofRefStatus.Ambiguous)
-        expect(result.candidates.len()).to_equal(2)
+        expect(result.candidates.len()).to_equal(2)  # oracle: two proof files claimed fn_c_thm
         expect(result.error_message.? ?? "").to_contain("Ambiguous")
         expect(result.error_message.? ?? "").to_contain("fn_c_thm")
 
@@ -96,18 +117,24 @@ describe "ProofRefResult":
 
 describe "ProofRefResolver":
     it "registers references":
+        # @req REQ-LEAN-PROOFREF-006
+        # @capture(protocol_json): registered reference list in registration order
+        step("Register sort and search theorem references")
         var resolver = proof_ref.ProofRefResolver.new(["proofs/"])
         resolver = resolver.register("sort", "sort_correct")
         resolver = resolver.register("search", "search_terminates")
-        expect(resolver.references.len()).to_equal(2)
+        expect(resolver.references.len()).to_equal(2)  # oracle: sort and search were both registered
         expect(resolver.references[0].theorem_name).to_equal("sort_correct")
         expect(resolver.references[1].theorem_name).to_equal("search_terminates")
 
     it "resolves with empty search paths to not_found":
+        # @req REQ-LEAN-PROOFREF-007
+        # @capture(protocol_json): resolution outcome when no search paths are configured
+        step("Resolve every reference with zero search paths")
         var resolver = proof_ref.ProofRefResolver.new([])
         resolver = resolver.register("missing", "missing_thm")
         val results = resolver.resolve_all()
-        expect(results.len()).to_equal(1)
+        expect(results.len()).to_equal(1)  # oracle: the resolver holds exactly one registered reference
         expect(results[0].status).to_equal(proof_ref.ProofRefStatus.NotFound)
 
 
@@ -117,28 +144,40 @@ describe "ProofRefResolver":
 
 describe "Collision Detection":
     it "finds collisions between generated and handwritten theorems":
+        # @req REQ-LEAN-PROOFREF-008
+        # @capture(bit_table): overlap of generated and handwritten theorem name sets
+        step("Compare generated names against handwritten names")
         val generated = ["thm_a", "thm_b", "thm_shared"]
         val handwritten = ["thm_c", "thm_shared", "thm_d"]
         val errors = proof_ref.ProofRefResolver.check_collisions(generated, handwritten)
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: only thm_shared appears on both sides
         expect(errors[0].theorem_name).to_equal("thm_shared")
 
     it "returns empty list when no collisions":
+        # @req REQ-LEAN-PROOFREF-009
+        # @capture(bit_table): disjoint generated/handwritten name sets
+        step("Compare fully disjoint theorem name sets")
         val generated = ["gen_1", "gen_2"]
         val handwritten = ["hw_1", "hw_2"]
         val errors = proof_ref.ProofRefResolver.check_collisions(generated, handwritten)
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: disjoint sets must produce zero collisions
 
     it "finds multiple collisions":
+        # @req REQ-LEAN-PROOFREF-010
+        # @capture(bit_table): two-name overlap across generated and handwritten sets
+        step("Detect both shared theorem names in one pass")
         val generated = ["shared_a", "unique_gen", "shared_b"]
         val handwritten = ["shared_a", "shared_b", "unique_hw"]
         val errors = proof_ref.ProofRefResolver.check_collisions(generated, handwritten)
-        expect(errors.len()).to_equal(2)
+        expect(errors.len()).to_equal(2)  # oracle: shared_a and shared_b both collide
 
     it "finds collisions with source locations":
+        # @req REQ-LEAN-PROOFREF-011
+        # @capture(protocol_json): collision record with generated and handwritten source locations
+        step("Attribute a collision to both of its source locations")
         val generated = [("thm_x", "codegen.spl:100")]
         val handwritten = [("thm_x", "manual.lean:50")]
         val errors = proof_ref.ProofRefResolver.check_collisions_with_sources(generated, handwritten)
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: thm_x is the single shared name
         expect(errors[0].generated_source).to_equal("codegen.spl:100")
         expect(errors[0].handwritten_source).to_equal("manual.lean:50")

@@ -3,6 +3,13 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.{HirStruct}
 
+# A module key whose text object was freed under the caller (the 2026-09-06
+# module-surface freeze defect) reads back as nil, and `nil + "|" + name` is
+# nil too. Concatenating that produced silent nil node keys, and the dictionary
+# miss they caused was dereferenced as a HirStruct: a bare SIGSEGV with no
+# diagnostic. This never dereferences, so the test itself cannot fault.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
 struct ValueStructLayoutWalk:
     node_key: text
     path: text
@@ -64,6 +71,9 @@ fn validate_value_struct_layouts(
             # Use the stable scalar owner key. HirModule.name is unsafe when
             # projected from an aggregate Dict value under closure pressure.
             val canonical = value_layout_node_key(module_key, struct_.name)
+            if not rt_heap_ref_wellformed(canonical):
+                return ["internal error: value struct layout module key at index "
+                    + "{module_index}" + " does not carry a usable text value"]
             structs[canonical] = struct_
             owner_module_indices[canonical] = module_index
             if not root_keys.has(canonical):
@@ -88,6 +98,12 @@ fn validate_value_struct_layouts(
                 continue
             visited[walk.node_key] = true
 
+            # A node key only ever comes from `roots` or from a `structs.has`
+            # guarded edge, so a miss here is a broken invariant, not input.
+            # Reading the miss and walking its fields is what turned that
+            # broken invariant into a SIGSEGV with no message.
+            if not structs.has(walk.node_key):
+                return ["internal error: value struct layout node key is absent from the struct index"]
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
             if owner_module_index < 0 or owner_module_index >= module_values.len():

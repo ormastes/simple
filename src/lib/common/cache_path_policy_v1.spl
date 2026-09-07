@@ -1,0 +1,115 @@
+# Cache path policy V1 -- pure validation shared by hosted runtime adapters.
+#
+# This module intentionally does not claim filesystem containment.  The host
+# adapter must open the selected root once and resolve every accepted relative
+# path beneath that handle (openat2/openat on Unix, handle-relative CreateFileW
+# on Windows).  These functions close the spelling aliases before that call.
+
+struct CachePathPolicyV1Result:
+    accepted: bool
+    logical_relative: text
+    error_code: text
+
+fn _cache_path_reject(code: text) -> CachePathPolicyV1Result:
+    CachePathPolicyV1Result(accepted: false, logical_relative: "", error_code: code)
+
+fn _cache_path_reserved_windows_name(segment: text) -> bool:
+    val lowered = segment.lower()
+    val stem = lowered.split(".")[0]
+    if stem == "con" or stem == "prn" or stem == "aux" or stem == "nul":
+        return true
+    if stem.len() == 4:
+        val prefix = stem.substring(0, 3)
+        val digit = stem.substring(3, 4)
+        if (prefix == "com" or prefix == "lpt") and "123456789".contains(digit):
+            return true
+    false
+
+fn _cache_path_policy_normalized_v1(relative: text) -> CachePathPolicyV1Result:
+    if relative == "":
+        return _cache_path_reject("CACHE_PATH_EMPTY")
+    val logical = relative
+    if logical.starts_with("/") or logical.starts_with("//"):
+        return _cache_path_reject("CACHE_PATH_ABSOLUTE")
+    if logical.len() >= 2 and logical.substring(1, 2) == ":":
+        return _cache_path_reject("CACHE_PATH_DRIVE")
+    if logical.contains(":"):
+        return _cache_path_reject("CACHE_PATH_ADS")
+    var canonical: [text] = []
+    for segment in logical.split("/"):
+        if segment == "" or segment == "." or segment == "..":
+            return _cache_path_reject("CACHE_PATH_COMPONENT")
+        if segment.ends_with(".") or segment.ends_with(" "):
+            return _cache_path_reject("CACHE_PATH_WINDOWS_TRIM_ALIAS")
+        if _cache_path_reserved_windows_name(segment):
+            return _cache_path_reject("CACHE_PATH_WINDOWS_DEVICE")
+        canonical.push(segment)
+    CachePathPolicyV1Result(accepted: true, logical_relative: canonical.join("/"), error_code: "")
+
+fn cache_path_policy_v1(relative: text) -> CachePathPolicyV1Result:
+    if relative.contains("\\"):
+        return _cache_path_reject("CACHE_PATH_SEPARATOR")
+    _cache_path_policy_normalized_v1(relative)
+
+fn host_cache_path_policy_v1(os: text, relative: text) -> CachePathPolicyV1Result:
+    if os == "windows":
+        return _cache_path_policy_normalized_v1(relative.replace("\\", "/"))
+    cache_path_policy_v1(relative)
+
+fn user_local_location_v1(os: text, local_app_data: text, xdg_cache_home: text, home: text) -> text:
+    var candidate = ""
+    if os == "windows":
+        if local_app_data != "":
+            candidate = local_app_data.replace("\\", "/")
+        elif home != "":
+            candidate = home.replace("\\", "/") + "/AppData/Local"
+    elif os == "macos":
+        if home != "":
+            candidate = home + "/Library/Caches"
+    elif xdg_cache_home != "":
+        candidate = xdg_cache_home
+    elif home != "":
+        candidate = home + "/.cache"
+    if cache_root_is_absolute_v1(os, candidate):
+        return candidate
+    ""
+
+fn cache_root_is_absolute_v1(os: text, root: text) -> bool:
+    if root == "":
+        return false
+    if os == "windows":
+        val normalized = root.replace("\\", "/")
+        if normalized.starts_with("//"):
+            val unc_tail = normalized.substring(2, normalized.len())
+            val share_separator = unc_tail.index_of("/")
+            return share_separator > 0 and share_separator < unc_tail.len() - 1
+        if normalized.len() < 3:
+            return false
+        val drive = normalized.substring(0, 1).lower()
+        return "abcdefghijklmnopqrstuvwxyz".contains(drive) and
+            normalized.substring(1, 2) == ":" and normalized.substring(2, 3) == "/"
+    root.starts_with("/")
+
+fn cache_location_v1(app: text, os: text, override_root: text, local_app_data: text, xdg_cache_home: text, home: text, workspace: text) -> text:
+    if override_root != "":
+        if cache_root_is_absolute_v1(os, override_root):
+            return override_root.replace("\\", "/")
+        return ""
+    val checked_app = cache_path_policy_v1(app)
+    if not checked_app.accepted:
+        return ""
+    if home != "" or local_app_data != "" or xdg_cache_home != "":
+        val user_root = user_local_location_v1(os, local_app_data, xdg_cache_home, home)
+        if not cache_root_is_absolute_v1(os, user_root):
+            return ""
+        return user_root + "/" + checked_app.logical_relative
+    # Hosted callers must configure SIMPLE_CACHE when the platform exposes no
+    # absolute user-local root.  A workspace fallback would fragment the
+    # machine cache across worktrees and make daemon cwd affect its identity.
+    ""
+
+fn cache_root_default_v1(os: text, override_root: text, local_app_data: text, home: text, workspace: text) -> text:
+    cache_location_v1("simple/cache-manager", os, override_root, local_app_data, "", home, workspace)
+
+export CachePathPolicyV1Result, cache_path_policy_v1, host_cache_path_policy_v1
+export user_local_location_v1, cache_root_is_absolute_v1, cache_location_v1, cache_root_default_v1

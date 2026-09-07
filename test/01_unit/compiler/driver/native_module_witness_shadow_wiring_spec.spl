@@ -1,4 +1,35 @@
-use std.spec.{describe, it, expect}
+"""
+## Purpose and audience
+
+Executable specification for the native module witness shadow-comparison
+wiring — the classifier that distinguishes an exact witness match from a
+mismatch, a legacy-missing witness, or a corrupt recorded witness — for
+compiler owners who change native-build incremental caching.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed scenarios.
+The first scenario calls the classifier directly with real inputs; the
+remaining scenarios pin which module owns each piece of the shadow-wiring
+contract by reading the owning source once per genuinely named local.
+
+## Compatibility and limitations
+
+Boundary scenarios read `driver_aot_native_output.spl`, `driver_types.spl`,
+and `driver_build/incremental.spl` at runtime to pin wiring shape; they do not
+exercise a full native build. Behavioral coverage of the classifier itself is
+in the first scenario.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to native-module witness classification or receipt
+naming. A boundary failure means a helper moved modules, was renamed, or a
+retired alias resurfaced.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: native module witness shadow wiring
+
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{file_read}
 use compiler.driver.driver_build.incremental.{
     native_module_cache_shadow_mismatch_v1
@@ -6,6 +37,9 @@ use compiler.driver.driver_build.incremental.{
 
 describe "native module witness shadow wiring":
     it "classifies exact legacy and mismatched recorded witnesses":
+        # @req REQ-DRIVER-WITNESS-001
+        # @capture(statistics): classifier verdict per witness-pair input
+        step("Classify matching, mismatched, legacy-missing, and corrupt witness pairs")
         val first = "native-module-cache-witness-v1|first"
         val second = "native-module-cache-witness-v1|second"
         expect(native_module_cache_shadow_mismatch_v1(first, first)).to_equal("match")
@@ -16,6 +50,9 @@ describe "native module witness shadow wiring":
                 "corrupt-recorded")
 
     it "keeps complete module witness authority while bounding mismatch evidence":
+        # @req REQ-DRIVER-WITNESS-002
+        # @capture(statistics): presence of authority markers, receipt naming, and retired-alias absence
+        step("Read the native output driver and pin witness-authority and receipt wiring")
         val source = file_read(
             "src/compiler/80.driver/driver_aot_native_output.spl")
         expect(source).to_contain(
@@ -39,10 +76,13 @@ describe "native module witness shadow wiring":
         expect(source).to_contain("native-capsule-source-mutated")
         expect(source).to_contain("phase=prelookup-attempt")
         expect(source).to_contain("non_authoritative=false")
-        expect(source.contains(
-            "native-build failed to write module witness shadow receipt")).to_equal(false)
+        val still_lacks_witness_shadow_failure_diagnostic = source.contains(
+            "native-build failed to write module witness shadow receipt")
+        expect(still_lacks_witness_shadow_failure_diagnostic).to_equal(false)
         expect(source).to_contain("val provider_threads = if backend_session.?")
-        expect(source.contains("native-module-source-mir-proxy-v1")).to_equal(false)
+        val still_uses_retired_source_mir_proxy_alias =
+            source.contains("native-module-source-mir-proxy-v1")
+        expect(still_uses_retired_source_mir_proxy_alias).to_equal(false)
 
         val types_source = file_read(
             "src/compiler/80.driver/driver_types.spl")
@@ -52,6 +92,9 @@ describe "native module witness shadow wiring":
             "storage_identity_text_v1(self.source_identity)")
 
     it "persists legacy-missing witnesses without treating them as authority":
+        # @req REQ-DRIVER-WITNESS-003
+        # @capture(statistics): presence of module_witness field, default, and classifier call wiring
+        step("Read the incremental driver and pin legacy-missing witness handling")
         val source = file_read(
             "src/compiler/80.driver/driver_build/incremental.spl")
         expect(source).to_contain("module_witness: text")

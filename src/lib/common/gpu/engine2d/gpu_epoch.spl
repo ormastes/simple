@@ -1,0 +1,339 @@
+"""Common GPU epoch contract for Engine2D scheduler hardening.
+
+Pure, allocation-light contracts shared by every GPU lane (Vulkan, Metal,
+DirectX) and by the no-GC runtime queue. This module never touches a device:
+it composes SimpleRing facts (`RingToken`, `RingPayloadLease`) with the DrawIR
+v3 execution-route capability model and freezes the truth labels the research
+record requires to be reported independently.
+
+Non-admission rule: every receipt starts as routing evidence only. A receipt
+claims device execution only after a provider advanced it past `gpu_finished`
+with qualifying device evidence. Nothing in this file can produce that claim on
+its own.
+"""
+
+use common.contracts.execution.simple_ring_async_v1.{
+    RingGeneration,
+    RingPayloadLease,
+    RingToken,
+    ring_payload_lease_validate
+}
+use common.ui.draw_ir_v3_execution_route.{
+    DRAW_IR_V3_MODE_CPU_REFERENCE,
+    DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU,
+    DRAW_IR_V3_MODE_RESIDENT_GPU,
+    DRAW_IR_V3_REASON_NONE,
+    DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE,
+    DRAW_IR_V3_REASON_NO_DEVICE,
+    DRAW_IR_V3_REASON_MISSING_CAPABILITY,
+    draw_ir_v3_missing_capabilities,
+    draw_ir_v3_mode_required_capabilities
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS,
+    DRAW_IR_V3_CAP_INDIRECT_COMMAND_BUFFERS,
+    DRAW_IR_V3_CAP_WORK_GRAPHS
+}
+
+# --- Profiles (policy names from the research record) -----------------------
+
+pub val ENGINE2D_GPU_PROFILE_CPU_REFERENCE: text = "cpu_reference"
+pub val ENGINE2D_GPU_PROFILE_GPU_RENDER: text = "gpu_render"
+pub val ENGINE2D_GPU_PROFILE_SCENE_BALANCED: text = "gpu_scene_balanced"
+pub val ENGINE2D_GPU_PROFILE_SCENE_REQUIRED: text = "gpu_scene_required"
+pub val ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL: text = "gpu_scene_static_pool"
+pub val ENGINE2D_GPU_PROFILE_DEVICE_INITIATED: text = "device_initiated_experimental"
+
+# --- Lifecycle phases (submitted != GPU-finished != completed != retired) -----
+
+pub val ENGINE2D_GPU_PHASE_REJECTED: text = "rejected"
+pub val ENGINE2D_GPU_PHASE_QUEUED: text = "queued"
+pub val ENGINE2D_GPU_PHASE_SUBMITTED: text = "submitted"
+pub val ENGINE2D_GPU_PHASE_GPU_FINISHED: text = "gpu_finished"
+pub val ENGINE2D_GPU_PHASE_COMPLETED: text = "completed"
+pub val ENGINE2D_GPU_PHASE_RETIRED: text = "retired"
+pub val ENGINE2D_GPU_PHASE_PRESENTED: text = "presented"
+pub val ENGINE2D_GPU_PHASE_DISPLAYED: text = "displayed"
+
+# --- Truth label values --------------------------------------------------------
+
+pub val ENGINE2D_GPU_TRUTH_NONE: text = "none"
+pub val ENGINE2D_GPU_TRUTH_PARTIAL: text = "partial"
+pub val ENGINE2D_GPU_TRUTH_FULL: text = "full"
+
+pub val ENGINE2D_GPU_AUTONOMY_CAPABILITIES: u32 = DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS + DRAW_IR_V3_CAP_INDIRECT_COMMAND_BUFFERS + DRAW_IR_V3_CAP_WORK_GRAPHS
+
+struct Engine2dGpuTruthLabels:
+    semantic_residency: text
+    data_residency: text
+    submission_autonomy: text
+    scheduling_assurance: text
+
+struct Engine2dGpuEpochRequest:
+    profile: text
+    queue_handle: i64
+    backend_handle: i64
+    queue_generation: u64
+    operation_generation: u64
+    scene_generation: u64
+    surface_generation: u64
+    arena_generation: u64
+    payload_lease: RingPayloadLease
+    command_count: i64
+    packet_bytes: i64
+    content_hash: u64
+
+struct Engine2dGpuDeviceEvidence:
+    binary_identity: text
+    device_name: text
+    device_type: text
+    driver_identity: text
+    host_submit_ns: i64
+    host_complete_ns: i64
+    device_timestamp_available: bool
+    device_begin_ticks: i64
+    device_end_ticks: i64
+    transfer_bytes: i64
+    negative_control_passed: bool
+
+struct Engine2dGpuEpochReceipt:
+    profile: text
+    queue_handle: i64
+    backend_handle: i64
+    queue_generation: u64
+    operation_generation: u64
+    scene_generation: u64
+    surface_generation: u64
+    arena_generation: u64
+    token: RingToken?
+    phase: text
+    terminal: bool
+    reason_code: u32
+    missing_capabilities: u32
+    truth: Engine2dGpuTruthLabels
+    routing_evidence_only: bool
+    device_execution_proven: bool
+    diagnostic: text
+
+# --- Profile policy -------------------------------------------------------------
+
+fn engine2d_gpu_profile_known(profile: text) -> bool:
+    profile == ENGINE2D_GPU_PROFILE_CPU_REFERENCE or profile == ENGINE2D_GPU_PROFILE_GPU_RENDER or profile == ENGINE2D_GPU_PROFILE_SCENE_BALANCED or profile == ENGINE2D_GPU_PROFILE_SCENE_REQUIRED or profile == ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL or profile == ENGINE2D_GPU_PROFILE_DEVICE_INITIATED
+
+fn engine2d_gpu_profile_mode(profile: text) -> u16:
+    if profile == ENGINE2D_GPU_PROFILE_CPU_REFERENCE:
+        return DRAW_IR_V3_MODE_CPU_REFERENCE
+    if profile == ENGINE2D_GPU_PROFILE_GPU_RENDER or profile == ENGINE2D_GPU_PROFILE_SCENE_BALANCED:
+        return DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU
+    DRAW_IR_V3_MODE_RESIDENT_GPU
+
+fn engine2d_gpu_profile_is_required(profile: text) -> bool:
+    """Required profiles refuse unsupported work; they never fall back to CPU semantics."""
+    profile == ENGINE2D_GPU_PROFILE_SCENE_REQUIRED or profile == ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL or profile == ENGINE2D_GPU_PROFILE_DEVICE_INITIATED
+
+fn engine2d_gpu_profile_required_capabilities(profile: text) -> u32:
+    val base = draw_ir_v3_mode_required_capabilities(engine2d_gpu_profile_mode(profile))
+    if profile == ENGINE2D_GPU_PROFILE_DEVICE_INITIATED:
+        return base + DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS
+    base
+
+fn engine2d_gpu_profile_allows_autonomous_submission(profile: text, available_capabilities: u32) -> bool:
+    """Autonomous (device-initiated) submission is opt-in per profile and needs a reported capability."""
+    if profile != ENGINE2D_GPU_PROFILE_DEVICE_INITIATED:
+        return false
+    (available_capabilities & ENGINE2D_GPU_AUTONOMY_CAPABILITIES) != 0u32
+
+# --- Constructors ------------------------------------------------------------------
+
+fn engine2d_gpu_truth_none() -> Engine2dGpuTruthLabels:
+    Engine2dGpuTruthLabels(semantic_residency: ENGINE2D_GPU_TRUTH_NONE, data_residency: ENGINE2D_GPU_TRUTH_NONE, submission_autonomy: ENGINE2D_GPU_TRUTH_NONE, scheduling_assurance: ENGINE2D_GPU_TRUTH_NONE)
+
+fn engine2d_gpu_truth_valid(label: text) -> bool:
+    label == ENGINE2D_GPU_TRUTH_NONE or label == ENGINE2D_GPU_TRUTH_PARTIAL or label == ENGINE2D_GPU_TRUTH_FULL
+
+fn engine2d_gpu_truth_labels_valid(truth: Engine2dGpuTruthLabels) -> bool:
+    engine2d_gpu_truth_valid(truth.semantic_residency) and engine2d_gpu_truth_valid(truth.data_residency) and engine2d_gpu_truth_valid(truth.submission_autonomy) and engine2d_gpu_truth_valid(truth.scheduling_assurance)
+
+fn engine2d_gpu_device_evidence_none() -> Engine2dGpuDeviceEvidence:
+    Engine2dGpuDeviceEvidence(binary_identity: "", device_name: "", device_type: "", driver_identity: "", host_submit_ns: 0, host_complete_ns: 0, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 0, negative_control_passed: false)
+
+fn engine2d_gpu_device_evidence_qualifies(evidence: Engine2dGpuDeviceEvidence) -> bool:
+    """Production qualification bar: exact identities, monotonic host timestamps,
+    a DEVICE-side timestamp pair, real transfer bytes, and a negative control.
+    Host-only facts never qualify: an empty submit brackets host time just as well.
+    """
+    if evidence.binary_identity == "" or evidence.device_name == "" or evidence.driver_identity == "":
+        return false
+    if evidence.host_submit_ns <= 0 or evidence.host_complete_ns < evidence.host_submit_ns:
+        return false
+    if not evidence.device_timestamp_available or evidence.device_end_ticks < evidence.device_begin_ticks:
+        return false
+    if evidence.transfer_bytes <= 0:
+        return false
+    evidence.negative_control_passed
+
+fn _engine2d_gpu_receipt(request: Engine2dGpuEpochRequest, token: RingToken?, phase: text, terminal: bool, reason_code: u32, missing: u32, diagnostic: text) -> Engine2dGpuEpochReceipt:
+    Engine2dGpuEpochReceipt(
+        profile: request.profile,
+        queue_handle: request.queue_handle,
+        backend_handle: request.backend_handle,
+        queue_generation: request.queue_generation,
+        operation_generation: request.operation_generation,
+        scene_generation: request.scene_generation,
+        surface_generation: request.surface_generation,
+        arena_generation: request.arena_generation,
+        token: token,
+        phase: phase,
+        terminal: terminal,
+        reason_code: reason_code,
+        missing_capabilities: missing,
+        truth: engine2d_gpu_truth_none(),
+        routing_evidence_only: true,
+        device_execution_proven: false,
+        diagnostic: diagnostic
+    )
+
+# --- Validation and admission -------------------------------------------------------
+
+fn engine2d_gpu_epoch_request_validate(request: Engine2dGpuEpochRequest) -> text:
+    """Empty text means valid; otherwise the first violated invariant."""
+    if not engine2d_gpu_profile_known(request.profile):
+        return "unknown profile {request.profile}"
+    if request.queue_handle <= 0:
+        return "queue handle must be positive"
+    if request.backend_handle <= 0:
+        return "backend handle must be positive"
+    if request.queue_generation == 0u64 or request.operation_generation == 0u64 or request.scene_generation == 0u64 or request.surface_generation == 0u64 or request.arena_generation == 0u64:
+        return "every generation must be non-zero"
+    if request.command_count <= 0:
+        return "command count must be positive"
+    if request.packet_bytes <= 0:
+        return "packet bytes must be positive"
+    if request.payload_lease.byte_length == 0u64:
+        return "payload lease must cover at least one byte"
+    val lease_check = ring_payload_lease_validate(request.payload_lease)
+    if not lease_check.ok:
+        return "payload lease invalid"
+    ""
+
+fn engine2d_gpu_epoch_admit(request: Engine2dGpuEpochRequest, token: RingToken?, device_available: bool, available_capabilities: u32) -> Engine2dGpuEpochReceipt:
+    """Pure admission: validates the request, applies profile policy, never runs anything.
+
+    Required profiles reject on missing device/capability. Non-required GPU
+    profiles are admitted with reason NONE and leave CPU recovery to the
+    caller's route decision. A CPU-reference request is terminal immediately
+    with a policy reason: there is nothing to queue.
+    """
+    val violation = engine2d_gpu_epoch_request_validate(request)
+    if violation != "":
+        return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_NONE, 0u32, violation)
+    if request.profile == ENGINE2D_GPU_PROFILE_CPU_REFERENCE:
+        return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE, 0u32, "cpu_reference profile does not queue GPU epochs")
+    val required = engine2d_gpu_profile_required_capabilities(request.profile)
+    val missing = draw_ir_v3_missing_capabilities(required, available_capabilities)
+    # A queued epoch is a GPU route with no CPU lane: without a device it is
+    # refused for every GPU profile. Non-required profiles recover on the CPU
+    # at the route decision, before an epoch exists, never by queueing one.
+    if not device_available:
+        val fallback_note = if engine2d_gpu_profile_is_required(request.profile): "CPU semantic fallback is forbidden" else: "caller may take the CPU route instead"
+        return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_NO_DEVICE, 0u32, "no device: a GPU epoch never queues without one; {fallback_note}")
+    if engine2d_gpu_profile_is_required(request.profile):
+        if missing != 0u32:
+            return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_MISSING_CAPABILITY, missing, "required profile refuses: device lacks capabilities {missing}")
+    if token == nil:
+        return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_NONE, missing, "queue full or emit failed: no ring token")
+    _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_QUEUED, false, DRAW_IR_V3_REASON_NONE, missing, "epoch queued; routing evidence only")
+
+fn _engine2d_gpu_phase_rank(phase: text) -> i64:
+    if phase == ENGINE2D_GPU_PHASE_QUEUED:
+        return 1
+    if phase == ENGINE2D_GPU_PHASE_SUBMITTED:
+        return 2
+    if phase == ENGINE2D_GPU_PHASE_GPU_FINISHED:
+        return 3
+    if phase == ENGINE2D_GPU_PHASE_COMPLETED:
+        return 4
+    if phase == ENGINE2D_GPU_PHASE_PRESENTED:
+        return 5
+    if phase == ENGINE2D_GPU_PHASE_DISPLAYED:
+        return 6
+    if phase == ENGINE2D_GPU_PHASE_RETIRED:
+        return 7
+    0
+
+fn engine2d_gpu_epoch_advance(receipt: Engine2dGpuEpochReceipt, next_phase: text, evidence: Engine2dGpuDeviceEvidence, truth: Engine2dGpuTruthLabels) -> Engine2dGpuEpochReceipt:
+    """Advance one phase forward. Terminal receipts never move; phases never go backwards.
+
+    `device_execution_proven` flips true only when the phase is at or past
+    `gpu_finished` and the evidence qualifies. Presentation phases require a
+    completed epoch. Retirement is terminal and distinct from completion.
+    """
+    if receipt.terminal:
+        return receipt
+    val current = _engine2d_gpu_phase_rank(receipt.phase)
+    val next = _engine2d_gpu_phase_rank(next_phase)
+    if next == 0 or next <= current:
+        return receipt
+    if next >= 5 and next <= 6 and current < 4:
+        return receipt
+    if not engine2d_gpu_truth_labels_valid(truth):
+        return receipt
+    val proven = next >= 3 and engine2d_gpu_device_evidence_qualifies(evidence)
+    Engine2dGpuEpochReceipt(
+        profile: receipt.profile,
+        queue_handle: receipt.queue_handle,
+        backend_handle: receipt.backend_handle,
+        queue_generation: receipt.queue_generation,
+        operation_generation: receipt.operation_generation,
+        scene_generation: receipt.scene_generation,
+        surface_generation: receipt.surface_generation,
+        arena_generation: receipt.arena_generation,
+        token: receipt.token,
+        phase: next_phase,
+        terminal: next_phase == ENGINE2D_GPU_PHASE_RETIRED,
+        reason_code: receipt.reason_code,
+        missing_capabilities: receipt.missing_capabilities,
+        truth: truth,
+        routing_evidence_only: not proven,
+        device_execution_proven: proven,
+        diagnostic: if proven: "device execution proven by qualifying evidence" else: "phase {next_phase}; routing evidence only"
+    )
+
+fn engine2d_gpu_epoch_receipt_summary(receipt: Engine2dGpuEpochReceipt) -> text:
+    "profile={receipt.profile};phase={receipt.phase};terminal={receipt.terminal};reason={receipt.reason_code};missing={receipt.missing_capabilities};semantic={receipt.truth.semantic_residency};data={receipt.truth.data_residency};autonomy={receipt.truth.submission_autonomy};assurance={receipt.truth.scheduling_assurance};proven={receipt.device_execution_proven}"
+
+export ENGINE2D_GPU_PROFILE_CPU_REFERENCE
+export ENGINE2D_GPU_PROFILE_GPU_RENDER
+export ENGINE2D_GPU_PROFILE_SCENE_BALANCED
+export ENGINE2D_GPU_PROFILE_SCENE_REQUIRED
+export ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL
+export ENGINE2D_GPU_PROFILE_DEVICE_INITIATED
+export ENGINE2D_GPU_PHASE_REJECTED
+export ENGINE2D_GPU_PHASE_QUEUED
+export ENGINE2D_GPU_PHASE_SUBMITTED
+export ENGINE2D_GPU_PHASE_GPU_FINISHED
+export ENGINE2D_GPU_PHASE_COMPLETED
+export ENGINE2D_GPU_PHASE_RETIRED
+export ENGINE2D_GPU_PHASE_PRESENTED
+export ENGINE2D_GPU_PHASE_DISPLAYED
+export ENGINE2D_GPU_TRUTH_NONE
+export ENGINE2D_GPU_TRUTH_PARTIAL
+export ENGINE2D_GPU_TRUTH_FULL
+export ENGINE2D_GPU_AUTONOMY_CAPABILITIES
+export Engine2dGpuTruthLabels
+export Engine2dGpuEpochRequest
+export Engine2dGpuDeviceEvidence
+export Engine2dGpuEpochReceipt
+export engine2d_gpu_profile_known
+export engine2d_gpu_profile_mode
+export engine2d_gpu_profile_is_required
+export engine2d_gpu_profile_required_capabilities
+export engine2d_gpu_profile_allows_autonomous_submission
+export engine2d_gpu_truth_none
+export engine2d_gpu_truth_labels_valid
+export engine2d_gpu_device_evidence_none
+export engine2d_gpu_device_evidence_qualifies
+export engine2d_gpu_epoch_request_validate
+export engine2d_gpu_epoch_admit
+export engine2d_gpu_epoch_advance
+export engine2d_gpu_epoch_receipt_summary

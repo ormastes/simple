@@ -1,16 +1,58 @@
-use std.spec.{describe, it, expect}
+"""
+## Purpose and audience
+Pins the atomic-rename ownership contract of the daemon SDK file protocol for
+maintainers of src/lib/nogc_sync_mut/daemon_sdk/protocol.spl: the rename
+runtime owner must be declared exactly once at module scope, and request and
+response publication must both ride the same owner so a crash between temp
+write and rename cannot publish half a message.
+## Operator workflow
+Run this spec with the seed runner
+(`src/compiler_rust/target/bootstrap/simple run <this-file>`); each scenario
+reads the protocol module source and asserts the owner declaration and the
+two publication call sites.
+## Compatibility and limitations
+This is a source-contract spec: it asserts properties of shipped protocol
+source that has no runtime API surface. It is currently legitimately RED —
+see the NOTE below — because the product moved the rename owner.
+## Verification guidance and troubleshooting
+A failure naming the extern declaration means protocol.spl no longer owns
+rt_file_rename; re-point the contract at the new owner rather than deleting
+the scenario. A failure on the indented-duplicate check means a second,
+method-scoped owner crept back in.
+"""
+# Lifecycle: doc/01_research/infra/security/security_aop_architecture_2026-03-28.md ;
+# doc/03_plan/infra/recovery/remaining_agent_teams_plan.md ;
+# doc/04_architecture/backend_layer_artifact_matrix.md ;
+# doc/05_design/backend_layer_artifact_matrix.md
+# @manual_section: daemon-sdk-protocol
+
+# NOTE (legitimately RED, 2026-09-05): src/lib/nogc_sync_mut/daemon_sdk/protocol.spl
+# no longer declares `extern fn rt_file_rename` — the extern moved to
+# src/lib/nogc_sync_mut/io_runtime.spl and protocol.spl now publishes through
+# std.io_runtime.file_rename. Both scenarios assert the OLD owner contract and
+# stay RED until the contract is re-pointed at the new owner. Counts preserved
+# deliberately; do not soften the assertions.
+
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{read_file}
 
 describe "daemon protocol atomic rename ownership":
     it "declares the atomic rename runtime owner once at module scope":
+        # @req REQ-DAEMON-PROTOCOL-RENAME-001
+        # @capture(protocol_json): the exact extern declaration line retained as the single-owner contract
+        step("Read the daemon protocol module and locate the rename extern")
         val source = read_file("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl")
         val declaration = "extern fn rt_file_rename(from: text, to: text) -> bool"
-        expect(source.count(declaration)).to_equal(1)
+        expect(source.count(declaration)).to_equal(1)  # oracle: the atomic-rename owner must be declared exactly once in the protocol module
         expect(source).to_contain("extern fn rt_file_write_text(path: text, content: text) -> bool\n" + declaration)
-        expect(source.contains("        " + declaration)).to_equal(false)
+        val indented_copy_absent = source.contains("        " + declaration)
+        expect(indented_copy_absent).to_equal(false)  # oracle: an indented duplicate would be a second, method-scoped owner
 
     it "keeps request and response atomic publication on the same owner":
+        # @req REQ-DAEMON-PROTOCOL-RENAME-002
+        # @capture(protocol_json): both tmp+rename publication call sites retained as the atomicity contract
+        step("Locate the rename guard at both request and response publication sites")
         val source = read_file("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl")
-        expect(source.count("if rt_file_rename(tmp_path,")).to_equal(2)
+        expect(source.count("if rt_file_rename(tmp_path,")).to_equal(2)  # oracle: exactly two publication sites — one request, one response — share the owner
         expect(source).to_contain("if rt_file_rename(tmp_path, req_path):")
         expect(source).to_contain("if rt_file_rename(tmp_path, resp_path):")

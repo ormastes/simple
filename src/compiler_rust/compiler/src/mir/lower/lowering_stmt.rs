@@ -13,6 +13,71 @@ use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 pub(super) const MAX_ARRAY_DESTRUCTURING_DEPTH: usize = 64;
 
+/// Bound on how deep `if_merge_tail_value_ty` walks nested tail `if`s before
+/// giving up. Generated HIR can nest arbitrarily; the recursion must stay
+/// finite without a stack probe.
+const IF_MERGE_TY_MAX_DEPTH: usize = 64;
+
+/// HIR type of the value a statement list leaves in `last_expr_value`, i.e. the
+/// value a tail-position `if`/`elif` chain merges into its temp local.
+///
+/// Only the *tail* statement can produce that value (`HirStmt::Expr` sets
+/// `last_expr_value`; a nested tail `if` merges its own arms first). Returns
+/// `None` when the block ends in something that leaves no value.
+fn if_merge_tail_value_ty(stmts: &[HirStmt], depth: usize) -> Option<TypeId> {
+    if depth > IF_MERGE_TY_MAX_DEPTH {
+        return None;
+    }
+    match stmts.last()? {
+        HirStmt::Expr(expr) => Some(expr.ty),
+        HirStmt::If {
+            then_block, else_block, ..
+        } => {
+            let then_ty = if_merge_tail_value_ty(then_block, depth + 1);
+            let else_ty = else_block
+                .as_ref()
+                .and_then(|stmts| if_merge_tail_value_ty(stmts, depth + 1));
+            match (then_ty, else_ty) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Type for the `__if_merge_*` temp local an `if` STATEMENT in value (tail)
+/// position merges its arms through.
+///
+/// Historically hardcoded `TypeId::I64`. That silently ZEROED every float:
+/// `compile_store` derives the slot's Cranelift type from `MirLocal.ty`, finds
+/// `I64` where the arm produced an `F64` value, matches no coercion arm, and
+/// falls through to `create_default` — `iconst(I64, 0)`. So
+/// `fn f(x: f64) -> f64:` with a tail `if`/`else` block returned `0.0` for every
+/// input (`doc/08_tracking/bug/std_math_abs_f64_returns_zero_2026-08-08.md`;
+/// `math_abs(-3.0) == 0.0`).
+///
+/// Narrow on purpose: only floats switch away from `I64`, and only when every
+/// value-producing arm agrees on the same float type. Every other shape keeps
+/// the previous `I64` slot, so this cannot perturb int/bool/heap merges.
+fn if_merge_local_ty(then_block: &[HirStmt], else_block: Option<&Vec<HirStmt>>) -> TypeId {
+    let is_float = |ty: TypeId| matches!(ty, TypeId::F32 | TypeId::F64);
+    let then_ty = if_merge_tail_value_ty(then_block, 0);
+    let else_ty = else_block.and_then(|stmts| if_merge_tail_value_ty(stmts, 0));
+    let merged = match (then_ty, else_ty) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        _ => None,
+    };
+    match merged {
+        Some(ty) if is_float(ty) => ty,
+        _ => TypeId::I64,
+    }
+}
+
 impl<'a> MirLowerer<'a> {
     /// Assign a runtime array value into an array-shaped lvalue pattern.
     ///
@@ -1209,11 +1274,16 @@ impl<'a> MirLowerer<'a> {
                 use crate::mir::effects::LocalKind;
                 use crate::mir::function::MirLocal;
 
+                // Slot type must match what the arms actually produce; a
+                // hardcoded I64 here zeroed every float merge (see
+                // `if_merge_local_ty`).
+                let merge_ty = if_merge_local_ty(then_block, else_block.as_ref());
+
                 let temp_local_index = self.with_func(|func, _| {
                     let index = func.params.len() + func.locals.len();
                     func.locals.push(MirLocal {
                         name: format!("__if_merge_{}", index),
-                        ty: TypeId::I64,
+                        ty: merge_ty,
                         kind: LocalKind::Local,
                         is_ghost: false,
                     });
@@ -1255,7 +1325,7 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::Store {
                             addr,
                             value: tv,
-                            ty: TypeId::I64,
+                            ty: merge_ty,
                         });
                     })?;
                 }
@@ -1282,7 +1352,7 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::Store {
                             addr,
                             value: ev,
-                            ty: TypeId::I64,
+                            ty: merge_ty,
                         });
                     })?;
                 }
@@ -1305,7 +1375,7 @@ impl<'a> MirLowerer<'a> {
                             block.instructions.push(MirInst::Load {
                                 dest: value,
                                 addr,
-                                ty: TypeId::I64,
+                                ty: merge_ty,
                             });
                             value
                         })?;

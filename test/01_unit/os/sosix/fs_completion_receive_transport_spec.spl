@@ -1,4 +1,29 @@
-"""Owned-copy syscall-133 completion receive transport contract."""
+"""
+## Purpose and audience
+Pins the SOSIX owned-copy syscall-133 completion receive transport:
+endpoint validation before EAGAIN classification, kernel envelope
+authentication (source, reply endpoint, request token), exactly-once
+publication, and the maximum-envelope capacity boundary. Audience: SOSIX
+filesystem async-I/O engineers.
+## Operator workflow
+Run this spec from the repo root with the Simple runner; scenarios drive
+the production sosix_fs_completion_receive_owned_result_v1 path against
+encoded IPC v1 completion fixtures over real transport state.
+## Compatibility and limitations
+Covers the owned-copy receive path only; no real kernel round-trip, no
+concurrent publishers. Envelope size-limit rejections are pinned at the
+exact capacity boundary and one byte beyond it.
+## Verification guidance and troubleshooting
+A red scenario names the transport invariant that regressed (endpoint
+validation, envelope authentication, publication semantics, or the
+capacity bound). Compare the failing expect against
+src/os/sosix/fs/completion_receive_transport.spl before editing oracles.
+"""
+# Lifecycle: doc/01_research/domain/sosix_parallel_qemu_refactor.md ;
+# doc/03_plan/os/misc/sosix_process_sharing.md ;
+# doc/04_architecture/sosix_parallel_qemu_refactor.md ;
+# doc/05_design/sosix_qemu_native_pass_bundle.md
+# @manual_section: completion-receive-transport
 
 use std.spec.*
 use os.sosix.core.operation.{SosixOperationSlot, sosix_operation_slot_new, sosix_operation_begin}
@@ -78,6 +103,9 @@ fn _receive_pending_at(fixture: Fixture, service: u64, reply: u64):
 describe "SOSIX owned completion receive transport":
     it "rejects invalid endpoint contracts before classifying EAGAIN":
         val fixture = _pending()
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): rejects-invalid-endpoint-contracts-before-classifying-eagain
+        step("rejects invalid endpoint contracts before classifying EAGAIN")
         val service_result = _receive_pending_at(fixture, 0, REPLY)
         expect(service_result.accepted).to_be(false)
         expect(service_result.pending).to_be(false)
@@ -89,16 +117,20 @@ describe "SOSIX owned completion receive transport":
 
     it "exposes EAGAIN as pending without publishing":
         step("Poll once while the owned reply endpoint is empty")
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): exposes-eagain-as-pending-without-publishing
         val fixture = _pending()
         val result = _receive(fixture, [], SOSIX_FS_COMPLETION_RECEIVE_EAGAIN)
         expect(result.accepted).to_be(false)
         expect(result.pending).to_be(true)
         expect(result.reason).to_equal("completion-pending")
         expect(result.pump.notify).to_be(false)
-        expect(result.pump.transport_state.notification_event).to_equal(0)
+        expect(result.pump.transport_state.notification_event).to_equal(0)  # oracle: 0 events means the pending poll published no notification
 
     it "authenticates kernel envelope facts and publishes exactly once":
         step("Receive one bounded completion from the expected service and reply endpoint")
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): authenticates-kernel-envelope-facts-and-publishes-exactly-once
         val fixture = _pending()
         val envelope = _envelope(
             SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0,
@@ -107,8 +139,8 @@ describe "SOSIX owned completion receive transport":
         expect(first.accepted).to_be(true)
         expect(first.pending).to_be(false)
         expect(first.pump.notify).to_be(true)
-        expect(first.pump.payload.len()).to_equal(3)
-        expect(first.pump.transport_state.notification_event).to_equal(1)
+        expect(first.pump.payload.len()).to_equal(3)  # oracle: the fixture completion carries the three-byte payload
+        expect(first.pump.transport_state.notification_event).to_equal(1)  # oracle: the first publish raises the notification event count to 1
 
         step("Replay the same owned envelope after terminal publication")
         val duplicate = sosix_fs_completion_receive_owned_result_v1(
@@ -117,10 +149,13 @@ describe "SOSIX owned completion receive transport":
         expect(duplicate.accepted).to_be(false)
         expect(duplicate.pump.notify).to_be(false)
         expect(duplicate.reason).to_equal("completion-already-published")
-        expect(duplicate.pump.transport_state.notification_event).to_equal(1)
+        expect(duplicate.pump.transport_state.notification_event).to_equal(1)  # oracle: a replayed envelope must not re-notify, so the count stays 1
 
     it "rejects spoofed source, swapped reply endpoint, and stale token":
         val fixture = _pending()
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): rejects-spoofed-source-swapped-reply-endpoint-and-stale-token
+        step("rejects spoofed source, swapped reply endpoint, and stale token")
         val payload = _payload(fixture, fixture.transport.active_request_token)
         val spoofed = _envelope(99, REPLY, SOSIX_FS_READ_AT, 1, 0, payload)
         val spoofed_result = _receive(fixture, spoofed, spoofed.len() as i64)
@@ -134,6 +169,9 @@ describe "SOSIX owned completion receive transport":
 
     it "rejects oversized, truncated, and capability-bearing envelopes":
         val fixture = _pending()
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): rejects-oversized-truncated-and-capability-bearing-envelopes
+        step("rejects oversized, truncated, and capability-bearing envelopes")
         val payload = _payload(fixture, fixture.transport.active_request_token)
         val valid = _envelope(SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0, payload)
         val truncated = _receive(fixture, valid, valid.len() as i64 + 1)
@@ -147,6 +185,9 @@ describe "SOSIX owned completion receive transport":
 
     it "accepts the exact maximum completion envelope and rejects one byte beyond it":
         val fixture = _pending_length(4096)
+        # @req REQ-SOSIX-FS-COMPLETION-RECEIVE-001
+        # @capture(statistics): accepts-the-exact-maximum-completion-envelope-and-rejects-one-byte-beyond-it
+        step("accepts the exact maximum completion envelope and rejects one byte beyond it")
         var bytes: [u8] = []
         var index: u64 = 0
         while index < 4096:
@@ -163,6 +204,6 @@ describe "SOSIX owned completion receive transport":
         expect(boundary.len() as u64).to_equal(SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1)
         val accepted = _receive(fixture, boundary, boundary.len() as i64)
         expect(accepted.accepted).to_be(true)
-        expect(accepted.pump.payload.len()).to_equal(4096)
+        expect(accepted.pump.payload.len()).to_equal(4096)  # oracle: the fixture 4096-byte payload transfers in full
         val beyond = _receive(fixture, boundary, boundary.len() as i64 + 1)
         expect(beyond.reason).to_equal("owned-envelope-size-mismatch")

@@ -455,6 +455,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_stdout_is_tty", terminal::rt_terminal_stdout_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
+    // See doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md —
+    // `rt_atexit_install` was the one extern in terminal.spl never bridged here;
+    // `rt_signal_install`/`rt_signal_check` (used by the very next line in
+    // `terminal_install_recovery`) were found missing during the same fix.
+    insert_simple!("rt_atexit_install", terminal::rt_atexit_install);
+    insert_simple!("rt_signal_install", terminal::rt_signal_install);
+    insert_simple!("rt_signal_check", terminal::rt_signal_check);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
@@ -1426,6 +1433,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_win32_dib_read_pixel", win32_hosted::rt_win32_dib_read_pixel);
     insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
+    insert_simple!("rt_secure_temp_dir", file_io::rt_secure_temp_dir);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
     insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
@@ -1436,6 +1444,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
+    insert_simple!("rt_file_publish_noreplace", file_io::rt_file_publish_noreplace);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);

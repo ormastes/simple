@@ -77,6 +77,7 @@ ${CC:-cc} -O2 -Wall -Wextra -Werror \
     -L"$ROOT/src/compiler_rust/target/release" -lsimple_runtime \
     -Wl,-rpath,"$ROOT/src/compiler_rust/target/release" $PLATFORM_LIBS \
     -o "$BUILD_DIR/bench"
+bench_rc=0
 if [ "$RECT_COUNT" -gt 0 ]; then
     PRIMITIVE_SPV="$BUILD_DIR/rect_filled.spv"
     if [ "$OPERATION" = "line" ]; then PRIMITIVE_SPV="$BUILD_DIR/line.spv"; fi
@@ -87,10 +88,26 @@ if [ "$RECT_COUNT" -gt 0 ]; then
     fi
     run_with_icd "$BUILD_DIR/bench" "$BUILD_DIR/clear.spv" \
         "$WIDTH" "$HEIGHT" "$SAMPLES" "$ACTIVE" \
-        "$PRIMITIVE_SPV" "$RECT_COUNT" | tee "$BUILD_DIR/receipt.env"
+        "$PRIMITIVE_SPV" "$RECT_COUNT" > "$BUILD_DIR/receipt.env" 2>&1 || bench_rc=$?
 else
     run_with_icd "$BUILD_DIR/bench" "$BUILD_DIR/clear.spv" \
-        "$WIDTH" "$HEIGHT" "$SAMPLES" "$ACTIVE" | tee "$BUILD_DIR/receipt.env"
+        "$WIDTH" "$HEIGHT" "$SAMPLES" "$ACTIVE" > "$BUILD_DIR/receipt.env" 2>&1 || bench_rc=$?
+fi
+cat "$BUILD_DIR/receipt.env"
+# The bench status is read DIRECTLY, never through the old `| tee` pipeline: a
+# pipeline's $? is tee's, always 0, so `set -e` never fired and a dead bench
+# fell through to `grep` on an empty receipt and exited 1 with NO verdict line.
+# Measured 2026-09-06: rt_vulkan_init returned 0 (unadvertised
+# VK_KHR_xlib_surface) and this gate reported nothing at all.
+if [ "$bench_rc" -ne 0 ]; then
+    echo "engine2d_vulkan_evidence_status=fail reason=bench-exit-$bench_rc"
+    echo "FAIL — bench exited $bench_rc; receipt has $(wc -l < "$BUILD_DIR/receipt.env") line(s)"
+    exit 1
+fi
+if [ ! -s "$BUILD_DIR/receipt.env" ]; then
+    echo "engine2d_vulkan_evidence_status=error reason=empty-receipt"
+    echo "ERROR — nothing was checked (bench produced an empty receipt)"
+    exit 2
 fi
 grep -q '^engine2d_vulkan_mismatch_count=0$' "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
@@ -178,3 +195,4 @@ EOF
     echo "engine2d_vulkan_feature_receipt=$BUILD_DIR/c-feature.receipt"
 fi
 echo "engine2d_vulkan_evidence_status=pass"
+echo "PASS — 4 receipt invariant(s) checked at ${WIDTH}x${HEIGHT}, 0 mismatches"

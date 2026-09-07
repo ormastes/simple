@@ -151,6 +151,89 @@ scan_wiring() {
     for _d in scripts .github src bin tools config; do
         [ -d "$_root/$_d" ] && echo "$_root/$_d" >> "$_wd/searchdirs"
     done
+    # 3a. A DEAD DISPATCH ARM IS NOT WIRING.
+    #
+    #     The push tier's single enforcement surface is the `push,` rows of
+    #     config/check/must_check_gates.sdn, each dispatched by an exact-match
+    #     `'<id>:<mode>:<command>'` case arm in run_manifest_push_gates
+    #     (scripts/check/check-push-must-pass.shs). The manifest key is the ONLY
+    #     thing that selects an arm, so an arm no key can select never executes.
+    #     Textually it is indistinguishable from a live one: it names the guard,
+    #     it names `run_push_gate`, it sits in a reached file -- and so it forged
+    #     a wiring edge, and this gate reported those guards WIRED. That is the
+    #     same false assurance one level up: the gate that verifies wiring was
+    #     satisfiable by wiring that cannot run. Found when a lane deleted four
+    #     unreachable arms as dead code and this gate went red with 3 NEW
+    #     unwired -- i.e. their only recognised wiring had been unreachable all
+    #     along. See doc/08_tracking/bug/guard_wiring_credits_dead_dispatch_arms_2026-09-07.md
+    #
+    #     Three ways an arm dies here, all detected:
+    #       no-manifest-row     no push row produces its key (this is also what a
+    #                           demoted row leaves behind: the row moves to
+    #                           tier=bootstrap, keeping its id without the `push-`
+    #                           prefix, and the push arm is left orphaned)
+    #       duplicate-shadowed  an identical pattern appears earlier in the case
+    #       after-catchall      it follows the `*)` arm, which matches everything
+    #
+    #     Conservative by construction, matching this scan's standing rule that a
+    #     parse gap must err toward NOT failing a build: an arm whose pattern is
+    #     not a single-quoted literal or a bare `*` (an alternation, a glob) is
+    #     treated as LIVE, and if either the dispatcher or the manifest is absent
+    #     nothing is excluded at all.
+    _manifest_file="$_root/config/check/must_check_gates.sdn"
+    _dispatcher="$_root/scripts/check/check-push-must-pass.shs"
+    : > "$_wd/deadarms"
+    : > "$_wd/deadsed"
+    if [ -f "$_dispatcher" ] && [ -f "$_manifest_file" ]; then
+        awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {
+            id = $1; mode = $4; cmd = $5
+            gsub(/^[ \t]+|[ \t]+$/, "", id); gsub(/[ \t]/, "", mode)
+            sub(/^[ \t]*"/, "", cmd); sub(/"[ \t]*$/, "", cmd)
+            print id ":" mode ":" cmd
+        }' "$_manifest_file" | sort -u > "$_wd/pushkeys"
+        # Q is passed in rather than written as \x27: this must also run under
+        # the BSD awk that ships on macOS, which does not honour \x escapes.
+        awk -v Q="'" -v KEYS="$_wd/pushkeys" '
+            BEGIN { while ((getline k < KEYS) > 0) key[k] = 1 }
+            /^run_manifest_push_gates\(\) \{$/ { infn = 1 }
+            infn && index($0, "case \"$_id:$_mode:$_command\" in") { incase = 1; next }
+            incase && /^[[:space:]]*esac[[:space:]]*$/ { incase = 0; infn = 0; next }
+            incase && inarm {
+                if ($0 ~ /;;[[:space:]]*$/) {
+                    inarm = 0
+                    if (reason != "") print start "\t" NR "\t" reason "\t" pat
+                }
+                next
+            }
+            incase {
+                line = $0
+                sub(/^[[:space:]]+/, "", line)
+                if (line !~ /\)$/) next
+                sub(/\)$/, "", line)
+                reason = ""
+                if (line == "*") { catchall = 1; pat = "*" }
+                else if (length(line) > 1 && substr(line, 1, 1) == Q &&
+                         substr(line, length(line), 1) == Q) {
+                    pat = substr(line, 2, length(line) - 2)
+                    if (catchall) reason = "after-catchall"
+                    else if (pat in seen) reason = "duplicate-shadowed"
+                    else if (!(pat in key)) reason = "no-manifest-row"
+                    seen[pat] = 1
+                } else next
+                start = NR
+                inarm = 1
+                if ($0 ~ /;;[[:space:]]*$/) {
+                    inarm = 0
+                    if (reason != "") print start "\t" NR "\t" reason "\t" pat
+                }
+                next
+            }' "$_dispatcher" > "$_wd/deadarms"
+        # Whole-span deletion, not just the pattern line: the guard's basename
+        # appears on the run_push_gate line inside the arm too, so excluding the
+        # pattern alone would leave the phantom edge standing.
+        awk -F'\t' '{print $1 "," $2 "d"}' "$_wd/deadarms" > "$_wd/deadsed"
+    fi
+
     : > "$_wd/hits"
     if [ -s "$_wd/guards" ] && [ -s "$_wd/searchdirs" ]; then
         # xargs -d is not portable; searchdirs are repo-relative and space-free.
@@ -169,9 +252,18 @@ scan_wiring() {
         # (.github is a dot-directory and rg honours .gitignore by default);
         # rg skips binaries like -I and lists names like -l.
         if command -v rg >/dev/null 2>&1; then
+            # rg is often a NATIVE binary (Windows/MSYS, and this is the only
+            # tool here that is): it rewrites an absolute POSIX argument like
+            # /tmp/x into C:/Users/.../Temp/x and emits '\' separators, so its
+            # output never string-equals the find-produced paths used as BFS
+            # edge keys -- every guard then looks orphaned (measured
+            # 2026-09-06: 0 reached, selftest red). Search RELATIVE dirs from
+            # inside $_root, then re-normalise separators and re-prefix. On
+            # Linux this is byte-identical to passing absolute dirs.
             # shellcheck disable=SC2046
-            rg -F -f "$_wd/guards" -l --no-ignore --hidden $(cat "$_wd/searchdirs") \
-                2>/dev/null > "$_wd/reffiles" || :
+            ( cd "$_root" && rg -F -f "$_wd/guards" -l --no-ignore --hidden \
+                $(sed "s#^$_root/##" "$_wd/searchdirs") 2>/dev/null ) |
+                tr '\\' '/' | sed "s#^#$_root/#" > "$_wd/reffiles" || :
         else
             # shellcheck disable=SC2046
             $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
@@ -190,14 +282,67 @@ scan_wiring() {
             # variable) so it cannot swallow genuine `sh script.shs`,
             # `. script.shs`, or `run_child ... "script.shs" ...` call sites,
             # which never start with that shape.
+            # Dead dispatch arms are cut out first, by line span, so the sed
+            # addresses still refer to the raw file (see step 3a).
+            if [ "${_f##*/}" = check-push-must-pass.shs ] && [ -s "$_wd/deadsed" ]; then
+                sed -f "$_wd/deadsed" "$_f" 2>/dev/null
+            else
+                cat "$_f" 2>/dev/null
+            fi |
             $GREP -v -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*_(report_note|note|report)="' \
-                "$_f" 2>/dev/null |
+                2>/dev/null |
                 _fixed_strings_only "$_wd/guards" |sort -u |
                 while IFS= read -r _b; do
                     printf '%s\t%s\n' "$_f" "$_b"
                 done
         done < "$_wd/reffiles" >> "$_wd/hits"
     fi
+
+    # 3b. MANIFEST-DRIVEN INVOCATION IS REAL WIRING, and the textual BFS above
+    #     cannot see it. config/check/must_check_gates.sdn rows whose tier is
+    #     `bootstrap` and whose mode is `automated` are executed VERBATIM by
+    #     check-bootstrap-must-pass.shs -- `run_automated_gate "$_command"` ->
+    #     `sh -c "$_gate_command"` (:270-272, reached from the row loop at :538)
+    #     -- and that runner is driven from CI by
+    #     .github/workflows/rust-bootstrap-multiplatform.yml (also play-tests.yml
+    #     and aot-lane-fences.yml) through scripts/bootstrap/bootstrap-from-
+    #     scratch.sh. The manifest is a DATA file and bootstrap-from-scratch.sh
+    #     lives outside the guard node set, so neither ever enters the frontier
+    #     (only guard basenames do) and every edge they carry was silently
+    #     discarded. Nine guards that a CI lane genuinely runs on every bootstrap
+    #     were therefore recorded as unwired debt.
+    #
+    #     ONLY mode=automated is credited. An `external-receipt` row is
+    #     VALIDATED, never executed (validate_external_gate_receipt, :513), so it
+    #     is not an invocation and the receipt-verifier guard those rows name
+    #     stays in the baseline. (Deliberately not spelled out here: this file is
+    #     itself reached, so writing a guard's basename in a COMMENT would forge
+    #     the very edge this gate exists to disbelieve. Measured -- naming it
+    #     wired 10 guards by accident.) Push-tier rows are not credited here
+    #     either: they are
+    #     dispatched by hardcoded arms in check-push-must-pass.shs, which the
+    #     textual scan already sees -- and see the dead-arm exclusion in 3a for
+    #     why "an arm exists" is not the same as "an arm runs".
+    #
+    #     The edge is keyed on the runner's own path, so it only fires once the
+    #     runner is itself reached. If the runner ever becomes unreachable these
+    #     edges stop firing and the guards become orphans -- the ratchet FAILs,
+    #     which is the safe direction for a gate.
+    _bootrunner="$_root/scripts/check/check-bootstrap-must-pass.shs"
+    _manifest_file="$_root/config/check/must_check_gates.sdn"
+    if [ -f "$_bootrunner" ] && [ -f "$_manifest_file" ]; then
+        awk -F, -v R="$_bootrunner" '
+            /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+                tier=$2; mode=$4; cmd=$5
+                gsub(/[ \t]/, "", tier); gsub(/[ \t]/, "", mode)
+                if (tier != "bootstrap" || mode != "automated") next
+                while (match(cmd, /[A-Za-z0-9_.-]+\.shs/)) {
+                    printf "%s\t%s\n", R, substr(cmd, RSTART, RLENGTH)
+                    cmd = substr(cmd, RSTART + RLENGTH)
+                }
+            }' "$_manifest_file" >> "$_wd/hits" 2>/dev/null || :
+    fi
+
     # A file never counts as invoking itself.
     awk -F'\t' '{n=$1; sub(/.*\//,"",n); if (n != $2) print}' "$_wd/hits" |
         sort -u > "$_wd/edges"
@@ -410,6 +555,89 @@ selftest() {
     _assert "baselined guard that no longer exists is stale" "st-gone.shs" \
         "$(printf 'st-gone.shs\n' | comm -23 - "$_w/guards" | tr '\n' ' ' | sed 's/ *$//')"
 
+    # MANIFEST-CREDIT fixtures, on their own tree so the counts asserted above
+    # stay stable. A guard named in a tier=bootstrap, mode=automated row of
+    # config/check/must_check_gates.sdn is EXECUTED by
+    # check-bootstrap-must-pass.shs and must be reached even though no shell
+    # script names it; a guard named only in an external-receipt row is
+    # VALIDATED, not executed, and must stay an orphan.
+    _tm=$(mktemp -d) || return 1
+    mkdir -p "$_tm/scripts/check" "$_tm/config/check" "$_tm/.github/workflows"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/check-bootstrap-must-pass.shs"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/st-boot.shs"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/st-ext.shs"
+    printf 'run: sh scripts/check/check-bootstrap-must-pass.shs\n' \
+        > "$_tm/.github/workflows/w.yml"
+    {
+        echo 'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|'
+        echo '    st-boot, bootstrap, false, automated, "sh scripts/check/st-boot.shs", -, -, "executed"'
+        echo '    st-ext, bootstrap, false, external-receipt, "sh scripts/check/st-ext.shs", -, -, "validated only"'
+    } > "$_tm/config/check/must_check_gates.sdn"
+    printf '# fixture\n' > "$_tm/optout.txt"
+    _wm=$(mktemp -d) || return 1
+    scan_wiring "$_tm" "$_tm/optout.txt" "$_wm"
+    _assert "manifest automated row wires its guard" yes \
+        "$($GREP -qx 'st-boot.shs' "$_wm/reached" && echo yes || echo no)"
+    _assert "manifest external-receipt row does NOT wire its guard" yes \
+        "$($GREP -qx 'st-ext.shs' "$_wm/orphans" && echo yes || echo no)"
+
+    # DEAD-ARM fixtures, again on their own tree. The dispatcher must really be
+    # named check-push-must-pass.shs, really contain run_manifest_push_gates and
+    # the $_id:$_mode:$_command case, and really be reached from a root -- a
+    # guard named only in a dead arm must be orphaned BECAUSE the arm is dead,
+    # not because the fixture forgot to wire the dispatcher.
+    _td=$(mktemp -d) || return 1
+    mkdir -p "$_td/scripts/check" "$_td/config/check" "$_td/.github/workflows"
+    for _g in st-live st-norow st-dup st-postcatch; do
+        printf '#!/bin/sh\n' > "$_td/scripts/check/$_g.shs"
+    done
+    printf 'run: sh scripts/check/check-push-must-pass.shs\n' \
+        > "$_td/.github/workflows/w.yml"
+    {
+        echo 'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|'
+        echo '    push-live, push, true, tree, "sh scripts/check/st-live.shs", -, -, "live"'
+        echo '    push-dup, push, true, tree, "sh scripts/check/st-dup.shs", -, -, "dispatched by the FIRST arm only"'
+    } > "$_td/config/check/must_check_gates.sdn"
+    {
+        echo 'run_manifest_push_gates() {'
+        echo '    case "$_id:$_mode:$_command" in'
+        echo "        'push-live:tree:sh scripts/check/st-live.shs')"
+        echo '            run_push_gate x y scripts/check/st-live.shs ;;'
+        echo "        'push-dup:tree:sh scripts/check/st-dup.shs')"
+        echo '            run_push_gate x y scripts/check/st-dup.shs ;;'
+        echo "        'push-norow:tree:sh scripts/check/st-norow.shs')"
+        echo '            run_push_gate x y scripts/check/st-norow.shs ;;'
+        echo "        'push-dup:tree:sh scripts/check/st-dup.shs')"
+        echo '            run_push_gate x y scripts/check/st-dup.shs ;;'
+        echo '        *)'
+        echo '            return 2 ;;'
+        echo "        'push-postcatch:tree:sh scripts/check/st-postcatch.shs')"
+        echo '            run_push_gate x y scripts/check/st-postcatch.shs ;;'
+        echo '    esac'
+        echo '}'
+    } > "$_td/scripts/check/check-push-must-pass.shs"
+    printf '# fixture\n' > "$_td/optout.txt"
+    _wdd=$(mktemp -d) || return 1
+    scan_wiring "$_td" "$_td/optout.txt" "$_wdd"
+    _assert "live dispatch arm still wires its guard" yes \
+        "$($GREP -qx 'st-live.shs' "$_wdd/reached" && echo yes || echo no)"
+    _assert "arm with no manifest row does NOT wire its guard" yes \
+        "$($GREP -qx 'st-norow.shs' "$_wdd/orphans" && echo yes || echo no)"
+    _assert "shadowed duplicate arm does not keep a guard wired on its own" yes \
+        "$($GREP -qx 'st-dup.shs' "$_wdd/reached" && echo yes || echo no)"
+    _assert "exactly one arm span is dropped for the duplicate" 1 \
+        "$(awk -F'\t' '$3=="duplicate-shadowed"' "$_wdd/deadarms" | wc -l | tr -d ' ')"
+    _assert "arm after the catch-all does NOT wire its guard" yes \
+        "$($GREP -qx 'st-postcatch.shs' "$_wdd/orphans" && echo yes || echo no)"
+    # Parse gap must err toward NOT failing: no manifest -> exclude nothing.
+    rm -f "$_td/config/check/must_check_gates.sdn"
+    _wdd2=$(mktemp -d) || return 1
+    scan_wiring "$_td" "$_td/optout.txt" "$_wdd2"
+    _assert "no manifest means no arm is judged dead" 0 \
+        "$(wc -l < "$_wdd2/deadarms" | tr -d ' ')"
+    _assert "no manifest leaves every named guard reached" yes \
+        "$($GREP -qx 'st-norow.shs' "$_wdd2/reached" && echo yes || echo no)"
+
     # Hook-shape fixtures exercise the exact canonical-copy exception. This is
     # intentionally inside the gate's selftest so future broad exemptions or a
     # basename-only check cannot silently accept a stale launcher again.
@@ -449,18 +677,139 @@ selftest() {
     _assert "untracked hook symlink rejected" 1 \
         "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
 
-    rm -rf "$_t" "$_w" "$_w2" "$_hw"
+    # --- --rev fixtures (2026-09-07) ------------------------------------
+    # These go through the REAL CLI, not scan_wiring directly, because the
+    # thing under test is the materialisation and the OPTOUT/BASELINE
+    # resolution around it. A fixture that only proved --rev does not crash
+    # would be worthless: the regression is a silently WRONG verdict.
+    #
+    # Two independent rot axes, injected by the one fixture:
+    #   axis 1 — the SCAN ROOT reverts to the working checkout. The checkout
+    #            carries an UNCOMMITTED guard that nothing invokes, so a
+    #            rotted scan root reports it as NEW unwired debt in a push
+    #            that does not contain it.
+    #   axis 2 — the BASELINE reverts to the working checkout. The checkout's
+    #            baseline names a guard that exists in neither tree, so a
+    #            rotted baseline read reports a stale-baseline failure.
+    # Either flips the asserted PASS.
+    #
+    # MIN_GUARDS is 300 and is deliberately NOT overridable, so the fixture
+    # generates 320 real guard files rather than opening a seam a production
+    # run could use to lower the vacuity bound.
+    _rt=$(mktemp -d) || return 1
+    if ! command -v git >/dev/null 2>&1; then
+        echo "SELFTEST FAILED: git unavailable, cannot verify the --rev committed-content path"
+        _fail=1
+    else
+        mkdir -p "$_rt/scripts/check" "$_rt/.github/workflows"
+        _i=1
+        while [ "$_i" -le 320 ]; do
+            printf '#!/bin/sh\n' > "$_rt/scripts/check/st-rev-$_i.shs"
+            _i=$((_i + 1))
+        done
+        printf 'run: sh scripts/check/st-rev-1.shs\n' > "$_rt/.github/workflows/w.yml"
+        {
+            printf '# fixture opt-out\n'
+            _i=2
+            while [ "$_i" -le 320 ]; do
+                printf 'st-rev-%s.shs  fixture filler, deliberately not a gate\n' "$_i"
+                _i=$((_i + 1))
+            done
+        } > "$_rt/scripts/check/guard_wiring_optout.txt"
+        printf '# fixture frozen unwired backlog (empty)\n' \
+            > "$_rt/scripts/check/guard_wiring_unwired_baseline.txt"
+        ( cd "$_rt" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+
+        # WORKING COPY ONLY, never committed. Three separate data inputs are
+        # dirtied so each can rot detectably on its own:
+        #   the SOURCES  (an uncommitted, uninvoked guard),
+        #   the BASELINE (a row naming a guard in neither tree),
+        #   the OPT-OUT  (st-rev-2's justification removed).
+        printf '#!/bin/sh\n' > "$_rt/scripts/check/st-rev-dirty.shs"
+        printf 'st-rev-ghost.shs\n' \
+            >> "$_rt/scripts/check/guard_wiring_unwired_baseline.txt"
+        $GREP -v '^st-rev-2\.shs' "$_rt/scripts/check/guard_wiring_optout.txt" \
+            > "$_rt/scripts/check/guard_wiring_optout.txt.new"
+        mv "$_rt/scripts/check/guard_wiring_optout.txt.new" \
+           "$_rt/scripts/check/guard_wiring_optout.txt"
+
+        # $0 may be relative; the children run with cwd inside the fixture.
+        _self="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+        _line() { printf '%s\n' "$2" | $GREP -m1 "$1" || :; }
+        _seen() { printf '%s\n' "$2" | $GREP -q "$1" && echo yes || echo no; }
+
+        _revout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" --rev HEAD 2>&1)
+        _revrc=$?
+        _assert "--rev exits 0 on the committed tree" 0 "$_revrc"
+        _assert "--rev enumerates only committed guards" "guard_total=320" \
+            "$(_line '^guard_total=' "$_revout")"
+        _assert "--rev sees no NEW unwired" "guard_unwired_new=0" \
+            "$(_line '^guard_unwired_new=' "$_revout")"
+        _assert "--rev does not read the working copy's baseline" no \
+            "$(_seen 'stale_baseline_missing=st-rev-ghost.shs' "$_revout")"
+
+        # The SAME tree scanned as a working tree must DISAGREE on BOTH axes,
+        # proving the two paths differ rather than both being blind.
+        _wtout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" 2>&1)
+        _wtrc=$?
+        _assert "working-tree scan exits 1 on the dirty tree" 1 "$_wtrc"
+        _assert "working-tree scan sees the uncommitted guard" yes \
+            "$(_seen 'unwired_guard=st-rev-dirty.shs' "$_wtout")"
+        _assert "working-tree scan reads the working copy's baseline" yes \
+            "$(_seen 'stale_baseline_missing=st-rev-ghost.shs' "$_wtout")"
+    fi
+
+    rm -rf "$_t" "$_w" "$_w2" "$_hw" "$_tm" "$_wm" "$_td" "$_wdd" "$_wdd2" "$_rt"
     if [ "$_fail" -ne 0 ]; then
         echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 20/20 fixtures correct"
+    echo "check-guard-wiring: selftest 36/36 fixtures correct"
     return 0
 }
 
-selftest || exit 2
-[ "${1:-}" = "--selftest-only" ] && exit 0
+# ---------------------------------------------------------------------------
+# Arguments.
+#
+# --rev <REV> scans the COMMITTED tree at REV instead of the working checkout
+# (2026-09-07). As a `tree`-mode push row this BLOCKING gate built its wiring
+# graph from whatever happened to be checked out, which under concurrent agent
+# load is not the commit being pushed: a guard another session had added but
+# not committed showed up as NEW unwired debt in YOUR push, and a guard your
+# commit orphaned did not. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# The split is deliberate and is the one place in this migration where a HALF
+# genuinely belongs to the host: the CONTENT scan (guard enumeration, roots,
+# edges, opt-out, baseline) is a property of the commit, while "is a hook
+# actually installed in this clone, and does it resolve to tracked current
+# source" is a property of THIS MACHINE and stays on the real repository root.
+# scan_wiring moves to the revision; scan_installed_hooks does not.
+# ---------------------------------------------------------------------------
+MODE=scan
+REV=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest-only) MODE=selftest-only; shift ;;
+        --generate-baseline) MODE=generate; shift ;;
+        --rev) [ $# -ge 2 ] || { echo "check-guard-wiring: ERROR — nothing was checked: --rev needs a value"; exit 2; }
+               REV="$2"; shift 2 ;;
+        *) echo "check-guard-wiring: ERROR — nothing was checked: unknown argument $1"; exit 2 ;;
+    esac
+done
+
+# The --rev fixture invokes this script recursively; re-running the selftest
+# there would recurse without end. The child exercises the real scan path,
+# which is the whole point of the fixture.
+if [ "${GUARD_WIRING_SELFTEST_CHILD:-0}" != 1 ]; then
+    selftest || exit 2
+fi
+[ "$MODE" = selftest-only ] && exit 0
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
 if [ -z "$ROOT" ]; then
@@ -512,7 +861,50 @@ case "$HERE_PHYS" in
         ;;
 esac
 
-OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
+WD=$(mktemp -d) || exit 2
+trap 'rm -rf "$WD"' EXIT
+
+# REPO_ROOT is this machine's clone and stays that way — the installed-hook
+# scan below is a property of the host, not of the pushed commit. SCAN_ROOT is
+# what the wiring graph is built from.
+REPO_ROOT="$ROOT"
+SCAN_ROOT="$ROOT"
+if [ -n "$REV" ]; then
+    if [ "$MODE" = generate ]; then
+        # It would write the baseline into the temp checkout and vanish with
+        # the trap: a silent no-op that looks like success.
+        echo "check-guard-wiring: ERROR — nothing was checked: --generate-baseline is incompatible with --rev"
+        exit 2
+    fi
+    if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$REV^{commit}" >/dev/null 2>&1; then
+        echo "check-guard-wiring: ERROR — nothing was checked: not a commit in $REPO_ROOT: $REV"
+        exit 2
+    fi
+    mkdir -p "$WD/rev"
+    # Exactly the trees scan_wiring reads: the guard directories, the roots
+    # (.github/workflows, scripts/hooks) and the searchdirs it greps for edges
+    # (scripts .github src bin tools config), minus the vendored trees named
+    # in CLAUDE.md's Owned-Code Scope. 312 MB / 1.2s with the exclusions
+    # against 2.0 GB / 19s without, and the exclusion was verified not to
+    # change the verdict. Separate tolerant invocations: `git archive` fails
+    # the WHOLE archive on a pathspec that matches nothing.
+    for _tree in scripts .github src bin tools config; do
+        ( cd "$REPO_ROOT" && git archive "$REV" -- "$_tree" \
+            ':(exclude,glob)src/compiler_rust/vendor/**' \
+            ':(exclude,glob)src/runtime/vendor/**' ) 2>/dev/null \
+          | tar -x -C "$WD/rev" 2>/dev/null || true
+    done
+    if [ ! -d "$WD/rev/scripts/check" ]; then
+        echo "check-guard-wiring: ERROR — nothing was checked: could not materialise $REV"
+        exit 2
+    fi
+    SCAN_ROOT="$WD/rev"
+fi
+
+# Resolved against SCAN_ROOT, not ROOT: judging committed content against the
+# working copy's opt-out or baseline is still a wrong-tree verdict. That is
+# the census's second rot axis; selftest fixture st-rev-* injects it.
+OPTOUT="$SCAN_ROOT/scripts/check/guard_wiring_optout.txt"
 # UNWIRED RATCHET (2026-08-23)
 # ----------------------------
 # This script sat permanently RED (414 unwired) for weeks, which is the worst of
@@ -533,11 +925,9 @@ OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
 # reported as a stale baseline and fails, so the file cannot silently keep
 # describing a tree that has moved on. --generate-baseline exists for reviewed
 # updates only; do not reach for it to turn a FAIL green.
-BASELINE="$ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
+BASELINE="$SCAN_ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
 
-WD=$(mktemp -d) || exit 2
-trap 'rm -rf "$WD"' EXIT
-scan_wiring "$ROOT" "$OPTOUT" "$WD"
+scan_wiring "$SCAN_ROOT" "$OPTOUT" "$WD"
 
 n_guards=$(wc -l < "$WD/guards" | tr -d ' ')
 if [ "$n_guards" -lt "$MIN_GUARDS" ]; then
@@ -562,7 +952,7 @@ if [ -f "$BASELINE" ]; then
     $GREP -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$BASELINE" 2>/dev/null |
         awk '{print $1}' | sort -u > "$WD/baseline" || :
 fi
-if [ "${1:-}" = --generate-baseline ]; then
+if [ "$MODE" = generate ]; then
     {
         echo "# Frozen backlog of guards that nothing invokes yet (NOT an opt-out:"
         echo "# an opt-out means 'deliberately not a gate'; a line here means"
@@ -594,6 +984,14 @@ echo "guard_orphaned=$n_orphan"
 echo "guard_optout_listed=$(wc -l < "$WD/optout" | tr -d ' ')"
 echo "guard_unwired_baselined=$n_baselined"
 echo "guard_unwired_new=$n_unjust_new"
+# Dead push-dispatch arms found in check-push-must-pass.shs and NOT counted
+# as wiring (step 3a). Printed so the number is visible rather than inferred:
+# a drop to 0 after arms are deleted is progress, a rise is new dead code.
+echo "dead_dispatch_arms=$(wc -l < "$WD/deadarms" | tr -d ' ')"
+while IFS="$(printf '\t')" read -r _dl_s _dl_e _dl_r _dl_p; do
+    [ -n "${_dl_s:-}" ] || continue
+    echo "dead_dispatch_arm=${_dl_r} lines ${_dl_s}-${_dl_e} ${_dl_p}"
+done < "$WD/deadarms"
 
 # ---------------------------------------------------------------------------
 # Installed-hook shape. Repository hooks must resolve to tracked current source.
@@ -615,9 +1013,13 @@ else
     case "$HOOKDIR" in
         /*) : ;;
         '') : ;;
-        *) HOOKDIR="$ROOT/$HOOKDIR" ;;
+        *) HOOKDIR="$REPO_ROOT/$HOOKDIR" ;;
     esac
-    scan_installed_hooks "$ROOT" "$HOOKDIR" "$WD" || {
+    # REPO_ROOT, never SCAN_ROOT: "is a hook installed in this clone, and does
+    # it resolve to tracked current source" is a property of THIS MACHINE. A
+    # materialised revision has no .git and no installed hooks, so pointing
+    # this half at it would report a clean install on every host.
+    scan_installed_hooks "$REPO_ROOT" "$HOOKDIR" "$WD" || {
         echo "check-guard-wiring: ERROR — hook scan could not resolve tracked sources."
         exit 2
     }

@@ -22,9 +22,46 @@
 #
 # @tag: mcp,testing,vacuous-green,meta
 
+"""
+## Purpose and audience
+This spec pins the vacuous-green bug CLASS across the MCP feature test
+trees: a print-only `fn main()` script can never fail, so its green exit
+proves nothing. Audience: maintainers of the MCP feature tests and reviewers
+of new test files landing under `test/03_system/feature/lib/mcp/` and
+`test/feature/lib/mcp/`.
+
+## Operator workflow
+Run the spec with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/lib/mcp/vacuous_print_only_test_detection_spec.spl`
+The scan walks both directories, reads every `*_test.spl` / `*_spec.spl`,
+and fails if any file carries zero oracle tokens.
+
+## Compatibility and limitations
+The scan is textual: a file whose only oracle token sits inside a string
+literal or a comment would pass the token census while still being vacuous;
+closing that gap needs a parser-grade scan and is out of scope here. Files
+in scanned directories that use none of the seven oracle tokens but are
+legitimately assertion-free (pure fixtures) would false-positive; none exist
+today.
+
+## Verification guidance and troubleshooting
+A failure of "finds no test file lacking any assertion" names the vacuous
+file through `bad` — add a real oracle to that file (or delete it if it
+tests nothing). If the non-empty-scan control fails, both scanned
+directories vanished or became unreadable; check the checkout before
+trusting any green.
+"""
+
+# Lifecycle: doc/01_research/app/mcp/mcp_feature_analysis_2026-02-05.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/app/mcp/mcp_performance_regression_enforcement.md ;
+# doc/05_design/app/mcp/mcpgdb.md
+
 use std.spec.step
 
 use app.io.mod (dir_entries, file_exists, file_read)
+
+# @manual_section: vacuous-green-class-guards
 
 val SCANNED_DIRS: [text] = [
     "test/03_system/feature/lib/mcp",
@@ -65,9 +102,10 @@ fn vacuous_files() -> [text]:
     bad
 
 describe "no vacuous print-only test files in the MCP feature trees":
-    # @manual scenario evidence
-
     it "scans a non-empty set of test files (guards against a vacuous scan)":
+        # @req REQ-MCP-VACUOUS-001
+        # @capture(statistics): the scanned-directory file counts retained as a checked total
+        step("Count the test files in both scanned MCP feature directories")
         # A scan that finds nothing may have scanned nothing. This control MUST
         # produce hits, otherwise the absence check below proves nothing.
         var total = 0
@@ -76,12 +114,18 @@ describe "no vacuous print-only test files in the MCP feature trees":
         expect(total).to_be_greater_than(0)
 
     it "detects that the oracle-token rule itself can fail":
+        # @req REQ-MCP-VACUOUS-002
+        # @capture(statistics): the predicate's positive and negative controls retained as checked booleans
+        step("Run the oracle-token predicate against a print-only body and an asserting body")
         # Positive control for the predicate: a print-only body has no oracle.
         val print_only = "fn main():\n    if ok:\n        print(\"ok\")\n    else:\n        print(\"fail\")\n"
-        expect(has_oracle(print_only)).to_equal(false)
-        val asserted = "describe \"x\":\n    it \"y\":\n        expect(1).to_equal(1)\n"
-        expect(has_oracle(asserted)).to_equal(true)
+        expect(has_oracle(print_only)).to_equal(false)  # oracle: a body whose only branches print must not satisfy any oracle token, or the class guard admits vacuous files
+        val asserted = "describe \"x\":\n    it \"y\":\n        assert_true(cond)\n"
+        expect(has_oracle(asserted)).to_equal(true)  # oracle: assert_true is one of the seven oracle tokens, so an asserting body must flip the predicate to true
 
     it "finds no test file lacking any assertion":
+        # @req REQ-MCP-VACUOUS-003
+        # @capture(statistics): the vacuous-file offender list retained as a checked empty set
+        step("Scan both MCP feature trees for files with zero oracle tokens")
         val bad = vacuous_files()
-        expect(bad.len()).to_equal(0)
+        expect(bad.len()).to_equal(0)  # oracle: zero offenders is the contract — every checked-in MCP feature test file carries a real oracle today

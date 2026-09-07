@@ -1,68 +1,134 @@
 # JTAG Unbind Script Tests — AC-3
-#
-# Verifies that the JTAG unbind/rebind script exists and targets the correct
-# USB interface. Hardware-gated execution tests emit BLOCKED.
+
+"""
+## Purpose and audience
+Executable contract for the FT4232H JTAG unbind/rebind helper used by the
+riscv64 FPGA bring-up lane. Audience: hardware bring-up engineers and the
+owners of the riscv64 FPGA sys_test gates, who must know that the helper
+exists, targets the correct USB interface, and that every hardware-gated
+step fails closed with a BLOCKED line instead of a false PASS when no board
+is attached.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/hardware/riscv64_fpga/jtag_unbind_spec.spl`.
+The scenarios read the shipped helper `scripts/fpga/jtag-ftdi-unbind.shs` and
+the preflight gate that emits the BLOCKED lines, then assert the contract
+tokens those artifacts must carry. No USB hardware is touched.
+## Compatibility and limitations
+All scenarios are artifact-read scenarios and run on any host with the
+repository checked out. Executing the unbind against real FT4232H hardware
+stays a manual AC-8 step; this spec verifies the fail-closed emission
+contract only, not the USB operation itself.
+## Verification guidance and troubleshooting
+A failure names the contract token that disappeared from the artifact:
+re-check the last commit that touched `scripts/fpga/jtag-ftdi-unbind.shs` or
+`scripts/check/check-riscv64-fpga-simpleos-preflight.shs`. The BLOCKED
+scenarios never require a connected board — they assert the exact
+fail-closed message text the preflight gate prints on a board-less host.
+"""
+# Lifecycle: doc/01_research/domain/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/03_plan/hardware/riscv/fpga_board_bringup_jtag_10min_plan_2026-07-24.md ;
+# doc/04_architecture/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/05_design/riscv32_riscv64_fpga_simpleos_production.md
+# @manual_section: JTAG unbind artifact contract
+
+use std.spec.step
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "JTAG Unbind Script - Existence (AC-3)":
-    # @manual scenario evidence
     it "jtag unbind script path is under scripts directory":
-        val prefix = "scripts/"
-        val name = "scripts/jtag-ftdi-unbind.shs"
-        expect(name).to_start_with(prefix)
-        expect(name).to_end_with(".shs")
+        # @req REQ-RISCV64-FPGA-JTAG-001
+        # @capture(bit_table): helper path and existence bit for the review record
+        step("Resolve the shipped unbind helper inside the repository tree")
+        val script_path = "scripts/fpga/jtag-ftdi-unbind.shs"
+        expect(script_path).to_start_with("scripts/")
+        expect(file_exists(script_path)).to_equal(true)
 
     it "jtag unbind script name contains jtag":
-        val name = "jtag-ftdi-unbind.shs"
-        expect(name).to_contain("jtag")
+        # @req REQ-RISCV64-FPGA-JTAG-001
+        # @capture(bit_table): token presence row for the helper name contract
+        step("Read the unbind helper artifact from disk")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("jtag")).to_equal(true)
 
     it "jtag unbind script name contains ftdi":
-        val name = "jtag-ftdi-unbind.shs"
-        expect(name).to_contain("ftdi")
+        # @req REQ-RISCV64-FPGA-JTAG-001
+        # @capture(bit_table): token presence row for the FTDI naming contract
+        step("Scan the helper text for the FTDI token")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("ftdi")).to_equal(true)
 
     it "jtag unbind script name contains unbind":
-        val name = "jtag-ftdi-unbind.shs"
-        expect(name).to_contain("unbind")
+        # @req REQ-RISCV64-FPGA-JTAG-001
+        # @capture(bit_table): token presence row for the unbind operation name
+        step("Scan the helper text for the unbind token")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("unbind")).to_equal(true)
 
 describe "JTAG Unbind Script - Interface Target (AC-3)":
     it "script targets USB interface 3-2:1.0 for JTAG channel A":
-        val interface_id = "3-2:1.0"
-        expect(interface_id).to_contain("3-2")
-        expect(interface_id).to_end_with("1.0")
+        # @req REQ-RISCV64-FPGA-JTAG-002
+        # @capture(bit_table): USB path token row for the channel-A contract
+        step("Read the helper and locate the pinned USB interface path")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("3-2:1.0")).to_equal(true)
 
     it "FTDI driver name is ftdi_sio":
-        val driver = "ftdi_sio"
-        expect(driver).to_equal("ftdi_sio")
+        # @req REQ-RISCV64-FPGA-JTAG-002
+        # @capture(bit_table): driver-name token row for the sysfs contract
+        step("Read the helper and locate the pinned kernel driver name")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("ftdi_sio")).to_equal(true)
 
     it "unbind sysfs path contains usb driver ftdi_sio":
-        val path = "/sys/bus/usb/drivers/ftdi_sio/unbind"
-        expect(path).to_contain("ftdi_sio")
-        expect(path).to_contain("unbind")
+        # @req REQ-RISCV64-FPGA-JTAG-002
+        # @capture(bit_table): unbind sysfs path row for the driver contract
+        step("Read the helper and locate the driver unbind sysfs path")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("/sys/bus/usb/drivers/ftdi_sio/unbind")).to_equal(true)
 
     it "rebind sysfs path contains usb driver ftdi_sio":
-        val path = "/sys/bus/usb/drivers/ftdi_sio/bind"
-        expect(path).to_contain("ftdi_sio")
-        expect(path).to_contain("bind")
+        # @req REQ-RISCV64-FPGA-JTAG-002
+        # @capture(bit_table): rebind sysfs path row for the driver contract
+        step("Read the helper and locate the driver rebind sysfs path")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("/sys/bus/usb/drivers/ftdi_sio/bind")).to_equal(true)
 
     it "unbind target interface index is 0 (JTAG/MPSSE channel A)":
-        val iface_index = 0
-        expect(iface_index).to_equal(0)
+        # @req REQ-RISCV64-FPGA-JTAG-002
+        # @capture(bit_table): interface-index row pinning channel A as the target
+        step("Read the helper and confirm interface 0 is the announced target")
+        val body = file_read("scripts/fpga/jtag-ftdi-unbind.shs").?
+        expect(body.contains("Interface 0")).to_equal(true)
+        expect(body.contains("JTAG MPSSE")).to_equal(true)
 
 describe "JTAG Unbind Script - BLOCKED Gates (AC-3, AC-8)":
     it "BLOCKED: JTAG unbind requires connected FT4232H device":
-        val blocked_line = "BLOCKED jtag_unbind: BLOCKED: JTAG unbind requires connected FT4232H device"
-        print blocked_line
-        expect(blocked_line).to_start_with("BLOCKED jtag_unbind:")
-        expect(blocked_line).to_contain("connected FT4232H device")
+        # @req REQ-RISCV64-FPGA-JTAG-003
+        # @capture(bit_table): BLOCKED emission row for the unbind gate
+        step("Read the preflight gate and locate the unbind BLOCKED emission")
+        val preflight = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(preflight.contains("jtag_unbind: BLOCKED: JTAG unbind requires connected FT4232H device")).to_equal(true)
 
     it "BLOCKED: ftdi_sio rebind requires connected FT4232H device":
-        val blocked_line = "BLOCKED ftdi_sio_rebind: no FT4232H USB device found (lsusb 0403:6011 absent)"
-        print blocked_line
-        expect(blocked_line).to_start_with("BLOCKED ftdi_sio_rebind:")
-        expect(blocked_line).to_contain("0403:6011")
+        # @req REQ-RISCV64-FPGA-JTAG-003
+        # @capture(bit_table): lsusb id row for the board-absent gate
+        step("Read the preflight gate and locate the board-absent lsusb id")
+        val preflight = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(preflight.contains("no FT4232H USB device found")).to_equal(true)
+        expect(preflight.contains("0403:6011")).to_equal(true)
 
     it "BLOCKED: openocd JTAG probe requires unbound ftdi_sio interface":
-        val blocked_line = "BLOCKED openocd_jtag_probe: requires unbound ftdi_sio interface before openocd probe"
-        print blocked_line
-        expect(blocked_line).to_start_with("BLOCKED openocd_jtag_probe:")
-        expect(blocked_line).to_contain("unbound ftdi_sio interface")
-        expect(blocked_line).to_contain("openocd")
+        # @req REQ-RISCV64-FPGA-JTAG-003
+        # @capture(bit_table): openocd/unbind wiring rows for the probe gate
+        step("Read the preflight gate and confirm the openocd-to-unbind wiring")
+        val preflight = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(preflight.contains("openocd")).to_equal(true)
+        expect(preflight.contains("jtag_unbind_cmd=sh")).to_equal(true)
+        # NOTE (product defect, not asserted here): preflight line 96 advertises
+        # `sh scripts/jtag-ftdi-unbind.shs` but the helper actually lives at
+        # `scripts/fpga/jtag-ftdi-unbind.shs`, so the advertised command fails
+        # from the repository root. The BLOCKED openocd_jtag_probe emission the
+        # original spec claimed does not exist in any shipped script either;
+        # this scenario pins the wiring that DOES exist until that gate lands.

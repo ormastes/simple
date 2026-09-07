@@ -1,0 +1,140 @@
+# codex-impl: complete, deterministic semantic read-set construction.
+
+use compiler.common.cache_contract.semantic_read_set_v1.{
+    SemanticEffectKindV1, SemanticReplayPolicyV1,
+    SemanticReadEntryV1, SemanticReadSetV1,
+}
+
+pub struct FrozenSemanticReadV1:
+    effect_kind: SemanticEffectKindV1
+    logical_name: text
+    provider_id: text
+    provider_manifest_digest: text
+    value_digest: text
+    replay_policy: SemanticReplayPolicyV1
+
+pub enum ExceptionalBodyKindV1:
+    GenericSpecialization
+    CrossModuleInline
+    ConstEvaluation
+    MacroExpansion
+    TraitImplementation
+    AopAdvice
+
+pub struct FrozenExceptionalBodyReadV1:
+    body_kind: ExceptionalBodyKindV1
+    stable_symbol_id: text
+    body_digest: text
+    provider_id: text
+    provider_manifest_digest: text
+    replay_policy: SemanticReplayPolicyV1
+
+fn _effect_rank_v1(kind: SemanticEffectKindV1) -> i64:
+    match kind:
+        case SemanticEffectKindV1.Source: 1
+        case SemanticEffectKindV1.GeneratedSource: 2
+        case SemanticEffectKindV1.MacroCtfeInput: 3
+        case SemanticEffectKindV1.EnvironmentFacade: 4
+        case SemanticEffectKindV1.ClockFacade: 5
+        case SemanticEffectKindV1.RandomnessFacade: 6
+        case SemanticEffectKindV1.NetworkFacade: 7
+        case SemanticEffectKindV1.ProcessFacade: 8
+        case SemanticEffectKindV1.Plugin: 9
+        case SemanticEffectKindV1.ToolchainComponent: 10
+
+fn _body_kind_name_v1(kind: ExceptionalBodyKindV1) -> text:
+    match kind:
+        case ExceptionalBodyKindV1.GenericSpecialization: "generic"
+        case ExceptionalBodyKindV1.CrossModuleInline: "inline"
+        case ExceptionalBodyKindV1.ConstEvaluation: "const"
+        case ExceptionalBodyKindV1.MacroExpansion: "macro"
+        case ExceptionalBodyKindV1.TraitImplementation: "trait_impl"
+        case ExceptionalBodyKindV1.AopAdvice: "aop_advice"
+
+fn _body_effect_kind_v1(kind: ExceptionalBodyKindV1) -> SemanticEffectKindV1:
+    match kind:
+        case ExceptionalBodyKindV1.ConstEvaluation: SemanticEffectKindV1.MacroCtfeInput
+        case ExceptionalBodyKindV1.MacroExpansion: SemanticEffectKindV1.MacroCtfeInput
+        case _: SemanticEffectKindV1.Source
+
+fn _read_identity_v1(entry: SemanticReadEntryV1) -> text:
+    "{_effect_rank_v1(entry.effect_kind)}\u0000{entry.logical_name}"
+
+fn _read_order_key_v1(entry: SemanticReadEntryV1) -> text:
+    "{_read_identity_v1(entry)}\u0000{entry.provider_manifest_digest}\u0000{entry.value_digest}"
+
+fn _provider_identity_valid_v1(entry: SemanticReadEntryV1) -> bool:
+    # Provider id and manifest are one identity: admitting only half permits a
+    # provider implementation/configuration change to alias an old read.
+    if (entry.provider_id == "") != (entry.provider_manifest_digest == ""):
+        return false
+    match entry.effect_kind:
+        case SemanticEffectKindV1.Source: true
+        case _: entry.provider_id != ""
+
+fn _insert_read_v1(entries: [SemanticReadEntryV1], value: SemanticReadEntryV1) -> Result<[SemanticReadEntryV1], text>:
+    if not _provider_identity_valid_v1(value):
+        return Err("semantic read provider identity is incomplete")
+    val identity = _read_identity_v1(value)
+    val key = _read_order_key_v1(value)
+    var inserted = false
+    var result: [SemanticReadEntryV1] = []
+    for current in entries:
+        val current_key = _read_order_key_v1(current)
+        if _read_identity_v1(current) == identity:
+            if (current.provider_id != value.provider_id or
+                    current.provider_manifest_digest != value.provider_manifest_digest or
+                    current.value_digest != value.value_digest or
+                    current.replay_policy != value.replay_policy):
+                return Err("semantic read identity has conflicting observations")
+            return Ok(entries)
+        if not inserted and key < current_key:
+            result.push(value)
+            inserted = true
+        result.push(current)
+    if not inserted:
+        result.push(value)
+    Ok(result)
+
+pub fn build_semantic_read_set_v1(
+    ordinary_reads: [FrozenSemanticReadV1],
+    exceptional_body_reads: [FrozenExceptionalBodyReadV1],
+) -> Result<SemanticReadSetV1, text>:
+    var entries: [SemanticReadEntryV1] = []
+    var uncacheable_reason = ""
+
+    for read in ordinary_reads:
+        if read.logical_name == "" or read.value_digest == "":
+            return Err("semantic read identity is incomplete")
+        val entry = SemanticReadEntryV1(
+            effect_kind: read.effect_kind,
+            logical_name: read.logical_name,
+            provider_id: read.provider_id,
+            provider_manifest_digest: read.provider_manifest_digest,
+            value_digest: read.value_digest,
+            replay_policy: read.replay_policy,
+        )
+        entries = _insert_read_v1(entries, entry)?
+        if read.replay_policy == SemanticReplayPolicyV1.UndeclaredUncacheable and uncacheable_reason == "":
+            uncacheable_reason = "undeclared semantic effect: {read.logical_name}"
+
+    for body in exceptional_body_reads:
+        if body.stable_symbol_id == "" or body.body_digest == "":
+            return Err("exceptional body read identity is incomplete")
+        val logical_name = "body:{_body_kind_name_v1(body.body_kind)}:{body.stable_symbol_id}"
+        val entry = SemanticReadEntryV1(
+            effect_kind: _body_effect_kind_v1(body.body_kind),
+            logical_name: logical_name,
+            provider_id: body.provider_id,
+            provider_manifest_digest: body.provider_manifest_digest,
+            value_digest: body.body_digest,
+            replay_policy: body.replay_policy,
+        )
+        entries = _insert_read_v1(entries, entry)?
+        if body.replay_policy == SemanticReplayPolicyV1.UndeclaredUncacheable and uncacheable_reason == "":
+            uncacheable_reason = "undeclared exceptional body: {logical_name}"
+
+    Ok(SemanticReadSetV1(entries: entries, uncacheable_reason: uncacheable_reason))
+
+export FrozenSemanticReadV1, ExceptionalBodyKindV1, FrozenExceptionalBodyReadV1
+export build_semantic_read_set_v1

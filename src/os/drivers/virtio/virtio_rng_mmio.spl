@@ -3,12 +3,7 @@
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read16, mmio_write16, mmio_read32, mmio_write32}
 use os.kernel.arch.riscv32.secure_entropy.{Rv32SecureEntropyCandidate, Rv32SecureEntropyProvenance, Rv32SecureEntropyReceipt, rv32_admit_secure_entropy_candidate}
 
-extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
-extern fn rt_dma_free(handle: i64)
-extern fn rt_dma_virt_of(handle: i64) -> i64
-extern fn rt_dma_phys_of(handle: i64) -> i64
-extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
-extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+use std.io.dma.{dma_raw_alloc, dma_raw_free, dma_raw_phys_of, dma_raw_sync_for_cpu, dma_raw_sync_for_device, dma_raw_virt_of}
 extern fn rt_memory_barrier()
 
 val VIRTIO_RNG_DEVICE_ID: u32 = 4u32
@@ -65,12 +60,12 @@ impl VirtioRngMmioOwner:
         var out = VirtioRngMmioOwner.unavailable()
         if base == 0u64 or mmio_read32(base + RNG_MAGIC) != 0x74726976u32 or mmio_read32(base + RNG_VERSION) != 2u32 or mmio_read32(base + RNG_DEVICE_ID) != VIRTIO_RNG_DEVICE_ID:
             return out
-        val handle = rt_dma_alloc(VIRTIO_RNG_DMA_BYTES, 2)
+        val handle = dma_raw_alloc(VIRTIO_RNG_DMA_BYTES, 2)
         if handle < 0: return out
-        val cpu = rt_dma_virt_of(handle).to_u64()
-        val device = rt_dma_phys_of(handle).to_u64()
+        val cpu = dma_raw_virt_of(handle).to_u64()
+        val device = dma_raw_phys_of(handle).to_u64()
         if cpu == 0u64 or device == 0u64 or (cpu & 15u64) != 0u64 or (device & 15u64) != 0u64:
-            rt_dma_free(handle)
+            dma_raw_free(handle)
             return out
         var clear_offset: u64 = 0u64
         while clear_offset < VIRTIO_RNG_DMA_BYTES.to_u64():
@@ -119,7 +114,7 @@ impl VirtioRngMmioOwner:
         mmio_write16(desc + 14u64, 0u16)
         mmio_write16(self.cpu + VIRTIO_RNG_AVAIL_OFFSET + 4u64, 0u16)
         self.avail_index = self.avail_index + 1u16
-        rt_dma_sync_for_device(self.dma_handle, 2)
+        dma_raw_sync_for_device(self.dma_handle, 2)
         mmio_write16(self.cpu + VIRTIO_RNG_AVAIL_OFFSET + 2u64, self.avail_index)
         rt_memory_barrier()
         mmio_write32(self.base + RNG_QUEUE_NOTIFY, 0u32)
@@ -133,7 +128,7 @@ impl VirtioRngMmioOwner:
             self._submit(received, VIRTIO_RNG_REQUIRED_BYTES - received)
             var polls: u32 = 0u32
             while polls < VIRTIO_RNG_MAX_POLLS_PER_COMPLETION:
-                rt_dma_sync_for_cpu(self.dma_handle, 2)
+                dma_raw_sync_for_cpu(self.dma_handle, 2)
                 if mmio_read16(self.cpu + VIRTIO_RNG_USED_OFFSET + 2u64) != self.used_index: break
                 polls = polls + 1u32
             if polls == VIRTIO_RNG_MAX_POLLS_PER_COMPLETION:
@@ -162,7 +157,7 @@ impl VirtioRngMmioOwner:
         if self.base != 0u64:
             mmio_write32(self.base + RNG_STATUS, 0u32)
             rt_memory_barrier()
-        if self.dma_handle >= 0: rt_dma_free(self.dma_handle)
+        if self.dma_handle >= 0: dma_raw_free(self.dma_handle)
         self.dma_handle = -1
         self.ready = false
         self.busy = false

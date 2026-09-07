@@ -1,39 +1,100 @@
+"""
+## Purpose and audience
+Pins the WEB launch evidence registry separation contract for the SimpleOS
+scheduler (os.kernel.scheduler.web_launch_evidence_registry_v1): a sealed,
+WEB-only, one-shot evidence owner; endpoint/policy derivation bound to the
+sealed image; revoke/retire hooks at the scheduler adoption and reap
+boundaries; and the ordering that revokes WEB publication before the
+server-data rejection tears down the address space. Written for scheduler
+and launch-authority owners reviewing the web launch path.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/kernel/scheduler/web_launch_evidence_registry_v1_spec.spl`
+and read the SPEC FILE VERDICT line; every scenario reads the shipped
+scheduler sources and binds each separation contract to a named check.
+## Compatibility and limitations
+These are source-contract scenarios over the shipped scheduler modules —
+they hold even when the WEB launch path cannot execute on the host. They do
+not exercise a live WEB server or a booted kernel.
+## Verification guidance and troubleshooting
+A failing named check names the exact contract token that left (or entered)
+the registry, adoption, or reaper source. Grep the cited module for the
+token in the failing check to locate the regression; the ordering scenario
+additionally reports index positions inside scheduler_executable_adoption.
+"""
+# Lifecycle: doc/01_research/os/scheduler/scheduler_process_isolation.md ;
+# doc/03_plan/os/simpleos/kernel_apps/simpleos_general_fs_exec_launch_plan.md ;
+# doc/04_architecture/os/simpleos/authenticated_server_launch_authority.md ;
+# doc/05_design/os/scheduler/scheduler_process_isolation.md
+# @manual_section: web-launch-evidence-registry
+
 use std.spec.{describe, it, expect}
 
 describe("WEB launch evidence registry separation"):
     it("is a distinct sealed WEB-only one-shot owner"):
-        val source = file_read("src/os/kernel/scheduler/web_launch_evidence_registry_v1.spl")
-        expect(source).to_contain("SIMPLEOS_WEB_EXECUTABLE_V1")
-        expect(source).to_contain("WebLaunchEndpointProjectionV1")
-        expect(source).to_contain("web_launch_evidence_consume_once_v1")
-        expect(source).to_contain("WebLaunchEvidenceStateV1.Consumed")
-        expect(source.contains("server_data_launch_grant_registry")).to_equal(false)
-        expect(source).to_contain("SIMPLEOS_WEB_HTTP_PORT_V1")
+        # @req REQ-SCHED-WEBLAUNCH-001
+        # @capture(protocol_json): the registry symbol table with seal, owner, and consume-once rows
+        step("Read the registry module and bind each WEB-only seal contract to a named check")
+        val registry_src = file_read("src/os/kernel/scheduler/web_launch_evidence_registry_v1.spl")
+        val pins_the_web_executable_seal = registry_src.contains("SIMPLEOS_WEB_EXECUTABLE_V1")
+        val projects_a_bound_endpoint_record = registry_src.contains("WebLaunchEndpointProjectionV1")
+        val consumes_evidence_exactly_once = registry_src.contains("web_launch_evidence_consume_once_v1")
+        val tracks_the_consumed_state = registry_src.contains("WebLaunchEvidenceStateV1.Consumed")
+        val borrows_no_server_data_grant_registry = registry_src.contains("server_data_launch_grant_registry") == false
+        val pins_the_web_http_port = registry_src.contains("SIMPLEOS_WEB_HTTP_PORT_V1")
+        expect(pins_the_web_executable_seal).to_equal(true)
+        expect(projects_a_bound_endpoint_record).to_equal(true)
+        expect(consumes_evidence_exactly_once).to_equal(true)
+        expect(tracks_the_consumed_state).to_equal(true)
+        expect(borrows_no_server_data_grant_registry).to_equal(true)
+        expect(pins_the_web_http_port).to_equal(true)
 
     it("derives endpoint and policy from the sealed image plus owner-bound pouch"):
-        val source = file_read("src/os/kernel/scheduler/web_launch_evidence_registry_v1.spl")
-        expect(source).to_contain("WebLaunchPublicationV1")
-        expect(source).to_contain("simpleos_web_configured_bind_ipv4_v1()")
-        expect(source).to_contain("web_launch_caps_exact_for_owner_v1")
-        expect(source).to_contain("policy_fingerprint")
-        expect(source.contains("pouch_digest")).to_equal(false)
+        # @req REQ-SCHED-WEBLAUNCH-002
+        # @capture(protocol_json): the endpoint projection and policy-fingerprint derivation rows
+        step("Bind the endpoint, capability, and policy derivation contracts to named checks")
+        val projection_src = file_read("src/os/kernel/scheduler/web_launch_evidence_registry_v1.spl")
+        val carries_the_publication_record = projection_src.contains("WebLaunchPublicationV1")
+        val reads_the_configured_bind_address = projection_src.contains("simpleos_web_configured_bind_ipv4_v1()")
+        val scopes_capabilities_to_the_owner = projection_src.contains("web_launch_caps_exact_for_owner_v1")
+        val fingerprints_the_served_policy = projection_src.contains("policy_fingerprint")
+        val keeps_no_pouch_digest_surface = projection_src.contains("pouch_digest") == false
+        expect(carries_the_publication_record).to_equal(true)
+        expect(reads_the_configured_bind_address).to_equal(true)
+        expect(scopes_capabilities_to_the_owner).to_equal(true)
+        expect(fingerprints_the_served_policy).to_equal(true)
+        expect(keeps_no_pouch_digest_surface).to_equal(true)
 
     it("has rollback and generation-bound reap retirement at scheduler boundaries"):
-        val adoption = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
-        val reaper = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
-        expect(adoption).to_contain("web_launch_evidence_revoke_v1(web_receipt.unwrap())")
-        expect(adoption).to_contain("before TCB publication")
-        expect(reaper).to_contain("web_launch_evidence_retire_reaped_v1")
-        expect(reaper).to_contain("task.lifecycle_generation, task.exec_generation")
+        # @req REQ-SCHED-WEBLAUNCH-003
+        # @capture(bit_table): the revoke and reap-retirement contract rows across adoption and reaper
+        step("Read the adoption and task-reaping modules and bind the revoke/retire hooks to named checks")
+        val adoption_src = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        val reaper_src = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
+        val adoption_revokes_the_web_receipt = adoption_src.contains("web_launch_evidence_revoke_v1(web_receipt.unwrap())")
+        val revocation_precedes_tcb_publication = adoption_src.contains("before TCB publication")
+        val reaper_retires_launch_evidence = reaper_src.contains("web_launch_evidence_retire_reaped_v1")
+        val retirement_is_generation_bound = reaper_src.contains("task.lifecycle_generation, task.exec_generation")
+        expect(adoption_revokes_the_web_receipt).to_equal(true)
+        expect(revocation_precedes_tcb_publication).to_equal(true)
+        expect(reaper_retires_launch_evidence).to_equal(true)
+        expect(retirement_is_generation_bound).to_equal(true)
 
     it("revokes WEB publication before the server-data rejection destroys its address space"):
-        val adoption = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
-        val server_rejection = adoption.index_of(
+        # @req REQ-SCHED-WEBLAUNCH-004
+        # @capture(statistics): the source-order indexes of rejection, revoke, and destroy
+        step("Locate the rejection, revocation, and teardown sites and assert their source order")
+        val adoption_src = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        val server_rejection = adoption_src.index_of(
             "if server_data_install.status != ServerDataLaunchGrantInstallStatusV1.NotApplicable")
-        val revoke = adoption.index_of(
+        val revoke = adoption_src.index_of(
             "if web_receipt != nil and not web_launch_evidence_revoke_v1(web_receipt.unwrap()):")
-        val destroy = adoption.index_of("destroy_user_address_space(space)", revoke)
-        expect(server_rejection).to_be_greater_than(0)
-        expect(revoke).to_be_greater_than(server_rejection)
-        expect(destroy).to_be_greater_than(revoke)
-        expect(adoption).to_contain("a serialization\n            # failure leaves the registry quarantined")
+        val destroy = adoption_src.index_of("destroy_user_address_space(space)", revoke)
+        val rejection_site_exists = server_rejection > 0
+        val revoke_precedes_server_rejection = revoke > server_rejection
+        val destroy_follows_the_revocation = destroy > revoke
+        val quarantine_comment_survives_serialization_failure = adoption_src.contains("a serialization\n            # failure leaves the registry quarantined")
+        expect(rejection_site_exists).to_equal(true)
+        expect(revoke_precedes_server_rejection).to_equal(true)
+        expect(destroy_follows_the_revocation).to_equal(true)
+        expect(quarantine_comment_survives_serialization_failure).to_equal(true)

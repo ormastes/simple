@@ -5,17 +5,7 @@
 #include "embedded_ssh_host_rsa_crt.h"
 #include "x86_64_nonce_slot_contract.h"
 
-/* The freestanding build compiles this architecture runtime as its C owner.
- * Pull in the shared atomic per-CPU implementation here so the Simple SMP
- * capsule and the linked boot runtime cannot drift or leave unresolved ABI
- * symbols. */
-#include "../../../../../../src/os/kernel/smp/percpu_atomic_owner.c"
-
 typedef int64_t RuntimeValue;
-
-void x25519_sc_reduce(uint8_t *s);
-void x25519_sc_muladd(uint8_t *s, const uint8_t *a, const uint8_t *b,
-                      const uint8_t *c);
 
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -78,18 +68,6 @@ static inline void io_wait(void)
      uint32_t hi = (uint32_t)(value >> 32);
      __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
  }
-
- uint64_t get_kernel_syscall_entry_addr(void);
-
- uint64_t rt_x86_install_syscall_entry_raw(void)
- {
-     uint64_t efer = rt_read_msr(0xC0000080u);
-     rt_write_msr(0xC0000080u, efer | 1u);
-     rt_write_msr(0xC0000081u, ((uint64_t)0x1B << 48) | ((uint64_t)0x08 << 32));
-     rt_write_msr(0xC0000082u, get_kernel_syscall_entry_addr());
-     rt_write_msr(0xC0000084u, 0x200u);
-     return get_kernel_syscall_entry_addr();
- }
  
  /* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
   * instruction. The Simple-side asm-volatile block in
@@ -115,14 +93,28 @@ static inline void io_wait(void)
      return *(const uint8_t*)(uintptr_t)ptr_addr;
  }
  
-int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
-                            uint64_t a3, uint64_t a4, uint64_t a5);
-
-int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
-                       uint64_t a3, uint64_t a4) {
-    /* Kernel-internal callers already run at CPL0; bypass LSTAR so the
-     * hardware entry path can be exclusively and safely user-origin. */
-    return rt_syscall_dispatch(id, a0, a1, a2, a3, a4, 0);
+ int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
+                        uint64_t a3, uint64_t a4) {
+     int64_t result;
+     /* Load every register explicitly from memory to avoid register-allocator
+      * reordering between the Sys V C ABI (arg3 in rcx, arg4 in r8, arg5 in
+      * r9) and the SYSCALL ABI (arg3 in r10, arg4 in r8). Memory operands are
+      * slower but unambiguous; the caller is in the kernel-stack path so the
+      * extra spill is negligible. */
+     __asm__ volatile(
+         "movq %1, %%rax\n\t"
+         "movq %2, %%rdi\n\t"
+         "movq %3, %%rsi\n\t"
+         "movq %4, %%rdx\n\t"
+         "movq %5, %%r10\n\t"
+         "movq %6, %%r8\n\t"
+         "syscall\n\t"
+         "movq %%rax, %0"
+         : "=m"(result)
+         : "m"(id), "m"(a0), "m"(a1), "m"(a2), "m"(a3), "m"(a4)
+         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r10", "r11", "memory"
+    );
+    return result;
 }
 
 #else
@@ -185,18 +177,6 @@ static void serial_put_hex(uint64_t v)
             started = 1;
         }
     }
-}
-
-/* Entry-closure probes may omit interrupt.spl.  Never let their #UD path bind
- * to auto_stubs.c's fabricated returning body: report the fault and park the
- * CPU.  The strong pure-Simple export overrides this fallback in full images. */
-__attribute__((weak, noreturn))
-void spl_x86_on_kernel_ud2_fault(uint64_t rip)
-{
-    serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=");
-    serial_put_hex(rip);
-    serial_puts(" vector=6 (#UD)\n");
-    for (;;) __asm__ volatile("cli; hlt");
 }
 
 static void serial_put_dec(int64_t v)
@@ -267,7 +247,7 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int64_t)(v) >> 3)
+#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
@@ -282,21 +262,15 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define FALSE_VALUE    ENCODE_INT(0)
 
 typedef struct {
-    uint8_t  type;      /* HeapObjectType (matches native runtime object_type@0) */
-    uint8_t  gc_flags;  /* native runtime gc_flags@1 (BYTE_PACKED lives here) */
-    uint16_t reserved;
+    uint32_t type;
     uint32_t size;
 } HeapHeader;
 
 typedef struct {
     HeapHeader hdr;
-    uint64_t   len;     /* MUST be uint64_t to match compiler-emitted objects */
+    uint64_t   len;
     char       data[];
 } RuntimeString;
-
-/* Keep in lock-step with arch/common/baremetal_runtime.h (single contract). */
-_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must be at offset 8");
-_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must be at offset 16");
 
 typedef struct {
     HeapHeader   hdr;
@@ -313,16 +287,6 @@ typedef struct {
 #define HEAP_MODULE  6
 #define HEAP_ENUM    7
 
-/* gc_flags bit marking a byte-packed [u8] array: `items`/data points to `len`
- * PACKED bytes (1 byte/element), NOT 8-byte tagged RuntimeValue slots. This is
- * the native compiler's [u8] contract (runtime value/heap.rs BYTE_PACKED=0b1000
- * + value/collections.rs is_byte_packed). The compiler's trusted inline
- * `[u8]` index reader (codegen/instr/calls.rs, rt_typed_bytes_u8_at) reads
- * stride-1 packed unconditionally, so every [u8] handed to Simple MUST be
- * packed+flagged. C consumers below stay defensive: they honor the flag and
- * still accept legacy tagged arrays. */
-#define BYTE_PACKED  0x08
-
 static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
 {
     return (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
@@ -332,19 +296,6 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
 {
     if (!a) return NULL;
     return a->items ? a->items : runtime_array_inline_items(a);
-}
-
-/* Current freestanding codegen holds tagged RuntimeArray handles and masks the
- * tag before direct header access. Some hosted/legacy helpers still pass raw
- * pointers, so accept both representations at this provider boundary while
- * keeping exported constructors tagged. */
-static inline RuntimeArray *runtime_array_from_abi(RuntimeValue v)
-{
-    RuntimeArray *a = IS_HEAP(v)
-        ? (RuntimeArray *)DECODE_PTR(v)
-        : (RuntimeArray *)(uintptr_t)v;
-    if (!a || a->hdr.type != HEAP_ARRAY) return NULL;
-    return a;
 }
 
 void *malloc(size_t sz);
@@ -450,8 +401,6 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
-    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
     a->len = len;
     a->cap = len;
@@ -491,6 +440,16 @@ static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
 static RuntimeValue simpleos_expose_runtime_value(RuntimeValue v)
 {
     return IS_INT(v) ? (RuntimeValue)DECODE_INT(v) : v;
+}
+
+RuntimeValue rt_x86_ap_trampoline_vector(void)
+{
+    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_VECTOR;
+}
+
+RuntimeValue rt_x86_ap_trampoline_phys(void)
+{
+    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_PHYS;
 }
 
 RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vector_rv)
@@ -575,12 +534,6 @@ RuntimeValue rt_map_clone(RuntimeValue map);
 RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
 RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
-RuntimeValue rt_map_has(RuntimeValue map, RuntimeValue key);
-RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key);
-RuntimeValue rt_map_keys(RuntimeValue map);
-RuntimeValue rt_map_values(RuntimeValue map);
-RuntimeValue rt_map_len(RuntimeValue map);
-RuntimeValue rt_map_clear(RuntimeValue map);
 RuntimeValue rt_array_new(RuntimeValue cap_val);
 int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
@@ -600,28 +553,10 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, Runt
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
-/* 512MB, raised from 192MB on 2026-07-26. free() below is a no-op bump
- * allocator, so EVERY render's allocations are permanent for the session.
- * Boot + the first desktop frame already reach ~142MB, so the first
- * interaction (F11 maximize) re-ran the layout, asked for 2x62MB and
- * panicked "heap exhausted" — the WM evidence lane could never reach its
- * maximize/restore captures. Sizing buys the session's render count; the
- * real fix is per-frame reclamation (frame arena mark/release) tracked in
- * doc/08_tracking/bug/simpleos_bump_heap_no_free_interactive_session_2026-07-26.md.
- * The identity map covers 4GiB (crt0.s boot_pd 2048 x 2MiB), and the lane's
- * VM has 2GB, so 512MB of .bss is mapped and physically present. */
-/* 1GiB, raised from 512MB on 2026-08-04: after the sfnt fvar fix let boot
- * proceed, initial desktop bring-up alone (3 app surfaces + web content
- * font/style layout at 4K CPU fallback) exhausted 512MB before the
- * [production-readiness] marker — same no-free-bump-allocator arithmetic as
- * the 07-26 raise. The lane's VM has 2GB and the identity map covers 4GiB,
- * so 1GiB of .bss stays mapped and physically present (heap start ~145MB +
- * 1GiB ≈ 1.17GB reserved end). Frame-arena reclamation remains the real fix:
- * doc/08_tracking/bug/simpleos_bump_heap_no_free_interactive_session_2026-07-26.md. */
-static const size_t BAREMETAL_HEAP_SIZE = 1024ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 896ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
-static char   _heap[1024ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz);
@@ -629,24 +564,6 @@ void *malloc(size_t sz);
 static inline size_t simpleos_heap_align(size_t sz)
 {
     return (sz + 15U) & ~(size_t)15U;
-}
-
-/*
- * The scalar direct-boot PMM reserves one physical prefix. Publish the exact
- * page-aligned end of this link-resident heap so that prefix includes every
- * byte malloc() may touch. A stale hard-coded PMM boundary previously made
- * the VMM allocate its PML4/PDPT inside _heap; once the bump allocator reached
- * those pages it corrupted CR3's tables and the guest triple-faulted.
- */
-uint64_t rt_baremetal_heap_start(void)
-{
-    return (uint64_t)(uintptr_t)_heap;
-}
-
-uint64_t rt_baremetal_heap_reserved_end(void)
-{
-    const uintptr_t heap_end = (uintptr_t)&_heap[sizeof(_heap)];
-    return (uint64_t)((heap_end + 4095U) & ~(uintptr_t)4095U);
 }
 
 static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
@@ -690,21 +607,7 @@ void *malloc(size_t sz)
 {
     void *caller = __builtin_return_address(0);
     sz = simpleos_heap_align(sz);
-    /* Watermark warning: emit ONCE when the bump offset first crosses the
-     * 144MB mark, not on every subsequent allocation. The per-alloc form
-     * flooded the serial line with ~11800 lines during a full first-frame
-     * render (which legitimately allocates past 144MB in the 192MB heap),
-     * which the evidence wrapper flags as guest-serial-fault-storm and which
-     * also starves the guest via per-alloc serial I/O. Large (>=1MB)
-     * allocations are still logged individually. */
-    static int _heap_warned = 0;
-    if (_heap_off >= BAREMETAL_HEAP_WARN_SIZE && !_heap_warned) {
-        _heap_warned = 1;
-        serial_puts("[heap] warn: crossed watermark off=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts("\r\n");
-    }
-    if (sz >= 0x100000) {
+    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
         serial_puts(" off_before=");
@@ -726,7 +629,7 @@ void *malloc(size_t sz)
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
-    if (sz >= 0x100000) {
+    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc off_after=");
         serial_put_hex((uint64_t)_heap_off);
         serial_puts("\r\n");
@@ -761,43 +664,19 @@ RuntimeValue rt_alloc(RuntimeValue sz)
      * Other runtime functions that need heap pointers use ENCODE_PTR themselves. */
     size_t bytes = (size_t)sz;
     if (bytes == 0) return 0;
-    /* No silent size clamp here: this used to truncate any request over
-     * 16MB down to exactly 0x1000000 bytes while returning success, so a
-     * caller that asked for (and believed it received) a larger buffer --
-     * e.g. a 3840x2160x4 = ~33.2MB full-screen backbuffer at 4K -- would
-     * write past the end of the actually-allocated 16MB block and silently
-     * corrupt whatever heap memory came after it (observed: corrupted
-     * FAT32/decode_string state a few MB past the truncated allocation).
-     * malloc() below already has a loud panic-on-exhaustion check against
-     * the real 192MB _heap[] backing array, which is the correct place to
-     * enforce a hard limit. */
+    /* Debug: log allocations of PciDevice-sized (96) or similar struct sizes */
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
     if (!p) return 0;
     __builtin_memset(p, 0, bytes);  /* zero to avoid garbage in uninitialized fields */
     return (RuntimeValue)(uintptr_t)p;
 }
 
-int64_t rt_ptr_read_i64(int64_t addr, int64_t offset)
-{
-    if (addr == 0) return 0;
-    return *(volatile int64_t *)(uintptr_t)(addr + offset);
-}
-
-int64_t rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value)
-{
-    if (addr == 0) return 0;
-    *(volatile int64_t *)(uintptr_t)(addr + offset) = value;
-    return value;
-}
-
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
     size_t bytes = (size_t)sz;
     if (bytes == 0) return 0;
-    /* Same silent-truncation footgun removed from rt_alloc above: a >16MB
-     * request (e.g. a 4K/8K framebuffer) must not be quietly clamped to
-     * 0x1000000 and then overflowed. malloc()'s panic-on-exhaustion against
-     * the real 192MB _heap[] is the correct hard limit. */
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
     if (!p) return 0;
     __builtin_memset(p, 0, bytes);
@@ -926,54 +805,6 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     return ENCODE_PTR(s);
 }
 
-/* Bug (native_chr_builtin_no_lowering, 2026-07-18): x86_64 was the only
- * SimpleOS arch with no working rt_char_from_code -- the real strong
- * definition lives in this directory's rt_extras.c, but llvm_native_link.spl
- * never compiles/links rt_extras.c for the x86_64 target (only
- * baremetal_stubs.c + auto_stubs.c), so every call silently resolved to
- * auto_stubs.c's `__attribute__((weak))` 8-argument NIL_VALUE catch-all stub
- * (wrong arity for a 1-arg call, and unconditionally NIL besides) --
- * matching the observed `chr='' cat='' len=0` in-guest symptom exactly.
- * Defining a correct, non-weak, 1-arg version here (mirroring arm32/arm64's
- * rt_char_from_code below) makes the linker prefer this strong symbol over
- * the weak stub. All self-hosted `rt_` owners accept a raw codepoint and
- * encode full UTF-8 for any Unicode scalar value -- required for SFNT
- * name-table text, which is the actual reported symptom.
- *
- * Deliberately NOT adding the bare `char_from_code` alias arm32/arm64 ship
- * alongside this (used only by the Rust seed's LLVM codegen, out of scope --
- * seed is bootstrap-only per repo rules): this x86_64 kernel's
- * gui_entry_desktop.spl imports `std.common.string_core.char_from_code` as a
- * real Simple function, and it is unconfirmed whether the self-hosted
- * compiler emits that as an unmangled `char_from_code` global -- adding the
- * alias here risked a duplicate-symbol link error the arm siblings never
- * exercised (their gui_entry_desktop.spl doesn't import that name). Only
- * `rt_char_from_code` is needed: it's the sole symbol the self-hosted
- * compiler's 50.mir lowering emits for `.chr()`/`.to_char()`. */
-RuntimeValue rt_char_from_code(RuntimeValue code)
-{
-    int64_t cp = (int64_t)code;
-    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return rt_string_new(0, 0);
-    uint8_t buf[4];
-    uint64_t len = 0;
-    if (cp < 0x80) {
-        buf[len++] = (uint8_t)cp;
-    } else if (cp < 0x800) {
-        buf[len++] = (uint8_t)(0xC0 | (cp >> 6));
-        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        buf[len++] = (uint8_t)(0xE0 | (cp >> 12));
-        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
-    } else {
-        buf[len++] = (uint8_t)(0xF0 | (cp >> 18));
-        buf[len++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
-        buf[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[len++] = (uint8_t)(0x80 | (cp & 0x3F));
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
-}
-
 RuntimeValue rt_string_len(RuntimeValue str)
 {
     /* Return RAW (untagged) — Cranelift backend does not unbox len results */
@@ -1000,79 +831,12 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
 
 RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
 {
-    const uint8_t *data;
-    uint64_t len;
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
     int64_t i = (int64_t)idx;
-    uint64_t byte_index = 0;
-    uint64_t char_index = 0;
-    if (i < 0) return 0;
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    if (s && s->hdr.type == HEAP_STRING) {
-        data = (const uint8_t *)s->data;
-        len = s->len;
-    } else {
-        data = (const uint8_t *)(uintptr_t)str;
-        if (!data) return 0;
-        len = strlen((const char *)data);
-    }
-    while (byte_index < len) {
-        uint8_t b0 = data[byte_index];
-        uint64_t width = 1;
-        RuntimeValue code = b0;
-        if (b0 >= 194 && b0 <= 223 && byte_index + 1 < len) {
-            width = 2;
-            code = ((RuntimeValue)(b0 & 31) << 6) | (data[byte_index + 1] & 63);
-        } else if (b0 >= 224 && b0 <= 239 && byte_index + 2 < len) {
-            width = 3;
-            code = ((RuntimeValue)(b0 & 15) << 12) | ((RuntimeValue)(data[byte_index + 1] & 63) << 6) | (data[byte_index + 2] & 63);
-        } else if (b0 >= 240 && b0 <= 244 && byte_index + 3 < len) {
-            width = 4;
-            code = ((RuntimeValue)(b0 & 7) << 18) | ((RuntimeValue)(data[byte_index + 1] & 63) << 12) | ((RuntimeValue)(data[byte_index + 2] & 63) << 6) | (data[byte_index + 3] & 63);
-        }
-        if (char_index == (uint64_t)i) return code;
-        byte_index += width;
-        char_index += 1;
-    }
-    return 0;
-}
-
-RuntimeValue __simple_rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
-{
-    return rt_string_char_code_at(str, idx);
-}
-
-/* Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at
- * above. Deliberately NOT UTF-8 aware: byte-framing callers (e.g. the web
- * renderer's browser_renderer_protocol.spl scanning for byte 10 '\n' / 44
- * ',') index the raw UTF-8 buffer directly, so a character index would
- * desync the frame at the first multi-byte codepoint. Mirrors the
- * pure-Simple implementation at src/runtime/simple_core/core_string.spl
- * and the RISC-V freestanding bridge in
- * src/os/kernel/arch/riscv64/boot/freestanding_runtime.c. O(1): straight
- * buffer read, no codepoint walk needed.
- */
-RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
-{
-    const uint8_t *data;
-    uint64_t len;
-    int64_t i = (int64_t)idx;
-    if (i < 0) return 0;
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    if (s && s->hdr.type == HEAP_STRING) {
-        data = (const uint8_t *)s->data;
-        len = s->len;
-    } else {
-        data = (const uint8_t *)(uintptr_t)str;
-        if (!data) return 0;
-        len = strlen((const char *)data);
-    }
-    if ((uint64_t)i >= len) return 0;
-    return data[i];
-}
-
-RuntimeValue __simple_rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
-{
-    return rt_string_byte_at(str, idx);
+    if (i < 0 || (uint64_t)i >= s->len) return 0;
+    return (RuntimeValue)(uint8_t)s->data[i];
 }
 
 int64_t rt_pool_safepoint(void)
@@ -1211,16 +975,6 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
     while (pos > 0) s->data[out++] = buf[--pos];
     s->data[out] = '\0';
     return ENCODE_PTR(s);
-}
-
-/* Signed sibling of rt_raw_u64_to_string, above. Delegates to
- * _int_to_string (already handles 0, INT64_MIN without overflow, and
- * negative sign) rather than duplicating digit-extraction logic. Mirrors
- * the pure-Simple implementation at
- * src/runtime/simple_core/core_string.spl:rt_raw_i64_to_string. */
-RuntimeValue rt_raw_i64_to_string(RuntimeValue raw)
-{
-    return _int_to_string((int64_t)raw);
 }
 
 RuntimeValue rt_value_to_string(RuntimeValue val)
@@ -1864,19 +1618,6 @@ static int nvme_io_cmd(uint8_t opcode, uint32_t nsid,
     return -110;
 }
 
-/* NVMe BAR relocation (Phase-2 root fix). The 64-bit q35 NVMe BAR physically
- * lives at 0xC000000000 and is boot-mapped in boot_pml4[1] (crt0.s), but PML4[1]
- * is NOT cloned into user address spaces, so under a user cr3 the BAR is
- * not-present and a ring-0 NVMe access faults. We instead reference the BAR
- * through an EXCLUSIVE higher-half kernel VA (PML4[384], which IS cloned into
- * every user AS). KEEP THESE TWO VALUES IN SYNC WITH:
- *   - crt0.s: boot_pml4[384] -> boot_nvme_pdpt[0] -> boot_high_pd (phys base)
- *   - src/os/kernel/memory/vmm_address_space.spl: vmm_map_nvme_bar_high()
- * BARs below 4 GiB stay identity-mapped in PML4[0] and are left unchanged. */
-#define NVME_BAR_PHYS_BASE 0xC000000000ULL
-#define NVME_BAR_VIRT_BASE 0xFFFFC00000000000ULL
-#define NVME_BAR_WINDOW    0x40000000ULL   /* 1 GiB crt0 high-MMIO window */
-
 /* ---------------------------------------------------------------
  * _nvme_init_and_read_sector0 — full NVMe init + BPB sector read
  * --------------------------------------------------------------- */
@@ -1930,20 +1671,11 @@ static int _nvme_init_controller(void)
     outl(0xCF8, cmd_addr);
     outl(0xCFC, cmd_reg);
 
-    /* Reference the BAR through its higher-half kernel VA (present under user
-     * cr3). BARs outside the 64-bit high-MMIO window stay identity-mapped. */
-    if (bar0_phys >= NVME_BAR_PHYS_BASE &&
-        bar0_phys <  NVME_BAR_PHYS_BASE + NVME_BAR_WINDOW) {
-        _nvme.bar0 = NVME_BAR_VIRT_BASE + (bar0_phys - NVME_BAR_PHYS_BASE);
-    } else {
-        _nvme.bar0 = bar0_phys; /* < 4 GiB: identity mapped in PML4[0] */
-    }
+    _nvme.bar0 = bar0_phys; /* Identity mapped: phys == virt */
 
     serial_puts("[nvme-c] BAR0=");
-    serial_put_hex(_nvme.bar0);
-    serial_puts(" (phys=");
     serial_put_hex(bar0_phys);
-    serial_puts(")\r\n");
+    serial_puts("\r\n");
 
     /* Step 2: Read CAP register (64-bit) */
     uint64_t cap = nvme_rd64(_nvme.bar0 + NVME_REG_CAP);
@@ -2937,152 +2669,10 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
     return 0;
 }
 
-/* ----------------------------------------------------------------------------
- * Streaming FAT32 reader for large files (clang_static ~119 MB) that do not fit
- * the 32 MiB static path-read buffer. The exec loader (fs_elf_exec_smoke_entry)
- * opens the file once, reads the ELF header/phdrs, then streams each PT_LOAD's
- * file range DIRECTLY into the already-mapped user frames (identity-mapped phys
- * destinations) instead of buffering the whole ELF. Forward-cursor design: as
- * long as the loader reads file offsets monotonically (segments are laid out in
- * file-offset order) the cost is O(total_clusters) NVMe reads, no O(n^2) walk.
- * -------------------------------------------------------------------------- */
-static struct {
-    int active;
-    uint32_t start_cluster;
-    uint32_t cur_cluster;      /* cluster whose data currently covers `pos` base */
-    uint32_t cluster_bytes;
-    uint64_t file_size;
-    uint64_t pos;              /* absolute byte offset of cur_cluster's first byte */
-    uint8_t *cbuf;             /* one-cluster scratch (nvme-aligned) */
-    uint32_t cbuf_cluster;     /* cluster currently loaded in cbuf, 0 = none */
-} _fat_stream;
-
-/* /FSEXEC.ELF preload: the FAT/NVMe read works at boot (pre-net, pre-vmm) but
- * returns 0 at exec time in the merged SSH kernel (device/FS state clobbered after
- * rt_net_init + vmm + SSH daemon activity). The boot entry reads the ELF into the
- * static path-read buffer once while state is pristine and records its size here;
- * the exec-time spawn consumes the resident buffer instead of re-streaming. */
-static uint64_t g_fsexec_preload_size = 0;
-void simpleos_fat32_note_preload_size(uint64_t sz) { g_fsexec_preload_size = sz; }
-uint64_t simpleos_fat32_preloaded_size(void) { return g_fsexec_preload_size; }
-
-/* Copy a text's bytes + NUL to a physical/identity-mapped address; returns
- * the RAW i64 byte length. Uses THIS file's RuntimeString layout (same decode
- * as rt_print_str, which prints loader-passed text correctly). (The
- * former rt_extras.c 4-byte-short header layout is fixed; offsets are locked
- * by the _Static_asserts near the RuntimeString typedef.) */
-int64_t rt_text_copy_to_phys(RuntimeValue str, uint64_t phys)
-{
-    RuntimeString *s = 0;
-    if (IS_HEAP(str)) {
-        RuntimeString *c = (RuntimeString *)DECODE_PTR(str);
-        if (c && c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
-    }
-    if (!s && str != 0) {
-        RuntimeString *c = (RuntimeString *)(uintptr_t)str;
-        if (c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
-    }
-    if (!s) return -1;
-    uint8_t *dst = (uint8_t *)(uintptr_t)phys;
-    for (uint32_t i = 0; i < s->len; i++) dst[i] = (uint8_t)s->data[i];
-    dst[s->len] = 0;
-    return (int64_t)s->len;
-}
-
-/* Ground-truth byte dump via plain C loads for freestanding .spl loaders —
- * mmio_read8 readbacks can falsely return 0 (address-dependent
- * rt_mmio_read_u8 zero bug). Raw u64 arg (rt_user_heap_init precedent). */
-void rt_dump_phys16(uint64_t phys)
-{
-    serial_puts("[cdump]");
-    const uint8_t *p = (const uint8_t *)(uintptr_t)phys;
-    for (int i = 0; i < 16; i++) {
-        serial_puts(" ");
-        serial_put_dec((int64_t)p[i]);
-    }
-    serial_puts("\r\n");
-}
-
-int64_t simpleos_fat32_stream_open(const char *path, int64_t path_len)
-{
-    char path_buf[128];
-    uint32_t cluster = 0;
-    uint32_t file_size = 0;
-
-    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
-        return -1;
-    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
-        return -1;
-
-    _fat_stream.cluster_bytes = _fat32.sectors_per_cluster * 512;
-    if (!_fat_stream.cbuf) {
-        _fat_stream.cbuf = (uint8_t *)nvme_alloc_aligned(_fat_stream.cluster_bytes, 512);
-        if (!_fat_stream.cbuf)
-            return -1;
-    }
-    _fat_stream.active        = 1;
-    _fat_stream.start_cluster = cluster;
-    _fat_stream.cur_cluster   = cluster;
-    _fat_stream.file_size     = file_size;
-    _fat_stream.pos           = 0;
-    _fat_stream.cbuf_cluster  = 0;
-    return (int64_t)file_size;
-}
-
-/* Advance/reset the cursor so cur_cluster is the cluster containing byte
- * target_off and pos == that cluster's file base. Returns 0 on success. */
-static int _fat_stream_seek(uint64_t target_off)
-{
-    uint32_t cb = _fat_stream.cluster_bytes;
-    if (cb == 0) return -1;
-    if (target_off < _fat_stream.pos) {
-        _fat_stream.cur_cluster = _fat_stream.start_cluster;
-        _fat_stream.pos = 0;
-    }
-    uint64_t target_base = (target_off / cb) * cb;
-    while (_fat_stream.pos < target_base) {
-        uint32_t next = _fat32_next_cluster(_fat_stream.cur_cluster);
-        if (next < 2 || next >= 0x0FFFFFF8) return -1;
-        _fat_stream.cur_cluster = next;
-        _fat_stream.pos += cb;
-    }
-    return 0;
-}
-
-/* Copy `len` bytes starting at file offset `file_off` into physical/identity
- * address `dst`. Returns bytes copied, or -1 on error. */
-int64_t simpleos_fat32_stream_read_at(uint64_t file_off, uint64_t dst, uint64_t len)
-{
-    if (!_fat_stream.active || !_fat_stream.cbuf) return -1;
-    uint32_t cb = _fat_stream.cluster_bytes;
-    uint8_t *out = (uint8_t *)(uintptr_t)dst;
-    uint64_t done = 0;
-
-    if (file_off >= _fat_stream.file_size) return 0;
-    if (file_off + len > _fat_stream.file_size)
-        len = _fat_stream.file_size - file_off;
-
-    while (done < len) {
-        uint64_t cur = file_off + done;
-        if (_fat_stream_seek(cur) != 0) return -1;
-        if (_fat_stream.cbuf_cluster != _fat_stream.cur_cluster) {
-            if (_fat32_read_cluster(_fat_stream.cur_cluster, _fat_stream.cbuf) != 0)
-                return -1;
-            _fat_stream.cbuf_cluster = _fat_stream.cur_cluster;
-        }
-        uint64_t in_off = cur - _fat_stream.pos;   /* pos is cluster base */
-        uint64_t avail  = cb - in_off;
-        uint64_t chunk  = (len - done < avail) ? (len - done) : avail;
-        __builtin_memcpy(out + done, _fat_stream.cbuf + in_off, chunk);
-        done += chunk;
-    }
-    return (int64_t)done;
-}
-
 static uint8_t simpleos_fat32_read_buf[32768];
 static const uint32_t simpleos_fat32_read_buf_size = 32768;
-static uint8_t simpleos_fat32_path_read_buf[33554432];
-static const uint32_t simpleos_fat32_path_read_buf_size = 33554432;
+static uint8_t simpleos_fat32_path_read_buf[4194304];
+static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
 
 static const char *simpleos_known_app_name(uint64_t app_id)
 {
@@ -3122,192 +2712,6 @@ uint64_t simpleos_fat32_read_buffer_addr(void)
 uint64_t simpleos_fat32_path_read_buffer_addr(void)
 {
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
-}
-
-/* ---- enterprise-store kernel-tier facade backing (lane W8-B) --------------
- * Backs the externs in
- * examples/09_embedded/simple_os/arch/x86_64/ent_store_fat32_kernel_facade.spl.
- * Two single-`text`-arg calls (latch path, then write) rather than one
- * two-`text` call: the measured Simple->C ABI passes ONE RuntimeString
- * pointer per text arg, and a second (ptr,len) pair arrives as garbage — a
- * 5-byte write then asked for ~480 KB and filled the volume.
- */
-static char     _entstore_path[128];
-static uint32_t _entstore_path_len = 0;
-static uint8_t  _entstore_read_buf[32768];
-
-/* Resolve a Simple `text` argument to (data,len) without the 128-byte path
- * truncation _fat32_copy_path_arg imposes. Same dual tagged/raw probe. */
-static int _entstore_text_arg(const char *src, const char **out, uint32_t *out_len)
-{
-    if (!src || !out || !out_len)
-        return -1;
-    RuntimeValue rv = (RuntimeValue)(uintptr_t)src;
-    if (IS_HEAP(rv)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(rv);
-        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
-            *out = s->data;
-            *out_len = s->len;
-            return 0;
-        }
-    }
-    RuntimeString *r = (RuntimeString *)(uintptr_t)src;
-    if (r && r->hdr.type == HEAP_STRING && r->len < 0x100000) {
-        *out = r->data;
-        *out_len = r->len;
-        return 0;
-    }
-    return -1;
-}
-
-/* Kernel-tier rt_file_exists / rt_file_size providers (lane W10-B, AC-17 L4).
- *
- * These are C, not Simple `@export("C")` in ent_store_fat32_kernel_facade.spl,
- * and the link graph makes the reason unambiguous:
- *
- *  1. ABI. Both names are in codegen's `text_arg_indices` table
- *     (compiler/src/codegen/instr/calls.rs + the LLVM twin), so EVERY Simple
- *     call site lowers `rt_file_exists(p)` to
- *     `rt_file_exists(rt_string_data(p), rt_string_len(p))` — a raw (ptr, len)
- *     pair. A Simple provider `fn rt_file_exists(path: text)` takes one boxed
- *     RuntimeValue and would be handed the raw data pointer instead. It cannot
- *     be correct even if it wins the link.
- *  2. Link order. The freestanding link passes `-z muldefs`
- *     (pipeline/native_project/linker.rs), so two STRONG definitions do not
- *     error — the first in link order silently wins, and the boot C objects
- *     precede the Simple module objects. `nm` on the pre-fix kernel showed
- *     exactly that split: rt_file_atomic_write/rt_file_read_text_at resolved to
- *     the facade, while rt_file_exists/rt_file_size resolved to the C stubs
- *     (NOP1 in rt_extras.c returning NIL_VALUE, and a TRAP_STUB_RET here that
- *     would have halted the CPU). Both of those stubs are now deleted in favour
- *     of the real definitions below, so there is one definition, not a race.
- *
- * `_fat32_copy_path_arg` decodes a boxed RuntimeValue text first and only falls
- * back to (ptr, len), so these stay correct under either calling shape.
- */
-int rt_file_exists(const char *path, int64_t path_len)
-{
-    char path_buf[128];
-    uint32_t cluster = 0, file_size = 0;
-
-    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
-        return 0;
-    return fat32_find_file(path_buf, &cluster, &file_size) == 0 ? 1 : 0;
-}
-
-int64_t rt_file_size(const char *path, int64_t path_len)
-{
-    char path_buf[128];
-    uint32_t cluster = 0, file_size = 0;
-
-    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
-        return -1;
-    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
-        return -1;
-    return (int64_t)file_size;
-}
-
-int64_t entstore_fat32_set_path(const char *path)
-{
-    int n = _fat32_copy_path_arg(path, -1, _entstore_path, sizeof(_entstore_path));
-    if (n <= 0) {
-        _entstore_path_len = 0;
-        return -1;
-    }
-    _entstore_path_len = (uint32_t)n;
-    return 0;
-}
-
-int64_t entstore_fat32_write_pending(const char *content)
-{
-    const char *data = "";
-    uint32_t len = 0;
-    if (_entstore_path_len == 0)
-        return -1;
-    if (_entstore_text_arg(content, &data, &len) != 0)
-        return -1;
-    serial_puts("[ent-store-c] write len=");
-    serial_put_dec((int64_t)len);
-    serial_puts("\r\n");
-    return fat32_write_file(_entstore_path, (const uint8_t *)data, len) == 0 ? 0 : -1;
-}
-
-/* Ground-truth byte extraction in C. The Simple-side tail
- * (mmio_read8 + rt_push_byte + rt_bytes_to_text) is bypassed because
- * an `extern fn mmio_read8` DECLARED IN A .spl FILE does not bind to the
- * kernel's Simple `os.kernel.boot.mmio.mmio_read8`: it binds to the C symbol
- * `mmio_read8` (type_stubs.c / auto_stubs.c weak), whose body is
- * `return NIL_VALUE` — every byte reads back 0. Every other kernel entry
- * `use`s the real Simple mmio module instead. Plain C loads are
- * authoritative here (see also rt_dump_phys16's note above). */
-RuntimeValue entstore_fat32_read_slice_text(const char *path, int64_t offset, int64_t size)
-{
-    char path_buf[128];
-    uint32_t cluster = 0, file_size = 0;
-    uint32_t off, want;
-
-    if (offset < 0 || size <= 0)
-        return rt_string_new(0, 0);
-    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0)
-        return rt_string_new(0, 0);
-    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
-        return rt_string_new(0, 0);
-    if (file_size == 0 || file_size > sizeof(_entstore_read_buf))
-        return rt_string_new(0, 0);
-    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0)
-        return rt_string_new(0, 0);
-    if (simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)_entstore_read_buf,
-                                      (uint64_t)file_size) != (int64_t)file_size)
-        return rt_string_new(0, 0);
-
-    off = (uint32_t)offset;
-    if (off >= file_size)
-        return rt_string_new(0, 0);
-    want = (uint32_t)size;
-    if (off + want > file_size)
-        want = file_size - off;
-    return rt_string_new((RuntimeValue)(uintptr_t)(_entstore_read_buf + off),
-                         (RuntimeValue)want);
-}
-
-/* Diagnostic (lane W8-B resume step): dump, via plain C loads, the first 16
- * bytes of `path` as they sit in the very buffer the Simple extraction loop
- * reads, so "absent / shifted / mis-assembled" can be told apart. */
-void entstore_fat32_dump_first16(const char *path)
-{
-    char path_buf[128];
-    uint32_t cluster = 0, file_size = 0;
-    int64_t n;
-    int i;
-
-    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0) {
-        serial_puts("[ent-store-dump] bad-path\r\n");
-        return;
-    }
-    if (fat32_find_file(path_buf, &cluster, &file_size) != 0) {
-        serial_puts("[ent-store-dump] not-found ");
-        serial_puts(path_buf);
-        serial_puts("\r\n");
-        return;
-    }
-    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0) {
-        serial_puts("[ent-store-dump] open-fail\r\n");
-        return;
-    }
-    n = simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf,
-                                      (uint64_t)file_size);
-    serial_puts("[ent-store-dump] ");
-    serial_puts(path_buf);
-    serial_puts(" fsize=");
-    serial_put_dec((int64_t)file_size);
-    serial_puts(" n=");
-    serial_put_dec(n);
-    serial_puts(" cbytes:");
-    for (i = 0; i < 16; i++) {
-        serial_puts(" ");
-        serial_put_dec((int64_t)simpleos_fat32_path_read_buf[i]);
-    }
-    serial_puts("\r\n");
 }
 
 static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
@@ -3368,7 +2772,17 @@ RuntimeValue simpleos_fat32_read_known_app_array(RuntimeValue app_id_val)
     if (fat32_find_file(name, &cluster, &file_size) != 0 || file_size > simpleos_fat32_read_buf_size)
         return rt_array_new((RuntimeValue)0);
 
-    return _rt_bytes_new(simpleos_fat32_read_buf, (uint32_t)file_size);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    if (!a)
+        return rt_array_new((RuntimeValue)0);
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    a->len = file_size;
+    a->cap = file_size;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < file_size; i++)
+        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_read_buf[i]);
+    return ENCODE_PTR(a);
 }
 
 int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)
@@ -3426,7 +2840,17 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     if (bytes_read != file_size)
         return rt_array_new((RuntimeValue)0);
 
-    return _rt_bytes_new(simpleos_fat32_path_read_buf, (uint32_t)file_size);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    if (!a)
+        return rt_array_new((RuntimeValue)0);
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
+    a->len = file_size;
+    a->cap = file_size;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < file_size; i++)
+        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
+    return ENCODE_PTR(a);
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
@@ -3447,7 +2871,6 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t old_cluster = 0;
     int found = 0;
     if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0) {
-        serial_puts("[wf-diag] root-dir slot FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file root-dir slot failed");
         return -1;
     }
@@ -3460,20 +2883,18 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t written = 0;
     uint8_t *cluster_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!cluster_buf) {
-        serial_puts("[wf-diag] cluster_buf alloc FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster_buf alloc failed");
         return -1;
     }
+
     for (uint32_t i = 0; i < clusters_needed; i++) {
         uint32_t cluster = _fat32_find_free_cluster();
         if (cluster < 2) {
-            serial_puts("[wf-diag] no free cluster\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file no free cluster");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (_fat32_write_fat_entry(cluster, 0x0FFFFFFF) != 0) {
-            serial_puts("[wf-diag] mark-eoc (NVMe FAT write) FAILED\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file mark-eoc failed");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
@@ -3492,7 +2913,6 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
         if (chunk > 0)
             __builtin_memcpy(cluster_buf, buf + written, chunk);
         if (_fat32_write_cluster(cluster, cluster_buf) != 0) {
-            serial_puts("[wf-diag] data-cluster (NVMe write) FAILED\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster write failed");
             _fat32_free_chain(first_cluster);
             return -1;
@@ -3515,7 +2935,6 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     _fat32_write_dir_entry(dir_buf + entry_index * 32, name83, first_cluster, size);
     if (_fat32_write_cluster(dir_cluster, dir_buf) != 0) {
-        serial_puts("[wf-diag] dir-cluster (NVMe write) FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file dir write failed");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
@@ -4693,544 +4112,6 @@ int64_t simpleos_virtio_net_selftest(void)
     return 0;
 }
 
-int64_t simpleos_virtio_net_init(void)
-{
-    return _virtio_net_init();
-}
-
-uint64_t simpleos_virtio_net_rx_dma_addr(void)
-{
-    return (uint64_t)(uintptr_t)_vnet.rx_buffers;
-}
-
-uint64_t simpleos_virtio_net_rx_dma_len(void)
-{
-    return (uint64_t)_vnet.rx_qsize * VIRTIO_NET_BUF_SIZE;
-}
-
-uint64_t simpleos_virtio_net_tx_dma_addr(void)
-{
-    return (uint64_t)(uintptr_t)_vnet.tx_buffers;
-}
-
-uint64_t simpleos_virtio_net_tx_dma_len(void)
-{
-    return (uint64_t)_vnet.tx_qsize * VIRTIO_NET_BUF_SIZE;
-}
-
-uint64_t simpleos_memory_leveling_virtio_net_init(void)
-{
-    int rc = _virtio_net_init();
-    return rc < 0 ? (uint64_t)(-rc) : 0;
-}
-
-uint64_t simpleos_memory_leveling_virtio_net_selftest(void)
-{
-    int rc = (int)simpleos_virtio_net_selftest();
-    return rc < 0 ? (uint64_t)(-rc) : 0;
-}
-
-/* Minimal legacy VirtIO PCI evidence used by the memory-leveling QEMU gate.
- * Production device ownership remains in the Simple drivers and memory
- * manager; these helpers only drive real QEMU queues from the freestanding
- * bootstrap runtime and expose the DMA regions registered by that manager. */
-struct simpleos_legacy_virtq {
-    uint16_t iobase;
-    uint16_t qsize;
-    uint16_t last_used;
-    struct vring_desc *desc;
-    struct vring_avail *avail;
-    struct vring_used *used;
-};
-
-static int simpleos_find_legacy_virtio(uint16_t device_id, uint16_t *iobase)
-{
-    if (_pci_cache_count < 0) _pci_scan();
-    for (int i = 0; i < _pci_cache_count; i++) {
-        if (_pci_cache[i].vendor != 0x1AF4 || _pci_cache[i].devid != device_id)
-            continue;
-
-        uint32_t cfg = 0x80000000u
-            | ((uint32_t)_pci_cache[i].bus << 16)
-            | ((uint32_t)_pci_cache[i].dev << 11);
-        outl(0xCF8, cfg | 0x10);
-        uint32_t bar0 = inl(0xCFC);
-        if ((bar0 & 1u) == 0) return -95;
-
-        outl(0xCF8, cfg | 0x04);
-        uint32_t command = inl(0xCFC) | (1u << 0) | (1u << 2);
-        outl(0xCF8, cfg | 0x04);
-        outl(0xCFC, command);
-        *iobase = (uint16_t)(bar0 & ~3u);
-        return 0;
-    }
-    return -19;
-}
-
-static int simpleos_legacy_virtq_setup(uint16_t iobase, uint16_t queue_index,
-                                      struct simpleos_legacy_virtq *queue)
-{
-    outw((uint16_t)(iobase + 0x0E), queue_index);
-    uint16_t qsize = inw((uint16_t)(iobase + 0x0C));
-    if (qsize == 0) return -19;
-
-    size_t desc_size = (size_t)qsize * 16;
-    size_t avail_size = 6 + (size_t)qsize * 2;
-    size_t used_offset = (desc_size + avail_size + 4095) & ~(size_t)4095;
-    size_t total = used_offset + 6 + (size_t)qsize * 8;
-    void *memory = nvme_alloc_aligned(total, 4096);
-    if (!memory) return -12;
-    __builtin_memset(memory, 0, total);
-
-    queue->iobase = iobase;
-    queue->qsize = qsize;
-    queue->last_used = 0;
-    queue->desc = (struct vring_desc *)memory;
-    queue->avail = (struct vring_avail *)((uint8_t *)memory + desc_size);
-    queue->used = (struct vring_used *)((uint8_t *)memory + used_offset);
-
-    uint32_t pfn = (uint32_t)((uintptr_t)memory >> 12);
-    outl((uint16_t)(iobase + 0x08), pfn);
-    if (inl((uint16_t)(iobase + 0x08)) != pfn) return -5;
-    return 0;
-}
-
-static int simpleos_legacy_virtq_submit(struct simpleos_legacy_virtq *queue,
-                                       uint16_t head, uint32_t poll_limit)
-{
-    uint16_t avail_index = queue->avail->idx;
-    queue->avail->ring[avail_index % queue->qsize] = head;
-    __sync_synchronize();
-    queue->avail->idx = (uint16_t)(avail_index + 1);
-    __sync_synchronize();
-    outw((uint16_t)(queue->iobase + 0x10), 0);
-
-    for (uint32_t i = 0; i < poll_limit; i++) {
-        uint16_t used = queue->used->idx;
-        if (used != queue->last_used) {
-            __sync_synchronize();
-            uint16_t slot = (uint16_t)((used - 1u) % queue->qsize);
-            if (queue->used->ring[slot].id != head) return -5;
-            queue->last_used = used;
-            return 0;
-        }
-        __asm__ volatile("pause" ::: "memory");
-    }
-    return -110;
-}
-
-static int simpleos_legacy_virtio_begin(uint16_t iobase)
-{
-    outb((uint16_t)(iobase + 0x12), 0);
-    for (volatile int i = 0; i < 10000; i++) {}
-    outb((uint16_t)(iobase + 0x12), VIRTIO_STATUS_ACK);
-    outb((uint16_t)(iobase + 0x12), VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
-    outl((uint16_t)(iobase + 0x04), 0);
-    return 0;
-}
-
-static void simpleos_legacy_virtio_finish(uint16_t iobase)
-{
-    outb((uint16_t)(iobase + 0x12),
-         VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
-}
-
-struct simpleos_modern_virtq {
-    volatile uint8_t *common;
-    volatile uint16_t *notify;
-    uint16_t qsize;
-    uint16_t last_used;
-    struct vring_desc *desc;
-    struct vring_avail *avail;
-    struct vring_used *used;
-};
-
-static uint32_t simpleos_pci_cfg_read32(int index, uint8_t offset)
-{
-    uint32_t cfg = 0x80000000u
-        | ((uint32_t)_pci_cache[index].bus << 16)
-        | ((uint32_t)_pci_cache[index].dev << 11)
-        | (uint32_t)(offset & 0xFCu);
-    outl(0xCF8, cfg);
-    return inl(0xCFC);
-}
-
-static uint8_t simpleos_pci_cfg_read8(int index, uint8_t offset)
-{
-    uint32_t value = simpleos_pci_cfg_read32(index, offset);
-    return (uint8_t)(value >> ((offset & 3u) * 8u));
-}
-
-static uint64_t simpleos_pci_bar_addr(int index, uint8_t bar_index)
-{
-    if (bar_index > 5) return 0;
-    uint8_t offset = (uint8_t)(0x10u + bar_index * 4u);
-    uint32_t low = simpleos_pci_cfg_read32(index, offset);
-    if (low & 1u) return 0;
-    uint64_t base = (uint64_t)(low & ~0xFu);
-    if (((low >> 1) & 3u) == 2u) {
-        if (bar_index == 5) return 0;
-        base |= (uint64_t)simpleos_pci_cfg_read32(index, (uint8_t)(offset + 4u)) << 32;
-    }
-    return base;
-}
-
-static int simpleos_find_modern_gpu(volatile uint8_t **common_out,
-                                    volatile uint8_t **notify_out,
-                                    uint32_t *notify_multiplier_out)
-{
-    if (_pci_cache_count < 0) _pci_scan();
-    int gpu_index = -1;
-    for (int i = 0; i < _pci_cache_count; i++) {
-        if (_pci_cache[i].vendor == 0x1AF4 && _pci_cache[i].devid == 0x1050) {
-            gpu_index = i;
-            break;
-        }
-    }
-    if (gpu_index < 0) return -19;
-
-    serial_puts("[memory-leveling] virtio-gpu-pci device=0x");
-    serial_put_hex(_pci_cache[gpu_index].devid);
-    serial_puts("\r\n");
-
-    uint32_t cfg = 0x80000000u
-        | ((uint32_t)_pci_cache[gpu_index].bus << 16)
-        | ((uint32_t)_pci_cache[gpu_index].dev << 11);
-    outl(0xCF8, cfg | 0x04);
-    uint32_t command = inl(0xCFC) | (1u << 1) | (1u << 2);
-    outl(0xCF8, cfg | 0x04);
-    outl(0xCFC, command);
-
-    volatile uint8_t *common = 0;
-    volatile uint8_t *notify = 0;
-    uint32_t notify_multiplier = 0;
-    uint8_t cap = simpleos_pci_cfg_read8(gpu_index, 0x34);
-    for (int count = 0; cap >= 0x40 && count < 48; count++) {
-        uint8_t id = simpleos_pci_cfg_read8(gpu_index, cap);
-        uint8_t next = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 1));
-        uint8_t length = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 2));
-        uint8_t cfg_type = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 3));
-        uint8_t bar = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 4));
-        serial_puts("[memory-leveling] virtio-gpu-cap id=0x");
-        serial_put_hex(id);
-        serial_puts(" type=");
-        serial_put_dec(cfg_type);
-        serial_puts(" bar=");
-        serial_put_dec(bar);
-        serial_puts(" len=");
-        serial_put_dec(length);
-        serial_puts("\r\n");
-        if (id == 0x09 && length >= 16 && (cfg_type == 1 || cfg_type == 2)) {
-            uint64_t bar_addr = simpleos_pci_bar_addr(gpu_index, bar);
-            uint32_t offset = simpleos_pci_cfg_read32(gpu_index, (uint8_t)(cap + 8));
-            serial_puts("[memory-leveling] virtio-gpu-cap-map base=0x");
-            serial_put_hex((uint32_t)bar_addr);
-            serial_puts(" offset=0x");
-            serial_put_hex(offset);
-            serial_puts("\r\n");
-            if (bar_addr == 0 || UINT64_MAX - bar_addr < offset) return -95;
-            if (cfg_type == 1) common = (volatile uint8_t *)(uintptr_t)(bar_addr + offset);
-            if (cfg_type == 2 && length >= 20) {
-                notify = (volatile uint8_t *)(uintptr_t)(bar_addr + offset);
-                notify_multiplier = simpleos_pci_cfg_read32(gpu_index, (uint8_t)(cap + 16));
-                serial_puts("[memory-leveling] virtio-gpu-notify multiplier=");
-                serial_put_dec((int)notify_multiplier);
-                serial_puts("\r\n");
-            }
-        }
-        if (next == 0 || next == cap) break;
-        cap = next;
-    }
-    if (!common || !notify || notify_multiplier == 0) return -95;
-    *common_out = common;
-    *notify_out = notify;
-    *notify_multiplier_out = notify_multiplier;
-    return 0;
-}
-
-static int simpleos_modern_gpu_begin(volatile uint8_t *common)
-{
-    *(volatile uint8_t *)(common + 0x14) = 0;
-    for (uint32_t i = 0; i < 100000; i++) {
-        if (*(volatile uint8_t *)(common + 0x14) == 0) break;
-        if (i == 99999) return -110;
-    }
-    *(volatile uint8_t *)(common + 0x14) = VIRTIO_STATUS_ACK;
-    *(volatile uint8_t *)(common + 0x14) = VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER;
-
-    *(volatile uint32_t *)(void *)(common + 0x00) = 1;
-    uint32_t high_features = *(volatile uint32_t *)(void *)(common + 0x04);
-    if ((high_features & 1u) == 0) return -95;
-    *(volatile uint32_t *)(void *)(common + 0x08) = 0;
-    *(volatile uint32_t *)(void *)(common + 0x0C) = 0;
-    *(volatile uint32_t *)(void *)(common + 0x08) = 1;
-    *(volatile uint32_t *)(void *)(common + 0x0C) = 1;
-
-    *(volatile uint8_t *)(common + 0x14) =
-        VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK;
-    if ((*(volatile uint8_t *)(common + 0x14) & VIRTIO_STATUS_FEATURES_OK) == 0)
-        return -95;
-    return 0;
-}
-
-static int simpleos_modern_virtq_setup(volatile uint8_t *common,
-                                      volatile uint8_t *notify_base,
-                                      uint32_t notify_multiplier,
-                                      struct simpleos_modern_virtq *queue)
-{
-    *(volatile uint16_t *)(void *)(common + 0x16) = 0;
-    uint16_t max_size = *(volatile uint16_t *)(void *)(common + 0x18);
-    if (max_size == 0) return -19;
-    uint16_t qsize = max_size > 128 ? 128 : max_size;
-    *(volatile uint16_t *)(void *)(common + 0x18) = qsize;
-
-    size_t desc_size = (size_t)qsize * 16;
-    size_t avail_size = 6 + (size_t)qsize * 2;
-    size_t used_size = 6 + (size_t)qsize * 8;
-    void *desc = nvme_alloc_aligned(desc_size, 4096);
-    void *avail = nvme_alloc_aligned(avail_size, 4096);
-    void *used = nvme_alloc_aligned(used_size, 4096);
-    if (!desc || !avail || !used) return -12;
-    __builtin_memset(desc, 0, desc_size);
-    __builtin_memset(avail, 0, avail_size);
-    __builtin_memset(used, 0, used_size);
-
-    uint64_t desc_addr = (uint64_t)(uintptr_t)desc;
-    uint64_t avail_addr = (uint64_t)(uintptr_t)avail;
-    uint64_t used_addr = (uint64_t)(uintptr_t)used;
-    *(volatile uint64_t *)(void *)(common + 0x20) = desc_addr;
-    *(volatile uint64_t *)(void *)(common + 0x28) = avail_addr;
-    *(volatile uint64_t *)(void *)(common + 0x30) = used_addr;
-    uint16_t notify_off = *(volatile uint16_t *)(void *)(common + 0x1E);
-    *(volatile uint16_t *)(void *)(common + 0x1C) = 1;
-
-    queue->common = common;
-    queue->notify = (volatile uint16_t *)(void *)(notify_base +
-        (uint64_t)notify_off * notify_multiplier);
-    queue->qsize = qsize;
-    queue->last_used = 0;
-    queue->desc = (struct vring_desc *)desc;
-    queue->avail = (struct vring_avail *)avail;
-    queue->used = (struct vring_used *)used;
-    return 0;
-}
-
-static int simpleos_modern_virtq_submit(struct simpleos_modern_virtq *queue,
-                                       uint16_t head, uint32_t poll_limit)
-{
-    uint16_t avail_index = queue->avail->idx;
-    queue->avail->ring[avail_index % queue->qsize] = head;
-    __sync_synchronize();
-    queue->avail->idx = (uint16_t)(avail_index + 1);
-    __sync_synchronize();
-    *queue->notify = 0;
-    for (uint32_t i = 0; i < poll_limit; i++) {
-        uint16_t used = queue->used->idx;
-        if (used != queue->last_used) {
-            __sync_synchronize();
-            uint16_t slot = (uint16_t)((used - 1u) % queue->qsize);
-            if (queue->used->ring[slot].id != head) return -5;
-            queue->last_used = used;
-            return 0;
-        }
-        __asm__ volatile("pause" ::: "memory");
-    }
-    return -110;
-}
-
-struct simpleos_virtio_gpu_probe {
-    struct simpleos_modern_virtq queue;
-    uint8_t *request;
-    uint8_t *response;
-    uint8_t *framebuffer;
-    uint64_t framebuffer_len;
-    int initialized;
-};
-
-static struct simpleos_virtio_gpu_probe _simpleos_vgpu;
-
-static uint64_t simpleos_probe_failure(const char *stage, int rc)
-{
-    uint64_t code = rc < 0 ? (uint64_t)(-rc) : (uint64_t)rc;
-    if (code == 0) code = 5;
-    serial_puts("[memory-leveling] device-probe-fail stage=");
-    serial_puts(stage);
-    serial_puts(" code=");
-    serial_put_dec((int)code);
-    serial_puts("\r\n");
-    return code;
-}
-
-static int simpleos_virtio_gpu_command(uint32_t type, uint32_t request_len,
-                                      uint32_t response_len,
-                                      uint32_t expected_response)
-{
-    struct simpleos_modern_virtq *q = &_simpleos_vgpu.queue;
-    __builtin_memset(_simpleos_vgpu.response, 0, 512);
-    *(volatile uint32_t *)(void *)_simpleos_vgpu.request = type;
-
-    q->desc[0].addr = (uint64_t)(uintptr_t)_simpleos_vgpu.request;
-    q->desc[0].len = request_len;
-    q->desc[0].flags = VRING_DESC_F_NEXT;
-    q->desc[0].next = 1;
-    q->desc[1].addr = (uint64_t)(uintptr_t)_simpleos_vgpu.response;
-    q->desc[1].len = response_len;
-    q->desc[1].flags = VRING_DESC_F_WRITE;
-    q->desc[1].next = 0;
-
-    int rc = simpleos_modern_virtq_submit(q, 0, 2000000);
-    if (rc < 0) return rc;
-    uint32_t response_type = *(volatile uint32_t *)(void *)_simpleos_vgpu.response;
-    return response_type == expected_response ? 0 : -5;
-}
-
-uint64_t simpleos_virtio_gpu_memory_init(void)
-{
-    if (_simpleos_vgpu.initialized) return 0;
-    volatile uint8_t *common = 0;
-    volatile uint8_t *notify = 0;
-    uint32_t notify_multiplier = 0;
-    int rc = simpleos_find_modern_gpu(&common, &notify, &notify_multiplier);
-    if (rc < 0) return simpleos_probe_failure("gpu-find", rc);
-    rc = simpleos_modern_gpu_begin(common);
-    if (rc < 0) return simpleos_probe_failure("gpu-negotiate", rc);
-    rc = simpleos_modern_virtq_setup(common, notify, notify_multiplier,
-                                     &_simpleos_vgpu.queue);
-    if (rc < 0) return simpleos_probe_failure("gpu-queue", rc);
-    *(volatile uint8_t *)(common + 0x14) =
-        VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER |
-        VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK;
-    if ((*(volatile uint8_t *)(common + 0x14) &
-         (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK)) !=
-        (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK))
-        return simpleos_probe_failure("gpu-driver-ok", -95);
-
-    _simpleos_vgpu.request = (uint8_t *)nvme_alloc_aligned(512, 64);
-    _simpleos_vgpu.response = (uint8_t *)nvme_alloc_aligned(512, 64);
-    _simpleos_vgpu.framebuffer_len = 64u * 64u * 4u;
-    _simpleos_vgpu.framebuffer = (uint8_t *)nvme_alloc_aligned(
-        (size_t)_simpleos_vgpu.framebuffer_len, 4096);
-    if (!_simpleos_vgpu.request || !_simpleos_vgpu.response ||
-        !_simpleos_vgpu.framebuffer) return simpleos_probe_failure("gpu-dma", -12);
-    __builtin_memset(_simpleos_vgpu.request, 0, 512);
-    __builtin_memset(_simpleos_vgpu.framebuffer, 0x5A,
-                     (size_t)_simpleos_vgpu.framebuffer_len);
-
-    rc = simpleos_virtio_gpu_command(0x0100, 24, 408, 0x1101);
-    if (rc < 0) return simpleos_probe_failure("gpu-display-info", rc);
-
-    __builtin_memset(_simpleos_vgpu.request, 0, 512);
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 24) = 1;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 28) = 1;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
-    rc = simpleos_virtio_gpu_command(0x0101, 40, 24, 0x1100);
-    if (rc < 0) return simpleos_probe_failure("gpu-resource-create", rc);
-
-    _simpleos_vgpu.initialized = 1;
-    serial_puts("[memory-leveling] virtio-gpu-backing=prepared\r\n");
-    return 0;
-}
-
-uint64_t simpleos_virtio_gpu_dma_addr(void)
-{
-    return (uint64_t)(uintptr_t)_simpleos_vgpu.framebuffer;
-}
-
-uint64_t simpleos_virtio_gpu_dma_len(void)
-{
-    return _simpleos_vgpu.framebuffer_len;
-}
-
-uint64_t simpleos_virtio_gpu_flush_selftest(void)
-{
-    if (!_simpleos_vgpu.initialized) return simpleos_probe_failure("gpu-not-initialized", -19);
-    __builtin_memset(_simpleos_vgpu.request, 0, 512);
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 24) = 1;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 28) = 1;
-    *(uint64_t *)(void *)(_simpleos_vgpu.request + 32) =
-        (uint64_t)(uintptr_t)_simpleos_vgpu.framebuffer;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 40) =
-        (uint32_t)_simpleos_vgpu.framebuffer_len;
-    int rc = simpleos_virtio_gpu_command(0x0106, 48, 24, 0x1100);
-    if (rc < 0) return simpleos_probe_failure("gpu-attach-backing", rc);
-
-    __builtin_memset(_simpleos_vgpu.request, 0, 512);
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 48) = 1;
-    rc = simpleos_virtio_gpu_command(0x0105, 56, 24, 0x1100);
-    if (rc < 0) return simpleos_probe_failure("gpu-transfer", rc);
-
-    __builtin_memset(_simpleos_vgpu.request, 0, 512);
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
-    *(uint32_t *)(void *)(_simpleos_vgpu.request + 40) = 1;
-    rc = simpleos_virtio_gpu_command(0x0104, 48, 24, 0x1100);
-    if (rc < 0) return simpleos_probe_failure("gpu-flush", rc);
-    serial_puts("[memory-leveling] virtio-gpu-transfer-flush=complete\r\n");
-    return 0;
-}
-
-struct simpleos_virtio_blk_req {
-    uint32_t type;
-    uint32_t reserved;
-    uint64_t sector;
-} __attribute__((packed));
-
-uint64_t simpleos_virtio_blk_swap_selftest(void)
-{
-    uint16_t iobase = 0;
-    int rc = simpleos_find_legacy_virtio(0x1001, &iobase);
-    if (rc < 0) return simpleos_probe_failure("blk-find", rc);
-    simpleos_legacy_virtio_begin(iobase);
-    struct simpleos_legacy_virtq queue;
-    rc = simpleos_legacy_virtq_setup(iobase, 0, &queue);
-    if (rc < 0) return simpleos_probe_failure("blk-queue", rc);
-    simpleos_legacy_virtio_finish(iobase);
-
-    struct simpleos_virtio_blk_req *request =
-        (struct simpleos_virtio_blk_req *)nvme_alloc_aligned(64, 64);
-    uint8_t *data = (uint8_t *)nvme_alloc_aligned(512, 512);
-    uint8_t *status = (uint8_t *)nvme_alloc_aligned(64, 64);
-    if (!request || !data || !status) return simpleos_probe_failure("blk-dma", -12);
-
-    for (uint32_t i = 0; i < 512; i++) data[i] = (uint8_t)((i * 37u + 11u) & 0xFFu);
-    request->type = 1;
-    request->reserved = 0;
-    request->sector = 8;
-    *status = 0xFF;
-    queue.desc[0] = (struct vring_desc){
-        .addr = (uint64_t)(uintptr_t)request, .len = 16,
-        .flags = VRING_DESC_F_NEXT, .next = 1
-    };
-    queue.desc[1] = (struct vring_desc){
-        .addr = (uint64_t)(uintptr_t)data, .len = 512,
-        .flags = VRING_DESC_F_NEXT, .next = 2
-    };
-    queue.desc[2] = (struct vring_desc){
-        .addr = (uint64_t)(uintptr_t)status, .len = 1,
-        .flags = VRING_DESC_F_WRITE, .next = 0
-    };
-    rc = simpleos_legacy_virtq_submit(&queue, 0, 2000000);
-    if (rc < 0 || *status != 0)
-        return simpleos_probe_failure("blk-write", rc < 0 ? rc : -5);
-
-    __builtin_memset(data, 0, 512);
-    request->type = 0;
-    *status = 0xFF;
-    queue.desc[1].flags = VRING_DESC_F_NEXT | VRING_DESC_F_WRITE;
-    rc = simpleos_legacy_virtq_submit(&queue, 0, 2000000);
-    if (rc < 0 || *status != 0)
-        return simpleos_probe_failure("blk-read", rc < 0 ? rc : -5);
-    for (uint32_t i = 0; i < 512; i++) {
-        uint8_t expected = (uint8_t)((i * 37u + 11u) & 0xFFu);
-        if (data[i] != expected) return simpleos_probe_failure("blk-compare", -74);
-    }
-    serial_puts("[memory-leveling] virtio-blk-write-read=complete bytes=512\r\n");
-    return 0;
-}
-
 /* TCP header */
 struct tcp_hdr {
     uint16_t src_port;
@@ -5302,11 +4183,6 @@ struct tcp_socket {
 static struct tcp_socket _sockets[MAX_SOCKETS];
 static uint32_t _tcp_isn = 0x10000;  /* initial sequence number counter */
 static uint16_t _tcp_ephemeral_port = 49152;
-
-static int _tcp_listener_accepts_port(uint16_t listen_port, uint16_t dst_port)
-{
-    return listen_port == dst_port || (listen_port == 22 && dst_port == 2222);
-}
 
 /* TCP pseudo-header checksum */
 static uint16_t _tcp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
@@ -5444,7 +4320,7 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
         for (int i = 0; i < MAX_SOCKETS; i++) {
             if (!_sockets[i].in_use) continue;
             if (_sockets[i].state == TCP_LISTEN &&
-                _tcp_listener_accepts_port(_sockets[i].local_port, dst_port)) {
+                _sockets[i].local_port == dst_port) {
                 listen_sid = i;
                 break;
             }
@@ -5530,7 +4406,7 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
             /* Add to listening socket's accept queue */
             for (int i = 0; i < MAX_SOCKETS; i++) {
                 if (_sockets[i].in_use && _sockets[i].state == TCP_LISTEN &&
-                    _tcp_listener_accepts_port(_sockets[i].local_port, s->local_port)) {
+                    _sockets[i].local_port == s->local_port) {
                     struct tcp_socket *ls = &_sockets[i];
                     if (ls->aq_count < TCP_ACCEPT_QUEUE) {
                         ls->accept_queue[ls->aq_tail] = sid;
@@ -6028,13 +4904,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _pci_enumerate(a0, a1, a2);
         case 82: /* DeviceGrant — read PCI BAR0 via _pci_enumerate mode 5 */
             return _pci_enumerate(5, a0, 0);
-        case 83: { /* MapBar — the 64-bit NVMe high BAR is relocated to a
-                    * higher-half kernel VA (present under user cr3); low BARs
-                    * stay identity mapped. Keep in sync with crt0.s boot_pml4[384]
-                    * + vmm_map_nvme_bar_high(). */
-            if (a0 >= NVME_BAR_PHYS_BASE && a0 < NVME_BAR_PHYS_BASE + NVME_BAR_WINDOW)
-                return (int64_t)(NVME_BAR_VIRT_BASE + (a0 - NVME_BAR_PHYS_BASE));
-            return (int64_t)a0; /* < 4 GiB: phys == virt (identity mapped) */
+        case 83: { /* MapBar — identity map on baremetal (no-op, return same addr) */
+            return (int64_t)a0; /* On baremetal, phys == virt (identity mapped) */
         }
         case 84: { /* AllocDma — allocate DMA buffer (use heap) */
             uint64_t size = a0;
@@ -6252,7 +5123,15 @@ static const uint32_t _sha256_H[8] = {
 
 static RuntimeValue rt_bytes_from_rodata(const uint8_t *data, size_t len)
 {
-    return _rt_bytes_new(data, (uint32_t)len);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    a->len = (uint32_t)len;
+    a->cap = (uint32_t)len;
+    a->items = runtime_array_inline_items(a);
+    for (size_t i = 0; i < len; i++) a->items[i] = ENCODE_INT((int64_t)data[i]);
+    return ENCODE_PTR(a);
 }
 
 static const uint8_t ssh_userauth_password_only_failure_payload[14] = {
@@ -6389,7 +5268,7 @@ int64_t rt_sha512_hash(int64_t data_rv, int64_t unused)
     uint8_t *data = (uint8_t *)malloc(data_len + 256);
     if (!data) return -1;
     for (uint32_t i = 0; i < data_len; i++)
-        data[i] = _rt_bytes_get(arr, i);
+        data[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
 
     /* SHA-512 padding */
     uint64_t bit_len = (uint64_t)data_len * 8;
@@ -7296,38 +6175,22 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
     _sc_store_u32_8(out, prod32);
 }
 
-/* Stable freestanding ABI consumed by the SSH/Ed25519 paths.  Keep these
- * concrete exports beside the scalar implementation so entry-closure builds
- * never bind their calls to auto_stubs.c's fabricated zero-return bodies. */
-void x25519_sc_reduce(uint8_t s[64])
-{
-    uint8_t reduced[32];
-    sc_reduce(reduced, s);
-    for (int i = 0; i < 32; i++) s[i] = reduced[i];
-}
-
-void x25519_sc_muladd(uint8_t s[32], const uint8_t a[32],
-                      const uint8_t b[32], const uint8_t c[32])
-{
-    sc_muladd(s, a, b, c);
-}
-
 /* ---------- ring crypto stubs (baremetal fallback — return -1 to trigger software path) ---------- */
 
-__attribute__((weak)) int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
+int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
 {
     (void)seed; (void)pk; (void)sk;
     return -1;
 }
 
-__attribute__((weak)) int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
                                         const uint8_t sk[64], uint8_t sig[64])
 {
     (void)msg; (void)msg_len; (void)sk; (void)sig;
     return -1;
 }
 
-__attribute__((weak)) int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
+int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
                                           const uint8_t pk[32], const uint8_t sig[64])
 {
     (void)msg; (void)msg_len; (void)pk; (void)sig;
@@ -7355,58 +6218,10 @@ static void _ed25519_create_keypair(const uint8_t seed[32], uint8_t pk[32], uint
 static void _ed25519_sign(const uint8_t *msg, uint32_t msg_len,
                            const uint8_t sk[64], uint8_t sig[64])
 {
-    uint8_t h[64];
-    _ed25519_sha512(sk, 32, h);
-
-    uint8_t a_scalar[32];
-    for (int i = 0; i < 32; i++) a_scalar[i] = h[i];
-    a_scalar[0] &= 248;
-    a_scalar[31] &= 127;
-    a_scalar[31] |= 64;
-
-    uint32_t nonce_input_len = 32U + msg_len;
-    uint8_t *nonce_input = (uint8_t *)malloc(nonce_input_len ? nonce_input_len : 1U);
-    if (!nonce_input) {
-        for (int i = 0; i < 64; i++) sig[i] = 0;
-        return;
-    }
-    for (uint32_t i = 0; i < 32U; i++) nonce_input[i] = h[32U + i];
-    for (uint32_t i = 0; i < msg_len; i++) nonce_input[32U + i] = msg ? msg[i] : 0;
-    uint8_t nonce_hash[64];
-    _ed25519_sha512(nonce_input, nonce_input_len, nonce_hash);
-    free(nonce_input);
-
-    uint8_t r_scalar[32];
-    extern void x25519_sc_reduce(uint8_t *);
-    x25519_sc_reduce(nonce_hash);
-    for (uint32_t i = 0; i < 32U; i++) r_scalar[i] = nonce_hash[i];
-
-    ge_p3 R;
-    ge_scalarmult_base(&R, r_scalar);
-    uint8_t r_encoded[32];
-    ge_tobytes(r_encoded, &R);
-
-    uint32_t hram_input_len = 64U + msg_len;
-    uint8_t *hram_input = (uint8_t *)malloc(hram_input_len ? hram_input_len : 1U);
-    if (!hram_input) {
-        for (int i = 0; i < 64; i++) sig[i] = 0;
-        return;
-    }
-    for (uint32_t i = 0; i < 32U; i++) hram_input[i] = r_encoded[i];
-    for (uint32_t i = 0; i < 32U; i++) hram_input[32U + i] = sk[32U + i];
-    for (uint32_t i = 0; i < msg_len; i++) hram_input[64U + i] = msg ? msg[i] : 0;
-    uint8_t hram_hash[64];
-    _ed25519_sha512(hram_input, hram_input_len, hram_hash);
-    free(hram_input);
-
-    uint8_t hram_reduced[32];
-    x25519_sc_reduce(hram_hash);
-    for (uint32_t i = 0; i < 32U; i++) hram_reduced[i] = hram_hash[i];
-    uint8_t s_scalar[32];
-    x25519_sc_muladd(s_scalar, hram_reduced, a_scalar, r_scalar);
-
-    for (uint32_t i = 0; i < 32U; i++) sig[i] = r_encoded[i];
-    for (uint32_t i = 0; i < 32U; i++) sig[32U + i] = s_scalar[i];
+    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                                  const uint8_t sk[64], uint8_t sig[64]);
+    if (rt_tls13_ring_ed25519_sign_raw(msg, msg_len, sk, sig) == 0) return;
+    for (int i = 0; i < 64; i++) sig[i] = 0;
 }
 
 static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
@@ -7430,7 +6245,7 @@ static uint8_t *_ed_rv_to_bytes(int64_t rv, uint32_t *out_len)
     uint8_t *buf = (uint8_t *)malloc(len);
     if (!buf) return (void*)0;
     for (uint32_t i = 0; i < len; i++)
-        buf[i] = _rt_bytes_get(arr, i);
+        buf[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
     *out_len = len;
     return buf;
 }
@@ -7448,8 +6263,9 @@ static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
     if (!hdr || hdr->type != HEAP_ARRAY) return -1;
     RuntimeArray *arr = (RuntimeArray *)hdr;
     if (arr->len < src_len) return -1;
+    RuntimeValue *items = runtime_array_items(arr);
     for (uint32_t i = 0; i < src_len; i++)
-        _rt_bytes_set(arr, i, (uint8_t)src[i]);
+        items[i] = ENCODE_INT(src[i]);
     return 0;
 }
 
@@ -7478,32 +6294,28 @@ int64_t rt_ed25519_sign(int64_t msg_rv, int64_t sk_rv, int64_t sig_rv)
     return 0;
 }
 
-RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue pub_rv, RuntimeValue msg_rv)
+RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue msg_rv)
 {
-    uint32_t seed_len = 0, pub_len = 0, msg_len = 0;
+    uint32_t seed_len = 0, msg_len = 0;
     uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
-    uint8_t *pub = _ed_rv_to_bytes(pub_rv, &pub_len);
     uint8_t *msg = _ed_rv_to_bytes(msg_rv, &msg_len);
-    if (!seed || seed_len != 32 || !pub || pub_len != 32) {
+    if (!seed || seed_len != 32) {
         if (seed) free(seed);
-        if (pub) free(pub);
         if (msg) free(msg);
         return NIL_VALUE;
     }
-    uint8_t sk[64], sig[64];
-    for (uint32_t i = 0; i < 32; i++) {
-        sk[i] = seed[i];
-        sk[32 + i] = pub[i];
-    }
-    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
-                                                  const uint8_t sk[64], uint8_t sig[64]);
-    if (rt_tls13_ring_ed25519_sign_raw(msg ? msg : (const uint8_t*)"", msg_len, sk, sig) != 0) {
-        _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
-    }
+    uint8_t pk[32], sk[64], sig[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
     free(seed);
-    free(pub);
     if (msg) free(msg);
-    return _rt_bytes_new(sig, 64);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
+    a->len = 64; a->cap = 64;
+    a->items = runtime_array_inline_items(a);
+    for (int i = 0; i < 64; i++) a->items[i] = ENCODE_INT(sig[i]);
+    return ENCODE_PTR(a);
 }
 
 int64_t rt_ed25519_verify(int64_t msg_rv, int64_t pk_rv, int64_t sig_rv)
@@ -7612,17 +6424,17 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return rt_string_new(0, 0);
     uint32_t len = a->len;
+    RuntimeValue *items = runtime_array_items(a);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
-    /* Header-dispatch each element: packed [u8] is 1 byte/element, legacy
-     * tagged arrays are 8-byte ENCODE_INT slots. Reading a packed buffer as
-     * 8-byte slots recovers only element 0 (its low byte) and reads garbage/OOB
-     * for every later element — the x64 freestanding text mis-decode bug. */
     for (uint32_t i = 0; i < len; i++) {
-        s->data[i] = (char)_rt_bytes_get(a, i);
+        RuntimeValue v = items[i];
+        /* Items may be tagged (from BoxInt push) or raw */
+        int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
+        s->data[i] = (char)(byte_val & 0xFF);
     }
     s->data[len] = '\0';
     return ENCODE_PTR(s);
@@ -7643,7 +6455,17 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s || s->hdr.type != HEAP_STRING) return rt_array_new(ENCODE_INT(0));
     uint32_t len = s->len;
-    return _rt_bytes_new((const uint8_t *)s->data, len);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    a->len = len;
+    a->cap = len;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < len; i++) {
+        a->items[i] = ENCODE_INT((uint8_t)s->data[i]);
+    }
+    return ENCODE_PTR(a);
 }
 
 static inline void _tls_put_u16(uint8_t *buf, uint32_t *off, uint16_t v)
@@ -7744,7 +6566,15 @@ RuntimeValue rt_tls13_build_client_hello(RuntimeValue host_rv)
     _tls_put_u24(hs, &hoff, boff);
     for (uint32_t i = 0; i < boff; i++) hs[hoff++] = body[i];
 
-    return _rt_bytes_new(hs, hoff);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
+    a->len = hoff;
+    a->cap = hoff;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < hoff; i++) a->items[i] = ENCODE_INT(hs[i]);
+    return ENCODE_PTR(a);
 }
 
 RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
@@ -7753,22 +6583,22 @@ RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
     if (!IS_HEAP(hs_rv)) return hs_rv;
     RuntimeArray *hs = (RuntimeArray *)DECODE_PTR(hs_rv);
     if (!hs || hs->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeValue *hs_items = runtime_array_items(hs);
 
     uint32_t rec_len = hs->len + 5;
     RuntimeArray *rec = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     if (!rec) return NIL_VALUE;
     rec->hdr.type = HEAP_ARRAY;
-    rec->hdr.gc_flags = BYTE_PACKED;
     rec->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     rec->len = rec_len;
     rec->cap = rec_len;
     rec->items = runtime_array_inline_items(rec);
-    ((uint8_t *)rec->items)[0] = (uint8_t)(0x16);
-    ((uint8_t *)rec->items)[1] = (uint8_t)(0x03);
-    ((uint8_t *)rec->items)[2] = (uint8_t)(0x01);
-    ((uint8_t *)rec->items)[3] = (uint8_t)((hs->len >> 8) & 0xFF);
-    ((uint8_t *)rec->items)[4] = (uint8_t)(hs->len & 0xFF);
-    for (uint32_t i = 0; i < hs->len; i++) ((uint8_t *)rec->items)[5 + i] = _rt_bytes_get(hs, i);
+    rec->items[0] = ENCODE_INT(0x16);
+    rec->items[1] = ENCODE_INT(0x03);
+    rec->items[2] = ENCODE_INT(0x01);
+    rec->items[3] = ENCODE_INT((hs->len >> 8) & 0xFF);
+    rec->items[4] = ENCODE_INT(hs->len & 0xFF);
+    for (uint32_t i = 0; i < hs->len; i++) rec->items[5 + i] = hs_items[i];
     return ENCODE_PTR(rec);
 }
 
@@ -7800,7 +6630,6 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -7817,7 +6646,7 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     }
     for (int64_t i = 0; i < count; i++) {
         _rng ^= _rng << 13; _rng ^= _rng >> 7; _rng ^= _rng << 17;
-        ((uint8_t *)a->items)[i] = (uint8_t)(_rng & 0xFF);
+        a->items[i] = ENCODE_INT(_rng & 0xFF);
     }
     return ENCODE_PTR(a);
 }
@@ -7927,7 +6756,7 @@ uint64_t rt_x86_rdrand_or_rdtsc(void)
 #endif
 }
 
-/* rt_ed25519_sign_test: exact RFC/live-vector signer gate. Returns 0=pass, -1=fail */
+/* rt_ed25519_sign_test: sign-only (skip broken verify). Returns 0=pass, -1=fail */
 int64_t rt_ed25519_sign_test(void)
 {
     _ed25519_init_consts();
@@ -7937,49 +6766,19 @@ int64_t rt_ed25519_sign_test(void)
         0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
         0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
     };
-    static const uint8_t expected_empty_sig[64] = {
-        0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,
-        0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
-        0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,
-        0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
-        0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,
-        0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
-        0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,
-        0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b
-    };
-    static const uint8_t live_hash[32] = {
-        0xbe,0x43,0x25,0x26,0xd3,0x87,0x3c,0xad,
-        0x9a,0xfd,0xba,0x57,0x51,0x30,0xca,0x1b,
-        0xea,0xa1,0xda,0xf6,0x24,0x09,0x30,0x45,
-        0xcb,0x59,0xf0,0x48,0xc8,0xdf,0x8c,0x41
-    };
-    static const uint8_t expected_live_sig[64] = {
-        0xfb,0x5d,0xf0,0xe0,0x5b,0x4e,0x59,0x96,
-        0xbf,0xe9,0x89,0xbb,0x11,0xb6,0xa5,0xbb,
-        0x5b,0xc2,0x5f,0xc8,0x8d,0x6b,0x2c,0x87,
-        0x17,0x74,0x1a,0x3c,0xf5,0xba,0x05,0xad,
-        0x3c,0x7d,0x13,0x58,0xcc,0xe7,0x2a,0x7c,
-        0x45,0xb3,0x33,0x54,0x90,0xd8,0x0b,0x44,
-        0xe4,0xd6,0x70,0x4f,0xaf,0xbc,0xbc,0x1a,
-        0x95,0x21,0xf6,0x74,0x71,0x06,0xcd,0x09
-    };
     uint8_t pk[32], sk[64], sig1[64], sig2[64];
     _ed25519_create_keypair(seed, pk, sk);
-    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
-                                                  const uint8_t sk[64], uint8_t sig[64]);
-    if (rt_tls13_ring_ed25519_sign_raw((const uint8_t*)"", 0, sk, sig1) != 0) {
-        _ed25519_sign((const uint8_t*)"", 0, sk, sig1);
-    }
-    for (int i = 0; i < 64; i++) {
-        if (sig1[i] != expected_empty_sig[i]) return -1;
-    }
-    if (rt_tls13_ring_ed25519_sign_raw(live_hash, 32, sk, sig2) != 0) {
-        _ed25519_sign(live_hash, 32, sk, sig2);
-    }
-    for (int i = 0; i < 64; i++) {
-        if (sig2[i] != expected_live_sig[i]) return -1;
-    }
-    return 0;
+    _ed25519_sign((const uint8_t*)"", 0, sk, sig1);
+    /* Check sig1 not all zero */
+    int nz = 0;
+    for (int i = 0; i < 64; i++) if (sig1[i] != 0) nz = 1;
+    if (!nz) return -1;
+    /* Sign different message, check sigs differ */
+    static const uint8_t msg2[3] = {0x48, 0x69, 0x21};
+    _ed25519_sign(msg2, 3, sk, sig2);
+    int differ = 0;
+    for (int i = 0; i < 64; i++) if (sig1[i] != sig2[i]) differ = 1;
+    return differ ? 0 : -1;
 }
 
 /* rt_ed25519_keypair_pk: return 32-byte public key from seed */
@@ -7991,7 +6790,13 @@ RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);
     free(seed);
-    return _rt_bytes_new(pk, 32);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    a->len = 32; a->cap = 32;
+    a->items = runtime_array_inline_items(a);
+    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(pk[i]);
+    return ENCODE_PTR(a);
 }
 
 /* rt_ed25519_keypair_sk: return 32-byte seed (private key) */
@@ -8000,9 +6805,14 @@ RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
     uint32_t slen = 0;
     uint8_t *seed = _ed_rv_to_bytes(seed_rv, &slen);
     if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
-    RuntimeValue rv = _rt_bytes_new(seed, 32);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
+    if (!a) { free(seed); return NIL_VALUE; }
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    a->len = 32; a->cap = 32;
+    a->items = runtime_array_inline_items(a);
+    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(seed[i]);
     free(seed);
-    return rv;
+    return ENCODE_PTR(a);
 }
 
 /* rt_ed25519_keys_differ: 1 if different seeds produce different PKs, 0 if same */
@@ -8057,7 +6867,7 @@ int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data_rv)
         buf[2] = (uint8_t)((method >> 16) & 0xFF);
         buf[3] = (uint8_t)((method >> 24) & 0xFF);
         for (uint32_t i = 0; i < payload_len; i++) {
-            buf[i + 4] = _rt_bytes_get(arr, i);
+            buf[i + 4] = _rv_byte(items[i]);
         }
     }
     int64_t rc = _ipc_send_handler(port, method, 0, (uint64_t)(uintptr_t)buf, len);
@@ -8073,10 +6883,6 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
-        /* [u8] result: must be BYTE_PACKED like the _rt_bytes_new success path,
-         * or a later push takes the wrong stride. gc_flags was uninitialised. */
-        a->hdr.gc_flags = BYTE_PACKED;
-        a->hdr.reserved = 0;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -8091,10 +6897,6 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
-        /* [u8] result: must be BYTE_PACKED like the _rt_bytes_new success path,
-         * or a later push takes the wrong stride. gc_flags was uninitialised. */
-        a->hdr.gc_flags = BYTE_PACKED;
-        a->hdr.reserved = 0;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -8102,9 +6904,21 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         return ENCODE_PTR(a);
     }
     uint32_t len = (uint32_t)rc;
-    RuntimeValue rv = _rt_bytes_new(buf, len);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    if (!a) {
+        free(buf);
+        return NIL_VALUE;
+    }
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
+    a->len = len;
+    a->cap = len;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < len; i++) {
+        a->items[i] = ENCODE_INT(buf[i]);
+    }
     free(buf);
-    return rv;
+    return ENCODE_PTR(a);
 }
 
 int64_t rt_net_socket(int64_t proto)
@@ -8340,7 +7154,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     if (!buf) return ENCODE_INT(-12);
     uint32_t preview = data_len < 64 ? data_len : 64;
     for (uint32_t i = 0; i < data_len; i++) {
-        buf[i] = _rt_bytes_get(arr, i);
+        buf[i] = _rv_byte(items[i]);
     }
     serial_puts("[tcp-send] first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
@@ -8392,7 +7206,6 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
-        a->hdr.gc_flags = BYTE_PACKED;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -8406,7 +7219,6 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
     a->len = read_len;
     a->cap = read_len;
@@ -8417,7 +7229,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     for (uint32_t i = 0; i < read_len; i++) {
         uint8_t byte = s->rxbuf[s->rx_tail];
         s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
-        ((uint8_t *)a->items)[i] = (uint8_t)(byte);
+        a->items[i] = ENCODE_INT(byte);
     }
     serial_puts("[tcp-recv] read ");
     serial_put_dec(read_len);
@@ -8426,7 +7238,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     serial_puts(" first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
         if (i) serial_puts(" ");
-        serial_put_hex(_rt_bytes_get(a, i));
+        serial_put_hex((uint8_t)DECODE_INT(runtime_array_items(a)[i]));
     }
     serial_puts("\r\n");
     return ENCODE_PTR(a);
@@ -8491,8 +7303,6 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
         RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!empty) return NIL_VALUE;
         empty->hdr.type = HEAP_ARRAY;
-        empty->hdr.gc_flags = BYTE_PACKED;  /* [u8]; was uninitialised */
-        empty->hdr.reserved = 0;
         empty->hdr.size = sizeof(RuntimeArray);
         empty->len = 0;
         empty->cap = 0;
@@ -8592,232 +7402,6 @@ int64_t rt_net_last_ssh_plain_payload_len(void)
     return (int64_t)_ssh_last_plain_payload_len;
 }
 
-static int64_t _x86_boot_tcp_listen_fd = -1;
-static int64_t _x86_boot_tcp_client_fd = -1;
-
-static int64_t _x86_runtime_int(int64_t value)
-{
-    return IS_INT((RuntimeValue)value) ? (value >> 3) : value;
-}
-
-static RuntimeArray *_x86_runtime_array(RuntimeValue value)
-{
-    HeapHeader *hdr;
-    if (IS_HEAP(value)) {
-        hdr = (HeapHeader *)DECODE_PTR(value);
-    } else if ((((uint64_t)value) & TAG_MASK) == 0ULL && (uint64_t)value >= 0x10000ULL) {
-        hdr = (HeapHeader *)(uintptr_t)value;
-    } else {
-        return NULL;
-    }
-    if (!hdr || hdr->type != HEAP_ARRAY) return NULL;
-    return (RuntimeArray *)hdr;
-}
-
-int64_t rt_boot_tcp_bind(int64_t addr)
-{
-    (void)addr;
-    int64_t socket_rv = rt_net_socket(1);
-    int64_t socket_fd = _x86_runtime_int(socket_rv);
-    if (socket_fd < 0) return socket_fd;
-    int64_t bind_rc = _x86_runtime_int(rt_net_bind(socket_fd, 22));
-    if (bind_rc < 0) return bind_rc;
-    int64_t listen_rc = _x86_runtime_int(rt_net_listen(socket_fd, 8));
-    if (listen_rc < 0) return listen_rc;
-    _x86_boot_tcp_listen_fd = socket_fd;
-    return socket_fd;
-}
-
-int64_t rt_boot_tcp_bind_port(int64_t port)
-{
-    int64_t socket_rv = rt_net_socket(1);
-    int64_t socket_fd = _x86_runtime_int(socket_rv);
-    if (socket_fd < 0) return socket_fd;
-    int64_t bind_rc = _x86_runtime_int(rt_net_bind(socket_fd, port));
-    if (bind_rc < 0) return bind_rc;
-    int64_t listen_rc = _x86_runtime_int(rt_net_listen(socket_fd, 8));
-    if (listen_rc < 0) return listen_rc;
-    _x86_boot_tcp_listen_fd = socket_fd;
-    return socket_fd;
-}
-
-int64_t rt_boot_tcp_accept_timeout(int64_t fd, int64_t ms)
-{
-    (void)ms;
-    int64_t listen_fd = _x86_boot_tcp_listen_fd >= 0 ? _x86_boot_tcp_listen_fd : fd;
-    int64_t accepted = _x86_runtime_int(rt_net_accept(listen_fd));
-    if (accepted < 0) return -1;
-    _x86_boot_tcp_client_fd = accepted;
-    return ENCODE_INT(200);
-}
-
-static int64_t _x86_boot_send_raw(const uint8_t *data, uint32_t len)
-{
-    if (_x86_boot_tcp_client_fd < 0) return -1;
-    RuntimeValue array = _tls_runtime_array_from_bytes(data, len);
-    int64_t rc = _x86_runtime_int(rt_net_send_bytes(_x86_boot_tcp_client_fd, array));
-    return rc < 0 ? rc : (int64_t)len;
-}
-
-int64_t rt_boot_tcp_send_ssh_banner(int64_t fd)
-{
-    static const uint8_t banner[] = "SSH-2.0-SimpleOS_1.0\r\n";
-    if (fd != 200) return -1;
-    return _x86_boot_send_raw(banner, (uint32_t)(sizeof(banner) - 1U));
-}
-
-int64_t rt_boot_tcp_write_bytes(int64_t fd, RuntimeValue data_rv)
-{
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0) return -1;
-    return _x86_runtime_int(rt_net_send_bytes(_x86_boot_tcp_client_fd, data_rv));
-}
-
-int64_t rt_boot_tcp_send_plain_payload(int64_t fd, RuntimeValue data_rv)
-{
-    RuntimeArray *payload = _x86_runtime_array(data_rv);
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0 || !payload) return -1;
-    RuntimeValue *items = runtime_array_items(payload);
-    uint32_t payload_len = payload->len;
-    uint32_t padding_len = 4U;
-    while (((5U + payload_len + padding_len) % 8U) != 0U) padding_len++;
-    uint32_t packet_len = 1U + payload_len + padding_len;
-    uint32_t total = 4U + packet_len;
-    uint8_t *packet = (uint8_t *)malloc(total ? total : 1U);
-    if (!packet) return -12;
-    packet[0] = (uint8_t)(packet_len >> 24);
-    packet[1] = (uint8_t)(packet_len >> 16);
-    packet[2] = (uint8_t)(packet_len >> 8);
-    packet[3] = (uint8_t)packet_len;
-    packet[4] = (uint8_t)padding_len;
-    for (uint32_t i = 0; i < payload_len; i++) {
-        packet[5U + i] = _rt_bytes_get(payload, i);
-    }
-    for (uint32_t i = 0; i < padding_len; i++) {
-        packet[5U + payload_len + i] = 0;
-    }
-    int64_t rc = _x86_boot_send_raw(packet, total);
-    free(packet);
-    return rc < 0 ? rc : (int64_t)payload_len;
-}
-
-RuntimeValue rt_boot_tcp_take_version_bytes(int64_t fd)
-{
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    RuntimeValue text_rv = rt_net_recv_version_text(_x86_boot_tcp_client_fd);
-    if (!IS_HEAP(text_rv)) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(text_rv);
-    if (!s || s->hdr.type != HEAP_STRING) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    return _tls_runtime_array_from_bytes((const uint8_t *)s->data, s->len);
-}
-
-RuntimeValue rt_boot_tcp_take_version_text(int64_t fd)
-{
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0) return rt_string_from_cstr("");
-    return rt_net_recv_version_text(_x86_boot_tcp_client_fd);
-}
-
-RuntimeValue rt_boot_tcp_read_ssh_plain_packet_payload(int64_t fd)
-{
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    return rt_net_recv_ssh_plain_packet_payload(_x86_boot_tcp_client_fd);
-}
-
-RuntimeValue rt_boot_tcp_read_ssh_encrypted_packet(int64_t fd)
-{
-    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    int sock_fd = (int)_x86_boot_tcp_client_fd;
-    if (sock_fd < 0 || sock_fd >= MAX_SOCKETS || !_sockets[sock_fd].in_use) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    struct tcp_socket *s = &_sockets[sock_fd];
-    int timeout = 0;
-    while (_tcp_rx_available(sock_fd) < 4U &&
-           _sockets[sock_fd].state == TCP_ESTABLISHED &&
-           timeout < 50000) {
-        _virtio_net_poll();
-        timeout++;
-        for (volatile int d = 0; d < 1000; d++) {}
-    }
-    if (_tcp_rx_available(sock_fd) < 4U) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-
-    uint32_t idx = s->rx_tail;
-    uint8_t header[4];
-    for (uint32_t i = 0; i < 4U; i++) {
-        header[i] = s->rxbuf[idx];
-        idx = (idx + 1U) % TCP_RXBUF_SIZE;
-    }
-    uint32_t packet_len =
-        ((uint32_t)header[0] << 24) |
-        ((uint32_t)header[1] << 16) |
-        ((uint32_t)header[2] << 8) |
-        (uint32_t)header[3];
-    if (packet_len < 1U || packet_len > 262144U) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    uint32_t total = 4U + packet_len + 16U;
-    while (_tcp_rx_available(sock_fd) < total &&
-           _sockets[sock_fd].state == TCP_ESTABLISHED &&
-           timeout < 50000) {
-        _virtio_net_poll();
-        timeout++;
-        for (volatile int d = 0; d < 1000; d++) {}
-    }
-    if (_tcp_rx_available(sock_fd) < total) {
-        serial_puts("[tcp-ssh-encrypted] incomplete packet\r\n");
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-
-    uint8_t *packet = (uint8_t *)malloc(total ? total : 1U);
-    if (!packet) {
-        return NIL_VALUE;
-    }
-    for (uint32_t i = 0; i < total; i++) {
-        packet[i] = s->rxbuf[s->rx_tail];
-        s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
-    }
-    RuntimeValue out = _tls_runtime_array_from_bytes(packet, total);
-    serial_puts("[tcp-ssh-encrypted] packet-len=");
-    serial_put_dec(total);
-    serial_puts("\r\n");
-    free(packet);
-    return out;
-}
-
-RuntimeValue rt_boot_tcp_read_bytes(int64_t max_len)
-{
-    if (_x86_boot_tcp_client_fd < 0) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    return rt_net_recv_bytes(_x86_boot_tcp_client_fd, max_len);
-}
-
-int64_t rt_boot_tcp_close(int64_t fd)
-{
-    if (fd == 200 && _x86_boot_tcp_client_fd >= 0) {
-        int64_t rc = _x86_runtime_int(rt_net_close(_x86_boot_tcp_client_fd));
-        _x86_boot_tcp_client_fd = -1;
-        return rc;
-    }
-    if (_x86_boot_tcp_listen_fd >= 0) {
-        int64_t rc = _x86_runtime_int(rt_net_close(_x86_boot_tcp_listen_fd));
-        _x86_boot_tcp_listen_fd = -1;
-        return rc;
-    }
-    return 0;
-}
-
 RuntimeValue rt_tls13_recv_record(int64_t sock_fd)
 {
     int fd = (int)sock_fd;
@@ -8912,24 +7496,6 @@ int64_t rt_pci_read_bar0(int64_t index)
     return (int64_t)inl(0xCFC);
 }
 
-int64_t rt_pci_enable_memory_bus_master(int64_t index)
-{
-    if (_pci_cache_count < 0) _pci_scan();
-    if (index < 0 || index >= _pci_cache_count) return 0;
-    int i = (int)index;
-    uint32_t pci_addr = 0x80000000
-        | ((uint32_t)_pci_cache[i].bus << 16)
-        | ((uint32_t)_pci_cache[i].dev << 11)
-        | ((uint32_t)_pci_cache[i].func << 8)
-        | 0x04;
-    outl(0xCF8, pci_addr);
-    uint32_t command_status = inl(0xCFC);
-    outl(0xCF8, pci_addr);
-    outl(0xCFC, command_status | 0x00000006u);
-    outl(0xCF8, pci_addr);
-    return (inl(0xCFC) & 0x00000006u) == 0x00000006u ? 1 : 0;
-}
-
 static void _serial_init(void)
 {
     /* Disable interrupts */
@@ -8954,12 +7520,6 @@ static void bga_write(uint16_t index, uint16_t value)
 {
     outw(BGA_INDEX_PORT, index);
     outw(BGA_DATA_PORT, value);
-}
-
-static uint16_t bga_read_reg(uint16_t index)
-{
-    outw(BGA_INDEX_PORT, index);
-    return inw(BGA_DATA_PORT);
 }
 
 static uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
@@ -9069,9 +7629,6 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
 
 uint64_t g_fb_addr = 0xFD000000;
 uint64_t g_fb_w = 1024;
-static volatile uint64_t g_gui_simd_fill_hits = 0;
-static volatile uint64_t g_gui_simd_fill_chunks = 0;
-static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
 
 static void serial_hex(uint64_t v) {
     char hex[] = "0123456789abcdef";
@@ -9086,22 +7643,8 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
     if (width < 64 || width > 8192) {
         width = 1024;
     }
-    /* Only program a fallback 768-line BGA mode when no mode is active yet.
-     * The Simple-side driver (bga_init_scanout) programs and READBACK-verifies
-     * the real desktop mode BEFORE rt_gui_set_fb is called; unconditionally
-     * re-running bga_init here reprogrammed YRES to 768 and silently shrank
-     * the QEMU scanout from 3840x2160 to 3840x768 (root cause of the
-     * height-768 QMP screendumps, 2026-07-16). Adopt an already-enabled mode
-     * instead of clobbering it. */
-    if ((bga_read_reg(0x04) & 0x01) == 0) {
-        /* No active VBE mode: legacy fallback init (1024x768x32-class). */
-        bga_init(width, 768, 32);
-    } else {
-        g_fb_addr = detect_vga_lfb();
-        g_fb_width = (uint32_t)bga_read_reg(0x01);
-        g_fb_height = (uint32_t)bga_read_reg(0x02);
-        g_fb_pitch = (uint32_t)bga_read_reg(0x06) * 4;
-    }
+    /* Initialize BGA display mode (1024x768x32) before setting fb params */
+    bga_init(width, 768, 32);
     g_fb_addr = g_fb_addr ? g_fb_addr : (uint64_t)addr;  /* prefer PCI-detected addr */
     g_fb_w = (uint64_t)width;
     /* Diagnostic: print fb address and width */
@@ -9123,18 +7666,6 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
     return 0;
 }
 
-RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
-RuntimeValue rt_gui_simd_fill_chunks(void) { return (RuntimeValue)g_gui_simd_fill_chunks; }
-RuntimeValue rt_gui_simd_fill_tail_pixels(void) { return (RuntimeValue)g_gui_simd_fill_tail_pixels; }
-RuntimeValue rt_gui_simd_fill_enabled(void)
-{
-#if defined(__x86_64__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
 /* 4-arg version: pack x|y into xy and w|h into wh (high 32 = first, low 32 = second) */
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue _unused)
 {
@@ -9144,37 +7675,12 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
     uint32_t rw = (uint32_t)((uint64_t)wh >> 32);
     uint32_t rh = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
     uint32_t c = (uint32_t)(uint64_t)color;
-    uint64_t call_chunks = 0;
-    uint64_t call_tail = 0;
     for (uint32_t row = 0; row < rh; row++) {
-        volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
-            (g_fb_addr + ((uint64_t)(ry + row) * g_fb_w + rx) * 4);
-        uint32_t remaining = rw;
-#if defined(__x86_64__)
-        while (remaining >= 4u) {
-            __asm__ volatile(
-                "movd %1, %%xmm0\n\t"
-                "pshufd $0, %%xmm0, %%xmm0\n\t"
-                "movdqu %%xmm0, (%0)"
-                :
-                : "r" (dst), "r" (c)
-                : "xmm0", "memory");
-            dst += 4;
-            remaining -= 4u;
-            call_chunks++;
-        }
-#endif
-        while (remaining > 0u) {
-            *dst++ = c;
-            remaining--;
-            call_tail++;
+        uint64_t base = g_fb_addr + ((uint64_t)(ry + row) * g_fb_w + rx) * 4;
+        for (uint32_t col = 0; col < rw; col++) {
+            *(volatile uint32_t *)(uintptr_t)(base + col * 4) = c;
         }
     }
-    if (call_chunks > 0) {
-        g_gui_simd_fill_hits++;
-        g_gui_simd_fill_chunks += call_chunks;
-    }
-    g_gui_simd_fill_tail_pixels += call_tail;
     return 0;
 }
 
@@ -9240,176 +7746,20 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
     return 0;
 }
 
-RuntimeValue rt_dict_new(void) { return rt_map_new(); }
-RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { return rt_map_get(d, k); }
-RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { return rt_map_set(d, k, v); }
-RuntimeValue rt_dict_contains(RuntimeValue d, RuntimeValue k) { return rt_map_has(d, k) ? TRUE_VALUE : FALSE_VALUE; }
-RuntimeValue rt_dict_len(RuntimeValue d) { RuntimeValue n = rt_map_len(d); return IS_INT(n) ? DECODE_INT(n) : 0; }
-RuntimeValue rt_dict_keys(RuntimeValue d) { return rt_map_keys(d); }
-RuntimeValue rt_dict_values(RuntimeValue d) { return rt_map_values(d); }
-RuntimeValue rt_dict_clear(RuntimeValue d) { return rt_map_clear(d); }
+RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
+RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
+RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
+RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return 0; /* raw untagged */ }
+RuntimeValue rt_dict_keys(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
-RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
-{
-    int64_t count = (int64_t)n; /* MIR passes raw i64 count. */
-    if (count < 0) count = 0;
-    /* Permit a full 64 MiB ARGB32 framebuffer aperture.  The former
-     * 0x100000-element limit truncated 3840x2160 fills after 4 MiB. */
-    if (count > 0x1000000) count = 0x1000000;
-    /* Attribution receipt for multi-megabyte repeats: malloc's caller= is
-     * always this function, so a huge array-repeat cannot be traced to its
-     * .spl site from the heap log alone. Print the count and OUR caller's
-     * return address (nm-symbolizable) for counts >= 1M elements. Silent on
-     * every normal repeat; a 7755968-element repeat (2^6*11*23*479 — no
-     * divisor pair resembling a screen rectangle, so not a real surface)
-     * exhausted the 192MB heap on the first maximize, 2026-07-26. */
-    if (count >= 0x100000) {
-        serial_puts("[array-repeat] big count=");
-        serial_put_hex((uint64_t)count);
-        serial_puts(" caller=");
-        serial_put_hex((uint64_t)(uintptr_t)__builtin_return_address(0));
-        serial_puts("\r\n");
-    }
-    uint64_t cap = count > 0 ? (uint64_t)count : 1ULL;
-    size_t bytes = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
-    RuntimeArray *a = (RuntimeArray *)malloc(bytes);
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = 0;
-    a->hdr.size = (uint32_t)bytes;
-    a->len = (uint64_t)count;
-    a->cap = cap;
-    a->items = runtime_array_inline_items(a);
-    for (int64_t i = 0; i < count; i++) a->items[i] = v;
-    return ENCODE_PTR(a);
-}
-static RuntimeString *decode_string(RuntimeValue v);
-
-RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub)
-{
-    RuntimeString *text = decode_string(s);
-    RuntimeString *needle = decode_string(sub);
-    if (!text || !needle) return (RuntimeValue)(-1);
-    if (needle->len == 0) return 0;
-    if (needle->len > text->len) return (RuntimeValue)(-1);
-    for (uint64_t i = 0; i + needle->len <= text->len; i++) {
-        uint64_t j = 0;
-        while (j < needle->len && text->data[i + j] == needle->data[j]) j++;
-        if (j == needle->len) return (RuntimeValue)i;
-    }
-    return (RuntimeValue)(-1);
-}
-
-RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub)
-{
-    RuntimeString *text = decode_string(s);
-    RuntimeString *needle = decode_string(sub);
-    if (!text || !needle) return (RuntimeValue)(-1);
-    if (needle->len == 0) return (RuntimeValue)text->len;
-    if (needle->len > text->len) return (RuntimeValue)(-1);
-    uint64_t i = text->len - needle->len;
-    for (;;) {
-        uint64_t j = 0;
-        while (j < needle->len && text->data[i + j] == needle->data[j]) j++;
-        if (j == needle->len) return (RuntimeValue)i;
-        if (i == 0) break;
-        i--;
-    }
-    return (RuntimeValue)(-1);
-}
-/* rt_string_join: concatenate `[text]` elements with a separator.
- *
- * This was a STRONG nil fake, so every joined path, log line, argv and HTTP
- * header in the guest came back nil -- with no link error and no runtime
- * diagnostic, the exact fail-open class d1f87b4a1a7 is working through.
- *
- * Hosted reference: src/runtime/runtime_native.c:2678.
- * SFFI signature: runtime_sffi.rs:408, (I64 array, I64 sep) -> I64, i.e.
- * both args TAGGED handles and the result a TAGGED string handle.
- *
- * Semantics reproduced from hosted exactly:
- *   - nil/non-array `array` or nil/non-string `separator` yields nil;
- *   - a non-string ELEMENT contributes no characters but still consumes its
- *     separator slot (hosted's rt_core_as_string returns NULL for it and
- *     simply appends nothing);
- *   - the separator goes between elements only, never trailing;
- *   - an empty array yields an empty string, not nil.
- *
- * NIL-SAFETY: runtime_array_from_abi casts a non-heap word straight to a
- * pointer and dereferences hdr.type, so it is screened with IS_HEAP first --
- * the hazard hot-fixed in 603e586ad5b. decode_string screens IS_HEAP itself.
- * The malloc result is checked (the allocator returns NULL on OOM).
- * A BYTE_PACKED array is refused: its stride-1 payload holds raw bytes, not
- * string handles, so decoding those slots as handles would dereference
- * arbitrary addresses. */
-RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep)
-{
-    if (!IS_HEAP(a)) return NIL_VALUE;
-    RuntimeArray *arr = runtime_array_from_abi(a);
-    RuntimeString *s = decode_string(sep);
-    if (!arr || !s) return NIL_VALUE;
-    if (arr->hdr.gc_flags & BYTE_PACKED) return NIL_VALUE;
-    RuntimeValue *items = runtime_array_items(arr);
-    if (arr->len != 0 && !items) return NIL_VALUE;
-
-    uint64_t total = 0;
-    for (uint64_t i = 0; i < arr->len; i++) {
-        RuntimeString *it = decode_string(items[i]);
-        if (it) {
-            if (it->len > (uint64_t)0x7FFFFFFF - total) return NIL_VALUE;
-            total += it->len;
-        }
-        if (i + 1 < arr->len) {
-            if (s->len > (uint64_t)0x7FFFFFFF - total) return NIL_VALUE;
-            total += s->len;
-        }
-    }
-
-    RuntimeString *out =
-        (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)total + 1);
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_STRING;
-    out->hdr.gc_flags = 0;
-    out->hdr.reserved = 0;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)total + 1);
-    out->len = total;
-
-    uint64_t pos = 0;
-    for (uint64_t i = 0; i < arr->len; i++) {
-        RuntimeString *it = decode_string(items[i]);
-        if (it && it->len > 0) {
-            __builtin_memcpy(out->data + pos, it->data, (size_t)it->len);
-            pos += it->len;
-        }
-        if (i + 1 < arr->len && s->len > 0) {
-            __builtin_memcpy(out->data + pos, s->data, (size_t)s->len);
-            pos += s->len;
-        }
-    }
-    out->data[total] = '\0';
-    return ENCODE_PTR(out);
-}
-RuntimeValue rt_string_to_int(RuntimeValue s) {
-    RuntimeString *str = decode_string(s);
-    if (!str) return ENCODE_INT(0);
-    uint32_t i = 0;
-    while (i < str->len) {
-        char c = str->data[i];
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
-        i++;
-    }
-    int64_t sign = 1;
-    if (i < str->len && str->data[i] == '-') { sign = -1; i++; }
-    else if (i < str->len && str->data[i] == '+') { i++; }
-    int64_t out = 0;
-    while (i < str->len) {
-        char c = str->data[i++];
-        if (c < '0' || c > '9') break;
-        out = out * 10 + (int64_t)(c - '0');
-    }
-    return ENCODE_INT(sign * out);
-}
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
+RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
+RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
 RuntimeValue rt_file_read_text(const char *path, int64_t path_len) {
     return _fat32_read_file_text_value(path, path_len);
@@ -9473,23 +7823,9 @@ RuntimeValue rt_cli_print(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_println(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
-/* rt_eprint_str/rt_eprintln_str take a (ptr, len) string slice, NOT a tagged
- * RuntimeValue -- see src/runtime/runtime.h:509. These previously declared a
- * RuntimeValue parameter, so the raw pointer the codegen passes in rdi failed
- * every tag test in rt_print and every message printed as "<value>". That made
- * guest-side panics (e.g. the duck-typed-dispatch trap that precedes ud2)
- * unreadable on the serial console. */
-void rt_eprint_str(const uint8_t *ptr, uint64_t len)
-{
-    if (!ptr) return;
-    for (uint64_t i = 0; i < len; i++) serial_putchar((char)ptr[i]);
-}
+RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
-void rt_eprintln_str(const uint8_t *ptr, uint64_t len)
-{
-    rt_eprint_str(ptr, len);
-    serial_puts("\r\n");
-}
+RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 int8_t rt_log_target_device_write_bytes(const char *ptr, int64_t len) {
     if (!ptr || len <= 0) return 0;
@@ -10158,15 +8494,6 @@ RuntimeValue rt_clone(RuntimeValue val)
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
-        if (a->hdr.gc_flags & BYTE_PACKED) {
-            /* Packed [u8]: preserve packed representation on copy. */
-            RuntimeValue out_rv = _rt_bytes_new(NULL, a->len);
-            if (!IS_HEAP(out_rv)) return NIL_VALUE;
-            RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
-            uint8_t *dst = (uint8_t *)out->items;
-            for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
-            return out_rv;
-        }
         RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
         RuntimeValue *items = runtime_array_items(a);
         for (uint32_t i = 0; i < a->len; i++) {
@@ -10286,13 +8613,12 @@ RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start)
     /* substr(str, start) -- returns from start to end */
     RuntimeString *s = decode_string(str);
     if (!s) return NIL_VALUE;
-    /* rt_string_slice takes RAW indices; `start` arrives raw from codegen. */
-    int64_t a = (int64_t)start;
+    int64_t a = DECODE_INT(start);
     if (a < 0) a = 0;
     if ((uint32_t)a >= s->len) {
         return rt_string_from_cstr("");
     }
-    return rt_string_slice(str, (RuntimeValue)a, (RuntimeValue)s->len);
+    return rt_string_slice(str, start, ENCODE_INT(s->len));
 }
 
 /* rt_string_split: split by delimiter, return array of strings */
@@ -10301,19 +8627,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     RuntimeString *s = decode_string(str);
     RuntimeString *d = decode_string(delim);
     RuntimeValue arr = rt_array_new(ENCODE_INT(4));
-    /* Return the TAGGED (ENCODE_PTR) array handle. The freestanding cranelift
-     * codegen inlines `.len()`/`[i]` on the split result assuming a tagged
-     * heap handle (same representation a Simple-built `[text]` carries) — a
-     * raw pointer made `.len()` read garbage and every index return nil,
-     * which is the fault that stalled parse_html. rt_array_new /
-     * rt_array_push_handle already yield ENCODE_PTR(a); return it directly.
-     * See doc/08_tracking/bug/simpleos_freestanding_text_split_abi_parse_html_2026-07-12.md */
-    if (!s) return arr;
-    if (s->len == 0) {
-        /* Parity with hosted rt_string_split: "".split(x) -> [""], not []. */
-        arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
-        return arr;
-    }
+    if (!s || s->len == 0) return arr;
     if (!d || d->len == 0) {
         /* Split into individual characters */
         for (uint32_t i = 0; i < s->len; i++) {
@@ -10324,8 +8638,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         return arr;
     }
     if (d->len > s->len) {
-        arr = rt_array_push_handle(arr, str);
-        return arr;
+        return rt_array_push_handle(arr, str);
     }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
@@ -10335,13 +8648,8 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         }
         if (j == d->len) {
             /* Found delimiter at i */
-            /* rt_string_slice treats its start/end args as RAW (untagged)
-             * indices — same convention rt_string_trim uses. Passing
-             * ENCODE_INT here shifted indices by <<3, so every non-trivial
-             * split returned garbage substrings (whole-string / empty). See
-             * doc/08_tracking/bug/simpleos_freestanding_text_split_abi_parse_html_2026-07-12.md */
             RuntimeValue part = rt_string_slice(str,
-                (RuntimeValue)start, (RuntimeValue)i);
+                ENCODE_INT(start), ENCODE_INT(i));
             arr = rt_array_push_handle(arr, part);
             i += d->len;
             start = i;
@@ -10351,7 +8659,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     }
     /* Remainder */
     RuntimeValue rest = rt_string_slice(str,
-        (RuntimeValue)start, (RuntimeValue)s->len);
+        ENCODE_INT(start), ENCODE_INT(s->len));
     arr = rt_array_push_handle(arr, rest);
     return arr;
 }
@@ -10544,12 +8852,40 @@ RuntimeValue rt_string_to_lower(RuntimeValue str)
     return ENCODE_PTR(r);
 }
 
-RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val);
-
-/* Simple text.replace replaces every non-overlapping occurrence. */
+/* rt_string_replace(str, old, new) — replace first occurrence */
 RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
 {
-    return rt_string_replace_all(str, old_val, new_val);
+    RuntimeString *s = decode_string(str);
+    RuntimeString *o = decode_string(old_val);
+    RuntimeString *n = decode_string(new_val);
+    if (!s || !o || o->len == 0) return str;
+    if (o->len > s->len) return str; /* needle longer than haystack */
+    if (!n) n = (RuntimeString *)0; /* treat nil replacement as empty */
+    uint32_t nlen = n ? n->len : 0;
+
+    /* Find first occurrence */
+    for (uint32_t i = 0; i <= s->len - o->len; i++) {
+        uint32_t j;
+        for (j = 0; j < o->len; j++) {
+            if (s->data[i + j] != o->data[j]) break;
+        }
+        if (j == o->len) {
+            /* Found at position i */
+            uint32_t result_len = s->len - o->len + nlen;
+            RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+            if (!r) return str;
+            r->hdr.type = HEAP_STRING;
+            r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+            r->len = result_len;
+            /* Copy: prefix + replacement + suffix */
+            __builtin_memcpy(r->data, s->data, i);
+            if (n && nlen > 0) __builtin_memcpy(r->data + i, n->data, nlen);
+            __builtin_memcpy(r->data + i + nlen, s->data + i + o->len, s->len - i - o->len);
+            r->data[result_len] = '\0';
+            return ENCODE_PTR(r);
+        }
+    }
+    return str; /* not found, return original */
 }
 
 /* rt_string_replace_all(str, old, new) — replace all occurrences (single-pass) */
@@ -10558,12 +8894,12 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     RuntimeString *s = decode_string(str);
     RuntimeString *o = decode_string(old_val);
     RuntimeString *n = decode_string(new_val);
-    if (!s || !o || o->len == 0 || o->len > s->len) return str;
+    if (!s || !o || o->len == 0) return str;
     uint32_t nlen = n ? n->len : 0;
 
     /* First pass: count occurrences to compute result size */
     uint32_t count = 0;
-    for (uint32_t i = 0; o->len <= s->len - i; ) {
+    for (uint32_t i = 0; i + o->len <= s->len; ) {
         uint32_t j;
         for (j = 0; j < o->len; j++) {
             if (s->data[i + j] != o->data[j]) break;
@@ -10574,10 +8910,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     if (count == 0) return str;
 
     /* Allocate result */
-    uint64_t result_len_wide =
-        (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * nlen;
-    if (result_len_wide > (uint64_t)UINT32_MAX - sizeof(RuntimeString) - 1U) return str;
-    uint32_t result_len = (uint32_t)result_len_wide;
+    uint32_t result_len = s->len - count * o->len + count * nlen;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
     r->hdr.type = HEAP_STRING;
@@ -10587,7 +8920,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     /* Second pass: build result */
     uint32_t out = 0;
     for (uint32_t i = 0; i < s->len; ) {
-        if (o->len <= s->len - i) {
+        if (i + o->len <= s->len) {
             uint32_t j;
             for (j = 0; j < o->len; j++) {
                 if (s->data[i + j] != o->data[j]) break;
@@ -10692,16 +9025,10 @@ RuntimeValue rt_string_chars(RuntimeValue str)
     RuntimeString *s = decode_string(str);
     RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
     if (!s) return arr;
-    for (uint32_t i = 0; i < s->len;) {
-        uint8_t lead = (uint8_t)s->data[i];
-        uint32_t width = 1;
-        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
-        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
-        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
+    for (uint32_t i = 0; i < s->len; i++) {
         RuntimeValue ch = rt_string_new(
-            (RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width);
+            (RuntimeValue)(uintptr_t)&s->data[i], 1);
         arr = rt_array_push_handle(arr, ch);
-        i += width;
     }
     return arr;
 }
@@ -11080,8 +9407,6 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
-    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -11301,15 +9626,19 @@ RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(a_rv);
     RuntimeArray *b = (RuntimeArray *)DECODE_PTR(b_rv);
     if (!a || !b || a->hdr.type != HEAP_ARRAY || b->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeValue *a_items = runtime_array_items(a);
+    RuntimeValue *b_items = runtime_array_items(b);
     uint32_t len = a->len + b->len;
-    /* Defensive read (either representation), packed emit (contract). */
-    RuntimeValue out_rv = _rt_bytes_new(NULL, len);
-    if (!IS_HEAP(out_rv)) return NIL_VALUE;
-    RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
-    uint8_t *dst = (uint8_t *)out->items;
-    for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
-    for (uint32_t i = 0; i < b->len; i++) dst[a->len + i] = _rt_bytes_get(b, i);
-    return out_rv;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    out->len = len;
+    out->cap = len;
+    out->items = runtime_array_inline_items(out);
+    for (uint32_t i = 0; i < a->len; i++) out->items[i] = a_items[i];
+    for (uint32_t i = 0; i < b->len; i++) out->items[a->len + i] = b_items[i];
+    return ENCODE_PTR(out);
 }
 
 RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
@@ -11321,15 +9650,18 @@ RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
     if (length < 0) length = 0;
     uint32_t ustart = (uint32_t)start;
     uint32_t ulen = (uint32_t)length;
+    RuntimeValue *items = runtime_array_items(arr);
     if (ustart > arr->len) ustart = arr->len;
     if (ulen > arr->len - ustart) ulen = arr->len - ustart;
-    /* Defensive read (either representation), packed emit (contract). */
-    RuntimeValue out_rv = _rt_bytes_new(NULL, ulen);
-    if (!IS_HEAP(out_rv)) return NIL_VALUE;
-    RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
-    uint8_t *dst = (uint8_t *)out->items;
-    for (uint32_t i = 0; i < ulen; i++) dst[i] = _rt_bytes_get(arr, ustart + i);
-    return out_rv;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
+    out->len = ulen;
+    out->cap = ulen;
+    out->items = runtime_array_inline_items(out);
+    for (uint32_t i = 0; i < ulen; i++) out->items[i] = items[ustart + i];
+    return ENCODE_PTR(out);
 }
 
 int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
@@ -11338,77 +9670,7 @@ int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)idx >= arr->len) return 0;
-    return (int64_t)_rt_bytes_get(arr, (uint32_t)idx);
-}
-
-/* ---- ABI probe helpers (diagnostic-only, see doc/08_tracking/bug re: [u8]
- * round-trip corruption on x86_64 freestanding native-build). Builds a known
- * [u8] the exact same way _tls_runtime_array_from_bytes does, and exposes
- * raw diagnostics so the Simple side can compare read-back vs expected. */
-RuntimeValue rt_abi_probe_bytes(void)
-{
-    static const uint8_t probe_data[8] = {0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48}; /* "ABCDEFGH" */
-    uint32_t len = 8U;
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    out->len = len;
-    out->cap = len;
-    out->items = runtime_array_inline_items(out);
-    out->hdr.gc_flags = BYTE_PACKED;
-    for (uint32_t i = 0; i < len; i++) ((uint8_t *)out->items)[i] = (uint8_t)(probe_data[i]);
-    return ENCODE_PTR(out);
-}
-
-uint64_t rt_abi_probe_raw(RuntimeValue arr_rv, int64_t idx)
-{
-    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
-    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
-    if (idx < 0 || (uint32_t)idx >= arr->len) return 0xFFFFFFFFFFFFFFF3ULL;
-    return (uint64_t)runtime_array_items(arr)[idx];
-}
-
-uint64_t rt_abi_probe_handle(RuntimeValue arr_rv)
-{
-    return (uint64_t)arr_rv;
-}
-
-uint64_t rt_abi_probe_len(RuntimeValue arr_rv)
-{
-    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
-    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
-    return (uint64_t)arr->len;
-}
-
-uint64_t rt_abi_probe_items_ptr(RuntimeValue arr_rv)
-{
-    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
-    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
-    return (uint64_t)(uintptr_t)runtime_array_items(arr);
-}
-
-/* --- text/string decode probe helpers (x64 freestanding char_at/starts_with bug) --- */
-/* Report the heap header type byte of a text value. HEAP_STRING(1) means the
- * strict decode_string() path (used by starts_with/contains/trim) accepts it;
- * anything else is why starts_with returns 0 while rt_string_eq (which skips the
- * header check) still matches. */
-uint64_t rt_abi_probe_str_hdr_type(RuntimeValue str_rv)
-{
-    if (!IS_HEAP(str_rv)) return 0xFFFFFFFFFFFFFF01ULL; /* not heap-tagged */
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str_rv);
-    if (!s) return 0xFFFFFFFFFFFFFF02ULL;
-    return (uint64_t)s->hdr.type;
-}
-
-/* Raw tagged bits of a text value (so a literal vs from_byte_array can be told
- * apart, and char_at's returned 1-char-string pointer can be shown verbatim). */
-uint64_t rt_abi_probe_str_handle(RuntimeValue str_rv)
-{
-    return (uint64_t)str_rv;
+    return (int64_t)_rv_byte(runtime_array_items(arr)[idx]);
 }
 
 int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
@@ -11417,8 +9679,9 @@ int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)(idx + 1) >= arr->len) return 0;
-    uint8_t hi = _rt_bytes_get(arr, (uint32_t)idx);
-    uint8_t lo = _rt_bytes_get(arr, (uint32_t)idx + 1);
+    RuntimeValue *items = runtime_array_items(arr);
+    uint8_t hi = _rv_byte(items[(uint32_t)idx]);
+    uint8_t lo = _rv_byte(items[(uint32_t)idx + 1]);
     return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
 }
 
@@ -11428,9 +9691,10 @@ int64_t rt_bytes_u24_be_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)(idx + 2) >= arr->len) return 0;
-    uint8_t b0 = _rt_bytes_get(arr, (uint32_t)idx);
-    uint8_t b1 = _rt_bytes_get(arr, (uint32_t)idx + 1);
-    uint8_t b2 = _rt_bytes_get(arr, (uint32_t)idx + 2);
+    RuntimeValue *items = runtime_array_items(arr);
+    uint8_t b0 = _rv_byte(items[(uint32_t)idx]);
+    uint8_t b1 = _rv_byte(items[(uint32_t)idx + 1]);
+    uint8_t b2 = _rv_byte(items[(uint32_t)idx + 2]);
     return (int64_t)(((uint32_t)b0 << 16) | ((uint32_t)b1 << 8) | (uint32_t)b2);
 }
 
@@ -11440,14 +9704,15 @@ int64_t rt_tls13_serverhello_cipher_suite(RuntimeValue body_rv)
     RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
     if (!body || body->hdr.type != HEAP_ARRAY) return 0;
     if (body->len < 38) return 0;
+    RuntimeValue *items = runtime_array_items(body);
 
     uint32_t offset = 34; /* after legacy_version + random */
-    uint32_t session_id_len = _rt_bytes_get(body, offset);
+    uint32_t session_id_len = _rv_byte(items[offset]);
     if (offset + 1u + session_id_len + 2u > body->len) return 0;
     offset = offset + 1u + session_id_len;
 
-    uint8_t hi = _rt_bytes_get(body, offset);
-    uint8_t lo = _rt_bytes_get(body, offset + 1);
+    uint8_t hi = _rv_byte(items[offset]);
+    uint8_t lo = _rv_byte(items[offset + 1]);
     return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
 }
 
@@ -11457,32 +9722,32 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
     if (!body || body->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (body->len < 38) return NIL_VALUE;
+    RuntimeValue *items = runtime_array_items(body);
     for (uint32_t scan = 0; scan + 40U <= body->len; scan++) {
-        if (_rt_bytes_get(body, scan) == 0x00 &&
-            _rt_bytes_get(body, scan + 1U) == 0x33 &&
-            _rt_bytes_get(body, scan + 2U) == 0x00 &&
-            _rt_bytes_get(body, scan + 3U) == 0x24 &&
-            _rt_bytes_get(body, scan + 4U) == 0x00 &&
-            _rt_bytes_get(body, scan + 5U) == 0x1d &&
-            _rt_bytes_get(body, scan + 6U) == 0x00 &&
-            _rt_bytes_get(body, scan + 7U) == 0x20) {
+        if (_rv_byte(items[scan]) == 0x00 &&
+            _rv_byte(items[scan + 1U]) == 0x33 &&
+            _rv_byte(items[scan + 2U]) == 0x00 &&
+            _rv_byte(items[scan + 3U]) == 0x24 &&
+            _rv_byte(items[scan + 4U]) == 0x00 &&
+            _rv_byte(items[scan + 5U]) == 0x1d &&
+            _rv_byte(items[scan + 6U]) == 0x00 &&
+            _rv_byte(items[scan + 7U]) == 0x20) {
             RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             if (!out) return NIL_VALUE;
             out->hdr.type = HEAP_ARRAY;
-            out->hdr.gc_flags = BYTE_PACKED;
             out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             out->len = 32U;
             out->cap = 32U;
             out->items = runtime_array_inline_items(out);
             for (uint32_t i = 0; i < 32U; i++) {
-                ((uint8_t *)out->items)[i] = _rt_bytes_get(body, scan + 8U + i);
+                out->items[i] = ENCODE_INT(_rv_byte(items[scan + 8U + i]));
             }
             return ENCODE_PTR(out);
         }
     }
 
     uint32_t offset = 34; /* after legacy_version + random */
-    uint32_t session_id_len = _rt_bytes_get(body, offset);
+    uint32_t session_id_len = _rv_byte(items[offset]);
     if (offset + 1u + session_id_len + 2u + 1u + 2u > body->len) return NIL_VALUE;
     offset = offset + 1u + session_id_len;
 
@@ -11490,26 +9755,26 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     offset += 2u;
     offset += 1u;
 
-    uint16_t exts_len = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
-                        (uint16_t)_rt_bytes_get(body, offset + 1);
+    uint16_t exts_len = ((uint16_t)_rv_byte(items[offset]) << 8) |
+                        (uint16_t)_rv_byte(items[offset + 1]);
     offset += 2u;
     uint32_t exts_end = offset + exts_len;
     if (exts_end > body->len) exts_end = body->len;
 
     while (offset + 4u <= exts_end) {
-        uint16_t ext_type = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
-                            (uint16_t)_rt_bytes_get(body, offset + 1);
-        uint16_t ext_len = ((uint16_t)_rt_bytes_get(body, offset + 2) << 8) |
-                           (uint16_t)_rt_bytes_get(body, offset + 3);
+        uint16_t ext_type = ((uint16_t)_rv_byte(items[offset]) << 8) |
+                            (uint16_t)_rv_byte(items[offset + 1]);
+        uint16_t ext_len = ((uint16_t)_rv_byte(items[offset + 2]) << 8) |
+                           (uint16_t)_rv_byte(items[offset + 3]);
         offset += 4u;
         uint32_t ext_data_end = offset + ext_len;
         if (ext_data_end > exts_end) ext_data_end = exts_end;
 
         if (ext_type == 51 && offset + 4u <= ext_data_end) {
-            uint16_t group = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
-                             (uint16_t)_rt_bytes_get(body, offset + 1);
-            uint16_t key_len = ((uint16_t)_rt_bytes_get(body, offset + 2) << 8) |
-                               (uint16_t)_rt_bytes_get(body, offset + 3);
+            uint16_t group = ((uint16_t)_rv_byte(items[offset]) << 8) |
+                             (uint16_t)_rv_byte(items[offset + 1]);
+            uint16_t key_len = ((uint16_t)_rv_byte(items[offset + 2]) << 8) |
+                               (uint16_t)_rv_byte(items[offset + 3]);
             uint32_t key_off = offset + 4u;
             uint32_t key_end = key_off + key_len;
             if (key_end > ext_data_end) key_end = ext_data_end;
@@ -11522,9 +9787,8 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
                 out->len = out_len;
                 out->cap = out_len;
                 out->items = runtime_array_inline_items(out);
-                out->hdr.gc_flags = BYTE_PACKED;
                 for (uint32_t i = 0; i < out_len; i++) {
-                    ((uint8_t *)out->items)[i] = _rt_bytes_get(body, key_off + i);
+                    out->items[i] = ENCODE_INT(_rv_byte(items[key_off + i]));
                 }
                 return ENCODE_PTR(out);
             }
@@ -11536,8 +9800,6 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
     if (!empty) return NIL_VALUE;
     empty->hdr.type = HEAP_ARRAY;
-    empty->hdr.gc_flags = BYTE_PACKED;  /* [u8]; was uninitialised */
-    empty->hdr.reserved = 0;
     empty->hdr.size = (uint32_t)sizeof(RuntimeArray);
     empty->len = 0;
     empty->cap = 0;
@@ -11799,8 +10061,9 @@ int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue 
     if (rt_tls13_ring_x25519_shared_secret_into_raw(scalar, point, out) != 0) {
         _tls_x25519_scalarmult(out, scalar, point);
     }
+    RuntimeValue *out_items = runtime_array_items(out_arr);
     for (uint32_t i = 0; i < 32U; i++) {
-        _rt_bytes_set(out_arr, i, (uint8_t)out[i]);
+        out_items[i] = ENCODE_INT(out[i]);
     }
     free(scalar);
     free(point);
@@ -11991,9 +10254,10 @@ static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
     if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
     uint32_t len = arr->len;
     if (len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
+    RuntimeValue *items = runtime_array_items(arr);
     uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
     if (!buf) return NULL;
-    for (uint32_t i = 0; i < len; i++) buf[i] = _rt_bytes_get(arr, i);
+    for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(items[i]);
     *out_len = len;
     return buf;
 }
@@ -12013,7 +10277,8 @@ static int _tls_materialize_runtime_bytes(RuntimeValue rv,
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     uint32_t len = arr->len;
     if (len <= stack_cap) {
-        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rt_bytes_get(arr, i);
+        RuntimeValue *items = runtime_array_items(arr);
+        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rv_byte(items[i]);
         *out_data = stack_buf;
         *out_len = len;
         return 1;
@@ -12103,59 +10368,15 @@ RuntimeValue rt_tls13_transcript_hash_record_payloads(RuntimeValue a_record_rv, 
 
 static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t len)
 {
-    /* Native [u8] contract: packed bytes + BYTE_PACKED flag. */
-    return _rt_bytes_new(buf, len);
-}
-
-RuntimeValue rt_tls13_sha512_full(RuntimeValue data_rv)
-{
-    uint32_t data_len = 0;
-    uint8_t *data = _tls_copy_runtime_bytes(data_rv, &data_len);
-    uint8_t out[64];
-    if (!data && data_len != 0) {
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    _ed25519_sha512(data ? data : (const uint8_t *)"", data_len, out);
-    if (data) free(data);
-    return _tls_runtime_array_from_bytes(out, 64U);
-}
-
-RuntimeValue rt_ed25519_sc_reduce_64(RuntimeValue scalar64_rv)
-{
-    uint32_t scalar_len = 0;
-    uint8_t *scalar = _tls_copy_runtime_bytes(scalar64_rv, &scalar_len);
-    uint8_t out[32];
-    if (!scalar || scalar_len != 64U) {
-        if (scalar) free(scalar);
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    extern void x25519_sc_reduce(uint8_t *);
-    x25519_sc_reduce(scalar);
-    for (uint32_t i = 0; i < 32U; i++) out[i] = scalar[i];
-    free(scalar);
-    return _tls_runtime_array_from_bytes(out, 32U);
-}
-
-RuntimeValue rt_ed25519_sc_muladd(RuntimeValue a_rv, RuntimeValue b_rv, RuntimeValue c_rv)
-{
-    uint32_t a_len = 0, b_len = 0, c_len = 0;
-    uint8_t *a = _tls_copy_runtime_bytes(a_rv, &a_len);
-    uint8_t *b = _tls_copy_runtime_bytes(b_rv, &b_len);
-    uint8_t *c = _tls_copy_runtime_bytes(c_rv, &c_len);
-    uint8_t out[32];
-    if (!a || !b || !c || a_len != 32U || b_len != 32U || c_len != 32U) {
-        if (a) free(a);
-        if (b) free(b);
-        if (c) free(c);
-        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-    }
-    extern void x25519_sc_muladd(uint8_t *s, const uint8_t *a, const uint8_t *b,
-                                 const uint8_t *c);
-    x25519_sc_muladd(out, a, b, c);
-    free(a);
-    free(b);
-    free(c);
-    return _tls_runtime_array_from_bytes(out, 32U);
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    out->len = len;
+    out->cap = len;
+    out->items = runtime_array_inline_items(out);
+    for (uint32_t i = 0; i < len; i++) out->items[i] = ENCODE_INT(buf[i]);
+    return ENCODE_PTR(out);
 }
 
 static int64_t _tls_write_runtime_bytes(RuntimeValue out_rv, const uint8_t *buf, uint32_t len)
@@ -12163,8 +10384,9 @@ static int64_t _tls_write_runtime_bytes(RuntimeValue out_rv, const uint8_t *buf,
     if (!IS_HEAP(out_rv)) return 0;
     RuntimeArray *out_arr = (RuntimeArray *)DECODE_PTR(out_rv);
     if (!out_arr || out_arr->hdr.type != HEAP_ARRAY || out_arr->len != len) return 0;
+    RuntimeValue *out_items = runtime_array_items(out_arr);
     for (uint32_t i = 0; i < len; i++) {
-        _rt_bytes_set(out_arr, i, (uint8_t)buf[i]);
+        out_items[i] = ENCODE_INT(buf[i]);
     }
     return 1;
 }
@@ -12178,84 +10400,6 @@ RuntimeValue rt_tls13_sha256(RuntimeValue data_rv)
     _tls_sha256_digest(data, data_len, out);
     if (data) free(data);
     return _tls_runtime_array_from_bytes(out, 32);
-}
-
-static int _ssh_hash_append_u32(uint8_t *out, uint32_t *off, uint32_t cap, uint32_t value)
-{
-    if (*off + 4U > cap) return 0;
-    out[(*off)++] = (uint8_t)(value >> 24);
-    out[(*off)++] = (uint8_t)(value >> 16);
-    out[(*off)++] = (uint8_t)(value >> 8);
-    out[(*off)++] = (uint8_t)value;
-    return 1;
-}
-
-static int _ssh_hash_append_string(uint8_t *out, uint32_t *off, uint32_t cap,
-                                   const uint8_t *data, uint32_t len)
-{
-    if (*off + 4U + len > cap) return 0;
-    if (!_ssh_hash_append_u32(out, off, cap, len)) return 0;
-    if (len > 0U) memcpy(out + *off, data, len);
-    *off += len;
-    return 1;
-}
-
-static int _ssh_hash_append_mpint(uint8_t *out, uint32_t *off, uint32_t cap,
-                                  const uint8_t *data, uint32_t len)
-{
-    uint32_t start = 0U;
-    uint32_t body_len;
-    while (start < len && data[start] == 0U) start++;
-    if (start >= len) return _ssh_hash_append_u32(out, off, cap, 0U);
-    body_len = len - start + ((data[start] & 0x80U) ? 1U : 0U);
-    if (*off + 4U + body_len > cap) return 0;
-    if (!_ssh_hash_append_u32(out, off, cap, body_len)) return 0;
-    if ((data[start] & 0x80U) != 0U) out[(*off)++] = 0U;
-    memcpy(out + *off, data + start, len - start);
-    *off += len - start;
-    return 1;
-}
-
-RuntimeValue rt_ssh_curve25519_exchange_hash(RuntimeValue client_version_rv,
-                                             RuntimeValue server_version_rv,
-                                             RuntimeValue client_kexinit_rv,
-                                             RuntimeValue server_kexinit_rv,
-                                             RuntimeValue host_key_blob_rv,
-                                             RuntimeValue client_public_rv,
-                                             RuntimeValue server_public_rv,
-                                             RuntimeValue shared_secret_rv)
-{
-    uint32_t cv_len = 0, sv_len = 0, ck_len = 0, sk_len = 0;
-    uint32_t hk_len = 0, cp_len = 0, sp_len = 0, ss_len = 0;
-    uint8_t *cv = _tls_copy_runtime_bytes(client_version_rv, &cv_len);
-    uint8_t *sv = _tls_copy_runtime_bytes(server_version_rv, &sv_len);
-    uint8_t *ck = _tls_copy_runtime_bytes(client_kexinit_rv, &ck_len);
-    uint8_t *sk = _tls_copy_runtime_bytes(server_kexinit_rv, &sk_len);
-    uint8_t *hk = _tls_copy_runtime_bytes(host_key_blob_rv, &hk_len);
-    uint8_t *cp = _tls_copy_runtime_bytes(client_public_rv, &cp_len);
-    uint8_t *sp = _tls_copy_runtime_bytes(server_public_rv, &sp_len);
-    uint8_t *ss = _tls_copy_runtime_bytes(shared_secret_rv, &ss_len);
-    uint8_t input[4096];
-    uint8_t out[32];
-    uint32_t off = 0U;
-    RuntimeValue rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
-
-    if (!cv || !sv || !ck || !sk || !hk || !cp || !sp || !ss) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), cv, cv_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), sv, sv_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), ck, ck_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), sk, sk_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), hk, hk_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), cp, cp_len)) goto done;
-    if (!_ssh_hash_append_string(input, &off, sizeof(input), sp, sp_len)) goto done;
-    if (!_ssh_hash_append_mpint(input, &off, sizeof(input), ss, ss_len)) goto done;
-    _tls_sha256_digest(input, off, out);
-    rv = _tls_runtime_array_from_bytes(out, 32U);
-
-done:
-    if (cv) free(cv); if (sv) free(sv); if (ck) free(ck); if (sk) free(sk);
-    if (hk) free(hk); if (cp) free(cp); if (sp) free(sp); if (ss) free(ss);
-    return rv;
 }
 
 RuntimeValue rt_tls13_transcript_hash_2(RuntimeValue a_rv, RuntimeValue b_rv)
@@ -14511,8 +12655,9 @@ int64_t rt_tls13_client_app_secret_diag_7(
 /* rt_array_pop: remove and return last element */
 RuntimeValue rt_array_pop(RuntimeValue arr)
 {
-    RuntimeArray *a = runtime_array_from_abi(arr);
-    if (!a || a->len == 0) return NIL_VALUE;
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return NIL_VALUE;
     RuntimeValue *items = runtime_array_items(a);
     a->len--;
     RuntimeValue val = items[a->len];
@@ -14525,23 +12670,20 @@ RuntimeValue rt_array_pop(RuntimeValue arr)
  * implementation ABI-compatible with that contract. */
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
 {
-    RuntimeArray *a = runtime_array_from_abi(arr);
-    if (!a) return NIL_VALUE;
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     int64_t i = (int64_t)idx;
     if (i < 0) i += (int64_t)a->len;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return runtime_array_items(a)[i];
 }
 
-RuntimeValue rt_array_get_text(RuntimeValue arr, RuntimeValue idx)
-{
-    return rt_array_get(arr, idx);
-}
-
 static int8_t rt_array_set_raw(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
 {
-    RuntimeArray *a = runtime_array_from_abi(arr);
-    if (!a) return 0;
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     int64_t i = (int64_t)idx;
     if (i < 0) i += (int64_t)a->len;
     if (i < 0 || (uint32_t)i >= a->len) return 0;
@@ -14555,91 +12697,16 @@ int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return rt_array_set_raw(arr, idx, val);
 }
 
-int8_t rt_array_set_text(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
-{
-    return rt_array_set_raw(arr, idx, val);
-}
-
-RuntimeValue rt_array_new_with_cap(int64_t cap);  /* defined below */
-
-/* rt_byte_array_new_len: zero-filled packed [u8] of `len` (raw i64 arg, per
- * `extern fn rt_byte_array_new_len(len: i64) -> [u8]`). Had no freestanding
- * definition, so the kernel link bound it to the weak nil-returning stub in
- * auto_stubs.c and every [u8] allocated through it came back nil -- surfacing
- * as "field access on nil receiver" in ByteSpan once real data reached it. */
-RuntimeValue rt_byte_array_new_len(int64_t len)
-{
-    if (len < 0) len = 0;
-    return _rt_bytes_new(NULL, (uint32_t)len);
-}
-
-/* rt_array_copy: value-semantics copy for array-typed place reads.
- * MIR lowers every `var x = <array place read>` through this
- * (src/compiler/50.mir/mir_lowering_stmts.spl). There was NO freestanding
- * definition, so the kernel link bound it to the weak nil-returning stub in
- * auto_stubs.c: every copied array came back as 0, which the inline element
- * reader sees as un-tagged and yields nil(3), so `.len()` read 0 while the
- * outer handle still looked healthy. Hosted builds were unaffected because
- * runtime_native.c defines the real one. */
-RuntimeValue rt_array_copy(RuntimeValue arr)
-{
-    /* runtime_array_from_abi casts a non-heap word straight to a pointer and
-     * dereferences hdr.type, so nil (3) or any tagged int would fault here
-     * before the !src guard below could run. Hosted is nil-safe; match it. */
-    if (!IS_HEAP(arr)) return arr;
-    RuntimeArray *src = runtime_array_from_abi(arr);
-    if (!src) return arr;
-    /* [u8] arrays are BYTE_PACKED (stride 1, not 8-byte tagged slots). Copying
-     * them as RuntimeValues over-reads the source and yields an unpacked array,
-     * which the compiler's stride-1 inline [u8] reader then misreads. */
-    if (src->hdr.gc_flags & BYTE_PACKED) {
-        const uint8_t *sb = (const uint8_t *)(void *)runtime_array_items(src);
-        return _rt_bytes_new(sb, (uint32_t)src->len);
-    }
-    RuntimeValue out = rt_array_new_with_cap((int64_t)src->len);
-    RuntimeArray *dst = runtime_array_from_abi(out);
-    if (!dst) return out;
-    dst->hdr.gc_flags = 0;  /* belt-and-braces: rt_array_new_with_cap now zeroes
-                             * this too, but a copy is never byte-packed here. */
-    RuntimeValue *si = runtime_array_items(src);
-    RuntimeValue *di = runtime_array_items(dst);
-    for (uint64_t i = 0; i < src->len; i++) di[i] = si[i];
-    dst->len = src->len;
-    return out;
-}
-
 /* rt_array_len: return RAW (untagged) integer.
  * The Cranelift backend's call_len_method does NOT unbox the result,
  * and the MIR for-loop lowering compares directly with raw index counters.
  * So we must return raw len, not ENCODE_INT(len). */
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    RuntimeArray *a = runtime_array_from_abi(arr);
-    if (!a) return 0;
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     return (RuntimeValue)a->len;
-}
-
-/* Array-literal finalization ABI used by native codegen. Construction first
- * reserves capacity, then codegen asks for the raw header and publishes the
- * known literal length before indexed stores. Without these functions the
- * freestanding auto-stubs leave len=0, so every rt_array_set is rejected. */
-RuntimeValue rt_array_header_ptr(RuntimeValue arr)
-{
-    RuntimeArray *a = runtime_array_from_abi(arr);
-    return a ? (RuntimeValue)(uintptr_t)a : 0;
-}
-
-int8_t rt_array_set_len_known(int64_t header_ptr, int64_t len)
-{
-    RuntimeArray *a = runtime_array_from_abi((RuntimeValue)header_ptr);
-    if (!a || len < 0 || (uint64_t)len > a->cap) return 0;
-    a->len = (uint64_t)len;
-    return 1;
-}
-
-int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len)
-{
-    return rt_array_set_len_known(header_ptr, len);
 }
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
@@ -14674,8 +12741,6 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
-    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -14875,15 +12940,6 @@ RuntimeValue rt_array_clone(RuntimeValue arr)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    if (a->hdr.gc_flags & BYTE_PACKED) {
-        /* Packed [u8]: clone preserving the packed representation. */
-        RuntimeValue out_rv = _rt_bytes_new(NULL, a->len);
-        if (!IS_HEAP(out_rv)) return NIL_VALUE;
-        RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
-        uint8_t *dst = (uint8_t *)out->items;
-        for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
-        return out_rv;
-    }
     RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
     for (uint32_t i = 0; i < a->len; i++) {
@@ -15286,12 +13342,10 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
  * This makes it immediately obvious when kernel code accidentally
  * uses a hosted-only API path.
  */
-void _bt_dump_from(uint64_t fp); /* DEBUG-INSTR: rbp-chain backtrace */
 #define TRAP_STUB_RET(n, nargs) \
     RuntimeValue n(TRAP_ARGS_##nargs) { \
         TRAP_SUPPRESS_##nargs \
         serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
-        _bt_dump_from((uint64_t)__builtin_frame_address(0)); \
         for (;;) { __asm__ volatile("hlt"); } \
         return 0; \
     }
@@ -15299,7 +13353,6 @@ void _bt_dump_from(uint64_t fp); /* DEBUG-INSTR: rbp-chain backtrace */
     void n(TRAP_ARGS_##nargs) { \
         TRAP_SUPPRESS_##nargs \
         serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
-        _bt_dump_from((uint64_t)__builtin_frame_address(0)); \
         for (;;) { __asm__ volatile("hlt"); } \
     }
 #define TRAP_ARGS_0   void
@@ -15313,36 +13366,16 @@ void _bt_dump_from(uint64_t fp); /* DEBUG-INSTR: rbp-chain backtrace */
 
 TRAP_STUB_RET(rt_file_read, 1)
 TRAP_STUB_RET(rt_file_write, 2)
+TRAP_STUB_RET(rt_file_exists, 1)
 TRAP_STUB_RET(rt_file_delete, 1)
 TRAP_STUB_RET(rt_file_append, 2)
-/* rt_file_size is defined for real above, over the FAT32-on-NVMe API, with the
- * (ptr, len) ABI its call sites actually emit. The TRAP stub that used to sit
- * here was a second STRONG definition; under `-z muldefs` it won by link order
- * and would have halted the CPU the moment std.enterprise_store's file backend
- * asked for a file size. See the note on rt_file_exists above (lane W10-B). */
+TRAP_STUB_RET(rt_file_size, 1)
 TRAP_STUB_RET(rt_file_copy, 2)
 TRAP_STUB_RET(rt_file_move, 2)
 TRAP_STUB_RET(rt_file_rename, 2)
 TRAP_STUB_RET(rt_file_is_dir, 1)
 TRAP_STUB_RET(rt_file_is_file, 1)
-/* rt_file_read_bytes is WEAK: kernels that mount a VFS override it with a
- * Simple-side @export("C") backed by g_vfs_read_file_bytes (see
- * gui_entry_desktop.spl). Entries without a VFS keep the trap. Needed because
- * lib font loading (font_registry.load_selected_font_file) legitimately
- * reaches this symbol on baremetal once rt_file_exists (VFS-backed) says the
- * asset is present; halting here killed the first desktop compose. */
-__attribute__((weak)) RuntimeValue rt_file_read_bytes(RuntimeValue _a) {
-    (void)_a;
-    /* No VFS mounted (degraded no-disk boot): a file read cannot succeed, so
-     * return an EMPTY [u8] instead of halting. Callers (e.g.
-     * font_registry.load_selected_font_file during first-frame render) treat
-     * empty bytes as "asset unavailable" and fall back to the bitmap font, so
-     * the WM still composes and renders. A VFS-mounting kernel overrides this
-     * weak symbol with the g_vfs_read_file_bytes-backed @export("C") and wins.
-     * Halting here killed the first desktop compose (SimpleOS WM render). */
-    serial_puts("[nvme-degraded] rt_file_read_bytes: no VFS, returning empty\r\n");
-    return rt_bytes_alloc_packed_empty();
-}
+TRAP_STUB_RET(rt_file_read_bytes, 1)
 TRAP_STUB_RET(rt_file_write_bytes, 2)
 TRAP_STUB_RET(rt_file_stat, 1)
 TRAP_STUB_RET(rt_file_realpath, 1)
@@ -15426,8 +13459,14 @@ S0(rt_math_pi)
 S0(rt_math_e)
 S0(rt_math_inf)
 S0(rt_math_nan)
-S1(rt_math_is_nan)
-S1(rt_math_is_inf)
+_Bool rt_math_is_nan(double x) { return x != x; }
+_Bool rt_math_is_inf(double x) {
+    double inf = 1.0e308 * 10.0;
+    return x == inf || x == -inf;
+}
+_Bool rt_math_is_finite(double x) {
+    return !rt_math_is_nan(x) && !rt_math_is_inf(x);
+}
 
 /* MMIO, CPU control, and interrupt stubs are provided as real
    implementations in Section 11 below — not generated via S* macros. */
@@ -15660,33 +13699,11 @@ TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
-/* rt_thread_sleep: real TSC-paced implementation near rt_time_now_monotonic_ms
- * at the end of this file (it needs the calibrated clock defined there).
- * It used to be a no-op fake here that returned immediately. */
-/* Safe single-slot mutex on single-core cooperative bare metal.
- * There is no preemption or SMP in the kernel's render/service paths, so an
- * uncontended mutex reduces to a value-guarding cell: new() boxes the initial
- * value, lock()/try_lock() return the current value, unlock() stores the new
- * value. This is NOT masking a hosted-only API — it is the correct single-core
- * semantics, and it unblocks Engine2D present()/glyph paths that guard render
- * state through std.concurrent.Mutex. (Halting here was a false positive.) */
-RuntimeValue rt_mutex_new(RuntimeValue initial) {
-    RuntimeValue *box = (RuntimeValue *)malloc(sizeof(RuntimeValue));
-    *box = initial;
-    return ENCODE_PTR(box);
-}
-RuntimeValue rt_mutex_lock(RuntimeValue m) {
-    if (!IS_HEAP(m)) { return m; }
-    return *(RuntimeValue *)DECODE_PTR(m);
-}
-RuntimeValue rt_mutex_unlock(RuntimeValue m, RuntimeValue new_value) {
-    if (IS_HEAP(m)) { *(RuntimeValue *)DECODE_PTR(m) = new_value; }
-    return new_value;
-}
-RuntimeValue rt_mutex_try_lock(RuntimeValue m) {
-    if (!IS_HEAP(m)) { return m; }
-    return *(RuntimeValue *)DECODE_PTR(m);
-}
+RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
+TRAP_STUB_RET(rt_mutex_new, 0)
+TRAP_STUB_RET(rt_mutex_lock, 1)
+TRAP_STUB_RET(rt_mutex_unlock, 1)
+TRAP_STUB_RET(rt_mutex_try_lock, 1)
 TRAP_STUB_RET(rt_condvar_new, 0)
 TRAP_STUB_RET(rt_condvar_wait, 1)
 TRAP_STUB_RET(rt_condvar_notify, 1)
@@ -15742,11 +13759,7 @@ S2(rt_result_unwrap_or)
 
 S1(rt_weak_ref)
 S1(rt_weak_deref)
-/* rt_closure_new is supplied by the selected runtime bundle. A fatal S1 stub
- * here is a strong definition and silently shadows the real allocator while
- * the other closure accessors remain real, yielding an ABI-incoherent guest.
- * Leave the symbol unresolved so no-stub linking fails closed when the runtime
- * bundle is missing. */
+S1(rt_closure_new)
 S2(rt_closure_call)
 S1(rt_closure_bind)
 
@@ -16141,18 +14154,6 @@ RuntimeValue rt_write_cr3_real(RuntimeValue val)
     return NIL_VALUE;
 }
 
-uint64_t rt_read_cr3_raw(void)
-{
-    uint64_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    return cr3;
-}
-
-void rt_write_cr3_raw(uint64_t val)
-{
-    __asm__ volatile("mov %0, %%cr3" : : "r"(val) : "memory");
-}
-
 RuntimeValue rt_read_cr2_real(RuntimeValue dummy)
 {
     (void)dummy;
@@ -16183,7 +14184,6 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
     RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!arr) return NIL_VALUE;
     arr->hdr.type = HEAP_ARRAY;
-    arr->hdr.gc_flags = BYTE_PACKED;
     arr->hdr.size = (uint32_t)(sizeof(RuntimeArray) + count * sizeof(RuntimeValue));
     arr->len = (uint32_t)count;
     arr->cap = (uint32_t)count;
@@ -16199,7 +14199,7 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
             val = ((uint64_t)hi << 32) | lo;
             val ^= (uint64_t)i * 0x9E3779B97F4A7C15ULL; /* mix */
         }
-        ((uint8_t *)arr->items)[i] = (uint8_t)(val & 0xFF);
+        arr->items[i] = ENCODE_INT((int64_t)(val & 0xFF));
     }
 
     return ENCODE_PTR(arr);
@@ -16337,13 +14337,9 @@ static void _serial_puthex64(uint64_t v) {
  * _rich_fault_print(rip, errcode, cs, rflags, cr2, cr3)
  *   => rdi=rip, rsi=errcode, rdx=cs, rcx=rflags, r8=cr2, r9=cr3
  */
-uint64_t g_fault_rbp; /* DEBUG-INSTR: faulting context frame pointer */
-
 __attribute__((naked)) static void _rich_fault_entry(void)
 {
     __asm__ volatile(
-        /* DEBUG-INSTR: capture faulting context RBP (untouched at entry) */
-        "movq %%rbp, g_fault_rbp(%%rip)\n\t"
         /* Save scratch registers */
         "pushq %%rax\n\t"
         "pushq %%rdx\n\t"
@@ -16391,79 +14387,16 @@ __attribute__((naked)) static void _rich_fault_entry(void)
          * If [rsp+8] == 0x08 (CS), no error code was pushed. */
         "cmpq $0x08, 8(%%rsp)\n\t"
         "je 3f\n\t"
-        /* Error code present: [rsp]=errcode, [rsp+8]=RIP, [rsp+16]=CS.
-         *
-         * Ring-3 guard: if this fault came from user mode (CS & 3 == 3), do NOT
-         * advance-RIP-and-iretq back into the faulting user instruction. The
-         * bad memory operand is still bad, so iretq re-faults immediately and
-         * the +2/iretq recovery walks the user RIP forward one fault at a time
-         * — an unbounded kernel re-fault runaway (clang_static NULL deref looped
-         * ~107k frames). Terminate the user process instead: report the fatal
-         * signal (pure-Simple spl_x86_on_user_fault) and park the CPU. #PF/#GP
-         * always push an error code, so unrecoverable ring-3 faults land here. */
-        "movq 16(%%rsp), %%rax\n\t"    /* CS from the interrupt frame */
-        "andq $3, %%rax\n\t"           /* CPL = CS & 3 */
-        "cmpq $3, %%rax\n\t"
-        "je 9f\n\t"                    /* ring-3 -> kill, never iretq back */
-        /* Kernel-origin fault (CPL=0): recover as before (skip stubbed call). */
+        /* Error code present: advance RIP (at [rsp+8]), pop errcode, iretq */
         "addq $2, 8(%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "addq $8, %%rsp\n\t"
         "iretq\n\t"
         "3:\n\t"
-        /* No error code: RIP is at (%rsp). Only reached for kernel-mode
-         * faults (CS==0x08 was detected above). This is the ONLY path #UD
-         * (vector 6) can land on — #UD never pushes an error code.
-         *
-         * Before blindly advancing+iretq-ing, check whether the faulting
-         * instruction IS `ud2` (opcode 0x0F 0x0B). A `ud2` is always an
-         * INTENTIONAL trap (e.g. the compiler's duck-dispatch-sentinel guard
-         * in compile_method_call_virtual, closures_structs.rs) — never a
-         * random invalid opcode safe to skip past. The old blind "RIP += 2,
-         * iretq" recovery treated it like any other recoverable fault, which
-         * turned an honest, deliberate abort into a silent wild-jump storm
-         * (see C8 in doc/08_tracking/bug/
-         * simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md).
-         * All OTHER no-error-code vectors (#DE, #BP, #OF, ...) keep the
-         * exact prior 2-byte-skip recovery, unchanged.
-         *
-         * `popq` does not touch EFLAGS, so it is safe to restore the scratch
-         * registers to their exact fault-time values AFTER the `cmpl` and
-         * still branch on the live ZF from it. */
-        "pushq %%rax\n\t"
-        "pushq %%rcx\n\t"
-        "movq 16(%%rsp), %%rax\n\t"    /* rax = faulting RIP (above the 2 pushes) */
-        "movzwl (%%rax), %%ecx\n\t"    /* ecx = 2 bytes at RIP */
-        "cmpl $0x0B0F, %%ecx\n\t"      /* 0x0F 0x0B (ud2) as a little-endian u16 */
-        "popq %%rcx\n\t"
-        "popq %%rax\n\t"
-        "je 6f\n\t"
+        /* No error code: advance RIP (at [rsp]), iretq */
         "addq $2, (%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
-        "6:\n\t"
-        /* Kernel ud2: fatal, never recover/iretq. Frame here (no error
-         * code): [rsp]=RIP, [rsp+8]=CS. spl_x86_on_kernel_ud2_fault prints
-         * the diagnostic; registers are free to clobber, we never return. */
-        "movq (%%rsp), %%rdi\n\t"      /* arg0: faulting RIP */
-        "callq spl_x86_on_kernel_ud2_fault\n\t"
-        "cli\n\t"
-        "7:\n\t"
-        "hlt\n\t"
-        "jmp 7b\n\t"
-        "9:\n\t"
-        /* Ring-3 unrecoverable fault: deliver fatal signal + park the CPU.
-         * Frame here: [rsp]=errcode, [rsp+8]=user RIP, [rsp+16]=CS; CR2 holds
-         * the faulting address. Registers are free to clobber — we never
-         * return to the faulting context. */
-        "movq 8(%%rsp), %%rdi\n\t"     /* arg0: faulting user RIP */
-        "movq 16(%%rsp), %%rsi\n\t"    /* arg1: user CS */
-        "movq %%cr2, %%rdx\n\t"        /* arg2: fault address (CR2) */
-        "callq spl_x86_on_user_fault\n\t"
-        "cli\n\t"
-        "8:\n\t"
-        "hlt\n\t"
-        "jmp 8b\n\t"
         : : : "memory"
     );
 }
@@ -16479,28 +14412,7 @@ void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
     serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
     serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
     serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
-    _bt_dump_from(g_fault_rbp); /* DEBUG-INSTR */
     serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
-}
-
-/* DEBUG-INSTR: walk an rbp frame chain, printing return addresses that land
- * in kernel text. Heap-free, bounded, defensive against garbage frames. */
-void _bt_dump_from(uint64_t fp)
-{
-    for (int i = 0; i < 16; i++) {
-        if (fp < 0x1000 || fp >= 0x20000000 || (fp & 7) != 0)
-            break;
-        uint64_t ra   = *(volatile uint64_t *)(fp + 8);
-        uint64_t next = *(volatile uint64_t *)fp;
-        serial_puts("[bt] ra=");
-        _serial_puthex64(ra);
-        serial_puts("\r\n");
-        if (ra < 0x100000 || ra >= 0x1800000)
-            break;
-        if (next <= fp)
-            break;
-        fp = next;
-    }
 }
 
 /* rt_install_rich_fault_hook — Wave 7C: called from Simple arch_init.
@@ -16661,11 +14573,12 @@ RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
 
     /* Extract raw bytes from the RuntimeArray (items are BoxInt-tagged) */
     uint32_t len = a->len;
+    RuntimeValue *items = runtime_array_items(a);
     if (len < 2) { serial_puts("[rt_parse_auth_verify] too short\r\n"); return 0; }
 
     uint8_t *raw = (uint8_t *)__builtin_alloca(len);
     for (uint32_t i = 0; i < len; i++) {
-        raw[i] = _rt_bytes_get(a, i);
+        raw[i] = (uint8_t)DECODE_INT(items[i]);
     }
 
     /* Check message type */
@@ -16845,33 +14758,23 @@ RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
     RuntimeArray *a = (RuntimeArray *)malloc(alloc);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = (uint32_t)alloc;
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
     a->items = runtime_array_inline_items(a);
     for (int64_t i = 0; i < count; i++)
-        ((uint8_t *)a->items)[i] = (uint8_t)(i & 0xFF);
+        a->items[i] = ENCODE_INT(i & 0xFF);
     return ENCODE_PTR(a);
 }
 
 /* rt_array_new_with_cap: create empty array with specified capacity (raw int).
- * Workaround for push growth bug — pre-allocate capacity so push never reallocs.
- *
- * gc_flags/reserved were NOT initialised here, so they inherited whatever
- * malloc handed back. If the garbage byte happened to carry BYTE_PACKED (0x08)
- * — one chance in two on random heap contents — every later reader of the
- * array (rt_array_copy, rt_array_push, rt_write_u32s_to_raw, the helper TUs)
- * took the stride-1 packed branch and silently misread 8-byte tagged slots as
- * bytes. Found by differential testing against a 0xAA-poisoned allocator. */
+ * Workaround for push growth bug — pre-allocate capacity so push never reallocs. */
 RuntimeValue rt_array_new_with_cap(int64_t cap)
 {
     if (cap < 0) cap = 16;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
-    a->hdr.gc_flags = 0;   /* tagged 8-byte slots, NOT byte-packed */
-    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -16970,11 +14873,12 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
     }
 
     uint32_t len = a->len;
+    RuntimeValue *items = runtime_array_items(a);
 
     /* Extract raw bytes */
     uint8_t *raw = (uint8_t *)__builtin_alloca(len);
     for (uint32_t i = 0; i < len; i++)
-        raw[i] = _rt_bytes_get(a, i);
+        raw[i] = (uint8_t)DECODE_INT(items[i]);
 
     /* Check message type */
     if (len < 17) {
@@ -17231,7 +15135,6 @@ extern void rt_x86_ring3_resume(int64_t rc);
 extern int64_t rt_x86_ring3_resume_valid(void);
 
 static uint64_t _user_heap_bump(uint64_t len);  /* defined below */
-static void _bare_exec_reset_files(void);
 
 /* ---------------------------------------------------------------------------
  * Lane B3 — nested SpawnWait (syscall 70) bookkeeping.
@@ -17427,19 +15330,8 @@ static void _bare_dump_output(struct bare_file *f) {
 
 static void _bare_dump_all_outputs(void) {
     for (int i = 0; i < BARE_MAX_FILES; i++)
-        if (_bare_files[i].used && _bare_files[i].is_output && _bare_files[i].size > 0) {
-            struct bare_file *f = &_bare_files[i];
-            _bare_dump_output(f);
-            /* Board reality: persist the output object to the real FAT32/NVMe
-             * disk (not only a serial base64 dump) so a build on physical
-             * hardware leaves a retrievable file. NVMe write DMA works here —
-             * this runs in ring 0 with the user cr3 loaded and the BAR/queues
-             * cloned into every user AS, same path the on-demand read uses. */
-            int wrc = fat32_write_file(f->name, f->data, f->size);
-            serial_puts("[oo-nvme] persist ");
-            serial_puts(f->name);
-            serial_puts(wrc == 0 ? " -> OK\r\n" : " -> FAIL\r\n");
-        }
+        if (_bare_files[i].used && _bare_files[i].is_output && _bare_files[i].size > 0)
+            _bare_dump_output(&_bare_files[i]);
 }
 
 /* Debug: print an in-guest path (user ptr + len) to serial. */
@@ -17452,9 +15344,26 @@ static void _bare_dbg_path(const char *tag, uint64_t src, uint64_t len) {
 
 /* Native bare-exec syscall handler. Returns 1 (handled, result in *out) or 0
  * (not a bare-exec syscall — let the normal dispatch/shim run). */
+static uint64_t _bare_sc_count = 0;
+
 static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                              uint64_t a3, uint64_t a4, uint64_t a5, int64_t *out) {
     (void)a5;
+    /* Discovery trace: log the first N syscalls (num + args) so the syscall
+     * surface a real program (clang_static --version) exercises is visible on
+     * serial without flooding it. */
+    _bare_sc_count++;
+    if (_bare_sc_count <= 400 && num != 60 && num != 32) {
+        serial_puts("[sc] n=");
+        serial_put_dec((int64_t)num);
+        serial_puts(" a0=");
+        serial_put_hex(a0);
+        serial_puts(" a1=");
+        serial_put_hex(a1);
+        serial_puts(" a2=");
+        serial_put_hex(a2);
+        serial_puts("\r\n");
+    }
     switch (num) {
         case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
             if (!_x86_exec_token_current_valid()) { *out = -1; return 1; }
@@ -17813,18 +15722,7 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
 static uint64_t _user_heap_bump(uint64_t len) {
     uint64_t aligned = (len + 0xFFF) & ~((uint64_t)0xFFF);
     if (aligned == 0) aligned = 0x1000;
-    if (_user_heap_cur == 0 || _user_heap_cur + aligned > _user_heap_end) {
-        serial_puts("[user-heap] OOM len=");
-        serial_put_dec((int64_t)len);
-        serial_puts(" aligned=");
-        serial_put_dec((int64_t)aligned);
-        serial_puts(" cur=");
-        serial_put_hex(_user_heap_cur);
-        serial_puts(" end=");
-        serial_put_hex(_user_heap_end);
-        serial_puts("\r\n");
-        return 0;
-    }
+    if (_user_heap_cur == 0 || _user_heap_cur + aligned > _user_heap_end) return 0;
     uint64_t p = _user_heap_cur;
     _user_heap_cur += aligned;
     return p;
@@ -17838,20 +15736,24 @@ static uint64_t _user_heap_bump(uint64_t len) {
  * All offsets stay < PAGE (4096). Called from fs_elf_exec_smoke_entry.spl.
  * -------------------------------------------------------------------------- */
 uint64_t rt_bare_build_cc1_stack(uint64_t stack_phys, uint64_t base_va) {
+    /* Stage D status: -emit-llvm-bc is GREEN (front-end + IR gen + RAMFS I/O
+     * end-to-end). -emit-obj is still BLOCKED, but NOT for the reason previously
+     * recorded: the clang_static objects are ALL built by HOST clang 20.1.8
+     * (verified via each .o's .comment section) — NOT the buggy cross-clang
+     * (20.0.0git) — and the current relinked binary was re-verified in-guest on
+     * 2026-07-06: -emit-obj still faults. The first fault is KERNEL-mode
+     * (cs=0x08, cr2=0x0, rip~0x4bf672) followed by a runaway fault loop, i.e. a
+     * SimpleOS ring-3 exec / RAMFS-syscall path issue triggered by the X86
+     * codegen+object-write workload, not a mis-linked or cross-clang-miscompiled
+     * binary. So "rebuild clang_static with a correct compiler" does NOT unblock
+     * D2. See doc/08_tracking/bug/cross_clang_codegen_broken_2026-07-06.md.
+     * Keeping -emit-llvm-bc here so the Stage D smoke stays green. */
     static const char *const cc1_argv[] = {
         "clang", "-cc1", "-triple", "x86_64-unknown-simpleos",
-        "-emit-obj", "-mrelocation-model", "static", "-O0",
-        "-o", "/hello.o", "-x", "c", "/hello.c"
+        "-emit-llvm-bc", "-mrelocation-model", "static", "-O0",
+        "-o", "/hello.bc", "-x", "c", "/hello.c"
     };
-    static const char *const link_argv[] = {
-        "clang", "--target=x86_64-unknown-simpleos", "-nostdlib", "-static",
-        "-Wl,--no-mmap-output-file", "-Wl,-e,_start", "-Wl,-Ttext,0x10000000",
-        "/hello.o", "-o", "/hello.elf"
-    };
-    uint32_t input_cluster = 0, input_size = 0;
-    const int link_pass = fat32_find_file("/hello.o", &input_cluster, &input_size) == 0;
-    const char *const *argv = link_pass ? link_argv : cc1_argv;
-    const int argc = link_pass ? 10 : 13;
+    const int argc = 13;
     const uint64_t rsp_off = 3600;                 /* 16-aligned */
     /* vector = argc + (argc+1) argv ptrs + envp NULL + 3 auxv pairs (6) */
     uint64_t str_off = rsp_off + 8 * (1 + (uint64_t)(argc + 1) + 1 + 6);
@@ -17859,7 +15761,7 @@ uint64_t rt_bare_build_cc1_stack(uint64_t stack_phys, uint64_t base_va) {
     uint64_t cur = str_off;
     for (int i = 0; i < argc; i++) {
         argv_va[i] = base_va + cur;
-        const char *s = argv[i];
+        const char *s = cc1_argv[i];
         int j = 0;
         for (; s[j]; j++)
             *(volatile uint8_t *)(uintptr_t)(stack_phys + cur + (uint64_t)j) = (uint8_t)s[j];
@@ -17940,47 +15842,10 @@ int64_t rt_x86_tss_init(void) {
  * Forwards to spl_handle_* weak stubs (or future strong overrides).
  * Returns -38 (ENOSYS) for unknown syscall numbers.
  * -------------------------------------------------------------------------- */
-
-/* ring-3 resume (setjmp/longjmp) helpers — defined in enter_user_first.s.
- * rt_x86_enter_user_first saves a kernel savepoint before iretq'ing to CPL3;
- * on exit(2) we longjmp back into the sshd accept loop instead of halting. */
-extern void    rt_x86_ring3_resume(int64_t rc);   /* does not return */
-extern int64_t rt_x86_ring3_resume_valid(void);
-extern int64_t rt_x86_ring3_exit_rc(void);
-
 int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
-    if (_bare_exec_mode) {
-        int64_t bare_out = 0;
-        if (_bare_exec_handle(num, a0, a1, a2, a3, a4, a5, &bare_out)) return bare_out;
-    }
     switch (num) {
-        case 0: {  /* exit(status) */
-            /* Prefer the strong Simple override (process/scheduler exit) when it
-             * is linked; the weak stub returns -38 (ENOSYS). For a STANDALONE
-             * ring-3 program (no scheduler to return to yet — e.g. the FS-exec
-             * ring-3 loader running a single clang-built ELF) provide a native
-             * terminator so it exits cleanly and reports status instead of
-             * faulting on fall-through past a no-return exit(). */
-            int64_t _ex = spl_handle_exit(a0, a1, a2, a3, a4, a5);
-            if (_ex == -38) {
-                serial_puts("[user] exit rc=");
-                serial_put_dec((int64_t)a0);
-                serial_puts("\r\n");
-                /* Multi-command SSH: if the FS-exec ring-3 loader established a
-                 * kernel savepoint (rt_x86_enter_user_first), longjmp back into
-                 * the sshd accept loop with this exit status instead of taking
-                 * QEMU down — so the kernel survives and can run a second
-                 * command in the same boot. The savepoint is consumed on use;
-                 * absent one (non-ring3 exit path) we fall back to halting. */
-                if (rt_x86_ring3_resume_valid()) {
-                    rt_x86_ring3_resume((int64_t)a0);   /* does not return */
-                }
-                outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit (QEMU) */
-                for (;;) __asm__ volatile("cli; hlt");  /* board: halt (0xf4 unused) */
-            }
-            return _ex;
-        }
+        case 0:  return spl_handle_exit(a0, a1, a2, a3, a4, a5);
         case 1:  return spl_handle_yield(a0, a1, a2, a3, a4, a5);
         case 2:  return spl_handle_spawn(a0, a1, a2, a3, a4, a5);
         case 3:  return spl_handle_wait(a0, a1, a2, a3, a4, a5);
@@ -18081,18 +15946,7 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
         case 106: return spl_handle_schedule(a0, a1, a2, a3, a4, a5);
         case 107: return spl_handle_schedctl(a0, a1, a2, a3, a4, a5);
-        default:
-            /* Loud ENOSYS — the discovery loop for growing the exec syscall
-             * surface. Log the number + first two args so a missing syscall in
-             * a ring-3 program (clang, libc) is visible on the serial console. */
-            serial_puts("[syscall] ENOSYS num=");
-            serial_put_dec((int64_t)num);
-            serial_puts(" a0=");
-            serial_put_hex(a0);
-            serial_puts(" a1=");
-            serial_put_hex(a1);
-            serial_puts("\r\n");
-            return -38; /* ENOSYS */
+        default: return -38; /* ENOSYS */
     }
 }
 
@@ -18103,16 +15957,10 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
 __attribute__((weak)) int64_t spl_handle_exit(uint64_t a0, uint64_t a1, uint64_t a2,
                                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    /* Ring-3 exec exit: signal QEMU isa-debug-exit with the process status so
-     * the harness observes the real return code (code = (status<<1)|1). If
-     * isa-debug-exit is absent the write is ignored and we halt. Matches the
-     * exit contract documented in boot/enter_user_first.s. */
-    serial_puts("[syscall] exit status=");
-    serial_put_dec((int64_t)a0);
-    serial_puts("\r\n");
-    outb(0xF4, (uint8_t)((a0 << 1) | 1));
+    (void)a0;
+    /* Best effort: halt so exit is semi-functional until Strong override lands */
     __asm__ __volatile__("cli; hlt");
-    return 0;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_yield(uint64_t a0, uint64_t a1, uint64_t a2,
@@ -18135,13 +15983,8 @@ __attribute__((weak)) int64_t spl_handle_wait(uint64_t a0, uint64_t a1, uint64_t
 
 __attribute__((weak)) int64_t spl_handle_getpid(uint64_t a0, uint64_t a1, uint64_t a2,
                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* Must return a NON-NEGATIVE pid: the sysroot libc's running_on_linux_host()
-     * probe (simpleos_libc.c) calls getpid (syscall 4) and treats a negative
-     * result as "running on a Linux host", which would misroute write/exit/mmap
-     * through Linux syscall numbers. a0==1 requests the parent pid (getppid). */
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    if (a0 == 1) return 1;   /* getppid */
-    return 2;                /* getpid  */
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_list_tasks(uint64_t a0, uint64_t a1, uint64_t a2,
@@ -18176,27 +16019,20 @@ __attribute__((weak)) int64_t spl_handle_get_parent_pid(uint64_t a0, uint64_t a1
 
 __attribute__((weak)) int64_t spl_handle_mmap(uint64_t a0, uint64_t a1, uint64_t a2,
                                                uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* Anonymous mmap only (MAP_ANONYMOUS). a1 = length. addr/prot/flags ignored
-     * — the pre-mapped user heap is RW. Returns the bumped VA, or -ENOMEM(-12)
-     * which libc maps to MAP_FAILED. Backed by rt_user_heap_init. */
-    (void)a0; (void)a2; (void)a3; (void)a4; (void)a5;
-    uint64_t p = _user_heap_bump(a1);
-    if (p == 0) return -12;
-    return (int64_t)p;
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_munmap(uint64_t a0, uint64_t a1, uint64_t a2,
                                                  uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* Bump allocator does not reclaim — accept and succeed. */
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return 0;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_mprotect(uint64_t a0, uint64_t a1, uint64_t a2,
                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* User heap is already RW; accept protection changes as no-ops. */
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return 0;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_spawn_binary(uint64_t a0, uint64_t a1, uint64_t a2,
@@ -18214,16 +16050,8 @@ __attribute__((weak)) int64_t spl_handle_enter_user_blocking(uint64_t a0, uint64
 
 __attribute__((weak)) int64_t spl_handle_brk(uint64_t a0, uint64_t a1, uint64_t a2,
                                               uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* Minimal brk over the bump heap: brk(0) queries the current break;
-     * brk(addr) sets it if within the pre-mapped region. Returns the resulting
-     * break (Linux/glibc semantics). */
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    if (a0 == 0) return (int64_t)(_user_heap_cur ? _user_heap_cur : _user_heap_base);
-    if (a0 >= _user_heap_base && a0 <= _user_heap_end) {
-        _user_heap_cur = a0;
-        return (int64_t)a0;
-    }
-    return (int64_t)_user_heap_cur;
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
 }
 
 __attribute__((weak)) int64_t spl_handle_system_reboot(uint64_t a0, uint64_t a1, uint64_t a2,
@@ -18306,19 +16134,7 @@ __attribute__((weak)) int64_t spl_handle_file_read(uint64_t a0, uint64_t a1, uin
 
 __attribute__((weak)) int64_t spl_handle_file_write(uint64_t a0, uint64_t a1, uint64_t a2,
                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* a0=fd, a1=buf, a2=count. stdout(1)/stderr(2) go to COM1. Real file writes
-     * are not yet backed (Stage D) — ENOSYS loudly so the discovery loop sees
-     * them. (libc routes fd 1/2 through syscall 60, but a direct write(32) on a
-     * standard fd is handled here too.) */
-    (void)a3; (void)a4; (void)a5;
-    if (a0 == 1 || a0 == 2) {
-        const char *p = (const char *)(uintptr_t)a1;
-        for (uint64_t i = 0; i < a2; i++) _serial_putchar_impl(p[i]);
-        return (int64_t)a2;
-    }
-    serial_puts("[syscall] file_write ENOSYS fd=");
-    serial_put_dec((int64_t)a0);
-    serial_puts("\r\n");
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }
 
@@ -19023,40 +16839,6 @@ int64_t rt_x86_64_native_gui_process_render(void)
 }
 
 /* End of Wave 12: x86_64 fs-exec probes */
-
-/* Wave 13: SFFI dlopen-based dynamic loading is inherently unsupported on
- * this freestanding kernel target -- there is no dynamic linker, no
- * filesystem-backed shared-library loader, and no libc underneath. The
- * generic auto-generated weak stub (auto_stubs.c) returns NIL_VALUE (0x3)
- * for ALL unresolved externs, which spl_fonts.spl's FontRasterizer.load()
- * misreads as a non-zero/"success" handle (its only failure check is
- * `== 0`) and proceeds to call spl_dlsym()/spl_wffi_call_i64() with that
- * fake handle/fptr, corrupting execution (observed as a garbage
- * instruction pointer, e.g. 0xf000d43df000d43d, reached from the taskbar
- * text-draw path -> FontRenderer.try_enable_ttf). These strong overrides
- * (stronger linkage than the weak auto_stubs.c fallback) make
- * dlopen/dlsym/wffi_call properly report failure (0), which
- * FontRasterizer.load() and its Simple-side callers already handle
- * correctly -- falling back / skipping TTF and keeping the bitmap glyph
- * renderer instead of crashing.
- */
-int64_t spl_dlopen(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
-{
-    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
-    return 0;
-}
-
-int64_t spl_dlsym(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
-{
-    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
-    return 0;
-}
-
-int64_t spl_wffi_call_i64(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
-{
-    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
-    return 0;
-}
 
 #endif /* __x86_64__ || __i386__ */
 

@@ -1,55 +1,114 @@
 """
-# File Watcher Application Integration
+## Purpose and audience
+Executable evidence for the file watcher's application lifecycle contract:
+how a watch opened over a build tree delivers lifecycle events in order,
+enforces the ignore policy, recovers from queue overflow, and keeps state
+isolated per watched root. Written for the tooling team that wires the
+watcher into the rebuild loop (`src/lib/nogc_async_mut/file_system/event_watch.spl`).
 
-**Category:** Tooling
-**Status:** In Progress
+## Operator workflow
+Run this file with the pure-Simple binary, e.g.
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/watcher/watcher_app_spec.spl`
+and read the per-scenario verdicts; every scenario is interpreter-runnable
+and needs no QEMU, GUI, or display session.
 
-## Overview
+## Compatibility and limitations
+Events are driven through the engine's documented deterministic injection
+API (`fswatch_inject`) — the same queue the disk reconciler feeds — because
+the interpreter's file-write layer was observed to lose the content of a
+second write within one process (see NOTE inside the first scenario); this
+spec asserts only surfaces that are deterministic across runs.
 
-Tests the file watcher's integration with the application lifecycle including
-monitoring source files, triggering rebuilds on change, and error handling.
-Verifies that the watcher correctly detects modifications and orchestrates rebuilds.
+## Verification guidance and troubleshooting
+A failure here means the watch-rebuild contract moved: re-run the file and
+read the first failing expect. An empty delivery list where events were
+injected points at the ignore policy or at the poll drain, not at the
+application lifecycle.
 """
-# System test for file watcher application integration.
-#
-# Tests the file watcher's integration with the application lifecycle,
-# including monitoring source files, triggering rebuilds, and error handling.
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: file watcher application lifecycle
 
-
+use std.spec.*
 use std.spec.step
+use std.nogc_async_mut.file_system.event_watch.{fswatch_open, fswatch_inject, fswatch_mark_overflow, fswatch_poll, fswatch_snapshot_lookup}
 
-describe "File Watcher":
-    # @manual scenario evidence
-    # Verifies the file watcher monitors source files correctly, rebuilds
-    # on changes with proper state management, and handles errors gracefully.
-    context "when monitoring source files":
-        it "detects basic changes":
-            # Test basic functionality that would be monitored
-            val x = 1
-            val y = 2
-            val sum = x + y
-            expect(sum).to_equal(3)
+describe "File watcher application lifecycle":
+    it "delivers created, modified, deleted in lifecycle order":
+        # @req REQ-WATCHER-APP-001
+        # @capture(bit_table): delivered event kinds in poll order
+        step("Inject the full create-change-delete lifecycle and poll once")
+        # NOTE product defect (not weakened around): driving this lifecycle
+        # with real file writes loses the content of every write after the
+        # first within one interpreter process (file_write_text reports
+        # success, file_read_text then returns empty), so the disk-backed
+        # reconciler path cannot yet be asserted on deterministically; the
+        # injected queue below is the same queue that reconciler feeds.
+        val st0 = fswatch_open("/tmp/simple_fswatch_app_spec", [".build"])
+        val st1 = fswatch_inject(st0, "created", "page.spl", "")
+        val st2 = fswatch_inject(st1, "modified", "page.spl", "")
+        val st3 = fswatch_inject(st2, "deleted", "page.spl", "")
+        val (_, delivered) = fswatch_poll(st3)
+        expect(delivered.len()).to_equal(3)  # oracle: all three lifecycle events are delivered on one poll
+        expect(delivered[0].kind).to_equal("created")  # oracle: the create is delivered first
+        expect(delivered[1].kind).to_equal("modified")  # oracle: the change follows the create
+        expect(delivered[2].kind).to_equal("deleted")  # oracle: the delete closes the lifecycle
 
-        it "handles multiple file operations":
-            var data = [1, 2, 3]
-            data.push(4)
-            expect(data.len()).to_equal(4)
+    it "rejects events for ignored build output before delivery":
+        # @req REQ-WATCHER-APP-002
+        # @capture(bit_table): delivered event count for build-output injections
+        step("Inject events whose paths sit under two ignored trees")
+        val st0 = fswatch_open("/tmp/simple_fswatch_app_spec", [".build", "node_modules"])
+        val st1 = fswatch_inject(st0, "created", ".build/page.o", "")
+        val st2 = fswatch_inject(st1, "modified", "node_modules/pkg/i.js", "")
+        val (_, delivered) = fswatch_poll(st2)
+        expect(delivered.len()).to_equal(0)  # oracle: neither ignored path may reach the rebuild trigger
 
-    context "when rebuilding on changes":
-        it "recalculates simple math":
-            # Test that code produces correct values after changes
-            val result = 21 * 2
-            expect(result).to_equal(42)
+    it "recovers a clean event stream after an overflow resnapshot":
+        # @req REQ-WATCHER-APP-003
+        # @capture(bit_table): poll results for the overflow pass and the recovery pass
+        step("Overflow the watch, poll, then inject a fresh event and poll again")
+        val st0 = fswatch_open("/tmp/simple_fswatch_app_spec", [])
+        val st1 = fswatch_mark_overflow(st0)
+        val (st2, overflow_pass) = fswatch_poll(st1)
+        val st3 = fswatch_inject(st2, "created", "fresh.spl", "")
+        val (_, recovery_pass) = fswatch_poll(st3)
+        expect(overflow_pass.len()).to_equal(1)  # oracle: the overflow pass reports exactly the collapsed overflow event
+        expect(overflow_pass[0].kind).to_equal("overflow")  # oracle: the collapsed event is the overflow marker
+        expect(recovery_pass.len()).to_equal(1)  # oracle: after resnapshot the next poll carries only the fresh event
+        expect(recovery_pass[0].kind).to_equal("created")  # oracle: the recovered stream is a clean created event, not stale queue
 
-        it "maintains state correctly":
-            # Test that state is preserved/reset correctly
-            var counter = 0
-            for i in [1, 2, 3]:
-                counter = counter + i
-            expect(counter).to_equal(6)
+    it "keeps watch state isolated between two watched roots":
+        # @req REQ-WATCHER-APP-004
+        # @capture(bit_table): per-root delivery counts for one injected event
+        step("Open two watch roots, inject into one, and poll both")
+        val left = fswatch_open("/tmp/simple_fswatch_app_spec", [])
+        val right = fswatch_open("/tmp/simple_fswatch_app_other", [])
+        val left1 = fswatch_inject(left, "modified", "left.spl", "")
+        val (_, right_events) = fswatch_poll(right)
+        val (_, left_events) = fswatch_poll(left1)
+        expect(right_events.len()).to_equal(0)  # oracle: an event injected into the left root must not reach the right watch
+        expect(left_events.len()).to_equal(1)  # oracle: the left watch delivers exactly its own injected event
+        expect(left_events[0].path).to_equal("left.spl")  # oracle: the delivered event names the left root's file
 
-    context "when handling errors":
-        it "recovers from errors gracefully":
-            # Test error handling
-            val success = true
-            expect(success).to_equal(true)
+    it "resolves snapshot stamps by path for reconciliation lookups":
+        # @req REQ-WATCHER-APP-005
+        # @capture(bit_table): snapshot-lookup verdicts for present and absent paths
+        step("Look up a stamped path and an unstamped path in a reconcile snapshot")
+        val snapshot = ["deadbeef\tbuild/app.spl", "feedface\tbuild/lib.spl"]
+        val hit = fswatch_snapshot_lookup(snapshot, "build/lib.spl")
+        val miss = fswatch_snapshot_lookup(snapshot, "build/other.spl")
+        expect(hit).to_equal("feedface")  # oracle: the lookup returns the stamp column of the matching row
+        expect(miss).to_equal("")  # oracle: an unstamped path resolves to empty, which marks it created on the next pass
+
+    it "opens a watch with a clean sequence counter and empty policy defaults":
+        # @req REQ-WATCHER-APP-006
+        # @capture(bit_table): open-state fields for a fresh watch root
+        step("Open a watch with one ignore entry and inspect the fresh state")
+        val st = fswatch_open("/tmp/simple_fswatch_app_spec", [".git"])
+        expect(st.next_seq).to_equal(1)  # oracle: a fresh watch has not yet assigned any sequence token
+        expect(st.ignores.len()).to_equal(1)  # oracle: exactly the configured ignore entry is stored
+        expect(st.root).to_equal("/tmp/simple_fswatch_app_spec")  # oracle: the watch remembers the root it was opened on
+        expect(st.overflowed).to_equal(false)  # oracle: a fresh watch has never overflowed

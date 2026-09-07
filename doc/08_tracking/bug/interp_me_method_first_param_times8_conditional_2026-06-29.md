@@ -193,3 +193,24 @@ the trigger condition itself is still unproven.
 - The exact JIT argument-lowering site was not pinned to a file:line; a delegated search of the
   seed's method-call argument path did not return before this session was interrupted.
 - Pure-Simple lane behaviour is untested.
+
+## Re-verification 2026-09-06 (bug-db closeout pass) — STILL OPEN, confirmed by source inspection
+
+`bug_db.sdn` carries this row as `fix-implemented-verification-pending`, which
+contradicts this doc's own content. Confirmed no fix has landed:
+
+- The `_p0` workaround is still present in source:
+  `examples/09_embedded/simpleos_nvme_fw/fw/ftl_journal.spl:94` still declares
+  `me append(_p0: i64, map_lba: i64, old_ppn: i64, new_ppn: i64, map_seq: i64)`
+  with the same `NOTE(interp bug)` comment.
+- The tag-box encoding this doc blames is unchanged:
+  `src/compiler_rust/runtime/src/value/core.rs` still encodes `Self((payload
+  << 3) | tag)` for `TAG_INT` (`0b000`).
+
+No spec was written for this one: the doc itself states the trigger is
+**conditional and not reproducible in isolation** (every attempted minimal
+replica in the original filing came back correct), so a cheap synthetic
+repro would not be a genuine test of the defect. **Conclusion: STILL
+BROKEN** (unverifiable-in-isolation, but demonstrably not fixed at the
+source level named by the doc). The `bug_db.sdn` status label for this row
+is simply wrong.

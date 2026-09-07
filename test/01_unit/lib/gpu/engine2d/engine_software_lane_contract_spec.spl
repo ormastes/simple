@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+Purpose: Pin the CURRENT contract of the Engine2D software/CPU lane — which
+backend it actually dispatches through, and what the `software_backend` field
+does and does not give you — so the missing software rung is visible in a
+spec instead of only in an audit.
+Audience: engine2d maintainers changing the per-primitive dispatch ladder.
+"""
+# @req: REQ-LIB-GPU-SWLANE-001 — stable requirement identity for this spec.
+
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 15%
+# @tag: unit, engine2d, engine, software, dispatch
+
+"""
+# Engine2D software/CPU lane — pinned dispatch contract
+
+## Overview
+
+`Engine2D` declares a `software_backend: SoftwareBackend? = nil` field
+(`engine.spl:309`). It is **not** a dispatch rung. The per-primitive ladder —
+`clear` at `engine.spl:1337`, `draw_rect` `:1355`, `draw_rect_filled` `:1373`,
+`draw_line` `:1391`, `draw_circle` `:1409` — reads:
+
+    virtio_gpu -> baremetal -> selected_backend_name == "cuda" -> vulkan
+                                                              -> else self.backend
+
+There is **no `elif val Some(sw) = self.software_backend` arm in any primitive
+method**. `software_backend` is read at only three places in the whole file:
+`:2616` (embedded-engine compositing) and `:3131` / `:3159` (shutdown). Every
+software draw therefore falls through to the terminal `else self.backend`
+rung — the same trait-object call site that has no vtable on the freestanding
+lane.
+
+This spec deliberately does NOT restructure the ladder. A 2026-07-16 attempt to
+add `cpu_backend`/`directx_backend` fields broke every `create_offscreen`
+caller on the hosted lane (proven 2026-07-18; see the incident comment at
+`engine.spl:567-583`). Instead it pins what is true today, so a future change
+is a deliberate, spec-visible decision rather than a silent one.
+
+## Pinned facts
+
+1. `create_with_backend(w, h, "cpu")` reports `selected_backend_name == "cpu"`
+   and leaves `software_backend` **nil**. The CPU lane never populates the
+   field at all.
+2. `create_offscreen(w, h)` reports `selected_backend_name == "software"` and
+   populates `software_backend`, because that constructor passes the same local
+   `sw` to both `backend:` and `software_backend:` (`engine.spl:584`).
+3. Both lanes render `clear` and `draw_rect_filled` correctly through the
+   terminal `else self.backend` rung — correct pixels are NOT evidence of a
+   software rung, they are evidence the fallthrough works.
+4. **The rasterizer obtained back out of `software_backend` is DETACHED from
+   the one the engine draws through.** Drawing through the engine leaves it
+   untouched. See the TODO below — this is the reason fact 3's pixels can only
+   be read back through the engine.
+
+## Open defect pinned by fact 4
+
+# TODO: [gpu][P2] Engine2D.software_backend hands back a DETACHED copy of the
+# software rasterizer: after engine.clear()/draw_rect_filled(), unwrapping
+# `self.software_backend` via `if val Some(sw) =` yields a rasterizer whose
+# pixels are still the initial fill, and drawing through that unwrapped value
+# is invisible to engine.read_pixels(). create_offscreen (engine.spl:584)
+# passes ONE local `sw` to both `backend:` and `software_backend:`, so these
+# must be the same object. Production code unwraps the field exactly this way
+# at engine.spl:2616 (compositing) and :3131/:3159 (shutdown), so those paths
+# operate on a stale copy. Likely the same value-semantics class as
+# doc/08_tracking/bug/nested_array_element_bound_to_var_copies_2026-09-05.md.
+# Evidence to close: the "software_backend is a detached copy" example below
+# flips to observing the engine's own pixels, or a bug record explains why
+# copy-on-unwrap is intended here.
+
+## Device-free
+
+Both constructors used here are pure CPU rasterizers. No GPU, driver, window,
+or display is touched, so this spec runs identically headless.
+"""
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i32 = 16
+val H: i32 = 8
+val TEAL: u32 = 0xff112233u32
+val RED: u32 = 0xffff0000u32
+val TRANSPARENT: u32 = 0x00000000u32
+
+fn _px(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[y.to_i64() * W.to_i64() + x.to_i64()]
+
+describe "Engine2D software lane — which backend actually dispatches":
+
+    it "the cpu lane names itself cpu and leaves software_backend unset":
+        step("Construct the CPU engine and inspect its backend bookkeeping")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        expect(engine.selected_backend_name).to_equal("cpu")  # oracle: requested name honoured
+        var populated = false
+        if val Some(sw) = engine.software_backend:
+            populated = true
+        assert_false(populated)  # oracle: engine.spl has no software_backend init on the cpu path
+
+    it "the offscreen lane names itself software and does populate software_backend":
+        step("Construct the offscreen engine and inspect the same bookkeeping")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_offscreen(W, H)
+        expect(engine.selected_backend_name).to_equal("software")  # oracle: engine.spl:584
+        var populated = false
+        if val Some(sw) = engine.software_backend:
+            populated = true
+        assert_true(populated)  # oracle: engine.spl:584 passes `software_backend: sw`
+
+    it "no primitive has a software rung — both lanes fall to the terminal else":
+        step("Neither constructor sets a rung field that any primitive tests")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        # The ladder tests virtio_gpu, baremetal, selected_backend_name=="cuda",
+        # then vulkan. A software engine matches NONE of them, so `else
+        # self.backend` is the only reachable arm. Pinned via the two rung
+        # conditions that are observable from outside the class.
+        var offscreen = Engine2D.create_offscreen(W, H)
+        assert_false(offscreen.selected_backend_name == "cuda")  # oracle: cuda rung not taken
+        var cpu = Engine2D.create_with_backend(W, H, "cpu")
+        assert_false(cpu.selected_backend_name == "cuda")  # oracle: cuda rung not taken
+        expect(cpu.selected_backend_name).to_equal("cpu")
+
+describe "Engine2D software lane — pixels through the terminal else rung":
+
+    it "cpu lane clears every pixel to the requested colour":
+        step("clear() on the CPU engine, then read the framebuffer back")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(TEAL)
+        val pixels = engine.read_pixels()
+        expect(pixels.len()).to_equal(128)  # oracle: 16 * 8
+        expect(_px(pixels, 0, 0)).to_equal(TEAL)  # oracle: top-left cleared
+        expect(_px(pixels, 15, 7)).to_equal(TEAL)  # oracle: bottom-right cleared
+        expect(_px(pixels, 8, 4)).to_equal(TEAL)  # oracle: interior cleared
+
+    it "cpu lane fills exactly the requested rectangle and nothing outside it":
+        step("clear to teal, fill a 4x4 red rect at (2,2), probe inside and outside")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(TEAL)
+        engine.draw_rect_filled(2, 2, 4, 4, RED)
+        val pixels = engine.read_pixels()
+        expect(_px(pixels, 2, 2)).to_equal(RED)  # oracle: inclusive top-left corner
+        expect(_px(pixels, 5, 5)).to_equal(RED)  # oracle: inclusive bottom-right corner
+        expect(_px(pixels, 3, 3)).to_equal(RED)  # oracle: interior
+        expect(_px(pixels, 1, 2)).to_equal(TEAL)  # oracle: one column left of the rect
+        expect(_px(pixels, 6, 5)).to_equal(TEAL)  # oracle: one column right of the rect
+        expect(_px(pixels, 2, 1)).to_equal(TEAL)  # oracle: one row above the rect
+        expect(_px(pixels, 3, 6)).to_equal(TEAL)  # oracle: one row below the rect
+
+    it "offscreen lane starts fully transparent and then fills correctly":
+        step("Probe the transparent start, then clear + fill through the same rung")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_offscreen(W, H)
+        val fresh = engine.read_pixels()
+        expect(_px(fresh, 0, 0)).to_equal(TRANSPARENT)  # oracle: engine.spl:555 sw.clear(0x0)
+        engine.clear(TEAL)
+        engine.draw_rect_filled(2, 2, 4, 4, RED)
+        val pixels = engine.read_pixels()
+        expect(_px(pixels, 3, 3)).to_equal(RED)  # oracle: inside the rect
+        expect(_px(pixels, 0, 0)).to_equal(TEAL)  # oracle: outside, cleared
+        expect(_px(pixels, 15, 7)).to_equal(TEAL)  # oracle: outside, cleared
+
+describe "Engine2D software_backend is a detached copy (pinned defect)":
+
+    it "engine draws are invisible through the unwrapped software_backend":
+        step("Draw through the engine, then read the rasterizer out of the field")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        # PINNING CURRENT BEHAVIOUR, NOT ENDORSING IT. See the TODO in this
+        # file's header. create_offscreen passes ONE `sw` to both `backend:`
+        # and `software_backend:`, so this SHOULD observe the drawn pixels.
+        var engine = Engine2D.create_offscreen(W, H)
+        engine.clear(TEAL)
+        engine.draw_rect_filled(2, 2, 4, 4, RED)
+        var observed_via_field: u32 = 0xdeadbeefu32
+        if val Some(sw) = engine.software_backend:
+            val sw_pixels = sw.read_pixels()
+            observed_via_field = _px(sw_pixels, 3, 3)
+        expect(observed_via_field).to_equal(TRANSPARENT)  # oracle: stale initial fill, NOT RED
+        val engine_pixels = engine.read_pixels()
+        expect(_px(engine_pixels, 3, 3)).to_equal(RED)  # oracle: the engine's own copy did change
+
+    it "draws through the unwrapped software_backend are invisible to the engine":
+        step("Draw through the field's rasterizer, then read the engine back")
+        # @req: REQ-LIB-GPU-SWLANE-001
+        var engine = Engine2D.create_offscreen(W, H)
+        if val Some(sw) = engine.software_backend:
+            var detached = sw
+            detached.clear(RED)
+            val own = detached.read_pixels()
+            expect(_px(own, 0, 0)).to_equal(RED)  # oracle: the detached copy did change
+        val engine_pixels = engine.read_pixels()
+        expect(_px(engine_pixels, 0, 0)).to_equal(TRANSPARENT)  # oracle: engine unaffected

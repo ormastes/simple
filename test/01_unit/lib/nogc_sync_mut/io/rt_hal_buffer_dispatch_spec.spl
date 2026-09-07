@@ -1,5 +1,44 @@
 # @feature mcdc_hal_runtime_hardening
-# @req REQ-009 REQ-010 REQ-015 REQ-017 NFR-005 NFR-006
+
+"""
+## Purpose and audience
+Executable evidence that the caller-owned HAL buffer dispatch lane v3 keeps
+its typed overflow preflight, structured error fields, five exact-buffer
+operations, bounded hot owner, single-consume access receipt, untagged-owner
+execution order, and canonical socket-dispatch operation/trace shape.
+Written for the engineers who own the nogc_sync_mut/io HAL hardening lane
+and the C runtime twin in src/runtime/runtime_hal_buffer_dispatch.c.
+## Operator workflow
+Run:
+    bin/simple test test/01_unit/lib/nogc_sync_mut/io/rt_hal_buffer_dispatch_spec.spl
+Every scenario must pass; a failure is a regression in the HAL buffer
+dispatch contract or its runtime twin.
+## Compatibility and limitations
+CURRENTLY UNRUNNABLE: `use std.nogc_sync_mut.io.hal_buffer_dispatch.*` fails
+to resolve — no src/lib module defines hal_buffer_dispatch (the file the
+source-contract scenarios read, src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl,
+is also absent from the tree). The runner reports outcome=ERROR with 0
+executed. This is a product-side module-resolution defect, not a spec
+defect; the scenarios are kept intact until the module lands or the import
+is corrected. The runtime-twin scenarios additionally require the C runtime
+sources under src/runtime/.
+## Verification guidance and troubleshooting
+A failure in the preflight scenario means captured/output overflow no longer
+maps to its typed RtHalBufferOverflowV3 variant. A failure in the receipt
+scenario means an access receipt is issued without being consumed exactly
+once — check HAL_ACCESS_POISONED_V3 handling in the C runtime. A failure in
+the ordering scenario means a tagged private replay slipped ahead of the
+untagged owner execution.
+"""
+# NOTE (import defect, observed 2026-09-05): `use std.nogc_sync_mut.io.hal_buffer_dispatch.*`
+# fails with "Module std.nogc_sync_mut.io does not export 'hal_buffer_dispatch'"
+# and the file_read source paths do not exist on disk, so the runner reports
+# outcome=ERROR before executing any scenario.
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/runtime/remaining_hardening_tasks_2026-06-11.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hal-buffer-dispatch
 
 use std.spec.*
 use std.io_runtime.{file_read}
@@ -7,54 +46,90 @@ use std.nogc_sync_mut.io.hal_buffer_dispatch.*
 
 describe "mission-critical caller-owned HAL buffers":
     it "reports typed overflow without truncation":
+        # @req REQ-HAL-BUFFER-001
+        # @capture(statistics): preflight verdicts for exact, captured-overflow and output-overflow sizes
+        step("Preflight an exact-fit buffer through rt_hal_buffer_preflight_v3")
         val exact = rt_hal_buffer_preflight_v3(32, 32)
         val captured_overflow = rt_hal_buffer_preflight_v3(33, 33)
         val output_overflow = rt_hal_buffer_preflight_v3(16, 15)
-        expect(exact.accepted).to_be(true)
-        expect(exact.overflow).to_equal(RtHalBufferOverflowV3.None)
-        expect(captured_overflow.accepted).to_be(false)
+        expect(exact.accepted).to_be(true)  # oracle: a 32-byte capture into 32 bytes fits exactly
+        expect(exact.overflow).to_equal(RtHalBufferOverflowV3.None)  # oracle: an exact fit raises no overflow variant
+        expect(captured_overflow.accepted).to_be(false)  # oracle: 33 bytes exceed the 32-byte bound and must be rejected
         expect(captured_overflow.overflow).to_equal(
-            RtHalBufferOverflowV3.CapturedLength)
-        expect(output_overflow.accepted).to_be(false)
+            RtHalBufferOverflowV3.CapturedLength)  # oracle: the oversized capture maps to the CapturedLength variant
+        expect(output_overflow.accepted).to_be(false)  # oracle: a 15-byte output cannot hold a 16-byte result
         expect(output_overflow.overflow).to_equal(
-            RtHalBufferOverflowV3.OutputCapacity)
+            RtHalBufferOverflowV3.OutputCapacity)  # oracle: the undersized output maps to the OutputCapacity variant
 
     it "requires structured error fields and preserves exact status codes":
-        expect(rt_hal_buffer_error_v3_well_formed(0, 0, 0, 0)).to_be(true)
-        expect(rt_hal_buffer_error_v3_well_formed(0, 1, 7, 0)).to_be(false)
-        expect(rt_hal_buffer_error_v3_well_formed(3, 2, -5, 9)).to_be(true)
-        expect(rt_hal_buffer_error_v3_well_formed(3, 0, 0, 0)).to_be(false)
+        # @req REQ-HAL-BUFFER-002
+        # @capture(statistics): well-formedness verdicts and the Diverged status mapping
+        step("Check the structured error contract for well-formed and malformed fields")
+        expect(rt_hal_buffer_error_v3_well_formed(0, 0, 0, 0)).to_be(true)  # oracle: all-zero fields satisfy the structured error contract
+        expect(rt_hal_buffer_error_v3_well_formed(0, 1, 7, 0)).to_be(false)  # oracle: a stage with no owner may not carry a status code
+        expect(rt_hal_buffer_error_v3_well_formed(3, 2, -5, 9)).to_be(true)  # oracle: a completed owner may carry a negative byte count and code 9
+        expect(rt_hal_buffer_error_v3_well_formed(3, 0, 0, 0)).to_be(false)  # oracle: a completed stage may not report zero live fields
+        step("Map status code 5 through rt_hal_buffer_status_v3")
         expect(rt_hal_buffer_status_v3(5)).to_equal(
-            RtHalBufferStatusV3.Diverged)
+            RtHalBufferStatusV3.Diverged)  # oracle: status code 5 is reserved for the Diverged verdict
 
     it "keeps old APIs and adds five separately tagged exact-buffer APIs":
+        # @req REQ-HAL-BUFFER-003
+        # @capture(bit_table): compatibility signatures and the five buffer_v3 operation tags
+        step("Verify the legacy read APIs remain exported")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
         val compatibility = file_read(
             "src/lib/nogc_sync_mut/io/process_ops.spl")
         val io_runtime = file_read("src/lib/nogc_sync_mut/io_runtime.spl")
-        expect(compatibility).to_contain("pub fn process_read_stdout(pid: i64) -> text:")
-        expect(io_runtime).to_contain("pub fn file_read_bytes(path: text) -> [u8]:")
-        expect(source).to_contain("operation: io.file.read.buffer_v3")
-        expect(source).to_contain("operation: io.stream.read.buffer_v3")
-        expect(source).to_contain("operation: io.stream.write.buffer_v3")
-        expect(source).to_contain("operation: io.environment.get.buffer_v3")
-        expect(source).to_contain("operation: io.random.fill.buffer_v3")
+        val keeps_process_read_stdout = compatibility.contains(
+            "pub fn process_read_stdout(pid: i64) -> text:")
+        val keeps_file_read_bytes = io_runtime.contains(
+            "pub fn file_read_bytes(path: text) -> [u8]:")
+        expect(keeps_process_read_stdout).to_equal(true)  # oracle: the legacy process stdout reader must remain exported unchanged
+        expect(keeps_file_read_bytes).to_equal(true)  # oracle: the legacy byte reader must remain exported unchanged
+        step("Verify the five exact-buffer operations carry distinct tags")
+        val tags_file_read = source.contains("operation: io.file.read.buffer_v3")
+        val tags_stream_read = source.contains("operation: io.stream.read.buffer_v3")
+        val tags_stream_write = source.contains("operation: io.stream.write.buffer_v3")
+        val tags_env_get = source.contains("operation: io.environment.get.buffer_v3")
+        val tags_random_fill = source.contains("operation: io.random.fill.buffer_v3")
+        expect(tags_file_read).to_equal(true)  # oracle: file read carries its own buffer_v3 operation tag
+        expect(tags_stream_read).to_equal(true)  # oracle: stream read carries its own buffer_v3 operation tag
+        expect(tags_stream_write).to_equal(true)  # oracle: stream write carries its own buffer_v3 operation tag
+        expect(tags_env_get).to_equal(true)  # oracle: environment get carries its own buffer_v3 operation tag
+        expect(tags_random_fill).to_equal(true)  # oracle: random fill carries its own buffer_v3 operation tag
 
     it "keeps the hot owner bounded and free of dynamic containers":
+        # @req REQ-HAL-BUFFER-004
+        # @capture(bit_table): bound constant and forbidden-container tokens in the dispatch source
+        step("Read the dispatch source and check the 32-byte bound constant")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
-        expect(source).to_contain("RT_HAL_BUFFER_MAX_BYTES_V3: i64 = 32")
-        expect(source).to_contain("_rt_hal_buffer_access_issue_instruction_v3")
-        expect(source).to_contain("rt_hal_buffer_access_consume_v3")
-        expect(source.contains("rt_hal_automatic_access_metadata_v1(")).to_equal(false)
-        expect(source.contains(".push(")).to_equal(false)
-        expect(source.contains("Dict<")).to_equal(false)
-        expect(source.contains("var storage: [")).to_equal(false)
-        expect(source.contains("rt_env_get")).to_equal(false)
-        expect(source.contains("substring(")).to_equal(false)
+        val keeps_32_byte_bound = source.contains("RT_HAL_BUFFER_MAX_BYTES_V3: i64 = 32")
+        val issues_access_instruction = source.contains("_rt_hal_buffer_access_issue_instruction_v3")
+        val consumes_access_receipt = source.contains("rt_hal_buffer_access_consume_v3")
+        expect(keeps_32_byte_bound).to_equal(true)  # oracle: the hot owner stays bounded at exactly 32 bytes
+        expect(issues_access_instruction).to_equal(true)  # oracle: receipt issuance goes through the issue helper
+        expect(consumes_access_receipt).to_equal(true)  # oracle: receipt consumption goes through the consume helper
+        step("Confirm the forbidden container and API tokens are absent")
+        val keeps_automatic_metadata_out = source.contains("rt_hal_automatic_access_metadata_v1(")
+        val keeps_dynamic_push_out = source.contains(".push(")
+        val keeps_dict_out = source.contains("Dict<")
+        val keeps_var_storage_out = source.contains("var storage: [")
+        val keeps_env_get_out = source.contains("rt_env_get")
+        val keeps_substring_out = source.contains("substring(")
+        expect(keeps_automatic_metadata_out).to_equal(false)  # oracle: the v1 automatic metadata path must not return
+        expect(keeps_dynamic_push_out).to_equal(false)  # oracle: the hot owner may never grow dynamically
+        expect(keeps_dict_out).to_equal(false)  # oracle: no Dict may enter the dispatch hot path
+        expect(keeps_var_storage_out).to_equal(false)  # oracle: storage stays caller-owned, not a mutable local array
+        expect(keeps_env_get_out).to_equal(false)  # oracle: environment access is fenced out of the dispatch lane
+        expect(keeps_substring_out).to_equal(false)  # oracle: substring costs are fenced out of the dispatch lane
 
     it "requires an actual executed receipt and consumes it exactly once":
+        # @req REQ-HAL-BUFFER-005
+        # @capture(bit_table): receipt state tokens pinned across the Simple and C sources
+        step("Check the extract helper issues and consumes its receipt")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
         val runtime = file_read("src/runtime/runtime_hal_buffer_dispatch.c")
@@ -63,47 +138,80 @@ describe "mission-critical caller-owned HAL buffers":
         val extract_begin = source.find("fn _rt_hal_buffer_extract_v3(")
         val extract_end = source.find("@unsafe(reason: \"bounded caller-owned HAL buffer dispatch\"")
         val extract = source.substring(extract_begin, extract_end)
-        expect(extract).to_contain("rt_hal_buffer_access_consume_v3")
-        expect(extract.contains("rt_hal_automatic_access_metadata_v1")).to_equal(false)
-        expect(runtime).to_contain("HAL_ACCESS_ISSUED_V3")
-        expect(runtime).to_contain("HAL_ACCESS_READY_V3")
-        expect(runtime).to_contain("HAL_ACCESS_CONSUMED_V3")
-        expect(runtime).to_contain("HAL_ACCESS_POISONED_V3")
-        expect(selfcheck).to_contain("access_consume_winners")
-        expect(selfcheck).to_contain("!= 1) return 30")
-        expect(selfcheck).to_contain("rt_hal_buffer_access_publish_v3")
+        val extract_consumes_receipt = extract.contains("rt_hal_buffer_access_consume_v3")
+        val extract_skips_metadata = extract.contains("rt_hal_automatic_access_metadata_v1")
+        expect(extract_consumes_receipt).to_equal(true)  # oracle: extraction must consume its issued receipt
+        expect(extract_skips_metadata).to_equal(false)  # oracle: extraction must not fall back to v1 metadata
+        step("Check the C runtime twin carries the four receipt states")
+        val runtime_has_issued = runtime.contains("HAL_ACCESS_ISSUED_V3")
+        val runtime_has_ready = runtime.contains("HAL_ACCESS_READY_V3")
+        val runtime_has_consumed = runtime.contains("HAL_ACCESS_CONSUMED_V3")
+        val runtime_has_poisoned = runtime.contains("HAL_ACCESS_POISONED_V3")
+        expect(runtime_has_issued).to_equal(true)  # oracle: the issued state exists in the C twin
+        expect(runtime_has_ready).to_equal(true)  # oracle: the ready state exists in the C twin
+        expect(runtime_has_consumed).to_equal(true)  # oracle: the consumed state exists in the C twin
+        expect(runtime_has_poisoned).to_equal(true)  # oracle: the poisoned state exists in the C twin
+        step("Check the C selfcheck proves single-consumption")
+        val selfcheck_counts_winners = selfcheck.contains("access_consume_winners")
+        val selfcheck_expects_one_winner = selfcheck.contains("!= 1) return 30")
+        val selfcheck_publishes_receipt = selfcheck.contains("rt_hal_buffer_access_publish_v3")
+        expect(selfcheck_counts_winners).to_equal(true)  # oracle: the selfcheck counts consume winners explicitly
+        expect(selfcheck_expects_one_winner).to_equal(true)  # oracle: exactly one consumer may win; else selfcheck exits 30
+        expect(selfcheck_publishes_receipt).to_equal(true)  # oracle: the selfcheck exercises the publish path
 
     it "executes inside untagged owners before private tagged replay":
+        # @req REQ-HAL-BUFFER-006
+        # @capture(bit_table): execution-order tokens across the dispatch owner pair
+        step("Check the shared executor issue-publish-execute sequence")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
+        val executes_via_executor = source.contains("val execution = executor.execute(")
+        val issues_receipt_first = source.contains("val generation = self.issue(")
+        val publishes_receipt = source.contains("val published = self.publish(")
+        expect(executes_via_executor).to_equal(true)  # oracle: execution goes through the shared executor
+        expect(issues_receipt_first).to_equal(true)  # oracle: a receipt generation is issued before execution
+        expect(publishes_receipt).to_equal(true)  # oracle: the receipt is published for the consume gate
+        step("Check the file-read owner runs untagged before any tagged replay")
         val begin = source.find("fn hal_file_read_buffer_executed_v3(")
         val finish = source.find("fn hal_stream_read_buffer_executed_v3(")
         val outer = source.substring(begin, finish)
-        expect(source).to_contain("val execution = executor.execute(")
-        expect(source).to_contain("val generation = self.issue(")
-        expect(source).to_contain("val published = self.publish(")
-        expect(outer).to_contain("owner.execute(1001")
-        expect(outer).to_contain("hal_file_read_buffer_v3(executed.0")
-        expect(outer.contains("execution: EnvExecutionReceiptV1")).to_equal(false)
-        expect(source).to_contain("export hal_file_read_buffer_executed_v3")
-        expect(source.contains("export hal_file_read_buffer_v3")).to_equal(false)
-        expect(source.contains("export rt_hal_file_read_buffer_direct_v3"))
-            .to_equal(false)
+        val owner_runs_tagged_1001 = outer.contains("owner.execute(1001")
+        val owner_calls_direct = outer.contains("hal_file_read_buffer_v3(executed.0")
+        val outer_skips_tagged_replay = outer.contains("execution: EnvExecutionReceiptV1")
+        expect(owner_runs_tagged_1001).to_equal(true)  # oracle: the untagged owner executes with operation 1001
+        expect(owner_calls_direct).to_equal(true)  # oracle: the owner hands the executed buffer to the direct v3 call
+        expect(outer_skips_tagged_replay).to_equal(false)  # oracle: no tagged private replay may appear inside the untagged owner
+        step("Confirm only the executed entry point is exported")
+        val exports_executed = source.contains("export hal_file_read_buffer_executed_v3")
+        val keeps_untagged_export_out = source.contains("export hal_file_read_buffer_v3")
+        val keeps_direct_export_out = source.contains("export rt_hal_file_read_buffer_direct_v3")
+        expect(exports_executed).to_equal(true)  # oracle: only the executed variant is the public entry point
+        expect(keeps_untagged_export_out).to_equal(false)  # oracle: the raw untagged variant must not be exported
+        expect(keeps_direct_export_out).to_equal(false)  # oracle: the direct variant must not be exported
 
     it "keeps configured normal socket dispatch on the canonical operation and exact trace shape":
+        # @req REQ-HAL-BUFFER-007
+        # @capture(bit_table): socket-dispatch operation constants and trace tokens across the three sources
+        step("Check the Simple and C sides agree on operation 1012")
         val simple_source = file_read(
             "src/lib/nogc_sync_mut/io/hal_process_socket_dispatch.spl")
         val runtime_source = file_read(
             "src/runtime/runtime_hal_buffer_dispatch.c")
         val selfcheck = file_read(
             "src/runtime/test/runtime_hal_buffer_dispatch_selfcheck.c")
-        expect(simple_source).to_contain(
+        val simple_pins_1012 = simple_source.contains(
             "RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3: i64 = 1012")
-        expect(runtime_source).to_contain(
+        val runtime_pins_1012 = runtime_source.contains(
             "HAL_BUFFER_OPERATION_SOCKET_CONNECT_TIMEOUT_V3 = 1012")
-        expect(runtime_source).to_contain(
+        expect(simple_pins_1012).to_equal(true)  # oracle: the Simple side pins the connect-timeout operation at 1012
+        expect(runtime_pins_1012).to_equal(true)  # oracle: the C twin pins the same connect-timeout operation at 1012
+        step("Check the trace tail and configured dispatch probes")
+        val runtime_checks_trace_tail = runtime_source.contains(
             "trace_length - trace_cursor != 1")
-        expect(selfcheck).to_contain(
+        val selfcheck_dispatches_1012 = selfcheck.contains(
             "rt_hal_buffer_dispatch_configured_v3(1012")
-        expect(selfcheck).to_contain(
+        val selfcheck_dispatches_1008 = selfcheck.contains(
             "rt_hal_buffer_dispatch_configured_v3(1008")
+        expect(runtime_checks_trace_tail).to_equal(true)  # oracle: the trace must end with exactly one unconsumed entry
+        expect(selfcheck_dispatches_1012).to_equal(true)  # oracle: the selfcheck drives the configured 1012 dispatch
+        expect(selfcheck_dispatches_1008).to_equal(true)  # oracle: the selfcheck drives the configured 1008 dispatch for contrast

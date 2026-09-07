@@ -1,0 +1,200 @@
+"""
+emu_payload_widening_witness_check — the NON-VACUITY witness for the payload
+widening ON THE Vt-PHYSICS EMULATOR BACKEND.
+
+`payload_widening_witness_check.spl` is the sibling of this file and proves the
+same property on the BEHAVIOURAL backend (`fil_nand_device`). It cannot speak for
+the emulator: `ftl_new()` never touches a Vt cell. Until this file existed, the
+emulator — the only backend with real threshold-voltage physics — stored ONE BYTE
+per page and every page-wide reliability scenario over that physics exercised a
+single column (bug record
+`doc/08_tracking/bug/payload_widening_did_not_reach_emu_backend_2026-09-01.md`:
+a host write of 0xA5 programmed exactly 4 of 4224 cells).
+
+Two independent oracles, both of which a one-byte emu path FAILS:
+
+  A. DATA. Distinct sentinel words at 0, 1, 100, 255 and 511 are written through
+     the real host command path on `nvme_controller_new_emu()` and through
+     `ftl_new_emu()`, and every one must come back. On a column-0 path words 1..
+     read back as the erased/zero placeholder, so this cannot pass vacuously.
+
+  B. PHYSICS. `emu_vt_histogram` counts stored Vt per cell. A byte write moves a
+     handful of cells; a page write must move thousands. The check requires the
+     page-written cell count to exceed the byte-written one by a wide margin, and
+     then requires wear + retention drift to act on cells ACROSS the page, not
+     only at column 0 — which is the entire payoff of routing PageData through
+     this backend.
+
+Geometry: the emulator runs NeProfile.S3, whose 4224-byte page is exactly
+PAGE_BYTES (4096) + OOB_BYTES (128); columns 0..4095 carry PageData word i at
+columns 8i..8i+7. That identity is asserted below so the reconciliation is
+checked here, not only asserted in a comment.
+
+Run from the REPO ROOT (fw/ uses cwd-relative SDN config):
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/emu_payload_widening_witness_check.spl
+Gate: prints "EMU PAYLOAD WIDENING WITNESS OK".
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_controller.*
+use ftl.*
+use fil.*
+use fil_nand.*
+
+# A page whose later words are distinct non-zero sentinels. Built through a single
+# owner (`var p`) — never through a temporary alias — so no write copies the page.
+fn emu_witness_page(tag: i64) -> PageData:
+    var p: PageData = page_zero()
+    p.words[0]   = 0x55 + tag
+    p.words[1]   = 0x1111 + tag
+    p.words[100] = 0x2222 + tag
+    p.words[255] = 0x3333 + tag
+    p.words[511] = 0x4444 + tag
+    p
+
+fn emu_expect_page(got: PageData, tag: i64, label: text) -> i64:
+    var f: i64 = 0
+    f = f + expect_eq(page_word(got, 0),   0x55 + tag,   "{label}: word 0")
+    f = f + expect_eq(page_word(got, 1),   0x1111 + tag, "{label}: word 1 (adjacent)")
+    f = f + expect_eq(page_word(got, 100), 0x2222 + tag, "{label}: word 100")
+    f = f + expect_eq(page_word(got, 255), 0x3333 + tag, "{label}: word 255")
+    f = f + expect_eq(page_word(got, 511), 0x4444 + tag, "{label}: word 511 (last)")
+    f
+
+# Cells at or above the program-verify level (148) are PROGRAMMED; the erased lobe
+# sits near 88. Counting the programmed side of the histogram is the direct
+# measure of "how much of this page is actually backed by written cells".
+fn emu_programmed_cells(hist: [i64]) -> i64:
+    var n: i64 = 0
+    var b: i64 = 148
+    while b < hist.len():
+        n = n + hist[b]
+        b = b + 1
+    n
+
+fn emu_total_cells(hist: [i64]) -> i64:
+    var n: i64 = 0
+    var b: i64 = 0
+    while b < hist.len():
+        n = n + hist[b]
+        b = b + 1
+    n
+
+# Cells sitting exactly on the pristine erase mean (88). Retention/wear drift moves
+# cells OFF this bin, so the drop in this count is a page-wide drift measure.
+fn emu_at_erase_mean(hist: [i64]) -> i64:
+    if hist.len() <= 88:
+        return 0
+    hist[88]
+
+fn main():
+    var fail: i64 = 0
+
+    # ── 0. Geometry reconciliation, asserted rather than asserted-in-prose ────
+    fail = fail + expect_eq(PAGE_BYTES + OOB_BYTES, 4224, "firmware page + spare == the S3 emu page (4096 + 128)")
+
+    # The witness page must not survive a one-word projection, or oracle A is
+    # vacuous. D11 deleted the one-word compat shim; the projection is built
+    # from the page-wide primitives directly — same property, no narrowing helper.
+    val wp: PageData = emu_witness_page(0)
+    var proj: PageData = page_zero()
+    proj.words[0] = page_word(wp, 0)
+    fail = fail + expect_eq(bool_to_int(page_eq(proj, wp)), 0,
+                            "witness page does NOT survive a one-word projection (test is non-vacuous)")
+
+    # ── A1. Full host round trip on the EMULATOR-backed controller ────────────
+    var c: NvmeController = nvme_controller_new_emu()
+    c.admin_submit(admin_create_cq_cmd(2, 1, MAX_QUEUE_SIZE))
+    c.admin_submit(admin_create_sq_cmd(3, 1, MAX_QUEUE_SIZE, 1))
+    c.admin_process()
+    c.admin_reap()
+    c.admin_reap()
+
+    c.io_submit(1, cmd_make_page(10, OP_WRITE, 0, 1, emu_witness_page(0)))
+    c.io_process()
+    val w: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(w.status, SC_SUCCESS, "emu host page write completed")
+
+    c.io_submit(1, cmd_make(11, OP_READ, 0, 1, 0))
+    c.io_process()
+    val r: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(r.status, SC_SUCCESS, "emu host page read completed")
+    fail = fail + emu_expect_page(r.page, 0, "emu host read-back through Vt cells")
+
+    # ── A2. Same property one layer down, straight through ftl_new_emu ────────
+    var f: Ftl = ftl_new_emu()
+    fail = fail + expect_eq(f.write_page(0, emu_witness_page(9)), SC_SUCCESS, "emu FTL page write")
+    fail = fail + emu_expect_page(f.read_page(0), 9, "emu FTL/FIL/FMC/NeChip round trip")
+
+    # ── B1. PHYSICS: a page write must move orders of magnitude more cells ────
+    # Byte reference: the SCALAR device seam, driven at the FMC (Fmc.dev_program ->
+    # NandEmu.program), which is deliberately still column-0 only. This reproduces
+    # the pre-widening behaviour EXACTLY, measured rather than remembered — note
+    # that Fil.program is NOT that path: its residual word-0 derivation widens
+    # the scalar into a full zero page and then programs page-wide, which is
+    # why the bug record's "4 of 4224 cells" needs the FMC seam to reproduce.
+    # Cells at or above the program-verify level are the programmed ones.
+    var bf: Fil = fil_new_emu()
+    val bppn: i64 = block_first_ppn(0)
+    fail = fail + expect_eq(bf.fmc.dev_program(bppn, 0, 1, 0xA5), NAND_OK, "byte reference: scalar column-0 write of 0xA5")
+    val bh: [i64] = bf.emu_vt_histogram(bppn)
+    val bcells: i64 = emu_total_cells(bh)
+    val bprog: i64 = emu_programmed_cells(bh)
+    print "  PROBE byte-path : cells={bcells} programmed={bprog} at_erase_mean={emu_at_erase_mean(bh)}"
+    fail = fail + expect_eq(bcells, 4224 * 8, "histogram covers every cell of the 4224-byte page")
+    fail = fail + expect_eq(bool_to_int(bprog < 16), 1, "byte path programs only a handful of cells (the pre-fix behaviour: 4 of 33792)")
+
+    # Page reference: the widened seam through the same device.
+    var pf: Fil = fil_new_emu()
+    fail = fail + expect_eq(pf.program_page(bppn, 0, 1, page_fill(0)), NAND_OK, "page reference: all-zero page write")
+    val ph: [i64] = pf.emu_vt_histogram(bppn)
+    val pprog: i64 = emu_programmed_cells(ph)
+    print "  PROBE page-path : cells={emu_total_cells(ph)} programmed={pprog} at_erase_mean={emu_at_erase_mean(ph)}"
+    # An all-zero 4096-byte page programs every cell of the main area: 4096*8 =
+    # 32768. The spare 128 bytes stay erased. A one-byte path cannot reach this.
+    fail = fail + expect_eq(bool_to_int(pprog >= PAGE_BYTES * 8), 1, "page path programs the WHOLE main area (>= 32768 cells)")
+    fail = fail + expect_eq(bool_to_int(pprog > bprog * 1000), 1, "page path moves >1000x the cells the byte path did")
+
+    # ── B2. PHYSICS: wear + retention drift acts ACROSS the page ──────────────
+    # The payoff. `emu_vt_histogram` reports STORED Vt, and drift is materialised
+    # into stored Vt only at the next program/erase (doc §3.4) — so the honest
+    # page-wide drift measure is the SENSED page: how many of the 4096 main-area
+    # bytes read back different from what was written, after aging a worn block.
+    var df: Fil = fil_new_emu()
+    val dppn: i64 = block_first_ppn(1)
+    val written: PageData = page_fill(0)
+    fail = fail + expect_eq(df.program_page(dppn, 0, 1, written), NAND_OK, "drift fixture: page write")
+    val clean: FilRead = df.read(dppn)
+    var clean_diff: i64 = 0
+    var ci: i64 = 0
+    while ci < PAGE_WORDS:
+        if page_word(clean.page, ci) != page_word(written, ci):
+            clean_diff = clean_diff + 1
+        ci = ci + 1
+    print "  PROBE fresh page: words differing from written = {clean_diff}"
+    fail = fail + expect_eq(clean_diff, 0, "a fresh page senses back exactly what was written, in every word")
+
+    df.emu_set_block_wear(ppn_block(dppn), 3000)
+    df.emu_advance_time_s(31536000.0)
+    val aged: FilRead = df.read(dppn)
+    var drift_words: i64 = 0
+    var di: i64 = 0
+    while di < PAGE_WORDS:
+        if page_word(aged.page, di) != page_word(written, di):
+            drift_words = drift_words + 1
+        di = di + 1
+    print "  PROBE aged page : words differing from written = {drift_words} of {PAGE_WORDS}"
+    # A one-byte backend can only ever drift word 0. Requiring drift across
+    # essentially the whole page is exactly the assertion the old path fails.
+    fail = fail + expect_eq(bool_to_int(drift_words > 400), 1, "wear + retention drift moved cells across the WHOLE page (>400 words)")
+    fail = fail + expect_eq(page_word_count(aged.page), PAGE_WORDS, "the drifted page is still a full page")
+
+    print ""
+    if fail == 0:
+        print "EMU PAYLOAD WIDENING WITNESS OK"
+    else:
+        print "EMU PAYLOAD WIDENING WITNESS FAIL ({fail})"
+    return ()

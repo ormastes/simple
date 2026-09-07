@@ -1,4 +1,31 @@
-# @req: REQ-009, REQ-010, REQ-012, REQ-023, REQ-024
+"""
+## Purpose and audience
+Executable spec of the typed HIR collection performance-facts pass for the
+semantic-analysis maintainers who own `src/compiler/semantics/perf_facts`.
+Scope: resolved-lookup admission from a verified registry contract, loop
+ancestry, fail-closed behavior for absent or unverified metadata, COLL002
+linear-lookup findings, and traversal coverage of comprehensions and nested
+method calls.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/semantics/hir_perf_facts_spec.spl — the pf_* helpers
+build HIR functions with one `Array.contains` lookup and each scenario feeds
+them to collect_hir_function_perf_facts against a fixture registry.
+## Compatibility and limitations
+HIR nodes are hand-built, so the spec pins the facts collector's contract,
+not frontend resolution. The registry fixture pins one operation kind
+(ContainsLookup) with signature `Array<T>.contains(T)->bool`.
+## Verification guidance and troubleshooting
+A failure means an unverified or absent registry row was admitted, a linear
+lookup lost or gained a COLL002 finding, loop depth was miscounted, a small
+literal domain was not suppressed, or traversal dropped a nested or
+comprehension-owned call. Each scenario name names which contract broke.
+"""
+# Lifecycle: doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md ;
+# doc/03_plan/infra/agent_sessions/lint_spec.md ;
+# doc/04_architecture/compiler/perf/simple_optimization_plugin.md ;
+# doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md
+# @manual_section: hir-perf-facts
 
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
@@ -120,36 +147,48 @@ fn pf_registry(symbol_id: i64, verified: bool) -> CollectionOperationRegistry:
 
 describe "typed HIR collection performance facts":
     it "records one resolved linear lookup with loop ancestry":
+        # @req REQ-009 REQ-010 REQ-012 REQ-023 REQ-024
+        # @capture(statistics): scan count, op count, loop depth, and COLL002 finding
+        step("Collect facts for one contains lookup inside a for loop")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 30))), pf_registry(30, true))
-        expect(facts.functions_scanned).to_equal(1)
-        expect(facts.collection_ops.len()).to_equal(1)
-        expect(facts.collection_ops[0].loop_depth).to_equal(1)
+        expect(facts.functions_scanned).to_equal(1)  # oracle: the fixture is exactly one function
+        expect(facts.collection_ops.len()).to_equal(1)  # oracle: the body holds exactly one method call
+        expect(facts.collection_ops[0].loop_depth).to_equal(1)  # oracle: the lookup sits inside exactly one for loop
         expect(facts.collection_ops[0].metadata_admitted).to_equal(true)
         val findings = typed_coll002_linear_lookup_findings(facts)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: one linear lookup inside a loop is exactly one COLL002 violation
         expect(findings[0].code).to_equal("COLL002")
         expect(findings[0].evidence).to_contain("lookup_cost=linear(receiver)")
 
     it "fails closed when operation metadata is absent":
+        # @req REQ-009 REQ-023
+        # @capture(statistics): unclassified count and empty op list
+        step("Collect facts against an empty registry")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 31))),
             CollectionOperationRegistry.new("stdlib-cost-v1"))
-        expect(facts.unclassified_method_calls).to_equal(1)
-        expect(facts.collection_ops.len()).to_equal(0)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.unclassified_method_calls).to_equal(1)  # oracle: the registry has no row for the call, so it must surface as unclassified
+        expect(facts.collection_ops.len()).to_equal(0)  # oracle: without a registry row nothing may be admitted
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: findings may only rest on admitted facts, so zero is the fail-closed result
 
     it "fails closed when registry metadata is not verified":
+        # @req REQ-009 REQ-023
+        # @capture(statistics): unclassified count and empty op list for unverified evidence
+        step("Collect facts against a registry row with no evidence receipt")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 32))), pf_registry(32, false))
-        expect(facts.unclassified_method_calls).to_equal(1)
-        expect(facts.collection_ops.len()).to_equal(0)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.unclassified_method_calls).to_equal(1)  # oracle: an unverified row is treated exactly like a missing one
+        expect(facts.collection_ops.len()).to_equal(0)  # oracle: no admission without evidence, so the op list stays empty
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: no admitted op means no COLL002 finding may be produced
 
     it "does not infer a collection capability without a typed receiver":
+        # @req REQ-012
+        # @capture(statistics): the unknown receiver reason text
+        step("Ask for the receiver kind of an expression with no type")
         val untyped = HirExpr(
             kind: HirExprKind.UnitLit, has_type_: false,
             type_: pf_unit_type(), span: pf_span(9))
@@ -160,13 +199,19 @@ describe "typed HIR collection performance facts":
                 expect(false).to_equal(true)
 
     it "does not convert an unresolved method name into cost evidence":
+        # @req REQ-012
+        # @capture(statistics): unclassified count and empty op list for an unresolved receiver
+        step("Collect facts for a call whose method resolution failed")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.Unresolved), pf_registry(30, true))
-        expect(facts.unclassified_method_calls).to_equal(1)
-        expect(facts.collection_ops.len()).to_equal(0)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.unclassified_method_calls).to_equal(1)  # oracle: even with a matching registry row, an unresolved call cannot be classified
+        expect(facts.collection_ops.len()).to_equal(0)  # oracle: unresolved names admit no operation facts
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: no admitted op, so no finding
 
     it "suppresses an exact small literal iteration domain":
+        # @req REQ-024
+        # @capture(statistics): fixed-small verdict plus loop depth and finding count
+        step("Iterate a one-element array literal and collect facts")
         val literal = pf_expr(HirExprKind.ArrayLit([
             pf_expr(HirExprKind.IntLit(1, nil), pf_array_type(), 10)
         ], nil), pf_array_type(), 10)
@@ -175,10 +220,13 @@ describe "typed HIR collection performance facts":
             pf_function_with_iter(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 30)), literal),
             pf_registry(30, true))
-        expect(facts.collection_ops[0].loop_depth).to_equal(0)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.collection_ops[0].loop_depth).to_equal(0)  # oracle: a literal iteration domain is fully enumerated, so it does not count as loop ancestry
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: a lookup in a known-small domain is not a linear-cost risk
 
     it "poisons duplicate registry symbols instead of overwriting them":
+        # @req REQ-010
+        # @capture(statistics): structural-validity flag and lookup verdict after the duplicate
+        step("Register the same symbol id twice and query the registry")
         var registry = pf_registry(40, true)
         val duplicate = registry.summaries[40]
         registry.register(duplicate)
@@ -186,6 +234,9 @@ describe "typed HIR collection performance facts":
         expect(registry.lookup(40).?).to_equal(false)
 
     it "recognizes contains in an unknown while domain without claiming coverage":
+        # @req REQ-009 REQ-012
+        # @capture(statistics): unknown-domain count, coverage flag, and finding count
+        step("Put the contains lookup inside a while loop with an unknown domain")
         val body = HirBlock(
             stmts: [HirStmt(kind: HirStmtKind.Expr(pf_lookup(
                 MethodResolution.InstanceMethod(
@@ -196,29 +247,38 @@ describe "typed HIR collection performance facts":
             pf_unit_type(), 2)
         val facts = collect_hir_function_perf_facts(
             pf_function_with_expr(loop), pf_registry(30, true))
-        expect(facts.unknown_execution_domains).to_equal(1)
+        expect(facts.unknown_execution_domains).to_equal(1)  # oracle: a while loop over an unknown condition is exactly one unbounded domain
         expect(facts.coverage_complete).to_equal(false)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(1)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(1)  # oracle: unlike the small-literal domain, an unbounded while is a real COLL002 risk
 
     it "does not relabel a different linear lookup as COLL002":
+        # @req REQ-010 REQ-023
+        # @capture(statistics): op count and empty COLL002 finding list
+        step("Register the lookup as a plain LinearLookup, not ContainsLookup")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 30))),
             pf_registry_operation(30, true, HirPerfOperationKind.LinearLookup))
-        expect(facts.collection_ops.len()).to_equal(1)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.collection_ops.len()).to_equal(1)  # oracle: the call is still admitted once, under its true operation kind
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: COLL002 is reserved for contains-style lookups, so a LinearLookup must not be relabeled
 
     it "rejects a registry contract with the wrong explicit arity":
+        # @req REQ-010 REQ-023
+        # @capture(statistics): op count, incomplete count, and finding count
+        step("Register ContainsLookup with zero explicit arguments")
         val facts = collect_hir_function_perf_facts(
             pf_function(MethodResolution.InstanceMethod(
                 SymbolId(id: 10), SymbolId(id: 30))),
             pf_registry_contract(
                 30, true, HirPerfOperationKind.ContainsLookup, 0))
-        expect(facts.collection_ops.len()).to_equal(1)
-        expect(facts.incomplete_ops).to_equal(1)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(facts.collection_ops.len()).to_equal(1)  # oracle: the call is admitted but flagged, not dropped
+        expect(facts.incomplete_ops).to_equal(1)  # oracle: the arity mismatch makes exactly this one op incomplete
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: an incomplete contract must not feed a COLL002 finding
 
     it "preserves parent receiver and argument preorder without counting wrappers":
+        # @req REQ-024
+        # @capture(statistics): the preorder method-name sequence of three nested lookups
+        step("Nest lookups as parent, receiver, and argument and collect facts")
         val resolution = MethodResolution.InstanceMethod(
             SymbolId(id: 10), SymbolId(id: 30))
         val leaf_receiver = pf_expr(
@@ -237,12 +297,15 @@ describe "typed HIR collection performance facts":
             argument_lookup, resolution, 23)
         val facts = collect_hir_function_perf_facts(
             pf_function_with_expr(parent_lookup), pf_registry(30, true))
-        expect(facts.collection_ops.len()).to_equal(3)
+        expect(facts.collection_ops.len()).to_equal(3)  # oracle: parent plus receiver lookup plus argument lookup, with no synthetic wrapper ops
         expect(facts.collection_ops[0].method_name).to_equal("parent_lookup")
         expect(facts.collection_ops[1].method_name).to_equal("receiver_lookup")
         expect(facts.collection_ops[2].method_name).to_equal("argument_lookup")
 
     it "visits for and if expressions owned by comprehension clause kinds":
+        # @req REQ-009 REQ-012
+        # @capture(statistics): clause-ordered method names, loop depths, and coverage flags
+        step("Put two lookups into a comprehension's for and if clauses")
         val resolution = MethodResolution.InstanceMethod(
             SymbolId(id: 10), SymbolId(id: 30))
         val leaf = pf_expr(
@@ -267,11 +330,11 @@ describe "typed HIR collection performance facts":
             pf_array_type(), 29)
         val facts = collect_hir_function_perf_facts(
             pf_function_with_expr(comprehension), pf_registry(30, true))
-        expect(facts.collection_ops.len()).to_equal(2)
+        expect(facts.collection_ops.len()).to_equal(2)  # oracle: one lookup per comprehension clause — the iter and the filter
         expect(facts.collection_ops[0].method_name).to_equal("iter_lookup")
         expect(facts.collection_ops[1].method_name).to_equal("if_lookup")
-        expect(facts.collection_ops[0].loop_depth).to_equal(0)
-        expect(facts.collection_ops[1].loop_depth).to_equal(0)
-        expect(facts.unknown_execution_domains).to_equal(1)
+        expect(facts.collection_ops[0].loop_depth).to_equal(0)  # oracle: a comprehension clause is not itself an enclosing loop for its own iter expression
+        expect(facts.collection_ops[1].loop_depth).to_equal(0)  # oracle: the filter clause is likewise not loop ancestry for its own lookup
+        expect(facts.unknown_execution_domains).to_equal(1)  # oracle: the comprehension's own iteration domain is not statically bounded here, so one unknown domain
         expect(facts.coverage_complete).to_equal(false)
-        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)  # oracle: clause lookups without proven loop ancestry stay outside COLL002

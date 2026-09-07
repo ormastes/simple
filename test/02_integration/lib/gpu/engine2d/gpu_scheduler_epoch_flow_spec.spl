@@ -1,0 +1,112 @@
+# @cover src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl 60%
+# @tag: integration, gpu, scheduler, epoch, draw_ir
+"""
+## Purpose and audience
+A packed DrawIR epoch has to survive a whole in-process lifetime: admission,
+provider submission, completion, and retirement, each distinct and each
+recorded on one receipt. This manual is for the engineers wiring a GPU provider
+onto the bounded host queue: it walks the full flow end to end and shows the
+bounded-capacity refusal. Feature IDs: gpu_scheduler_hardening. Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/simple test test/02_integration/lib/gpu/engine2d/gpu_scheduler_epoch_flow_spec.spl
+## Compatibility and limitations
+Runs in one process against the bounded host-GPU runtime queue with no device
+attached. Every phase here is routing evidence; the compatibility provider
+exposes no fence and no device timestamp, so the epoch never claims device
+execution and `device_execution_proven` stays false through completion.
+## Verification guidance and troubleshooting
+A RED here means the epoch lifecycle changed: phase order, terminal-once
+retirement, or bounded-capacity refusal. Each scenario resets the
+process-global queue first, so a RED is never leakage from a sibling scenario.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec.*
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_embedding_config, draw_ir_rect}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_COMPLETED,
+    ENGINE2D_GPU_PHASE_QUEUED,
+    ENGINE2D_GPU_PHASE_REJECTED,
+    ENGINE2D_GPU_PHASE_RETIRED,
+    ENGINE2D_GPU_PROFILE_SCENE_BALANCED
+}
+use common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES}
+use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
+    engine2d_draw_ir_epoch_request_from_batch,
+    engine2d_draw_ir_runtime_queue_complete_packed,
+    engine2d_draw_ir_runtime_queue_retire_packed,
+    engine2d_draw_ir_runtime_queue_submit_packed
+}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR,
+    ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU,
+    engine2d_host_gpu_runtime_emit_packet,
+    engine2d_host_gpu_runtime_queue_with_backend_handle,
+    engine2d_host_gpu_runtime_reset
+}
+
+val EPOCH_BLUE: u32 = 0xff2244ccu32
+
+fn epoch_batch(id: text):
+    draw_ir_batch(id, DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("epoch-surface", "epoch-window", 0, 0, 48, 32, 10, 1000, false),
+        [draw_ir_rect("epoch-rect", 2, 2, 12, 9, EPOCH_BLUE)])
+
+describe "packed GPU epoch flow over the bounded host queue":
+    it "carries one packed epoch from admission through completion to terminal retirement":
+        # @req REQ-GPU-SCHED-PAYLOAD-001
+        step("Reserve an epoch over a registered packed payload")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val request = engine2d_draw_ir_epoch_request_from_batch(epoch_batch("epoch-flow"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+
+        step("Submit the registered draw payload")
+        val queued = engine2d_draw_ir_runtime_queue_submit_packed(request, queue, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(queued.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(queued.terminal).to_be(false)
+        expect(queued.token).to_not_be_nil()
+
+        step("Publish the provider completion")
+        val completed = engine2d_draw_ir_runtime_queue_complete_packed(queued, queue)
+        expect(completed.phase).to_equal(ENGINE2D_GPU_PHASE_COMPLETED)
+        expect(completed.device_execution_proven).to_be(false)
+        expect(completed.routing_evidence_only).to_be(true)
+        expect(completed.terminal).to_be(false)
+
+        step("Retire resources after native ownership ends")
+        val retired = engine2d_draw_ir_runtime_queue_retire_packed(completed, queue)
+        expect(retired.phase).to_equal(ENGINE2D_GPU_PHASE_RETIRED)
+        expect(retired.terminal).to_be(true)
+        expect(retired.device_execution_proven).to_be(false)
+
+        step("Retire a second time and observe a no-op on the terminal receipt")
+        val retired_again = engine2d_draw_ir_runtime_queue_retire_packed(retired, queue)
+        expect(retired_again.phase).to_equal(ENGINE2D_GPU_PHASE_RETIRED)
+        expect(retired_again.terminal).to_be(true)
+        engine2d_host_gpu_runtime_reset()
+
+    it "refuses a packed epoch once the bounded queue is saturated":
+        # @req REQ-GPU-SCHED-SAFE-002
+        val QUEUE_CAPACITY: i64 = 1024
+        step("Fill the bounded runtime queue to its exact capacity")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        var filled: i64 = 0
+        var last_packet_id: i64 = 0
+        while filled < QUEUE_CAPACITY:
+            last_packet_id = engine2d_host_gpu_runtime_emit_packet(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, 8, 7)
+            filled = filled + 1
+        expect(last_packet_id).to_equal(QUEUE_CAPACITY)  # oracle: RT_HOST_GPU_QUEUE_CAPACITY 1024 in src/runtime/runtime_native.c
+
+        step("Submit one more packed epoch into the full queue")
+        val request = engine2d_draw_ir_epoch_request_from_batch(epoch_batch("epoch-full"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+        val refused = engine2d_draw_ir_runtime_queue_submit_packed(request, queue, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        step("Read the explicit refusal instead of a silent drop")
+        expect(refused.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(refused.terminal).to_be(true)
+        expect(refused.token).to_be_nil()
+        expect(refused.diagnostic).to_contain("queue full")
+        engine2d_host_gpu_runtime_reset()

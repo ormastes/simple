@@ -1,90 +1,180 @@
-"""Source contract for the scalar pgwire socket-worker frontend."""
+"""Source contract for the scalar pgwire socket-worker frontend.
+
+## Purpose and audience
+Freezes the scalar pgwire frontend shape for database-layer maintainers:
+protocol state stays local to the frontend class, transport goes through
+the scalar adapter port, completions fail closed, and socket workers are
+reconstructed only from scalar descriptor fields.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/database/postgres_mimic_scalar_frontend_contract_spec.spl`
+and read the SPEC FILE VERDICT line.
+## Compatibility and limitations
+These assertions cover source contract and ordering shape only; a native
+vertical fixture remains the evidence gate for live socket execution. The
+contract reads shipped product source and asserts via named contract
+locals; it does not open connections.
+## Verification guidance and troubleshooting
+A failure names which contract local went false; grep the cited token in
+the cited source file to see what moved. RED here documents a real
+frontend contract defect.
+"""
+# Lifecycle: doc/01_research/local/postgres_mimic_server.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/lib/database/postgres_mimic_server.md ;
+# doc/05_design/postgres_mimic_scalar_dispatch_v1.md
+# @manual_section: scalar pgwire frontend contract
 
 use std.spec
 use std.io_runtime.{file_read}
 
 describe "Postgres mimic scalar pgwire frontend":
     it "keeps worker protocol state local and database transport scalar":
+        # @req REQ-PG-SCALAR-FE-001
+        # @capture(bit_table): frontend class shape tokens and retired-type verdicts
+        step("Read scalar_frontend.spl and verify the adapter-port transport and the absent retired types")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/scalar_frontend.spl")
-        expect(source).to_contain("class PgWireScalarFrontend:")
-        expect(source).to_contain("port: PgScalarFrontendAdapter")
-        expect(source).to_contain("pending_request_id: i64")
-        expect(source).to_contain("fn poll_port(")
-        expect(source).to_contain("self.port.publish_startup(")
-        expect(source).to_contain("self.port.publish_query(")
-        expect(source).to_contain("self.port.poll_receipt(request)")
-        expect(source).to_contain("self.port.release_blob(blob)")
-        expect(source).to_contain("self.port.release_result(receipt)")
-        expect(source.contains("PgDispatchGate")).to_equal(false)
-        expect(source.contains("PgDatabaseOwner")).to_equal(false)
+        val declares_frontend_class = source.contains("class PgWireScalarFrontend:")
+        val transports_through_scalar_adapter = source.contains("port: PgScalarFrontendAdapter")
+        val keeps_pending_request_id_local = source.contains("pending_request_id: i64")
+        val polls_via_port = source.contains("fn poll_port(")
+        val publishes_startup_via_port = source.contains("self.port.publish_startup(")
+        val publishes_query_via_port = source.contains("self.port.publish_query(")
+        val collects_receipts_via_port = source.contains("self.port.poll_receipt(request)")
+        val releases_blobs_via_port = source.contains("self.port.release_blob(blob)")
+        val releases_results_via_port = source.contains("self.port.release_result(receipt)")
+        val references_retired_dispatch_gate = source.contains("PgDispatchGate")
+        val references_retired_database_owner = source.contains("PgDatabaseOwner")
+        expect(declares_frontend_class).to_equal(true)  # oracle: the scalar frontend is a single named class
+        expect(transports_through_scalar_adapter).to_equal(true)  # oracle: all database transport goes through the scalar adapter port
+        expect(keeps_pending_request_id_local).to_equal(true)  # oracle: protocol state stays a local scalar field
+        expect(polls_via_port).to_equal(true)  # oracle: receipt polling enters through poll_port
+        expect(publishes_startup_via_port).to_equal(true)  # oracle: startup goes through the adapter port
+        expect(publishes_query_via_port).to_equal(true)  # oracle: queries go through the adapter port
+        expect(collects_receipts_via_port).to_equal(true)  # oracle: receipts are polled through the adapter port
+        expect(releases_blobs_via_port).to_equal(true)  # oracle: blob release is routed through the adapter port
+        expect(releases_results_via_port).to_equal(true)  # oracle: result release is routed through the adapter port
+        expect(references_retired_dispatch_gate).to_equal(false)  # oracle: the dispatch-gate ABI is retired from the frontend
+        expect(references_retired_database_owner).to_equal(false)  # oracle: the database-owner ABI is retired from the frontend
 
     it "fails closed on malformed or mismatched scalar completions":
+        # @req REQ-PG-SCALAR-FE-002
+        # @capture(bit_table): fail-closed diagnostic tokens
+        step("Read scalar_frontend.spl and verify the fail-closed rejection diagnostics")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/scalar_frontend.spl")
-        expect(source).to_contain("database command cancelled or timed out")
-        expect(source).to_contain("invalid database completion")
-        expect(source).to_contain("database completion operation mismatch")
-        expect(source).to_contain("return self.reject_and_close")
+        val diagnoses_cancelled_or_timed_out = source.contains("database command cancelled or timed out")
+        val diagnoses_malformed_completion = source.contains("invalid database completion")
+        val diagnoses_operation_mismatch = source.contains("database completion operation mismatch")
+        val rejects_and_closes_on_fault = source.contains("return self.reject_and_close")
+        expect(diagnoses_cancelled_or_timed_out).to_equal(true)  # oracle: cancellation must fail closed with a named diagnostic
+        expect(diagnoses_malformed_completion).to_equal(true)  # oracle: a malformed completion must fail closed
+        expect(diagnoses_operation_mismatch).to_equal(true)  # oracle: an operation mismatch must fail closed
+        expect(rejects_and_closes_on_fault).to_equal(true)  # oracle: every fault path ends in reject_and_close
 
     it "uses the immutable request deadline rather than a worker-local extension":
+        # @req REQ-PG-SCALAR-FE-003
+        # @capture(bit_table): deadline immutability token presence
+        step("Read parallel_linux_server.spl and verify the deadline comes from the claim, never a local extension")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
-        expect(source).to_contain("val deadline = self.scalar.claim_deadline(claim)")
-        expect(source).to_contain("deadline <= now_ms")
-        expect(source).to_contain("val remaining_timeout = deadline - now_ms")
+        val reads_claim_deadline = source.contains("val deadline = self.scalar.claim_deadline(claim)")
+        val compares_deadline_to_now = source.contains("deadline <= now_ms")
+        val derives_remaining_from_deadline = source.contains("val remaining_timeout = deadline - now_ms")
+        expect(reads_claim_deadline).to_equal(true)  # oracle: the deadline is the immutable claim deadline
+        expect(compares_deadline_to_now).to_equal(true)  # oracle: expiry is judged against the immutable deadline
+        expect(derives_remaining_from_deadline).to_equal(true)  # oracle: remaining budget derives from the same immutable deadline
 
     it "requires scalar config bytes before a worker reconstructs local text":
+        # @req REQ-PG-SCALAR-FE-004
+        # @capture(bit_table): scalar byte ABI presence in Simple and C sides
+        step("Read the scalar runtime ABI and the C runtime and verify the scalar config byte accessor on both sides")
         val abi = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/scalar_runtime_abi.spl")
         val runtime = file_read("src/runtime/runtime_db.c")
-        expect(abi).to_contain("rt_pg_wire_server_config_scalar_byte")
-        expect(runtime).to_contain("int64_t rt_pg_wire_server_config_scalar_byte(")
-        expect(runtime).to_contain("Returning a\n * runtime text value here would reintroduce")
+        val abi_declares_scalar_byte_accessor = abi.contains("rt_pg_wire_server_config_scalar_byte")
+        val c_implements_scalar_byte_accessor = runtime.contains("int64_t rt_pg_wire_server_config_scalar_byte(")
+        val c_warns_against_text_return = runtime.contains("Returning a\n * runtime text value here would reintroduce")
+        expect(abi_declares_scalar_byte_accessor).to_equal(true)  # oracle: the Simple ABI side exposes the scalar byte accessor
+        expect(c_implements_scalar_byte_accessor).to_equal(true)  # oracle: the C runtime implements the scalar byte accessor
+        expect(c_warns_against_text_return).to_equal(true)  # oracle: the C side documents why text return is forbidden
 
     it "keeps the socket worker free of database-owner and dispatch-gate values":
+        # @req REQ-PG-SCALAR-FE-005
+        # @capture(bit_table): socket-worker slice verdicts
+        step("Slice the socket worker class out of parallel_linux_server.spl and verify the retired values are absent")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
         val start = source.index_of("class PgScalarSocketWorkerV1:")
         val end = source.index_of("class PgParallelControl:")
         val worker = source.slice(start, end)
-        expect(worker).to_contain("PgWireScalarFrontend.create")
-        expect(worker).to_contain("PgScalarFrontendAdapter(port_token")
-        expect(worker.contains("PgDatabaseOwner")).to_equal(false)
-        expect(worker.contains("PgDispatchGate")).to_equal(false)
-        expect(worker.contains("rt_pg_dispatch_gate_registry")).to_equal(false)
+        val builds_scalar_frontend = worker.contains("PgWireScalarFrontend.create")
+        val binds_scalar_adapter = worker.contains("PgScalarFrontendAdapter(port_token")
+        val leaks_database_owner = worker.contains("PgDatabaseOwner")
+        val leaks_dispatch_gate = worker.contains("PgDispatchGate")
+        val leaks_gate_registry = worker.contains("rt_pg_dispatch_gate_registry")
+        expect(builds_scalar_frontend).to_equal(true)  # oracle: the socket worker is built on the scalar frontend
+        expect(binds_scalar_adapter).to_equal(true)  # oracle: the socket worker binds through the scalar adapter
+        expect(leaks_database_owner).to_equal(false)  # oracle: no database-owner value may reach a socket worker
+        expect(leaks_dispatch_gate).to_equal(false)  # oracle: no dispatch-gate value may reach a socket worker
+        expect(leaks_gate_registry).to_equal(false)  # oracle: the gate registry ABI may not reach a socket worker
 
     it "reconstructs descriptor state only from scalar fields before starting a worker":
+        # @req REQ-PG-SCALAR-FE-006
+        # @capture(bit_table): scalar descriptor reconstruction tokens
+        step("Read parallel_linux_server.spl and verify descriptor registration and reconstruction use scalar fields only")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
-        expect(source).to_contain("fn pg_scalar_register_descriptor(")
-        expect(source).to_contain("rt_pg_worker_descriptor_new(worker_id, listener_fd,")
-        expect(source).to_contain("control_id, port_token, limits_id, config_id)")
-        expect(source).to_contain("fn pg_scalar_socket_worker_from_descriptor(")
-        expect(source).to_contain("pg_scalar_limits_from_token(limits_id)?")
-        expect(source).to_contain("pg_scalar_worker_config_from_token(config_id)?")
-        expect(source).to_contain("fn pg_scalar_release_descriptor(descriptor: i64)")
+        val registers_scalar_descriptor = source.contains("fn pg_scalar_register_descriptor(")
+        val allocates_scalar_descriptor = source.contains("rt_pg_worker_descriptor_new(worker_id, listener_fd,")
+        val passes_only_scalar_ids = source.contains("control_id, port_token, limits_id, config_id)")
+        val rebuilds_from_descriptor = source.contains("fn pg_scalar_socket_worker_from_descriptor(")
+        val resolves_limits_from_token = source.contains("pg_scalar_limits_from_token(limits_id)?")
+        val resolves_config_from_token = source.contains("pg_scalar_worker_config_from_token(config_id)?")
+        val releases_descriptor_by_id = source.contains("fn pg_scalar_release_descriptor(descriptor: i64)")
+        expect(registers_scalar_descriptor).to_equal(true)  # oracle: descriptor registration is scalar-first
+        expect(allocates_scalar_descriptor).to_equal(true)  # oracle: descriptor allocation uses the scalar runtime constructor
+        expect(passes_only_scalar_ids).to_equal(true)  # oracle: only scalar ids cross the worker boundary
+        expect(rebuilds_from_descriptor).to_equal(true)  # oracle: worker state is rebuilt from the descriptor, not captured closures
+        expect(resolves_limits_from_token).to_equal(true)  # oracle: limits resolve from the scalar token
+        expect(resolves_config_from_token).to_equal(true)  # oracle: config resolves from the scalar token
+        expect(releases_descriptor_by_id).to_equal(true)  # oracle: descriptor release is by scalar id
 
     it "keeps database execution on the parent scalar pump and joins before release":
+        # @req REQ-PG-SCALAR-FE-007
+        # @capture(bit_table): parent-pump execution tokens
+        step("Read parallel_linux_server.spl and verify the parent pump owns execution and joins before release")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
-        expect(source).to_contain("me serve_scalar_parallel_bounded(max_connections: i64)")
-        expect(source).to_contain("PgScalarDispatchPortV1.create()")
-        expect(source).to_contain("pg_scalar_spawn_slot(slots[spawn_index])")
-        expect(source).to_contain("owner_pump.pump_one(self.owner")
-        expect(source).to_contain("for handle in handles: handle.join()")
-        expect(source).to_contain("pg_scalar_unregister(slots)")
-        expect(source).to_contain("scalar_port.release()")
-        expect(source).to_contain("idle_deadline = pg_parallel_now_ms() + self.limits.read_timeout_ms")
+        val serves_bounded_parallel = source.contains("me serve_scalar_parallel_bounded(max_connections: i64)")
+        val creates_scalar_dispatch_port = source.contains("PgScalarDispatchPortV1.create()")
+        val spawns_bounded_slots = source.contains("pg_scalar_spawn_slot(slots[spawn_index])")
+        val pumps_parent_owner = source.contains("owner_pump.pump_one(self.owner")
+        val joins_worker_handles = source.contains("for handle in handles: handle.join()")
+        val unregisters_slots_after_join = source.contains("pg_scalar_unregister(slots)")
+        val releases_scalar_port = source.contains("scalar_port.release()")
+        val derives_idle_deadline_from_limits = source.contains("idle_deadline = pg_parallel_now_ms() + self.limits.read_timeout_ms")
+        expect(serves_bounded_parallel).to_equal(true)  # oracle: execution enters the bounded parallel server
+        expect(creates_scalar_dispatch_port).to_equal(true)  # oracle: the parent owns the scalar dispatch port
+        expect(spawns_bounded_slots).to_equal(true)  # oracle: workers spawn through the bounded slot table
+        expect(pumps_parent_owner).to_equal(true)  # oracle: database execution stays on the parent pump
+        expect(joins_worker_handles).to_equal(true)  # oracle: workers are joined before teardown
+        expect(unregisters_slots_after_join).to_equal(true)  # oracle: slots unregister only after the join
+        expect(releases_scalar_port).to_equal(true)  # oracle: the scalar port is released at teardown
+        expect(derives_idle_deadline_from_limits).to_equal(true)  # oracle: the idle deadline derives from the pinned read timeout
 
     it "lets the parent request bounded drain before joining workers":
+        # @req REQ-PG-SCALAR-FE-007
+        # @capture(bit_table): drain/join/unregister/release ordering indexes
+        step("Read parallel_linux_server.spl and verify the drain, join, unregister, and release ordering")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
-        expect(source).to_contain("var drain_started = false")
-        expect(source).to_contain("control.active_count() == 0")
-        expect(source).to_contain("control.begin_drain()")
-        expect(source).to_contain("while not drain_started or control.stopped_count() < self.worker_count")
-        expect(source).to_contain("for handle in handles: handle.join()")
+        val tracks_drain_state = source.contains("var drain_started = false")
+        val drains_only_when_idle = source.contains("control.active_count() == 0")
+        val requests_bounded_drain = source.contains("control.begin_drain()")
+        val waits_for_all_stopped = source.contains("while not drain_started or control.stopped_count() < self.worker_count")
+        val joins_worker_handles = source.contains("for handle in handles: handle.join()")
 
         val drain = source.index_of("                    control.begin_drain()\n                    drain_started = true")
         val stopped = source.index_of("        while not drain_started or control.stopped_count() < self.worker_count:")
@@ -92,6 +182,11 @@ describe "Postgres mimic scalar pgwire frontend":
         val unregistered = source.index_of("        pg_scalar_unregister(slots)\n        val completed = control.completed_count()")
         val port_released = source.index_of("        val _ = scalar_port.release()\n        val _ = control.release()")
         val control_released = source.index_of("        val _ = control.release()\n        Ok(completed)")
+        expect(tracks_drain_state).to_equal(true)  # oracle: drain is an explicit state transition
+        expect(drains_only_when_idle).to_equal(true)  # oracle: drain is requested only when no worker is active
+        expect(requests_bounded_drain).to_equal(true)  # oracle: the parent requests a bounded drain
+        expect(waits_for_all_stopped).to_equal(true)  # oracle: the parent waits until every worker stopped
+        expect(joins_worker_handles).to_equal(true)  # oracle: handles are joined after the drain
         expect(drain).to_be_less_than(stopped)
         expect(stopped).to_be_less_than(joined)
         expect(joined).to_be_less_than(unregistered)

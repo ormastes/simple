@@ -1,11 +1,38 @@
 # @feature mcdc_hal_runtime_hardening
-# @req REQ-015 REQ-016 REQ-017
+"""
+## Purpose and audience
+Freezes the device execution binding surface of the HAL dispatch layer for
+compiler-backend and runtime maintainers: every operation must expose its
+raw direct-compare symbol, its tagged leaf symbol, an explicit three-phase
+lifecycle, and an allocation-free hot wrapper set.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/backend/rt_hal_device_exec_binding_source_contract_spec.spl`
+and read the SPEC FILE VERDICT line.
+## Compatibility and limitations
+This is a source contract over shipped dispatch source that has no runtime
+API; it reads the product source and asserts on grep-verified tokens bound
+to named contract locals. It does not execute the HAL itself.
+## Verification guidance and troubleshooting
+A failure names which contract local went false; grep the named token in
+src/lib/nogc_sync_mut/io/hal_device_dispatch.spl to see whether the symbol
+was renamed or dropped. RED here documents a real binding-surface defect.
+"""
+# Lifecycle: doc/01_research/local/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hal device execution binding contract
 
 use std.spec.*
 use std.nogc_sync_mut.io_runtime.{file_read}
 
 describe "rt(hal) frozen device execution binding source contract":
     it "defines raw direct compare and tagged leaves for all operations":
+        # @req REQ-015
+        # @req REQ-016
+        # @capture(bit_table): per-operation presence of raw/direct/compare/tag binding symbols
+        step("Read hal_device_dispatch.spl and verify the frozen v1 binding symbols for all eight operations")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_device_dispatch.spl")
         val names = ["irq_mask", "irq_acknowledge", "mmio_read",
@@ -14,21 +41,33 @@ describe "rt(hal) frozen device execution binding source contract":
         var index = 0
         while index < names.len():
             val name = names[index]
-            expect(source).to_contain("_hal_" + name + "_exec_v1_raw")
-            expect(source).to_contain(
-                "rt_hal_" + name + "_exec_direct_v1")
-            expect(source).to_contain(
-                "rt_hal_" + name + "_exec_compare_v1")
-            expect(source).to_contain("hal_" + name + "_exec_v1")
+            val exposes_raw_compare = source.contains("_hal_" + name + "_exec_v1_raw")
+            val exposes_direct_entry = source.contains("rt_hal_" + name + "_exec_direct_v1")
+            val exposes_compare_entry = source.contains("rt_hal_" + name + "_exec_compare_v1")
+            val exposes_tagged_leaf = source.contains("hal_" + name + "_exec_v1")
+            expect(exposes_raw_compare).to_equal(true)  # oracle: the frozen contract requires a raw compare symbol per operation
+            expect(exposes_direct_entry).to_equal(true)  # oracle: the frozen contract requires a direct exec entry per operation
+            expect(exposes_compare_entry).to_equal(true)  # oracle: the frozen contract requires a compare exec entry per operation
+            expect(exposes_tagged_leaf).to_equal(true)  # oracle: the frozen contract requires a tagged leaf symbol per operation
             index = index + 1
 
     it "keeps lifecycle explicit and hot wrappers allocation free":
+        # @req REQ-017
+        # @capture(bit_table): lifecycle symbol presence and hot-path forbidden-token verdicts
+        step("Read hal_device_dispatch.spl and verify the explicit lifecycle symbols and the allocation-free hot path")
         val source = file_read(
             "src/lib/nogc_sync_mut/io/hal_device_dispatch.spl")
-        expect(source).to_contain("rt_hal_device_route_prepare_v1")
-        expect(source).to_contain("rt_hal_device_route_seal_v1")
-        expect(source).to_contain("rt_hal_device_route_shutdown_v1")
-        expect(source.contains("Dict<")).to_be(false)
-        expect(source.contains(".push(")).to_be(false)
-        expect(source.contains("process_")).to_be(false)
-        expect(source.contains("rt_env_get")).to_be(false)
+        val has_prepare_phase = source.contains("rt_hal_device_route_prepare_v1")
+        val has_seal_phase = source.contains("rt_hal_device_route_seal_v1")
+        val has_shutdown_phase = source.contains("rt_hal_device_route_shutdown_v1")
+        val hot_path_allocates_dict = source.contains("Dict<")
+        val hot_path_appends_dynamically = source.contains(".push(")
+        val hot_path_spawns_processes = source.contains("process_")
+        val hot_path_reads_environment = source.contains("rt_env_get")
+        expect(has_prepare_phase).to_equal(true)  # oracle: the lifecycle contract names an explicit prepare phase
+        expect(has_seal_phase).to_equal(true)  # oracle: the lifecycle contract names an explicit seal phase
+        expect(has_shutdown_phase).to_equal(true)  # oracle: the lifecycle contract names an explicit shutdown phase
+        expect(hot_path_allocates_dict).to_equal(false)  # oracle: hot wrappers must stay allocation free
+        expect(hot_path_appends_dynamically).to_equal(false)  # oracle: dynamic append would allocate in the hot path
+        expect(hot_path_spawns_processes).to_equal(false)  # oracle: process spawn is forbidden in hot wrappers
+        expect(hot_path_reads_environment).to_equal(false)  # oracle: environment reads are forbidden in hot wrappers

@@ -2,12 +2,20 @@
 # @tag: integration, ui, wm, nested, lane-c
 
 """
+## Purpose and audience
 Lane C of "rendering-inside-rendering": nested content frames in the WM/GUI
 layer. A content frame (WmContentFrame) can now be embedded inside ANOTHER
 content frame — a GUI panel embedded in a GUI panel, or a web-render panel
 embedded in a GUI window — expressed purely at the content-frame layer via
 WmContentFrame.parent_window_id/offset_x/offset_y (common.ui.window_scene)
 and rendered by the recursive executor in common.ui.window_scene_draw_ir.
+Audience: WM/GUI compositor engineers touching the content-frame projection
+or the shared executor.
+
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/wm_nested_content_frame_spec.spl`). Every
+scenario drives the in-memory TestPixelBackend — no host window system.
 
 This spec pins:
   (a) a child GUI frame renders at the parent's content rect + offset;
@@ -20,9 +28,23 @@ This spec pins:
       rejected (fail-closed, same as an invalid checksum);
   (f) a scene with no nested content frames renders byte-identical to the
       pre-nesting executor behavior (regression).
+
+## Compatibility and limitations
+The Draw IR projection scenarios (`shared_wm_nested_content_frames` /
+Draw IR image cases) currently FAIL against the shipped window_scene_draw_ir
+sources — that is the legitimately-RED part of this file and must stay RED
+until the projection contract lands. The pixel-backend scenarios are
+host-neutral and always run.
+
+## Verification guidance and troubleshooting
+A failure in the offset/clip scenarios means the recursive executor lost the
+parent content rect or the offset accumulation; a magenta scenario failure
+means the fail-closed path stopped isolating to the child's own area; the
+known-failing Draw IR projection scenarios fail with unresolved bindings —
+see the Compatibility section before treating them as a new regression.
 """
 
-use std.spec.{describe, it, expect, step, assert_not_equal}
+use std.spec.{describe, context, it, expect, step, assert_not_equal}
 use common.ui.window_scene.{
     SharedWmScene,
     SharedWmWindow,
@@ -157,9 +179,17 @@ fn _top_level_web_frame(window_id: text, scene_revision: i64, w: i32, h: i32, co
         offset_y: 0
     )
 
+# Lifecycle: research doc/01_research/domain/wm_gui_web_2d_host_env_hardening.md ;
+# plan doc/03_plan/agent_tasks/wm_gui_web_2d_host_env_hardening.md ;
+# architecture doc/04_architecture/wm_gui_web_2d_host_env_hardening.md ;
+# design doc/05_design/wm_gui_web_2d_host_env_hardening.md
+
+# @manual_section: nested content frames
 describe "Nested content frames (Lane C: rendering inside rendering)":
 
     it "renders a valid GUI child frame at the parent content rect plus offset":
+        # @req REQ-WMNESTED-001
+        # @capture(gui_image): child-at-offset composition sample retained
         step("Build a parent window with a top-level Simple Web frame and a nested GUI child frame")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-a", [window])
@@ -173,13 +203,15 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         step("Render through the shared executor")
         val stats = shared_wm_scene_render_context_to_backend(backend, input)
         step("The child's pixels appear at (window.x + offset_x, window.y + offset_y)")
-        expect(backend.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)
+        expect(backend.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)  # oracle: (25,25) is window origin (10,10) plus the child offset (10,10) plus an interior pixel (5,5)
         step("A pixel outside the child rect but inside the parent rect keeps the parent's own color")
-        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)
-        expect(stats.content_pixel_count).to_be_greater_than(7000)
+        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)  # oracle: (15,15) is inside the parent frame but above-left of the child rect, so the parent color must survive
+        expect(stats.content_pixel_count).to_be_greater_than(7000)  # oracle: the parent alone contributes 100*70=7000 content pixels and the child adds more
 
     it "clips a child frame that extends past its parent's content rect":
-        step("Child offset + width overflows the parent's 100px-wide content rect")
+        # @req REQ-WMNESTED-002
+        # @capture(gui_image): clipped child composition sample retained
+        step("Build a child whose offset plus width overflows the parent's 100px-wide content rect")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(160, 140, "nested-b", [window])
         val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
@@ -190,13 +222,16 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val backend = TestPixelBackend.create(160, 140, 0u32)
         shared_wm_scene_render_context_to_backend(backend, input)
         step("Inside the clipped visible region (x in [60,110)) the child color is drawn")
-        expect(backend.pixels[25 * 160 + 65]).to_equal(0xFF333333u32)
+        expect(backend.pixels[25 * 160 + 65]).to_equal(0xFF333333u32)  # oracle: x=65 lies in the visible child strip [60,110) so the child color is drawn
         step("Left of the child's offset, inside the parent rect, the parent's own color is untouched")
-        expect(backend.pixels[25 * 160 + 15]).to_equal(0xFF111111u32)
+        expect(backend.pixels[25 * 160 + 15]).to_equal(0xFF111111u32)  # oracle: x=15 is left of the child offset, so only the parent frame color may appear
         step("Past the parent's right edge (content rect ends at x=110, outside the window entirely) the child color never bleeds through")
         assert_not_equal(backend.pixels[25 * 160 + 120], 0xFF333333u32)
 
     it "fails closed with a magenta rect over just the child's area on an invalid checksum, parent intact":
+        # @req REQ-WMNESTED-003
+        # @capture(gui_image): fail-closed magenta composition sample retained
+        step("Render a child frame whose checksum is zero and require the magenta fallback")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-c", [window])
         val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
@@ -207,12 +242,15 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val backend = TestPixelBackend.create(140, 140, 0u32)
         shared_wm_scene_render_context_to_backend(backend, input)
         step("The child's declared rect is magenta-filled instead of drawing the (unvalidated) pixels")
-        expect(backend.pixels[25 * 140 + 25]).to_equal(MAGENTA)
+        expect(backend.pixels[25 * 140 + 25]).to_equal(MAGENTA)  # oracle: (25,25) is inside the invalid child rect, which must render the exact fail-closed magenta
         assert_not_equal(backend.pixels[25 * 140 + 25], 0xFF222222u32)
         step("A parent-only pixel outside the child rect is untouched by the failure")
-        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)
+        expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)  # oracle: (15,15) is parent-only area, so the invalid child must not leak past its own rect
 
     it "accumulates offsets through a grandchild (two levels of nesting)":
+        # @req REQ-WMNESTED-004
+        # @capture(gui_image): grandchild offset composition sample retained
+        step("Render child and grandchild frames and require the offsets to accumulate")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-d", [window])
         val parent_frame = _top_level_web_frame("win-parent", 7, 100, 70, 0xFF111111u32)
@@ -225,11 +263,13 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val backend = TestPixelBackend.create(140, 140, 0u32)
         shared_wm_scene_render_context_to_backend(backend, input)
         step("Grandchild pixel position = window.xy + child.offset + grandchild.offset")
-        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF333333u32)
+        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF333333u32)  # oracle: (20,20) is window (10,10) + child offset (5,5) + grandchild offset (3,3) plus (2,2) inside the grandchild
         step("Just outside the grandchild (still inside the child) is the child's own color")
-        expect(backend.pixels[20 * 140 + 30]).to_equal(0xFF222222u32)
+        expect(backend.pixels[20 * 140 + 30]).to_equal(0xFF222222u32)  # oracle: x=30 is past the 10px-wide grandchild but inside the 50px-wide child
 
     it "clips a grandchild to its partially visible ancestor":
+        # @req REQ-WMNESTED-005
+        # @capture(gui_image): ancestor-clipped grandchild sample retained
         step("Place a child so its right edge is clipped by the parent, then place its grandchild wholly in that clipped-off area")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-ancestor-clip", [window])
@@ -243,12 +283,14 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val backend = TestPixelBackend.create(140, 140, 0u32)
         shared_wm_scene_render_context_to_backend(backend, input)
         step("The visible child strip renders inside its parent")
-        expect(backend.pixels[25 * 140 + 105]).to_equal(0xFF222222u32)
+        expect(backend.pixels[25 * 140 + 105]).to_equal(0xFF222222u32)  # oracle: x=105 is in the child's visible strip [100,110) inside the parent
         step("The grandchild cannot escape through the child's clipped-off area")
         assert_not_equal(backend.pixels[20 * 140 + 115], 0xFF333333u32)
 
     it "accepts origin 'gui' like 'simple_web' and rejects an unrecognized origin":
-        step("A top-level frame with origin_kind=gui renders normally")
+        # @req REQ-WMNESTED-006
+        # @capture(gui_image): gui-origin and fail-closed-origin samples retained
+        step("Render a top-level frame with origin_kind gui and check its pixels")
         val gui_window = _borderless_window("win-gui", 10, 10, 20, 20)
         val gui_pixels = _solid_pixels(20 * 20, 0xFF444444u32)
         val gui_frame = wm_gui_content_frame_from_pixels("win-gui", "", 0, 0, 20, 20, gui_pixels, 5, 1)
@@ -257,7 +299,7 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val gui_input = SharedWmRenderInput(scene: gui_scene, revision: gui_revision, content_frames: [gui_frame], metrics: _metrics(), t_micros: 0)
         val gui_backend = TestPixelBackend.create(100, 100, 0u32)
         shared_wm_scene_render_context_to_backend(gui_backend, gui_input)
-        expect(gui_backend.pixels[15 * 100 + 15]).to_equal(0xFF444444u32)
+        expect(gui_backend.pixels[15 * 100 + 15]).to_equal(0xFF444444u32)  # oracle: origin gui must render the frame's own pixels exactly like simple_web
 
         step("A top-level frame with an unrecognized origin fails closed to magenta")
         val bad_window = _borderless_window("win-bad-origin", 10, 10, 20, 20)
@@ -268,10 +310,12 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val bad_input = SharedWmRenderInput(scene: bad_scene, revision: bad_revision, content_frames: [bad_frame], metrics: _metrics(), t_micros: 0)
         val bad_backend = TestPixelBackend.create(100, 100, 0u32)
         shared_wm_scene_render_context_to_backend(bad_backend, bad_input)
-        expect(bad_backend.pixels[15 * 100 + 15]).to_equal(MAGENTA)
+        expect(bad_backend.pixels[15 * 100 + 15]).to_equal(MAGENTA)  # oracle: an unrecognized origin fails closed to the exact magenta sentinel
 
     it "renders a top-level frame with no children byte-identical to the pre-nesting executor (regression)":
-        step("Same scene/frame shape as the existing window_scene_render_executor_spec top-level content-frame test")
+        # @req REQ-WMNESTED-007
+        # @capture(gui_image): regression parity composition sample retained
+        step("Render the pre-nesting scene shape and compare against the documented pixel and count")
         val window = _borderless_window("win-probe", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-f", [window])
         val pixels: [u32] = [0xFF123456u32; 100 * 70]
@@ -280,10 +324,15 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: _metrics(), t_micros: 0)
         val backend = TestPixelBackend.create(140, 140, 0u32)
         val stats = shared_wm_scene_render_context_to_backend(backend, input)
-        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF123456u32)
-        expect(stats.content_pixel_count).to_equal(7000)
+        expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF123456u32)  # oracle: (20,20) is inside the 100x70 frame placed at window origin (10,10)
+        expect(stats.content_pixel_count).to_equal(7000)  # oracle: the frame contributes exactly its 100x70=7000 pixels, matching the pre-nesting executor
 
     it "renders a linked nested Draw IR image through real CPU Engine2D readback":
+        # @req REQ-WMNESTED-008
+        # @capture(gui_image): nested Draw IR CPU readback retained
+        # NOTE: legitimately RED today — shared_wm_nested_content_frames is not
+        # yet exported by window_scene_draw_ir; this scenario pins the target
+        # contract and must stay RED until that projection lands.
         step("Build a scene whose window has a nested GUI content frame")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-g", [window])
@@ -293,7 +342,7 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         step("Project both frames and resolve both authoritative pixel resources")
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [parent_frame, child_frame], "cpu", 1000, "", 0)
         val nested_frames = shared_wm_nested_content_frames(scene, [parent_frame, child_frame], [parent_frame], 7, 28)
-        expect(nested_frames.len()).to_equal(1)
+        expect(nested_frames.len()).to_equal(1)  # oracle: exactly one of the two frames is nested under a parent
         var found_surface = false
         var found_parent_id = false
         for batch in composition.batches:
@@ -308,14 +357,16 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val parent_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(parent_frame), parent_frame.width, parent_frame.height, parent_frame.pixels)
         val child_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(nested_frames[0]), nested_frames[0].width, nested_frames[0].height, nested_frames[0].pixels)
         val result = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [parent_image, child_image])
-        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)
-        expect(result.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)
-        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)  # oracle: (15,15) shows the parent frame's own 0xFF112233 pixels
+        expect(result.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)  # oracle: (25,25) is the nested child's offset position carrying the child color
+        expect(result.skipped_command_count).to_equal(0)  # oracle: a fully resolved composition skips no command
         expect(result.fallback_required).to_be(false)
         expect(result.readback_source).to_equal("cpu_mirror")
         cpu.shutdown()
 
     it "paints invalid nested Draw IR metadata magenta without resolving fabricated pixels":
+        # @req REQ-WMNESTED-009
+        # @capture(gui_image): fail-closed nested Draw IR readback retained
         step("Build a valid parent with one visible child whose checksum is invalid")
         val window = _borderless_window("win-parent-invalid", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-invalid", [window])
@@ -331,17 +382,22 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val result = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [parent_image])
 
         step("Read back the parent and the fail-closed child rectangle from the same CPU frame")
-        expect(result.pixels.len()).to_equal(140 * 140)
-        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)
-        expect(result.pixels[25 * 140 + 25]).to_equal(0xFFFF00FFu32)
-        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels.len()).to_equal(140 * 140)  # oracle: the readback is the full 140x140 composition surface
+        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)  # oracle: (15,15) is parent-only area carrying the parent color
+        expect(result.pixels[25 * 140 + 25]).to_equal(0xFFFF00FFu32)  # oracle: (25,25) is the invalid child rect, which must be the exact magenta sentinel
+        expect(result.skipped_command_count).to_equal(0)  # oracle: the fail-closed child is painted, not skipped
         expect(result.fallback_required).to_be(false)
         expect(result.readback_source).to_equal("cpu_mirror")
-        expect(result.backend_handle).to_equal(0)
-        expect(result.readback_checksum).to_be_greater_than(0)
+        expect(result.backend_handle).to_equal(0)  # oracle: a cpu_mirror readback carries no device backend handle
+        expect(result.readback_checksum).to_be_greater_than(0)  # oracle: a real readback carries a nonzero integrity checksum
         cpu.shutdown()
 
     it "projects an authoritative top-level content frame as a resolved Draw IR image":
+        # @req REQ-WMNESTED-010
+        # @capture(bit_table): resolved image projection flags retained
+        # NOTE: legitimately RED today — the Draw IR image projection contract
+        # is not fully wired in window_scene_draw_ir; pinned here fail-closed.
+        step("Compose a scene with one authoritative top-level frame and look for its resolved image command")
         val window = _borderless_window("win-image", 10, 10, 20, 20)
         val scene = simple_gui_internal_window_scene(80, 80, "image-projection", [window])
         val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
@@ -355,6 +411,11 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         expect(found).to_be(true)
 
     it "rejects a top-level Draw IR image whose nonzero checksum is incorrect":
+        # @req REQ-WMNESTED-011
+        # @capture(bit_table): bad-checksum rejection flags retained
+        # NOTE: legitimately RED today — pins the fail-closed rejection of a
+        # wrong nonzero checksum; stays RED until the projection contract lands.
+        step("Compose a scene whose frame carries a wrong nonzero checksum and require no image command")
         val window = _borderless_window("win-bad-image", 10, 10, 20, 20)
         val scene = simple_gui_internal_window_scene(80, 80, "bad-image-projection", [window])
         val pixels = _solid_pixels(20 * 20, 0xFF556677u32)

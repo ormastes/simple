@@ -1,0 +1,69 @@
+"""Focused lifecycle and failover evidence for REQ-CSM-009..011."""
+
+use compiler.driver.cache.daemon.cache_daemon_lifecycle
+use compiler.driver.cache.daemon.cache_daemon_transport
+
+describe "compiler cache daemon lifecycle":
+    it "runs one monotonic launch and reconnect before fallback":
+        val machine = cache_connect_state_machine_new(100i64)
+        val first = machine.connect_unavailable(110i64)
+        expect(first.reason).to_equal("launch_then_reconnect")
+        expect(machine.launch_count).to_equal(1i64)
+        val retry = machine.connect_unavailable(350i64)
+        expect(retry.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(retry.reconnect_count).to_equal(1i64)
+        expect(machine.connect_unavailable(351i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+
+    it "starts unsupported-host fallback inside the total budget":
+        val late = cache_connect_state_machine_new(0i64)
+        late.connect_unavailable(1i64)
+        val fallback = late.connect_unavailable(250i64)
+        expect(fallback.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(cache_transport_shared_writes_enabled(fallback)).to_equal(false)
+        expect(late.finished).to_equal(true)
+
+    it "rejects negative or reversing monotonic time":
+        val negative = cache_connect_state_machine_new(-1i64)
+        expect(negative.connect_unavailable(0i64).reason).to_equal("invalid_monotonic_time")
+        val reverse = cache_connect_state_machine_new(10i64)
+        reverse.connect_unavailable(20i64)
+        expect(reverse.connect_unavailable(19i64).reason).to_equal("invalid_monotonic_time")
+
+    it "exits no earlier than ten seconds after every inhibitor ends":
+        val lifecycle = cache_daemon_lifecycle_new(0i64)
+        expect(lifecycle.begin_request(0i64)).to_equal(true)
+        expect(lifecycle.begin_lease(1i64)).to_equal(true)
+        expect(lifecycle.begin_publication(2i64)).to_equal(true)
+        expect(lifecycle.begin_gc_transaction(3i64)).to_equal(true)
+        lifecycle.end_request(4i64)
+        lifecycle.end_lease(5i64)
+        lifecycle.end_publication(6i64)
+        lifecycle.end_gc_transaction(7i64)
+        expect(lifecycle.should_begin_shutdown(10006i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(10007i64)).to_equal(true)
+        expect(lifecycle.begin_request(10008i64)).to_equal(false)
+
+    it "new admitted work cancels an armed idle deadline":
+        val lifecycle = cache_daemon_lifecycle_new(0i64)
+        lifecycle.arm_if_idle(0i64)
+        expect(lifecycle.should_begin_shutdown(9999i64)).to_equal(false)
+        expect(lifecycle.begin_request(9999i64)).to_equal(true)
+        lifecycle.end_request(10000i64)
+        expect(lifecycle.should_begin_shutdown(19999i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(20000i64)).to_equal(true)
+
+    it "arms at startup and drains checkpoint and epoch release before stop":
+        val lifecycle = cache_daemon_lifecycle_new(50i64)
+        expect(lifecycle.should_begin_shutdown(10049i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(10050i64)).to_equal(true)
+        expect(lifecycle.finish_shutdown()).to_equal(false)
+        lifecycle.note_checkpoint_complete()
+        expect(lifecycle.finish_shutdown()).to_equal(false)
+        lifecycle.note_writer_epoch_released()
+        expect(lifecycle.finish_shutdown()).to_equal(true)
+        expect(lifecycle.shutdown_state).to_equal(CACHE_DAEMON_STOPPED)
+
+    it "treats twelve seconds as the exact exit bound":
+        val lifecycle = cache_daemon_lifecycle_new(5i64)
+        expect(lifecycle.exceeded_exit_bound(12004i64)).to_equal(false)
+        expect(lifecycle.exceeded_exit_bound(12005i64)).to_equal(true)

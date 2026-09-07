@@ -1,0 +1,189 @@
+"""
+## Purpose and audience
+Purpose: show which of three different code paths a single `draw_rect_filled`
+call takes once a stencil mask is installed, why the routing has to diverge, and
+what pixels and provenance each route leaves behind.
+Audience: engine2d/GPU maintainers touching `draw_rect_filled`
+(`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:796`) or the mask plane,
+and reviewers who need to see that removing the mask detour would turn this file
+RED instead of silently reintroducing a mask-parity divergence.
+
+## The divergence being pinned
+`draw_rect_filled` has three exits, tested in this order:
+
+  1. `color_a(color) < 255` (`:798`) — the ALPHA route. The rect is expanded to a
+     pixel buffer and handed to `draw_image_blend` (`:806`). This test comes
+     FIRST, so alpha wins even when a mask is also active.
+  2. `self.mask_buf.len() > 0` (`:808`) — the MASK route. The comment at
+     `:809-813` states why: the rect compute kernel packs clip state but has no
+     mask plane, so a device dispatch would paint straight through an active
+     stencil mask. The rect is expanded and handed to `draw_image` (`:820`),
+     the host path that applies clip AND mask.
+  3. otherwise — the DEVICE route: `_dispatch_framebuffer_checked` with the
+     `pipe_rect_filled` compute pipeline (`:825`).
+
+The non-obvious part, and the reason a maintainer can delete the detour and
+still see masked pixels in some tests: the alpha route does NOT bypass the mask.
+`emu_draw_image_blend` composites into a scratch buffer and then calls
+`core.draw_image(...)` (`backend_emu_adv.spl:96`), funnelling straight back into
+the same masked host path route 2 uses. Both host routes therefore honour the
+mask; what distinguishes them is the recorded provenance and the blended value.
+This file asserts both, so the two routes cannot be confused for each other.
+
+## Operator workflow
+    src/compiler_rust/target/bootstrap/simple run \
+      test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_mask_plane_spec.spl
+
+## Compatibility and limitations
+Device-free. `VulkanBackend.create()` returns a backend that has never reached a
+driver; geometry is assigned directly and `d_framebuffer` stays 0. Every SFFI
+call the host routes make is therefore a no-op that cannot mutate anything the
+assertions read — the pixels below are written by the pure-Simple loop at
+`:1076-1097`, and the framebuffer upload at `:1098` has no device to upload to.
+
+The DEVICE route is only pinned NEGATIVELY here: device-free its dispatch cannot
+succeed, so what this file proves about it is that it leaves the host buffer
+alone and records the dispatch failure. That an unmasked opaque rect really is
+painted by the compute kernel needs a device and belongs in `test/03_system/`.
+
+`cpu_fallback_reason` keeps only the FIRST transition reason
+(`:651-655` — `if not self.cpu_fallback_used`), so each scenario uses a fresh
+backend; reading it after two different routes would report only the earlier one.
+
+## Verification guidance and troubleshooting
+If a masked opaque rect starts reporting `framebuffer-dispatch-failed` instead of
+`image-copy-host-fallback`, the mask detour at `:808` was removed or its
+condition inverted — that is the exact regression this file exists to catch, and
+on a real device it appears as a mask-parity divergence in
+`native_shader_backend_readback_matrix_spec`.
+"""
+# Lifecycle: doc/01_research/local/engine2d_four_backend_capture.md ;
+# doc/03_plan/ui/engine2d_vulkan_showcase_parity_plan.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/engine2d_four_backend_capture.md
+# @manual_section: vulkan-mask-plane
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 15%
+# @tag: unit, engine2d, vulkan, mask, clip, parity
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+# A 4x2 stencil: two writable pixels on the top row (columns 1 and 2), two on the
+# bottom row (columns 2 and 3). Asymmetric on both axes so a row/column mix-up in
+# the mask index at :1088 cannot pass.
+val MASK_4X2: [u8] = [0u8, 1u8, 1u8, 0u8, 0u8, 0u8, 1u8, 1u8]
+
+val OPAQUE_BLUE: u32 = 0xFF112233u32
+val HALF_ALPHA_BLUE: u32 = 0x80112233u32
+
+fn masked_backend() -> VulkanBackend:
+    """A 4x2 Vulkan backend with a cleared host buffer and MASK_4X2 installed."""
+    var b = VulkanBackend.create()
+    b.w = 4
+    b.h = 2
+    b.host_buf = [0u32; 8]
+    b.clip_w = 4
+    b.clip_h = 2
+    b.initialized = true
+    b.set_mask(MASK_4X2, 4, 2)
+    b
+
+fn unmasked_backend() -> VulkanBackend:
+    """The same backend with no stencil installed, so route 3 is selected."""
+    var b = VulkanBackend.create()
+    b.w = 4
+    b.h = 2
+    b.host_buf = [0u32; 8]
+    b.clip_w = 4
+    b.clip_h = 2
+    b.initialized = true
+    b
+
+describe "Vulkan mask plane — which path a filled rect takes":
+
+    it "an opaque rect over an active mask is painted through the host image path":
+        # @req REQ-LIB-GPU-VKMASK-001
+        step("Install a 4x2 stencil and fill the whole surface with an opaque colour")
+        var b = masked_backend()
+        # @capture(gui_image): 4x2 host framebuffer after a masked opaque fill
+        b.draw_rect_filled(0, 0, 4, 2, OPAQUE_BLUE)
+        step("Confirm the route taken was the image path, not the rect compute kernel")
+        expect(b.cpu_fallback_reason).to_equal("image-copy-host-fallback")  # oracle: :1073, reached only via draw_image
+        assert_true(b.cpu_fallback_used)  # oracle: :655 set by the same transition
+        step("Confirm the stencil selected exactly the four writable pixels")
+        expect(b.host_buf[0]).to_equal(0u32)  # oracle: MASK_4X2[0] = 0, :1090 leaves it unwritten
+        expect(b.host_buf[1]).to_equal(OPAQUE_BLUE)  # oracle: MASK_4X2[1] = 1, written at :1092
+        expect(b.host_buf[2]).to_equal(OPAQUE_BLUE)  # oracle: MASK_4X2[2] = 1
+        expect(b.host_buf[3]).to_equal(0u32)  # oracle: MASK_4X2[3] = 0
+        expect(b.host_buf[4]).to_equal(0u32)  # oracle: MASK_4X2[4] = 0, bottom row starts masked out
+        expect(b.host_buf[5]).to_equal(0u32)  # oracle: MASK_4X2[5] = 0
+        expect(b.host_buf[6]).to_equal(OPAQUE_BLUE)  # oracle: MASK_4X2[6] = 1
+        expect(b.host_buf[7]).to_equal(OPAQUE_BLUE)  # oracle: MASK_4X2[7] = 1
+
+    it "a translucent rect takes the blend path even when a mask is active":
+        # @req REQ-LIB-GPU-VKMASK-002
+        step("Fill the same masked surface with a half-alpha colour")
+        var b = masked_backend()
+        # @capture(gui_image): 4x2 host framebuffer after a masked half-alpha fill
+        b.draw_rect_filled(0, 0, 4, 2, HALF_ALPHA_BLUE)
+        step("Confirm the alpha test at :798 won over the mask test at :808")
+        expect(b.cpu_fallback_reason).to_equal("image-blend-host-fallback")  # oracle: :1636, reached only via draw_image_blend
+        step("Confirm the blend still honoured the stencil")
+        expect(b.host_buf[0]).to_equal(0u32)  # oracle: MASK_4X2[0] = 0; the blend funnels back through draw_image
+        expect(b.host_buf[3]).to_equal(0u32)  # oracle: MASK_4X2[3] = 0
+        expect(b.host_buf[4]).to_equal(0u32)  # oracle: MASK_4X2[4] = 0
+        step("Confirm the written pixels carry the src-over result, not the flattened colour")
+        expect(b.host_buf[1]).to_equal(HALF_ALPHA_BLUE)  # oracle: backend_emu_math.spl:38 blend(src, 0x00000000) = src
+        expect(b.host_buf[6]).to_equal(HALF_ALPHA_BLUE)  # oracle: same src-over over the cleared framebuffer
+        step("Confirm the two host routes are distinguishable, not interchangeable")
+        assert_false(b.host_buf[1] == OPAQUE_BLUE)  # oracle: the blend preserved alpha 0x80, the copy would not
+
+    it "an opaque rect with no mask is left to the device compute kernel":
+        # @req REQ-LIB-GPU-VKMASK-003
+        step("Fill an unmasked surface with the same opaque colour")
+        var b = unmasked_backend()
+        # @capture(gui_image): 4x2 host framebuffer after an unmasked opaque fill
+        b.draw_rect_filled(0, 0, 4, 2, OPAQUE_BLUE)
+        step("Confirm neither host route ran — the dispatch was attempted and failed")
+        expect(b.cpu_fallback_reason).to_equal("framebuffer-dispatch-failed")  # oracle: backend_vulkan_helpers.spl:410
+        step("Confirm the host buffer was not touched by the device route")
+        expect(b.host_buf[1]).to_equal(0u32)  # oracle: :825 dispatches, it never writes host_buf
+        expect(b.host_buf[6]).to_equal(0u32)  # oracle: same
+        assert_false(b.dirty)  # oracle: :827 dirty is set only when dispatched > 0
+
+describe "Vulkan mask plane — clearing and rejecting":
+
+    it "clearing the mask hands the next opaque rect back to the device route":
+        # @req REQ-LIB-GPU-VKMASK-004
+        step("Install a stencil, then clear it before drawing")
+        var b = masked_backend()
+        b.clear_mask()
+        # @capture(statistics): mask buffer extent and recorded route after clear_mask()
+        expect(b.mask_buf.len()).to_equal(0)  # oracle: :1120 self.mask_buf = []
+        expect(b.mask_w).to_equal(0)  # oracle: :1121
+        b.draw_rect_filled(0, 0, 4, 2, OPAQUE_BLUE)
+        step("Confirm the mask detour at :808 was no longer taken")
+        expect(b.cpu_fallback_reason).to_equal("framebuffer-dispatch-failed")  # oracle: backend_vulkan_helpers.spl:410, the device route
+        expect(b.host_buf[1]).to_equal(0u32)  # oracle: no host write happened
+
+    it "rejects a masked rect whose pixel count would overflow an i32 buffer":
+        # @req REQ-LIB-GPU-VKMASK-005
+        step("Ask for a masked fill whose width x height exceeds the i32 pixel-count limit")
+        var b = masked_backend()
+        # @capture(statistics): recorded refusal reason for an oversized masked rect
+        b.draw_rect_filled(0, 0, 65536, 65536, OPAQUE_BLUE)
+        step("Confirm it refused by name rather than attempting the allocation")
+        expect(b.cpu_fallback_reason).to_equal("masked-rect-size-overflow")  # oracle: :817, guarded at :816
+        expect(b.host_buf[1]).to_equal(0u32)  # oracle: returned at :818 before any pixel was written
+
+    it "ignores an empty masked rect without recording a fallback at all":
+        # @req REQ-LIB-GPU-VKMASK-006
+        step("Ask for a masked fill with zero width")
+        var b = masked_backend()
+        # @capture(statistics): fallback state after a degenerate masked rect
+        b.draw_rect_filled(0, 0, 0, 2, OPAQUE_BLUE)
+        step("Confirm the degenerate rect was dropped, not misreported as a fallback")
+        assert_false(b.cpu_fallback_used)  # oracle: :815 returns before mark_cpu_fallback is reachable
+        expect(b.cpu_fallback_reason).to_equal("")  # oracle: :648 initial value, never overwritten
+        expect(b.host_buf[1]).to_equal(0u32)  # oracle: nothing was drawn

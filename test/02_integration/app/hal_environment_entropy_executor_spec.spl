@@ -1,5 +1,32 @@
+"""
+## Purpose and audience
+Purpose: pin the hosted secure entropy authority's single-consumption
+contract: one authorized fill per cursor, exact authorization-token checking,
+an upper bound on requested bytes, and replay that never re-reads entropy.
+Audience: MCDC HAL runtime engineers who own the entropy environment
+instruction executor and its cursor/receipt wire contract.
+## Operator workflow
+Run this spec with
+`simple run test/02_integration/app/hal_environment_entropy_executor_spec.spl`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed executor behavior.
+## Compatibility and limitations
+Exercises the hosted entropy executor wrappers only; the authority is
+constructed with a fixed invocation and authorization token, so no real
+hardware RNG source is contacted and determinism comes from the sealed
+cursor state machine.
+## Verification guidance and troubleshooting
+A failure names the rejected condition (cursor reuse, wrong authorization,
+oversized request) or the broken capture/replay pair; re-run this spec and
+compare the failing scenario's receipt fields to reproduce locally.
+"""
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-011 REQ-015 REQ-016 REQ-017
+# Lifecycle: doc/01_research/local/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hosted-secure-entropy-executor
 
 use std.spec.*
 use app.test.hal_environment_entropy_executor.*
@@ -37,6 +64,9 @@ fn entropy_arguments(requested: i64) -> [u8]:
 
 describe "hosted secure entropy environment executor":
     it "fills caller-owned storage once and replays without another effect":
+        # @req REQ-011
+        # @capture(protocol_binary): entropy capture receipt plus replay receipt with no second effect
+        step("Fill 32 authorized entropy bytes once, then replay them from the observation")
         val authority = entropy_authority()
         val cursor = hosted_secure_entropy_cursor_v1(authority)
         val instruction = entropy_instruction(32)
@@ -44,23 +74,26 @@ describe "hosted secure entropy environment executor":
         var captured: [u8] = [0u8; 32]
         var replayed: [u8] = [0u8; 32]
 
-        val step = hosted_secure_entropy_execute_v1(
+        val attempt = hosted_secure_entropy_execute_v1(
             authority, cursor, entropy_policy(), instruction,
             arguments, captured)
         val replay = env_replay_exact_v1(
-            instruction, instruction, step.receipt.observation,
+            instruction, instruction, attempt.receipt.observation,
             arguments, captured, replayed)
 
-        expect(step.receipt.applied).to_be(true)
-        expect(step.receipt.physical_effect).to_be(true)
-        expect(step.receipt.allocation_count_after_seal).to_equal(0)
-        expect(hosted_secure_entropy_complete_v1(step.cursor)).to_be(true)
+        expect(attempt.receipt.applied).to_be(true)
+        expect(attempt.receipt.physical_effect).to_be(true)
+        expect(attempt.receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
+        expect(hosted_secure_entropy_complete_v1(attempt.cursor)).to_be(true)
         expect(replay.applied).to_be(true)
-        expect(replay.physical_effect).to_be(false)
-        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replay.physical_effect).to_be(false)  # oracle: replay must serve the snapshot without a second entropy read
+        expect(replay.allocation_count_after_seal).to_equal(0)  # oracle: replay allocates nothing after the seal point either
         expect(replayed).to_equal(captured)
 
     it "rejects cursor reuse before reading entropy or changing storage":
+        # @req REQ-015
+        # @capture(protocol_binary): diverged rejection receipt for a consumed cursor
+        step("Replay a consumed cursor against the authority and expect rejection")
         val authority = entropy_authority()
         val consumed = HostedSecureEntropyCursorV1(
             invocation_id: 771, next_sequence: 1,
@@ -68,17 +101,20 @@ describe "hosted secure entropy environment executor":
         val instruction = entropy_instruction(16)
         var result: [u8] = [73u8; 16]
 
-        val step = hosted_secure_entropy_execute_v1(
+        val attempt = hosted_secure_entropy_execute_v1(
             authority, consumed, entropy_policy(), instruction,
             entropy_arguments(16), result)
 
-        expect(step.receipt.applied).to_be(false)
+        expect(attempt.receipt.applied).to_be(false)
         expect(env_instruction_status_to_i64(
-            step.receipt.observation.status)).to_equal(
+            attempt.receipt.observation.status)).to_equal(
                 env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
-        expect(result[0]).to_equal(73u8)
+        expect(result[0]).to_equal(73u8)  # oracle: the sentinel 73 must survive because a rejected fill may not touch result storage
 
     it "rejects wrong authorization without reading entropy":
+        # @req REQ-016
+        # @capture(protocol_binary): diverged rejection receipt for a corrupted authorization token
+        step("Corrupt the authorization token byte and expect rejection before any entropy read")
         val authority = entropy_authority()
         val cursor = hosted_secure_entropy_cursor_v1(authority)
         val instruction = entropy_instruction(16)
@@ -86,26 +122,29 @@ describe "hosted secure entropy environment executor":
         arguments[8] = 0u8
         var result: [u8] = [91u8; 16]
 
-        val step = hosted_secure_entropy_execute_v1(
+        val attempt = hosted_secure_entropy_execute_v1(
             authority, cursor, entropy_policy(), instruction,
             arguments, result)
 
-        expect(step.receipt.applied).to_be(false)
+        expect(attempt.receipt.applied).to_be(false)
         expect(env_instruction_status_to_i64(
-            step.receipt.observation.status)).to_equal(
+            attempt.receipt.observation.status)).to_equal(
                 env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
-        expect(result[0]).to_equal(91u8)
+        expect(result[0]).to_equal(91u8)  # oracle: the sentinel 91 must survive because a rejected fill may not touch result storage
 
     it "rejects oversized requests without allocation":
+        # @req REQ-017
+        # @capture(protocol_binary): oversized-request rejection receipt with untouched storage
+        step("Request 33 entropy bytes against the 32-byte authority bound and expect rejection")
         val authority = entropy_authority()
         val cursor = hosted_secure_entropy_cursor_v1(authority)
         val instruction = entropy_instruction(33)
         var result: [u8] = [91u8; 33]
 
-        val step = hosted_secure_entropy_execute_v1(
+        val attempt = hosted_secure_entropy_execute_v1(
             authority, cursor, entropy_policy(), instruction,
             entropy_arguments(33), result)
 
-        expect(step.receipt.applied).to_be(false)
-        expect(step.receipt.allocation_count_after_seal).to_equal(0)
-        expect(result[0]).to_equal(91u8)
+        expect(attempt.receipt.applied).to_be(false)
+        expect(attempt.receipt.allocation_count_after_seal).to_equal(0)  # oracle: an oversized request must allocate nothing
+        expect(result[0]).to_equal(91u8)  # oracle: the sentinel 91 must survive because a rejected fill may not touch result storage

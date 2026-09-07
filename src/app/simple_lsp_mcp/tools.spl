@@ -9,6 +9,9 @@ use app.io.minimal_runtime_ops.{process_run, process_run_timeout, process_run_bo
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use .session_state.{lsp_record_location, lsp_resolve_requester}
+use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # Base-repair (mirrors origin/main): run_command_text calls process_run_bounded
 # with these bounds, but the merge left them undefined here.
@@ -177,10 +180,31 @@ fn make_empty_list_result(id: text, key: text) -> text:
     jsonrpc_result(id, jo1(jp(key: key, value: "[]")))
 
 fn handle_resources_list(id: text) -> text:
-    make_empty_list_result(id: id, key: "resources")
+    val resource = jo2(jp("uri", js("simple-summary://")), jp("name", js("Frozen Public Summaries")))
+    jsonrpc_result(id, jo1(jp("resources", "[" + resource + "]")))
 
 fn handle_resource_templates_list(id: text) -> text:
-    make_empty_list_result(id: id, key: "resourceTemplates")
+    val descriptor = jo2(
+        jp("uriTemplate", js("simple-summary://{snapshot}/{logical_path}/_tldr.spl")),
+        jp("name", js("Frozen Public Summary")))
+    jsonrpc_result(id, jo1(jp("resourceTemplates", "[" + descriptor + "]")))
+
+fn handle_resource_read(id: text, body: text) -> text:
+    val uri = arg_field(body, "uri")
+    if not uri.starts_with("simple-summary://"):
+        return jsonrpc_error(id, -32002, "Resource not found")
+    val result = lsp_virtual_source_read_registered_v1(uri, 0, 65536)
+    if result.status == VirtualSourceRegistrationStatusV1.Unavailable:
+        return jsonrpc_error(id, -32004, "Virtual summary cache unavailable")
+    if result.status == VirtualSourceRegistrationStatusV1.Miss:
+        return jsonrpc_error(id, -32002, "Virtual summary not found in the exact snapshot")
+    if result.status != VirtualSourceRegistrationStatusV1.Ready or result.value == nil:
+        return jsonrpc_error(id, -32602, "Virtual summary request rejected")
+    val value = result.value.unwrap()
+    if not value.complete:
+        return jsonrpc_error(id, -32005, "Virtual summary exceeds the 65536-byte resource bound")
+    val content = jo3(jp("uri", js(uri)), jp("mimeType", js("text/x-simple")), jp("text", js(rt_bytes_to_text(value.bytes))))
+    jsonrpc_result(id, jo1(jp("contents", "[" + content + "]")))
 
 fn handle_prompts_list(id: text) -> text:
     make_empty_list_result(id: id, key: "prompts")
@@ -472,6 +496,7 @@ export format_lsp_diagnostics_block
 export handle_tool_call
 export handle_resources_list
 export handle_resource_templates_list
+export handle_resource_read
 export handle_prompts_list
 export handle_roots_list
 export handle_logging_set_level

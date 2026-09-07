@@ -1,78 +1,123 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # Preflight Script Tests — AC-1, AC-8
-#
-# Verifies that the riscv64 FPGA preflight script exists, is runnable,
-# and correctly emits BLOCKED when hardware/tools are unavailable.
-# Hardware-gated tests emit BLOCKED rather than false PASS.
 
-use std.io_runtime.{file_exists}
+"""
+## Purpose and audience
+Executable contract for the riscv64 FPGA preflight gate
+`scripts/check/check-riscv64-fpga-simpleos-preflight.shs`. Audience: the
+riscv64 FPGA bring-up engineers and sys_test gate owners who need the script
+to exist, to detect the cross tools it advertises, and to emit BLOCKED (never
+a false PASS) when the FT4232H board or a tool is unavailable.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/hardware/riscv64_fpga/preflight_spec.spl`.
+The scenarios read the shipped preflight script and assert the tool names,
+the BLOCKED emission strings, and the PASS/FAIL/BLOCKED output-format tokens
+it must carry. The script itself is never executed here.
+## Compatibility and limitations
+Every scenario is an artifact read and runs on any host with the repository
+checked out. Detecting a real FT4232H device or a serial console stays a
+manual AC-8 step on hardware; this spec pins the fail-closed message text
+only. Hosts without the script fail every scenario by design.
+## Verification guidance and troubleshooting
+A failure names the contract token that disappeared from the preflight
+script: re-check the last commit that touched
+`scripts/check/check-riscv64-fpga-simpleos-preflight.shs`. If the script is
+renamed, update the pinned path in the existence scenario first — every
+other scenario reads through it.
+"""
+# Lifecycle: doc/01_research/domain/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/03_plan/hardware/riscv/fpga_board_bringup_jtag_10min_plan_2026-07-24.md ;
+# doc/04_architecture/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/05_design/riscv32_riscv64_fpga_simpleos_production.md
+# @manual_section: Preflight gate contract
 
-use std.io_runtime.{file_exists}
 use std.spec.step
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "Preflight Script - Existence (AC-1)":
-    # @manual scenario evidence
     it "preflight script exists":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): preflight path and existence bit for the review record
+        step("Resolve the shipped preflight gate inside the repository tree")
         val path = "scripts/check/check-riscv64-fpga-simpleos-preflight.shs"
         val exists = file_exists(path)
         expect(exists).to_equal(true)
 
     it "preflight script has correct name":
-        val name = "check-riscv64-fpga-simpleos-preflight.shs"
-        expect(name).to_start_with("check-riscv64-fpga-simpleos-preflight")
-        expect(name).to_end_with(".shs")
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): shebang row pinning the runnable-script contract
+        step("Read the preflight gate and confirm it is a runnable sh script")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.starts_with("#!/bin/sh")).to_equal(true)
 
 describe "Preflight Script - Tool Detection (AC-1)":
     it "BLOCKED: preflight USB detection requires FT4232H board":
-        val blocked_line = "BLOCKED ft4232h_usb_present: no FT4232H USB device found (lsusb 0403:6011 absent)"
-        expect(blocked_line).to_start_with("BLOCKED ft4232h_usb_present:")
-        expect(blocked_line).to_contain("0403:6011")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-001
+        # @capture(bit_table): board-absent BLOCKED emission rows for the USB gate
+        step("Read the preflight gate and locate the board-absent USB emission")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("no FT4232H USB device found")).to_equal(true)
+        expect(body.contains("0403:6011")).to_equal(true)
 
     it "BLOCKED: preflight serial port scan requires connected board":
-        val blocked_line = "BLOCKED uart_console_probe: BLOCKED: hardware inventory requires connected board"
-        expect(blocked_line).to_start_with("BLOCKED uart_console_probe:")
-        expect(blocked_line).to_contain("hardware inventory requires connected board")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-001
+        # @capture(bit_table): uart probe BLOCKED emission rows for the serial gate
+        step("Read the preflight gate and locate the serial-probe BLOCKED emission")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("uart_console_probe: BLOCKED: hardware inventory requires connected board")).to_equal(true)
 
     it "BLOCKED: preflight JTAG claim status requires connected FT4232H device":
-        val blocked_line = "BLOCKED jtag_unbind: BLOCKED: JTAG unbind requires connected FT4232H device"
-        expect(blocked_line).to_start_with("BLOCKED jtag_unbind:")
-        expect(blocked_line).to_contain("connected FT4232H device")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-001
+        # @capture(bit_table): jtag claim BLOCKED emission rows for the unbind gate
+        step("Read the preflight gate and locate the JTAG-claim BLOCKED emission")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("jtag_unbind: BLOCKED: JTAG unbind requires connected FT4232H device")).to_equal(true)
 
 describe "Preflight Script - Cross Compiler Check (AC-1)":
     it "riscv64-unknown-elf-gcc is a known cross compiler name":
-        val compiler_name = "riscv64-unknown-elf-gcc"
-        expect(compiler_name).to_contain("riscv64")
-        expect(compiler_name).to_end_with("gcc")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-002
+        # @capture(bit_table): bare-metal tool token row for the compiler gate
+        step("Read the preflight gate and locate the bare-metal cross compiler token")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("riscv64-unknown-elf-gcc")).to_equal(true)
 
     it "riscv64-linux-gnu-gcc is a known cross compiler name":
-        val compiler_name = "riscv64-linux-gnu-gcc"
-        expect(compiler_name).to_contain("riscv64")
-        expect(compiler_name).to_end_with("gcc")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-002
+        # @capture(bit_table): linux tool token row for the compiler gate
+        step("Read the preflight gate and locate the linux cross compiler token")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("riscv64-linux-gnu-gcc")).to_equal(true)
 
     it "preflight reports openFPGALoader as a known programming tool":
-        val tool = "openFPGALoader"
-        expect(tool).to_contain("FPGA")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-002
+        # @capture(bit_table): programming-tool token row for the flash gate
+        step("Read the preflight gate and locate the openFPGALoader token")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("openFPGALoader")).to_equal(true)
 
     it "preflight reports openocd as a known JTAG tool":
-        val tool = "openocd"
-        expect(tool).to_equal("openocd")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-002
+        # @capture(bit_table): jtag-tool token row for the probe gate
+        step("Read the preflight gate and locate the openocd token")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("openocd")).to_equal(true)
 
 describe "Preflight Script - BLOCKED Emission (AC-8)":
     it "BLOCKED: full preflight run requires connected board and tools":
-        val local_only_gate = "--local-only"
-        val completion_marker = "preflight_complete=true"
-        val hardware_summary = "hardware_inventory: BLOCKED: no FT4232H USB device found"
-        expect(local_only_gate).to_equal("--local-only")
-        expect(completion_marker).to_equal("preflight_complete=true")
-        expect(hardware_summary).to_start_with("hardware_inventory: BLOCKED:")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-003
+        # @capture(bit_table): local-only and completion-marker rows for the run gate
+        step("Read the preflight gate and locate the fail-closed run markers")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("--local-only")).to_equal(true)
+        expect(body.contains("preflight_complete=true")).to_equal(true)
+        expect(body.contains("hardware_inventory: BLOCKED:")).to_equal(true)
 
     it "preflight output format includes pass/fail/blocked keywords":
-        val fmt_pass = "PASS"
-        val fmt_fail = "FAIL"
-        val fmt_blocked = "BLOCKED"
-        expect(fmt_pass).to_equal("PASS")
-        expect(fmt_fail).to_equal("FAIL")
-        expect(fmt_blocked).to_equal("BLOCKED")
+        # @req REQ-RISCV64-FPGA-PREFLIGHT-003
+        # @capture(bit_table): output-format token rows for the verdict vocabulary
+        step("Read the preflight gate and locate the three verdict keywords")
+        val body = file_read("scripts/check/check-riscv64-fpga-simpleos-preflight.shs").?
+        expect(body.contains("printf 'PASS %s")).to_equal(true)
+        expect(body.contains("printf 'FAIL %s")).to_equal(true)
+        expect(body.contains("printf 'BLOCKED %s")).to_equal(true)

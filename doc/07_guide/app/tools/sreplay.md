@@ -1,6 +1,7 @@
 # SReplay — Simple Replay Debugger Guide
 
-SReplay is a deterministic replay and reverse debugging system for Simple programs, C/C++ programs, baremetal targets, SimpleOS kernel, containers, and VMs. It enables recording program execution and replaying it later with full reverse debugging support.
+SReplay is a deterministic replay and reverse debugging system for Simple programs, C/C++ programs, baremetal targets, SimpleOS kernel, containers, and VMs. Track 1 (QEMU) has real full-system reverse debugging via QEMU's own deterministic replay. **Tracks 3, 5, and 6 are earlier-stage: recording/state-capture is real, but restore-and-replay-forward is only partially wired — see the per-track notes below and
+`doc/08_tracking/bug/sreplay_capability_labels_overstate_implementation_2026-09-05.md`.**
 
 ## Architecture
 
@@ -77,13 +78,24 @@ simple build --debug-trace=full        # + variable writes, borrows, async
 
 ## Reverse Debugging
 
-SReplay does NOT execute instructions backwards. Instead, reverse execution works by:
+SReplay does NOT execute instructions backwards. The intended design is:
 
 1. Finding the nearest checkpoint before the target point
 2. Restoring that checkpoint (registers + memory)
 3. Replaying forward from the checkpoint to the target event
 
-This approach works across all tracks. GDB MI commands `reverse-step` and `reverse-continue` are supported. DAP `stepBack` and `reverseContinue` are wired for VS Code integration.
+This is real for Track 1 (QEMU icount replay). For Track 3 (process rr), it is
+currently `trace-navigation-prototype`: `reverse_step`/`reverse_continue`
+(`process/replayer.spl`) select the nearest checkpoint and move an in-memory
+event cursor to it, but never call the checkpoint restore function — no
+process memory or registers are actually restored, so step 2 above does not
+happen on this track yet. Track 5 (container) restore is
+`schema-and-orchestration-prototype` — see its track note below. `planned-capability`
+for full reverse support across every track: see
+`doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`
+§8/§13. GDB MI commands `reverse-step` and `reverse-continue` are wired for
+Track 1 only; DAP `stepBack` and `reverseContinue` integration is
+`planned-capability` for the other tracks.
 
 ## Core Types
 
@@ -184,7 +196,12 @@ Key files:
 
 ### Track 2 — SimpleOS Kernel Event Log
 
-Native kernel replay by logging all nondeterministic events. Zero cost when off (single atomic load + branch).
+Native kernel replay by logging all nondeterministic events.
+`runtime-switchable-near-zero` when off: `os.kernel.replay.mode.replay_is_off()`
+is a plain `i32` global compare-and-branch executed on every hook call — small,
+but not eliminated at compile time. The overhead spec
+(`replay_offmode_overhead_spec.spl`) only bounds 1000 calls to <100ms wall time;
+there is no compile-time-off / binary-identity gate yet.
 
 13 event kinds: ScheduleNext, ThreadCreate, ThreadExit, SyscallEnter, SyscallExit, IrqDeliver, IrqAck, IpcSend, IpcRecv, TimerRead, RandomBytes, MmapResult, DmaTransfer.
 
@@ -196,12 +213,15 @@ Key files:
 
 ### Track 3 — Process-Level rr
 
-`simple record ./app` + `simple replay trace.srr` for Linux host. Works for Simple AND C/C++ programs via ptrace syscall interception.
+`simple record ./app` + `simple replay trace.srr` for Linux host. Recording
+works for Simple AND C/C++ programs by shelling out to `strace` (not direct
+ptrace SFFI — see below), which is enough to observe syscalls but not to
+capture a complete deterministic execution record.
 
 Key files:
-- `src/lib/nogc_sync_mut/replay/process/recorder.spl` — Ptrace-based syscall recorder
-- `src/lib/nogc_sync_mut/replay/process/replayer.spl` — Syscall result injection
-- `src/lib/nogc_sync_mut/replay/process/checkpoint.spl` — Page-level CoW checkpoints
+- `src/lib/nogc_sync_mut/replay/process/recorder.spl` — `syscall-observation-prototype`: shells out to `strace -f -tt -T`, parses its text output; syscall numbers are not reconstructed (`extract_syscall_nr` always returns 0)
+- `src/lib/nogc_sync_mut/replay/process/replayer.spl` — Syscall result injection; its `reverse_step`/`reverse_continue` are `trace-navigation-prototype` (event-cursor navigation, no process restore — see Reverse Debugging above)
+- `src/lib/nogc_sync_mut/replay/process/checkpoint.spl` — `partial-process-state-prototype`: reads a handful of registers via `/proc/<pid>/syscall` and up to 20 writable memory regions via `/proc/<pid>/mem`; register restore is not implemented (the code itself prints "restore requires ptrace SFFI")
 - `src/lib/nogc_sync_mut/replay/process/chaos_scheduler.spl` — 4 scheduling strategies
 
 Chaos scheduler strategies: RoundRobin, Random, YieldHeavy, StarvationProbe.
@@ -226,23 +246,36 @@ Debugger commands: `show-object`, `show-lifetime`, `show-borrows`, `show-moves`,
 
 ### Track 5 — SimpleOS Container Checkpoint/Replay
 
-Snapshot and restore entire SimpleOS containers (process tree, memory, registers, FDs, filesystem, IPC).
+`schema-and-orchestration-prototype`: the checkpoint/restore call graph, types,
+and serialization format exist, but the scheduler freeze/thaw and every restore
+step (memory page write-back, register set, FD reconstruction, filesystem
+write) are no-ops or comments describing what a real kernel would do — see
+`container_restore.spl`'s `restore_memory_page`/`restore_fd`/`restore_fs_entry`,
+each of which is `Ok(nil)`.
 
 Key files:
-- `src/os/kernel/replay/checkpoint/container_checkpoint.spl` — Freeze + snapshot orchestration
-- `src/os/kernel/replay/checkpoint/container_restore.spl` — Container restore
+- `src/os/kernel/replay/checkpoint/container_checkpoint.spl` — Orchestration only: scheduler freeze/thaw are comments, not calls
+- `src/os/kernel/replay/checkpoint/container_restore.spl` — Container restore: process tree recreation, register restore, page mapping, FD/filesystem restore are all unimplemented no-op bodies
 - `src/lib/nogc_sync_mut/replay/container/checkpoint_format.spl` — Binary `.scc` serialization
 
 ### Track 6 — Simple-Native VM Replay
 
-Simple-native VM with deterministic record/replay. RV32I vCPU, virtual memory with dirty page tracking, MMIO device bus.
+Simple-native VM with RV32I vCPU and MMIO device bus. Snapshot/restore today is
+`cpu-register-snapshot-prototype`: `save_snapshot` records CPU registers/PC/
+cycle-count and dirty-page *addresses* (not contents, and `device_states` is
+always `[]`); `restore_snapshot` writes CPU registers/PC/cycle-count back but
+never rehydrates memory from the recorded dirty-page list and never touches a
+device. The MMIO device bus is `device-contract-prototype`: it declares a
+`ReplayableDevice` trait (`snapshot`/`restore`/`mmio_read`/`mmio_write`) but the
+bus itself stores only address-range descriptors, and no device anywhere in
+the tree implements the trait.
 
-Devices: Timer, Serial (UART), Block.
+Devices: Timer, Serial (UART), Block (configured on the bus as address ranges; none implement `ReplayableDevice` yet).
 
 Key files:
 - `src/lib/nogc_sync_mut/replay/vm/vcpu.spl` — Virtual CPU (RV32I)
-- `src/lib/nogc_sync_mut/replay/vm/vmem.spl` — Virtual memory + dirty tracking
-- `src/lib/nogc_sync_mut/replay/vm/device_bus.spl` — MMIO dispatch
+- `src/lib/nogc_sync_mut/replay/vm/vmem.spl` — Virtual memory; dirty tracking records page addresses only, not contents
+- `src/lib/nogc_sync_mut/replay/vm/device_bus.spl` — MMIO dispatch; `ReplayableDevice` trait declared, zero implementations
 - `src/lib/nogc_sync_mut/replay/vm/qemu_bridge.spl` — Hybrid QEMU bridge
 
 ## Baremetal Replay Core

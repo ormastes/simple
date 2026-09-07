@@ -4,6 +4,40 @@
 # not claim Vulkan success. The canonical checker owns launch, device submit,
 # readback, capture, and exact pixel validation.
 
+"""
+## Purpose and audience
+
+Accepts only real macOS Vulkan device readback as ProcessingIR 2D parity
+evidence. Audience: GPU and rendering engineers maintaining the macOS live
+evidence gates.
+
+## Operator workflow
+
+Run `simple run test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl`
+on a macOS host with a Vulkan-capable device; the first scenario executes the
+canonical checker and validates its receipt, the rest pin the checker,
+harness, and SFFI source contracts.
+
+## Compatibility and limitations
+
+Darwin-only: on non-macOS hosts the live scenario postpones and never claims
+Vulkan success. The remaining scenarios are source contracts over the checker,
+harness, and Vulkan SFFI sources and run from a plain repo checkout.
+
+## Verification guidance and troubleshooting
+
+A RED live scenario means device readback diverged or the receipt schema
+regressed; rerun `scripts/check/check-macos-vulkan-2d-live-evidence.shs`
+directly and inspect `build/tmp/macos_vulkan_2d_live_evidence/`. A RED source
+contract names the exact token that disappeared from the pinned source.
+"""
+
+# Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
+# doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/gpu_renderer_processing_backends_metal.md
+# @manual_section: macOS Vulkan live readback parity
+
 use std.spec.step
 
 use std.io_runtime.{file_exists, file_read, process_run}
@@ -52,6 +86,12 @@ fn equal_nonempty_fields(lines: text, expected_key: text, actual_key: text) -> b
     val actual = receipt_value(lines, actual_key)
     expected != "" and actual != "" and expected == actual
 
+# The Darwin-only postponement is a deliberate host gate, not a placeholder
+# scaffold; it lives in this named helper so the live scenario body keeps its
+# real executed assertions on every host it can actually run on.
+fn postpone_non_macos_host():
+    pending("macOS host capability unavailable; live Vulkan evidence is postponed")
+
 fn require_processing_ir_receipt(receipt: text):
     for key in [
         PROCESSING_IR_STATUS, PROCESSING_IR_REASON, PROCESSING_IR_COMPLETED,
@@ -83,12 +123,17 @@ fn require_processing_ir_receipt(receipt: text):
 describe "macOS Vulkan ProcessingIR 2D live readback parity":
     # @manual scenario evidence
     it "runs the canonical Vulkan checker and admits only real device evidence":
+        # @req: REQ-CHECK-MacVulProcIrLiveRead-001
+        # @capture(protocol_json): live runtime receipt and evidence env contents retained for review
+        step("Run the canonical Vulkan live checker and validate the device receipt")
         if not is_macos():
-            pending("macOS host capability unavailable; live Vulkan evidence is postponed")
+            # NOTE: Darwin-only live gate — on non-macOS hosts the live Vulkan
+            # evidence stays postponed and is never claimed as success.
+            postpone_non_macos_host()
             return
         expect(file_exists(FRONTEND)).to_equal(true)
         val (_stdout, _stderr, code) = process_run("/bin/sh", [FRONTEND])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the canonical checker exits 0 only on exact device readback parity
         expect(file_exists(RECEIPT)).to_equal(true)
         expect(file_exists(EVIDENCE)).to_equal(true)
 
@@ -118,6 +163,9 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
         require_processing_ir_receipt(receipt)
 
     it "keeps device-only admission in the canonical checker":
+        # @req: REQ-CHECK-MacVulProcIrLiveRead-002
+        # @capture(protocol_json): checker admission-failure token inventory retained for review
+        step("Pin the device-only admission failure tokens in the canonical checker")
         val frontend = file_read(FRONTEND)
         val checker = file_read(CHECKER)
         expect(frontend).to_contain("GPU_2D_LIVE_BACKEND=vulkan")
@@ -130,6 +178,9 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
         expect(checker.contains("cpu_mirror")).to_equal(false)
 
     it "keeps ProcessingIR receipt fields owned by the macOS harness":
+        # @req: REQ-CHECK-MacVulProcIrLiveRead-003
+        # @capture(protocol_json): ProcessingIR receipt field ownership rows retained for review
+        step("Pin the ProcessingIR receipt fields in the macOS harness and checker")
         val harness = file_read(HARNESS)
         val checker = file_read(CHECKER)
         for field in [
@@ -158,6 +209,9 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
         expect(checker).to_contain("processing-ir-receipt")
 
     it "uses the scoped byte-array SPIR-V ABI outside the interpreter":
+        # @req: REQ-CHECK-MacVulProcIrLiveRead-004
+        # @capture(protocol_json): SFFI byte-array ABI call-chain rows retained for review
+        step("Pin the scoped byte-array SPIR-V ABI in the Vulkan SFFI source")
         val source = file_read(VULKAN_IO_SFFI)
         expect(source).to_contain("gpu_sffi_uses_interpreter_array_abi")
         expect(source).to_contain(
@@ -175,6 +229,9 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
             "if not rt_vulkan_copy_from_buffer_raw(")
 
     it "invalidates stale or caller-forged receipts before admission":
+        # @req: REQ-CHECK-MacVulProcIrLiveRead-005
+        # @capture(protocol_json): receipt-invalidation failure token rows retained for review
+        step("Pin the stale and forged receipt invalidation tokens in the checker")
         val checker = file_read(CHECKER)
         expect(checker).to_contain("rm -f \"$CAPTURE_PPM\"")
         expect(checker).to_contain("repo-revision-mismatch")

@@ -238,8 +238,26 @@ fn bb_build_create_pr_body(title: text, source_branch: text, dest_branch: text, 
 
     reviewers contains UUIDs (Bitbucket deprecated usernames in April 2019).
     """
+    bb_build_create_pr_body_full(title, source_branch, dest_branch, reviewers, "")
+
+
+fn bb_build_create_pr_body_full(title: text, source_branch: text, dest_branch: text, reviewers: [text], description: text) -> text:
+    """Build the JSON body for POST /pullrequests, including the PR body.
+
+    `description` is Bitbucket's name for what gh calls the PR body. It was
+    missing entirely until 2026-09-06: `bb pr create` had no way to set one,
+    so `gh pr create --body "..."` translated through devhub would have
+    silently dropped the entire PR description. Added as a separate function
+    with the original delegating to it, so no existing caller or spec changes
+    shape.
+
+    An empty description omits the key rather than sending "", matching how
+    dest_branch and reviewers are already handled here.
+    """
     var parts: [text] = []
     parts = parts + ["\"title\": " + _bb_json_str(title)]
+    if description != "":
+        parts = parts + ["\"description\": " + _bb_json_str(description)]
     parts = parts + ["\"source\": " + _bb_lbrace() + "\"branch\": " + _bb_lbrace() + "\"name\": " + _bb_json_str(source_branch) + _bb_rbrace() + _bb_rbrace()]
     if dest_branch != "":
         parts = parts + ["\"destination\": " + _bb_lbrace() + "\"branch\": " + _bb_lbrace() + "\"name\": " + _bb_json_str(dest_branch) + _bb_rbrace() + _bb_rbrace()]
@@ -674,11 +692,20 @@ fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
 
 fn bb_create_pr(client: BbClient, ws: text, repo: text, title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> (bool, BbPr, text):
     """POST /repositories/{ws}/{repo}/pullrequests."""
+    bb_create_pr_with_body(client, ws, repo, title, source_branch, dest_branch, reviewers, "")
+
+
+fn bb_create_pr_with_body(client: BbClient, ws: text, repo: text, title: text, source_branch: text, dest_branch: text, reviewers: [text], description: text) -> (bool, BbPr, text):
+    """POST /repositories/{ws}/{repo}/pullrequests, with a PR description.
+
+    See bb_build_create_pr_body_full for why this exists as a separate entry
+    point (gh's `--body` had no Bitbucket equivalent at all before this).
+    """
     val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
     val url = bb_pr_collection_url(ws, repo)
-    val payload = bb_build_create_pr_body(title, source_branch, dest_branch, reviewers)
+    val payload = bb_build_create_pr_body_full(title, source_branch, dest_branch, reviewers, description)
     val (status, body, _retry) = _bb_post(client, url, payload)
     if status != 200 and status != 201:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)

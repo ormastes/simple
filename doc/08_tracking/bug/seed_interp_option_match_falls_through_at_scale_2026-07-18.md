@@ -276,3 +276,23 @@ rm -rf src/compiler_rust/target   # disk discipline cleanup when done
 - `doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md`
   — the native/cranelift `InterpCall` bridge bug (S78/S82), a different
   layer, already fixed same-day.
+
+## Re-probed 2026-09-06 — the falsy-payload probe is NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+`Some(0)` is still seen as PRESENT — presence is not re-decided from payload
+truthiness:
+
+```
+SOME_ZERO=present     # interpret
+SOME_ZERO=present     # jit
+```
+
+Probes `_scratch/p_opt.spl` and `_scratch/p_opt3.spl` (the latter also covers
+`if zero_v().is_some():` taking the correct arm). This record is about behaviour
+"at scale", which a small probe cannot disprove — it retires the minimal shape
+only.

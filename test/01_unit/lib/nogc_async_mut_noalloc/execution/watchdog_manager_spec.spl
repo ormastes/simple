@@ -1,28 +1,41 @@
 # @cover src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl
 # @cover src/app/interpreter/core/watchdog.spl
 # @tag: unit, execution, backend_isolation
-#
-# Backend-isolation Gap D (doc/03_plan/ui/rendering/backend_isolation_plan.md
-# § P3 Gap D): before this change, `src/app/interpreter/core/watchdog.spl`
-# declared `extern fn rt_watchdog_start`/`rt_watchdog_stop` directly in the
-# app layer (a Class C violation of the isolation gate
-# `scripts/check/check-ui-backend-isolation.shs`). Those externs now live
-# only in the `WatchdogManager` facade
-# (`src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl`); the
-# app-layer module calls `WatchdogManager.start`/`.stop` instead.
-#
-# Note: `rt_watchdog_start`/`rt_watchdog_stop` have no native implementation
-# registered anywhere in the Rust runtime (verified: no
-# `"rt_watchdog_start"`/`"rt_watchdog_stop"` FFI registration exists outside
-# `src/compiler_rust/compiler/src/watchdog.rs`, which the CLI driver calls
-# directly in Rust, never through this extern). Actually invoking
-# `WatchdogManager.start`/`.stop` (or `start_watchdog`/`stop_watchdog`) at
-# runtime aborts the whole process with `unknown extern function:
-# rt_watchdog_start` -- true before and after this migration, so this spec
-# intentionally does NOT call them (that would crash the test runner, not
-# just fail an assertion). It instead pins the source-contract shape: no
-# `extern rt_watchdog_*` remains in the app layer, and the facade is the only
-# owner.
+"""
+## Purpose and audience
+For interpreter-core and HAL-isolation maintainers. Documents Backend-
+isolation Gap D (`doc/03_plan/ui/rendering/backend_isolation_plan.md` § P3
+Gap D): the `rt_watchdog_start`/`rt_watchdog_stop` externs used to live
+directly in the app-layer interpreter module (a Class C isolation
+violation); they now live only inside the `WatchdogManager` facade, and the
+app layer calls the facade instead of declaring the externs itself.
+## Operator workflow
+Run this spec after touching `watchdog_manager.spl` or
+`src/app/interpreter/core/watchdog.spl`: `bin/simple test
+test/01_unit/lib/nogc_async_mut_noalloc/execution/watchdog_manager_spec.spl`.
+Each scenario reads the shipped source of one of the two modules and checks
+the extern-ownership boundary is still where the migration put it.
+## Compatibility and limitations
+`rt_watchdog_start`/`rt_watchdog_stop` have no native implementation
+registered anywhere in the Rust runtime (verified: no
+`"rt_watchdog_start"`/`"rt_watchdog_stop"` FFI registration exists outside
+`src/compiler_rust/compiler/src/watchdog.rs`, which the CLI driver calls
+directly in Rust, never through this extern). Actually invoking
+`WatchdogManager.start`/`.stop` at runtime aborts the whole process with
+`unknown extern function: rt_watchdog_start` -- true before and after the
+migration -- so this spec intentionally never calls them; it pins the
+source-contract shape instead: no `extern rt_watchdog_*` remains in the app
+layer, and the facade is the only owner.
+## Verification guidance and troubleshooting
+A failure names the missing facade symbol or a reintroduced app-layer
+extern. Re-open the named module, restore the ownership boundary described
+above, and re-run this file.
+"""
+# Lifecycle: doc/01_research/infra/aop/crash_containment_framework_local.md ;
+# doc/03_plan/ui/rendering/backend_isolation_plan.md ;
+# doc/04_architecture/ui/rendering/backend_isolation_architecture.md ;
+# doc/05_design/ui/rendering/draw_ir_multibackend_design.md
+# @manual_section: watchdog_manager_facade_ownership
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file, file_exists}
@@ -30,29 +43,74 @@ use std.io_runtime.{read_file, file_exists}
 
 describe "backend-isolation Gap D: WatchdogManager facade owns rt_watchdog_* externs":
     it "adds the WatchdogManager facade module":
-        expect(file_exists("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")).to_equal(true)
-        val source = read_file("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
-        expect(source.contains("extern fn rt_watchdog_start")).to_equal(true)
-        expect(source.contains("extern fn rt_watchdog_stop")).to_equal(true)
-        expect(source.contains("class WatchdogManager")).to_equal(true)
-        expect(source.contains("fn start(timeout_secs: i64)")).to_equal(true)
-        expect(source.contains("fn stop()")).to_equal(true)
+        # @req REQ-WATCHDOG-001
+        # @capture(statistics): boolean presence checks for the facade module's externs and API
+        step("Confirm the WatchdogManager facade module file exists")
+        val facade_module_exists = file_exists("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
+        step("Read the WatchdogManager facade module source")
+        val facade_module_source = read_file("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
+        step("Confirm the facade declares both watchdog externs")
+        val facade_declares_start_extern = facade_module_source.contains("extern fn rt_watchdog_start")
+        val facade_declares_stop_extern = facade_module_source.contains("extern fn rt_watchdog_stop")
+        step("Confirm the facade exposes the WatchdogManager class and its start/stop API")
+        val facade_declares_class = facade_module_source.contains("class WatchdogManager")
+        val facade_declares_start_method = facade_module_source.contains("fn start(timeout_secs: i64)")
+        val facade_declares_stop_method = facade_module_source.contains("fn stop()")
+        expect(facade_module_exists).to_equal(true)
+        expect(facade_declares_start_extern).to_equal(true)
+        expect(facade_declares_stop_extern).to_equal(true)
+        expect(facade_declares_class).to_equal(true)
+        expect(facade_declares_start_method).to_equal(true)
+        expect(facade_declares_stop_method).to_equal(true)
 
     it "removes the rt_watchdog_* externs from the app-layer interpreter module":
-        val source = read_file("src/app/interpreter/core/watchdog.spl")
-        expect(source.contains("extern fn rt_watchdog_start")).to_equal(false)
-        expect(source.contains("extern fn rt_watchdog_stop")).to_equal(false)
-        expect(source.contains("rt_watchdog_start(")).to_equal(false)
-        expect(source.contains("rt_watchdog_stop(")).to_equal(false)
+        # @req REQ-WATCHDOG-002
+        # @capture(statistics): boolean absence checks for app-layer watchdog externs
+        # NOTE: legitimate RED, verified 2026-09-06. src/app/interpreter/core/watchdog.spl:19-20,31,35
+        # still declares and calls rt_watchdog_start/rt_watchdog_stop directly -- the Gap D
+        # facade migration this scenario expects was never completed in the app layer (only
+        # the WatchdogManager facade module was added). See
+        # doc/08_tracking/bug/watchdog_externs_unregistered_module_uncalled_2026-07-08.md,
+        # whose "migration moved app layer -> facade" framing is itself stale against current
+        # source. Do not weaken this assertion to make it pass.
+        step("Read the app-layer interpreter watchdog module source")
+        val interpreter_watchdog_source = read_file("src/app/interpreter/core/watchdog.spl")
+        step("Confirm neither watchdog extern declaration remains in the app layer")
+        val still_declares_start_extern = interpreter_watchdog_source.contains("extern fn rt_watchdog_start")
+        val still_declares_stop_extern = interpreter_watchdog_source.contains("extern fn rt_watchdog_stop")
+        step("Confirm neither watchdog extern is called directly from the app layer")
+        val still_calls_start_extern_directly = interpreter_watchdog_source.contains("rt_watchdog_start(")
+        val still_calls_stop_extern_directly = interpreter_watchdog_source.contains("rt_watchdog_stop(")
+        expect(still_declares_start_extern).to_equal(false)
+        expect(still_declares_stop_extern).to_equal(false)
+        expect(still_calls_start_extern_directly).to_equal(false)
+        expect(still_calls_stop_extern_directly).to_equal(false)
 
     it "routes the app-layer watchdog API through the WatchdogManager facade":
-        val source = read_file("src/app/interpreter/core/watchdog.spl")
-        expect(source.contains("use std.nogc_async_mut_noalloc.execution.watchdog_manager.{" + "WatchdogManager}")).to_equal(true)
-        expect(source.contains("WatchdogManager.start(timeout_secs)")).to_equal(true)
-        expect(source.contains("WatchdogManager.stop()")).to_equal(true)
+        # @req REQ-WATCHDOG-003
+        # @capture(statistics): boolean presence checks for facade routing and unchanged public API
+        # NOTE: legitimate RED, verified 2026-09-06 -- same defect as the previous scenario.
+        # src/app/interpreter/core/watchdog.spl does not import or route through
+        # WatchdogManager; it still calls rt_watchdog_start/stop directly. See
+        # doc/08_tracking/bug/watchdog_externs_unregistered_module_uncalled_2026-07-08.md.
+        step("Read the app-layer interpreter watchdog module source")
+        val interpreter_watchdog_source = read_file("src/app/interpreter/core/watchdog.spl")
+        step("Confirm the module imports the WatchdogManager facade")
+        val imports_facade = interpreter_watchdog_source.contains("use std.nogc_async_mut_noalloc.execution.watchdog_manager.{" + "WatchdogManager}")
+        step("Confirm start/stop calls route through the facade, not a direct extern")
+        val routes_start_through_facade = interpreter_watchdog_source.contains("WatchdogManager.start(timeout_secs)")
+        val routes_stop_through_facade = interpreter_watchdog_source.contains("WatchdogManager.stop()")
         # The public app-layer API surface (start_watchdog/stop_watchdog/
         # check_timeout) is unchanged -- only the FFI ownership moved.
-        expect(source.contains("export start_watchdog, stop_watchdog, check_timeout")).to_equal(true)
-        expect(source.contains("fn start_watchdog(timeout_secs: i64):")).to_equal(true)
-        expect(source.contains("fn stop_watchdog():")).to_equal(true)
-        expect(source.contains("fn check_timeout() -> Result<(), text>:")).to_equal(true)
+        step("Confirm the public app-layer API surface is unchanged")
+        val exports_unchanged_public_api = interpreter_watchdog_source.contains("export start_watchdog, stop_watchdog, check_timeout")
+        val keeps_start_watchdog_signature = interpreter_watchdog_source.contains("fn start_watchdog(timeout_secs: i64):")
+        val keeps_stop_watchdog_signature = interpreter_watchdog_source.contains("fn stop_watchdog():")
+        val keeps_check_timeout_signature = interpreter_watchdog_source.contains("fn check_timeout() -> Result<(), text>:")
+        expect(imports_facade).to_equal(true)
+        expect(routes_start_through_facade).to_equal(true)
+        expect(routes_stop_through_facade).to_equal(true)
+        expect(exports_unchanged_public_api).to_equal(true)
+        expect(keeps_start_watchdog_signature).to_equal(true)
+        expect(keeps_stop_watchdog_signature).to_equal(true)
+        expect(keeps_check_timeout_signature).to_equal(true)

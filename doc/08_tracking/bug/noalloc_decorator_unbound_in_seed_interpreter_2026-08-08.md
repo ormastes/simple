@@ -130,3 +130,22 @@ residual is purely a redeploy of `bin/simple`, not a source defect.
 
 **Status: RESOLVED in source.** Close once the seed in `bin/release/` is
 rebuilt; nothing further to change in the interpreter.
+
+## Re-verification 2026-09-06 (bug-db closeout pass) — FIXED-VERIFIED, now deployed
+
+The doc's own named repro,
+`test/unit/lib/zz_noalloc_direct_probe_spec.spl`, was never actually
+committed to the tree (repo-wide grep on 2026-09-06 finds it named only in
+bug-tracking prose, never as a real file). Wrote a permanent equivalent:
+`test/01_unit/lib/noalloc_decorator_module_load_spec.spl` (full-path import of
+`std.nogc_async_mut_noalloc.hash.{fnv1a_hash_i64}`, no facade). Ran on this
+host's deployed seed:
+
+```
+SPEC FILE VERDICT: test/01_unit/lib/noalloc_decorator_module_load_spec.spl outcome=OK declared>=1 executed=1 passed=1 failed=0
+Results: 1 total, 1 passed, 0 failed
+```
+
+No `variable noalloc not found` error, no module drop. **Conclusion:
+FIXED-VERIFIED** — the fix is now deployed on this host, not merely landed in
+source.

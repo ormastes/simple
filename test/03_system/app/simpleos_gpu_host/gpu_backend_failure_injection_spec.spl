@@ -1,4 +1,31 @@
-"""Live CUDA/Vulkan ProcessingIR failure seams with process-isolated env."""
+"""
+## Purpose and audience
+For GPU offload maintainers verifying that the live CUDA and Vulkan
+ProcessingIR backends report typed, distinguishable failures (unavailable,
+init, submit, readback, checksum-mismatch) when a fault is injected, and leave
+the production default path unmodified when no fault gate is set.
+## Operator workflow
+Run `bin/simple run test/03_system/app/simpleos_gpu_host/gpu_backend_failure_injection_spec.spl`.
+Each scenario re-invokes this same file as a child process with
+`--backend=<name> --phase=<phase>` plus `SIMPLE_GPU_FAULT_INJECT`, so the fault
+gate lives in a fresh, process-isolated environment rather than mutating this
+process's own env.
+## Compatibility and limitations
+CUDA fault-injection scenarios run unconditionally. Vulkan scenarios fall back
+to `pending` when the host's deployed runtime predates
+`rt_vulkan_dependency_quarantine_lock` — see
+`doc/03_plan/agent_tasks/gpu_dynamic_backend_full_offload.md` for the backend
+availability contract this depends on.
+## Verification guidance and troubleshooting
+A failing scenario prints the full `GPU_FAULT_PROBE ...` line from the child
+process; compare its `reason=` field against the expected fault reason named in
+the assertion to locate which lifecycle phase regressed.
+"""
+# Lifecycle: doc/01_research/local/gpu_dynamic_backend_full_offload.md ;
+# doc/03_plan/agent_tasks/gpu_dynamic_backend_full_offload.md ;
+# doc/04_architecture/gpu_dynamic_backend_full_offload.md ;
+# doc/05_design/gpu_dynamic_backend_full_offload.md
+# @manual_section: gpu_backend_fault_injection
 
 use std.spec.step
 
@@ -60,6 +87,9 @@ fn _assert_default(backend: text) -> text:
         expect(out).to_contain("reason=ok")
     out
 
+fn _skip_vulkan_runtime_missing(reason: text):
+    pending(reason)
+
 fn _assert_injected(backend: text, phase: text, reason: text) -> bool:
     val out = _run_case(backend, phase, true, true)
     if out == VULKAN_RUNTIME_UNAVAILABLE:
@@ -68,17 +98,22 @@ fn _assert_injected(backend: text, phase: text, reason: text) -> bool:
     true
 
 describe "live CUDA and Vulkan ProcessingIR fault injection":
-    # @manual scenario evidence
     it "leaves the CUDA production default unmodified when the gate is absent":
+        # @req REQ-GPU-FAULT-001
+        # @capture(protocol_json): child-process GPU_FAULT_PROBE line for the ungated CUDA default
+        step("Run a child process with no fault gate set and probe the CUDA default")
         if _probe_mode(): return
         expect(_assert_default("cuda")).to_contain(
             "backend=cuda phase=none fault_active=false")
 
     it "leaves the Vulkan production default unmodified when the gate is absent":
+        # @req REQ-GPU-FAULT-002
+        # @capture(protocol_json): child-process GPU_FAULT_PROBE line for the ungated Vulkan default
+        step("Run a child process with no fault gate set and probe the Vulkan default")
         if _probe_mode(): return
         val out = _run_case("vulkan", "none", false, false)
         if out == VULKAN_RUNTIME_UNAVAILABLE:
-            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
+            _skip_vulkan_runtime_missing("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
             return
         expect(out).to_contain("GPU_FAULT_PROBE backend=vulkan phase=none fault_active=false")
         expect(out.contains("reason=vulkan-init-failed")).to_equal(false)
@@ -86,6 +121,9 @@ describe "live CUDA and Vulkan ProcessingIR fault injection":
             expect(out).to_contain("reason=ok")
 
     it "requires both fault gate variables":
+        # @req REQ-GPU-FAULT-003
+        # @capture(protocol_json): two child-process probes, each missing one of the two required gate variables
+        step("Set only the test gate, then only the selector, and confirm neither alone activates the fault")
         if _probe_mode(): return
         expect(_run_case("cuda", "init", true, false)).to_contain(
             "phase=init fault_active=false")
@@ -93,6 +131,9 @@ describe "live CUDA and Vulkan ProcessingIR fault injection":
             "phase=init fault_active=false")
 
     it "returns typed CUDA unavailable, init, submit, readback, and mismatch failures":
+        # @req REQ-GPU-FAULT-004
+        # @capture(protocol_json): five child-process GPU_FAULT_PROBE lines, one per injected CUDA phase
+        step("Inject each CUDA lifecycle phase in turn and confirm its typed failure reason")
         if _probe_mode(): return
         expect(_assert_injected("cuda", "unavailable", "cuda-unavailable")).to_equal(true)
         expect(_assert_injected("cuda", "init", "cuda-init-failed")).to_equal(true)
@@ -101,10 +142,13 @@ describe "live CUDA and Vulkan ProcessingIR fault injection":
         expect(_assert_injected("cuda", "mismatch", "checksum-mismatch")).to_equal(true)
 
     it "returns typed Vulkan lifecycle and dispatch failures":
+        # @req REQ-GPU-FAULT-005
+        # @capture(protocol_json): five child-process GPU_FAULT_PROBE lines, one per injected Vulkan phase
+        step("Inject each Vulkan lifecycle phase in turn and confirm its typed failure reason")
         if _probe_mode(): return
         val unavailable = _run_case("vulkan", "unavailable", true, true)
         if unavailable == VULKAN_RUNTIME_UNAVAILABLE:
-            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
+            _skip_vulkan_runtime_missing("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
             return
         expect(unavailable).to_contain(
             "backend=vulkan phase=unavailable fault_active=true completed=false reason=vulkan-unavailable values=0 handle=0 identity=0")
@@ -112,4 +156,4 @@ describe "live CUDA and Vulkan ProcessingIR fault injection":
            not _assert_injected("vulkan", "submit", "vulkan-submit-failed") or
            not _assert_injected("vulkan", "readback", "vulkan-readback-failed") or
            not _assert_injected("vulkan", "mismatch", "checksum-mismatch"):
-            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
+            _skip_vulkan_runtime_missing("existing runtime lacks rt_vulkan_dependency_quarantine_lock")

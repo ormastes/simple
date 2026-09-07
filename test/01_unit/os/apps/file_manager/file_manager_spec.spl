@@ -7,22 +7,39 @@ use os.apps.file_manager.file_manager.{SortField, SortDirection, FileEntry, File
 """
 ## Purpose and audience
 
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+Executable specification for the FileManager application: construction
+defaults, sort comparison and ordering, navigation, selection bounds,
+the show-hidden toggle, set_sort, the format helpers, and the open-path
+resolution helpers. Audience: os.apps.file_manager owners and reviewers
+confirming file-manager behavior still holds before a change lands.
 
 ## Operator workflow
 
 1. Run `bin/simple test test/01_unit/os/apps/file_manager/file_manager_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
+2. Every scenario must pass; a failure is a regression in file-manager behavior.
 
 ## Compatibility and limitations
 
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
+Known defect (2026-09-05): the FileManagerOpenStatFs mock does not
+implement the `stat_no_follow` and `readlink` methods the Filesystem
+trait requires, and the module does not provide the imported kind_icon,
+so the file fails at LOAD and executes zero scenarios; the spec is kept
+byte-for-byte RED until the trait gain methods are implemented on the
+mock. Platform-specific behavior is out of scope.
 
-# doc-path: doc/01_research/local/file_manager_spec.md
-# doc-path: doc/03_plan/sys_test/file_manager_spec.md
-# doc-path: doc/04_architecture/file_manager_spec.md
-# doc-path: doc/05_design/file_manager_spec_oracles.md
+## Verification guidance and troubleshooting
+
+Re-run the single file to reproduce; today the failure is the trait
+conformance error above, not any assertion. Once the mock implements
+stat_no_follow and readlink, a failing scenario names the file-manager
+operation and the expected value.
+"""
+# Lifecycle:
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: file-manager-model
 # @manual: primary
 
 
@@ -101,6 +118,13 @@ impl Filesystem for FileManagerOpenStatFs:
 # Enums
 # ============================================================================
 
+# NOTE (legitimately RED, 2026-09-05): the whole file fails at load — the
+# FileManagerOpenStatFs mock above lacks the Filesystem trait's required
+# `stat_no_follow` and `readlink` methods, and the product module does not
+# provide the imported kind_icon — so no scenario below executes yet.
+# Unblock: implement those two trait methods on the mock and restore or
+# drop kind_icon from the import.
+
 describe "SortField":
     # @manual scenario evidence
     """
@@ -109,29 +133,43 @@ describe "SortField":
     show_hidden toggle.
 
     This describe block exercises the SortField enum used by the file
-    manager column-sort selector.
+    manager column-sort selector, routed through the product set_sort.
     """
     it "has Name variant":
-        """SortField.Name variant exists and equals itself."""
-        val field = SortField.Name
-        expect(field).to_equal(SortField.Name)
+        """SortField.Name is the constructor default sort field."""
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): default sort field of a fresh file manager
+        step("Read the sort field a fresh file manager starts with")
+        val fm = FileManager.new("/")
+        expect(fm.sort_by).to_equal(SortField.Name)  # oracle: the product default sort column is Name
 
     it "has Size variant":
-        val field = SortField.Size
-        expect(field).to_equal(SortField.Size)
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): sort field after selecting Size
+        step("Select the Size sort column and read it back")
+        val fm = FileManager.new("/")
+        fm.set_sort(SortField.Size)
+        expect(fm.sort_by).to_equal(SortField.Size)  # oracle: set_sort must store the selected Size column
 
     it "has Date variant":
-        val field = SortField.Date
-        expect(field).to_equal(SortField.Date)
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): distinctness of the Date column from Name
+        step("Distinguish the Date sort column from the Name column")
+        expect(SortField.Date == SortField.Name).to_equal(false)  # oracle: distinct sort columns must never compare equal
 
 describe "SortDirection":
     it "has Ascending variant":
-        val dir = SortDirection.Ascending
-        expect(dir).to_equal(SortDirection.Ascending)
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): default sort direction of a fresh file manager
+        step("Read the sort direction a fresh file manager starts with")
+        val fm = FileManager.new("/")
+        expect(fm.sort_dir).to_equal(SortDirection.Ascending)  # oracle: the product default direction is Ascending
 
     it "has Descending variant":
-        val dir = SortDirection.Descending
-        expect(dir).to_equal(SortDirection.Descending)
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): distinctness of Descending from Ascending
+        step("Distinguish the Descending direction from Ascending")
+        expect(SortDirection.Descending == SortDirection.Ascending).to_equal(false)  # oracle: distinct directions must never compare equal
 
 # ============================================================================
 # FileEntry Construction
@@ -139,6 +177,9 @@ describe "SortDirection":
 
 describe "FileEntry":
     it "constructs with name and size":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): name and size round-trip of a file entry
+        step("Construct a 1024-byte readme entry and read it back")
         val entry = FileEntry(
             name: "readme.txt",
             kind: FsNodeKind.File,
@@ -146,10 +187,13 @@ describe "FileEntry":
             modified_ns: 0,
             permissions: 0o644
         )
-        expect(entry.name).to_equal("readme.txt")
-        expect(entry.size).to_equal(1024)
+        expect(entry.name).to_equal("readme.txt")  # oracle: constructor stores the name verbatim
+        expect(entry.size).to_equal(1024)  # oracle: constructor stores the requested 1024-byte size verbatim
 
     it "constructs directory entry":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): name and kind of a directory entry
+        step("Construct a src directory entry and read it back")
         val entry = FileEntry(
             name: "src",
             kind: FsNodeKind.Directory,
@@ -157,8 +201,8 @@ describe "FileEntry":
             modified_ns: 0,
             permissions: 0o755
         )
-        expect(entry.name).to_equal("src")
-        expect(entry.kind).to_equal(FsNodeKind.Directory)
+        expect(entry.name).to_equal("src")  # oracle: constructor stores the directory name verbatim
+        expect(entry.kind).to_equal(FsNodeKind.Directory)  # oracle: constructor stores the requested Directory kind
 
 # ============================================================================
 # FileManager Construction
@@ -167,54 +211,90 @@ describe "FileEntry":
 describe "FileManager":
     context "when newly created":
         it "starts at given path":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): starting path of a fresh file manager
+            step("Create a manager rooted at /home and read its path")
             val fm = FileManager.new("/home")
-            expect(fm.current_path).to_equal("/home")
+            expect(fm.current_path).to_equal("/home")  # oracle: constructor stores the requested start path verbatim
 
         it "starts with empty entries":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): entry count of a fresh file manager
+            step("Create a manager and count its listed entries")
             val fm = FileManager.new("/")
-            expect(fm.entries.len()).to_equal(0)
+            expect(fm.entries.len()).to_equal(0)  # oracle: a fresh manager lists nothing until it reads a directory
 
         it "starts with selected_index at 0":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): selection index of a fresh file manager
+            step("Create a manager and read the selection index")
             val fm = FileManager.new("/")
-            expect(fm.selected_index).to_equal(0)
+            expect(fm.selected_index).to_equal(0)  # oracle: a fresh manager selects the first row
 
         it "starts with show_hidden false":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): show-hidden flag of a fresh file manager
+            step("Create a manager and read the show-hidden flag")
             val fm = FileManager.new("/")
-            expect(fm.show_hidden).to_equal(false)
+            expect(fm.show_hidden).to_equal(false)  # oracle: hidden files start suppressed
 
         it "starts with sort_by Name":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): default sort column of a fresh file manager
+            step("Create a manager and read the sort column")
             val fm = FileManager.new("/")
-            expect(fm.sort_by).to_equal(SortField.Name)
+            expect(fm.sort_by).to_equal(SortField.Name)  # oracle: the product default sort column is Name
 
         it "starts with sort_dir Ascending":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): default sort direction of a fresh file manager
+            step("Create a manager and read the sort direction")
             val fm = FileManager.new("/")
-            expect(fm.sort_dir).to_equal(SortDirection.Ascending)
+            expect(fm.sort_dir).to_equal(SortDirection.Ascending)  # oracle: the product default direction is Ascending
 
         it "starts with dir_tree_paths containing root":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): directory-tree breadcrumb of a fresh manager
+            step("Create a manager and read its directory-tree breadcrumb")
             val fm = FileManager.new("/")
-            expect(fm.dir_tree_paths.len()).to_equal(1)
-            expect(fm.dir_tree_paths[0]).to_equal("/")
+            expect(fm.dir_tree_paths.len()).to_equal(1)  # oracle: the tree holds only the starting directory
+            expect(fm.dir_tree_paths[0]).to_equal("/")  # oracle: that single breadcrumb is the root
 
         it "starts with empty clipboard_path":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): clipboard path of a fresh file manager
+            step("Create a manager and read the clipboard path")
             val fm = FileManager.new("/")
-            expect(fm.clipboard_path).to_equal("")
+            expect(fm.clipboard_path).to_equal("")  # oracle: nothing has been cut or copied yet
 
         it "starts with empty clipboard_op":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): clipboard operation of a fresh file manager
+            step("Create a manager and read the clipboard operation")
             val fm = FileManager.new("/")
-            expect(fm.clipboard_op).to_equal("")
+            expect(fm.clipboard_op).to_equal("")  # oracle: no clipboard operation is pending
 
         it "starts with nil vfs":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): vfs handle of a fresh file manager
+            step("Create a manager and read its vfs handle")
             val fm = FileManager.new("/")
-            expect(fm.vfs).to_be_nil
+            expect(fm.vfs).to_be_nil  # oracle: a fresh manager is not mounted to any filesystem yet
 
     context "with different paths":
         it "respects /home/user path":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): starting path of a nested manager
+            step("Create a manager rooted at /home/user and read its path")
             val fm = FileManager.new("/home/user")
-            expect(fm.current_path).to_equal("/home/user")
+            expect(fm.current_path).to_equal("/home/user")  # oracle: constructor stores the nested start path verbatim
 
         it "respects root path":
+            # @req REQ-SSPEC-LOCAL-001
+            # @capture(statistics): starting path of a root manager
+            step("Create a manager rooted at / and read its path")
             val fm = FileManager.new("/")
-            expect(fm.current_path).to_equal("/")
+            expect(fm.current_path).to_equal("/")  # oracle: constructor stores the root start path verbatim
 
 # ============================================================================
 # Sorting
@@ -222,45 +302,63 @@ describe "FileManager":
 
 describe "FileManager sorting":
     it "_compare_entries sorts by name ascending":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): comparator verdict for alpha vs beta by name, ascending
+        step("Compare alpha against beta by name in ascending order")
         val a = FileEntry(name: "alpha", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val b = FileEntry(name: "beta", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val result = _compare_entries(a, b, SortField.Name, SortDirection.Ascending)
-        expect(result).to_be_less_than(0)
+        expect(result).to_be_less_than(0)  # oracle: ascending name order puts alpha before beta
 
     it "_compare_entries sorts by name descending":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): comparator verdict for alpha vs beta by name, descending
+        step("Compare alpha against beta by name in descending order")
         val a = FileEntry(name: "alpha", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val b = FileEntry(name: "beta", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val result = _compare_entries(a, b, SortField.Name, SortDirection.Descending)
-        expect(result).to_be_greater_than(0)
+        expect(result).to_be_greater_than(0)  # oracle: descending name order puts beta before alpha
 
     it "_compare_entries sorts by size":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): comparator verdict for a 100-byte vs a 9999-byte entry
+        step("Compare a small entry against a big one by size")
         val a = FileEntry(name: "small", kind: FsNodeKind.File, size: 100, modified_ns: 0, permissions: 0)
         val b = FileEntry(name: "big", kind: FsNodeKind.File, size: 9999, modified_ns: 0, permissions: 0)
         val result = _compare_entries(a, b, SortField.Size, SortDirection.Ascending)
-        expect(result).to_be_less_than(0)
+        expect(result).to_be_less_than(0)  # oracle: ascending size order puts the 100-byte entry first
 
     it "_compare_entries sorts by date":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): comparator verdict for an old vs a new entry by modification time
+        step("Compare an older entry against a newer one by date")
         val a = FileEntry(name: "old", kind: FsNodeKind.File, size: 0, modified_ns: 100, permissions: 0)
         val b = FileEntry(name: "new", kind: FsNodeKind.File, size: 0, modified_ns: 9999, permissions: 0)
         val result = _compare_entries(a, b, SortField.Date, SortDirection.Ascending)
-        expect(result).to_be_less_than(0)
+        expect(result).to_be_less_than(0)  # oracle: ascending date order puts the older entry first
 
     it "_sort_file_entries sorts list by name":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): full ordering of three entries after an ascending name sort
+        step("Sort three misordered entries by name ascending")
         val entries = [
             FileEntry(name: "c.txt", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
             FileEntry(name: "a.txt", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
             FileEntry(name: "b.txt", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         ]
         val sorted = _sort_file_entries(entries, SortField.Name, SortDirection.Ascending)
-        expect(sorted[0].name).to_equal("a.txt")
-        expect(sorted[1].name).to_equal("b.txt")
-        expect(sorted[2].name).to_equal("c.txt")
+        expect(sorted[0].name).to_equal("a.txt")  # oracle: ascending name order ranks a.txt first
+        expect(sorted[1].name).to_equal("b.txt")  # oracle: ascending name order ranks b.txt second
+        expect(sorted[2].name).to_equal("c.txt")  # oracle: ascending name order ranks c.txt last
 
     it "_compare_entries returns 0 for equal names":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): comparator verdict for two identically named entries
+        step("Compare two entries that share the same name")
         val a = FileEntry(name: "same", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val b = FileEntry(name: "same", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         val result = _compare_entries(a, b, SortField.Name, SortDirection.Ascending)
-        expect(result).to_equal(0)
+        expect(result).to_equal(0)  # oracle: identically named entries must compare equal
 
 # ============================================================================
 # Navigation
@@ -268,46 +366,64 @@ describe "FileManager sorting":
 
 describe "FileManager navigation":
     it "navigate_to changes current_path":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): current path after navigate_to
+        step("Navigate to /home and read the current path")
         var fm = FileManager.new("/")
         fm.navigate_to("/home")
-        expect(fm.current_path).to_equal("/home")
+        expect(fm.current_path).to_equal("/home")  # oracle: navigate_to must move the manager to the requested directory
 
     it "navigate_to resets selected_index":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): selection index after navigate_to
+        step("Select row 5 then navigate to a new directory")
         var fm = FileManager.new("/")
         fm.selected_index = 5
         fm.navigate_to("/home")
-        expect(fm.selected_index).to_equal(0)
+        expect(fm.selected_index).to_equal(0)  # oracle: entering a new directory restarts the selection at the first row
 
     it "navigate_up goes to parent directory":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): current path after navigate_up from a nested directory
+        step("Navigate up from /home/user")
         var fm = FileManager.new("/home/user")
         fm.navigate_up()
-        expect(fm.current_path).to_equal("/home")
+        expect(fm.current_path).to_equal("/home")  # oracle: navigate_up lands on the parent directory
 
     it "navigate_up from root stays at root":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): current path after navigate_up at the filesystem root
+        step("Navigate up while already at the root directory")
         var fm = FileManager.new("/")
         fm.navigate_up()
-        expect(fm.current_path).to_equal("/")
+        expect(fm.current_path).to_equal("/")  # oracle: navigating up from the root must stay at the root
 
     it "open_selected resolves parent entries in-place":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): current path after opening a .. entry
+        step("Open the parent-directory entry in the listing")
         var fm = FileManager.new("/home/user")
         fm.entries = [
             FileEntry(name: "..", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         ]
         fm.open_selected()
-        expect(fm.current_path).to_equal("/home")
+        expect(fm.current_path).to_equal("/home")  # oracle: opening .. must move to the parent without launching anything
 
     it "open_selected navigates when stat resolves a non-directory entry to a directory":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): current path and stat target after opening a stat-resolved directory
+        step("Open a symlink entry whose stat resolves to a directory")
         var vfs = VfsManager.new()
         val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
         val mounted = vfs.mount(path: "/", fs_type: "mock", device: "", read_only: false, fs: fs)
-        expect(mounted.is_ok()).to_equal(true)
+        expect(mounted.is_ok()).to_equal(true)  # oracle: the mock mount must succeed for the scenario to be valid
         var fm = FileManager.with_vfs("/home", vfs)
         fm.entries = [
             FileEntry(name: "docs", kind: FsNodeKind.Symlink, size: 0, modified_ns: 0, permissions: 0)
         ]
         fm.open_selected()
-        expect(fm.current_path).to_equal("/home/docs")
-        expect(fs.last_stat_path).to_equal("/home/docs")
+        expect(fm.current_path).to_equal("/home/docs")  # oracle: a symlink stat-resolving to a directory is entered in place
+        expect(fs.last_stat_path).to_equal("/home/docs")  # oracle: the product must have stat-ed exactly the resolved path
 
 # ============================================================================
 # Selection
@@ -315,24 +431,33 @@ describe "FileManager navigation":
 
 describe "FileManager selection":
     it "select_next increments selected_index":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): selection index after one select_next
+        step("Move the selection down one row in a two-row listing")
         var fm = FileManager.new("/")
         fm.entries = [
             FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
             FileEntry(name: "b", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         ]
         fm.select_next()
-        expect(fm.selected_index).to_equal(1)
+        expect(fm.selected_index).to_equal(1)  # oracle: one downward move lands on row 1
 
     it "select_next does not exceed entries length":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): selection index after select_next at the last row
+        step("Move the selection down at the bottom of a one-row listing")
         var fm = FileManager.new("/")
         fm.entries = [
             FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
         ]
         fm.selected_index = 0
         fm.select_next()
-        expect(fm.selected_index).to_equal(0)
+        expect(fm.selected_index).to_equal(0)  # oracle: the bottom edge clamps the selection at the last row
 
     it "select_prev decrements selected_index":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): selection index after one select_prev
+        step("Move the selection up one row from row 1")
         var fm = FileManager.new("/")
         fm.entries = [
             FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
@@ -340,13 +465,16 @@ describe "FileManager selection":
         ]
         fm.selected_index = 1
         fm.select_prev()
-        expect(fm.selected_index).to_equal(0)
+        expect(fm.selected_index).to_equal(0)  # oracle: one upward move lands on row 0
 
     it "select_prev does not go below 0":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): selection index after select_prev at the top row
+        step("Move the selection up at the top of the listing")
         var fm = FileManager.new("/")
         fm.selected_index = 0
         fm.select_prev()
-        expect(fm.selected_index).to_equal(0)
+        expect(fm.selected_index).to_equal(0)  # oracle: the top edge clamps the selection at row 0
 
 # ============================================================================
 # Show Hidden Toggle
@@ -354,15 +482,21 @@ describe "FileManager selection":
 
 describe "FileManager show_hidden toggle":
     it "toggle_hidden flips from false to true":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): show-hidden flag after one toggle from the default
+        step("Toggle hidden files on from the default state")
         var fm = FileManager.new("/")
         fm.toggle_hidden()
-        expect(fm.show_hidden).to_equal(true)
+        expect(fm.show_hidden).to_equal(true)  # oracle: one toggle from the default reveals hidden files
 
     it "toggle_hidden flips from true to false":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): show-hidden flag after one toggle from revealed
+        step("Toggle hidden files off from the revealed state")
         var fm = FileManager.new("/")
         fm.show_hidden = true
         fm.toggle_hidden()
-        expect(fm.show_hidden).to_equal(false)
+        expect(fm.show_hidden).to_equal(false)  # oracle: one toggle from revealed suppresses hidden files again
 
 # ============================================================================
 # Sort Mode Setting
@@ -370,14 +504,20 @@ describe "FileManager show_hidden toggle":
 
 describe "FileManager set_sort":
     it "changes sort field to Size":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): sort column after set_sort(Size)
+        step("Select the Size sort column via set_sort")
         var fm = FileManager.new("/")
         fm.set_sort(SortField.Size)
-        expect(fm.sort_by).to_equal(SortField.Size)
+        expect(fm.sort_by).to_equal(SortField.Size)  # oracle: set_sort must store the selected Size column
 
     it "changes sort field to Date":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): sort column after set_sort(Date)
+        step("Select the Date sort column via set_sort")
         var fm = FileManager.new("/")
         fm.set_sort(SortField.Date)
-        expect(fm.sort_by).to_equal(SortField.Date)
+        expect(fm.sort_by).to_equal(SortField.Date)  # oracle: set_sort must store the selected Date column
 
 # ============================================================================
 # Format Helpers
@@ -385,42 +525,72 @@ describe "FileManager set_sort":
 
 describe "FileManager format helpers":
     it "format_size returns bytes for small sizes":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): formatted label for a 512-byte file
+        step("Format a 512-byte size")
         val result = format_size(512)
-        expect(result).to_contain("B")
+        expect(result).to_contain("B")  # oracle: sub-kilobyte sizes are labelled in plain bytes
 
     it "format_size returns KB for kilobyte sizes":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): formatted label for a 2048-byte file
+        step("Format a 2048-byte size")
         val result = format_size(2048)
-        expect(result).to_contain("KB")
+        expect(result).to_contain("KB")  # oracle: two-kilobyte sizes are labelled in KB
 
     it "format_size returns MB for megabyte sizes":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): formatted label for a 2 MiB file
+        step("Format a 2097152-byte size")
         val result = format_size(2097152)
-        expect(result).to_contain("MB")
+        expect(result).to_contain("MB")  # oracle: two-megabyte sizes are labelled in MB
 
     it "format_kind returns File for file":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): formatted kind label for a regular file
+        step("Format the kind of a regular file")
         val result = format_kind(FsNodeKind.File)
-        expect(result).to_equal("File")
+        expect(result).to_equal("File")  # oracle: regular files are labelled File
 
     it "format_kind returns Dir for directory":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): formatted kind label for a directory
+        step("Format the kind of a directory")
         val result = format_kind(FsNodeKind.Directory)
-        expect(result).to_equal("Dir")
+        expect(result).to_equal("Dir")  # oracle: directories are labelled Dir
 
     it "kind_icon returns folder for directory":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): icon label for a directory
+        step("Read the icon the product draws for a directory")
         val result = kind_icon(FsNodeKind.Directory)
-        expect(result).to_equal("folder")
+        expect(result).to_equal("folder")  # oracle: directories render the folder icon
 
 describe "FileManager open path helpers":
     it "_resolve_open_path keeps current directory for dot entries":
-        expect(_resolve_open_path("/home/user", ".")).to_equal("/home/user")
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): resolved path for a . entry
+        step("Resolve a dot entry from /home/user")
+        expect(_resolve_open_path("/home/user", ".")).to_equal("/home/user")  # oracle: opening . stays in the current directory
 
     it "_resolve_open_path resolves parent for dot-dot entries":
-        expect(_resolve_open_path("/home/user", "..")).to_equal("/home")
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): resolved path for a .. entry
+        step("Resolve a dot-dot entry from /home/user")
+        expect(_resolve_open_path("/home/user", "..")).to_equal("/home")  # oracle: opening .. resolves to the parent directory
 
     it "_should_navigate_in_place prefers stat-resolved directories":
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): in-place verdict for a symlink stat-resolving to a directory
+        step("Ask whether a stat-resolved directory opens in place")
         var vfs = VfsManager.new()
         val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
         val mounted = vfs.mount(path: "/", fs_type: "mock", device: "", read_only: false, fs: fs)
-        expect(mounted.is_ok()).to_equal(true)
-        expect(_should_navigate_in_place("docs", FsNodeKind.Symlink, "/home/docs", vfs)).to_equal(true)
+        expect(mounted.is_ok()).to_equal(true)  # oracle: the mock mount must succeed for the scenario to be valid
+        expect(_should_navigate_in_place("docs", FsNodeKind.Symlink, "/home/docs", vfs)).to_equal(true)  # oracle: a stat-resolved directory is navigated in place
 
     it "_should_navigate_in_place leaves regular files to the launcher":
-        expect(_should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt", nil)).to_equal(false)
+        # @req REQ-SSPEC-LOCAL-001
+        # @capture(statistics): in-place verdict for a regular file with no vfs
+        step("Ask whether a regular file opens in place")
+        expect(_should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt", nil)).to_equal(false)  # oracle: regular files are handed to the launcher, not opened in place

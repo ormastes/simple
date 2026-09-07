@@ -1,14 +1,22 @@
 """
-# Debug Adapter Protocol (DAP) Server
-
-**Category:** Developer Tools
-**Status:** In Progress
-
-## Overview
-
-Tests the DAP server implementation including protocol initialization, capability
-negotiation, and request handling. Verifies that the server conforms to the DAP
-specification and correctly manages debug sessions for Simple programs.
+## Purpose and audience
+Executable source contract for the Debug Adapter Protocol server surface —
+initialize/capability negotiation, breakpoint management, execution control,
+stack/variable inspection, evaluation, and debugger events — for the
+developer-tools team that owns the Simple debugger.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/dap/dap_spec.spl
+## Compatibility and limitations
+The DAP server ships as source contract modules
+(src/lib/nogc_sync_mut/dap/**) with no in-process runtime API callable from
+this lane, so every scenario pins genuinely-named shipped-source tokens
+instead of driving a live adapter; the live protocol lane is
+test/system/dap_protocol_live_spec.spl.
+## Verification guidance and troubleshooting
+A failure means a pinned DAP contract token vanished or changed meaning in
+the server, protocol, breakpoint, handler, or hook module. Rerun after any
+src/lib/nogc_sync_mut/dap edit and reconcile against the DAP 1.51
+specification before removing a pin.
 """
 # # Debug Adapter Protocol (DAP) Server Tests
 #
@@ -16,165 +24,213 @@ specification and correctly manages debug sessions for Simple programs.
 # **Category:** Developer Tools
 # **Status:** Active
 #
-# ## Overview
-#
-# Tests the Debug Adapter Protocol implementation for the Simple language debugger. Covers
-# initialization and capability negotiation, breakpoint management (line, conditional, function),
-# execution control (continue, step over/into/out, pause), stack inspection with scope and
-# variable retrieval, expression evaluation in stopped context, and debugger events (stopped,
-# output, terminated).
-#
-# ## Syntax
-#
-# ```simple
-# val capabilities = {
-# "supportsConfigurationDoneRequest": true,
-# "supportsBreakpointLocationsRequest": true,
-# "supportsEvaluateForHovers": true
-# }
-# val breakpoint = {"source": {"path": "/test.spl"}, "line": 10, "verified": true}
-# val result = {"result": "43", "type": "i64"}
-# ```
+# Covers initialization and capability negotiation, breakpoint management
+# (line, conditional, advanced), execution control (continue, step over/into/
+# out, pause), stack inspection with scope and variable retrieval, expression
+# evaluation in stopped context, and debugger events (stopped, output,
+# terminated).
 # @Feature 705.1: DAP server
 # @Description: Test the Debug Adapter Protocol implementation
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ; plan doc/03_plan/sspec_modernization_plan.md ; architecture doc/04_architecture/sspec_documentization_maintenance.md ; design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-# NOTE: describe, it, expect are built-in - no imports needed
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
+val SERVER = "src/lib/nogc_sync_mut/dap/server.spl"
+val PROTOCOL = "src/lib/nogc_sync_mut/dap/protocol.spl"
+val BREAKPOINTS = "src/lib/nogc_sync_mut/dap/breakpoints.spl"
+val HANDLERS = "src/lib/nogc_sync_mut/dap/dap_handlers.spl"
+val HOOKS = "src/lib/nogc_sync_mut/dap/hooks.spl"
 
 describe "DAP - initialization":
     # @manual scenario evidence
     it "handles initialize request":
-        val adapter_id = "simple-dap"
-        expect(adapter_id).to_equal("simple-dap")
+        # @req REQ-DAP-SRV-001
+        # @capture(protocol_json): initialize lifecycle tokens pinned from the server source
+        step("Pin the uninitialized entry state and the initialized event emission")
+        val server = file_read(SERVER) ?? ""
+        val server_starts_uninitialized = server.contains("state: DebuggerState.Uninitialized")
+        val server_emits_initialized_event = server.contains("transport.write_event(\"initialized\", {})?")
+        expect(server_starts_uninitialized).to_equal(true)  # oracle: server.spl:33 pins the pre-initialize debugger state
+        expect(server_emits_initialized_event).to_equal(true)  # oracle: server.spl:82 emits the DAP initialized event after configuration
 
     it "responds with adapter capabilities":
-        val capabilities = {
-            "supportsConfigurationDoneRequest": true,
-            "supportsBreakpointLocationsRequest": true,
-            "supportsEvaluateForHovers": true
-        }
-
-        assert_true(capabilities["supportsConfigurationDoneRequest"])
+        # @req REQ-DAP-CAP-002
+        # @capture(protocol_json): capability defaults pinned from the protocol source
+        step("Pin the default capability block served on initialize")
+        val protocol = file_read(PROTOCOL) ?? ""
+        val server = file_read(SERVER) ?? ""
+        val default_capabilities_declared = protocol.contains("\"supportsConfigurationDoneRequest\": true,")
+        val capabilities_served_in_response = server.contains("val capabilities = protocol.Capabilities.default()")
+        expect(default_capabilities_declared).to_equal(true)  # oracle: protocol.spl:205 declares supportsConfigurationDoneRequest in the default capability block
+        expect(capabilities_served_in_response).to_equal(true)  # oracle: server.spl:76 attaches the default capabilities to the initialize response body
 
 describe "DAP - breakpoints":
     it "sets line breakpoints":
-        val breakpoint = {
-            "source": {"path": "/test.spl"},
-            "line": 10,
-            "verified": true
-        }
+        # @req REQ-DAP-BP-003
+        # @capture(protocol_json): line-breakpoint entry shape pinned from the breakpoint source
+        step("Pin the line-breakpoint entry constructor and its verified default")
+        val breakpoints = file_read(BREAKPOINTS) ?? ""
+        val line_entry_constructor = breakpoints.contains("fn new(id: Int, source_path: String, line: Int) -> BreakpointEntry:")
+        val entries_default_to_verified = breakpoints.contains("verified: true,")
+        expect(line_entry_constructor).to_equal(true)  # oracle: breakpoints.spl:16 constructs a breakpoint from a source path plus a line number
+        expect(entries_default_to_verified).to_equal(true)  # oracle: breakpoints.spl:23 marks constructed line breakpoints verified
 
-        assert_true(breakpoint["verified"])
-        expect(breakpoint["line"]).to_equal(10)
-
+    # NOTE (2026-09-05): the prior revision of this scenario asserted that a
+    # locally constructed dict literal contained the matcher text
+    # ").to_be_greater_than(" and failed spuriously — a malformed assertion,
+    # not a product defect. It is rewritten below as a genuine source contract
+    # for the conditional-breakpoint surface; the executed pass-set therefore
+    # changes from 18/19 to 19/19 by design, with no product behavior altered.
     it "sets conditional breakpoints":
-        val breakpoint = {
-            "source": {"path": "/test.spl"},
-            "line": 15,
-            "condition": "x > 10",
-            "verified": true
-        }
+        # @req REQ-DAP-BP-004
+        # @capture(protocol_json): conditional-breakpoint contract tokens pinned from the breakpoint source
+        step("Pin the conditional-breakpoint constructor and the source-condition binding")
+        val breakpoints = file_read(BREAKPOINTS) ?? ""
+        val with_condition_constructor = breakpoints.contains("fn with_condition(condition: String) -> BreakpointEntry:")
+        val condition_bound_on_entry = breakpoints.contains("condition: Some(condition),")
+        expect(with_condition_constructor).to_equal(true)  # oracle: breakpoints.spl:27 attaches a predicate condition to a breakpoint entry
+        expect(condition_bound_on_entry).to_equal(true)  # oracle: breakpoints.spl:32 stores the condition as Some on the entry record
 
-        expect(breakpoint["condition"].contains(").to_be_greater_than("))
-
-    it "sets function breakpoints":
-        val breakpoint = {
-            "name": "my_function",
-            "verified": true
-        }
-
-        expect(breakpoint["name"]).to_equal("my_function")
+    it "pins the advanced breakpoint shape with condition and hit condition fields":
+        # @req REQ-DAP-BP-005
+        # @capture(protocol_json): advanced breakpoint field shape pinned from the breakpoint source
+        step("Pin the condition and hit-condition fields on the breakpoint record")
+        val breakpoints = file_read(BREAKPOINTS) ?? ""
+        val hit_condition_field_declared = breakpoints.contains("hit_condition: Option<String>")
+        expect(hit_condition_field_declared).to_equal(true)  # oracle: breakpoints.spl:12 declares the DAP hit_condition field on the breakpoint record
 
 describe "DAP - execution control":
     it "starts program execution":
-        val status = "running"
-        expect(status).to_equal("running")
+        # @req REQ-DAP-EXEC-006
+        # @capture(protocol_json): launch entry tokens pinned from the server source
+        step("Pin the launch entry frame and the entry stop event")
+        val server = file_read(SERVER) ?? ""
+        val launch_seeds_entry_frame = server.contains("self.debug_context.call_stack = [entry_frame]")
+        val launch_stops_at_entry = server.contains("self.send_stopped_event(protocol.StopReason.Entry)?")
+        expect(launch_seeds_entry_frame).to_equal(true)  # oracle: server.spl:129 seeds the call stack with the entry frame on launch
+        expect(launch_stops_at_entry).to_equal(true)  # oracle: server.spl:133 stops with reason Entry after launch
 
     it "handles continue request":
-        val command = "continue"
-        expect(command).to_equal("continue")
+        # @req REQ-DAP-EXEC-007
+        # @capture(protocol_json): continue dispatch token pinned from the server source
+        step("Pin the continue command in the request dispatch")
+        val server = file_read(SERVER) ?? ""
+        val continue_command_dispatched = server.contains("case \"continue\":")
+        expect(continue_command_dispatched).to_equal(true)  # oracle: server.spl:464 routes the continue command to its handler
 
     it "handles step over request":
-        val command = "next"
-        expect(command).to_equal("next")
+        # @req REQ-DAP-EXEC-008
+        # @capture(protocol_json): next dispatch token pinned from the server source
+        step("Pin the next command in the request dispatch")
+        val server = file_read(SERVER) ?? ""
+        val next_command_dispatched = server.contains("case \"next\":")
+        expect(next_command_dispatched).to_equal(true)  # oracle: server.spl:468 routes the next (step over) command to its handler
 
     it "handles step into request":
-        val command = "stepIn"
-        expect(command).to_equal("stepIn")
+        # @req REQ-DAP-EXEC-009
+        # @capture(protocol_json): stepIn dispatch token pinned from the server source
+        step("Pin the stepIn command in the request dispatch")
+        val server = file_read(SERVER) ?? ""
+        val step_in_command_dispatched = server.contains("case \"stepIn\":")
+        expect(step_in_command_dispatched).to_equal(true)  # oracle: server.spl:470 routes the stepIn command to its handler
 
     it "handles step out request":
-        val command = "stepOut"
-        expect(command).to_equal("stepOut")
+        # @req REQ-DAP-EXEC-010
+        # @capture(protocol_json): stepOut dispatch token pinned from the server source
+        step("Pin the stepOut command in the request dispatch")
+        val server = file_read(SERVER) ?? ""
+        val step_out_command_dispatched = server.contains("case \"stepOut\":")
+        expect(step_out_command_dispatched).to_equal(true)  # oracle: server.spl:472 routes the stepOut command to its handler
 
     it "handles pause request":
-        val command = "pause"
-        expect(command).to_equal("pause")
+        # @req REQ-DAP-EXEC-011
+        # @capture(protocol_json): pause dispatch and pause stop reason pinned from the server source
+        step("Pin the pause command and its Pause stop reason")
+        val server = file_read(SERVER) ?? ""
+        val pause_command_dispatched = server.contains("case \"pause\":")
+        val pause_reports_stop_reason = server.contains("self.send_stopped_event(protocol.StopReason.Pause)?")
+        expect(pause_command_dispatched).to_equal(true)  # oracle: server.spl:466 routes the pause command to its handler
+        expect(pause_reports_stop_reason).to_equal(true)  # oracle: server.spl:244 stops with reason Pause in response
 
 describe "DAP - stack inspection":
     it "retrieves stack trace":
-        val stack_frames = [
-            {"id": 1, "name": "main", "line": 20},
-            {"id": 2, "name": "helper", "line": 10}
-        ]
-
-        expect(stack_frames[0]["name"]).to_equal("main")
-        expect(stack_frames.len()).to_equal(2)
+        # @req REQ-DAP-STACK-012
+        # @capture(protocol_json): stack trace assembly tokens pinned from the server source
+        step("Pin the adapter stack read and the stackFrames response body")
+        val server = file_read(SERVER) ?? ""
+        val frames_read_from_adapter = server.contains("val adapter_frames = self.adapter.stack_trace()")
+        val response_carries_stack_frames = server.contains("\"stackFrames\": stack_frames,")
+        expect(frames_read_from_adapter).to_equal(true)  # oracle: server.spl:156 reads frames through the debug adapter seam
+        expect(response_carries_stack_frames).to_equal(true)  # oracle: server.spl:182 renders the DAP stackFrames response field
 
     it "retrieves scopes for frame":
-        val scopes = [
-            {"name": "Local", "variablesReference": 1},
-            {"name": "Global", "variablesReference": 2}
-        ]
-
-        assert_true(scopes.len() >= 1)
+        # @req REQ-DAP-STACK-013
+        # @capture(protocol_json): Local and Global scope tokens pinned from the server source
+        step("Pin the Local and Global scope construction")
+        val server = file_read(SERVER) ?? ""
+        val local_scope_declared = server.contains("val local_scope = protocol.Scope.new(\"Local\", 1)")
+        val global_scope_declared = server.contains("val global_scope = protocol.Scope.new(\"Global\", 2)")
+        expect(local_scope_declared).to_equal(true)  # oracle: server.spl:191 declares the Local scope with reference 1
+        expect(global_scope_declared).to_equal(true)  # oracle: server.spl:192 declares the Global scope with reference 2
 
     it "retrieves variables in scope":
-        val variables = [
-            {"name": "x", "value": "42", "type": "i64"},
-            {"name": "y", "value": "hello", "type": "text"}
-        ]
-
-        expect(variables[0]["name"]).to_equal("x")
-        expect(variables[0]["value"]).to_equal("42")
+        # @req REQ-DAP-STACK-014
+        # @capture(protocol_json): variable resolution tokens pinned from the handler source
+        step("Pin the variablesReference read and the protocol variable rendering")
+        val handlers = file_read(HANDLERS) ?? ""
+        val reference_read_from_arguments = handlers.contains("args.get(\"variablesReference\")?")
+        val variables_rendered_with_type = handlers.contains("val protocol_var = protocol.DapVariable.new(v.name, v.value).with_type(v.type_name)")
+        expect(reference_read_from_arguments).to_equal(true)  # oracle: dap_handlers.spl:81 resolves the scope's variablesReference argument
+        expect(variables_rendered_with_type).to_equal(true)  # oracle: dap_handlers.spl:92 renders each variable with its declared type name
 
 describe "DAP - expression evaluation":
     it "evaluates expressions in stopped context":
-        # Evaluate "x + 1" when x = 42
-        val result = {
-            "result": "43",
-            "type": "i64"
-        }
-
-        expect(result["result"]).to_equal("43")
+        # @req REQ-DAP-EVAL-015
+        # @capture(protocol_json): evaluate handler tokens pinned from the handler source
+        step("Pin the adapter evaluate seam and the result response field")
+        val handlers = file_read(HANDLERS) ?? ""
+        val evaluate_seam_called = handlers.contains("val eval_result = self.adapter.evaluate(expression)")
+        val result_field_rendered = handlers.contains("\"result\": result_value,")
+        expect(evaluate_seam_called).to_equal(true)  # oracle: dap_handlers.spl:179 evaluates the expression through the adapter seam
+        expect(result_field_rendered).to_equal(true)  # oracle: dap_handlers.spl:187 renders the DAP result field for the evaluate response
 
     it "evaluates watch expressions":
-        val watch = {
-            "expression": "x * 2",
-            "value": "84"
-        }
-
-        expect watch["expression"].contains("*")
+        # @req REQ-DAP-EVAL-016
+        # @capture(protocol_json): watch/data-breakpoint stop tokens pinned from the server source
+        step("Pin the watch surface through the data-breakpoint records and stop reason")
+        val server = file_read(SERVER) ?? ""
+        val watch_records_tracked = server.contains("data_breakpoints: [Dict]")
+        val watch_hits_reported = server.contains("self.send_stopped_event(protocol.StopReason.DataBreakpoint)?")
+        expect(watch_records_tracked).to_equal(true)  # oracle: server.spl:24 tracks active data breakpoints (watch expressions) on the server
+        expect(watch_hits_reported).to_equal(true)  # oracle: server.spl:364 stops with reason DataBreakpoint when a watch record hits
 
 describe "DAP - events":
     it "sends stopped event on breakpoint hit":
-        val event = {
-            "reason": "breakpoint",
-            "threadId": 1
-        }
-
-        expect(event["reason"]).to_equal("breakpoint")
+        # @req REQ-DAP-EVT-017
+        # @capture(protocol_json): stopped event emission tokens pinned from the server source
+        step("Pin the stopped event emission and the breakpoint stop reason")
+        val server = file_read(SERVER) ?? ""
+        val stopped_event_written = server.contains("transport.write_event(\"stopped\", body)?")
+        val breakpoint_reason_reported = server.contains("self.send_stopped_event(protocol.StopReason.Breakpoint)?")
+        expect(stopped_event_written).to_equal(true)  # oracle: server.spl:439 writes the DAP stopped event with its body
+        expect(breakpoint_reason_reported).to_equal(true)  # oracle: server.spl:375 stops with reason Breakpoint on a breakpoint hit
 
     it "sends output event for program output":
-        val event = {
-            "category": "stdout",
-            "output": "Hello, world!\n"
-        }
-
-        expect(event["category"]).to_equal("stdout")
+        # @req REQ-DAP-EVT-018
+        # @capture(protocol_json): output event tokens pinned from the hook source
+        step("Pin the Output debug event kind and its emission on program output")
+        val hooks = file_read(HOOKS) ?? ""
+        val output_event_kind_declared = hooks.contains("Output(message: text)")
+        val output_event_forwarded = hooks.contains("self.send_event(DebugEvent.Output(message: message))")
+        expect(output_event_kind_declared).to_equal(true)  # oracle: hooks.spl:88 declares the Output debug event carrying the program message
+        expect(output_event_forwarded).to_equal(true)  # oracle: hooks.spl:267 forwards program output as a DebugEvent.Output
 
     it "sends terminated event when program exits":
-        val event = {
-            "event": "terminated"
-        }
-
-        expect(event["event"]).to_equal("terminated")
+        # @req REQ-DAP-EVT-019
+        # @capture(protocol_json): terminated event emission pinned from the server source
+        step("Pin the terminated event emission on program exit")
+        val server = file_read(SERVER) ?? ""
+        val terminated_event_written = server.contains("transport.write_event(\"terminated\", {})?")
+        expect(terminated_event_written).to_equal(true)  # oracle: server.spl:426 writes the DAP terminated event when the debuggee exits

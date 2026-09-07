@@ -1,0 +1,113 @@
+"""
+Purpose and audience: executable specification for the UI composition
+adapter — the smallest static path that lets a UI product admit its
+providers through the existing composition authority
+(`std.nogc_sync_mut.composition.provider_contract`) with no directory
+scan, no manifest parse, no loader thread, and no new registry authority.
+Audience: UI product owners wiring a hello-world TUI/GUI recipe.
+
+research: doc/01_research/ui/slim_kernel_plugin/ ; plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; design: doc/05_design/ui/slim_kernel_plugin/design.md
+
+@manual_section UI Composition
+"""
+use std.nogc_sync_mut.ui.composition_adapter.*
+
+fn _descriptor(id: u64, kind: u32, abi: u32, handle: u64, capabilities: u64) -> UiProviderDescriptor:
+    UiProviderDescriptor(
+        provider_id: id,
+        kind: kind,
+        abi_version: abi,
+        interface_handle: handle,
+        capability_bits: capabilities
+    )
+
+fn _recipe(required: [u32], forbidden: u64) -> UiRecipe:
+    UiRecipe(expected_abi_version: 1, required_kinds: required, forbidden_capability_bits: forbidden)
+
+describe "UI composition adapter static admission":
+
+    it "admits exactly one resolved handle per required kind on success":
+        # @req REQ-UI-SLIM-003
+        # @req REQ-UI-SLIM-006
+        # @capture(text)
+        step("Admit a terminal and a text provider against a recipe requiring both")
+        val descriptors = [
+            _descriptor(1, UI_KIND_TERMINAL, 1, 100, 0),
+            _descriptor(2, UI_KIND_TEXT, 1, 200, 0)
+        ]
+        val recipe = _recipe([UI_KIND_TERMINAL, UI_KIND_TEXT], 0)
+        val admission = admit_static(descriptors, recipe)
+
+        step("The admission succeeds with a fully resolved coarse handle table")
+        expect(admission.diagnostic.ok).to_equal(true)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_OK)
+        expect(admission.handles.len()).to_equal(2)  # oracle: 2 = one entry per required kind (terminal, text)
+        expect(admission.handles[0].interface_handle).to_equal(100)
+        expect(admission.handles[1].interface_handle).to_equal(200)
+
+    it "rejects a duplicate provider id":
+        # @req REQ-UI-SLIM-003
+        # @capture(text)
+        step("Two descriptors share the same provider id")
+        val descriptors = [
+            _descriptor(9, UI_KIND_TERMINAL, 1, 100, 0),
+            _descriptor(9, UI_KIND_TEXT, 1, 200, 0)
+        ]
+        val recipe = _recipe([UI_KIND_TERMINAL], 0)
+        val admission = admit_static(descriptors, recipe)
+
+        step("Admission is rejected fail-closed")
+        expect(admission.diagnostic.ok).to_equal(false)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_ERR_DUPLICATE_ID)
+        expect(admission.handles.len()).to_equal(0)  # oracle: 0 = no handle table on rejection
+
+    it "rejects an ABI version mismatch":
+        # @req REQ-UI-SLIM-003
+        # @capture(text)
+        step("A descriptor declares an ABI version the recipe does not expect")
+        val descriptors = [_descriptor(1, UI_KIND_TERMINAL, 2, 100, 0)]
+        val recipe = _recipe([UI_KIND_TERMINAL], 0)
+        val admission = admit_static(descriptors, recipe)
+
+        step("Admission is rejected fail-closed")
+        expect(admission.diagnostic.ok).to_equal(false)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_ERR_ABI_MISMATCH)
+
+    it "rejects a missing required kind":
+        # @req REQ-UI-SLIM-003
+        # @capture(text)
+        step("Only a text provider is offered, but the recipe requires a renderer too")
+        val descriptors = [_descriptor(1, UI_KIND_TEXT, 1, 100, 0)]
+        val recipe = _recipe([UI_KIND_TEXT, UI_KIND_RENDERER], 0)
+        val admission = admit_static(descriptors, recipe)
+
+        step("Admission is rejected fail-closed")
+        expect(admission.diagnostic.ok).to_equal(false)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_ERR_MISSING_KIND)
+
+    it "rejects a forbidden capability":
+        # @req REQ-UI-SLIM-006
+        # @capture(text)
+        step("A provider carries a capability bit the recipe forbids")
+        val descriptors = [_descriptor(1, UI_KIND_TERMINAL, 1, 100, 4)]
+        val recipe = _recipe([UI_KIND_TERMINAL], 4)
+        val admission = admit_static(descriptors, recipe)
+
+        step("Admission is rejected fail-closed")
+        expect(admission.diagnostic.ok).to_equal(false)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_ERR_FORBIDDEN_CAPABILITY)
+
+    it "rejects more than one provider of an exclusive kind":
+        # @req REQ-UI-SLIM-006
+        # @capture(text)
+        step("Two host_window providers are offered together")
+        val descriptors = [
+            _descriptor(1, UI_KIND_HOST_WINDOW, 1, 100, 0),
+            _descriptor(2, UI_KIND_HOST_WINDOW, 1, 200, 0)
+        ]
+        val recipe = _recipe([UI_KIND_HOST_WINDOW], 0)
+        val admission = admit_static(descriptors, recipe)
+
+        step("Admission is rejected fail-closed")
+        expect(admission.diagnostic.ok).to_equal(false)
+        expect(admission.diagnostic.code).to_equal(UI_ADMIT_ERR_EXCLUSIVE_KIND_CONFLICT)

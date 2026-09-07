@@ -1,0 +1,263 @@
+"""
+## Purpose and audience
+Purpose: show what `VulkanSession.release()` does to the GPU RESOURCES a session
+was holding — its eleven compute pipelines, its eleven shader modules, and the
+command pool / pipeline cache / allocator behind them — and show that a released
+session refuses further pipeline work instead of half-operating on freed handles.
+Audience: engine2d/GPU maintainers changing the session lifecycle in
+`src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl`, and reviewers checking
+that a teardown which quietly stopped releasing something would turn this file
+RED.
+
+## Relationship to the identity spec — read this before adding a scenario here
+`vulkan_session_release_identity_spec.spl` (same directory) already covers the
+DEVICE-IDENTITY half of `_cleanup()`: `device`, `instance`, `physical_device`,
+`queue`, `device_name`, `driver_identity`, `device_type`, `is_initialized`, plus
+the refcount gating around them. Nothing in this file re-asserts any of that.
+This file covers the RESOURCE half only: pipeline handles, shader handles, the
+pool/cache/allocator triple, the font-atlas pipeline bookkeeping, idempotence of
+a second release, and the post-release refusal contract.
+
+## Operator workflow
+    src/compiler_rust/target/bootstrap/simple run \
+      test/01_unit/lib/gpu/engine2d/vulkan_session_release_teardown_spec.spl
+
+## Compatibility and limitations
+Device-free, and safe to run on a GPU workstation. That is a property of the
+runtime, not an accident: `rt_vulkan_destroy_pipeline`
+(`src/compiler_rust/runtime/src/vulkan_graphics_runtime_shader.rs:332`) is a
+handle-REGISTRY lookup — it removes the handle from `state.compute_pipelines` /
+`state.graphics_pipelines` and returns 0 when the handle is unknown. It never
+passes the raw i64 to `vkDestroyPipeline`. `rt_vulkan_destroy_shader` is built
+the same way. So the sentinel handles installed below can never reach a driver,
+on any host.
+
+Sentinel handles are the point of this file, not a shortcut. `_cleanup()`
+(`vulkan_session.spl:486`) guards every destroy call behind a `!= 0` test, so a
+session whose handles are all zero would satisfy "every handle is 0 afterwards"
+vacuously — the guards would simply never be entered. Every scenario below
+therefore installs distinct non-zero handles first, so a `_cleanup()` that
+skipped a field is caught.
+
+What this file does NOT prove: that a real driver actually freed the GPU memory
+behind those handles, or that N init/release cycles keep a flat resource count.
+Both need a device and belong in `test/03_system/`.
+
+## Verification guidance and troubleshooting
+`create_command_buffer()` is deliberately NOT used as the "refuses further work"
+oracle. It calls `vulkan_sffi_begin_compute()` unconditionally
+(`vulkan_session.spl:317`) with no session guard at all, so device-free it
+returns 0 for a live session and a dead one alike — asserting on it would be a
+false oracle that passes for the wrong reason. The refusal contract is read from
+`font_atlas_pipeline_evidence()` (`:464`) instead, which branches on
+`is_valid()` and names its reason.
+"""
+# Lifecycle: doc/01_research/local/engine2d_four_backend_capture.md ;
+# doc/03_plan/ui/engine2d_vulkan_showcase_parity_plan.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/engine2d_four_backend_capture.md
+# @manual_section: vulkan-session-teardown
+# @cover src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl 30%
+# @tag: unit, engine2d, vulkan, session, lifecycle, teardown
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+
+# Distinct sentinel handles so a cleanup that copies one field over another, or
+# zeroes one field twice and another never, is still caught.
+val H_PIPE_CLEAR: i64 = 0x5101
+val H_PIPE_RECT_FILLED: i64 = 0x5102
+val H_PIPE_RECT_OUTLINE: i64 = 0x5103
+val H_PIPE_CIRCLE_FILLED: i64 = 0x5104
+val H_PIPE_CIRCLE_OUTLINE: i64 = 0x5105
+val H_PIPE_LINE: i64 = 0x5106
+val H_PIPE_ROUNDED_RECT: i64 = 0x5107
+val H_PIPE_TRIANGLE: i64 = 0x5108
+val H_PIPE_GRADIENT: i64 = 0x5109
+val H_PIPE_BLIT: i64 = 0x510A
+val H_PIPE_FONT_ATLAS: i64 = 0x510B
+
+val H_SHADER_CLEAR: i64 = 0x6101
+val H_SHADER_RECT_FILLED: i64 = 0x6102
+val H_SHADER_RECT_OUTLINE: i64 = 0x6103
+val H_SHADER_CIRCLE_FILLED: i64 = 0x6104
+val H_SHADER_CIRCLE_OUTLINE: i64 = 0x6105
+val H_SHADER_LINE: i64 = 0x6106
+val H_SHADER_ROUNDED_RECT: i64 = 0x6107
+val H_SHADER_TRIANGLE: i64 = 0x6108
+val H_SHADER_GRADIENT: i64 = 0x6109
+val H_SHADER_BLIT: i64 = 0x610A
+val H_SHADER_FONT_ATLAS: i64 = 0x610B
+
+val H_COMMAND_POOL: i64 = 0x7101
+val H_PIPELINE_CACHE: i64 = 0x7102
+val H_ALLOCATOR: i64 = 0x7103
+
+fn resourced_session() -> VulkanSession:
+    """A retained session holding a distinct non-zero handle in every resource slot.
+
+    Stands in for what a completed `init()` would have written. `retain()` is
+    mandatory: `release()` early-returns at `:306` when `ref_count <= 0`, so a
+    never-retained session would satisfy every assertion below vacuously.
+    """
+    var s = VulkanSession.create()
+    s.device = 0x3003
+    s.instance = 0x1001
+    s.is_initialized = true
+
+    s.pipe_clear = H_PIPE_CLEAR
+    s.pipe_rect_filled = H_PIPE_RECT_FILLED
+    s.pipe_rect_outline = H_PIPE_RECT_OUTLINE
+    s.pipe_circle_filled = H_PIPE_CIRCLE_FILLED
+    s.pipe_circle_outline = H_PIPE_CIRCLE_OUTLINE
+    s.pipe_line = H_PIPE_LINE
+    s.pipe_rounded_rect = H_PIPE_ROUNDED_RECT
+    s.pipe_triangle = H_PIPE_TRIANGLE
+    s.pipe_gradient = H_PIPE_GRADIENT
+    s.pipe_blit = H_PIPE_BLIT
+    s.pipe_font_atlas = H_PIPE_FONT_ATLAS
+
+    s.shader_clear = H_SHADER_CLEAR
+    s.shader_rect_filled = H_SHADER_RECT_FILLED
+    s.shader_rect_outline = H_SHADER_RECT_OUTLINE
+    s.shader_circle_filled = H_SHADER_CIRCLE_FILLED
+    s.shader_circle_outline = H_SHADER_CIRCLE_OUTLINE
+    s.shader_line = H_SHADER_LINE
+    s.shader_rounded_rect = H_SHADER_ROUNDED_RECT
+    s.shader_triangle = H_SHADER_TRIANGLE
+    s.shader_gradient = H_SHADER_GRADIENT
+    s.shader_blit = H_SHADER_BLIT
+    s.shader_font_atlas = H_SHADER_FONT_ATLAS
+
+    s.command_pool = H_COMMAND_POOL
+    s.pipeline_cache = H_PIPELINE_CACHE
+    s.allocator = H_ALLOCATOR
+
+    s.font_atlas_artifact_mode = "runtime-glsl"
+    s.font_atlas_artifact_identity = "fake-atlas-artifact"
+    s.font_atlas_status = "installed"
+    s.font_atlas_emission_compile_ns = 4242
+
+    s.retain()
+    s
+
+describe "VulkanSession resource teardown on release":
+
+    it "releases every compute pipeline the session was holding":
+        # @req REQ-LIB-GPU-VKTEARDOWN-001
+        step("Install a distinct handle in all eleven pipeline slots and release the session")
+        var s = resourced_session()
+        expect(s.pipe_clear).to_equal(H_PIPE_CLEAR)  # oracle: precondition — the guards at :487 must be entered
+        # @capture(statistics): eleven pipeline handles, before and after release
+        s.release()
+        step("Confirm no pipeline slot still names a handle the session no longer owns")
+        expect(s.pipe_clear).to_equal(0)  # oracle: :498 self.pipe_clear = 0
+        expect(s.pipe_rect_filled).to_equal(0)  # oracle: :499
+        expect(s.pipe_rect_outline).to_equal(0)  # oracle: :500
+        expect(s.pipe_circle_filled).to_equal(0)  # oracle: :501
+        expect(s.pipe_circle_outline).to_equal(0)  # oracle: :502
+        expect(s.pipe_line).to_equal(0)  # oracle: :503
+        expect(s.pipe_rounded_rect).to_equal(0)  # oracle: :504
+        expect(s.pipe_triangle).to_equal(0)  # oracle: :505
+        expect(s.pipe_gradient).to_equal(0)  # oracle: :506
+        expect(s.pipe_blit).to_equal(0)  # oracle: :507
+        expect(s.pipe_font_atlas).to_equal(0)  # oracle: :488, cleared before the rest
+
+    it "releases every shader module the session was holding":
+        # @req REQ-LIB-GPU-VKTEARDOWN-002
+        step("Install a distinct handle in all eleven shader slots and release the session")
+        var s = resourced_session()
+        expect(s.shader_font_atlas).to_equal(H_SHADER_FONT_ATLAS)  # oracle: precondition — :521 guard must be entered
+        # @capture(statistics): eleven shader-module handles, before and after release
+        s.release()
+        step("Confirm no shader slot still names a destroyed module")
+        expect(s.shader_clear).to_equal(0)  # oracle: :522 self.shader_clear = 0
+        expect(s.shader_rect_filled).to_equal(0)  # oracle: :523
+        expect(s.shader_rect_outline).to_equal(0)  # oracle: :524
+        expect(s.shader_circle_filled).to_equal(0)  # oracle: :525
+        expect(s.shader_circle_outline).to_equal(0)  # oracle: :526
+        expect(s.shader_line).to_equal(0)  # oracle: :527
+        expect(s.shader_rounded_rect).to_equal(0)  # oracle: :528
+        expect(s.shader_triangle).to_equal(0)  # oracle: :529
+        expect(s.shader_gradient).to_equal(0)  # oracle: :530
+        expect(s.shader_blit).to_equal(0)  # oracle: :531
+        expect(s.shader_font_atlas).to_equal(0)  # oracle: :532
+
+    it "drops the command pool, pipeline cache and allocator with the rest":
+        # @req REQ-LIB-GPU-VKTEARDOWN-003
+        step("Release a session holding the three command/memory objects")
+        var s = resourced_session()
+        # @capture(statistics): command pool, pipeline cache and allocator handles after release
+        s.release()
+        step("Confirm the command and memory objects are no longer addressable")
+        expect(s.command_pool).to_equal(0)  # oracle: :547 self.command_pool = 0
+        expect(s.pipeline_cache).to_equal(0)  # oracle: :548
+        expect(s.allocator).to_equal(0)  # oracle: :549
+
+    it "resets the font-atlas pipeline bookkeeping so no stale artifact is reported":
+        # @req REQ-LIB-GPU-VKTEARDOWN-004
+        step("Release a session that had a font-atlas artifact installed")
+        var s = resourced_session()
+        expect(s.font_atlas_status).to_equal("installed")  # oracle: precondition set by the fixture
+        # @capture(statistics): font-atlas artifact mode, identity, status and compile timing
+        s.release()
+        step("Confirm the atlas bookkeeping went back to its uninstalled values")
+        expect(s.font_atlas_artifact_mode).to_equal("none")  # oracle: :533
+        expect(s.font_atlas_artifact_identity).to_equal("")  # oracle: :534
+        expect(s.font_atlas_emission_compile_ns).to_equal(0)  # oracle: :535
+        expect(s.font_atlas_status).to_equal("not-installed")  # oracle: :536
+
+describe "VulkanSession teardown is idempotent and final":
+
+    it "a second release is inert and does not re-enter cleanup":
+        # @req REQ-LIB-GPU-VKTEARDOWN-005
+        step("Release the only reference, then release the session a second time")
+        var s = resourced_session()
+        s.release()
+        expect(s.ref_count).to_equal(0)  # oracle: one retain minus one release
+        # @capture(statistics): refcount and resource handles across a double release
+        s.release()
+        step("Confirm the second call changed nothing — no double release of any handle")
+        expect(s.ref_count).to_equal(0)  # oracle: :306 `if self.ref_count <= 0: return`, no underflow
+        expect(s.pipe_clear).to_equal(0)  # oracle: still zero, nothing was destroyed twice
+        expect(s.shader_blit).to_equal(0)  # oracle: still zero
+        expect(s.command_pool).to_equal(0)  # oracle: still zero
+
+    it "a released session refuses pipeline work instead of half-operating":
+        # @req REQ-LIB-GPU-VKTEARDOWN-006
+        step("Read the font-atlas pipeline authority while the session is still live")
+        var s = resourced_session()
+        val live = s.font_atlas_pipeline_evidence()
+        expect(live.status).to_equal("ready")  # oracle: :465 is_valid() and both handles > 0
+        expect(live.reason).to_equal("current-session-pipeline")  # oracle: :467
+        expect(live.pipeline_handle).to_equal(H_PIPE_FONT_ATLAS)  # oracle: :470 echoes the live handle
+        # @capture(statistics): font-atlas pipeline evidence before and after release
+        step("Release the session and read the same authority again")
+        s.release()
+        val dead = s.font_atlas_pipeline_evidence()
+        step("Confirm it refuses by name rather than reporting a usable pipeline")
+        expect(dead.status).to_equal("unavailable")  # oracle: :477 fall-through branch
+        expect(dead.reason).to_equal("invalid-session")  # oracle: :479 `else: "invalid-session"`
+        expect(dead.pipeline_handle).to_equal(0)  # oracle: :480 handles zeroed, not echoed
+        expect(dead.shader_handle).to_equal(0)  # oracle: :480
+
+    it "a session with two references keeps every resource through the first release":
+        # @req REQ-LIB-GPU-VKTEARDOWN-007
+        step("Take a second reference, then release once")
+        var s = resourced_session()
+        s.retain()
+        # @capture(statistics): resource handles after a non-final release
+        s.release()
+        step("Confirm cleanup did not run — every resource handle is untouched")
+        expect(s.ref_count).to_equal(1)  # oracle: :308 one outstanding reference
+        expect(s.pipe_font_atlas).to_equal(H_PIPE_FONT_ATLAS)  # oracle: :309 cleanup runs only at zero
+        expect(s.shader_blit).to_equal(H_SHADER_BLIT)  # oracle: untouched
+        expect(s.command_pool).to_equal(H_COMMAND_POOL)  # oracle: untouched
+        expect(s.font_atlas_status).to_equal("installed")  # oracle: untouched
+        assert_true(s.is_valid())  # oracle: the session is still usable
+        step("Release the last reference and confirm the resources go now")
+        s.release()
+        expect(s.pipe_font_atlas).to_equal(0)  # oracle: :488 cleanup ran at zero
+        expect(s.command_pool).to_equal(0)  # oracle: :547
+        assert_false(s.is_valid())  # oracle: :551 is_initialized = false

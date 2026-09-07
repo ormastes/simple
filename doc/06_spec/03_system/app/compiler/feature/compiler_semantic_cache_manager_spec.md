@@ -1,0 +1,1053 @@
+# Compiler semantic cache manager
+
+> This executable acceptance manual is for compiler, loader, cache-daemon,
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 31 | 31 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Compiler semantic cache manager
+
+This executable acceptance manual is for compiler, loader, cache-daemon,
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active/RED |
+| Requirements | doc/02_requirements/feature/compiler_semantic_cache_daemon_virtual_summary.md |
+| Plan | doc/03_plan/sys_test/compiler_semantic_cache_manager.md |
+| Design | doc/05_design/compiler_semantic_cache_manager.md |
+| Research | doc/01_research/local/compiler_semantic_cache_daemon_virtual_summary_2026-09-01.md |
+| Source | `test/03_system/app/compiler/feature/compiler_semantic_cache_manager_spec.spl` |
+| Updated | 2026-09-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+
+This executable acceptance manual is for compiler, loader, cache-daemon,
+MCP/LSP, SPipe, and release owners. It proves coherent snapshots, verified
+cross-worktree reuse, fail-closed daemon fallback, virtual summaries, lazy
+startup capsules, bootstrap parity, and bounded compile performance.
+
+## Claim boundary
+
+Only production behavior observed through admitted pure-Simple Phase 2 and
+Phase 3 runtimes can pass. Source inspection, mocks, Rust-seed execution, stale
+binaries, and hand-authored receipts are not evidence. The seven oracle helpers
+fail explicitly until their production owners are connected, so the suite is
+intentionally RED rather than silently passing incomplete behavior.
+
+## Preconditions
+
+Use isolated cache roots and worktrees, an admitted quiet-runner performance
+profile, and retained source/runtime/provider/schema/target/hardware digests.
+The detailed mutation, crash, security, concurrency, startup, and performance
+rows are in doc/03_plan/sys_test/compiler_semantic_cache_manager.md.
+
+**Requirements:** doc/02_requirements/feature/compiler_semantic_cache_daemon_virtual_summary.md
+and doc/02_requirements/nfr/compiler_semantic_cache_daemon_virtual_summary.md
+**Plan:** doc/03_plan/sys_test/compiler_semantic_cache_manager.md
+**Architecture:** doc/04_architecture/compiler_semantic_cache_manager.md
+**Design:** doc/05_design/compiler_semantic_cache_manager.md
+**Research:** doc/01_research/local/compiler_semantic_cache_daemon_virtual_summary_2026-09-01.md
+and doc/01_research/domain/compiler_semantic_cache_daemon_virtual_summary_2026-09-01.md
+
+## Overview
+
+The cache is a verified accelerator, never semantic authority. Compilation
+first freezes one coherent source snapshot, then derives immutable,
+schema-versioned CAS objects. An append-only journal roots admitted mappings;
+PureDatabase holds rebuildable projections. A per-user daemon owns writes when
+healthy, while a bounded direct fallback preserves compilation availability.
+
+Public summaries and stable-index AST objects can be reused by content across
+branches and relocated worktrees. Virtual summary pages are read through one
+bounded authorization API and never become real imports. Compiler startup uses
+typed MDSOC capsules: frontend-only work does not load native backends, linkers,
+AOP bodies, MCP/LSP, tests, UI, or unrelated product commands.
+
+## Syntax and examples
+
+A summary URI has this form:
+
+`simple-summary://<snapshot>/<logical-path>/_tldr.spl`
+
+A passing relocation case compiles identical bytes under two absolute roots and
+observes one verified AST digest. A semantic source or provider mutation must
+produce a miss. A daemon-kill case reconnects once, begins direct compilation
+within 250 ms, and writes only an isolated spool without an exclusive epoch.
+
+Performance evidence alternates baseline and candidate runs. It reports ratios,
+not unrelated absolute samples. A candidate fails when both the median and
+20%-trimmed mean exceed 1.10 with CV at most 5%.
+
+## Snapshot and identity evidence
+
+- Read source bytes from the same handle that is validated.
+- Record ordered positive and negative resolution candidates.
+- Bind anchored directory generations and symlink/case/Unicode policy.
+- Bind generated inputs, configuration, compiler, runtime, and provider bytes.
+- Restart exactly once when mutation precedes publication.
+- Fail `source_snapshot_unstable` after a second mutation.
+- Compile only frozen bytes after publication.
+- Exclude absolute roots, branches, inode, mtime, and database row IDs.
+- Include logical paths only where language semantics require them.
+- Reject undeclared environment, clock, randomness, network, file, or process reads.
+
+## Journal daemon and GC evidence
+
+- Rebuild PureDatabase projections from journal and CAS authority.
+- Reject torn or incorrectly checksummed journal records.
+- Verify canonical checkpoint snapshots before advancing the superblock.
+- Preserve the previous superblock generation across checkpoint crashes.
+- Admit one credentialed daemon instance through private endpoints.
+- Reject stale PID reuse, stale readiness receipts, and wrong writer epochs.
+- Attempt one bounded reconnect or restart before direct fallback.
+- Keep fallback writes isolated until reconciled by an admitted owner.
+- Keep requests, leases, publication, and GC transactions from triggering idle exit.
+- Exit 10–12 seconds after the final protected activity.
+- Mark roots, leases, and pins before tombstone/two-generation deletion.
+- Quarantine corrupt objects without deleting live concurrent-reader state.
+- Create `DirectReadPinV1` before an in-process CAS read becomes visible.
+- Preserve that pin if the daemon starts and GC runs during the direct read.
+- Publish action/root authority only through the current `CacheWriterV1` epoch.
+- Emit stable error, miss, and retry reason codes across daemon and direct paths.
+
+## Summary and AST evidence
+
+- Generate deterministic grammar-valid public `_tldr.spl` bytes.
+- Include declarations, layout/ABI, traits, coherence, extensions, and reexports.
+- Include ordered AOP selectors and macro signatures/read sets.
+- Reference required generic, inline, const, trait, and advice bodies by digest.
+- Never shadow a real file or participate in source resolution.
+- Hide private AST by default.
+- Bind authorization to root, session, capability, snapshot, path, and visibility.
+- Serve compiler, CLI, MCP, LSP MCP, and SPipe through VirtualSourceStoreV1.
+- Delegate list, stat, read, and page to one SummaryStoreV1 frozen snapshot.
+- Require byte, provenance, error, and snapshot parity across all adapters.
+- Reject consumer-local reparsing and parallel summary generators.
+- Bound page limit, token lifetime, counts, offsets, depth, and strings.
+- Reject wrong schema, compiler, source identity, and malformed stable indices.
+- Match fresh parse semantics and code generation on Phase 2 and Phase 3.
+- Load imported public summaries without ordinary private bodies.
+- Load exceptional bodies only when the selected task requires them.
+- Keep `SummaryStoreV1` private; consumers receive only `VirtualSourceStoreV1`.
+- Keep the gateway tiny and start the summary service lazily on its first request.
+
+## Startup capsule evidence
+
+- Keep argv, encoding, diagnostics, path/hash/snapshot admission eager.
+- Keep public signature/import and semantic summary contracts eager.
+- Keep loader and interpreter interfaces eager but their execution bodies delayed.
+- Delay AOP implementation, monomorphization, MIR, borrow checking, and optimization.
+- Delay concrete backends, object/archive owners, and linkers until native output.
+- Delay database transport, network, UI, GPU, audio, tests, and reporting.
+- Bind every capsule to digest, ABI, capabilities, configuration, and effects.
+- Preserve the previous generation until the candidate is admitted.
+- Retain required and forbidden capsule receipts for every startup mode.
+- Prohibit unrelated command closures from help, cache query, and frontend checks.
+
+## Shadow and security evidence
+
+- Compare fresh and shadow AST, summary, object bytes, and diagnostics.
+- Cover mutation, corruption, crash, concurrency, and relocation matrices.
+- Quarantine same-action/different-output nondeterminism.
+- Reject corrupt, forged, truncated, oversized, and symlinked objects.
+- Reject wrong-schema objects and receipts.
+- Keep HIR/object hits shadow-only until complete equality evidence exists.
+- Keep cross-phase reuse disabled until admitted bootstrap parity.
+- Cover compiler, interpreter, loader, CLI, tools, MCP, and LSP.
+- Cover daemonless, daemon, restart, and direct-fallback paths.
+- Never accept a Rust seed or stale binary as release evidence.
+
+## Performance evidence
+
+- Measure cold, unchanged-warm, private-edit, public-edit, trait/AOP-edit, and link lanes.
+- Run one warmup and at least seven alternating pairs per lane.
+- Use an admitted quiet-runner profile.
+- Bind source, compiler, runtime, provider, schema, root, target, and command digests.
+- Bind hardware and baseline identity.
+- Retain wall, CPU, RSS, hits, misses, reparses, and output identity.
+- Compute median and 20%-trimmed mean over paired ratios.
+- Require CV at most 5% for a conclusive verdict.
+- Pass only when both estimators are at most 1.10.
+- Fail when both estimators exceed 1.10.
+- Retry an inconclusive result once on a quiet runner.
+- Block release if the bounded retry remains inconclusive.
+
+## Recovery and limitations
+
+Daemon loss must fall back in process without weakening writer ownership.
+Corruption, nondeterminism, missing receipts, unavailable production helpers,
+or inconclusive performance after one retry block admission and release.
+
+## Helper contracts and reproduction
+
+`prepare_cache_fixture(row)` creates an isolated cache, journal, database,
+writer epoch, and deterministic fault point. `freeze_compile_snapshot(row)`
+returns snapshot admission and retry evidence. `verify_cached_artifact(row)`
+compares fresh and cached bytes and diagnostics while retaining pin/GC receipts.
+`stop_cache_daemon(row)` kills the real daemon at the named boundary and times
+direct fallback. `verify_summary_page(row)` invokes every real consumer adapter
+and reports parity plus construction counts. `verify_startup_closure(row)` reads
+the real capsule receipt. `verify_perf_evidence(row)` runs the admitted paired
+benchmark lane and returns its estimators and provenance verdict.
+
+Stable cache error codes are `cache_unavailable`, `cache_transport_timeout`,
+`cache_protocol_mismatch`, `cache_access_denied`, `cache_bounds_exceeded`,
+`cache_corrupt`, `cache_writer_epoch_stale`,
+`cache_journal_tail_quarantined`, `cache_spool_reconcile_failed`,
+`cache_nondeterminism`, `cache_pin_expired`, and
+`cache_pin_renewal_failed`. Stable summary errors are
+`summary_snapshot_mismatch`, `summary_access_denied`, `summary_token_invalid`,
+`summary_token_expired`, `summary_bounds_exceeded`, `summary_corrupt`,
+`summary_schema_mismatch`, and `virtual_source_request_invalid`. Provider
+admission uses `provider_admission_rejected`; snapshot admission uses
+`source_snapshot_unstable` and `ambient_read_uncacheable`. Not-found is a
+successful typed result with `present=false`, never an error string.
+
+Every performance row retains source-snapshot, compiler, runtime, provider,
+cache-schema, cache-root, target, command, hardware, and baseline digests;
+wall/CPU/RSS; hit/miss/reparse counters; output and diagnostic digests; lookup
+p95; idle RSS and shutdown time; overhead ratio and RSS; resource-bound and
+host-parity evidence. The six PASS lanes assert every one of these fields.
+
+Reproduce from the repository root with the admitted pure-Simple test runner:
+
+`bin/simple test test/03_system/app/compiler/feature/compiler_semantic_cache_manager_spec.spl`
+
+Then regenerate this manual with:
+
+`bin/simple spipe-docgen test/03_system/app/compiler/feature/compiler_semantic_cache_manager_spec.spl --output doc/06_spec --no-index`
+
+## Current status
+
+Active/RED. All 31 scenarios execute and reach one of seven typed helpers that
+`fail("unimplemented oracle")`. Structural documentation generation is useful,
+but it is not runtime PASS evidence and must not enable release or cache hits.
+
+## Scenarios
+
+### Compiler semantic cache manager
+
+### REQ-CSM-001..006: coherent snapshots and action identity
+
+#### should freeze one coherent same-handle source generation
+
+- Freeze one coherent compile snapshot
+   - Expected: evidence.verdict equals `ADMITTED`
+   - Expected: evidence.retry_count equals `0`
+   - Expected: evidence.artifact_digest equals `evidence.comparison_digest`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-004 REQ-CSM-005 REQ-CSM-006 NFR-CSM-001
+step("Freeze one coherent compile snapshot")
+val evidence = freeze_compile_snapshot("same_handle_ordered_resolution")
+expect(evidence.verdict).to_equal("ADMITTED")
+expect(evidence.retry_count).to_equal(0)
+expect(evidence.artifact_digest).to_equal(evidence.comparison_digest)
+```
+
+</details>
+
+#### should reuse one verified AST after relocating the worktree
+
+- Reuse one AST across relocated worktrees
+   - Expected: evidence.verdict equals `HIT`
+   - Expected: evidence.bytes_equal is true
+   - Expected: evidence.miss_reason equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-004 REQ-CSM-005 REQ-CSM-006 NFR-CSM-001
+step("Reuse one AST across relocated worktrees")
+val evidence = verify_cached_artifact("relocate_branch_worktree_inode_mtime_rowid")
+expect(evidence.verdict).to_equal("HIT")
+expect(evidence.bytes_equal).to_equal(true)
+expect(evidence.miss_reason).to_equal("")
+```
+
+</details>
+
+#### should reject unstable mutation and undeclared compile-time effects
+
+- Mutate resolution witnesses during snapshot admission
+   - Expected: evidence.verdict equals `REJECTED`
+   - Expected: evidence.retry_count equals `1`
+   - Expected: evidence.error_code equals `source_snapshot_unstable`
+   - Expected: evidence.retry_reason equals `snapshot_generation_changed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-004 REQ-CSM-005 REQ-CSM-006 NFR-CSM-001
+step("Mutate resolution witnesses during snapshot admission")
+val evidence = freeze_compile_snapshot("source_resolution_trait_aop_macro_provider_effect_mutation_twice")
+expect(evidence.verdict).to_equal("REJECTED")
+expect(evidence.retry_count).to_equal(1)
+expect(evidence.error_code).to_equal("source_snapshot_unstable")
+expect(evidence.retry_reason).to_equal("snapshot_generation_changed")
+```
+
+</details>
+
+#### should mark an undeclared ambient read uncacheable without publication
+
+- Read undeclared environment clock randomness network file and process inputs
+   - Expected: evidence.verdict equals `UNCACHEABLE`
+   - Expected: evidence.error_code equals `ambient_read_uncacheable`
+   - Expected: evidence.hit_count equals `0`
+   - Expected: evidence.retry_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-004 REQ-CSM-005 REQ-CSM-006 NFR-CSM-001
+step("Read undeclared environment clock randomness network file and process inputs")
+val evidence = freeze_compile_snapshot("undeclared_ambient_read_matrix")
+expect(evidence.verdict).to_equal("UNCACHEABLE")
+expect(evidence.error_code).to_equal("ambient_read_uncacheable")
+expect(evidence.hit_count).to_equal(0)
+expect(evidence.retry_count).to_equal(0)
+```
+
+</details>
+
+### REQ-CSM-007..012: journal, daemon fallback, and lease-aware GC
+
+#### should rebuild projections from admitted journal roots and CAS
+
+- Rebuild a deleted PureDatabase projection
+   - Expected: evidence.verdict equals `REBUILT`
+   - Expected: evidence.error_code equals ``
+   - Expected: evidence.resource_bounds_enforced is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-002 NFR-CSM-003 NFR-CSM-004 NFR-CSM-005 NFR-CSM-010 NFR-CSM-011
+step("Rebuild a deleted PureDatabase projection")
+val evidence = prepare_cache_fixture("delete_projection_replay_journal_cas")
+expect(evidence.verdict).to_equal("REBUILT")
+expect(evidence.live_objects).to_be_greater_than(0)
+expect(evidence.error_code).to_equal("")
+expect(evidence.lookup_p95_ms).to_be_less_than(11)
+expect(evidence.resource_bounds_enforced).to_equal(true)
+expect(evidence.host_parity_count).to_be_greater_than(0)
+```
+
+</details>
+
+#### should fail over to an isolated spool after daemon loss
+
+- Fail over after the cache daemon stops
+   - Expected: evidence.verdict equals `DIRECT_FALLBACK`
+   - Expected: evidence.retry_count equals `1`
+   - Expected: evidence.bytes_equal is true
+   - Expected: evidence.diagnostics_equal is true
+   - Expected: evidence.retry_reason equals `daemon_unavailable`
+   - Expected: evidence.error_code equals `cache_unavailable`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-002 NFR-CSM-003 NFR-CSM-004 NFR-CSM-005 NFR-CSM-010 NFR-CSM-011
+step("Fail over after the cache daemon stops")
+val evidence = stop_cache_daemon("kill_after_request_before_publish")
+expect(evidence.verdict).to_equal("DIRECT_FALLBACK")
+expect(evidence.retry_count).to_equal(1)
+expect(evidence.fallback_ms).to_be_less_than(251)
+expect(evidence.bytes_equal).to_equal(true)
+expect(evidence.diagnostics_equal).to_equal(true)
+expect(evidence.retry_reason).to_equal("daemon_unavailable")
+expect(evidence.error_code).to_equal("cache_unavailable")
+expect(evidence.idle_rss_bytes).to_be_less_than(104857601)
+expect(evidence.shutdown_ms).to_be_greater_than(9999)
+expect(evidence.shutdown_ms).to_be_less_than(12001)
+expect(evidence.overhead_ratio).to_be_less_than(0.051)
+expect(evidence.overhead_rss_bytes).to_be_less_than(134217729)
+```
+
+</details>
+
+#### should restart GC when a reader enters between pre-close and final scan
+
+- Admit a reader after GC pre-close and before deletion-closed final scan
+   - Expected: evidence.verdict equals `GC_RESTARTED_FOR_READER`
+   - Expected: evidence.gc_restart_count equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-002 NFR-CSM-003 NFR-CSM-004 NFR-CSM-005 NFR-CSM-010 NFR-CSM-011
+step("Admit a reader after GC pre-close and before deletion-closed final scan")
+val evidence = verify_cached_artifact("reader_admission_epoch_between_gc_scans")
+expect(evidence.verdict).to_equal("GC_RESTARTED_FOR_READER")
+expect(evidence.reader_admission_epoch).to_be_greater_than(evidence.gc_preclose_epoch)
+expect(evidence.gc_restart_count).to_equal(1)
+expect(evidence.live_objects).to_be_greater_than(0)
+```
+
+</details>
+
+#### should publish only through the admitted CacheWriterV1 epoch
+
+- Race stale and current writer epochs at journal publication
+   - Expected: evidence.verdict equals `STALE_WRITER_REJECTED`
+   - Expected: evidence.error_code equals `cache_writer_epoch_stale`
+   - Expected: evidence.miss_reason equals `writer_epoch_mismatch`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-002 NFR-CSM-003 NFR-CSM-004 NFR-CSM-005 NFR-CSM-010 NFR-CSM-011
+step("Race stale and current writer epochs at journal publication")
+val evidence = prepare_cache_fixture("cache_writer_epoch_stale_publish")
+expect(evidence.verdict).to_equal("STALE_WRITER_REJECTED")
+expect(evidence.writer_epoch).to_be_greater_than(0)
+expect(evidence.error_code).to_equal("cache_writer_epoch_stale")
+expect(evidence.miss_reason).to_equal("writer_epoch_mismatch")
+```
+
+</details>
+
+#### should replay crash boundaries without publishing partial authority
+
+- Crash before record after record before fsync and before superblock advance
+   - Expected: evidence.verdict equals `LAST_DURABLE_GENERATION`
+   - Expected: evidence.error_code equals `cache_journal_tail_quarantined`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-002 NFR-CSM-003 NFR-CSM-004 NFR-CSM-005 NFR-CSM-010 NFR-CSM-011
+step("Crash before record after record before fsync and before superblock advance")
+val evidence = prepare_cache_fixture("journal_checkpoint_crash_boundary_matrix")
+expect(evidence.verdict).to_equal("LAST_DURABLE_GENERATION")
+expect(evidence.quarantined_objects).to_be_greater_than(0)
+expect(evidence.error_code).to_equal("cache_journal_tail_quarantined")
+```
+
+</details>
+
+#### should look up direct pins by atomic generation before object access
+
+- Advance the pin generation while a direct reader starts
+   - Expected: evidence.verdict equals `PIN_GENERATION_MATCHED`
+   - Expected: evidence.pin_lookup_generation equals `evidence.pin_generation`
+   - Expected: evidence.error_code equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-001 NFR-CSM-010
+step("Advance the pin generation while a direct reader starts")
+val evidence = verify_cached_artifact("pin_generation_first_lookup")
+expect(evidence.verdict).to_equal("PIN_GENERATION_MATCHED")
+expect(evidence.pin_lookup_generation).to_equal(evidence.pin_generation)
+expect(evidence.error_code).to_equal("")
+```
+
+</details>
+
+#### should renew a live direct pin in its current generation
+
+- Renew a direct read pin before its bounded lease expires
+   - Expected: evidence.verdict equals `PIN_RENEWED`
+   - Expected: evidence.pin_lookup_generation equals `evidence.pin_generation`
+   - Expected: evidence.pin_renewal_count equals `1`
+   - Expected: evidence.pin_expired is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-001 NFR-CSM-010
+step("Renew a direct read pin before its bounded lease expires")
+val evidence = verify_cached_artifact("pin_generation_first_renewal")
+expect(evidence.verdict).to_equal("PIN_RENEWED")
+expect(evidence.pin_lookup_generation).to_equal(evidence.pin_generation)
+expect(evidence.pin_renewal_count).to_equal(1)
+expect(evidence.pin_expired).to_equal(false)
+```
+
+</details>
+
+#### should fail closed when a direct pin expires or renewal crosses generation
+
+- Expire one pin and attempt renewal through a newer generation
+   - Expected: evidence.verdict equals `PIN_REJECTED`
+   - Expected: evidence.pin_expired is true
+   - Expected: evidence.error_code equals `cache_pin_expired`
+   - Expected: evidence.retry_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-001 NFR-CSM-010
+step("Expire one pin and attempt renewal through a newer generation")
+val evidence = verify_cached_artifact("pin_expiry_and_cross_generation_renewal")
+expect(evidence.verdict).to_equal("PIN_REJECTED")
+expect(evidence.pin_expired).to_equal(true)
+expect(evidence.error_code).to_equal("cache_pin_expired")
+expect(evidence.retry_count).to_equal(0)
+```
+
+</details>
+
+#### should report renewal failure without extending a stale pin
+
+- Fail one bounded pin renewal in the current generation
+   - Expected: evidence.verdict equals `PIN_REJECTED`
+   - Expected: evidence.pin_renewal_count equals `0`
+   - Expected: evidence.error_code equals `cache_pin_renewal_failed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-011 REQ-CSM-012 NFR-CSM-001 NFR-CSM-010
+step("Fail one bounded pin renewal in the current generation")
+val evidence = verify_cached_artifact("pin_renewal_failure")
+expect(evidence.verdict).to_equal("PIN_REJECTED")
+expect(evidence.pin_renewal_count).to_equal(0)
+expect(evidence.error_code).to_equal("cache_pin_renewal_failed")
+```
+
+</details>
+
+### REQ-CSM-013..017: virtual summaries and stable-index AST reuse
+
+#### should expose one frozen virtual source identically to every consumer
+
+- Read one virtual _tldr.spl summary
+- Compare compiler CLI MCP LSP MCP and SPipe list stat read and page results
+   - Expected: evidence.verdict equals `FROZEN_PARITY`
+   - Expected: evidence.consumer_parity_count equals `5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-013 REQ-CSM-014 REQ-CSM-015 REQ-CSM-016 REQ-CSM-017 NFR-CSM-001 NFR-CSM-010 NFR-CSM-012
+step("Read one virtual _tldr.spl summary")
+step("Compare compiler CLI MCP LSP MCP and SPipe list stat read and page results")
+val evidence = verify_summary_page("list_stat_read_page_all_consumers")
+expect(evidence.verdict).to_equal("FROZEN_PARITY")
+expect(evidence.consumer_parity_count).to_equal(5)
+expect_operation_parity(evidence.list_result)
+expect_operation_parity(evidence.stat_result)
+expect_operation_parity(evidence.read_result)
+expect_operation_parity(evidence.page_result)
+```
+
+</details>
+
+#### should use one summary owner without consumer reparsing or generators
+
+- Request one summary through every consumer adapter
+- Verify VirtualSourceStoreV1 delegates to SummaryStoreV1 exactly once
+   - Expected: evidence.verdict equals `ONE_PRIVATE_OWNER`
+   - Expected: evidence.summary_build_count equals `1`
+   - Expected: evidence.consumer_parity_count equals `5`
+   - Expected: evidence.miss_reason equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-013 REQ-CSM-014 REQ-CSM-015 REQ-CSM-016 REQ-CSM-017 NFR-CSM-001 NFR-CSM-010 NFR-CSM-012
+step("Request one summary through every consumer adapter")
+step("Verify VirtualSourceStoreV1 delegates to SummaryStoreV1 exactly once")
+val evidence = verify_summary_page("private_summary_store_tiny_gateway_lazy_service")
+expect(evidence.verdict).to_equal("ONE_PRIVATE_OWNER")
+expect(evidence.summary_build_count).to_equal(1)
+expect(evidence.consumer_parity_count).to_equal(5)
+expect(evidence.miss_reason).to_equal("")
+```
+
+</details>
+
+#### should reject forged pages private AST exposure and malformed indices
+
+- Submit an expired token and oversized malformed AST page
+   - Expected: evidence.verdict equals `REJECTED`
+   - Expected: evidence.error_code equals `virtual_source_request_invalid`
+   - Expected: evidence.consumer_parity_count equals `5`
+   - Expected: evidence.retry_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-013 REQ-CSM-014 REQ-CSM-015 REQ-CSM-016 REQ-CSM-017 NFR-CSM-001 NFR-CSM-010 NFR-CSM-012
+step("Submit an expired token and oversized malformed AST page")
+val evidence = verify_summary_page("expired_token_private_ast_oversize_bad_index_wrong_schema")
+expect(evidence.verdict).to_equal("REJECTED")
+expect(evidence.error_code).to_equal("virtual_source_request_invalid")
+expect(evidence.consumer_parity_count).to_equal(5)
+expect(evidence.retry_count).to_equal(0)
+```
+
+</details>
+
+#### should represent virtual-source not-found without an error
+
+- Stat read and page a missing virtual summary path
+   - Expected: evidence.verdict equals `NOT_FOUND`
+   - Expected: evidence.stat_result.present is false
+   - Expected: evidence.read_result.present is false
+   - Expected: evidence.page_result.present is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-013 REQ-CSM-014 REQ-CSM-015 REQ-CSM-016 REQ-CSM-017 NFR-CSM-001 NFR-CSM-010 NFR-CSM-012
+step("Stat read and page a missing virtual summary path")
+val evidence = verify_summary_page("virtual_source_not_found")
+expect(evidence.verdict).to_equal("NOT_FOUND")
+expect(evidence.stat_result.present).to_equal(false)
+expect(evidence.read_result.present).to_equal(false)
+expect(evidence.page_result.present).to_equal(false)
+expect_five_equal(evidence.stat_result.consumer_error_codes, "")
+expect_five_equal(evidence.read_result.consumer_error_codes, "")
+expect_five_equal(evidence.page_result.consumer_error_codes, "")
+```
+
+</details>
+
+### REQ-CSM-018..022: MDSOC startup capsule boundaries
+
+#### should keep help and frontend startup inside the eager capsule
+
+- Inspect the frontend-only startup closure
+   - Expected: evidence.verdict equals `EAGER_ONLY`
+   - Expected: evidence.loaded_provider_count equals `0`
+   - Expected: evidence.forbidden_loaded_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-018 REQ-CSM-019 REQ-CSM-020 REQ-CSM-021 REQ-CSM-022 NFR-CSM-006 NFR-CSM-011 NFR-CSM-012
+step("Inspect the frontend-only startup closure")
+val evidence = verify_startup_closure("help_cache_query_frontend")
+expect(evidence.verdict).to_equal("EAGER_ONLY")
+expect(evidence.loaded_provider_count).to_equal(0)
+expect(evidence.forbidden_receipt_count).to_be_greater_than(0)
+expect(evidence.forbidden_loaded_count).to_equal(0)
+```
+
+</details>
+
+#### should load only the provider selected for native output
+
+- Load only the selected native provider
+   - Expected: evidence.verdict equals `SELECTED_PROVIDER_ONLY`
+   - Expected: evidence.loaded_provider_count equals `1`
+   - Expected: evidence.forbidden_loaded_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-018 REQ-CSM-019 REQ-CSM-020 REQ-CSM-021 REQ-CSM-022 NFR-CSM-006 NFR-CSM-011 NFR-CSM-012
+step("Load only the selected native provider")
+val evidence = verify_startup_closure("native_compile_selected_llvm_provider")
+expect(evidence.verdict).to_equal("SELECTED_PROVIDER_ONLY")
+expect(evidence.loaded_provider_count).to_equal(1)
+expect(evidence.forbidden_receipt_count).to_be_greater_than(0)
+expect(evidence.forbidden_loaded_count).to_equal(0)
+```
+
+</details>
+
+#### should reject unadmitted providers without replacing the prior generation
+
+- Activate a provider with the wrong digest ABI and effects
+   - Expected: evidence.verdict equals `PREVIOUS_GENERATION_RETAINED`
+   - Expected: evidence.error_code equals `provider_admission_rejected`
+   - Expected: evidence.loaded_provider_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-018 REQ-CSM-019 REQ-CSM-020 REQ-CSM-021 REQ-CSM-022 NFR-CSM-006 NFR-CSM-011 NFR-CSM-012
+step("Activate a provider with the wrong digest ABI and effects")
+val evidence = verify_startup_closure("wrong_digest_abi_capability_config_effects")
+expect(evidence.verdict).to_equal("PREVIOUS_GENERATION_RETAINED")
+expect(evidence.error_code).to_equal("provider_admission_rejected")
+expect(evidence.loaded_provider_count).to_equal(0)
+```
+
+</details>
+
+### REQ-CSM-023..025: shadow activation and bootstrap parity
+
+#### should keep authoritative reuse disabled before complete shadow equality
+
+- Compare fresh and shadow AST summary object and diagnostics
+   - Expected: evidence.verdict equals `SHADOW_ONLY`
+   - Expected: evidence.bytes_equal is true
+   - Expected: evidence.diagnostics_equal is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-023 REQ-CSM-024 REQ-CSM-025 NFR-CSM-001 NFR-CSM-012
+step("Compare fresh and shadow AST summary object and diagnostics")
+val evidence = verify_cached_artifact("complete_shadow_mutation_crash_corruption_concurrency_relocation")
+expect(evidence.verdict).to_equal("SHADOW_ONLY")
+expect(evidence.bytes_equal).to_equal(true)
+expect(evidence.diagnostics_equal).to_equal(true)
+```
+
+</details>
+
+#### should quarantine same-action different-output nondeterminism
+
+- Produce different bytes for one complete action identity
+   - Expected: evidence.verdict equals `QUARANTINED`
+   - Expected: evidence.error_code equals `cache_nondeterminism`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-023 REQ-CSM-024 REQ-CSM-025 NFR-CSM-001 NFR-CSM-012
+step("Produce different bytes for one complete action identity")
+val evidence = verify_cached_artifact("same_action_different_output")
+expect(evidence.verdict).to_equal("QUARANTINED")
+expect(evidence.error_code).to_equal("cache_nondeterminism")
+expect(evidence.quarantined_objects).to_be_greater_than(0)
+```
+
+</details>
+
+#### should admit hits only after Phase 2 and Phase 3 parity
+
+- Verify cache and fallback parity on admitted bootstrap runtimes
+   - Expected: evidence.verdict equals `AUTHORITATIVE_HITS_ADMITTED`
+   - Expected: evidence.bytes_equal is true
+   - Expected: evidence.diagnostics_equal is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-CSM-023 REQ-CSM-024 REQ-CSM-025 NFR-CSM-001 NFR-CSM-012
+step("Verify cache and fallback parity on admitted bootstrap runtimes")
+val evidence = verify_cached_artifact("phase2_phase3_compiler_loader_interpreter_cli_tools_mcp_lsp")
+expect(evidence.verdict).to_equal("AUTHORITATIVE_HITS_ADMITTED")
+expect(evidence.bytes_equal).to_equal(true)
+expect(evidence.diagnostics_equal).to_equal(true)
+```
+
+</details>
+
+### NFR-CSM-007..009: paired compile performance evidence
+
+#### should measure the cold compile lane
+
+- Measure seven alternating cold compile pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating cold compile pairs after one warmup")
+val evidence = verify_perf_evidence("cold")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should measure the unchanged warm compile lane
+
+- Measure seven alternating unchanged warm compile pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating unchanged warm compile pairs after one warmup")
+val evidence = verify_perf_evidence("unchanged_warm")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should measure the private edit compile lane
+
+- Measure seven alternating private edit compile pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating private edit compile pairs after one warmup")
+val evidence = verify_perf_evidence("private_edit")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should measure the public edit compile lane
+
+- Measure seven alternating public edit compile pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating public edit compile pairs after one warmup")
+val evidence = verify_perf_evidence("public_edit")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should measure the trait and AOP edit compile lane
+
+- Measure seven alternating trait and AOP edit pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating trait and AOP edit pairs after one warmup")
+val evidence = verify_perf_evidence("trait_aop_edit")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should measure the native link lane
+
+- Measure seven alternating native link pairs after one warmup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Measure seven alternating native link pairs after one warmup")
+val evidence = verify_perf_evidence("native_link")
+expect_perf_pass(evidence)
+```
+
+</details>
+
+#### should reject an injected compile regression above ten percent
+
+- Reject a compile-time regression above ten percent
+   - Expected: evidence.verdict equals `FAIL`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Reject a compile-time regression above ten percent")
+val evidence = verify_perf_evidence("public_edit_injected_regression")
+expect(evidence.verdict).to_equal("FAIL")
+expect(evidence.pair_count).to_be_greater_than(6)
+expect(evidence.median_ratio).to_be_greater_than(1.10)
+expect(evidence.trimmed_mean_ratio).to_be_greater_than(1.10)
+expect(evidence.cv_ratio).to_be_less_than(0.051)
+```
+
+</details>
+
+#### should block release after one inconclusive quiet-runner retry
+
+- Retain stable miss retry and provenance telemetry for an inconclusive retry
+   - Expected: evidence.verdict equals `RELEASE_BLOCKED`
+   - Expected: evidence.retry_count equals `1`
+   - Expected: evidence.retry_reason equals `performance_evidence_inconclusive`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req NFR-CSM-007 NFR-CSM-008 NFR-CSM-009
+step("Retain stable miss retry and provenance telemetry for an inconclusive retry")
+val evidence = verify_perf_evidence("inconclusive_retry")
+expect(evidence.verdict).to_equal("RELEASE_BLOCKED")
+expect(evidence.retry_count).to_equal(1)
+expect(evidence.retry_reason).to_equal("performance_evidence_inconclusive")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 31 |
+| Active scenarios | 31 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/compiler_semantic_cache_daemon_virtual_summary.md`
+- **Plan:** `doc/03_plan/sys_test/compiler_semantic_cache_manager.md`
+- **Design:** `doc/05_design/compiler_semantic_cache_manager.md`
+- **Research:** `doc/01_research/local/compiler_semantic_cache_daemon_virtual_summary_2026-09-01.md`
+
+
+</details>

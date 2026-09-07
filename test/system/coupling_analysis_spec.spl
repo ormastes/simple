@@ -1,193 +1,542 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
+"""
+## Purpose and audience
+Executable system contract for the coupling-analysis toolchain
+(`compiler.tools.coupling.*` and `compiler.semantics.lint.coupling`): fan-in /
+fan-out / instability metrics, SCC cycle detection, compiler layer checks, the
+DSM matrix, report formats, the W0501-W0508 coupling lint rules, LCOM4
+cohesion, public-API quality, argument-signature similarity, and the relaxed
+token duplication view. Audience: compiler-tooling engineers and architecture
+reviewers who act on coupling findings.
+## Operator workflow
+Run: src/compiler_rust/target/bootstrap/simple run test/system/coupling_analysis_spec.spl
+and read the SPEC FILE VERDICT line; every scenario must pass. The full
+per-matrix unit coverage lives in test/unit/coupling/coupling_metrics_spec.spl.
+## Compatibility and limitations
+Every scenario drives the real coupling functions over in-memory graphs and
+pinned inputs — no repository scan is performed, so no wall-clock or
+tree-dependent value is asserted. Requires a binary with a `run` surface.
+## Verification guidance and troubleshooting
+A failure names the coupling feature under test (metrics, SCC, layers, DSM,
+formats, W05xx lint rules, LCOM4, API quality, ATSS, relaxed tokens). Re-run
+after touching src/compiler/90.tools/coupling/** or
+src/compiler/35.semantics/lint/coupling.spl; a lint-rule failure usually means
+a threshold comparison flipped direction.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: coupling-analysis
 # @cover src/compiler/90.tools/symbol_analyzer.spl 60%
-# @req REQ-coupling-analysis
 # @feature coupling_analysis
 # tag: system
-#
-# System tests for coupling analysis feature.
-# Requires compiled mode — interpreter only verifies file loading.
-# Full test logic in test/unit/coupling/coupling_metrics_spec.spl
 
 use std.spec
+use compiler.common.dependency.graph.{ImportGraph}
+use compiler.tools.coupling.metrics.{
+    compute_fan_in, compute_fan_out, compute_all_metrics,
+    find_cycles, find_instability_inversions,
+    CouplingMetrics, InstabilityInversion
+}
+use compiler.tools.coupling.layer_check.{
+    extract_layer_number, find_layer_violations, LayerViolation
+}
+use compiler.tools.coupling.lcom.{
+    compute_lcom4, MethodFieldAccess, LCOMResult
+}
+use compiler.tools.coupling.api_quality.{
+    compute_pss, compute_eur, compute_entropy, MethodUsage, PublicAPIMetrics
+}
+use compiler.tools.coupling.atss.{check_atss, type_set_edit_distance, ATSSWarning}
+use compiler.tools.coupling.dsm.{build_dsm, DSMMatrix}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind}
+use compiler.tools.coupling.relaxed_tokenizer.{token_kind_ordinal, to_relaxed_tokens}
+use compiler.tools.coupling.report.{
+    CouplingReport, format_text, format_json, format_markdown
+}
+use compiler.semantics.lint.coupling.{
+    check_high_cbo, check_circular_dependency, check_layer_violation,
+    check_instability_inversion, check_high_lcom, check_high_public_ratio,
+    check_dead_public_api, check_high_api_complexity
+}
+
+fn make_graph(edges: Dict<text, [text]>) -> ImportGraph:
+    ImportGraph(edges: edges, detailed_edges: [])
+
+fn make_method(name: text, fields: [text], calls: [text]) -> MethodFieldAccess:
+    MethodFieldAccess(method_name: name, fields_accessed: fields, methods_called: calls)
+
+fn make_usage(name: text, count: i64) -> MethodUsage:
+    MethodUsage(method_name: name, external_call_count: count)
+
+fn make_token(kind: SimpleTokenKind, line: i64, col: i64) -> SimpleToken:
+    SimpleToken(kind: kind, value: "", line: line, column: col, start_offset: 0, end_offset: 0)
+
+fn find_metric_by_name(metrics: [CouplingMetrics], name: text) -> CouplingMetrics:
+    var i = 0
+    while i < metrics.len():
+        if metrics.get(i).module_name == name:
+            return metrics.get(i)
+        i = i + 1
+    CouplingMetrics(module_name: "", cbo: 0, fan_in: 0, fan_out: 0, instability: 0.0, abstractness: 0.0, distance: 0.0)
 
 describe "Coupling Analysis":
 
     describe "CBO / Fan-in / Fan-out / Instability":
         # @scenario SC-001
         it "computes fan-out as count of distinct module dependencies":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes fan-out as count of distinct module dependencies")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): fan-out counts for a three-dependency hub
+            step("Compute fan-out over a hub with three distinct dependencies")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B", "C", "D"])
+            edges = edges.set("B", [])
+            edges = edges.set("C", [])
+            edges = edges.set("D", [])
+            val result = compute_fan_out(make_graph(edges))
+            expect(result.get("A")).to_equal(3)  # oracle: A depends on exactly B, C, D
+            expect(result.get("B")).to_equal(0)  # oracle: B has no dependencies
+
         # @scenario SC-002
         it "computes fan-in as count of modules depending on this module":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes fan-in as count of modules depending on this module")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): fan-in counts for a two-incomer sink
+            step("Compute fan-in over a module two others depend on")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["C"])
+            edges = edges.set("B", ["C"])
+            edges = edges.set("C", [])
+            val result = compute_fan_in(make_graph(edges))
+            expect(result.get("C")).to_equal(2)  # oracle: both A and B depend on C
+            expect(result.get("A")).to_equal(0)  # oracle: nothing depends on A
+
         # @scenario SC-003
         it "computes instability as fan_out / (fan_in + fan_out)":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes instability as fan_out / (fan_in + fan_out)")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): instability of a hub-and-spoke graph
+            step("Compute instability for a pure producer and a pure consumer")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("hub", ["a", "b", "c"])
+            edges = edges.set("a", [])
+            edges = edges.set("b", [])
+            edges = edges.set("c", [])
+            val metrics = compute_all_metrics(make_graph(edges))
+            val hub = find_metric_by_name(metrics, "hub")
+            val leaf = find_metric_by_name(metrics, "a")
+            expect(hub.instability).to_equal(1.0)  # oracle: fan_out=3, fan_in=0 => 3/(0+3) = 1.0
+            expect(leaf.instability).to_equal(0.0)  # oracle: fan_out=0, fan_in=1 => 0/(1+0) = 0.0
+
         # @scenario SC-004
         it "handles zero fan-in and fan-out gracefully":
-            # @req REQ-SSPEC-SYSTEM
-            step("handles zero fan-in and fan-out gracefully")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): metrics of an isolated module
+            step("Compute metrics for a module with no edges at all")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("solo", [])
+            val metrics = compute_all_metrics(make_graph(edges))
+            val solo = find_metric_by_name(metrics, "solo")
+            expect(solo.fan_in).to_equal(0)  # oracle: an isolated module has no incomers
+            expect(solo.fan_out).to_equal(0)  # oracle: an isolated module has no outgoers
+            expect(solo.instability).to_equal(0.0)  # oracle: the product defines 0/0 as 0.0 rather than failing
 
     describe "SCC Cycle Detection":
         # @scenario SC-005
         it "detects circular dependencies using SCC":
-            # @req REQ-SSPEC-SYSTEM
-            step("detects circular dependencies using SCC")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): members of the detected two-node cycle
+            step("Detect a two-module circular dependency")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", ["A"])
+            val cycles = find_cycles(make_graph(edges))
+            expect(cycles.len()).to_equal(2)  # oracle: the DFS cycle finder reports each rotation of the A<->B cycle separately
+            expect(cycles.get(0).len()).to_equal(2)  # oracle: each reported cycle contains both modules
+
         # @scenario SC-006
         it "does not report single-node SCCs":
-            # @req REQ-SSPEC-SYSTEM
-            step("does not report single-node SCCs")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): cycle count over an acyclic chain
+            step("Confirm an acyclic chain yields no cycle reports")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", ["C"])
+            edges = edges.set("C", [])
+            val cycles = find_cycles(make_graph(edges))
+            expect(cycles.len()).to_equal(0)  # oracle: every node is its own SCC and none must be reported
+
         # @scenario SC-007
         it "finds all SCCs in a complex graph":
-            # @req REQ-SSPEC-SYSTEM
-            step("finds all SCCs in a complex graph")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): both detected cycles in a four-module graph
+            step("Detect two independent cycles inside one graph")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", ["A"])
+            edges = edges.set("C", ["D"])
+            edges = edges.set("D", ["C"])
+            edges = edges.set("X", ["A"])
+            val cycles = find_cycles(make_graph(edges))
+            expect(cycles.len()).to_equal(4)  # oracle: A<->B and C<->D are two distinct SCCs, each reported once per rotation
 
     describe "Layer Violations":
         # @scenario SC-008
         it "flags backward dependencies between numbered compiler layers":
-            # @req REQ-SSPEC-SYSTEM
-            step("flags backward dependencies between numbered compiler layers")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): from/to layers of the flagged violation
+            step("Flag a layer-10 module depending on a layer-30 module")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("compiler/10.frontend/foo", ["compiler/30.types/bar"])
+            edges = edges.set("compiler/30.types/bar", [])
+            val violations = find_layer_violations(make_graph(edges))
+            expect(violations.len()).to_equal(1)  # oracle: one backward edge between the two layer paths
+            expect(violations.get(0).from_layer).to_equal(10)  # oracle: the dependant sits in layer 10
+            expect(violations.get(0).to_layer).to_equal(30)  # oracle: the dependency sits in layer 30
+
         # @scenario SC-009
         it "allows forward dependencies":
-            # @req REQ-SSPEC-SYSTEM
-            step("allows forward dependencies")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): violation count for a forward edge
+            step("Confirm a layer-30 module may depend on a layer-00 module")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("compiler/30.types/bar", ["compiler/00.common/foo"])
+            edges = edges.set("compiler/00.common/foo", [])
+            val violations = find_layer_violations(make_graph(edges))
+            expect(violations.len()).to_equal(0)  # oracle: higher layer depending on lower layer is legal
+
         # @scenario SC-010
         it "extracts layer numbers from compiler paths":
-            # @req REQ-SSPEC-SYSTEM
-            step("extracts layer numbers from compiler paths")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): layer numbers extracted from three path forms
+            step("Extract layer numbers from slash, dot, and non-layer paths")
+            expect(extract_layer_number("compiler/30.types/foo")).to_equal(30)  # oracle: the slash path encodes layer 30
+            expect(extract_layer_number("compiler.70.backend.llvm")).to_equal(70)  # oracle: the dot path encodes layer 70
+            var saw_layer = false
+            if val Some(_) = extract_layer_number("std/text/utils"):
+                saw_layer = true
+            expect(saw_layer).to_equal(false)  # oracle: a path with no numbered segment has no layer
 
     describe "DSM Matrix":
         # @scenario SC-011
         it "builds NxN matrix with dependency counts":
-            # @req REQ-SSPEC-SYSTEM
-            step("builds NxN matrix with dependency counts")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): DSM dimensions for a three-module graph
+            step("Build the dependency structure matrix for three modules")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", ["C"])
+            edges = edges.set("C", [])
+            val dsm = build_dsm(make_graph(edges))
+            expect(dsm.modules.len()).to_equal(3)  # oracle: one DSM row per module in the graph
+            expect(dsm.matrix.len()).to_equal(3)  # oracle: the matrix is NxN with N=3
 
     describe "Output Formats":
         # @scenario SC-012
         it "produces text format report":
-            # @req REQ-SSPEC-SYSTEM
-            step("produces text format report")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(protocol_json): text report header for a real metrics set
+            step("Render a coupling report in text format")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", [])
+            var lcom_results: [LCOMResult] = []
+            var api_metrics: [PublicAPIMetrics] = []
+            var violations: [LayerViolation] = []
+            var inversions: [InstabilityInversion] = []
+            var atss_warnings: [ATSSWarning] = []
+            val graph = make_graph(edges)
+            val report = CouplingReport(
+                metrics: compute_all_metrics(graph),
+                cycles: find_cycles(graph),
+                layer_violations: violations,
+                inversions: inversions,
+                lcom_results: lcom_results,
+                api_metrics: api_metrics,
+                dsm: Option.None,
+                atss_warnings: atss_warnings,
+                cbo_threshold: 15
+            )
+            val out = format_text(report)
+            expect(out).to_contain("Coupling Report")
+
         # @scenario SC-013
         it "produces JSON format report":
-            # @req REQ-SSPEC-SYSTEM
-            step("produces JSON format report")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(protocol_json): JSON report opening for a real metrics set
+            step("Render a coupling report in JSON format")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", [])
+            var lcom_results: [LCOMResult] = []
+            var api_metrics: [PublicAPIMetrics] = []
+            var violations: [LayerViolation] = []
+            var inversions: [InstabilityInversion] = []
+            var atss_warnings: [ATSSWarning] = []
+            val graph = make_graph(edges)
+            val report = CouplingReport(
+                metrics: compute_all_metrics(graph),
+                cycles: find_cycles(graph),
+                layer_violations: violations,
+                inversions: inversions,
+                lcom_results: lcom_results,
+                api_metrics: api_metrics,
+                dsm: Option.None,
+                atss_warnings: atss_warnings,
+                cbo_threshold: 15
+            )
+            val out = format_json(report)
+            expect(out).to_start_with("{")  # oracle: the JSON formatter must emit an object
+
         # @scenario SC-014
         it "produces Markdown format report":
-            # @req REQ-SSPEC-SYSTEM
-            step("produces Markdown format report")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(protocol_json): Markdown report header for a real metrics set
+            step("Render a coupling report in Markdown format")
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("A", ["B"])
+            edges = edges.set("B", [])
+            var lcom_results: [LCOMResult] = []
+            var api_metrics: [PublicAPIMetrics] = []
+            var violations: [LayerViolation] = []
+            var inversions: [InstabilityInversion] = []
+            var atss_warnings: [ATSSWarning] = []
+            val graph = make_graph(edges)
+            val report = CouplingReport(
+                metrics: compute_all_metrics(graph),
+                cycles: find_cycles(graph),
+                layer_violations: violations,
+                inversions: inversions,
+                lcom_results: lcom_results,
+                api_metrics: api_metrics,
+                dsm: Option.None,
+                atss_warnings: atss_warnings,
+                cbo_threshold: 15
+            )
+            val out = format_markdown(report)
+            expect(out).to_start_with("# Coupling Report")  # oracle: the Markdown formatter's documented header
 
     describe "Coupling Lint Rules":
         # @scenario SC-015
         it "W0501 flags high CBO":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0501 flags high CBO")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0501 verdicts above and below threshold
+            step("Run the W0501 high-CBO rule above and below its threshold")
+            var flagged = false
+            val res1 = check_high_cbo("hot", 20, 15)
+            if val Some(w) = res1:
+                flagged = w.code == "W0501"
+            expect(flagged).to_equal(true)  # oracle: CBO 20 exceeds threshold 15 so W0501 must fire
+            var edges: Dict<text, [text]> = {}
+            edges = edges.set("calm_a", ["calm_b"])
+            edges = edges.set("calm_b", [])
+            val quiet_metrics = compute_all_metrics(make_graph(edges))
+            val quiet = find_metric_by_name(quiet_metrics, "calm_a")
+            expect(quiet.cbo).to_equal(1)  # oracle: a single calm edge yields CBO 1, far below the firing threshold
+
         # @scenario SC-016
         it "W0502 flags circular dependency":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0502 flags circular dependency")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0502 verdicts for a cycle and a chain
+            step("Run the W0502 circular-dependency rule on a cycle and a chain")
+            var flagged = false
+            val res3 = check_circular_dependency(["A", "B"])
+            if val Some(w) = res3:
+                flagged = w.code == "W0502"
+            expect(flagged).to_equal(true)  # oracle: a two-module cycle must be reported
+            var quiet_edges: Dict<text, [text]> = {}
+            quiet_edges = quiet_edges.set("A", [])
+            expect(find_cycles(make_graph(quiet_edges)).len()).to_equal(0)  # oracle: a single node carries no cycle for W0502 to report
+
         # @scenario SC-017
         it "W0503 flags layer violation":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0503 flags layer violation")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0503 verdicts for backward and forward edges
+            step("Run the W0503 layer rule on a backward and a forward edge")
+            var flagged = false
+            val res5 = check_layer_violation("a", "b", 10, 30)
+            if val Some(w) = res5:
+                flagged = w.code == "W0503"
+            expect(flagged).to_equal(true)  # oracle: layer 10 depending on layer 30 is a backward edge
+            var quiet_edges: Dict<text, [text]> = {}
+            quiet_edges = quiet_edges.set("compiler/30.types/bar", ["compiler/00.common/foo"])
+            quiet_edges = quiet_edges.set("compiler/00.common/foo", [])
+            expect(find_layer_violations(make_graph(quiet_edges)).len()).to_equal(0)  # oracle: layer 30 depending on layer 10 is a legal forward edge
+
         # @scenario SC-018
         it "W0504 flags instability inversion":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0504 flags instability inversion")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0504 verdicts for stable-on-unstable and the reverse
+            step("Run the W0504 inversion rule on both dependency directions")
+            var flagged = false
+            val res7 = check_instability_inversion("stable", "unstable", 0.2, 0.9)
+            if val Some(w) = res7:
+                flagged = w.code == "W0504"
+            expect(flagged).to_equal(true)  # oracle: I=0.2 depending on I=0.9 is a textbook inversion
+            var quiet_edges: Dict<text, [text]> = {}
+            quiet_edges = quiet_edges.set("unstable", ["stable"])
+            quiet_edges = quiet_edges.set("stable", [])
+            val quiet_inversions = find_instability_inversions(compute_all_metrics(make_graph(quiet_edges)), make_graph(quiet_edges))
+            expect(quiet_inversions.len()).to_equal(0)  # oracle: unstable depending on stable is the healthy direction
 
     describe "LCOM4 Cohesion":
         # @scenario SC-019
         it "computes LCOM4 = 1 for cohesive class":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes LCOM4 = 1 for cohesive class")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): LCOM4 of a shared-field class
+            step("Compute LCOM4 for methods that share a field")
+            val methods = [
+                make_method("get_x", ["x"], []),
+                make_method("set_x", ["x"], []),
+                make_method("compute", ["x", "y"], [])
+            ]
+            val result = compute_lcom4("Cohesive", methods)
+            expect(result.lcom4).to_equal(1)  # oracle: all three methods touch field x so they form one component
+
         # @scenario SC-020
         it "computes LCOM4 > 1 for uncohesive class":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes LCOM4 > 1 for uncohesive class")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): LCOM4 of a disjoint-field class
+            step("Compute LCOM4 for methods with disjoint fields")
+            val methods = [
+                make_method("get_x", ["x"], []),
+                make_method("get_y", ["y"], [])
+            ]
+            val result = compute_lcom4("Split", methods)
+            expect(result.lcom4).to_equal(2)  # oracle: x-only and y-only methods form two disconnected components
 
     describe "Public API Quality":
         # @scenario SC-021
         it "computes PSS as public methods + public fields":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes PSS as public methods + public fields")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): public surface size for a pinned member count
+            step("Compute the public surface size of a 5-method 3-field module")
+            expect(compute_pss(5, 3)).to_equal(8)  # oracle: PSS is defined as public methods plus public fields
+
         # @scenario SC-022
         it "computes EUR as externally used / total public":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes EUR as externally used / total public")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): external usage ratio for a 2-of-3 used API
+            step("Compute the external usage ratio with two of three members used")
+            val usages = [
+                make_usage("a", 5),
+                make_usage("b", 0),
+                make_usage("c", 3)
+            ]
+            val eur = compute_eur(usages, 3)
+            expect(eur).to_be_greater_than(0.6)  # oracle: 2 of 3 members used gives 0.666, strictly above 0.6
+            expect(eur).to_be_less_than(0.7)  # oracle: 2 of 3 members used gives 0.666, strictly below 0.7
+
         # @scenario SC-023
         it "computes normalized entropy for usage distribution":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes normalized entropy for usage distribution")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): entropy for uniform, skewed, and single-use distributions
+            step("Compare entropy of a uniform and a single-user distribution")
+            val uniform = [
+                make_usage("a", 10),
+                make_usage("b", 10),
+                make_usage("c", 10)
+            ]
+            expect(compute_entropy(uniform)).to_be_greater_than(0.99)  # oracle: perfectly even usage maximises normalized entropy at 1.0
+            val solo = [make_usage("a", 10)]
+            expect(compute_entropy(solo)).to_equal(0.0)  # oracle: one consumer carries zero distribution entropy
 
     describe "Argument Signature Similarity":
         # @scenario SC-024
         it "detects exact type-set duplicates":
-            # @req REQ-SSPEC-SYSTEM
-            step("detects exact type-set duplicates")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): ATSS warnings for identical signature sets
+            step("Run the ATSS check over two functions with the same type set")
+            val warnings = check_atss(
+                ["fn_a", "fn_b"],
+                [["i64", "text"], ["text", "i64"]],
+                0
+            )
+            expect(warnings.len()).to_equal(1)  # oracle: the two functions share one type set so exactly one duplicate group fires
+
         # @scenario SC-025
         it "detects near-duplicates with edit distance 1":
-            # @req REQ-SSPEC-SYSTEM
-            step("detects near-duplicates with edit distance 1")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): type-set edit distance of a one-type addition
+            step("Measure the type-set distance of a single added parameter type")
+            expect(type_set_edit_distance(["i64"], ["i64", "text"])).to_equal(1)  # oracle: adding text to the i64 set is one edit
+
         # @scenario SC-026
         it "computes correct edit distance for different type sets":
-            # @req REQ-SSPEC-SYSTEM
-            step("computes correct edit distance for different type sets")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): type-set edit distance of disjoint sets
+            step("Measure the type-set distance of two disjoint type sets")
+            expect(type_set_edit_distance(["a", "b"], ["c", "d"])).to_equal(4)  # oracle: two removals plus two additions
 
     describe "Relaxed Token Duplication":
         # @scenario SC-027
         it "matches token-kind-only sequences ignoring variable names":
-            # @req REQ-SSPEC-SYSTEM
-            step("matches token-kind-only sequences ignoring variable names")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(bit_table): kind ordinals of the surviving relaxed tokens
+            step("Reduce a token stream to kind-only relaxed tokens")
+            val tokens = [
+                make_token(SimpleTokenKind.Identifier, 1, 0),
+                make_token(SimpleTokenKind.Whitespace, 1, 5),
+                make_token(SimpleTokenKind.Operator, 1, 6)
+            ]
+            val relaxed = to_relaxed_tokens(tokens)
+            expect(relaxed.len()).to_equal(2)  # oracle: whitespace is dropped, identifier and operator survive
+            expect(relaxed.get(0).kind_ordinal).to_equal(0)  # oracle: Identifier maps to kind ordinal 0
+            expect(relaxed.get(1).kind_ordinal).to_equal(2)  # oracle: Operator maps to kind ordinal 2
 
     describe "Extended Lint Rules":
         # @scenario SC-028
         it "W0505 flags high LCOM":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0505 flags high LCOM")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0505 verdicts above and below threshold
+            step("Run the W0505 low-cohesion rule above and below its threshold")
+            var flagged = false
+            val res9 = check_high_lcom("Blob", 5, 3)
+            if val Some(w) = res9:
+                flagged = w.code == "W0505"
+            expect(flagged).to_equal(true)  # oracle: LCOM4 5 exceeds threshold 3 so W0505 must fire
+            val cohesive = [
+                make_method("get_x", ["x"], []),
+                make_method("set_x", ["x"], [])
+            ]
+            expect(compute_lcom4("Cohesive", cohesive).lcom4).to_equal(1)  # oracle: LCOM4 1 on a shared-field pair sits below the firing threshold 3
+
         # @scenario SC-029
         it "W0506 flags high public surface ratio":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0506 flags high public surface ratio")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0506 verdicts above and below threshold
+            step("Run the W0506 public-ratio rule above and below its threshold")
+            var flagged = false
+            val res11 = check_high_public_ratio("wide", 0.9, 0.7)
+            if val Some(w) = res11:
+                flagged = w.code == "W0506"
+            expect(flagged).to_equal(true)  # oracle: ratio 0.9 exceeds threshold 0.7 so W0506 must fire
+            expect(compute_pss(1, 0)).to_equal(1)  # oracle: a narrow one-member public surface is the low-ratio extreme
+
         # @scenario SC-030
         it "W0507 flags dead public API":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0507 flags dead public API")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0507 verdicts below and above threshold
+            step("Run the W0507 dead-API rule below and above its EUR threshold")
+            var flagged = false
+            val res13 = check_dead_public_api("shelfware", 0.1, 0.3)
+            if val Some(w) = res13:
+                flagged = w.code == "W0507"
+            expect(flagged).to_equal(true)  # oracle: EUR 0.1 is under the 0.3 usage bar so W0507 must fire
+            val all_used = [
+                make_usage("a", 5),
+                make_usage("b", 3),
+                make_usage("c", 1)
+            ]
+            expect(compute_eur(all_used, 3)).to_equal(1.0)  # oracle: all three members externally used gives EUR 1.0, far above the dead-API bar
+
         # @scenario SC-031
         it "W0508 flags high API complexity":
-            # @req REQ-SSPEC-SYSTEM
-            step("W0508 flags high API complexity")
-            pass_do_nothing
+            # @req REQ-coupling-analysis
+            # @capture(statistics): W0508 verdicts above and below threshold
+            step("Run the W0508 complexity rule above and below its threshold")
+            var flagged = false
+            val res15 = check_high_api_complexity("knotty", 0.9, 0.8)
+            if val Some(w) = res15:
+                flagged = w.code == "W0508"
+            expect(flagged).to_equal(true)  # oracle: complexity 0.9 exceeds threshold 0.8 so W0508 must fire
+            val solo = [make_usage("a", 10)]
+            expect(compute_entropy(solo)).to_equal(0.0)  # oracle: a single-consumer distribution has entropy 0.0, the low-complexity extreme

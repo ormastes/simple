@@ -1,20 +1,68 @@
+# Lifecycle: research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+"""
+## Purpose and audience
+This spec is for compiler backend maintainers who route native AOT codegen
+through the Cranelift target owner. It pins `CodegenPipeline.aot(...)` to the
+`CraneliftTarget` enum (Native, X86_64) and guards against a regression where
+the backend facade module reverts to routing through the older, deprecated
+`CodegenTarget` enum instead.
+
+## Operator workflow
+Run this file directly (`bin/simple run <this spec>`) after touching
+`compiler.backend.codegen` or `src/compiler/70.backend/backend/compiler.spl`.
+The first two scenarios build a pipeline object in-process and assert its
+target/mode fields; the third scenario reads the backend module's own source
+text and checks which enum it imports and calls, which is the only way to
+observe module-level wiring without executing a full native build.
+
+## Compatibility and limitations
+Scenario 3 is a source-text observation, not a semantic/behavioral check: it
+verifies the specific import and call-site strings the backend module is
+expected to contain. It is intentionally sensitive to the backend module
+being edited to route through `CraneliftTarget` rather than the facade
+`CodegenTarget` enum. As of this writing,
+`src/compiler/70.backend/backend/compiler.spl` still routes through
+`CodegenTarget.Native`, not `CraneliftTarget.Native` — this scenario is
+expected to be RED until that module is migrated, and its assertion must not
+be softened to hide that.
+
+## Verification guidance and troubleshooting
+If scenario 3 fails, check `src/compiler/70.backend/backend/compiler.spl` for
+its current `use compiler.backend.codegen.{...}` line and confirm whether it
+still constructs `CodegenPipeline.aot(CodegenTarget.Native)` instead of
+`CodegenPipeline.aot(CraneliftTarget.Native)`. If scenarios 1-2 fail, the
+`CraneliftTarget`/`CodegenMode` enum shape itself changed and
+`CodegenPipeline.aot` construction should be re-checked directly.
+Traceability: REQ-COMPILER-BACKEND-CRANELIFT-TARGET-001.
+"""
+
 use std.spec
 use std.io_runtime.{file_read}
 use compiler.backend.codegen.{CodegenMode, CodegenPipeline, CraneliftTarget}
 
+# @manual_section: Cranelift target boundary
 describe "compiler backend Cranelift target boundary":
     it "constructs the native AOT pipeline with the Cranelift target owner":
+        step("Construct an AOT pipeline pinned to the Cranelift Native target")
+        # @req REQ-COMPILER-BACKEND-CRANELIFT-TARGET-001
+        # @capture(bit_table): pipeline target and mode enum fields after construction
         val pipeline = CodegenPipeline.aot(CraneliftTarget.Native)
         expect(pipeline.target).to_equal(CraneliftTarget.Native)
         expect(pipeline.mode).to_equal(CodegenMode.Aot)
 
     it "preserves the explicit x86_64 Cranelift target adjacent case":
+        step("Construct an AOT pipeline pinned to the Cranelift X86_64 target")
+        # @req REQ-COMPILER-BACKEND-CRANELIFT-TARGET-001
+        # @capture(bit_table): pipeline target and mode enum fields after construction
         val pipeline = CodegenPipeline.aot(CraneliftTarget.X86_64)
         expect(pipeline.target).to_equal(CraneliftTarget.X86_64)
         expect(pipeline.mode).to_equal(CodegenMode.Aot)
 
     it "does not route the backend through the facade CodegenTarget enum":
-        val source = file_read("src/compiler/70.backend/backend/compiler.spl")
-        expect(source).to_contain("use compiler.backend.codegen.{CodegenPipeline, CraneliftTarget}")
-        expect(source).to_contain("CodegenPipeline.aot(CraneliftTarget.Native)")
-        expect(source.contains("CodegenPipeline.aot(CodegenTarget.Native)")).to_equal(false)
+        step("Read the backend module source and confirm it imports CraneliftTarget, not the CodegenTarget facade")
+        # @req REQ-COMPILER-BACKEND-CRANELIFT-TARGET-001
+        # @capture(bit_table): presence/absence of the CraneliftTarget import line and the CodegenTarget.Native call-site string
+        val backend_module_text = file_read("src/compiler/70.backend/backend/compiler.spl")
+        expect(backend_module_text).to_contain("use compiler.backend.codegen.{CodegenPipeline, CraneliftTarget}")
+        expect(backend_module_text).to_contain("CodegenPipeline.aot(CraneliftTarget.Native)")
+        check(backend_module_text.contains("CodegenPipeline.aot(CodegenTarget.Native)") == false)

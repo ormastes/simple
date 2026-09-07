@@ -10,7 +10,9 @@
 # Windows has no tmux. The windows backend does not fake panes: it reports
 # failure with a concrete reason instead of inventing a pane list.
 
-use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
+use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which,
+    sosix_pty_open, sosix_pty_spawn, sosix_pty_write, sosix_pty_close,
+    sosix_pty_is_running}
 
 struct Pane:
     pane_id: text
@@ -18,6 +20,78 @@ struct Pane:
     pid: i64
     active: bool
     zoomed: bool
+
+struct WindowsPaneRecord:
+    session: text
+    pane: Pane
+    pty_handle: i32
+
+const WINDOWS_PANE_CAPACITY: i64 = 16
+var _windows_panes: [WindowsPaneRecord] = []
+var _windows_next_pane: i64 = 1
+var _windows_probe_known: bool = false
+var _windows_probe_ok: bool = false
+
+fn windows_quote_arg(arg: text) -> text:
+    """Quote one CreateProcess command-line argument using Windows CRT rules."""
+    if arg != "" and not arg.contains(" ") and not arg.contains("\t") and not arg.contains("\""):
+        return arg
+    var out = "\""
+    var slashes: i64 = 0
+    for ch in arg.chars():
+        if ch == "\\":
+            slashes = slashes + 1
+        else:
+            if ch == "\"":
+                var qi: i64 = 0
+                while qi < slashes * 2 + 1:
+                    out = out + "\\"
+                    qi = qi + 1
+                out = out + "\""
+            else:
+                var si: i64 = 0
+                while si < slashes:
+                    out = out + "\\"
+                    si = si + 1
+                out = out + ch
+            slashes = 0
+    var ti: i64 = 0
+    while ti < slashes * 2:
+        out = out + "\\"
+        ti = ti + 1
+    out + "\""
+
+fn windows_command_line(cmd: text, args: [text]) -> text:
+    var line = windows_quote_arg(cmd)
+    for arg in args:
+        line = line + " " + windows_quote_arg(arg)
+    line
+
+fn windows_spawn_command_line(cmd: text, args: [text]) -> text:
+    """Build a ConPTY command line, routing Windows batch shims via cmd.exe."""
+    val lower = cmd.lower()
+    if lower.ends_with(".cmd") or lower.ends_with(".bat"):
+        return windows_command_line("cmd.exe", ["/d", "/c", "call", cmd] + args)
+    windows_command_line(cmd, args)
+
+fn _windows_pane_copy(pane: Pane, active: bool, zoomed: bool) -> Pane:
+    Pane(pane_id: pane.pane_id, title: pane.title, pid: pane.pid,
+        active: active, zoomed: zoomed)
+
+fn _windows_list(session: text) -> [Pane]:
+    var panes: [Pane] = []
+    var live: [WindowsPaneRecord] = []
+    for record in _windows_panes:
+        if sosix_pty_is_running(record.pty_handle):
+            live = live + [record]
+            if record.session == session:
+                panes = panes + [record.pane]
+        else:
+            # Reap the PTY provider record after the child exits. A false
+            # close is harmless when another owner already completed cleanup.
+            val _closed = sosix_pty_close(record.pty_handle)
+    _windows_panes = live
+    panes
 
 # tmux emits one line per pane. pane_title may contain spaces, so it is LAST and
 # the remaining columns are rejoined into it. `.split(sep, N)` ignores N on this
@@ -111,7 +185,13 @@ fn pane_backend_name() -> text:
 # POSITIVE probe: tmux must be on PATH and must actually answer.
 fn pane_available() -> bool:
     if _is_windows():
-        return false
+        if not _windows_probe_known:
+            val handle = sosix_pty_open(2, 2)
+            _windows_probe_ok = handle >= 0
+            if handle >= 0:
+                val _closed = sosix_pty_close(handle)
+            _windows_probe_known = true
+        return _windows_probe_ok
     if sosix_which("tmux") == "":
         return false
     sosix_run("tmux", ["-V"]).exit_code == 0
@@ -124,6 +204,8 @@ fn _tmux_ok(args: [text]) -> bool:
 fn pane_list(session: text) -> [Pane]:
     if not pane_available():
         return []
+    if _is_windows():
+        return _windows_list(session)
     val result = sosix_run("tmux", pane_list_argv(session))
     if result.exit_code != 0:
         return []
@@ -132,16 +214,58 @@ fn pane_list(session: text) -> [Pane]:
 fn pane_select(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
+    if _is_windows():
+        var found = false
+        var next: [WindowsPaneRecord] = []
+        for record in _windows_panes:
+            val selected = record.session == session and record.pane.pane_id == pane_id
+            if selected:
+                found = true
+            val active = if record.session == session: selected else: record.pane.active
+            next = next + [WindowsPaneRecord(session: record.session,
+                pane: _windows_pane_copy(record.pane, active, record.pane.zoomed),
+                pty_handle: record.pty_handle)]
+        if found:
+            _windows_panes = next
+        return found
     _tmux_ok(pane_select_argv(pane_id))
 
 # Toggle maximize on the pane currently taking a command.
 fn pane_zoom(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
+    if _is_windows():
+        var found = false
+        var next: [WindowsPaneRecord] = []
+        for record in _windows_panes:
+            val selected = record.session == session and record.pane.pane_id == pane_id
+            if selected:
+                found = true
+            val zoomed = if selected: not record.pane.zoomed else: false
+            next = next + [WindowsPaneRecord(session: record.session,
+                pane: _windows_pane_copy(record.pane, record.pane.active, zoomed),
+                pty_handle: record.pty_handle)]
+        if found:
+            _windows_panes = next
+        return found
     _tmux_ok(pane_zoom_argv(pane_id))
 
 fn pane_kill(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
+        return false
+    if _is_windows():
+        var found = false
+        var closed = false
+        var next: [WindowsPaneRecord] = []
+        for record in _windows_panes:
+            if record.session == session and record.pane.pane_id == pane_id:
+                found = true
+                closed = sosix_pty_close(record.pty_handle)
+            else:
+                next = next + [record]
+        if found and closed:
+            _windows_panes = next
+            return true
         return false
     _tmux_ok(pane_kill_argv(pane_id))
 
@@ -150,6 +274,11 @@ fn pane_kill(session: text, pane_id: text) -> bool:
 # partial line is never submitted to an agent.
 fn pane_send(session: text, pane_id: text, body: text) -> bool:
     if session == "" or pane_id == "" or body == "":
+        return false
+    if _is_windows():
+        for record in _windows_panes:
+            if record.session == session and record.pane.pane_id == pane_id:
+                return sosix_pty_write(record.pty_handle, body + "\r\n")
         return false
     if not _tmux_ok(pane_send_literal_argv(pane_id, body)):
         return false
@@ -163,6 +292,23 @@ fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
         return empty
     if session == "" or cmd == "":
         return empty
+    if _is_windows():
+        if _windows_panes.len() >= WINDOWS_PANE_CAPACITY:
+            return empty
+        val handle = sosix_pty_open(24, 80)
+        if handle < 0:
+            return empty
+        val pid = sosix_pty_spawn(handle, windows_spawn_command_line(cmd, args))
+        if pid <= 0:
+            val _closed = sosix_pty_close(handle)
+            return empty
+        val pane_id = "%w" + _windows_next_pane.to_text()
+        _windows_next_pane = _windows_next_pane + 1
+        val pane = Pane(pane_id: pane_id, title: title, pid: pid,
+            active: _windows_list(session).len() == 0, zoomed: false)
+        _windows_panes = _windows_panes + [WindowsPaneRecord(
+            session: session, pane: pane, pty_handle: handle)]
+        return pane
     var argv: [text] = []
     if pane_list(session).len() == 0:
         argv = ["new-session", "-d", "-s", session, "-P", "-F", "#{{pane_id}}"]
@@ -186,5 +332,6 @@ export Pane, PANE_FORMAT
 export pane_parse_line, pane_parse_lines
 export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv
 export pane_send_literal_argv, pane_send_enter_argv
+export windows_quote_arg, windows_command_line, windows_spawn_command_line, WINDOWS_PANE_CAPACITY
 export pane_backend_name, pane_available
 export pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send

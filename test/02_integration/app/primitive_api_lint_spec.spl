@@ -1,3 +1,32 @@
+"""
+## Purpose and audience
+Contract for the primitive_api lint rule, for the engineers who own
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl`: public APIs
+must not expose bare primitive parameter/return types, while newunit semantic
+wrappers and pure-math signatures stay unflagged, and the audit surface
+(primitive_api_audit_source / primitive_api_audit_report) classifies the same
+signatures without changing the visible lint count.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/02_integration/app/primitive_api_lint_spec.spl
+Each scenario feeds a fixture source through check_primitive_api (or the
+audit pair) and pins the visible fix count or audit report content.
+## Compatibility and limitations
+Fixtures are minimal single-function sources checked through the rule's
+public entry points only; file-scope `#![allow(primitive_api)]` suppression
+and `pub me` / `pub static fn` variants are not exercised here.
+## Verification guidance and troubleshooting
+A count failure means the rule's bare-primitive or pure-math classification
+changed — diff check_primitive_api_with_lines before editing an assertion.
+The `audits bool and text...` scenario is currently RED by design (see its
+NOTE): the rule emits a visible fix where the contract still expects an
+audit-only classification.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: primitive-api-lint
+
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api, primitive_api_audit_report, primitive_api_audit_source}
 
 fn count_visible_primitive_api(source: text) -> i64:
@@ -13,36 +42,60 @@ fn count_visible_primitive_api(source: text) -> i64:
 
 describe "primitive_api lint":
     it "flags bare primitive public function parameter and return types":
+        # @req REQ-COMPILER-LINT-PRIMITIVE-001
+        # @capture(statistics): visible primitive_api fixes for the i64/i32 fixture
+        step("Check a pub fn with bare i64 param and i32 return through the lint")
         val source =
             "pub fn truncate(value: i64) -> i32:\n" +
             "    return value as i32\n"
 
-        expect(count_visible_primitive_api(source)).to_equal(2)
+        expect(count_visible_primitive_api(source)).to_equal(2)  # oracle: one fix for the bare param plus one for the bare return type
 
     it "does not flag newunit semantic wrapper public APIs":
+        # @req REQ-COMPILER-LINT-PRIMITIVE-002
+        # @capture(statistics): visible fix count for the newunit wrapper fixture
+        step("Check a pub fn whose param and return use a newunit wrapper type")
         val source =
             "newunit UserId: i64 as uid\n" +
             "\n" +
             "pub fn current_user() -> UserId:\n" +
             "    return 42_uid\n"
 
-        expect(count_visible_primitive_api(source)).to_equal(0)
+        expect(count_visible_primitive_api(source)).to_equal(0)  # oracle: a semantic newunit wrapper is not a bare primitive and must not be flagged
 
     it "audits bool and text public primitives without changing lint count":
+        # NOTE: legitimately RED — product defect. check_primitive_api_with_lines
+        # (src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl, the
+        # `if _is_bare_primitive_type(param_type)` emission after the
+        # is_pure_math split) emits a VISIBLE EasyFix for the bare `text`
+        # parameter of `pub fn enabled(name: text) -> bool` (count 1), while
+        # this scenario's contract — and the audit surface, which still
+        # classifies the same signature as audit-only entries
+        # needs_domain_text_type / needs_bool_wrapper_or_enum — expects the
+        # audit to record the finding WITHOUT changing the visible lint count
+        # (expected 0). The audit lane and the lint lane disagree on who owns
+        # bool/text primitives; the lint lane must stop emitting here until
+        # that is settled.
+        # @req REQ-COMPILER-LINT-PRIMITIVE-003
+        # @capture(statistics): audit entries and visible count for the bool/text fixture
+        step("Run the audit pair and the visible lint over a bool/text signature")
         val source =
             "pub fn enabled(name: text) -> bool:\n" +
             "    return name.len() > 0\n"
 
         val entries = primitive_api_audit_source(source, "sample.spl")
         val report = primitive_api_audit_report(source, "sample.spl")
-        expect(count_visible_primitive_api(source)).to_equal(0)
-        expect(entries.len()).to_equal(2)
+        expect(count_visible_primitive_api(source)).to_equal(0)  # oracle: bool/text primitives belong to the audit surface, not the visible lint
+        expect(entries.len()).to_equal(2)  # oracle: the audit records exactly needs_domain_text_type and needs_bool_wrapper_or_enum
         expect(report).to_contain("needs_domain_text_type")
         expect(report).to_contain("needs_bool_wrapper_or_enum")
 
     it "does not flag pure math signatures":
+        # @req REQ-COMPILER-LINT-PRIMITIVE-004
+        # @capture(statistics): visible fix count for the pure-math fixture
+        step("Check a pub fn whose every type is the same primitive i64")
         val source =
             "pub fn add(left: i64, right: i64) -> i64:\n" +
             "    return left + right\n"
 
-        expect(count_visible_primitive_api(source)).to_equal(0)
+        expect(count_visible_primitive_api(source)).to_equal(0)  # oracle: an all-same-primitive signature is pure math and exempt

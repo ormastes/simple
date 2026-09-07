@@ -1,7 +1,3 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
-
 """
 ## Purpose and audience
 Purpose: prove the P2 common index engine — idempotent replace, delete
@@ -9,7 +5,29 @@ no-op/precondition validation, and logical-root determinism across equivalent
 delta histories — and the P2 exhaustive top-k oracle's ordering/tie-break.
 Audience: engineers implementing later index/retrieval packages (P4-P8) who
 must match this engine's observable behavior.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/search/index_engine_spec.spl` from the repo root; each
+scenario drives the real IndexEngine / Segment / top-k product calls.
+
+## Compatibility and limitations
+Scenarios exercise the pure in-memory engine only — persistence, concurrency,
+and segment merging across processes are out of scope. The malformed mixed
+precondition is constructed directly because the tagged constructors cannot
+produce it.
+
+## Verification guidance and troubleshooting
+A red scenario prints the observed logical root, count, or ranking; compare
+against the expected value cited in the failing assertion. If `logical_root`
+mismatches after an equivalent history, suspect document-order leakage into
+the root digest.
 """
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_base_architecture.md
+# @manual_section: index-engine-idempotence
 
 use std.spec.step
 use std.spec
@@ -33,6 +51,8 @@ fn doc_of(id: text, revision: text, title: text) -> ScopedSearchDocumentV1:
 
 describe "index_engine: idempotent replace by (id, revision)":
     it "treats a repeated add of the same (id, revision) as a no-op":
+        # @req REQ-LIB-SEARCH-001
+        # @capture(statistics): logical root digest and document count after the replayed add retained for review
         step("build an engine with one document")
         val d0 = doc_of("doc-1", "r1", "Alpha")
         val engine0 = IndexEngine.of_documents([d0])
@@ -41,10 +61,12 @@ describe "index_engine: idempotent replace by (id, revision)":
         val engine1 = engine0.apply_operation(op).unwrap()
         step("logical root and document count are unchanged")
         expect(engine1.logical_root()).to_equal(engine0.logical_root())
-        expect(engine1.document_count()).to_equal(1)
+        expect(engine1.document_count()).to_equal(1)  # oracle: the repeated add must not insert a second copy of the same (id, revision)
         return ()
 
     it "treats replaying a replace to an already-current revision as a no-op":
+        # @req REQ-LIB-SEARCH-002
+        # @capture(statistics): logical root digest and stored revision after the replayed replace retained for review
         step("build an engine with one document at revision r2")
         val d0 = doc_of("doc-1", "r1", "Alpha")
         val d1 = doc_of("doc-1", "r2", "Alpha v2")
@@ -61,6 +83,9 @@ describe "index_engine: idempotent replace by (id, revision)":
         return ()
 
     it "rejects a replace whose asserted prior revision does not match":
+        # @req REQ-LIB-SEARCH-003
+        # @capture(statistics): rejected replace outcome for a mismatched prior revision retained for review
+        step("apply a replace whose asserted prior revision disagrees with the stored document")
         val d0 = doc_of("doc-1", "r1", "Alpha")
         val d1 = doc_of("doc-1", "r2", "Alpha v2")
         val engine0 = IndexEngine.of_documents([d0])
@@ -71,6 +96,9 @@ describe "index_engine: idempotent replace by (id, revision)":
         return ()
 
     it "rejects a replace targeting a document that does not exist":
+        # @req REQ-LIB-SEARCH-004
+        # @capture(statistics): rejected replace outcome for an absent target document retained for review
+        step("apply a replace against an empty engine")
         val engine0 = IndexEngine.of_documents([])
         val d1 = doc_of("doc-1", "r2", "Alpha v2")
         val result = engine0.apply_operation(
@@ -81,27 +109,39 @@ describe "index_engine: idempotent replace by (id, revision)":
 
 describe "index_engine: delete no-op and closed precondition":
     it "treats deleting an absent id as a no-op (delete_absent)":
+        # @req REQ-LIB-SEARCH-005
+        # @capture(statistics): logical root digest and document count after deleting an absent id retained for review
+        step("delete an id that was never added")
         val engine0 = IndexEngine.of_documents([doc_of("doc-1", "r1", "Alpha")])
         val engine1 = engine0.apply_operation(IndexOperationV1.delete_absent("doc-missing")).unwrap()
         expect(engine1.logical_root()).to_equal(engine0.logical_root())
-        expect(engine1.document_count()).to_equal(1)
+        expect(engine1.document_count()).to_equal(1)  # oracle: deleting an absent id must leave the single stored document intact
         return ()
 
     it "treats deleting an absent id as a no-op even with an asserted (delete_present) precondition":
+        # @req REQ-LIB-SEARCH-006
+        # @capture(statistics): logical root digest after a preconditioned delete of an absent id retained for review
+        step("delete an absent id under a delete_present precondition")
         val engine0 = IndexEngine.of_documents([doc_of("doc-1", "r1", "Alpha")])
         val engine1 = engine0.apply_operation(IndexOperationV1.delete_present("doc-missing", "r1", "hash-x")).unwrap()
         expect(engine1.logical_root()).to_equal(engine0.logical_root())
         return ()
 
     it "deletes a present document when the precondition matches":
+        # @req REQ-LIB-SEARCH-007
+        # @capture(statistics): document count and containment after a preconditioned delete retained for review
+        step("delete the stored document under its exact revision and hash precondition")
         val d0 = doc_of("doc-1", "r1", "Alpha")
         val engine0 = IndexEngine.of_documents([d0])
         val engine1 = engine0.apply_operation(IndexOperationV1.delete_present("doc-1", "r1", "hash-doc-1-r1")).unwrap()
-        expect(engine1.document_count()).to_equal(0)
+        expect(engine1.document_count()).to_equal(0)  # oracle: the only stored document was removed, so the count is exactly zero
         expect(engine1.contains("doc-1")).to_be_false()
         return ()
 
     it "rejects deleting a present document when the asserted precondition mismatches":
+        # @req REQ-LIB-SEARCH-008
+        # @capture(statistics): rejected delete outcome for a mismatched precondition retained for review
+        step("delete the stored document under a wrong revision precondition")
         val d0 = doc_of("doc-1", "r1", "Alpha")
         val engine0 = IndexEngine.of_documents([d0])
         val result = engine0.apply_operation(IndexOperationV1.delete_present("doc-1", "WRONG-REV", "hash-doc-1-r1"))
@@ -109,6 +149,9 @@ describe "index_engine: delete no-op and closed precondition":
         return ()
 
     it "rejects a mixed null/non-null delete precondition (closed tagged choice)":
+        # @req REQ-LIB-SEARCH-009
+        # @capture(statistics): rejected apply outcome for a malformed mixed precondition retained for review
+        step("apply a hand-built operation carrying a mixed null/non-null precondition")
         # Neither delete_absent nor delete_present constructors can produce a
         # mixed pair, so construct the malformed operation directly to prove
         # has_closed_preconditions() actually gates apply_operation.
@@ -120,6 +163,9 @@ describe "index_engine: delete no-op and closed precondition":
 
 describe "index_engine: logical root determinism across equivalent delta histories":
     it "clean rebuild equals replaying add-then-add-then-delete-then-add":
+        # @req REQ-LIB-SEARCH-010
+        # @capture(statistics): rebuilt vs replayed logical root digests and final document count retained for review
+        step("rebuild the final set {a, c} directly for the reference root")
         val a = doc_of("a", "r1", "A")
         val b = doc_of("b", "r1", "B")
         val c = doc_of("c", "r1", "C")
@@ -136,10 +182,13 @@ describe "index_engine: logical root determinism across equivalent delta histori
         ]).unwrap()
 
         expect(replayed.logical_root()).to_equal(rebuilt.logical_root())
-        expect(replayed.document_count()).to_equal(2)
+        expect(replayed.document_count()).to_equal(2)  # oracle: the replay deletes b from {a, b, c}, leaving exactly a and c
         return ()
 
     it "is order-independent: adding a and c in either order yields the same logical root":
+        # @req REQ-LIB-SEARCH-011
+        # @capture(statistics): logical root digests for both insertion orders retained for review
+        step("add a then c, and separately c then a, and compare the roots")
         val a = doc_of("a", "r1", "A")
         val c = doc_of("c", "r1", "C")
         val forward = IndexEngine.empty().apply_operations([IndexOperationV1.add(a), IndexOperationV1.add(c)]).unwrap()
@@ -148,6 +197,9 @@ describe "index_engine: logical root determinism across equivalent delta histori
         return ()
 
     it "changes the logical root when the final document set actually differs":
+        # @req REQ-LIB-SEARCH-012
+        # @capture(statistics): logical root digests for the one-document and two-document sets retained for review
+        step("build engines over the one-document and two-document sets and compare the roots")
         val a = doc_of("a", "r1", "A")
         val b = doc_of("b", "r1", "B")
         val only_a = IndexEngine.of_documents([a])
@@ -157,12 +209,18 @@ describe "index_engine: logical root determinism across equivalent delta histori
 
 describe "segment: unsigned UTF-8 id comparator":
     it "orders ASCII ids ascending":
+        # @req REQ-LIB-SEARCH-013
+        # @capture(statistics): pairwise unsigned UTF-8 comparator verdicts retained for review
+        step("compare a/b, b/a, and a/a through the unsigned UTF-8 comparator")
         expect(unsigned_utf8_lt("a", "b")).to_be_true()
         expect(unsigned_utf8_lt("b", "a")).to_be_false()
         expect(unsigned_utf8_lt("a", "a")).to_be_false()
         return ()
 
     it "sorts a built segment's documents by unsigned UTF-8 document id":
+        # @req REQ-LIB-SEARCH-014
+        # @capture(statistics): sorted segment document id order retained for review
+        step("build a segment from out-of-order documents and read back the id order")
         val seg = Segment.build([doc_of("c", "r1", "C"), doc_of("a", "r1", "A"), doc_of("b", "r1", "B")])
         expect(seg.documents[0].document_id).to_equal("a")
         expect(seg.documents[1].document_id).to_equal("b")
@@ -171,6 +229,9 @@ describe "segment: unsigned UTF-8 id comparator":
 
 describe "top_k: exhaustive oracle ordering and tie-break":
     it "ranks higher scores first":
+        # @req REQ-LIB-SEARCH-015
+        # @capture(statistics): exhaustive top-k ordering and source ranks for two scored candidates retained for review
+        step("score a low-term-frequency and a high-term-frequency candidate and rank them")
         val low = score_exhaustive_candidate("doc-low", [
             Bm25FieldV1.of("body", ["cat"], [1], [1], 4, 4, 1),
         ], ["body"]).unwrap()
@@ -178,14 +239,17 @@ describe "top_k: exhaustive oracle ordering and tie-break":
             Bm25FieldV1.of("body", ["cat"], [3], [1], 4, 4, 1),
         ], ["body"]).unwrap()
         val hits = exhaustive_top_k_v1([low, high], 2)
-        expect(hits.len()).to_equal(2)
+        expect(hits.len()).to_equal(2)  # oracle: both candidates fit within k=2, so none may be dropped
         expect(hits[0].document_id).to_equal("doc-high")
-        expect(hits[0].source_rank).to_equal(1)
+        expect(hits[0].source_rank).to_equal(1)  # oracle: the higher-scoring candidate must occupy rank 1
         expect(hits[1].document_id).to_equal("doc-low")
-        expect(hits[1].source_rank).to_equal(2)
+        expect(hits[1].source_rank).to_equal(2)  # oracle: the lower-scoring candidate must occupy rank 2
         return ()
 
     it "breaks exact score ties by ascending unsigned UTF-8 document id":
+        # @req REQ-LIB-SEARCH-016
+        # @capture(statistics): tied-score candidates and their tie-broken top-k order retained for review
+        step("score two identically-scoring candidates whose ids differ only lexicographically")
         val fields = [Bm25FieldV1.of("body", ["cat"], [1], [1], 4, 4, 2)]
         val z = score_exhaustive_candidate("z-doc", fields, ["body"]).unwrap()
         val a = score_exhaustive_candidate("a-doc", fields, ["body"]).unwrap()
@@ -196,8 +260,11 @@ describe "top_k: exhaustive oracle ordering and tie-break":
         return ()
 
     it "clamps k to the candidate count":
+        # @req REQ-LIB-SEARCH-017
+        # @capture(statistics): top-k result count when k exceeds the candidate count retained for review
+        step("request k=50 from a single-candidate pool")
         val fields = [Bm25FieldV1.of("body", ["cat"], [1], [1], 4, 4, 1)]
         val only = score_exhaustive_candidate("only", fields, ["body"]).unwrap()
         val hits = exhaustive_top_k_v1([only], 50)
-        expect(hits.len()).to_equal(1)
+        expect(hits.len()).to_equal(1)  # oracle: k is clamped to the single available candidate, never padded
         return ()

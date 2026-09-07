@@ -1,36 +1,33 @@
 # @cover src/lib/common/engine/interaction/draw_ir_hit_bridge.spl 80%
 """
-# DrawIR hit bridge — DrawIR composition to hit forest + group collision
+## Purpose and audience
 
-**Feature IDs:** N/A (Lane L1 of the unified 2D event/panel/offload plan)
-**Category:** Stdlib / Engine
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
-**Design:** N/A
-**Research:** N/A
+DrawIR hit bridge: `draw_ir_hit_forest` lifts a `DrawIrComposition` into the
+interaction core's `HitProxy2D` forest (batch = group node from the
+embedding rect/layer, command with a present `hit_rect` = leaf node
+translated into absolute coordinates, `parent_id`/batch parentage in a
+child->parent map), and `group_collisions` reports pairwise AABB overlap
+over the SAME proxy set. Lane L1 of the unified 2D event/panel/offload
+plan, decisions D2 and D5; written for the interaction-core owner and
+anyone wiring DrawIR content through the one event core.
 
-## Overview
+## Operator workflow
 
-Covers decisions D2 and D5 of the 2026-07-30 plan: `draw_ir_hit_forest`
-lifts a `DrawIrComposition` into the interaction core's `HitProxy2D`
-forest (batch = group node from the embedding rect/layer, command with a
-present `hit_rect` = leaf node translated into absolute coordinates,
-`parent_id`/batch parentage in a child->parent map), and
-`group_collisions` reports pairwise AABB overlap over the SAME proxy set.
+Run one spec: `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/engine/interaction/draw_ir_hit_bridge_spec.spl`.
+Each scenario builds a real composition, lifts it through
+`draw_ir_hit_forest`, and asserts absolute half-open proxy geometry, stable
+FNV-1a node ids, and dispatch outcomes from the shipped
+`std.common.engine.interaction` modules — no fixtures or stubs.
+
+## Compatibility and limitations
+
 Node ids are stable 32-bit FNV-1a hashes of component_id text with a
-reverse `node_names` map for callers. All bounds follow the core's
-half-open convention (left/top inclusive, right/bottom exclusive).
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Group node | One per DrawIrBatch: embedding {x,y,w,h} as absolute half-open edges, render_layer = embedding.layer, tree_order = batch index |
-| Leaf node | One per DrawIrCommand with a present hit_rect, translated by embedding x/y, parented to its batch (or command parent_id) |
-| Clip clamp | embedding.clip = true clamps leaf rects to the batch rect |
-| Stable ids | FNV-1a over component_id bytes — same text always hashes to the same i64, never -1 |
-| Half-open collision | Rects sharing only an edge do NOT collide, matching contains_point |
+reverse `node_names` map; all bounds follow the core's half-open convention
+(left/top inclusive, right/bottom exclusive), so rects sharing only an edge
+do NOT collide, matching `contains_point`. The group node carries no clip
+state of its own: clipping happens at lift time via `embedding.clip`, so a
+re-lift is required when an embedding changes.
 
 ## Examples
 
@@ -40,7 +37,21 @@ A taskbar batch at (10, 20) sized 100x50 on layer 3 becomes a group proxy
 group, so `hit_stack` at (16, 26) resolves the leaf with ancestor_path
 [group, leaf] and a bubble listener registered on the GROUP fires when
 the LEAF is hit — DrawIR content dispatching through the one event core.
+
+## Verification guidance and troubleshooting
+
+A geometry failure names the exact edge (left/top/right/bottom): recompute
+embedding xy plus batch-local hit_rect offset and check the half-open
+right/bottom = x+w / y+h convention. A node-id failure is almost always a
+component_id text change (ids are FNV-1a of that text; the pinned
+"hello" -> 0x4F9F2CAB vector catches algorithm drift). A collision failure
+usually means an edge-touching pair was reported — recheck that the
+disabled/visible filters and the half-open overlap rule are intact.
 """
+# Lifecycle: doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md ;
+# doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md ;
+# doc/04_architecture/ui/engine_2d.md ;
+# doc/05_design/ui/drawir_affine_transform_2026-07-31.md
 
 use std.spec.*
 use std.common.engine.interaction.hit_proxy.{HitProxy2D}
@@ -74,9 +85,12 @@ fn _rect_command(component_id: text, x: i32, y: i32, w: i32, h: i32, hx: i32, hy
     cmd.hit_rect = draw_ir_rect_bounds(hx, hy, hw, hh)
     cmd
 
+# @manual_section: draw-ir-forest-lift
 describe "draw_ir_hit_forest — DrawIR composition to hit forest":
 
     it "a batch becomes a group proxy from its embedding rect and layer":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(bit_table): group proxy half-open edges and layer for the embedded batch
         step("One batch embedded at (10, 20) sized 100x50 on layer 3")
         val emb = draw_ir_embedding_config("surface", "panel", 10, 20, 100, 50, 3, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
@@ -84,20 +98,22 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
         ])
 
         val forest = draw_ir_hit_forest(comp)
-        expect(forest.proxies.len()).to_equal(1)
+        expect(forest.proxies.len()).to_equal(1)  # oracle: one batch lifts to exactly one group proxy and nothing else — no commands means no leaves
         val group = forest.proxies[0]
-        expect(group.node_id).to_equal(draw_ir_node_id("panel"))
+        expect(group.node_id).to_equal(draw_ir_node_id("panel"))  # oracle: the group id must be the FNV-1a of the embedding's component text, the only identity the batch carries
         step("embedding {x,y,w,h} become absolute half-open edges")
-        expect(group.left).to_equal(10)
-        expect(group.top).to_equal(20)
-        expect(group.right).to_equal(110)
-        expect(group.bottom).to_equal(70)
-        expect(group.render_layer).to_equal(3)
+        expect(group.left).to_equal(10)  # oracle: left is the embedding x unchanged; the embedding origin is the absolute anchor
+        expect(group.top).to_equal(20)  # oracle: top is the embedding y unchanged, per the absolute-anchor rule
+        expect(group.right).to_equal(110)  # oracle: half-open convention is x+w = 10+100, so 110 is excluded from the rect
+        expect(group.bottom).to_equal(70)  # oracle: half-open convention is y+h = 20+50, so 70 is excluded from the rect
+        expect(group.render_layer).to_equal(3)  # oracle: the embedding layer passes through unchanged — layering is owned by the embedding, not the lift
         step("the reverse map recovers the component_id text")
         assert_true(forest.node_names.contains_key(group.node_id))
-        expect(forest.node_names[group.node_id]).to_equal("panel")
+        expect(forest.node_names[group.node_id]).to_equal("panel")  # oracle: the reverse map must invert the hash back to the exact embedding component text
 
     it "a command with a hit_rect becomes a leaf translated by the embedding origin":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(bit_table): leaf proxy absolute edges and parent link for the hit_rect command
         step("Batch at (10, 20); command hit_rect (5, 5, 20, 10) is batch-local")
         val emb = draw_ir_embedding_config("surface", "panel", 10, 20, 100, 50, 0, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
@@ -107,18 +123,21 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
         ])
 
         val forest = draw_ir_hit_forest(comp)
-        expect(forest.proxies.len()).to_equal(2)
+        expect(forest.proxies.len()).to_equal(2)  # oracle: one group plus one hit_rect-carrying leaf — the only two proxies this composition can produce
         val leaf = _find_proxy(forest.proxies, draw_ir_node_id("btn"))
-        expect(leaf.node_id).to_equal(draw_ir_node_id("btn"))
-        expect(leaf.left).to_equal(15)
-        expect(leaf.top).to_equal(25)
-        expect(leaf.right).to_equal(35)
-        expect(leaf.bottom).to_equal(35)
+        expect(leaf.node_id).to_equal(draw_ir_node_id("btn"))  # oracle: the leaf id is the FNV-1a of the command component text, independent of position
+        expect(leaf.left).to_equal(15)  # oracle: embedding x 10 plus batch-local hit_rect x 5 gives the absolute left edge
+        expect(leaf.top).to_equal(25)  # oracle: embedding y 20 plus batch-local hit_rect y 5 gives the absolute top edge
+        expect(leaf.right).to_equal(35)  # oracle: absolute left 15 plus hit_rect width 20 under the half-open convention
+        expect(leaf.bottom).to_equal(35)  # oracle: absolute top 25 plus hit_rect height 10 under the half-open convention
         step("the leaf's parent is its batch group")
         assert_true(forest.parents.contains_key(leaf.node_id))
-        expect(forest.parents[leaf.node_id]).to_equal(draw_ir_node_id("panel"))
+        expect(forest.parents[leaf.node_id]).to_equal(draw_ir_node_id("panel"))  # oracle: a command without parent_id parents to its batch group, the only ancestor a batch child can have
 
     it "a command without a hit_rect produces no leaf proxy":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(bit_table): proxy count for a composition whose only command lacks hit_rect
+        step("Lift a batch whose only rect command carries no hit_rect at all")
         val emb = draw_ir_embedding_config("surface", "panel", 0, 0, 100, 50, 0, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
             draw_ir_batch("b0", "host", emb, [
@@ -126,9 +145,11 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
             ])
         ])
         val forest = draw_ir_hit_forest(comp)
-        expect(forest.proxies.len()).to_equal(1)
+        expect(forest.proxies.len()).to_equal(1)  # oracle: only the group may exist — a hit_rect-less command is never hit-testable, so it must contribute zero leaves
 
     it "the parent map ancestor chain feeds hit_stack's ancestor_path":
+        # @req REQ-UNIFIED-2D-D5
+        # @capture(bit_table): root-to-target ancestor path resolved by hit_stack
         step("panel group > row (parent = batch) > btn (parent_id = row)")
         val emb = draw_ir_embedding_config("surface", "panel", 0, 0, 200, 100, 0, 1000, false)
         var row = _rect_command("row", 10, 10, 180, 40, 10, 10, 180, 40)
@@ -141,14 +162,16 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
         val forest = draw_ir_hit_forest(comp)
         val result = hit_stack(forest.proxies, forest.parents, 25, 25)
         step("the innermost (latest-emitted) leaf wins the hit")
-        expect(result.primary).to_equal(draw_ir_node_id("btn"))
+        expect(result.primary).to_equal(draw_ir_node_id("btn"))  # oracle: btn is emitted after row and contains the point, and latest-emitted containment wins the hit
         step("ancestor_path is root-to-target: panel, row, btn")
-        expect(result.ancestor_path.len()).to_equal(3)
-        expect(result.ancestor_path[0]).to_equal(draw_ir_node_id("panel"))
-        expect(result.ancestor_path[1]).to_equal(draw_ir_node_id("row"))
-        expect(result.ancestor_path[2]).to_equal(draw_ir_node_id("btn"))
+        expect(result.ancestor_path.len()).to_equal(3)  # oracle: group, nested leaf and target leaf is the complete chain — a missing link would truncate it below three
+        expect(result.ancestor_path[0]).to_equal(draw_ir_node_id("panel"))  # oracle: the chain is root-first, and the batch group is the root of this forest
+        expect(result.ancestor_path[1]).to_equal(draw_ir_node_id("row"))  # oracle: row is btn's declared parent_id, so it must sit between group and target
+        expect(result.ancestor_path[2]).to_equal(draw_ir_node_id("btn"))  # oracle: the chain is target-last; a path not ending at the hit node breaks dispatch bubbling
 
     it "embedding.clip = true clamps leaf rects to the batch rect":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(bit_table): clamped leaf edges for an overhanging hit_rect under clip
         step("Batch [10, 110) x [10, 60) with clip; hit_rect overhangs on all sides")
         val emb = draw_ir_embedding_config("surface", "panel", 10, 10, 100, 50, 0, 1000, true)
         val comp = draw_ir_composition("comp", "scene", "host", [
@@ -159,12 +182,15 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
 
         val forest = draw_ir_hit_forest(comp)
         val leaf = _find_proxy(forest.proxies, draw_ir_node_id("wide"))
-        expect(leaf.left).to_equal(10)
-        expect(leaf.top).to_equal(10)
-        expect(leaf.right).to_equal(110)
-        expect(leaf.bottom).to_equal(60)
+        expect(leaf.left).to_equal(10)  # oracle: clip clamps the overhanging left (-10 translated) up to the batch left edge of 10
+        expect(leaf.top).to_equal(10)  # oracle: clip clamps the overhanging top up to the batch top edge of 10
+        expect(leaf.right).to_equal(110)  # oracle: clip clamps the overhanging right down to the batch half-open right edge of 10+100
+        expect(leaf.bottom).to_equal(60)  # oracle: clip clamps the overhanging bottom down to the batch half-open bottom edge of 10+50
 
     it "without clip the same overhanging leaf keeps its full rect":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(bit_table): unclamped leaf edges proving clip is the only clamp source
+        step("Lift the identical overhanging hit_rect with embedding.clip off")
         val emb = draw_ir_embedding_config("surface", "panel", 10, 10, 100, 50, 0, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
             draw_ir_batch("b0", "host", emb, [
@@ -173,31 +199,35 @@ describe "draw_ir_hit_forest — DrawIR composition to hit forest":
         ])
         val forest = draw_ir_hit_forest(comp)
         val leaf = _find_proxy(forest.proxies, draw_ir_node_id("wide"))
-        expect(leaf.left).to_equal(-10)
-        expect(leaf.top).to_equal(-10)
-        expect(leaf.right).to_equal(490)
-        expect(leaf.bottom).to_equal(490)
+        expect(leaf.left).to_equal(-10)  # oracle: embedding x 10 plus hit_rect x -20 — no clip means the raw translated edge survives
+        expect(leaf.top).to_equal(-10)  # oracle: embedding y 10 plus hit_rect y -20, unclamped
+        expect(leaf.right).to_equal(490)  # oracle: absolute left -10 plus hit_rect width 500, unclamped
+        expect(leaf.bottom).to_equal(490)  # oracle: absolute top -10 plus hit_rect height 500, unclamped
 
     it "node ids are stable across rebuilds and distinct per component_id":
+        # @req REQ-UNIFIED-2D-D2
+        # @capture(statistics): pinned FNV-1a vector and rebuild identity check
         step("FNV-1a of the same text is the same id in any build")
-        expect(draw_ir_node_id("panel")).to_equal(draw_ir_node_id("panel"))
+        expect(draw_ir_node_id("panel")).to_equal(draw_ir_node_id("panel"))  # oracle: id stability across calls is the contract that lets persisted scenes resolve proxies
         assert_not_equal(draw_ir_node_id("panel"), draw_ir_node_id("btn"))
         step("pinned vector: fnv1a_32(\"hello\") = 0x4F9F2CAB")
-        expect(draw_ir_node_id("hello")).to_equal(1335831723)
+        expect(draw_ir_node_id("hello")).to_equal(1335831723)  # oracle: 1335831723 is 0x4F9F2CAB, the pinned FNV-1a-32 of "hello" — a known-answer vector against algorithm drift
         step("ids never collide with the core's -1 nothing-hit sentinel")
         assert_true(draw_ir_node_id("") > 0)
-
         val emb = draw_ir_embedding_config("surface", "panel", 0, 0, 10, 10, 0, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
             draw_ir_batch("b0", "host", emb, [])
         ])
         val a = draw_ir_hit_forest(comp)
         val b = draw_ir_hit_forest(comp)
-        expect(a.proxies[0].node_id).to_equal(b.proxies[0].node_id)
+        expect(a.proxies[0].node_id).to_equal(b.proxies[0].node_id)  # oracle: two lifts of one composition must produce the identical id — per-build randomness would break persisted hit maps
 
+# @manual_section: group-collision-report
 describe "group_collisions — pairwise AABB overlap over the same proxies":
 
     it "reports overlap, skips edge-touch (half-open) and disabled proxies":
+        # @req REQ-UNIFIED-2D-D5
+        # @capture(bit_table): colliding pair list over the four-probe fixture
         step("A [0,10) overlaps B [5,15); C touches A only at x = 10")
         val a = HitProxy2D.create(1, 0, 0, 10, 10)
         val b = HitProxy2D.create(2, 5, 5, 15, 15)
@@ -207,22 +237,28 @@ describe "group_collisions — pairwise AABB overlap over the same proxies":
 
         val pairs = group_collisions([a, b, c, d])
         step("exactly A-B and B-C collide; the edge-touching A-C pair and the disabled D never do")
-        expect(pairs.len()).to_equal(2)
-        expect(pairs[0].0).to_equal(1)
-        expect(pairs[0].1).to_equal(2)
-        expect(pairs[1].0).to_equal(2)
-        expect(pairs[1].1).to_equal(3)
+        expect(pairs.len()).to_equal(2)  # oracle: four probes yield at most six pairs; the half-open rule kills A-C and the enabled filter kills both D pairs, leaving exactly two
+        expect(pairs[0].0).to_equal(1)  # oracle: pairs are emitted in probe order, so the first collision must open with A's id 1
+        expect(pairs[0].1).to_equal(2)  # oracle: the first pair is A-B, so its second member is B's id 2
+        expect(pairs[1].0).to_equal(2)  # oracle: the second pair starts at B, the lower-id member of the B-C overlap
+        expect(pairs[1].1).to_equal(3)  # oracle: the second pair closes with C's id 3, completing the B-C overlap
 
     it "an invisible proxy is skipped even when fully overlapping":
+        # @req REQ-UNIFIED-2D-D5
+        # @capture(statistics): collision count with a fully overlapping invisible proxy
+        step("Overlap a visible and a fully coincident invisible proxy")
         val a = HitProxy2D.create(1, 0, 0, 10, 10)
         var phantom = HitProxy2D.create(2, 0, 0, 10, 10)
         phantom.visible = false
         val pairs = group_collisions([a, phantom])
-        expect(pairs.len()).to_equal(0)
+        expect(pairs.len()).to_equal(0)  # oracle: invisibility must suppress hit reporting entirely, so a perfectly overlapping invisible proxy yields zero pairs
 
+# @manual_section: dispatch-integration
 describe "dispatch integration — DrawIR content through the one event core":
 
     it "a bubble listener on the batch group fires when a leaf inside it is hit":
+        # @req REQ-UNIFIED-2D-D5
+        # @capture(tui_grid): fired node list and stopped flag from the dispatch outcome
         step("Build forest -> hit_stack -> dispatch, listener registered on the GROUP only")
         val emb = draw_ir_embedding_config("surface", "panel", 10, 20, 100, 50, 0, 1000, false)
         val comp = draw_ir_composition("comp", "scene", "host", [
@@ -235,14 +271,13 @@ describe "dispatch integration — DrawIR content through the one event core":
         val result = hit_stack(forest.proxies, forest.parents, 16, 26)
         val btn_id = draw_ir_node_id("btn")
         val panel_id = draw_ir_node_id("panel")
-        expect(result.primary).to_equal(btn_id)
-
+        expect(result.primary).to_equal(btn_id)  # oracle: (16, 26) lands inside the translated leaf, so the leaf must be the primary hit the ancestor chain walks from
         val listeners = [
             EventListener2D.create(panel_id, -1, false, false, handler_none)
         ]
         val event = PointerEvent2D.create(1, POINTER_DOWN, 16, 26, 1, result.primary)
         val outcome = dispatch(event, listeners, result.ancestor_path)
         step("the group's bubble listener fired for a hit that resolved to the leaf")
-        expect(outcome.fired_node_ids.len()).to_equal(1)
-        expect(outcome.fired_node_ids[0]).to_equal(panel_id)
+        expect(outcome.fired_node_ids.len()).to_equal(1)  # oracle: only the group listener exists, so exactly one node can fire no matter how long the ancestor chain is
+        expect(outcome.fired_node_ids[0]).to_equal(panel_id)  # oracle: the fired node must be the group — bubbling walks the ancestor path, and the leaf has no listener of its own
         assert_false(outcome.stopped)

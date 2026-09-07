@@ -1,0 +1,237 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl 60%
+# @tag: unit, web, draw_ir, gpu, residency
+"""Engine2D reuse across web Draw IR route calls, the steady non-offload route,
+and the per-pixel oracle fingerprint.
+
+Items 1, 2 and 7 of
+doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md.
+Every assertion below is an OPERATION COUNT — engines created, reused,
+discarded, parked; device round trips attempted. Nothing here is a timing
+claim: this host has no GPU device available to the session and cannot measure
+one.
+"""
+use std.spec.step
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_draw_ir_engine_cache_create_count,
+    web_draw_ir_engine_cache_discard_count,
+    web_draw_ir_engine_cache_drain,
+    web_draw_ir_engine_cache_live_count,
+    web_draw_ir_engine_cache_reuse_count,
+    web_draw_ir_gpu_route_canonical_submission_count,
+    web_draw_ir_gpu_route_last_evidence,
+    web_draw_ir_fingerprint_pixels_scanned,
+    web_draw_ir_gpu_route_policy_reset,
+    web_draw_ir_gpu_route_sample,
+    web_draw_ir_oracle_fingerprint
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    present_layout_pixels_with_engine2d_readback,
+    web_presenter_engine_cache_create_attempt_count,
+    web_presenter_engine_cache_discard_count,
+    web_presenter_engine_cache_live_count,
+    web_presenter_engine_cache_reset,
+    web_presenter_engine_cache_reuse_count
+}
+
+val REUSE_GREEN: u32 = 0xff22c55eu32
+
+fn _reuse_composition(width: i32, height: i32) -> DrawIrComposition:
+    draw_ir_composition(
+        "web-root", "web:reuse", DRAW_IR_BACKEND_CPU,
+        [draw_ir_batch(
+            "web-root", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "web-surface", "web", 0, 0, width, height, 0, 1000, false),
+            [draw_ir_rect("background", 0, 0, width, height, REUSE_GREEN)])])
+
+fn _solid_pixels(count: i32) -> [u32]:
+    var out: [u32] = []
+    var index = 0
+    while index < count:
+        out.push(REUSE_GREEN)
+        index = index + 1
+    out
+
+fn _reset_all():
+    web_draw_ir_gpu_route_policy_reset()
+    web_presenter_engine_cache_reset()
+
+describe "Web Draw IR Engine2D reuse across route calls":
+    # @manual scenario evidence
+
+    it "reuses one engine across route calls at an unchanged extent":
+        # @req REQ-SSPEC-LIB
+        step("reuses one engine across route calls at an unchanged extent")
+        _reset_all()
+        val composition = _reuse_composition(8, 4)
+        web_draw_ir_gpu_route_sample(composition, 8, 4, "software")
+        val creates_after_first = web_draw_ir_engine_cache_create_count()
+        web_draw_ir_gpu_route_sample(composition, 8, 4, "software")
+        # The extent and the backend are unchanged, so the second frame creates
+        # no engine at all: it takes the parked one and puts it back.
+        expect(web_draw_ir_engine_cache_create_count()).to_equal(creates_after_first)
+        expect(web_draw_ir_engine_cache_reuse_count() > 0).to_equal(true)
+        expect(web_draw_ir_engine_cache_live_count()).to_equal(1)
+
+    it "recreates when the surface extent changes":
+        # @req REQ-SSPEC-LIB
+        step("recreates when the surface extent changes")
+        _reset_all()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "software")
+        val creates_after_small = web_draw_ir_engine_cache_create_count()
+        val discards_after_small = web_draw_ir_engine_cache_discard_count()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 8), 8, 8, "software")
+        # The parked engine's framebuffer is the wrong size, so it is torn down
+        # (discard) and a new one is built (create) — never handed back.
+        expect(web_draw_ir_engine_cache_create_count() > creates_after_small).to_equal(true)
+        expect(web_draw_ir_engine_cache_discard_count() > discards_after_small).to_equal(true)
+        expect(web_draw_ir_engine_cache_live_count()).to_equal(1)
+
+    it "recreates when the backend changes":
+        # @req REQ-SSPEC-LIB
+        step("recreates when the backend changes")
+        _reset_all()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "software")
+        val creates_after_software = web_draw_ir_engine_cache_create_count()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "cpu")
+        # "software" and "cpu" are distinct canonical backend keys, so the cpu
+        # frame cannot be served by the parked software engine.
+        expect(web_draw_ir_engine_cache_create_count() > creates_after_software).to_equal(true)
+
+    it "never parks an engine that did not get the backend it asked for":
+        # @req REQ-SSPEC-LIB
+        step("never parks an engine that did not get the backend it asked for")
+        _reset_all()
+        # No CUDA device is reachable from this session, so
+        # create_with_backend_fast("cuda") silently returns a CPU fallback
+        # surface (measured: requested=cuda -> selected=cpu). A fallback is not
+        # the requested backend, so it is discarded rather than parked: a cached
+        # handle is never evidence that the device came up.
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "cuda")
+        val creates_after_first = web_draw_ir_engine_cache_create_count()
+        val discards_after_first = web_draw_ir_engine_cache_discard_count()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "cuda")
+        expect(web_draw_ir_engine_cache_create_count() > creates_after_first).to_equal(true)
+        expect(web_draw_ir_engine_cache_discard_count() > discards_after_first).to_equal(true)
+
+    it "tears every parked engine down on drain":
+        # @req REQ-SSPEC-LIB
+        step("tears every parked engine down on drain")
+        _reset_all()
+        web_draw_ir_gpu_route_sample(_reuse_composition(8, 4), 8, 4, "software")
+        expect(web_draw_ir_engine_cache_live_count()).to_equal(1)
+        val discards_before = web_draw_ir_engine_cache_discard_count()
+        web_draw_ir_engine_cache_drain()
+        expect(web_draw_ir_engine_cache_live_count()).to_equal(0)
+        expect(web_draw_ir_engine_cache_discard_count()).to_equal(discards_before + 1)
+        expect(web_presenter_engine_cache_live_count()).to_equal(0)
+
+    it "reuses, resizes and refuses the presenter engine on the same key rules":
+        # @req REQ-SSPEC-LIB
+        step("reuses, resizes and refuses the presenter engine on the same key rules")
+        _reset_all()
+        val small = _solid_pixels(8 * 4)
+        present_layout_pixels_with_engine2d_readback(small, 8, 4, "vulkan", 0u32)
+        expect(web_presenter_engine_cache_create_attempt_count()).to_equal(1)
+        expect(web_presenter_engine_cache_live_count()).to_equal(1)
+        # Same backend, same extent: no second device is stood up.
+        present_layout_pixels_with_engine2d_readback(small, 8, 4, "vulkan", 0u32)
+        expect(web_presenter_engine_cache_create_attempt_count()).to_equal(1)
+        expect(web_presenter_engine_cache_reuse_count()).to_equal(1)
+        expect(web_presenter_engine_cache_live_count()).to_equal(1)
+        # Changed extent: the parked engine's framebuffer is the wrong size, so
+        # it is torn down and a new one is stood up.
+        present_layout_pixels_with_engine2d_readback(_solid_pixels(8 * 8), 8, 8, "vulkan", 0u32)
+        expect(web_presenter_engine_cache_create_attempt_count()).to_equal(2)
+        expect(web_presenter_engine_cache_discard_count()).to_equal(1)
+        expect(web_presenter_engine_cache_live_count()).to_equal(1)
+        # Changed backend, and one that cannot initialize here: the attempt is
+        # made and fails, and nothing is parked for it. An engine that failed to
+        # initialize is never cached and never handed back.
+        present_layout_pixels_with_engine2d_readback(small, 8, 4, "cuda", 0u32)
+        expect(web_presenter_engine_cache_create_attempt_count()).to_equal(3)
+        expect(web_presenter_engine_cache_reuse_count()).to_equal(1)
+        expect(web_presenter_engine_cache_live_count()).to_equal(1)
+
+    it "stops round-tripping the device once the non-offload route is decided":
+        # @req REQ-SSPEC-LIB
+        step("stops round-tripping the device once the non-offload route is decided")
+        _reset_all()
+        val composition = _reuse_composition(8, 4)
+        # Three sampling frames gather the evidence that decides the route; each
+        # one still attempts the presenter's device round trip.
+        var frame = 0
+        while frame < 3:
+            web_draw_ir_gpu_route_sample(composition, 8, 4, "vulkan")
+            frame = frame + 1
+        val attempts_while_sampling = web_presenter_engine_cache_create_attempt_count()
+        val submissions_while_sampling = web_draw_ir_gpu_route_canonical_submission_count()
+        expect(attempts_while_sampling).to_equal(1)
+        # Pin the branch under test: the decision must be non-offload, otherwise
+        # the fourth frame would take the gpu route and prove nothing about it.
+        expect(web_draw_ir_gpu_route_last_evidence().should_offload).to_equal(false)
+        # The fourth frame is steady and non-offload. It is still a canonical
+        # route submission, but it no longer uploads to the device and reads the
+        # whole surface back purely to compare against pixels it already has.
+        web_draw_ir_gpu_route_sample(composition, 8, 4, "vulkan")
+        expect(web_presenter_engine_cache_create_attempt_count()).to_equal(attempts_while_sampling)
+        expect(web_draw_ir_gpu_route_canonical_submission_count()).to_equal(
+            submissions_while_sampling + 1)
+
+    it "fingerprints the oracle surface only for a route that will read it":
+        # @req REQ-SSPEC-LIB
+        step("fingerprints the oracle surface only for a route that will read it")
+        _reset_all()
+        val composition = _reuse_composition(8, 4)
+        var frame = 0
+        while frame < 4:
+            web_draw_ir_gpu_route_sample(composition, 8, 4, "vulkan")
+            frame = frame + 1
+        # The route ends non-offload here (no device is reachable from this
+        # session), and the oracle fingerprint has exactly one reader: the
+        # steady OFFLOAD branch. So on this route nothing can ever read it, and
+        # nothing should ever compute it.
+        expect(web_draw_ir_gpu_route_last_evidence().should_offload).to_equal(false)
+        expect(web_draw_ir_fingerprint_pixels_scanned()).to_equal(0)
+
+    it "keeps the offload gate's fingerprint able to fail a genuine mismatch":
+        # @req REQ-SSPEC-LIB
+        step("keeps the offload gate's fingerprint able to fail a genuine mismatch")
+        _reset_all()
+        val oracle = _solid_pixels(8 * 4)
+        val baseline = web_draw_ir_oracle_fingerprint(oracle)
+        # Same pixels, same fingerprint: a matching GPU surface still passes.
+        expect(web_draw_ir_oracle_fingerprint(_solid_pixels(8 * 4))).to_equal(baseline)
+        # One pixel different out of 32: the gate operand separates it.
+        var one_off = _solid_pixels(8 * 4)
+        one_off[17] = 0xff000000u32
+        expect(web_draw_ir_oracle_fingerprint(one_off) == baseline).to_equal(false)
+        # A pure REORDER of the same pixel values. Engine2DReadback.checksum is
+        # a plain modular sum and cannot see this; the fingerprint folds the
+        # index, so it can. This is why the gate must not be swapped for the
+        # checksum.
+        var swapped = _solid_pixels(8 * 4)
+        swapped[3] = 0xff112233u32
+        swapped[9] = 0xff445566u32
+        var reordered = _solid_pixels(8 * 4)
+        reordered[3] = 0xff445566u32
+        reordered[9] = 0xff112233u32
+        expect(
+            web_draw_ir_oracle_fingerprint(swapped) ==
+                web_draw_ir_oracle_fingerprint(reordered)).to_equal(false)
+        # A truncated surface is a mismatch, not a near miss.
+        expect(web_draw_ir_oracle_fingerprint(_solid_pixels(8 * 4 - 1)) == baseline).to_equal(false)

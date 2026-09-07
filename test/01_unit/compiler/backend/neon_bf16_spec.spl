@@ -1,10 +1,34 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+BF16 (BFloat16) emit functions — BFDOT, BFMMLA, BFCVTN, BFCVTN2
+(REQ-COMPILER-BACKEND-NATIVE-NEON-BF16). Audience: the ARM64 backend engineer
+who must verify each ARMv8.6-A BF16 dot-product / matrix-multiply /
+narrow-convert instruction matches the ARMv8 ARM opcode layout bit-for-bit
+before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_bf16_spec.spl
+
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode. BF16
+requires ARMv8.6-A (or the optional BF16 extension on earlier ARMv8.x);
+targets without it must take the software fallback path, which this file does
+not cover.
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one BF16
+instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 ARM §C7.2.20 (BFDOT), §C7.2.21 (BFMMLA), §C7.2.19
+(BFCVTN/BFCVTN2), and the per-scenario derivation comment (`base + Rm*65536 +
+Rn*32 + Rd` for 3-register forms, `base + Rn*32 + Rd` for 2-register forms) to
+locate which register field produced the wrong byte. The final scenario
+additionally verifies the Q-bit distinction between BFCVTN and BFCVTN2.
+"""
+# research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+# @manual_section: neon-bf16-encoding
 
 # test/unit/compiler/backend/neon_bf16_spec.spl
 #
@@ -20,11 +44,6 @@
 # All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
 # Encoding: 3-reg: base + Rm*65536 + Rn*32 + Rd
 #           2-reg: base + Rn*32 + Rd
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.arm_neon.{emit_bfdot_v4bf16, emit_bfmmla_v4bf16, emit_bfcvtn_v4bf16, emit_bfcvtn2_v8bf16}
 
@@ -33,123 +52,167 @@ use compiler.backend.native.arm_neon.{emit_bfdot_v4bf16, emit_bfmmla_v4bf16, emi
 # LE bytes: 0x00, 0xFC, 0x40, 0x2E
 # ============================================================================
 
+# @manual_section: neon-bfdot-golden
 describe "emit_bfdot_v4bf16 — BF16 dot product 64-bit":
     it "BFDOT V0.2S, V0.4H, V0.4H encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFDOT V0.2S, V0.4H, V0.4H (Rd=Rn=Rm=0)")
         var b = emit_bfdot_v4bf16(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xFC)
-        expect(b[2]).to_equal(0x40)
-        expect(b[3]).to_equal(0x2E)
+        # @capture(bit_table): BFDOT little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: BFDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xFC)  # oracle: byte1 = base opcode bits for the BFDOT dot-product family
+        expect(b[2]).to_equal(0x40)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm*65536 offset)
+        expect(b[3]).to_equal(0x2E)  # oracle: byte3 = top opcode byte identifying Q=0 BFDOT
 
     it "BFDOT V1.2S, V2.4H, V3.4H encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFDOT V1.2S, V2.4H, V3.4H (Rd=1, Rn=2, Rm=3)")
         # word = 0x2E40FC00 + 3*65536 + 2*32 + 1 = 0x2E43FC41
         # LE bytes: 0x41, 0xFC, 0x43, 0x2E
         var b = emit_bfdot_v4bf16(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0xFC)
-        expect(b[2]).to_equal(0x43)
-        expect(b[3]).to_equal(0x2E)
+        # @capture(bit_table): BFDOT little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: BFDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn*32(64) folded into the low byte
+        expect(b[1]).to_equal(0xFC)  # oracle: byte1 unaffected — Rn*32 stayed within byte0's carry
+        expect(b[2]).to_equal(0x43)  # oracle: byte2 = base byte + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x2E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_bfdot_v4bf16 always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFDOT V5.2S, V6.4H, V7.4H and verify the fixed instruction width")
         var b = emit_bfdot_v4bf16(5, 6, 7)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): BFDOT emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every BFDOT encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # BFMMLA V0.4S, V0.8H, V0.8H => base 0x6E40EC00
 # LE bytes: 0x00, 0xEC, 0x40, 0x6E
 # ============================================================================
 
+# @manual_section: neon-bfmmla-golden
 describe "emit_bfmmla_v4bf16 — BF16 matrix multiply-accumulate 128-bit":
     it "BFMMLA V0.4S, V0.8H, V0.8H encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFMMLA V0.4S, V0.8H, V0.8H (Rd=Rn=Rm=0)")
         var b = emit_bfmmla_v4bf16(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xEC)
-        expect(b[2]).to_equal(0x40)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): BFMMLA little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: BFMMLA is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xEC)  # oracle: byte1 = base opcode bits for the BFMMLA matrix-multiply family
+        expect(b[2]).to_equal(0x40)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm*65536 offset)
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte identifying Q=1 BFMMLA
 
     it "BFMMLA V1.4S, V2.8H, V3.8H encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFMMLA V1.4S, V2.8H, V3.8H (Rd=1, Rn=2, Rm=3)")
         # word = 0x6E40EC00 + 3*65536 + 2*32 + 1 = 0x6E43EC41
         # LE bytes: 0x41, 0xEC, 0x43, 0x6E
         var b = emit_bfmmla_v4bf16(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0xEC)
-        expect(b[2]).to_equal(0x43)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): BFMMLA little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: BFMMLA is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn*32(64) folded into the low byte
+        expect(b[1]).to_equal(0xEC)  # oracle: byte1 unaffected — Rn*32 stayed within byte0's carry
+        expect(b[2]).to_equal(0x43)  # oracle: byte2 = base byte + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_bfmmla_v4bf16 always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFMMLA V5.4S, V6.8H, V7.8H and verify the fixed instruction width")
         var b = emit_bfmmla_v4bf16(5, 6, 7)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): BFMMLA emitted byte count for an arbitrary register triple
+        expect(b.len()).to_equal(4)  # oracle: every BFMMLA encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # BFCVTN V0.4H, V0.4S => base 0x0EA16800
 # LE bytes: 0x00, 0x68, 0xA1, 0x0E
 # ============================================================================
 
+# @manual_section: neon-bfcvtn-golden
 describe "emit_bfcvtn_v4bf16 — narrow float32 to bfloat16 lower half":
     it "BFCVTN V0.4H, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN V0.4H, V0.4S (Rd=Rn=0)")
         var b = emit_bfcvtn_v4bf16(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): BFCVTN little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: BFCVTN is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 = base opcode bits for the BFCVTN narrow-convert family
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits identifying the float32-source size
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte identifying Q=0 BFCVTN (lower half)
 
     it "BFCVTN V1.4H, V2.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN V1.4H, V2.4S (Rd=1, Rn=2)")
         # word = 0x0EA16800 + 2*32 + 1 = 0x0EA16841
         # LE bytes: 0x41, 0x68, 0xA1, 0x0E
         var b = emit_bfcvtn_v4bf16(1, 2)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): BFCVTN little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: BFCVTN is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn*32(64) folded into the low byte
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected — Rn*32 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 unaffected — BFCVTN has no third register operand
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_bfcvtn_v4bf16 always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN V3.4H, V4.4S and verify the fixed instruction width")
         var b = emit_bfcvtn_v4bf16(3, 4)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): BFCVTN emitted byte count for an arbitrary register pair
+        expect(b.len()).to_equal(4)  # oracle: every BFCVTN encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # BFCVTN2 V0.8H, V0.4S => base 0x4EA16800
 # LE bytes: 0x00, 0x68, 0xA1, 0x4E
 # ============================================================================
 
+# @manual_section: neon-bfcvtn2-golden
 describe "emit_bfcvtn2_v8bf16 — narrow float32 to bfloat16 upper half":
     it "BFCVTN2 V0.8H, V0.4S encodes to base opcode bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN2 V0.8H, V0.4S (Rd=Rn=0)")
         var b = emit_bfcvtn2_v8bf16(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): BFCVTN2 little-endian 4-byte base opcode layout
+        expect(b.len()).to_equal(4)  # oracle: BFCVTN2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 = base opcode bits for the BFCVTN2 narrow-convert family
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits identifying the float32-source size
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte identifying Q=1 BFCVTN2 (upper half)
 
     it "BFCVTN2 V1.8H, V2.4S encodes register fields correctly":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN2 V1.8H, V2.4S (Rd=1, Rn=2)")
         # word = 0x4EA16800 + 2*32 + 1 = 0x4EA16841
         # LE bytes: 0x41, 0x68, 0xA1, 0x4E
         var b = emit_bfcvtn2_v8bf16(1, 2)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): BFCVTN2 little-endian 4-byte register-field layout
+        expect(b.len()).to_equal(4)  # oracle: BFCVTN2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn*32(64) folded into the low byte
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected — Rn*32 stayed within byte0's carry
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 unaffected — BFCVTN2 has no third register operand
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "emit_bfcvtn2_v8bf16 always returns 4 bytes":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN2 V3.8H, V4.4S and verify the fixed instruction width")
         var b = emit_bfcvtn2_v8bf16(3, 4)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): BFCVTN2 emitted byte count for an arbitrary register pair
+        expect(b.len()).to_equal(4)  # oracle: every BFCVTN2 encoding is a fixed 4-byte AArch64 instruction
 
 # ============================================================================
 # Property: BFCVTN vs BFCVTN2 differ only in byte[3] by Q bit (0x40)
 # ============================================================================
 
+# @manual_section: neon-bfcvtn-q-bit-distinction
 describe "BFCVTN vs BFCVTN2 Q-bit distinction":
     it "BFCVTN and BFCVTN2 with same regs match bytes 0-2 and differ at byte[3]":
+        # @req REQ-COMPILER-BACKEND-NATIVE-NEON-BF16
+        step("Encode BFCVTN V1.4H, V2.4S and BFCVTN2 V1.8H, V2.4S with matching registers")
         var n = emit_bfcvtn_v4bf16(1, 2)
         var n2 = emit_bfcvtn2_v8bf16(1, 2)
+        # @capture(bit_table): byte-by-byte comparison of BFCVTN vs BFCVTN2 for the same register pair
         expect(n[0]).to_equal(n2[0])
         expect(n[1]).to_equal(n2[1])
         expect(n[2]).to_equal(n2[2])
         # BFCVTN2 has Q=1 (bit 30), which raises byte[3] by 0x40
-        expect(n2[3] - n[3]).to_equal(0x40)
+        expect(n2[3] - n[3]).to_equal(0x40)  # oracle: bit30 (Q) is the only differing bit between BFCVTN and BFCVTN2, adding 0x40 to byte[3]

@@ -2,9 +2,19 @@
 # Protocol I/O is now handled by StdioTransport (mcp_sdk).
 # Initialize and tools/list are handled by the McpServer facade.
 
+use std.io_runtime.{file_read}
+use .main_lazy_json.{make_json_result, make_error, extract_field, escape_json}
+use .main_lazy_json.{top_level_item_count, shell_cmd, _slice_text}
+use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, mcp_virtual_source_read_registered_v1}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
 val _PROTO_NL = "\n"
 
 export make_result_response
+export handle_resources_list
+export handle_resource_templates_list
+export handle_resources_read
 
 # ============================================================================
 # Resources / Prompts / Completion
@@ -26,6 +36,7 @@ fn make_resource_json(uri: text, name: text, desc: text, mime: text) -> text:
 
 fn build_resources_json() -> text:
     var r = make_resource_json("project:///info", "Project Information", "Project metadata and cwd", "text/plain")
+    r = r + "," + make_resource_json("simple-summary://", "Frozen Public Summaries", "Authenticated exact-snapshot virtual _tldr.spl sources", "text/x-simple")
     r = r + "," + make_resource_json("file:///*", "File Contents", "Read file contents by absolute path", "text/plain")
     r = r + "," + make_resource_json("debuglog:///status", "Debug Log Status", "Debug log status", "application/json")
     "[" + r + "]"
@@ -49,7 +60,14 @@ fn handle_resource_templates_list(id: text) -> text:
     t2 = t2 + "," + jp("mimeType", js("text/plain"))
     t2 = t2 + RB()
 
-    val result = jo1(jp("resourceTemplates", "[" + t1 + "," + t2 + "]"))
+    var t3 = LB()
+    t3 = t3 + jp("uriTemplate", js("simple-summary://" + LB() + "snapshot" + RB() + "/" + LB() + "logical_path" + RB() + "/_tldr.spl"))
+    t3 = t3 + "," + jp("name", js("Frozen Public Summary"))
+    t3 = t3 + "," + jp("description", js("Exact-snapshot public Simple declarations; never shadows physical files"))
+    t3 = t3 + "," + jp("mimeType", js("text/x-simple"))
+    t3 = t3 + RB()
+
+    val result = jo1(jp("resourceTemplates", "[" + t1 + "," + t2 + "," + t3 + "]"))
     make_result_response(id, result)
 
 fn get_cwd() -> text:
@@ -75,6 +93,18 @@ fn handle_resources_read(id: text, uri: text) -> text:
     if uri == "project:///info":
         val info = "Simple MCP (main_lazy)" + NL + "Working Dir: " + get_cwd()
         return make_resource_content_response(id, uri, info, "text/plain")
+    if uri.starts_with("simple-summary://"):
+        val cached = mcp_virtual_source_read_registered_v1(uri, 0, 65536)
+        if cached.status == VirtualSourceRegistrationStatusV1.Unavailable:
+            return make_error(id, -32004, "Virtual summary cache unavailable")
+        if cached.status == VirtualSourceRegistrationStatusV1.Miss:
+            return make_error(id, -32002, "Virtual summary not found in the exact snapshot")
+        if cached.status != VirtualSourceRegistrationStatusV1.Ready or cached.value == nil:
+            return make_error(id, -32602, "Virtual summary request rejected")
+        val value = cached.value.unwrap()
+        if not value.complete:
+            return make_error(id, -32005, "Virtual summary exceeds resource/read bound; use simple_summary_read or simple_summary_page")
+        return make_resource_content_response(id, uri, rt_bytes_to_text(value.bytes), "text/x-simple")
     if uri.starts_with("file:///"):
         val path = _slice_text(uri, 7, uri.len())
         val content = file_read(path)

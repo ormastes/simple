@@ -34,7 +34,34 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   malformed mismatch counts, and checksum mismatches are rejected.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
+
+## Operator workflow
+
+Run the spec with the command in the Syntax section. Each scenario builds a
+fixture proof JSON via `_proof_command`, invokes the validator
+(`node scripts/check/validate-electron-generated-gui-web-proof.js`) or the live
+wrapper, and asserts on the normalized `electron_generated_gui_web_*` rows.
+
+## Compatibility and limitations
+
+Requires `node` on PATH and write access to `build/`. The live-wrapper
+scenarios shell out to `scripts/check/check-electron-generated-gui-web-parity-evidence.shs`
+without launching Electron; pixel capture itself is exercised only through
+fixture ARGB JSON.
+
+## Verification guidance and troubleshooting
+
+A failed `rejects...` scenario means forged or malformed proof was accepted —
+read the retained evidence row named in the assertion for the
+`validation_reason` and file a product defect; never soften the assertion. A
+failed `accepts...` scenario means the happy-path fixture was rejected: compare
+the retained rows against the fixture fields.
 """
+
+# Lifecycle: doc/01_research/domain/chromium_web_renderer_primitive_differential.md ;
+# doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md ;
+# doc/04_architecture/chromium_web_renderer_primitive_differential.md ;
+# doc/05_design/browser_wasm_webgpu_infra.md
 
 # @tag: system, gui, electron, renderer, capture, performance
 
@@ -44,9 +71,13 @@ use std.spec.*
 fn _proof_command(path: text, mutation: text) -> text:
     "node -e 'const fs=require(\"fs\");const p={renderer:\"electron-live-capture-page\",scene:\"generated-gui-widget-html\",width:96,height:72,iterations:3,checksum:\"100\",expected_checksum:\"100\",weighted_checksum:\"500\",expected_weighted_checksum:\"500\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:72,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,generated_gui_text_normalization_pixels:0,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
+# @manual_section: Electron generated GUI Web proof validation
+
 describe "Electron generated GUI Web proof validator":
 
     it "selects only self hosted Simple driver candidates in live wrapper":
+        # @req: REQ-CHECK-001
+        # @capture(protocol_binary): wrapper source contract for self-hosted Simple driver selection
         step("Verify: selects only self hosted Simple driver candidates in live wrapper")
         # @req: REQ-CHECK-ElecGeneGuiWebProoVali-001
         val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
@@ -59,10 +90,11 @@ describe "Electron generated GUI Web proof validator":
         expect(script).to_contain("electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS")
 
     it "rejects explicit Rust seed Simple driver in live wrapper":
+        # @capture(protocol_json): evidence and report rows for the forbidden Rust-seed driver
         val root = "build/test-electron-generated-gui-web-seed-forbidden"
         val command = "rm -rf " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-generated-gui-web-parity-evidence.shs || true"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: harness exit 0 proves the wrapper ran; the verdict is asserted from the evidence rows
 
         val evidence = file_read(root + "/out/evidence.env")
         expect(evidence).to_contain("electron_generated_gui_web_status=unavailable")
@@ -81,12 +113,13 @@ describe "Electron generated GUI Web proof validator":
         expect(report).to_contain("- Electron captured ARGB artifact:  / not-run / unavailable")
 
     it "accepts complete Electron timing capture and checksum proof":
+        # @capture(protocol_json): evidence rows for the accepted full generated-GUI proof
         val root = "build/test-electron-generated-gui-web-validator-pass"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: harness exit 0 proves the wrapper ran; the verdict is asserted from the evidence rows
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized Electron generated-GUI proof rows")
@@ -101,6 +134,7 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_blur_or_tolerance_used=false")
 
     it "rejects unexpected Electron renderer or generated GUI scene identity":
+        # @capture(protocol_json): evidence rows for wrong-renderer and wrong-scene rejections
         val root = "build/test-electron-generated-gui-web-validator-identity"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
@@ -108,7 +142,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/scene.json", "p.scene=\"other-scene\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/scene.json > " + root + "/scene.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val renderer = file_read(root + "/renderer.env")
         val scene = file_read(root + "/scene.env")
@@ -119,6 +153,7 @@ describe "Electron generated GUI Web proof validator":
         expect(scene).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-scene")
 
     it "rejects proof without the live Electron capture source marker":
+        # @capture(protocol_json): evidence rows for missing and substituted proof-source markers
         val root = "build/test-electron-generated-gui-validator-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "delete p.proof_source") +
@@ -126,7 +161,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/generated-gui-proof.json\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/wrong.json > " + root + "/wrong.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val missing = file_read(root + "/missing.env")
         val wrong = file_read(root + "/wrong.env")
@@ -139,12 +174,13 @@ describe "Electron generated GUI Web proof validator":
         expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/generated-gui-proof.json")
 
     it "rejects proof when the live generated GUI capture source artifact is missing":
+        # @capture(protocol_json): evidence rows for the missing producer source artifact
         val root = "build/test-electron-generated-gui-validator-source-artifact"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "") +
             " && cd " + root + " && node ../../scripts/check/validate-electron-generated-gui-web-proof.js proof.json > evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm generated GUI proof source marker is bound to the producer source file")
@@ -158,6 +194,7 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_proof_source_actual_size_bytes=")
 
     it "rejects missing Electron capture backend and GPU feature diagnostics":
+        # @capture(protocol_json): evidence rows for backend, compositor, and GPU status rejections
         val root = "build/test-electron-generated-gui-web-validator-backend-gpu"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/backend.json", "p.capture_backend=\"manual-json\"") +
@@ -169,7 +206,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.rasterization=\"enabled\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val backend = file_read(root + "/backend.env")
         val mode = file_read(root + "/mode.env")
@@ -186,6 +223,7 @@ describe "Electron generated GUI Web proof validator":
         expect(gpu_mismatch).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
 
     it "rejects missing Electron Chromium runtime identity":
+        # @capture(protocol_json): evidence rows for engine, user-agent, and version rejections
         val root = "build/test-electron-generated-gui-web-validator-runtime-identity"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
@@ -197,7 +235,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/chrome-version.json", "p.chrome_process_version=\"dev\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/chrome-version.json > " + root + "/chrome-version.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val engine = file_read(root + "/engine.env")
         val ua = file_read(root + "/ua.env")
@@ -214,12 +252,13 @@ describe "Electron generated GUI Web proof validator":
         expect(chrome_version).to_contain("electron_generated_gui_web_chrome_process_version=dev")
 
     it "rejects large checksum values that differ past JavaScript number precision":
+        # @capture(protocol_json): evidence rows preserving full-precision decimal checksum text
         val root = "build/test-electron-generated-gui-web-validator-large-checksum"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.checksum=\"9007199254740993\";p.expected_checksum=\"9007199254740992\";p.weighted_checksum=\"18014398509481985\";p.expected_weighted_checksum=\"18014398509481985\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val evidence = file_read(root + "/evidence.env")
         step("Assert decimal integer text is preserved for large Electron generated-GUI proof")
@@ -231,12 +270,14 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum=18014398509481985")
 
     it "rejects malformed Electron frame timing":
+        # @capture(protocol_json): evidence rows for the non-numeric frame_us rejection
+        step("Reject a frame_us value that is not a JSON number")
         val root = "build/test-electron-generated-gui-web-validator-bad-frame"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
@@ -244,6 +285,8 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=not-a-number")
 
     it "rejects missing capture artifact and provenance proof rows":
+        # @capture(protocol_json): evidence rows for unwritten capture and missing provenance
+        step("Reject proofs whose capture flag or provenance rows are absent")
         val root = "build/test-electron-generated-gui-web-validator-missing-artifacts"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/capture.json", "p.captured_argb_written=false") +
@@ -251,7 +294,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/provenance.json", "delete p.capture_native_width") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/provenance.json > " + root + "/provenance.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val capture = file_read(root + "/capture.env")
         val provenance = file_read(root + "/provenance.env")
@@ -260,6 +303,7 @@ describe "Electron generated GUI Web proof validator":
         expect(provenance).to_contain("electron_generated_gui_web_validation_reason=missing-capture-provenance")
 
     it "rejects missing and empty captured ARGB files":
+        # @capture(protocol_json): evidence rows for missing and empty ARGB artifact rejections
         val root = "build/test-electron-generated-gui-web-validator-captured-files"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
@@ -267,7 +311,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/empty.json > " + root + "/empty.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val missing = file_read(root + "/missing.env")
         val empty = file_read(root + "/empty.env")
@@ -286,12 +330,13 @@ describe "Electron generated GUI Web proof validator":
         expect(empty).to_contain("electron_generated_gui_web_captured_argb_size_bytes=0")
 
     it "rejects captured ARGB paths that point back at the proof JSON":
+        # @capture(protocol_json): evidence rows for the self-referencing artifact rejection
         val root = "build/test-electron-generated-gui-web-validator-self-artifact"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.width=2;p.height=2;p.capture_native_width=2;p.capture_native_height=2;p.format=\"argb-u32\";p.producer=\"electron-live-capture-page\";p.pixels=Array(4).fill(4294967295)") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm the proof JSON cannot be reused as its own ARGB artifact")
@@ -304,6 +349,7 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
 
     it "rejects symlinked Electron generated-GUI proof and captured ARGB artifacts":
+        # @capture(protocol_json): evidence rows for symlinked proof and ARGB rejections
         val root = "build/test-electron-generated-gui-web-validator-symlink-artifact"
         val command = "rm -rf " + root + " " + root + "-external && mkdir -p " + root + " && " +
             _proof_command(root + "/proof-real.json", "") + " && " +
@@ -312,7 +358,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/proof.json", "const external=dir+\"-external\";fs.mkdirSync(external,{recursive:true});fs.writeFileSync(path.join(external,\"captured.json\"),JSON.stringify(argb));fs.symlinkSync(path.join(external,\"captured.json\"),path.join(dir,\"linked.json\"));p.captured_argb_path=\"linked.json\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/argb.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val proof = file_read(root + "/proof.env")
         val argb = file_read(root + "/argb.env")
@@ -334,6 +380,7 @@ describe "Electron generated GUI Web proof validator":
         expect(argb).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
 
     it "rejects hardlinked Electron generated-GUI proof and captured ARGB artifacts":
+        # @capture(protocol_json): evidence rows for hardlinked proof and ARGB rejections
         val root = "build/test-electron-generated-gui-web-validator-hardlink-artifact"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof-real.json", "") + " && " +
@@ -342,7 +389,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/argb.json", "const real=path.join(dir,\"captured-real.json\");fs.renameSync(path.join(dir,\"captured.json\"),real);fs.linkSync(real,path.join(dir,\"captured.json\"))") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/argb.json > " + root + "/argb.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val proof = file_read(root + "/proof.env")
         val argb = file_read(root + "/argb.env")
@@ -364,6 +411,7 @@ describe "Electron generated GUI Web proof validator":
         expect(argb).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
 
     it "rejects malformed captured ARGB shape and pixel data":
+        # @capture(protocol_json): evidence rows for shape, dimension, type, range, and blank rejections
         val root = "build/test-electron-generated-gui-web-validator-argb-shape"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
@@ -381,7 +429,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(0)}))") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/blank.json > " + root + "/blank.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val malformed = file_read(root + "/malformed.env")
         val viewport = file_read(root + "/viewport.env")
@@ -404,6 +452,8 @@ describe "Electron generated GUI Web proof validator":
         expect(blank).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count=0")
 
     it "rejects missing requested viewport and native capture viewport mismatch":
+        # @capture(protocol_json): evidence rows for missing-width and viewport-mismatch rejections
+        step("Reject proofs whose requested or native capture viewport rows are absent or conflicting")
         val root = "build/test-electron-generated-gui-web-validator-viewport"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "delete p.width") +
@@ -411,7 +461,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/mismatch.json", "p.capture_native_width=95") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val missing = file_read(root + "/missing.env")
         val mismatch = file_read(root + "/mismatch.env")
@@ -422,6 +472,7 @@ describe "Electron generated GUI Web proof validator":
         expect(mismatch).to_contain("electron_generated_gui_web_capture_native_width=95")
 
     it "rejects stringified live generated GUI viewport provenance timing and normalization proof rows":
+        # @capture(protocol_json): evidence rows for stringified numeric proof rejections
         val root = "build/test-electron-generated-gui-web-validator-string-numeric-proof"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/requested.json", "p.width=\"96\"") +
@@ -435,7 +486,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/normalization.json", "p.generated_gui_text_normalization_pixels=\"0\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/normalization.json > " + root + "/normalization.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val requested = file_read(root + "/requested.env")
         val argb = file_read(root + "/argb.env")
@@ -465,12 +516,14 @@ describe "Electron generated GUI Web proof validator":
         expect_not(normalization.contains("electron_generated_gui_web_text_normalization_pixels=0"))
 
     it "rejects missing generated GUI text-normalization proof":
+        # @capture(protocol_json): evidence rows for the deleted normalization row
+        step("Reject proofs that omit the text-normalization pixel row")
         val root = "build/test-electron-generated-gui-web-validator-missing-normalization"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "delete p.generated_gui_text_normalization_pixels") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
@@ -478,6 +531,7 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_text_normalization_pixels=")
 
     it "rejects string booleans without normalizing them as valid diagnostics":
+        # @capture(protocol_json): evidence rows for string-typed boolean probe rejections
         val root = "build/test-electron-generated-gui-web-validator-string-booleans"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
@@ -487,7 +541,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/blur.json > " + root + "/blur.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val capture = file_read(root + "/capture.env")
         val downsampled = file_read(root + "/downsampled.env")
@@ -508,6 +562,8 @@ describe "Electron generated GUI Web proof validator":
         expect_not(blur.contains("electron_generated_gui_web_blur_or_tolerance_used=false"))
 
     it "rejects blur tolerance and malformed mismatch counts":
+        # @capture(protocol_json): evidence rows for blur tolerance and malformed count rejections
+        step("Reject blur-tolerant capture and non-numeric mismatch counts")
         val root = "build/test-electron-generated-gui-web-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
@@ -515,7 +571,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val blur = file_read(root + "/blur.env")
         val mismatch = file_read(root + "/mismatch.env")
@@ -524,6 +580,8 @@ describe "Electron generated GUI Web proof validator":
         expect(mismatch).to_contain("electron_generated_gui_web_mismatch_count=bad")
 
     it "rejects checksum and pixel mismatches as non-pass proof":
+        # @capture(protocol_json): evidence rows mapping checksum and pixel mismatches to divergent
+        step("Map checksum and pixel mismatches to divergent evidence instead of pass")
         val root = "build/test-electron-generated-gui-web-validator-divergent"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/checksum.json", "p.checksum=\"101\"") +
@@ -531,7 +589,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/pixel.json", "p.mismatch_count=4") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/pixel.json > " + root + "/pixel.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val checksum = file_read(root + "/checksum.env")
         val pixel = file_read(root + "/pixel.env")
@@ -540,6 +598,7 @@ describe "Electron generated GUI Web proof validator":
         expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 
     it "rejects checksum rows that do not match captured generated GUI ARGB":
+        # @capture(protocol_json): evidence rows recomputing checksums from the captured ARGB artifact
         val root = "build/test-electron-generated-gui-web-validator-artifact-checksum"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/checksum.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
@@ -547,7 +606,7 @@ describe "Electron generated GUI Web proof validator":
             _proof_command(root + "/weighted.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact={width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(1)};artifact.pixels[0]=2;artifact.pixels[1]=0;fs.writeFileSync(artifactPath,JSON.stringify(artifact));p.checksum=\"6912\";p.expected_checksum=\"6912\";p.weighted_checksum=\"23891328\";p.expected_weighted_checksum=\"23891328\"") +
             " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exit 1 is the fail-closed reject signal for forged evidence
 
         val checksum = file_read(root + "/checksum.env")
         val weighted = file_read(root + "/weighted.env")
@@ -563,6 +622,8 @@ describe "Electron generated GUI Web proof validator":
         expect(weighted).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum=23891327")
 
     it "keeps the live Electron wrapper wired to validator and divergent mapping":
+        # @capture(protocol_binary): validator and wrapper source contracts pinned by token checks
+        step("Pin the validator and wrapper source to the normalized row and divergent mapping")
         val validator = file_read("scripts/check/validate-electron-generated-gui-web-proof.js")
         expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
         expect(validator).to_contain("fs.realpathSync(candidate)")

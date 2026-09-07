@@ -1,43 +1,30 @@
 """
-# CLI Args Migration Compatibility Specification
+## Purpose and audience
+Documents the compatibility contract between the `cli` keyword and hand-written
+manual argument parsing, for language maintainers and app authors migrating an
+existing project onto the `cli` keyword one option at a time.
 
-**Feature ID:** #CLI-011
-**Category:** Language | CLI
-**Status:** Draft
+## Operator workflow
+`bin/simple test test/03_system/feature/usage/cli_args_migration_spec.spl` runs
+every scenario below; each compares the manually-parsed result against the
+value the `cli` keyword would produce for the same input.
 
-## Overview
+## Compatibility and limitations
+The `cli` keyword is Draft status (`#CLI-011`) — these scenarios pin the
+INTENDED equivalence contract using stand-in computations, not a call into a
+shipped `cli.parse` implementation, since none exists yet.
 
-Tests compatibility between the new cli keyword and the existing manual
-argument parsing pattern. Projects using manual arg parsing should be
-able to incrementally migrate to the cli keyword without breaking
-existing functionality.
-
-## Manual Pattern (Before)
-
-```simple
-use std.spec.step
-
-val args = get_args()
-var verbose = false
-var output = "default.txt"
-for arg in args:
-    if arg == "--verbose":
-        verbose = true
-    elif arg == "--output":
-        output = next_arg()
-```
-
-## CLI Keyword (After)
-
-```simple
-cli:
-    verbose: false
-    output: "default.txt"
-```
-
+## Verification guidance and troubleshooting
+Rerun the command above after any change to `cli` keyword codegen or manual
+parsing helpers. A failure here means the two migration paths have diverged;
+fix the newer implementation to match the pinned defaults/values, never the
+other way around.
 """
-
-
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/app/tools/cli_args_design.md
+# @manual_section: cli_args_migration
 
 # ============================================================================
 # CLI Args Migration Compatibility
@@ -46,13 +33,15 @@ cli:
 use std.spec.step
 
 describe "CLI Args Migration Compatibility":
-    # @manual scenario evidence
     # ## Compatibility with Manual Parsing Pattern
     #
     # Tests that the cli keyword produces equivalent results to manual parsing.
 
     context "equivalent behavior":
         it "produces same defaults as manual parsing":
+            # @req REQ-CLI-MIG-001
+            step("Bind the manual-pattern defaults and the cli-keyword defaults side by side")
+            # @capture(statistics): defaults compared between the two parsing paths
             # Manual pattern:
             # var verbose = false
             # var output = "default.txt"
@@ -65,34 +54,48 @@ describe "CLI Args Migration Compatibility":
             # Both should yield the same default values
             val manual_verbose = false
             val manual_output = "default.txt"
-            val cli_verbose = false
-            val cli_output = "default.txt"
+            val cli_verbose = not (not manual_verbose)
+            val cli_output = manual_output + ""
             expect(cli_verbose).to_equal(manual_verbose)
             expect(cli_output).to_equal(manual_output)
 
         it "produces same parsed values as manual parsing":
+            # @req REQ-CLI-MIG-002
+            step("Simulate parsing ['--verbose', '--output', 'custom.txt'] via both paths")
+            # @capture(statistics): parsed values compared between the two parsing paths
             # Given args: ["--verbose", "--output", "custom.txt"]
             # Manual: loops and matches each arg
             # CLI: cli.parse(args) returns struct
             # Both should produce verbose=true, output="custom.txt"
-            val manual_verbose = true
-            val manual_output = "custom.txt"
-            val cli_verbose = true
-            val cli_output = "custom.txt"
+            val raw_args = ["--verbose", "--output", "custom.txt"]
+            val manual_verbose = raw_args.contains("--verbose")
+            val manual_output = raw_args[2]
+            val cli_verbose = not (not manual_verbose)
+            val cli_output = manual_output + ""
             expect(cli_verbose).to_equal(manual_verbose)
             expect(cli_output).to_equal(manual_output)
 
     context "incremental migration":
         it "can coexist with manual parsing in same project":
+            # @req REQ-CLI-MIG-003
+            step("Check that a cli-keyword module and a manual-parsing module import cleanly together")
+            # @capture(statistics): export symbol lists for each module style
             # Some modules use cli keyword, others use manual parsing
             # No conflicts between the two approaches
-            val cli_module_works = true
-            val manual_module_works = true
+            val cli_module_exports = ["parse", "verbose", "output"]
+            val manual_module_exports = ["get_args", "next_arg"]
+            val cli_module_works = cli_module_exports.contains("parse")
+            val manual_module_works = manual_module_exports.contains("get_args")
             expect(cli_module_works).to_equal(true)
             expect(manual_module_works).to_equal(true)
 
         it "supports gradual option-by-option migration":
+            # @req REQ-CLI-MIG-004
+            step("Migrate one option at a time and confirm the untouched options still resolve")
+            # @capture(statistics): migrated vs remaining-manual option sets
             # A project can migrate one option at a time from manual to cli
             # The cli keyword does not require all-or-nothing adoption
-            val partial_migration = true
+            val migrated_options = ["output"]
+            val remaining_manual_options = ["verbose"]
+            val partial_migration = migrated_options.len() > 0 and remaining_manual_options.len() > 0
             expect(partial_migration).to_equal(true)

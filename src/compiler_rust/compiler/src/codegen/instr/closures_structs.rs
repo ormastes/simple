@@ -1617,7 +1617,7 @@ fn try_compile_builtin_method_call<M: Module>(
             get_vreg_or_default(ctx, builder, &args[1])
         } else {
             // Default to collection length
-            inline_runtime_len_value(builder, receiver_val)
+            inline_runtime_len_value(builder, receiver_val, ctx.baremetal)
         };
 
         // step argument (optional, defaults to 1)
@@ -1633,7 +1633,7 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // is_empty: compile as rt_len(receiver) == 0
     if method == "is_empty" {
-        let len_val = inline_runtime_len_value(builder, receiver_val);
+        let len_val = inline_runtime_len_value(builder, receiver_val, ctx.baremetal);
         let zero = builder.ins().iconst(types::I64, 0);
         let result = builder
             .ins()
@@ -2125,25 +2125,24 @@ fn try_compile_builtin_method_call<M: Module>(
         // The receiver-type prefix is restricted to integer spellings so a
         // genuine `SomeStruct.chr` method is left to normal resolution.
         //
-        // `text_dot_from_char_code` is the same runtime entry point the LLVM
-        // backend calls and is non-ASCII correct (see
-        // char_from_code_non_ascii_unsupported_2026-07-20). It is declared
-        // explicitly because it is not an `rt_*` pre-declared import.
+        // `rt_char_from_code` is the canonical registered runtime ABI for this
+        // operation.  The legacy `text_dot_from_char_code` export has the
+        // same implementation, but is intentionally absent from the static
+        // provider manifest, so declaring it directly makes a strict JIT
+        // module NULL-jump/fail closed.  Keep Cranelift aligned with the MIR
+        // and runtime manifests rather than bypassing provider ownership.
         //
         // doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
         m if args.is_empty() && is_int_chr_method(m) => {
-            let fid = if let Some(&existing) = ctx.func_ids.get("text_dot_from_char_code") {
+            let fid = if let Some(&existing) = ctx.func_ids.get("rt_char_from_code") {
                 existing
             } else {
                 let mut sig = Signature::new(platform_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
-                match ctx
-                    .module
-                    .declare_function("text_dot_from_char_code", Linkage::Import, &sig)
-                {
+                match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
                     Ok(id) => {
-                        ctx.func_ids.insert("text_dot_from_char_code".to_string(), id);
+                        ctx.func_ids.insert("rt_char_from_code".to_string(), id);
                         id
                     }
                     Err(_) => return Ok(None),
@@ -2158,7 +2157,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "merge" => {
             if args.len() == 1 {
                 let other_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let count = inline_runtime_len_value(builder, other_val);
+                let count = inline_runtime_len_value(builder, other_val, ctx.baremetal);
                 if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
                     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                     adapted_call(builder, func_ref, &[receiver_val, other_val, count]);
@@ -2315,7 +2314,7 @@ fn try_compile_builtin_method_call<M: Module>(
     };
 
     if runtime_func == "rt_len" {
-        return Ok(Some(inline_runtime_len_value(builder, receiver_val)));
+        return Ok(Some(inline_runtime_len_value(builder, receiver_val, ctx.baremetal)));
     }
 
     // Check if runtime function exists; declare on-demand if missing

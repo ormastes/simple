@@ -326,3 +326,20 @@ attempted (diagnosis-only lane).
   `append` to the array-mutator builtins). Different lane, same primitive.
 - `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
 - `doc/08_tracking/bug/module_global_write_lost_on_frame_pop_2026-07-28.md`
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+`.pop()` on a struct-field array both returns the last element and shrinks the
+array, on both lanes:
+
+```
+LEN0=3  POPPED=3  LEN1=2        # struct field
+LOCAL_POPPED=3  LOCAL_LEN=2     # plain local control
+```
+
+(identical on interpret and jit). Probe `_scratch/p_pop.spl`.

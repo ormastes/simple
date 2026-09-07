@@ -1,47 +1,46 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-MEMLEAK
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+Baseline memory leak measurement specification (file 1 of 3)
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-MEMLEAK
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Purpose and audience
+Baseline workload file for the 3-file sequential parent-process RSS
+measurement (`--mem-check`), maintained by the testing-infrastructure team.
+Each scenario generates typical runner work so the parent's memory profile
+matches a real test file, not a synthetic no-op.
 
-# Baseline Memory Leak Measurement Spec
-#
-# This spec file is designed to be run as part of a 3-file sequential test
-# to measure parent-process memory growth via the --mem-check flag.
-#
-# Usage:
-#   bin/simple test test/unit/memleak/
-#
-# == Investigation Results (2026-02-22) ==
-#
-# RESULT: NO parent-side memory leak detected.
-#
-# The parent test runner's RSS stays flat after initial warmup (~600 kB).
-# After the first test file, subsequent tests show 0 kB growth.
-# Verified across 3, 74, and 100+ test file runs.
-#
-# The originally suspected leak sources (below) do NOT cause measurable growth:
-#   1. Building child args (array of strings) — negligible
-#   2. Capturing stdout/stderr from child (strings) — freed after print
-#   3. Creating TestFileResult struct — ~200 bytes each
-#   4. Pushing to results/completed_files arrays — absorbed by page allocator
-#   5. String interpolation for print_result output — temporary, freed
-#
-# The REAL memory issue is in CHILD processes that import compiler.core.*
-# modules (ast, parser, lexer) — these can consume up to 16GB per child.
-# Since each child is a separate process, this does NOT leak into the parent.
+## Operator workflow
+Run `bin/simple test test/unit/memleak/` so the runner executes all three
+files in sequence and prints the parent RSS deltas; this file is baseline
+file 1 and must stay first.
+
+## Compatibility and limitations
+Investigation 2026-02-22 found NO parent-side leak: the parent's RSS stays
+flat after ~600 kB warmup and later files show 0 kB growth. The real memory
+consumer is CHILD processes importing compiler.core.* (up to 16 GB each);
+each child is a separate process, so nothing leaks into the parent. On hosts
+without /proc/self/status (e.g. macOS) the RSS scenario exercises and pins
+the graceful no-proc path instead.
+
+## Verification guidance and troubleshooting
+A failure here means the workload or one of its runtime probes broke, not
+that a leak was found — leaks are judged by the parent RSS deltas printed by
+the 3-file sequence, never by this file's pass/fail. If /proc/self/status is
+expected on your host but the RSS line is missing, check that the runner
+spawned this file as a child process with /proc mounted.
+"""
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: memleak baseline workload
+# @req REQ-SSPEC-MEMLEAK
 
 use std.spec.step
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Baseline memleak - file 1":
-    # @manual scenario evidence
     it "performs string operations to generate typical stdout":
         # @req REQ-SSPEC-MEMLEAK
-        step("performs string operations to generate typical stdout")
+        # @capture(statistics): generated string count and a real repository read-back length
+        step("Generate result strings and probe a real repository file through the runtime")
         # Generate output similar to real tests
         # Note: nested fn can't mutate outer closure vars, so we return the array
         fn do_work() -> [text]:
@@ -53,11 +52,16 @@ describe "Baseline memleak - file 1":
             out
         val results = do_work()
         print "  Generated {results.len()} result strings"
-        expect(results.len()).to_equal(10)
+        expect(results.len()).to_equal(10)  # oracle: the loop pushes exactly one string per iteration for k in 0..9
+        # real runtime probe: the product's file-read SFFI must return a real
+        # repository document, giving this workload an external oracle
+        val glossary = rt_file_read_text("doc/glossary.md") ?? ""
+        expect(glossary.len() > 0).to_equal(true)  # oracle: doc/glossary.md is a tracked non-empty document, so the runtime reader must return at least one byte
 
     it "reads /proc/self/status for RSS measurement":
         # @req REQ-SSPEC-MEMLEAK
-        step("reads /proc/self/status for RSS measurement")
+        # @capture(statistics): the observed VmRSS line, or the pinned graceful no-proc result
+        step("Read the process status file and pin whichever path this host takes")
         val status = rt_file_read_text("/proc/self/status") ?? ""
         var rss_line = ""
         if status != "":
@@ -67,16 +71,21 @@ describe "Baseline memleak - file 1":
                     rss_line = line
         if rss_line != "":
             print "  [RSS] {rss_line}"
+            expect(rss_line).to_start_with("VmRSS:")  # oracle: the scanner keyed on the literal VmRSS: prefix, so the reported line must carry it
         else:
             print "  [RSS] Could not read /proc/self/status"
-        expect(1).to_equal(1)
+            expect(status).to_equal("")  # oracle: on hosts without /proc the runtime reader must fail closed to an empty read, which this branch pins
 
     it "verifies this is a clean child process":
         # @req REQ-SSPEC-MEMLEAK
-        step("verifies this is a clean child process")
+        # @capture(statistics): runtime read-back of this spec's own tracked source
+        step("Prove the child reads real files, then exit and let the OS reclaim")
         # This runs in a child process spawned by test runner.
         # The child exits after this file, and OS reclaims all memory.
         # Any leak in the child does NOT affect the parent.
         # The parent's leak is from processing this child's output.
         print "  Child process running - all memory freed on exit"
-        expect(1).to_equal(1)
+        # real runtime probe: a clean child must still resolve tracked
+        # repository content through the product's file-read SFFI
+        val self_source = rt_file_read_text("test/01_unit/memleak/baseline_memleak_spec.spl") ?? ""
+        expect(self_source.contains("Baseline memleak")).to_equal(true)  # oracle: this spec's own tracked title is the fixed marker the read-back must find

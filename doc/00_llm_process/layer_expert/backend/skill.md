@@ -240,3 +240,22 @@ After backend regressions, FFI fixes, or linker changes, refresh this skill
 with new issue links and concrete marshalling patterns.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Cranelift inline `.len()` reads the wrong heap tag space (2026-09-06)
+
+The inline `.len()` fast path in
+`src/compiler_rust/compiler/src/codegen/instr/helpers.rs` dispatches on the
+header byte and carries BOTH heap numbering schemes at once: `:74` treats
+`object_type == 3` as `RuntimeDict` (len @8), `:81` treats `object_type == 6` as
+freestanding `SplDict` (len @16). Hosted and freestanding SWAP dict and closure
+(`Dict 0x03` / `Closure 0x06` hosted; `CLOSURE 0x03` / `DICT 0x06` in
+`src/runtime/runtime_native.c:250,252`), and `:81` is scoped to freestanding in
+its comment only — so `.len()` on a *hosted* closure returns
+`RuntimeClosure.capture_count` (offset 16) instead of the `-1` sentinel, i.e.
+`0` for a non-capturing lambda.
+
+Do NOT "fix" this by gating on the target triple: the same binary links both
+runtimes (`linker.rs:1642`, ~514 duplicate `rt_*` symbols at `:1649` resolved by
+archive order + `/FORCE:MULTIPLE` at `:1654-1668`). Full write-up, table and
+landmine: [runtime layer expert](../runtime/skill.md) § Session update
+2026-09-06. Tracking PR: <https://github.com/ormastes/simple/pull/403>.

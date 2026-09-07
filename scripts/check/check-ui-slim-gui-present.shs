@@ -1,0 +1,391 @@
+#!/bin/sh
+# check-ui-slim-gui-present.shs — qualify a REAL displayed GUI window for the
+# ui_slim G0/G1 workloads.
+#
+# What it does: launches test/05_perf/ui_slim/g1_greeting_gui.spl through the
+# existing macOS GUI route (scripts/gui/macos-gui-run.shs, which bundles a
+# GUI-enabled driver into a throwaway .app so LaunchServices registers it and
+# the window actually composites), records an external timestamp immediately
+# before the launch, parses the fixture's [ui-slim] milestone lines, and
+# verifies the framebuffer PPM the fixture wrote.
+#
+# CLOCK: the external stamp uses `gdate +%s%N` when coreutils is installed,
+# else `date +%s` (second resolution). Both
+# are CLOCK_REALTIME, the SAME clock the fixture stamps with
+# (time_now_unix_micros x 1000), so the deltas are meaningful. Neither side is
+# monotonic; a wall-clock step during the run invalidates the numbers.
+#
+# ORACLE: the PPM is the framebuffer handed to present_argb_u32 — never a
+# screen capture. "Non-blank" means: inside the greeting label's rect, some
+# pixels differ from the declared background colour. A uniform image FAILs.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — window presented, <k> milestones, ppm non-blank      exit 0
+#   FAIL  — ...                                                  exit 1
+#   ERROR — nothing was checked (<reason>)                       exit 2
+# A zero-exit run with no `window_created` milestone is FAIL, never a pass.
+set -u
+
+repo_root=$(cd "$(dirname "$0")/.." && cd .. && pwd -P)
+fixture_default="$repo_root/test/05_perf/ui_slim/g1_greeting_gui.spl"
+timeout_s=${UI_SLIM_TIMEOUT_S:-30}
+hold_ms=${UI_SLIM_HOLD_MS:-500}
+
+now_ns() {
+  if command -v gdate >/dev/null 2>&1; then
+    gdate +%s%N
+  else
+    echo "$(date +%s)000000000"
+  fi
+}
+
+clock_name() {
+  if command -v gdate >/dev/null 2>&1; then echo "gdate CLOCK_REALTIME ns"
+  else echo "date CLOCK_REALTIME seconds (coarse)"; fi
+}
+
+verdict_pass() { echo "PASS — $1"; exit 0; }
+verdict_fail() { echo "FAIL — $1"; exit 1; }
+verdict_error() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+# ---------------------------------------------------------------- milestones
+milestone_ns() {  # <errfile> <name>  -> ns or empty
+  awk -v want="$2" '
+    $1 == "[ui-slim]" && $2 == want {
+      for (i = 3; i <= NF; i++) if (substr($i, 1, 5) == "t_ns=") { print substr($i, 6); exit }
+    }' "$1"
+}
+
+probe_field() {  # <errfile> <key>  -> value
+  awk -v key="$2" '
+    $1 == "[ui-slim]" && $2 == "probe" {
+      n = length(key) + 1
+      for (i = 3; i <= NF; i++) if (substr($i, 1, n) == key "=") { print substr($i, n + 1); exit }
+    }' "$1"
+}
+
+delta_ms() {  # <base_ns> <ns>  -> ms or NOT_MEASURED
+  if [ -z "$2" ]; then echo "NOT_MEASURED"; return; fi
+  awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", (b - a) / 1000000.0 }'
+}
+
+# ------------------------------------------------------------- ppm non-blank
+# Prints "<total> <differing>" for the rect, or nothing on a malformed file.
+ppm_rect_diff() {  # <ppm> <bg_hex6> <x> <y> <w> <h>
+  ppm=$1; bg=$2; rx=$3; ry=$4; rw=$5; rh=$6
+  [ -s "$ppm" ] || return 1
+  magic=$(head -c 2 "$ppm")
+  [ "$magic" = "P6" ] || return 1
+  dims=$(head -c 64 "$ppm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C awk '{print $2, $3, $4}')
+  iw=$(echo "$dims" | awk '{print $1}')
+  ih=$(echo "$dims" | awk '{print $2}')
+  mx=$(echo "$dims" | awk '{print $3}')
+  case "$iw$ih$mx" in *[!0-9]*|"") return 1 ;; esac
+  hdr=$(( 3 + ${#iw} + 1 + ${#ih} + 1 + ${#mx} + 1 ))
+  # BSD awk has no strtonum(), so the hex background is decoded by hand.
+  tail -c "+$((hdr + 1))" "$ppm" | LC_ALL=C od -An -v -tu1 |
+    LC_ALL=C awk -v iw="$iw" -v ih="$ih" -v bg="$bg" -v rx="$rx" -v ry="$ry" -v rw="$rw" -v rh="$rh" '
+      function hx(s,   i, v, c, p) {
+        v = 0
+        for (i = 1; i <= length(s); i++) {
+          c = tolower(substr(s, i, 1))
+          p = index("0123456789abcdef", c) - 1
+          if (p < 0) return -1
+          v = v * 16 + p
+        }
+        return v
+      }
+      BEGIN {
+        br = hx(substr(bg, 1, 2))
+        bgc = hx(substr(bg, 3, 2))
+        bb = hx(substr(bg, 5, 2))
+        n = 0; total = 0; diff = 0; distinct = 0
+      }
+      {
+        for (i = 1; i <= NF; i++) {
+          c[n % 3] = $i + 0
+          if (n % 3 == 2) {
+            p = int(n / 3); x = p % iw; y = int(p / iw)
+            if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
+              total++
+              if (c[0] != br || c[1] != bgc || c[2] != bb) diff++
+              key = c[0] "," c[1] "," c[2]
+              if (!(key in seen)) { seen[key] = 1; distinct++ }
+            }
+          }
+          n++
+        }
+      }
+      END { print total, diff, distinct }'
+}
+
+# ------------------------------------------------------------------ selftest
+make_fake() {  # <path> <mode>
+  cat > "$1" <<FAKE
+#!/bin/sh
+# fake fixture launcher for selftest mode: $2
+out=""
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "--out" ]; then out="\$a"; fi
+  prev="\$a"
+done
+t() {
+  if command -v gdate >/dev/null 2>&1; then gdate +%s%N
+  else echo "\$(date +%s)000000000"; fi
+}
+echo "[ui-slim] probe size=8x4 bg=141414 rect=0,0,8,4 btn=4,2" >&2
+echo "[ui-slim] entry t_ns=\$(t)" >&2
+FAKE
+  if [ "$2" != "no_window" ]; then
+    echo 'echo "[ui-slim] window_created t_ns=$(t)" >&2' >> "$1"
+  fi
+  cat >> "$1" <<'FAKE'
+echo "[ui-slim] first_frame_submitted t_ns=$(t)" >&2
+echo "[ui-slim] input_ready t_ns=$(t)" >&2
+echo "[ui-slim] input_response t_ns=$(t)" >&2
+echo "[ui-slim] exit_ok t_ns=$(t)" >&2
+FAKE
+  # 8x4 P6: uniform 0x141414, plus a white run when the image must be non-blank
+  cat >> "$1" <<FAKE
+if [ -n "\$out" ]; then
+  printf 'P6\n8 4\n255\n' > "\$out"
+  i=0
+  while [ \$i -lt 32 ]; do
+    if [ "$2" = "blank" ] || [ \$i -ge 8 ]; then
+      printf '\\024\\024\\024' >> "\$out"
+    else
+      printf '\\377\\377\\377' >> "\$out"
+    fi
+    i=\$((i + 1))
+  done
+fi
+exit 0
+FAKE
+  chmod +x "$1"
+}
+
+run_selftest() {
+  tmp=$(mktemp -d) || { echo "selftest: cannot mktemp" >&2; return 1; }
+  pass=0
+  for mode in good blank no_window missing; do
+    launcher="$tmp/fake_$mode.sh"
+    st_fixture="$tmp/fixture_$mode.spl"
+    if [ "$mode" = "missing" ]; then
+      rm -f "$st_fixture"
+      launcher="/nonexistent/launcher"
+    else
+      make_fake "$launcher" "$mode"
+      echo "# fake" > "$st_fixture"
+    fi
+    UI_SLIM_LAUNCHER="$launcher" UI_SLIM_SELFTEST_CHILD=1 \
+      sh "$0" --fixture "$st_fixture" --out "$tmp/$mode.ppm" >"$tmp/$mode.log" 2>&1
+    rc=$?
+    got=$(tail -n 1 "$tmp/$mode.log" | awk '{print $1}')
+    case "$mode:$got:$rc" in
+      good:PASS:0|blank:FAIL:1|no_window:FAIL:1|missing:ERROR:2)
+        pass=$((pass + 1)) ;;
+      *)
+        echo "selftest: case $mode expected the documented verdict, got '$got' (exit $rc)" >&2
+        sed -n '1,20p' "$tmp/$mode.log" >&2 ;;
+    esac
+  done
+  rm -rf "$tmp"
+  echo "selftest: $pass/4 passed"
+  [ "$pass" -eq 4 ]
+}
+
+# ---------------------------------------------------------------- arg parsing
+fixture="$fixture_default"
+out_ppm=""
+selftest=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest) selftest=1 ;;
+    --fixture) shift; fixture="${1:-}" ;;
+    --out) shift; out_ppm="${1:-}" ;;
+    --hold-ms) shift; hold_ms="${1:-500}" ;;
+    *) echo "usage: $0 [--selftest] [--fixture PATH] [--out PPM] [--hold-ms N]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$selftest" = "1" ]; then
+  run_selftest || exit 1
+  exit 0
+fi
+
+# The selftest drives this script recursively; a standalone run always
+# selftests first, and a selftest failure is fatal.
+if [ "${UI_SLIM_SELFTEST_CHILD:-0}" != "1" ]; then
+  run_selftest || verdict_error "selftest failed"
+fi
+
+[ -n "$fixture" ] && [ -f "$fixture" ] || verdict_error "fixture not found: $fixture"
+
+work=$(mktemp -d) || verdict_error "cannot create a work directory"
+[ -n "$out_ppm" ] || out_ppm="$work/g1.ppm"
+case "$out_ppm" in /*) ;; *) out_ppm="$(pwd -P)/$out_ppm" ;; esac
+rm -f "$out_ppm"
+errfile="$work/stderr.txt"
+receipt="$work/pid.receipt"
+
+launcher="${UI_SLIM_LAUNCHER:-}"
+echo "clock: $(clock_name)"
+echo "fixture: $fixture"
+echo "out: $out_ppm"
+
+t0=$(now_ns)
+
+if [ -n "$launcher" ]; then
+  # Selftest / alternate-route injection. The default is the real route below.
+  echo "launcher: $launcher (injected)"
+  [ -x "$launcher" ] || { rm -rf "$work"; verdict_error "injected launcher not executable: $launcher"; }
+  "$launcher" "$fixture" --hold-ms "$hold_ms" --out "$out_ppm" >"$work/stdout.txt" 2>"$errfile"
+else
+  route="$repo_root/scripts/gui/macos-gui-run.shs"
+  echo "launcher: $route"
+  [ -f "$route" ] || { rm -rf "$work"; verdict_error "GUI route script missing: $route"; }
+  # macos-gui-run.shs launches through `open -n`, so the child's cwd is `/` and
+  # only the LSEnvironment keys its Info.plist lists are forwarded.
+  # SIMPLE_SPL_WINIT_PATH is NOT one of them, and GuiRenderer's other candidate
+  # ("build/sffi/libspl_winit.dylib") is relative and cannot resolve from `/`.
+  # DYLD_LIBRARY_PATH *is* forwarded, and dyld consults it with the leaf name
+  # for any dlopen path, so pointing it at build/sffi is how the existing route
+  # reaches the cdylib without modifying the route script.
+  sffi_dir="${SIMPLE_SFFI_DIR:-$repo_root/build/sffi}"
+  if [ ! -f "$sffi_dir/libspl_winit.dylib" ]; then
+    echo "note: $sffi_dir/libspl_winit.dylib is absent — GuiRenderer will report it"
+  fi
+  SIMPLE_GUI_LAUNCHED_PID_PATH="$receipt" SIMPLE_GUI_RUN_SKIP_NUDGE=0 \
+  SIMPLE_SPL_WINIT_PATH="$sffi_dir/libspl_winit.dylib" \
+  DYLD_LIBRARY_PATH="$sffi_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+    sh "$route" "$fixture" --hold-ms "$hold_ms" --out "$out_ppm" \
+    >"$work/launch.log" 2>"$work/launch.err"
+  launch_rc=$?
+  sed -n '1,20p' "$work/launch.log" 2>/dev/null
+  sed -n '1,20p' "$work/launch.err" 2>/dev/null
+  # The route can die on SIGPIPE (141) inside its own `ps | awk` pid lookup
+  # AFTER `open` already succeeded, leaving no receipt. Recover the bundle from
+  # the line it prints; only a launch that produced no bundle at all is ERROR.
+  bundle=""
+  pid=""
+  if [ -f "$receipt" ]; then
+    pid=$(awk -F= '$1 == "launched_pid" { print $2 }' "$receipt")
+    bundle=$(awk -F= '$1 == "launched_bundle" { print $2 }' "$receipt")
+  fi
+  if [ -z "$bundle" ]; then
+    bundle=$(awk '$1 == "launching" { for (i = 1; i <= NF; i++) if ($i ~ /SimpleGui\.app$/) { print $i; exit } }' "$work/launch.log")
+  fi
+  if [ -z "$bundle" ]; then
+    rm -rf "$work"
+    verdict_error "macos-gui-run.shs refused to launch (exit $launch_rc) — see the diagnostic above"
+  fi
+  app_err="$bundle/../launch.err"
+  if [ -z "$pid" ]; then
+    pid=$(pgrep -f "$bundle/Contents/MacOS/SimpleGui" 2>/dev/null | head -n 1)
+  fi
+  echo "app bundle: $bundle"
+  echo "app pid: ${pid:-<not resolved>}"
+  waited=0
+  while [ "$waited" -lt "$timeout_s" ]; do
+    [ -n "$pid" ] || break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null
+    sleep 2
+    kill -KILL "$pid" 2>/dev/null
+    echo "note: killed pid $pid after ${timeout_s}s (no window is left open)"
+  fi
+  [ -f "$app_err" ] && cp "$app_err" "$errfile"
+  [ -f "$bundle/../launch.out" ] && cp "$bundle/../launch.out" "$work/stdout.txt"
+fi
+
+[ -f "$errfile" ] || { rm -rf "$work"; verdict_error "no stderr transcript was produced"; }
+
+grep -c '^\[ui-slim\]' "$errfile" >/dev/null 2>&1
+n_lines=$(grep -c '^\[ui-slim\]' "$errfile" 2>/dev/null || echo 0)
+if [ "$n_lines" -eq 0 ]; then
+  echo "--- fixture stdout (diagnostic) ---"
+  sed -n '1,30p' "$work/stdout.txt" 2>/dev/null
+  echo "--- fixture stderr (diagnostic) ---"
+  sed -n '1,30p' "$errfile"
+  rm -rf "$work"
+  verdict_error "the fixture emitted no [ui-slim] milestone at all"
+fi
+
+m_entry=$(milestone_ns "$errfile" entry)
+m_window=$(milestone_ns "$errfile" window_created)
+m_frame=$(milestone_ns "$errfile" first_frame_submitted)
+m_ready=$(milestone_ns "$errfile" input_ready)
+m_resp=$(milestone_ns "$errfile" input_response)
+
+k=0
+for v in "$m_entry" "$m_window" "$m_frame" "$m_ready" "$m_resp"; do
+  [ -n "$v" ] && k=$((k + 1))
+done
+
+echo "launch_to_entry            $(delta_ms "$t0" "$m_entry") ms"
+echo "launch_to_window_created   $(delta_ms "$t0" "$m_window") ms"
+echo "launch_to_first_submission $(delta_ms "$t0" "$m_frame") ms"
+echo "launch_to_input_ready      $(delta_ms "$t0" "$m_ready") ms"
+if [ -n "$m_ready" ] && [ -n "$m_resp" ]; then
+  echo "input_to_visible_response  $(delta_ms "$m_ready" "$m_resp") ms"
+else
+  echo "input_to_visible_response  NOT_MEASURED ms"
+fi
+
+if [ -z "$m_window" ]; then
+  echo "--- fixture stdout (diagnostic) ---"
+  sed -n '1,30p' "$work/stdout.txt" 2>/dev/null
+  rm -rf "$work"
+  verdict_fail "no window: the window_created milestone is absent ($k milestone(s) seen)"
+fi
+
+bg=$(probe_field "$errfile" bg)
+rect=$(probe_field "$errfile" rect)
+[ -n "$bg" ] || bg="141414"
+if [ -z "$rect" ]; then
+  rm -rf "$work"
+  verdict_fail "the fixture declared no greeting rect, so the PPM cannot be judged"
+fi
+rx=$(echo "$rect" | cut -d, -f1)
+ry=$(echo "$rect" | cut -d, -f2)
+rw=$(echo "$rect" | cut -d, -f3)
+rh=$(echo "$rect" | cut -d, -f4)
+
+if [ ! -f "$out_ppm" ]; then
+  rm -rf "$work"
+  verdict_fail "no framebuffer PPM at $out_ppm (the read_pixels route produced nothing)"
+fi
+
+counts=$(ppm_rect_diff "$out_ppm" "$bg" "$rx" "$ry" "$rw" "$rh")
+if [ -z "$counts" ]; then
+  rm -rf "$work"
+  verdict_fail "the PPM at $out_ppm is not a readable P6 image"
+fi
+total=$(echo "$counts" | awk '{print $1}')
+diff=$(echo "$counts" | awk '{print $2}')
+distinct=$(echo "$counts" | awk '{print $3}')
+echo "ppm: $out_ppm  greeting_rect=${rx},${ry},${rw}x${rh}  bg=#$bg  sampled=$total differing=$diff distinct=$distinct"
+
+if [ "${total:-0}" -eq 0 ]; then
+  rm -rf "$work"
+  verdict_fail "the greeting rect sampled 0 pixels — the PPM does not cover it"
+fi
+if [ "${diff:-0}" -eq 0 ]; then
+  rm -rf "$work"
+  verdict_fail "the framebuffer is blank: every pixel in the greeting rect equals the background #$bg"
+fi
+# A rect that is one flat non-background colour is a filled panel with no
+# greeting drawn on it — content, not just paint, is what this gate qualifies.
+if [ "${distinct:-0}" -lt 2 ]; then
+  rm -rf "$work"
+  verdict_fail "the greeting rect is one flat colour ($distinct distinct value) — no glyphs were rasterised"
+fi
+
+rm -rf "$work"
+verdict_pass "window presented, $k milestones, ppm non-blank"

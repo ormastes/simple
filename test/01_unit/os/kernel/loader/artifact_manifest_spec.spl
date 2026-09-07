@@ -1,5 +1,8 @@
 """
-# Unified SimpleArtifactManifest Specification (P2 Process/Loader)
+## Purpose and audience
+Unified SimpleArtifactManifest (P2 Process/Loader) contract for maintainers of
+src/os/kernel/loader/artifact_manifest.spl and the SimpleOS loader policy
+surface.
 
 **Feature IDs:** #OS-P2-ARTIFACT-MANIFEST
 **Category:** Runtime / Security
@@ -9,8 +12,6 @@
 **Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane MAN)
 **Design:** doc/01_research/domain/simpleos_production_host_master_plan.md (§5.3, §5.4, §12)
 **Research:** doc/01_research/domain/simpleos_production_host_master_plan.md
-
-## Overview
 
 Master plan §5.3 requires ONE artifact manifest covering ELF, SMF, script and
 native-Simple artifacts so the loader has a single policy surface instead of
@@ -38,9 +39,23 @@ metadata (`src/app/startup/launch_metadata.spl`), not a second manifest format:
 
 Oracles are absolute (exact reason strings, exact bitmasks) — no
 self-referential comparisons.
+## Operator workflow
+Run the spec with the seed runner
+(`src/compiler_rust/target/bootstrap/simple run <this-file>`); scenarios build
+typed manifests from per-kind skeletons and assert validation reasons,
+concrete rights-ceiling bitmasks, and SHA-256 content-hash verification over
+real artifact bytes.
+## Compatibility and limitations
+The running-target contract pins simpleos/x86_64/simpleos, so the
+target-mismatch scenarios assume that host triple. Content-hash verification
+covers declared bytes only — signature cryptography itself is out of scope.
+## Verification guidance and troubleshooting
+A failure names the exact rejection reason or bit value that drifted; restore
+the published reason string or ceiling in the manifest module, never the
+oracle alone. A failure of the FIPS 180-4 vector scenario means the SHA-256
+helper itself regressed.
 """
 # @manual: primary
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
 # doc-path: doc/01_research/infra/aop/numbered_artifact_guard.md
 # doc-path: doc/03_plan/runtime/loader_shared_core_refactor.md
 # doc-path: doc/04_architecture/backend_layer_artifact_matrix.md
@@ -103,20 +118,23 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
 
     it("uses the dependency-free common value contract through the loader adapter"):
         # @req REQ-SSPEC-UNIT
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-OS-LOADER_ARTIFACT_MANIFEST-001
+        # @capture(protocol_binary): the elf skeleton's kind and format fields retained through the loader adapter
+        step("build a manifest through the dependency-free common value adapter")
         val common_manifest: CommonSimpleArtifactManifest = manifest_for_kind(manifest_kind_elf())
         expect(common_manifest.artifact_kind).to_equal("elf")
-        expect(common_manifest.format_version).to_equal(1)
+        expect(common_manifest.format_version).to_equal(1)  # oracle: format 1 is the only published manifest format
 
     # =======================================================================
     # 1. Each kind has a typed skeleton whose well-formed manifest validates
     # =======================================================================
 
     it("validates a well-formed ELF manifest"):
+        # @capture(protocol_binary): the elf skeleton's abi features and namespace retained
         step("the elf skeleton carries elf64 + W^X abi features and app_default namespace")
         val m = _elf_ok()
         expect(m.artifact_kind).to_equal("elf")
-        expect(m.format_version).to_equal(1)
+        expect(m.format_version).to_equal(1)  # oracle: format 1 is the only published manifest format
         expect(m.required_abi_features).to_contain("elf64")
         expect(m.required_abi_features).to_contain("w_xor_x")
         expect(m.namespace_template).to_equal("app_default")
@@ -127,6 +145,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(check.reason).to_equal("ok")
 
     it("validates a well-formed SMF manifest"):
+        # @capture(protocol_binary): the smf skeleton's abi feature set retained
+        step("build the smf skeleton and validate it")
         val m = _smf_ok()
         expect(m.artifact_kind).to_equal("smf")
         expect(m.required_abi_features).to_contain("smf1")
@@ -136,6 +156,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(check.reason).to_equal("ok")
 
     it("validates a well-formed script manifest that declares its interpreter"):
+        # @capture(protocol_binary): the script skeleton's interpreter binding retained
+        step("build the script skeleton with its declared interpreter and validate it")
         val m = _script_ok()
         expect(m.artifact_kind).to_equal("script")
         expect(m.interpreter).to_equal("/usr/bin/simple")
@@ -145,6 +167,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(check.reason).to_equal("ok")
 
     it("validates a well-formed native-Simple manifest"):
+        # @capture(protocol_binary): the native-Simple skeleton's abi feature set retained
+        step("build the native-Simple skeleton and validate it")
         val m = _native_ok()
         expect(m.artifact_kind).to_equal("native_simple")
         expect(m.required_abi_features).to_contain("simple_rt")
@@ -154,6 +178,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(check.reason).to_equal("ok")
 
     it("knows exactly the four artifact kinds"):
+        # @capture(bit_table): the four known-kind verdicts and the unknown-kind rejections retained
         assert_true(manifest_kind_is_known("elf"))
         assert_true(manifest_kind_is_known("smf"))
         assert_true(manifest_kind_is_known("script"))
@@ -168,6 +193,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
     # =======================================================================
 
     it("rejects a manifest with an empty entrypoint"):
+        # @capture(protocol_binary): the empty-entrypoint rejection reason retained
         step("a bare skeleton is deliberately not yet valid")
         val skeleton = manifest_for_kind(manifest_kind_elf())
         expect(skeleton.entrypoint).to_equal("")
@@ -177,6 +203,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_reason_empty_entrypoint()).to_equal("empty_entrypoint")
 
     it("rejects an unknown artifact kind"):
+        # @capture(protocol_binary): the unknown-kind rejection reason retained
+        step("validate a manifest built on an unregistered kind")
         val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
         val check = manifest_validate(m)
         expect_not(check.ok)
@@ -184,6 +212,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_reason_unknown_kind()).to_equal("unknown_artifact_kind")
 
     it("rejects a target-triple mismatch against the running target"):
+        # @capture(protocol_binary): the foreign, blank and wildcard target verdicts retained
         step("the running target is simpleos/x86_64/simpleos")
         val running = manifest_running_target()
         expect(running.os).to_equal("simpleos")
@@ -213,6 +242,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         assert_true(manifest_target_matches(anywhere.target, running))
 
     it("rejects a signature that no content hash binds"):
+        # @capture(protocol_binary): the unbound-signature rejection and its bound counterpart retained
+        step("sign a manifest whose content_hashes list is empty")
         val unbound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", [])
         val check = manifest_validate(unbound)
         expect_not(check.ok)
@@ -222,9 +253,10 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         step("the same signature WITH a hash that binds it is accepted")
         val bound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", ["blake3:deadbeef"])
         assert_true(manifest_validate(bound).ok)
-        expect(bound.content_hashes.len()).to_equal(1)
+        expect(bound.content_hashes.len()).to_equal(1)  # oracle: exactly one blake3 hash binds the signature
 
     it("rejects a script manifest with no interpreter - never defaults one"):
+        # @capture(protocol_binary): the interpreter-less rejection reason retained
         step("the script skeleton has an EMPTY interpreter on purpose")
         val bare = manifest_with_entrypoint(
             manifest_for_kind(manifest_kind_script()),
@@ -242,6 +274,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         assert_true(manifest_validate(_script_ok()).ok)
 
     it("rejects a manifest from a future format version"):
+        # @capture(protocol_binary): the future-version rejection reason retained
+        step("validate a hand-built manifest that declares format version 2")
         val future = SimpleArtifactManifest(
             format_version: 2,
             artifact_kind: manifest_kind_elf(),
@@ -263,13 +297,14 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
             signature: "",
             debug_identity: ""
         )
-        expect(manifest_format_version()).to_equal(1)
+        expect(manifest_format_version()).to_equal(1)  # oracle: format 1 is the only published manifest version, so 2 is the future
         val check = manifest_validate(future)
         expect_not(check.ok)
         expect(check.reason).to_equal("unsupported_format_version")
         expect(manifest_reason_bad_format_version()).to_equal("unsupported_format_version")
 
     it("reports the six rejection reasons as six distinct strings"):
+        # @capture(protocol_binary): the seven pairwise-distinct reason strings retained
         step("a shared reason string would let two failures be confused")
         val reasons = [
             manifest_reason_ok(),
@@ -288,13 +323,14 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
                     seen = true
             if not seen:
                 distinct.push(r)
-        expect(distinct.len()).to_equal(7)
+        expect(distinct.len()).to_equal(7)  # oracle: ok plus six rejection reasons must be pairwise distinct
 
     # =======================================================================
     # 3. Rights ceiling — concrete bit values
     # =======================================================================
 
     it("computes the ELF policy ceiling as READ|EXEC|MAP with concrete bits"):
+        # @capture(bit_table): the concrete capability bit values and the elf ceiling 69 retained
         expect(CAP_RIGHT_READ).to_equal(1u32)
         expect(CAP_RIGHT_EXEC).to_equal(4u32)
         expect(CAP_RIGHT_ADMIN).to_equal(8u32)
@@ -305,6 +341,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_required_rights(_elf_ok())).to_equal(69u32)
 
     it("never lets any artifact kind request CAP_RIGHT_ADMIN"):
+        # @capture(bit_table): the per-kind allowed masks proving ADMIN is clamped retained
         step("ADMIN is absent from every kind's allowed mask")
         expect(manifest_kind_allowed_rights(manifest_kind_elf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
         expect(manifest_kind_allowed_rights(manifest_kind_smf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
@@ -320,6 +357,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_required_rights(greedy)).to_equal(69u32)
 
     it("never lets a script request EXEC or MOUNT"):
+        # @capture(bit_table): the script ceiling 65 and the greedy-request clamp retained
         step("a script is read and mapped - the INTERPRETER is what executes")
         expect(manifest_kind_base_rights(manifest_kind_script())).to_equal(65u32)
         expect(manifest_required_rights(_script_ok())).to_equal(65u32)
@@ -334,15 +372,18 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_required_rights(greedy)).to_equal(65u32)
 
     it("gives an unknown artifact kind no rights at all"):
+        # @capture(bit_table): the zero allowed, required and effective masks for an unknown kind retained
+        step("compute every rights surface for an unregistered kind")
         val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
         expect(manifest_kind_allowed_rights("wasm")).to_equal(0u32)
         expect(manifest_required_rights(m)).to_equal(0u32)
         expect(manifest_effective_rights(m, 511u32, 511u32)).to_equal(0u32)
 
     it("adds MAP when libraries or startup preloads are declared"):
+        # @capture(bit_table): the library-flavored counts and the added MAP bit retained
         val with_libs = manifest_with_libraries(_smf_ok(), ["libc.so"], ["std.smf"])
-        expect(with_libs.native_libraries.len()).to_equal(1)
-        expect(with_libs.smf_libraries.len()).to_equal(1)
+        expect(with_libs.native_libraries.len()).to_equal(1)  # oracle: exactly one declared native library flavor
+        expect(with_libs.smf_libraries.len()).to_equal(1)  # oracle: exactly one declared smf library flavor
         expect(manifest_required_rights(with_libs) & CAP_RIGHT_MAP).to_equal(64u32)
 
         step("a section 12 startup contract rides on the SAME manifest")
@@ -360,8 +401,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
                 hash_policy: "verify"
             )]
         )
-        expect(with_startup.argument_schema.len()).to_equal(1)
-        expect(with_startup.startup_preloads.len()).to_equal(1)
+        expect(with_startup.argument_schema.len()).to_equal(1)  # oracle: one declared startup argument feeds the preload contract
+        expect(with_startup.startup_preloads.len()).to_equal(1)  # oracle: exactly one section-12 preload entry is declared
         expect(with_startup.startup_preloads[0].mode).to_equal("map_read_only")
         expect(manifest_required_rights(with_startup) & CAP_RIGHT_READ).to_equal(1u32)
         expect(manifest_required_rights(with_startup) & CAP_RIGHT_MAP).to_equal(64u32)
@@ -372,6 +413,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
     # =======================================================================
 
     it("intersects effective rights with BOTH ceilings using concrete bits"):
+        # @capture(bit_table): the parent/system/artifact ceiling intersection 5 = READ|EXEC retained
         step("parent may delegate READ|WRITE|EXEC = 7")
         val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
         expect(parent).to_equal(7u32)
@@ -384,7 +426,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         val m = _elf_ok()
         expect(manifest_required_rights(m)).to_equal(69u32)
         val eff = manifest_effective_rights(m, parent, system)
-        expect(eff).to_equal(5u32)
+        expect(eff).to_equal(5u32)  # oracle: READ(1) | EXEC(4) = 5 is the only bit both ceilings and the parent share
         expect(eff).to_equal(CAP_RIGHT_READ | CAP_RIGHT_EXEC)
 
         step("and it is a subset of the artifact ceiling, the parent AND the system")
@@ -401,15 +443,21 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(eff & CAP_RIGHT_ADMIN).to_equal(0u32)
 
     it("cannot amplify past a powerless parent"):
+        # @capture(bit_table): the zero effective mask under a powerless parent retained
+        step("intersect against a parent that delegates nothing")
         val m = _elf_ok()
         expect(manifest_effective_rights(m, 0u32, 511u32)).to_equal(0u32)
         assert_true(manifest_rights_within_ceilings(m, 0u32, 511u32))
 
     it("cannot amplify past a powerless system ceiling"):
+        # @capture(bit_table): the zero effective mask under a powerless system ceiling retained
+        step("intersect against a system ceiling of zero")
         val m = _native_ok()
         expect(manifest_effective_rights(m, 511u32, 0u32)).to_equal(0u32)
 
     it("keeps script effective rights free of EXEC even when parent holds it"):
+        # @capture(bit_table): the script effective mask 65 despite an EXEC-holding parent retained
+        step("intersect a script manifest with an EXEC-holding parent")
         val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
         val system: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
         val eff = manifest_effective_rights(_script_ok(), parent, system)
@@ -422,6 +470,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
     # =======================================================================
 
     it("projects launch-metadata entry kinds onto artifact kinds"):
+        # @capture(protocol_binary): the launch-entry-kind to artifact-kind mapping retained
         step("launch_metadata.startup_detect_launch_kind vocabulary")
         expect(manifest_kind_from_launch_entry_kind("smf")).to_equal("smf")
         expect(manifest_kind_from_launch_entry_kind("script")).to_equal("script")
@@ -432,6 +481,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_kind_from_launch_entry_kind("bogus")).to_equal("")
 
     it("adapts a parsed LaunchMetadata into a valid unified manifest"):
+        # @capture(protocol_binary): the adapted manifest fields and the cross-target rejection retained
+        step("adapt a parsed LaunchMetadata through the one-way adapter")
         val m = manifest_from_launch_metadata(
             "native",
             "simpleos",
@@ -455,6 +506,8 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_validate(cross).reason).to_equal("target_triple_mismatch")
 
     it("renders a greppable one-line summary for serial traces"):
+        # @capture(protocol_binary): the kind/os/entry/interp summary fields retained
+        step("render the summary line for a script manifest")
         val s = manifest_summary(_script_ok())
         expect(s).to_contain("kind=script")
         expect(s).to_contain("os=simpleos")
@@ -462,6 +515,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(s).to_contain("interp=/usr/bin/simple")
 
     it("builds manifests without mutating the input manifest"):
+        # @capture(protocol_binary): the untouched skeleton fields across builder calls retained
         step("builders are pure - the skeleton must survive being built from")
         val skeleton = manifest_for_kind(manifest_kind_script())
         val bound = manifest_with_entrypoint(skeleton, "/etc/boot.shs")
@@ -474,6 +528,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_validate(bound).reason).to_equal("script_without_interpreter")
 
     it("validates against an explicitly supplied running target"):
+        # @capture(protocol_binary): the here/there validation verdicts for one manifest retained
         step("validate_for_target is the pure form validate() delegates to")
         val m = manifest_with_target(
             _elf_ok(),
@@ -495,11 +550,13 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
     # =======================================================================
 
     it("computes the FIPS 180-4 published SHA-256 test vector for 'abc'"):
+        # @capture(protocol_binary): the published KAT digest retained as the hash-function oracle
         step("absolute oracle - the published KAT, not a self-referential compare")
         val digest = manifest_sha256_hex(rt_text_to_bytes("abc"))
         expect(digest).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
     it("accepts a manifest whose declared hash matches the REAL artifact bytes"):
+        # @capture(protocol_binary): the matching-hash acceptance verdict over real bytes retained
         step("real bytes for a real artifact")
         val real_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
         val real_hex = manifest_sha256_hex(real_bytes)
@@ -514,6 +571,7 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(outcome.reason).to_equal(manifest_reason_ok())
 
     it("REJECTS a manifest when the artifact bytes were tampered with (security property)"):
+        # @capture(protocol_binary): the tampered-byte rejection and its reason retained
         step("the manifest was signed against the ORIGINAL bytes")
         val original_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
         val original_hex = manifest_sha256_hex(original_bytes)
@@ -531,8 +589,10 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         expect(manifest_reason_content_hash_mismatch()).to_equal("content_hash_mismatch")
 
     it("fails closed when NO content hash is declared - never a vacuous pass"):
+        # @capture(protocol_binary): the no-hash-declared rejection reason retained
+        step("verify content hash over a manifest that declares none")
         val m = _elf_ok()
-        expect(m.content_hashes.len()).to_equal(0)
+        expect(m.content_hashes.len()).to_equal(0)  # oracle: a bare elf skeleton declares no content hash
         val outcome = manifest_verify_content_hash(m, rt_text_to_bytes("anything"))
         expect_not(outcome.ok)
         expect(outcome.reason).to_equal(manifest_reason_no_content_hash_declared())

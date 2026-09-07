@@ -213,3 +213,58 @@ src/lib/nogc_sync_mut/debug/smf_agent.spl
 #     through a typed std.database wrapper like everything else, not be
 #     exempted wholesale.
 src/lib/nogc_sync_mut/rt_hal/virtual_device.spl
+#
+# --- rt API group providers, named 2026-09-06 (rt_api_group_policy.md Stage 1)
+# Each entry below is an EXISTING boundary being NAMED, not a new exemption.
+# Admission criterion, applied mechanically and recorded here so it can be
+# re-checked: 100% of the group's direct rt_* call sites under src/ already
+# live in this one file, AND the file's role is the ABI seam itself (a shim,
+# a bridge, a hosted backend, a platform-event demultiplexer) rather than
+# logic that merely happens to call the primitive. Groups that failed the
+# criterion were left `unowned` on purpose — see the policy doc's Stage 1
+# note for the ones deliberately NOT closed.
+src/os/kernel/net/driver_shim.spl
+src/os/compositor/hosted_backend_cocoa.spl
+src/lib/editor/70.backend/gui_sdl_bridge.spl
+src/lib/nogc_async_mut/io/platform_event.spl
+
+# Differential effect-comparison probe. The rt_* call sites in this file are
+# not incidental: the probe must read the filesystem through raw runtime
+# externs precisely BECAUSE it is verifying wrapped implementations, and a
+# wrapped reader would corroborate a mocked writer. The file's role is the ABI
+# seam itself — two named providers plus the observation that discriminates
+# them — not logic that happens to call a primitive. Owner + reason:
+# doc/03_plan/runtime/native_to_pure_simple/native_surface_to_pure_simple_migration.md
+# and doc/08_tracking/bug/io_runtime_file_write_resolves_to_retryless_twin_2026-09-06.md
+# (lane C, 2026-09-06). Classified provider, baseline NOT bumped.
+src/lib/nogc_sync_mut/dual_fs/
+# --- rt API group owners, 2026-09-06 (pass 2) -------------------------------
+#
+# `staged` was NOT closed. It meets the mechanical criterion (100% of the
+# group's call sites in one file, and that file IS the ABI seam: it declares
+# every rt_staged_tree_provider_*_v1 extern and owns the opaque session
+# handle). But naming it here DELETES the group instead of owning it: the
+# registry generator's symbol universe is C/Rust definition text UNION the
+# FORBIDDEN call-site census, and these symbols have neither a C nor a Rust
+# definition line, so allowlisting their only caller drops them out of the
+# registry entirely. Measured 2026-09-06: the `staged` group row vanished and
+# the unowned count fell by one for the wrong reason. Fix belongs in the
+# generator (fold --provider-out into the universe), not here — and that fix
+# needs a reviewed regeneration of the frozen baseline, which this lane may
+# not do. See doc/08_tracking/bug/rt_api_group_provider_erases_unbacked_group_2026-09-06.md
+# `port`: the x86 port-I/O owner leaf. It was already the declared owner but
+# had no consumers — 46 of the group's 53 call sites bypassed it from 8 other
+# files, each redeclaring the same 7 externs (and os/kernel/boot/cpu.spl
+# declaring them at the WRONG width, u64, against the C ABI
+# `uint8_t rt_port_inb(uint16_t)`). Those 8 files now consume this owner
+# (directly, or via the compile-time re-export
+# src/os/kernel/arch_adapt/x86_port_io.spl), so it is the group's only
+# remaining rt_port_* call site.
+src/os/kernel/arch/x86/port_io_owner.spl
+# `dma`: the arch-agnostic DMA owner. Its own header already declared it the
+# owner of the rt_dma_* boundary, but 47 of the group's 61 call sites bypassed
+# it from 10 driver files, each redeclaring the same externs and so missing the
+# module's __fallback stubs on the interpreted path. Those drivers now consume
+# the handle-level dma_raw_* wrappers, leaving this file the group's only
+# rt_dma_* call site.
+src/lib/nogc_sync_mut/io/dma.spl
