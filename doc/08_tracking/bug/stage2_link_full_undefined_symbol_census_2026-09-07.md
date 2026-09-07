@@ -56,15 +56,19 @@ Bucket definitions per the task:
 
 | Bucket | Count | Disposition |
 |---|---|---|
-| FIXED (1/2, mechanical) | 32 | Implemented this change — see below |
+| FIXED (1/2, mechanical) | 32 | Implemented in the first change — see below |
+| FIXED (2, `rt_simd_*` + `rt_io_file_*`) | 36 | Implemented in this follow-up change — see "What was implemented (rt_simd_* / rt_io_file_*, this change)" below. 23 `rt_simd_*` (not 22 as originally scoped — the family has 23 rows in the full symbol table below) + 13 `rt_io_file_*` (not 12 — `rt_io_file_exists`/`rt_io_file_delete` take a path, not an fd, but are part of the same census row group). |
 | 1-candidate, no reference semantics | 15 | `rt_file_view_*_v1` (9), `rt_pinned_archive_*_v1` (5), `rt_native_build` (1) — 0 C, 0 Rust *native* symbol, and no header/doc contract exists to mirror. Handed off. |
 | 2-deferred: cranelift JIT bridge | 75 | `rt_cranelift_*` — implemented in Rust (`codegen/cranelift_sffi.rs`, `interpreter_extern/cranelift.rs`) for the seed's own JIT; this archive is a plain native-AOT C lane with no JIT concept. Handed off — needs a design decision (stub vs. exclude the JIT-only call sites from this closure), not a mechanical port. |
 | 2-deferred: sqlite lane wiring | 24 | `rt_sqlite_*` — **deliberately excluded** from the core-C archive by design (`build_sqlite_runtime_object`'s doc comment in `native_project/tools.rs`: avoids forcing `-lsqlite3` on every native binary). The real bug is the caller not detecting sqlite usage and adding the on-demand object + `-lsqlite3` for *this* closure. Lane-wiring bug, not a runtime gap. Handed off. |
-| 2-deferred: Rust-only, C-lane gap (misc) | 90 | Implemented in Rust (`runtime/src/value/**`, mostly `#[no_mangle] extern "C" fn`) but never ported to the core-C-bootstrap archive: `rt_file_*`/`rt_io_file_*` (file I/O), `rt_log_*`, `rt_random_*`, `rt_path_*`, `rt_env_*`, `rt_process_*`, `rt_dir_glob`, `rt_exec`, `rt_execute_native`, `rt_fs_read_text`, `rt_get_host_target_code`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`, `rt_mem_attr_*`, `rt_typed_bytes_u8_data_at`, the `rt_simd_*` SIMD-intrinsic family (add/sub/mul/and/or/xor/shl/shr over i32x4/i32x8/u8x16, AES round, carryless-multiply, xor_u64x2). Real bucket-2 debt, same shape as the fixed set, but 90 symbols is too large to port safely and individually-verify in this change's scope — each needs its own semantics check (e.g. the SIMD family needs intrinsic-level correctness, not just a libm passthrough). Handed off with this census as the punch list. |
+| 2-deferred: Rust-only, C-lane gap (misc, remaining) | 54 | Implemented in Rust (`runtime/src/value/**`, mostly `#[no_mangle] extern "C" fn`) but never ported to the core-C-bootstrap archive: `rt_file_*` (fd/path helpers distinct from the now-fixed `rt_io_file_*` family), `rt_log_*`, `rt_random_*`, `rt_path_*`, `rt_env_*`, `rt_process_*`, `rt_dir_glob`, `rt_exec`, `rt_execute_native`, `rt_fs_read_text`, `rt_get_host_target_code`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`, `rt_mem_attr_*`, `rt_typed_bytes_u8_data_at`. **The `rt_simd_*` (23) and `rt_io_file_*` (13) rows that were previously counted in this bucket (90 total) are now FIXED — see the row above.** `rt_exec`/`rt_process_*`/`rt_get_host_target_code` need `security_runtime.rs`'s sandbox subsystem, not a mechanical port — explicitly out of scope for the mechanical-port pass. `rt_file_atomic_write_mode`, `rt_file_list_dir`, `rt_file_mode`, `rt_fs_read_text` have **no implementation on either side** (0 C, 0 Rust) — a different problem, left alone. Handed off with this census as the punch list. |
 | 3: UFCS/method resolve-by-name | 7 | `Array.remove_at`, `CompilerDriver.compile_to_vhdl`, `DynamicBackendPluginLease.admitted_handle`, `GenericTemplate.is_err`, `MirBuilder.emit_comment`, `str.split_whitespace`, `str.strip`. Owned by the UFCS classifier agent already working this per the task's instructions — not touched here. |
 | 4: lenient-unresolved-global | 3 | `Unit`, `virtual_source_store`, `rt_numeric.f64` — same `lenient_types` HIR-fallback mechanism as `Unit`'s documented `note:` block. |
 
-Table counts: 32+15+75+24+90+7+3 = 246, matching the linker's own count exactly.
+Table counts: 32+36+15+75+24+54+7+3 = 246, matching the linker's own count exactly
+(re-split 2026-09-07 continued: the original 90-row "Rust-only, C-lane gap (misc)"
+bucket split into 36 now-FIXED `rt_simd_*`/`rt_io_file_*` rows + 54 still-deferred
+rows; 32+90=122 before this change, 32+36=68 fixed total after it).
 
 **Not one of the 246, but flagged for the same owner:** `raise` appeared as
 undefined in the naive `nm -u` census (method #3 above) but is *not* in the
@@ -153,6 +157,137 @@ parallel Rust-hosted lane (`build.rs`'s C-source whitelist already carries
   recipe as the pre-existing `rt_runtime_kind_probes_core_c_selfcheck.c`
   beside it): `PASS: bootstrap core-C lane atomic/math/time additions behave
   correctly`.
+
+## What was implemented (rt_simd_* / rt_io_file_*, this follow-up change)
+
+Two named families from the "2-deferred: Rust-only, C-lane gap (misc)" bucket,
+36 symbols total (all added to `src/runtime/runtime_simd_dispatch.c` and
+`src/runtime/runtime_native.c`, both already archive members of
+`bootstrap_mutex_core_c_runtime`/`build_core_c_runtime_library` — no new file,
+no whitelist change).
+
+### `rt_simd_*` (23 symbols: `add/sub/mul/xor/and/or/shl/shr` over i32x4 and
+i32x8, `add`/`xor` over u8x16, `aes_round_u8x16`/`aes_round_last_u8x16`,
+`clmul_lo_u64`/`clmul_hi_u64`/`xor_u64x2`)
+
+**The Rust `pub extern "C" fn rt_simd_*` signatures in `simd_int_ops.rs` /
+`simd_byte_ops.rs` (a scalar-lane-array ABI: e.g. `rt_simd_add_i32x4(a0..a3,
+b0..b3, out: *mut i32)`) are NOT the real ABI and were not mirrored — their
+own doc comments admit they are provisional ("once a Vec4i marshalling layer
+lands they will receive the actual lane data"), and neither family is
+registered in `codegen/runtime_sffi.rs`'s `RUNTIME_FUNCS`, so nothing enforces
+that shape at a call site.** The real ABI was determined by disassembling the
+actual generated call sites in the kept failed-link object set
+(`native-objects-8HIZif/mod_842.o` for i32x4/i32x8, `mod_843.o` for
+u8x16/u64x2): every `lib__nogc_sync_mut__simd__simd_*` wrapper tail-calls its
+`rt_simd_*` counterpart with plain `int64_t` args/return, each a tagged
+pointer (`payload | 1`) to a flat array of `int64_t` lane slots allocated via
+`rt_alloc` — identical to the convention this file already used for
+`rt_simd_add_f32x4`/`rt_simd_add_u32x4`/etc. (see the block comment at
+`runtime_simd_dispatch.c` line ~2246, itself reverse-engineered from
+`mod_814.o`/`mod_815.o` by an earlier pass on the Windows LNK2019 inventory).
+`rt_simd_aes_round_u8x16`/`rt_simd_aes_round_last_u8x16` additionally cross-
+checked clean against their *already-registered* `RUNTIME_FUNCS` spec
+(`&[I64, I64] -> &[I64]`, `runtime_sffi.rs:594-595`). No codegen change was
+needed or made — the existing generic struct-boxing path already produces the
+correct calls; only the missing C-side symbols were added, reusing the file's
+existing `rt_simd_vec_payload`/`rt_simd_lane_u64`/`rt_simd_result_vec` helpers.
+
+Semantics were mirrored from the Rust lane kernels (`simd_int_ops.rs`,
+`simd_byte_ops.rs`, `simd_aes_ops.rs`, `simd_clmul_ops.rs`), not guessed:
+32-bit wrapping add/sub/mul, bitwise xor/and/or, LOGICAL (zero-fill) shl/shr
+with the shift count masked to `0..31`; per-lane wrapping u8 add with no
+cross-lane carry; AES round = `MixColumns(SubBytes(ShiftRows(state))) XOR
+key` (last round skips MixColumns), FIPS 197 SBOX/ShiftRows/MixColumns copied
+byte-for-byte from the Rust scalar fallback (and cross-checked against the
+Rust file's own FIPS 197 Appendix B unit test vector); carryless 64×64→128
+multiply via the identical shift-and-XOR loop, `clmul_lo_u64`/`clmul_hi_u64`
+operating on `Vec2u64`'s `(lo, hi)` field order per
+`src/lib/nogc_sync_mut/simd_crypto.spl`.
+
+### `rt_io_file_*` (13 symbols: `read`, `read_line`, `write`, `write_all`,
+`seek`, `flush`, `set_permissions`, `meta_size`, `meta_flags`,
+`meta_modified`, `meta_created`, `exists`, `delete`)
+
+Mirrors `runtime/src/value/sffi/file_io/io_file.rs` exactly (fd validity,
+mode/whence encodings, EINTR-retry-then-propagate read/write semantics,
+`read_line`'s byte-at-a-time EOF-exact-positioning contract and its
+discard-everything-on-error behavior, `set_permissions`'s Unix
+`chmod a-w`/`chmod u+w` — not "restore previous mode" — semantics,
+`meta_created`'s "0 if birth time unsupported" fallback). Reused this file's
+existing `rt_text_arg_to_path`/`rt_core_nil`/`rt_byte_array_new_len`/
+`rt_core_array_ptr` helpers, the same ones `rt_io_file_open`/`_close`/
+`_read_all` (already resolved, immediately above) use. `rt_io_file_exists`
+and `rt_io_file_delete` are the only two of the 13 that take a `text` (path)
+rather than an `fd`; both were **already** registered in the seed's
+`(ptr,len)` text-ABI tables (`codegen/instr/calls.rs:2603`,
+`codegen/runtime_sffi.rs:2101-2102`) before this change — confirmed by
+symbol-grep, not assumed — so no codegen change was needed there either. The
+other 11 take only plain scalars/pointers (`fd: i64`, `data_ptr: *const u8,
+data_len: u64`), the ordinary SysV calling convention with no struct-boxing
+involved; the real call sites (`FileHandle.write`/`write_all` in
+`mod_810.o`/`mod_837.o`) were disassembled to confirm the 3-register
+`(fd, ptr, len)` shape arrives unmarshalled, which is what let this land
+without touching `text_arg_indices` at all.
+
+### Verification
+
+- **Grep/nm count, exactly one definition per symbol**: all 23 `rt_simd_*`
+  and all 13 `rt_io_file_*` symbols appear exactly once each in
+  `nm --defined-only` output on the standalone-compiled `.o`s.
+- **`cargo check --release --bin simple -j4`** (fresh
+  `CARGO_TARGET_DIR=$HOME/.cargo-target-simd`): clean, `Finished` in ~1m —
+  no Rust source was touched by this change.
+- **`sh scripts/check/check-c-runtime-compiles-push.shs`**:
+  `PASS — 132 file(s) compiled, 0 errors (5 skipped for unavailable external
+  dependencies)`.
+- **Real relink of the actual failed object set**, patching only
+  `runtime_native.o`/`runtime_simd_dispatch.o` inside a copy of the real
+  `libsimple_runtime.a`. A clean A/B was required to isolate this change's
+  effect from other concurrent landings already present at `HEAD` (the raw
+  frozen-archive baseline is 246 undefined as expected, but `HEAD` *without*
+  this change already resolves 32 of them via the earlier merged fix, and
+  hits 16 unrelated `duplicate symbol` errors — `rt_alloc`/`rt_free`/
+  `rt_memcpy`/etc. now defined in both `runtime_native.c` and the frozen
+  snapshot's untouched `runtime_memory.o`, pure version skew from mixing a
+  fresh compile against a historical object snapshot, worked around for
+  measurement only with `-Wl,--allow-multiple-definition`, not shipped):
+  pre-this-change 214 undefined → post-this-change **178 undefined, exactly
+  36 fewer**, **0 new duplicate-symbol errors introduced by this change**, and
+  `comm -23` between the pre/post undefined-symbol lists is **byte-identical**
+  to the 36 symbols implemented here (verified both directions: `comm -13`
+  reports 0, i.e. nothing new became undefined and nothing outside this set
+  was incidentally resolved).
+- **Behavioural test** (not just linkage):
+  `src/runtime/test/rt_bootstrap_c_lane_simd_iofile_selfcheck.c` — real
+  values and state transitions, not just "the call returns": i32x4/i32x8
+  signed wrapping arithmetic including an `INT32_MAX + 1 → INT32_MIN`
+  wraparound case, bitwise ops, logical-vs-arithmetic shift discrimination
+  (`shr(-1, 4)` must equal `0x0FFFFFFF`, must NOT equal `-1`) and shift-count
+  masking (`shl(x, 33) == shl(x, 1)`); u8x16 per-lane wrap-without-carry;
+  AES round against the FIPS 197 Appendix B known-answer vector (same vector
+  as the Rust unit test); carryless multiply against a hand-computed GF(2)
+  product including a carry-producing case; `xor_u64x2` lane-wise XOR; and a
+  real fd-based file round trip (open/write_all/flush/meta_size/meta_flags/
+  set_permissions toggling the readonly bit both ways/seek SEEK_SET+CUR+END/
+  a read-only-fd write correctly failing with -1 rather than a fabricated
+  success/read returning exactly the bytes on disk/exists/delete). Confirmed
+  non-vacuous by deliberately breaking one assertion and re-running: the
+  harness correctly reports `FAIL` and exit 1. Run: `PASS: bootstrap core-C
+  lane rt_simd_*/rt_io_file_* additions behave correctly`.
+
+### What remains in this bucket (handed off)
+
+54 symbols: `rt_file_*` (the sibling fd/path family, distinct from
+`rt_io_file_*`), `rt_log_*`, `rt_random_*`, `rt_path_*`, `rt_env_*`,
+`rt_dir_glob`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/
+`rt_cli_run_tests_process_args`, `rt_mem_attr_*`, `rt_typed_bytes_u8_data_at`,
+plus the capability-sandboxed group (`rt_exec`, `rt_execute_native`,
+`rt_process_run_with_limits`, `rt_process_spawn_inherit`,
+`rt_get_host_target_code` — need `security_runtime.rs`'s sandbox subsystem,
+not a mechanical port) and the four symbols with no implementation on either
+side (`rt_file_atomic_write_mode`, `rt_file_list_dir`, `rt_file_mode`,
+`rt_fs_read_text`).
 
 ## Runnable check for future regressions
 
@@ -375,7 +510,7 @@ resolution is a name collision, not a fix.
 | `rt_cranelift_urem` | lib__nogc_sync_mut__sffi__codegen | — | — |
 | `rt_cranelift_ushr` | lib__nogc_sync_mut__sffi__codegen | — | — |
 
-### Bucket 2 deferred: Rust-only, core-C-bootstrap lane gap (real debt, too large to safely port in this change, 90)
+### Bucket 2 deferred: Rust-only, core-C-bootstrap lane gap (real debt, remaining after this change, 54)
 
 | Symbol | Declared/referenced (.spl callsite module) | C impl found | Rust impl found |
 |---|---|---|---|
@@ -403,19 +538,19 @@ resolution is a name collision, not a fix.
 | `rt_file_unlock` | lib__nogc_sync_mut__io__file_ops | — | src/compiler_rust/runtime/src/lib.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_fs_read_text` | lib__nogc_sync_mut__sffi__fs | — | — |
 | `rt_get_host_target_code` | lib__nogc_sync_mut__sffi__system | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs, |
-| `rt_io_file_delete` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_exists` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_flush` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_meta_created` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_meta_flags` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_meta_modified` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_meta_size` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_read` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_read_line` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_seek` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_set_permissions` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_write_all` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
-| `rt_io_file_write` | lib__nogc_sync_mut__io__file | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_delete` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_exists` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_flush` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_created` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_flags` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_modified` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_size` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_read` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_read_line` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_seek` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_set_permissions` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_write_all` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_write` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
 | `rt_load_barrier` | lib__nogc_sync_mut__io__volatile_ops | — | src/compiler_rust/runtime/src/lib.rs, |
 | `rt_log_clear_scope_levels` | app__io__mod | — | src/compiler_rust/runtime/src/value/log_sffi.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_log_emit` | app__io__mod | — | src/compiler_rust/runtime/src/value/log_sffi.rs,src/compiler_rust/runtime/src/value/mod.rs, |
@@ -443,29 +578,29 @@ resolution is a name collision, not a fix.
 | `rt_random_randint` | app__io__mod | — | src/compiler_rust/runtime/src/value/sffi/random.rs, |
 | `rt_random_uniform` | app__io__mod | — | src/compiler_rust/runtime/src/value/sffi/random.rs, |
 | `rt_remove` | lib__nogc_async_mut__io__file | src/runtime/runtime.c,src/runtime/runtime_hosted_fs.c, | src/compiler_rust/runtime/src/value/collections.rs, |
-| `rt_simd_add_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_add_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_add_u8x16` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_byte_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_aes_round_last_u8x16` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_aes_round_u8x16` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_and_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_and_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_clmul_hi_u64` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_clmul_lo_u64` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_mul_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_mul_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_or_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_or_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_shl_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_shl_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_shr_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_shr_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_sub_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_sub_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_xor_i32x4` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_xor_i32x8` | lib__nogc_sync_mut__simd | — | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_xor_u64x2` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_simd_xor_u8x16` | lib__nogc_sync_mut__simd_crypto | — | src/compiler_rust/runtime/src/value/simd_byte_ops.rs, |
+| `rt_simd_add_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_add_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_add_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_byte_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_aes_round_last_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_aes_round_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_and_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_and_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_clmul_hi_u64` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_clmul_lo_u64` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_mul_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_mul_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_or_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_or_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shl_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shl_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shr_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shr_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_sub_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_sub_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_u64x2` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_byte_ops.rs, |
 | `rt_store_barrier` | lib__nogc_sync_mut__io__volatile_ops | — | src/compiler_rust/runtime/src/lib.rs, |
 | `rt_time_now_seconds` | lib__nogc_sync_mut__io__time_ops | src/runtime/runtime.c,src/runtime/runtime_time.c, | src/compiler_rust/runtime/src/value/sffi/time.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_typed_bytes_u8_data_at` | lib__common__crypto__sha256 | — | src/compiler_rust/runtime/src/lib.rs,src/compiler_rust/runtime/src/value/collections.rs,src/compiler_rust/runtime/src/value/mod.rs, |
