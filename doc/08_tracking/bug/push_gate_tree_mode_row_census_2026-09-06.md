@@ -269,6 +269,24 @@ rotted rc=2
   FAILING FIXTURES: fixture12_rev_did_not_read_committed_content(got=[FAIL — 1 file(s) failed to compile: src/runtime/fx_r_needs.c (1 compiled clean, 0 skipped ...)])
 ```
 
+```
+=== sffi-v2-authority, axis 1 (ROOT not repointed) ===
+rotted rc=2
+  selftest --rev did not read committed content, got [FAIL — 2 of 2 guard(s) failed]
+=== sffi-v2-authority, axis 2 (sources from the rev, sub-guard SCRIPTS from the checkout) ===
+rotted rc=2
+  selftest --rev did not read committed content, got [FAIL — 2 of 2 guard(s) failed]
+```
+
+**A wrapper-of-guards has a rot axis no data-file gate has: the sub-guard
+SCRIPTS are themselves content.** A conversion that materialises the sources
+the children read but still executes the children from the working copy — or
+merely changes the cwd and lets their own `$0` resolve back to the checkout —
+is still a wrong-tree verdict, and a sabotaged working-copy child would decide
+the result. `check-sffi-v2-authority.shs`'s fixture injects exactly that
+(axis 2 above: the committed marker is intact, only the child script is
+sabotaged in the working copy).
+
 **A materialising conversion has a third failure mode the two axes do not
 name: an INCOMPLETE archive.** It does not produce a FAIL, it produces a
 quieter PASS — files drop out of the compiled set into "skipped for an
@@ -311,7 +329,7 @@ the fixture — weaker, and stated here rather than glossed.)
 | 9 | `push-perf-regression-tests` | `check-perf-regression-tests.shs` | no | `--rev` over source text | TODO |
 | 10 | `push-process-wait-eintr-retry` | `check-process-wait-eintr-retry.shs` | no | `--rev`; small (91 lines) | TODO |
 | 11 | `push-interpreter-extern-registry-gap` | `check-interpreter-extern-registry-gap.shs --scan-only` | **yes** | `--rev` over `':(glob)src/compiler/**/*.spl'` + `interpreter_extern/mod.rs` + the frozen baseline. The baseline path was previously resolved from `repo_root` and so did **not** follow `--root`; it now resolves against the scanned tree, which is what makes the second rot axis coverable at all. Fixture 7 injects both axes. No longer red at origin/main (repaired by another lane). Caveat recorded: the push row's `--scan-only` skips the selftest, so the fixture is enforced by the separate bootstrap-tier row `interpreter-extern-registry-gap-selftest`, not on the push path — the same is true of `push-type-walk-constructor-parity`. | **DONE 2026-09-07** |
-| 12 | `push-sffi-v2-authority` | `check-sffi-v2-authority.shs` | **yes** | 102-line wrapper over 46 separate `scripts/audit/*.shs` guards with **zero selftest**. Per-script `--rev` is infeasible, but the fix is still one commit: `git worktree add --detach $WORK $REV` then run the wrapper with cwd inside `$WORK`. A detached worktree (not `git archive`) is required precisely because the 46 sub-guards may run git themselves. Add the missing selftest in the same change — a 46-guard wrapper with no fixtures cannot be shown to discriminate at all. **RED at origin/main — see below.** | TODO |
+| 12 | `push-sffi-v2-authority` | `check-sffi-v2-authority.shs` | **yes** | **The census's provisional design was wrong on two counts and both were measured before writing code.** (a) A detached worktree is NOT required: `grep -lE '(^\|[^a-z])git ' scripts/audit/*sffi*.shs scripts/audit/rt-time-contract.shs` returns **0 files** — none of the 46 runs git — so `git archive` suffices and no shared `.git/worktrees/` state is written on a box with ~20 concurrent pushing sessions. (b) "run the wrapper with cwd inside `$WORK`" would NOT have worked: all 46 resolve their root from their own `$0` (234 hits for `cd -- "$(dirname -- "$0")/../.."`, zero `rev-parse --show-toplevel`), so the wrapper must execute the COPIES INSIDE the materialised tree. Repointing `ROOT` does both halves, since `run_guard` already invokes `sh "$ROOT/$guard_rel"`. Scope `src scripts test examples` minus the vendored trees: 551 MB / 3.3s, vs 2.0 GB / 19s with vendor, and verified not to change any of the 46 verdicts. Gate cost 29s -> 41s. Gained its first selftest (3 fixtures, `--guard-list` drives the real loop over 2 fakes). **STILL RED — 3 of 46, identically on the checkout and on the revision, so it is real committed debt.** | **DONE 2026-09-07** |
 | 13 | `push-type-walk-constructor-parity` | `check-type-walk-constructor-parity.shs --scan-only` | **yes** | `--rev` — reads exactly 3 files | **DONE** |
 | 14 | `push-shs-path-conversion-equivalence` | `check-shs-path-conversion-equivalence.shs` | no | scan half is source text → `--rev`. The *exec* half needs `cygpath` and is NOT RUN off Windows; that half is genuinely host-scoped. | TODO (split) |
 | 15 | `push-shs-native-tool-boundary-preserved` | `check-shs-native-tool-boundary-preserved.shs` | no | as above | TODO (split) |
