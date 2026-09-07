@@ -390,16 +390,35 @@ fn compile_c_runtime_sources() {
     // See the runtime_process.c comment above: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
-    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if target_env == "msvc" {
+    let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os_for_heap_counters == "windows" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
         // are __attribute__((weak)) so the Rust accounting wins whenever both
         // are linked. MSVC has no weak attribute, so on this lane the C
         // fallbacks are STRONG and collide with the Rust definitions in
         // value::heap -- LNK2005, measured on x86_64-pc-windows-msvc. The Rust
         // runtime always provides them here (mem_snapshot.rs imports both), so
-        // suppress the C fallbacks rather than duplicate them. Gated to msvc:
-        // the GNU/Darwin lanes keep the weak fallbacks byte-unchanged.
+        // suppress the C fallbacks rather than duplicate them.
+        //
+        // Keyed on target_os, NOT target_env == "msvc" (2026-09-07). The
+        // earlier msvc-only gate reasoned that "the GNU/Darwin lanes keep the
+        // weak fallbacks byte-unchanged", but that holds only for the *Unix*
+        // GNU lanes. runtime_memtrack.c selects its weak branch with
+        // `#elif (__GNUC__ || __clang__) && !defined(_WIN32)`, so
+        // x86_64-pc-windows-gnu skips that branch and lands on the same STRONG
+        // definitions MSVC gets -- deliberately, because a GNU-style weak
+        // symbol on MinGW becomes a `.weak.NAME.ref` COFF alias that ld drops
+        // under --gc-sections (documented at that file's `#else`). With the
+        // suppression gated to msvc, MinGW therefore got the strong C
+        // definitions AND the Rust ones, failing the seed link with:
+        //   multiple definition of `rt_heap_peak_bytes';
+        //   simple_runtime...rcgu.o: first defined here
+        // measured on x86_64-pc-windows-gnu / GCC 16.2 running
+        // `cargo build --profile bootstrap -p simple-driver`.
+        //
+        // Both Windows ABIs need the same suppression for the same reason, so
+        // the condition is the OS. Unix GNU and Darwin still take the weak
+        // branch and are unaffected.
         build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
     }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
