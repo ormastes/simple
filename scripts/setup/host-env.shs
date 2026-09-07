@@ -1,0 +1,272 @@
+#!/bin/sh
+# host-env.shs — hostname-keyed environment loader. SOURCE this file:
+#
+#   . scripts/setup/host-env.shs
+#
+# Resolves this host's name and looks up config/host/<hostname>.sdn (schema
+# simple-host-env-v1, see config/host/DESKTOP-5A4V03J.sdn for an example).
+# When a config file exists for this host, exports SIMPLE_HOST_* variables
+# built from it. When none exists, this is a silent NO-OP — nothing is
+# exported, nothing fails, and the caller keeps its own generic defaults.
+# That is correct behaviour for an unconfigured host, not a degraded one.
+#
+# Safety: a config file is applied ONLY when its own `hostname:` field matches
+# the host this process actually resolved to (via `hostname`, falling back to
+# `uname -n`). A mismatch REFUSES — prints to stderr and returns/exits
+# non-zero — rather than silently applying another machine's paths.
+#
+# Exports on a match:
+#   SIMPLE_HOST_ENV_FILE               path to the config file that was applied
+#   SIMPLE_HOST_PATH_PREPEND           colon-joined PATH entries, in order
+#   SIMPLE_HOST_RUSTUP_HOME
+#   SIMPLE_HOST_RUSTUP_FALLBACK_HOME
+#   SIMPLE_HOST_RUSTUP_HOST_TRIPLE
+#   SIMPLE_HOST_TEMP_DEPLOY_ROOT
+#
+# host_env_apply_path() prepends SIMPLE_HOST_PATH_PREPEND onto PATH,
+# idempotently — sourcing this file (or calling the function) more than once
+# does not duplicate entries.
+#
+# Executed directly (not sourced) with --selftest, runs the fixtures below
+# against isolated temp fixtures (never this repo's own config/host/):
+#
+#   sh scripts/setup/host-env.shs --selftest
+#
+# Direct-execution detection relies on bash's ${BASH_SOURCE[0]} differing from
+# $0 only when sourced. This repo's `sh` is bash (see scripts/check/
+# check-native-shader-backend-readback-matrix.shs for the same precedent), so
+# this is safe here; on a strict POSIX /bin/sh (dash) BASH_SOURCE is unset and
+# --selftest detection falls back to $0 alone, which is only reliable for
+# direct execution, not for sourcing — not a concern for this repo's shells.
+
+set -u
+
+if [ -n "${BASH_SOURCE:-}" ]; then
+    _host_env_self="${BASH_SOURCE[0]}"
+else
+    _host_env_self="$0"
+fi
+
+_host_env_dir=$(CDPATH= cd -- "$(dirname -- "${_host_env_self}")" && pwd) || _host_env_dir=""
+if [ -n "${_host_env_dir}" ]; then
+    _host_env_repo_root=$(CDPATH= cd -- "${_host_env_dir}/../.." && pwd) || _host_env_repo_root=""
+else
+    _host_env_repo_root=""
+fi
+
+host_env_resolve_hostname() {
+    _hen_h=$(hostname 2>/dev/null) || _hen_h=""
+    if [ -z "${_hen_h}" ]; then
+        _hen_h=$(uname -n 2>/dev/null) || _hen_h=""
+    fi
+    printf '%s' "${_hen_h}"
+}
+
+# host_env_config_path NAME ROOT -> prints the resolved config path, exit 0.
+# Tries NAME.sdn, then lowercased NAME.sdn. Neither exists -> exit 1, prints
+# nothing (that is the NO-OP case, not an error).
+host_env_config_path() {
+    _hen_name="$1"
+    _hen_root="$2"
+    if [ -f "${_hen_root}/config/host/${_hen_name}.sdn" ]; then
+        printf '%s' "${_hen_root}/config/host/${_hen_name}.sdn"
+        return 0
+    fi
+    _hen_lower=$(printf '%s' "${_hen_name}" | tr '[:upper:]' '[:lower:]')
+    if [ "${_hen_lower}" != "${_hen_name}" ] && [ -f "${_hen_root}/config/host/${_hen_lower}.sdn" ]; then
+        printf '%s' "${_hen_root}/config/host/${_hen_lower}.sdn"
+        return 0
+    fi
+    return 1
+}
+
+# host_env_sdn_get FILE KEY -> prints the scalar value of a "  key: value"
+# line (exactly two-space indent, under the host_env: block). Intentionally
+# not a general SDN parser — this file's shape is fixed and small.
+host_env_sdn_get() {
+    sed -n -E "s/^  ${2}:[[:space:]]*(.*)\$/\1/p" "$1" | head -n1
+}
+
+# host_env_sdn_get_list FILE KEY -> prints one item per line for a
+#   key:
+#     - item
+# block (two-space key indent, four-space "- item" indent).
+host_env_sdn_get_list() {
+    awk -v key="$2" '
+        BEGIN { on = 0 }
+        $0 ~ "^  " key ":[ \t]*$" { on = 1; next }
+        on && /^    - / { line = $0; sub(/^    - /, "", line); print line; next }
+        on && !/^    - / { on = 0 }
+    ' "$1"
+}
+
+# host_env_apply_path -> prepend SIMPLE_HOST_PATH_PREPEND onto PATH.
+# Idempotent: an entry already present in PATH is not re-added.
+host_env_apply_path() {
+    [ -n "${SIMPLE_HOST_PATH_PREPEND:-}" ] || return 0
+    _hen_old_ifs="${IFS}"
+    IFS=:
+    set -- ${SIMPLE_HOST_PATH_PREPEND}
+    IFS="${_hen_old_ifs}"
+    for _hen_entry in "$@"; do
+        [ -n "${_hen_entry}" ] || continue
+        case ":${PATH}:" in
+            *":${_hen_entry}:"*) ;;
+            *) PATH="${_hen_entry}:${PATH}" ;;
+        esac
+    done
+    export PATH
+}
+
+# host_env_load NAME ROOT -> resolve+export SIMPLE_HOST_* for NAME using
+# ROOT/config/host/. Returns 0 with nothing exported when no config exists
+# for NAME (no-op), 0 with everything exported on a match, 1 (refused, stderr
+# message) on a hostname mismatch inside the file.
+host_env_load() {
+    _hen_name="$1"
+    _hen_root="$2"
+    [ -n "${_hen_name}" ] || return 0
+    _hen_cfg=$(host_env_config_path "${_hen_name}" "${_hen_root}") || return 0
+    _hen_cfg_hostname=$(host_env_sdn_get "${_hen_cfg}" hostname)
+    if [ "${_hen_cfg_hostname}" != "${_hen_name}" ]; then
+        printf 'host-env: refusing %s -- its hostname field "%s" does not match the resolved host "%s"\n' \
+            "${_hen_cfg}" "${_hen_cfg_hostname}" "${_hen_name}" >&2
+        return 1
+    fi
+    SIMPLE_HOST_ENV_FILE="${_hen_cfg}"
+    SIMPLE_HOST_PATH_PREPEND=$(host_env_sdn_get_list "${_hen_cfg}" path_prepend | tr '\n' ':' | sed 's/:$//')
+    SIMPLE_HOST_RUSTUP_HOME=$(host_env_sdn_get "${_hen_cfg}" rustup_home)
+    SIMPLE_HOST_RUSTUP_FALLBACK_HOME=$(host_env_sdn_get "${_hen_cfg}" rustup_fallback_home)
+    SIMPLE_HOST_RUSTUP_HOST_TRIPLE=$(host_env_sdn_get "${_hen_cfg}" rustup_host_triple)
+    SIMPLE_HOST_TEMP_DEPLOY_ROOT=$(host_env_sdn_get "${_hen_cfg}" temp_deploy_root)
+    export SIMPLE_HOST_ENV_FILE SIMPLE_HOST_PATH_PREPEND SIMPLE_HOST_RUSTUP_HOME \
+        SIMPLE_HOST_RUSTUP_FALLBACK_HOME SIMPLE_HOST_RUSTUP_HOST_TRIPLE SIMPLE_HOST_TEMP_DEPLOY_ROOT
+    return 0
+}
+
+_host_env_main() {
+    [ -n "${_host_env_repo_root}" ] || return 0
+    host_env_load "$(host_env_resolve_hostname)" "${_host_env_repo_root}"
+}
+
+# ---------------------------------------------------------------------------
+# --selftest (direct execution only)
+# ---------------------------------------------------------------------------
+host_env__selftest() {
+    _st_dir=$(mktemp -d 2>/dev/null) || { printf 'selftest: mktemp -d failed\n' >&2; return 2; }
+    _st_pass=0
+    _st_fail=0
+
+    mkdir -p "${_st_dir}/config/host"
+
+    # (a) matching hostname applies cleanly.
+    cat >"${_st_dir}/config/host/matchhost.sdn" <<'EOF'
+host_env:
+  schema: simple-host-env-v1
+  hostname: matchhost
+  platform: test
+
+  path_prepend:
+    - /st/one
+    - /st/two
+
+  rustup_home: /st/rustup-home
+  rustup_fallback_home: /st/rustup-fallback
+  rustup_host_triple: x86_64-test-triple
+
+  temp_deploy_root: /st/deploy-root
+EOF
+    unset SIMPLE_HOST_ENV_FILE SIMPLE_HOST_PATH_PREPEND SIMPLE_HOST_RUSTUP_HOME \
+        SIMPLE_HOST_RUSTUP_FALLBACK_HOME SIMPLE_HOST_RUSTUP_HOST_TRIPLE SIMPLE_HOST_TEMP_DEPLOY_ROOT
+    if host_env_load matchhost "${_st_dir}" \
+        && [ "${SIMPLE_HOST_PATH_PREPEND:-}" = "/st/one:/st/two" ] \
+        && [ "${SIMPLE_HOST_RUSTUP_HOME:-}" = "/st/rustup-home" ] \
+        && [ "${SIMPLE_HOST_RUSTUP_HOST_TRIPLE:-}" = "x86_64-test-triple" ] \
+        && [ "${SIMPLE_HOST_TEMP_DEPLOY_ROOT:-}" = "/st/deploy-root" ]; then
+        printf 'ok - (a) matching hostname applies cleanly\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (a) matching hostname applies cleanly (PATH_PREPEND=%s RUSTUP_HOME=%s TRIPLE=%s DEPLOY=%s)\n' \
+            "${SIMPLE_HOST_PATH_PREPEND:-}" "${SIMPLE_HOST_RUSTUP_HOME:-}" "${SIMPLE_HOST_RUSTUP_HOST_TRIPLE:-}" "${SIMPLE_HOST_TEMP_DEPLOY_ROOT:-}"
+        _st_fail=$((_st_fail + 1))
+    fi
+
+    # (b) mismatched hostname field is refused (non-zero, no export).
+    cat >"${_st_dir}/config/host/mismatchhost.sdn" <<'EOF'
+host_env:
+  schema: simple-host-env-v1
+  hostname: some-other-machine
+  platform: test
+
+  path_prepend:
+    - /st/three
+
+  rustup_home: /st/wrong-home
+  rustup_fallback_home: /st/wrong-fallback
+  rustup_host_triple: x86_64-wrong-triple
+
+  temp_deploy_root: /st/wrong-deploy
+EOF
+    unset SIMPLE_HOST_ENV_FILE SIMPLE_HOST_PATH_PREPEND SIMPLE_HOST_RUSTUP_HOME \
+        SIMPLE_HOST_RUSTUP_FALLBACK_HOME SIMPLE_HOST_RUSTUP_HOST_TRIPLE SIMPLE_HOST_TEMP_DEPLOY_ROOT
+    if host_env_load mismatchhost "${_st_dir}" 2>/tmp/host-env-selftest-b.err; then
+        printf 'not ok - (b) mismatched hostname is refused (returned 0)\n'
+        _st_fail=$((_st_fail + 1))
+    else
+        if [ -n "${SIMPLE_HOST_PATH_PREPEND:-}" ]; then
+            printf 'not ok - (b) mismatched hostname is refused (exported anyway)\n'
+            _st_fail=$((_st_fail + 1))
+        elif ! grep -q 'refusing' /tmp/host-env-selftest-b.err 2>/dev/null; then
+            printf 'not ok - (b) mismatched hostname is refused (no stderr message)\n'
+            _st_fail=$((_st_fail + 1))
+        else
+            printf 'ok - (b) mismatched hostname is refused\n'
+            _st_pass=$((_st_pass + 1))
+        fi
+    fi
+    rm -f /tmp/host-env-selftest-b.err
+
+    # (c) missing config is a silent no-op returning 0.
+    unset SIMPLE_HOST_ENV_FILE SIMPLE_HOST_PATH_PREPEND SIMPLE_HOST_RUSTUP_HOME \
+        SIMPLE_HOST_RUSTUP_FALLBACK_HOME SIMPLE_HOST_RUSTUP_HOST_TRIPLE SIMPLE_HOST_TEMP_DEPLOY_ROOT
+    if host_env_load nosuchhost-xyz "${_st_dir}" \
+        && [ -z "${SIMPLE_HOST_PATH_PREPEND:-}" ] && [ -z "${SIMPLE_HOST_ENV_FILE:-}" ]; then
+        printf 'ok - (c) missing config is a silent no-op returning 0\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (c) missing config is a silent no-op returning 0\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+
+    # (d) applying PATH twice does not duplicate entries.
+    SIMPLE_HOST_PATH_PREPEND="/st/dup-one:/st/dup-two"
+    export SIMPLE_HOST_PATH_PREPEND
+    _st_saved_path="${PATH}"
+    PATH="/st/baseline"
+    host_env_apply_path
+    host_env_apply_path
+    _st_result_path="${PATH}"
+    PATH="${_st_saved_path}"
+    export PATH
+    _st_count=$(printf '%s' "${_st_result_path}" | tr ':' '\n' | grep -c '^/st/dup-one$')
+    if [ "${_st_count}" = "1" ]; then
+        printf 'ok - (d) applying PATH twice does not duplicate entries\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (d) applying PATH twice does not duplicate entries (count=%s)\n' "${_st_count}"
+        _st_fail=$((_st_fail + 1))
+    fi
+    unset SIMPLE_HOST_PATH_PREPEND
+
+    rm -rf "${_st_dir}"
+
+    printf 'selftest: %d passed, %d failed\n' "${_st_pass}" "${_st_fail}"
+    [ "${_st_fail}" -eq 0 ]
+}
+
+if [ "${_host_env_self}" = "$0" ] && [ "${1:-}" = "--selftest" ]; then
+    host_env__selftest
+    exit $?
+fi
+
+_host_env_main
