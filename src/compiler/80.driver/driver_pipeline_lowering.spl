@@ -61,7 +61,17 @@ fn _driver_mcdc_budget(ctx: CompileContext, key: text, fallback: i64) -> i64:
 # already report them (message, plus file:line:col when the span is known).
 fn _format_mir_error(err: MirError) -> text:
     # Staged native Option payloads can be malformed. Diagnostics must still
-    # report the original failure instead of crashing while formatting a span.
+    # report the original failure instead of crashing while formatting a span,
+    # so the span is read through the `if val` Option-binding form (never a
+    # direct `err.span.line` field access) and any span whose `file` is empty
+    # -- the zero-value default `Span.default()`/`Span.empty()` a call site
+    # passes when it has no real location -- is treated as "no span" rather
+    # than printed as a misleading `:1:1`.
+    if val span = err.span:
+        if span.file != "":
+            return "MIR lowering error: {err.message} at {span.file}:{span.line}:{span.col}"
+        if span.line > 0:
+            return "MIR lowering error: {err.message} at line {span.line}:{span.col}"
     "MIR lowering error: {err.message}"
 
 # MirLowering.errors mixes genuine "this MIR is broken" failures with
@@ -336,7 +346,21 @@ impl CompilerDriver:
                         log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
                         return false
                     direct_lowering.symbols = direct_hir.symbols
-                    var lowered_entry = direct_lowering.lower_module(direct_hir)
+                    # Per-module transient scope. The lowering arena for one
+                    # module is dead once its MirModule exists; without this
+                    # every intermediate stays registered for the life of the
+                    # process (the compiler's own immortal heap). See
+                    # lower_module_transient_scoped for the enumerated escape
+                    # set and why ambient bootstrap is excluded.
+                    val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
+                    if scoped_entry.is_err():
+                        # Fail closed: the scope has already been ended, so the
+                        # arena (including the module we would have returned) is
+                        # gone. Never continue on a half-reclaimed lowering.
+                        self.ctx.add_error("MIR lowering transient scope failed for {name_direct}: {scoped_entry.unwrap_err()}")
+                        log_phase("aot:lower_to_mir:transient_scope_failed idx={direct_idx} module={name_direct}")
+                        return false
+                    var lowered_entry = scoped_entry.unwrap()
                     lowered_entry.name = name_direct
                     log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     lowered_entry

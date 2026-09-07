@@ -1,6 +1,6 @@
 # Stage 2 sanity fails at `native-capsule-source-mutated` on hello world, and the reason is nondeterministically unreportable
 
-**Status:** OPEN — diagnosed to the branch, NOT fixed. Two diagnosability defects
+**Status:** ROOT-CAUSED and WORKED AROUND 2026-09-07; the underlying native-codegen field-binding defect is OPEN.
 found alongside it are fixed (see "What was fixed").
 **Component:** `src/compiler/80.driver/driver_aot_native_output.spl`,
 `src/compiler/80.driver/driver_types.spl`,
@@ -116,53 +116,114 @@ if capsule.cache_source != "" and (
 source; the compiled Stage-2 binary diverges from the semantics of its own
 source in `sha256_text(source.content)` vs
 `sha256_text(SourceFile.load(path).content)`. Which of the two sides is wrong is
-NOT yet established — see the blocker below.
+NOW ESTABLISHED — see ROOT CAUSE below. (This paragraph is kept as written at the time; the answer is: the disk side is wrong.)
 
-## Blocker: the reason is nondeterministically unreportable
+## ROOT CAUSE (established 2026-09-07, after the first revision of this record)
 
-The two hashes could not be obtained, because the diagnostic channel that would
-carry them is itself broken.
-
-`driver_native_collect_capsule_result_v1` was changed (landed, see below) to
-report the two branches separately and to quote `cache_source`, `frozen=` and
-`disk=`. On the two Stage-2 binaries rebuilt with that change, the summary
-reports:
+`driver_native_disk_source_identity` returns the sha256 of the **PATH STRING**,
+not of the file's content, in the Stage-2-compiled compiler. Source says:
 
 ```
+fn driver_native_disk_source_identity(source_path: text) -> text:
+    match SourceFile.load(source_path):
+        case Ok(source): sha256_text(source.content)
+        case Err(_): ""
+```
+
+The `case Ok(source)` payload's `.content` read yields field 0 (`path`) instead
+of `content`. `SourceFile` is `path, authored_path (defaulted), content,
+module_name`.
+
+Evidence — a first-ever compile of a module name, on Stage-2 binary
+`a11d1c069e8957287fc0e11eaf48181f75dd4d5fb00b0955ee4f3f33ee848a95`, with the
+new verdict text:
+
+```
+[native-compile-failed] build.capsule_repro.sub.hw_fresh_a: native-capsule-source-mutated:build.capsule_repro.sub.hw_fresh_a:cache_source=build/capsule-repro/sub/hw_fresh_a.spl:frozen=2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a:disk=009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b
+```
+
+and the two inputs, measured:
+
+```
+$ sha256sum build/capsule-repro/sub/hw_fresh_a.spl
+2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a   <- frozen= (CORRECT)
+
+$ printf 'build/capsule-repro/sub/hw_fresh_a.spl' | sha256sum
+009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b   <- disk=  (the PATH)
+```
+
+Confirmed on a second, independent module: for
+`build/capsule-repro/sub/hw_fresh_b.spl` the emitted `disk=` is `47d1543b17b10d26…`,
+byte-identical to `printf 'build/capsule-repro/sub/hw_fresh_b.spl' | sha256sum`.
+
+So the **frozen side is correct** and the **disk side is wrong**, and every
+capsule verification on this lane compared a content digest with a path digest.
+Interpreted under the Rust seed the same expression returns the correct content
+digest (`build/capsule-repro/hash_probe.spl`), so this is a native-codegen
+field-binding defect, not a source-level one.
+
+## The "nondeterministic reason loss" in the first revision of this record was WRONG
+
+It is not nondeterministic and it is not "leading statements of
+`driver_native_record_module_failure` do not execute". Both claims were an
+artefact of only ever re-running module names that had already been compiled in
+this workspace.
+
+The rule, measured: the **first-ever** compile of a given module name reports the
+full reason (and the `print` in `driver_native_record_module_failure` fires); a
+**repeat** run of the same module name reports
+`reason: (none recorded — BUG in the producer: a non-OK unit must carry a
+diagnostic)` and no print. A fresh `--cache-dir` does not reset it — the state
+that survives is keyed by module name (`object_path = "{object_base}.{module_name}.o"`
+plus its `.capsule-receipt`), outside the cache dir.
+
+```
+--- FIRST compile of a never-seen module ---
+rc=1
+      reason: native-capsule-source-mutated:...:frozen=2976a380...:disk=009f18fc...
+--- SECOND run, same module ---
+rc=1
       reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)
 ```
 
-This is not caused by the longer message, and it is not the line-count retention
-bound (`build_outcome_retain_diagnostics` returns a one-line blob unchanged).
-**The same binary `4d0c20ba…`, with the identical command, printed the real
-`native-capsule-source-mutated:…` reason earlier the same day and prints
-`(none recorded)` now.** The loss is nondeterministic on a fixed binary.
+That repeat-run path reaches `driver_native_record_module_failure` with an EMPTY
+`detail` (or records through some path not yet identified) — a real, separate
+observability defect, but a deterministic one with a named trigger. **Anyone
+reproducing this must use a module name never compiled in that workspace, or
+they will measure the empty-reason path and conclude the wrong thing.**
 
-`reason_block_for` only emits that line when a record MATCHING the path exists
-with `diagnostics == ""`, so `outcomes.record(...)` did run — i.e.
-`driver_native_record_module_failure` was reached with an empty `detail`, or its
-`detail` was lost between the argument and the stored field.
+## Fix landed
 
-An unconditional `print` added as the first statement of
-`driver_native_record_module_failure` did **not** appear in the output of either
-rebuilt binary, on the bootstrap lane or on a direct run, even though `strings`
-confirms the literal is present in the binary and `print` demonstrably works
-elsewhere in the same file (`print outcomes.summary()`). That probe was reverted
-rather than shipped, because a statement that provably emits nothing is dead
-code — but the observation stands and is the sharpest lead: **leading statements
-of this function appear not to execute in the Stage-2-compiled compiler.**
+`driver_native_disk_source_identity` (BOTH duplicate definitions, see below) now
+reads the file directly with `_sffi_file_read_text` and hashes that, avoiding the
+defective match-payload field read. This is also strictly more correct than the
+original: the frozen side hashes content obtained by
+`_driver_cached_entry_source_scan` from a raw `rt_file_read_text`, never through
+`SourceFile.load`, which additionally strips a coverage-wrapper marker line
+(`source_file_coverage_identity`) and would therefore have disagreed for
+`simple_cov_*` / `spipe_wrapped_*` inputs even with correct codegen. The
+`""`-on-empty behaviour matches `SourceFile.load`, which returns `Err` for an
+empty file. The gate is NOT relaxed: a file genuinely rewritten between parse and
+native-compile still fails it.
 
-## Also found, not fixed
+## Still open
 
-Duplicate top-level definitions in `driver_aot_native_output.spl`, introduced by
-`848f626638b` ("surgical extraction of PR #235"): `driver_native_disk_source_identity`
-twice (bodies identical) and `driver_native_module_source_identity` twice
-(bodies DIFFERENT — one reads the SoA owners via
-`driver_native_frozen_source_lookup`, the other iterates `ctx.sources`). Neither
-is on the failing path, so this is not the cause here, but a merge artifact of
-that shape will bite something.
+1. **The underlying native-codegen defect.** A `case Ok(record):` binding reads
+   the wrong field of the payload struct. Only one call site is worked around
+   here; every other match-bound struct field read in compiled Simple is
+   suspect. `SourceFile`'s middle field `authored_path` carries a DEFAULT
+   (`= ""`) while its neighbours do not, which is the most likely trigger to
+   investigate first.
+2. **The empty-`detail` repeat-run path** described above.
+3. **Duplicate top-level definitions** in `driver_aot_native_output.spl`,
+   introduced by `848f626638b` ("surgical extraction of PR #235"):
+   `driver_native_disk_source_identity` twice (bodies identical — both had to be
+   patched) and `driver_native_module_source_identity` twice (bodies DIFFERENT:
+   one reads the SoA owners via `driver_native_frozen_source_lookup`, the other
+   iterates `ctx.sources`). Not the cause here, but a merge artefact of that
+   shape will bite something.
 
-## What was fixed (separate commits)
+## What was fixed alongside (separate commit)
 
 1. The stage-2 failure diagnostic read only `stage2-native-build.log` while
    `stage2_status` is also set by the sanity gate, the receiver check and the
@@ -171,12 +232,23 @@ that shape will bite something.
    `bootstrap-from-scratch.sh` passes all eight stage-2 logs. Proven in situ on
    a real bootstrap run.
 2. `native-capsule-source-mutated` now names WHICH invariant fired and quotes
-   `cache_source`, `frozen=` and `disk=`; `source-identity-empty` /
-   `source-identity-mismatch` likewise.
+   `cache_source`, `frozen=` and `disk=` — without which the root cause above
+   could not have been read off a single run.
 
-## Next step for whoever picks this up
+## Verified: the blocker is cleared, and the NEXT one is named
 
-The reason plumbing must be made reliable before the capsule hashes can be read.
-The cheapest route is probably not `print` (see above) but writing the verdict to
-a file with `rt_file_append_text` from inside
-`driver_native_collect_capsule_result_v1` itself, on a fresh Stage-2 build.
+Stage 2 rebuilt with the fix (binary `d7ee97d8059f1d92…`), first-ever compile of
+a fresh module name:
+
+```
+[native-compile-failed] build.capsule_repro.sub.hw_fix_1: native-capsule-receipt-invalid:build.capsule_repro.sub.hw_fix_1:receipt-content-mismatch:expected-bytes=1069:actual-bytes=1069
+```
+
+`native-capsule-source-mutated` no longer fires — the source-identity invariant
+now passes. The next blocker is `receipt-content-mismatch` in
+`driver_native_capsule_result_reason_v1`: the `.capsule-receipt` written beside
+the object and the string rebuilt for comparison are **the same length (1069
+bytes) and different content**, which is the signature of one equal-width field
+(a hex digest) differing — i.e. very likely the SAME field-binding defect class,
+one layer further in (`capsule.capsule_identity`, `capsule.object_path`,
+`fp.size` or `fp.content_hash`). Stage 3 is still not reached.

@@ -315,6 +315,40 @@ pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
 }
 
+/// Return the process-monotonic count of registered heap allocations.
+///
+/// Diagnostic only. Paired with `rt_heap_free_count`, this is the cheapest way
+/// to see whether a transient scope actually reclaimed anything: a region that
+/// allocates but never frees leaves `alloc - free` climbing monotonically.
+///
+/// Callable from Simple as: `rt_heap_alloc_count() -> i64`
+pub fn rt_heap_alloc_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_alloc_count requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_alloc_count()))
+}
+
+/// Return the process-monotonic count of unregistered (freed) heap allocations.
+///
+/// Callable from Simple as: `rt_heap_free_count() -> i64`
+pub fn rt_heap_free_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_free_count requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_free_count()))
+}
+
+/// Return the peak of `rt_heap_live_bytes` for this process.
+///
+/// Callable from Simple as: `rt_heap_peak_bytes() -> i64`
+pub fn rt_heap_peak_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_peak_bytes requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_peak_bytes()))
+}
+
 /// Return live container backing-buffer bytes.
 ///
 /// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`

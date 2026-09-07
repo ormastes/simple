@@ -967,6 +967,21 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
             # unwrap as the qualified/call forms (`case E.C:`, `case E.A(x):`)
             # -- see the comment on that function.
             return match_enum_variant_pattern(value_id, name, [])
+        # A bare CAPITALIZED identifier tested against a BOXED ENUM scrutinee is
+        # a nullary variant pattern, never a binder -- exactly the rule the CALL
+        # form has always used (`pattern_enum_variant_name`: "Any other bare
+        # identifier is only treated as a variant when the scrutinee is actually
+        # a boxed enum"). Without this, the nullary form fell through to the
+        # binder below and matched EVERY value, so a mis-spelled or
+        # wrong-enum arm silently swallowed every later arm including `case _:`
+        # -- bug case_bare_ident_is_irrefutable_binding_2026-08-01.md /
+        # match_bare_ident_const_irrefutable_2026-07-20.md. Deliberately narrow,
+        # so under-reporting is the failure mode: a lowercase `case other:` is
+        # still a binder, and a non-enum scrutinee (the const-in-case-position
+        # shape, Probe B in that record) is untouched because this engine cannot
+        # tell a const pattern from a binder without const resolution.
+        if val_is_boxed_enum(value_id) and name_is_spelled_like_a_variant(name):
+            return match_enum_variant_pattern(value_id, name, [])
         # Binding: bind value to name
         env_define(name, value_id)
         return true
@@ -1062,6 +1077,17 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     val pattern_val = eval_expr(pattern_eid)
     if eval_had_error: return false
     val_equals(value_id, pattern_val)
+
+fn name_is_spelled_like_a_variant(name: text) -> bool:
+    """True when `name` is spelled the way a variant is: it starts with an
+    uppercase letter (`Green`, `WS_OPCODE_TEXT`). Binders are conventionally
+    lowercase, so this is the spelling half of the bare-`case`-identifier rule
+    in match_pattern. Mirrors the seed's `case_name_is_spelled_like_a_variant`
+    (src/compiler_rust/compiler/src/pattern_case_naming.rs) so the two engines
+    cannot drift on the spelling test."""
+    if name == "": return false
+    val c0 = name.substring(0, 1)
+    c0 >= "A" and c0 <= "Z"
 
 fn val_enum_variant_name(value_id: i64) -> text:
     """Variant name of a boxed enum value, or "" when it is not one.

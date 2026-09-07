@@ -388,6 +388,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
     insert_simple!("rt_heap_live_bytes", memory::rt_heap_live_bytes);
+    insert_simple!("rt_heap_peak_bytes", memory::rt_heap_peak_bytes);
+    insert_simple!("rt_heap_alloc_count", memory::rt_heap_alloc_count);
+    insert_simple!("rt_heap_free_count", memory::rt_heap_free_count);
     insert_simple!("rt_heap_aux_live_bytes", memory::rt_heap_aux_live_bytes);
     insert_simple!("rt_heap_array_capacity_bytes", memory::rt_heap_array_capacity_bytes);
     insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);
@@ -3264,6 +3267,35 @@ mod tests {
         for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
             assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
         }
+    }
+
+    #[test]
+    fn dispatches_lexer_shallow_free_without_reclaiming_managed_array() {
+        let handler = EXTERN_DISPATCH
+            .get("rt_array_free")
+            .expect("lexer snapshot cleanup requires rt_array_free registration");
+        let managed = Value::array(vec![Value::Int(11), Value::Int(22)]);
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(
+            &[managed.clone()],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("managed array shallow-free dispatch should succeed");
+
+        assert_eq!(result, Value::Nil);
+        // `Value` has never exposed `as_array` -- the call that made 398665ef526
+        // delete this test instead of fixing it. Assert the same property
+        // directly: the managed array must still carry both original elements.
+        assert_eq!(managed, Value::array(vec![Value::Int(11), Value::Int(22)]));
     }
 
     #[test]
