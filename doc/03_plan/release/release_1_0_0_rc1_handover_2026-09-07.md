@@ -101,7 +101,7 @@ Do not chase them one run at a time — that wasted about an hour here.
 |---|---|---|
 | fixed (math/atomic/time/abi) | 32 | ✅ merged |
 | cranelift JIT bridge | 75 | ✅ merged as **named traps** — dead code in this lane (default backend is `llvm`, `bootstrap-from-scratch.sh:573`) |
-| **Rust-only misc** | **90** | ⚠️ **in progress by an agent when this was written — check `work/` branches before starting** |
+| **Rust-only misc** | **90** | 30 done (PR #492); **56 remain**, each named in the census |
 | sqlite lane wiring | 24 | ❌ excluded by design; it is a **caller-wiring** bug, not a missing symbol |
 | no reference semantics | 15 | ❌ `rt_file_view_*_v1`, `rt_pinned_archive_*_v1`, `rt_native_build` — nothing to mirror; do not guess |
 | UFCS dotted | 7 | partially addressed by #489 |
@@ -185,8 +185,14 @@ lock made the next three runs fail 30 seconds in with a misleading
 
 ## 4. The path to a real release
 
-1. Land the remaining Rust-only misc symbols (check `work/` branches first — one
-   agent was mid-flight).
+1. Land the remaining **56** Rust-only misc symbols. PR #492 closed 30 of 90.
+   The census names each remaining one and why the skipped ones were skipped:
+   the `rt_simd_*` (22) and fd-based `rt_io_file_*` (12) families need
+   per-symbol reference checks; the capability-sandboxed group needs
+   `security_runtime.rs`, not a single-function mirror. Four symbols
+   (`rt_file_atomic_write_mode`, `rt_file_list_dir`, `rt_file_mode`,
+   `rt_fs_read_text`) have **no implementation on either side** — a different
+   problem, do not paper over them.
 2. Decide the sqlite caller-wiring (24) and the 15 no-semantics symbols — both
    need an owner decision, not more implementation.
 3. Get Stage 2 to link, then Stage 3 self-host, then Stage 4 + `--deploy`.
