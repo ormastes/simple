@@ -677,18 +677,139 @@ selftest() {
     _assert "untracked hook symlink rejected" 1 \
         "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
 
-    rm -rf "$_t" "$_w" "$_w2" "$_hw" "$_tm" "$_wm" "$_td" "$_wdd" "$_wdd2"
+    # --- --rev fixtures (2026-09-07) ------------------------------------
+    # These go through the REAL CLI, not scan_wiring directly, because the
+    # thing under test is the materialisation and the OPTOUT/BASELINE
+    # resolution around it. A fixture that only proved --rev does not crash
+    # would be worthless: the regression is a silently WRONG verdict.
+    #
+    # Two independent rot axes, injected by the one fixture:
+    #   axis 1 — the SCAN ROOT reverts to the working checkout. The checkout
+    #            carries an UNCOMMITTED guard that nothing invokes, so a
+    #            rotted scan root reports it as NEW unwired debt in a push
+    #            that does not contain it.
+    #   axis 2 — the BASELINE reverts to the working checkout. The checkout's
+    #            baseline names a guard that exists in neither tree, so a
+    #            rotted baseline read reports a stale-baseline failure.
+    # Either flips the asserted PASS.
+    #
+    # MIN_GUARDS is 300 and is deliberately NOT overridable, so the fixture
+    # generates 320 real guard files rather than opening a seam a production
+    # run could use to lower the vacuity bound.
+    _rt=$(mktemp -d) || return 1
+    if ! command -v git >/dev/null 2>&1; then
+        echo "SELFTEST FAILED: git unavailable, cannot verify the --rev committed-content path"
+        _fail=1
+    else
+        mkdir -p "$_rt/scripts/check" "$_rt/.github/workflows"
+        _i=1
+        while [ "$_i" -le 320 ]; do
+            printf '#!/bin/sh\n' > "$_rt/scripts/check/st-rev-$_i.shs"
+            _i=$((_i + 1))
+        done
+        printf 'run: sh scripts/check/st-rev-1.shs\n' > "$_rt/.github/workflows/w.yml"
+        {
+            printf '# fixture opt-out\n'
+            _i=2
+            while [ "$_i" -le 320 ]; do
+                printf 'st-rev-%s.shs  fixture filler, deliberately not a gate\n' "$_i"
+                _i=$((_i + 1))
+            done
+        } > "$_rt/scripts/check/guard_wiring_optout.txt"
+        printf '# fixture frozen unwired backlog (empty)\n' \
+            > "$_rt/scripts/check/guard_wiring_unwired_baseline.txt"
+        ( cd "$_rt" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+
+        # WORKING COPY ONLY, never committed. Three separate data inputs are
+        # dirtied so each can rot detectably on its own:
+        #   the SOURCES  (an uncommitted, uninvoked guard),
+        #   the BASELINE (a row naming a guard in neither tree),
+        #   the OPT-OUT  (st-rev-2's justification removed).
+        printf '#!/bin/sh\n' > "$_rt/scripts/check/st-rev-dirty.shs"
+        printf 'st-rev-ghost.shs\n' \
+            >> "$_rt/scripts/check/guard_wiring_unwired_baseline.txt"
+        $GREP -v '^st-rev-2\.shs' "$_rt/scripts/check/guard_wiring_optout.txt" \
+            > "$_rt/scripts/check/guard_wiring_optout.txt.new"
+        mv "$_rt/scripts/check/guard_wiring_optout.txt.new" \
+           "$_rt/scripts/check/guard_wiring_optout.txt"
+
+        # $0 may be relative; the children run with cwd inside the fixture.
+        _self="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+        _line() { printf '%s\n' "$2" | $GREP -m1 "$1" || :; }
+        _seen() { printf '%s\n' "$2" | $GREP -q "$1" && echo yes || echo no; }
+
+        _revout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" --rev HEAD 2>&1)
+        _revrc=$?
+        _assert "--rev exits 0 on the committed tree" 0 "$_revrc"
+        _assert "--rev enumerates only committed guards" "guard_total=320" \
+            "$(_line '^guard_total=' "$_revout")"
+        _assert "--rev sees no NEW unwired" "guard_unwired_new=0" \
+            "$(_line '^guard_unwired_new=' "$_revout")"
+        _assert "--rev does not read the working copy's baseline" no \
+            "$(_seen 'stale_baseline_missing=st-rev-ghost.shs' "$_revout")"
+
+        # The SAME tree scanned as a working tree must DISAGREE on BOTH axes,
+        # proving the two paths differ rather than both being blind.
+        _wtout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" 2>&1)
+        _wtrc=$?
+        _assert "working-tree scan exits 1 on the dirty tree" 1 "$_wtrc"
+        _assert "working-tree scan sees the uncommitted guard" yes \
+            "$(_seen 'unwired_guard=st-rev-dirty.shs' "$_wtout")"
+        _assert "working-tree scan reads the working copy's baseline" yes \
+            "$(_seen 'stale_baseline_missing=st-rev-ghost.shs' "$_wtout")"
+    fi
+
+    rm -rf "$_t" "$_w" "$_w2" "$_hw" "$_tm" "$_wm" "$_td" "$_wdd" "$_wdd2" "$_rt"
     if [ "$_fail" -ne 0 ]; then
         echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 29/29 fixtures correct"
+    echo "check-guard-wiring: selftest 36/36 fixtures correct"
     return 0
 }
 
-selftest || exit 2
-[ "${1:-}" = "--selftest-only" ] && exit 0
+# ---------------------------------------------------------------------------
+# Arguments.
+#
+# --rev <REV> scans the COMMITTED tree at REV instead of the working checkout
+# (2026-09-07). As a `tree`-mode push row this BLOCKING gate built its wiring
+# graph from whatever happened to be checked out, which under concurrent agent
+# load is not the commit being pushed: a guard another session had added but
+# not committed showed up as NEW unwired debt in YOUR push, and a guard your
+# commit orphaned did not. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# The split is deliberate and is the one place in this migration where a HALF
+# genuinely belongs to the host: the CONTENT scan (guard enumeration, roots,
+# edges, opt-out, baseline) is a property of the commit, while "is a hook
+# actually installed in this clone, and does it resolve to tracked current
+# source" is a property of THIS MACHINE and stays on the real repository root.
+# scan_wiring moves to the revision; scan_installed_hooks does not.
+# ---------------------------------------------------------------------------
+MODE=scan
+REV=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest-only) MODE=selftest-only; shift ;;
+        --generate-baseline) MODE=generate; shift ;;
+        --rev) [ $# -ge 2 ] || { echo "check-guard-wiring: ERROR — nothing was checked: --rev needs a value"; exit 2; }
+               REV="$2"; shift 2 ;;
+        *) echo "check-guard-wiring: ERROR — nothing was checked: unknown argument $1"; exit 2 ;;
+    esac
+done
+
+# The --rev fixture invokes this script recursively; re-running the selftest
+# there would recurse without end. The child exercises the real scan path,
+# which is the whole point of the fixture.
+if [ "${GUARD_WIRING_SELFTEST_CHILD:-0}" != 1 ]; then
+    selftest || exit 2
+fi
+[ "$MODE" = selftest-only ] && exit 0
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
 if [ -z "$ROOT" ]; then
@@ -740,7 +861,50 @@ case "$HERE_PHYS" in
         ;;
 esac
 
-OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
+WD=$(mktemp -d) || exit 2
+trap 'rm -rf "$WD"' EXIT
+
+# REPO_ROOT is this machine's clone and stays that way — the installed-hook
+# scan below is a property of the host, not of the pushed commit. SCAN_ROOT is
+# what the wiring graph is built from.
+REPO_ROOT="$ROOT"
+SCAN_ROOT="$ROOT"
+if [ -n "$REV" ]; then
+    if [ "$MODE" = generate ]; then
+        # It would write the baseline into the temp checkout and vanish with
+        # the trap: a silent no-op that looks like success.
+        echo "check-guard-wiring: ERROR — nothing was checked: --generate-baseline is incompatible with --rev"
+        exit 2
+    fi
+    if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$REV^{commit}" >/dev/null 2>&1; then
+        echo "check-guard-wiring: ERROR — nothing was checked: not a commit in $REPO_ROOT: $REV"
+        exit 2
+    fi
+    mkdir -p "$WD/rev"
+    # Exactly the trees scan_wiring reads: the guard directories, the roots
+    # (.github/workflows, scripts/hooks) and the searchdirs it greps for edges
+    # (scripts .github src bin tools config), minus the vendored trees named
+    # in CLAUDE.md's Owned-Code Scope. 312 MB / 1.2s with the exclusions
+    # against 2.0 GB / 19s without, and the exclusion was verified not to
+    # change the verdict. Separate tolerant invocations: `git archive` fails
+    # the WHOLE archive on a pathspec that matches nothing.
+    for _tree in scripts .github src bin tools config; do
+        ( cd "$REPO_ROOT" && git archive "$REV" -- "$_tree" \
+            ':(exclude,glob)src/compiler_rust/vendor/**' \
+            ':(exclude,glob)src/runtime/vendor/**' ) 2>/dev/null \
+          | tar -x -C "$WD/rev" 2>/dev/null || true
+    done
+    if [ ! -d "$WD/rev/scripts/check" ]; then
+        echo "check-guard-wiring: ERROR — nothing was checked: could not materialise $REV"
+        exit 2
+    fi
+    SCAN_ROOT="$WD/rev"
+fi
+
+# Resolved against SCAN_ROOT, not ROOT: judging committed content against the
+# working copy's opt-out or baseline is still a wrong-tree verdict. That is
+# the census's second rot axis; selftest fixture st-rev-* injects it.
+OPTOUT="$SCAN_ROOT/scripts/check/guard_wiring_optout.txt"
 # UNWIRED RATCHET (2026-08-23)
 # ----------------------------
 # This script sat permanently RED (414 unwired) for weeks, which is the worst of
@@ -761,11 +925,9 @@ OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
 # reported as a stale baseline and fails, so the file cannot silently keep
 # describing a tree that has moved on. --generate-baseline exists for reviewed
 # updates only; do not reach for it to turn a FAIL green.
-BASELINE="$ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
+BASELINE="$SCAN_ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
 
-WD=$(mktemp -d) || exit 2
-trap 'rm -rf "$WD"' EXIT
-scan_wiring "$ROOT" "$OPTOUT" "$WD"
+scan_wiring "$SCAN_ROOT" "$OPTOUT" "$WD"
 
 n_guards=$(wc -l < "$WD/guards" | tr -d ' ')
 if [ "$n_guards" -lt "$MIN_GUARDS" ]; then
@@ -790,7 +952,7 @@ if [ -f "$BASELINE" ]; then
     $GREP -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$BASELINE" 2>/dev/null |
         awk '{print $1}' | sort -u > "$WD/baseline" || :
 fi
-if [ "${1:-}" = --generate-baseline ]; then
+if [ "$MODE" = generate ]; then
     {
         echo "# Frozen backlog of guards that nothing invokes yet (NOT an opt-out:"
         echo "# an opt-out means 'deliberately not a gate'; a line here means"
@@ -851,9 +1013,13 @@ else
     case "$HOOKDIR" in
         /*) : ;;
         '') : ;;
-        *) HOOKDIR="$ROOT/$HOOKDIR" ;;
+        *) HOOKDIR="$REPO_ROOT/$HOOKDIR" ;;
     esac
-    scan_installed_hooks "$ROOT" "$HOOKDIR" "$WD" || {
+    # REPO_ROOT, never SCAN_ROOT: "is a hook installed in this clone, and does
+    # it resolve to tracked current source" is a property of THIS MACHINE. A
+    # materialised revision has no .git and no installed hooks, so pointing
+    # this half at it would report a clean install on every host.
+    scan_installed_hooks "$REPO_ROOT" "$HOOKDIR" "$WD" || {
         echo "check-guard-wiring: ERROR — hook scan could not resolve tracked sources."
         exit 2
     }
