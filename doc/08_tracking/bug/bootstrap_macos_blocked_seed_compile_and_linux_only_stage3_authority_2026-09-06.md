@@ -607,3 +607,76 @@ arithmetic would reach `Embedding.dot` (search/embeddings) and the spreadsheet
 formula engine with nothing to signal it. Getting this right needs the packed
 f64 array ABI pinned down first, with a behavioural test alongside
 `src/runtime/test/rt_core_exports_behaviour_selfcheck.c`.
+
+## Two findings that change what "finish the deploy" means
+
+### Native f64 accumulation is wrong in the core-C lane (new, reproducible)
+
+Refusing the reduction rewrite (see the `SIMPLE_NO_RUNTIME_NUMERIC_KERNELS`
+knob added to `classify_hir_simd_reduction`) gets the link past
+`rt_numeric.f64` — and reveals that the *plain loop* is also wrong:
+
+```
+fn sumf(a: [f64]) -> f64:
+    var acc = 0.0
+    var i = 0
+    while i < a.len():
+        acc = acc + a[i]
+        i = i + 1
+    acc
+```
+
+| lane | `sumf([1.5, 2.5])` |
+|---|---|
+| seed interpreter (`simple run`) | **4.0** — correct reference |
+| native, core-c-bootstrap, kernels ON | `2.5` (kernel ABI mismatch) |
+| native, core-c-bootstrap, kernels OFF | **`NaN`** |
+
+and the dot-product variant returns `0.0` where the interpreter gives `11`.
+
+So f64 accumulation in the native core-C lane is broken *independently of the
+kernels*. This is the concrete, minimal case behind the comment already sitting
+in `src/lib/common/search/types.spl`:
+
+```
+fn dot(other: Embedding<D>) -> f64:
+    """f64 dot product. UNRELIABLE on this repo's backends — see header."""
+```
+
+That file works around it with `dot_fixed` / `l2_sq_fixed` (integer fixed-point,
+"reliable path"). The comment is now backed by a reproducer and a reference
+value.
+
+**This is the reason a Stage-4 deploy should not be finished today.** A
+deployed compiler whose f64 sums produce `NaN` is worse than the current state,
+in which `bin/simple` is an honest Rust seed. Fix the f64 native path first.
+
+### Gate 6: the runtime capsule defines owner-provided symbols strongly
+
+Past gate 5, the link reaches a further macOS gate:
+
+```
+Build failed: Stage4 runtime capsule defines owner-provided runtime symbols
+STRONGLY (the outer runtime could not override them): _rt_actor_join,
+_rt_alloc, _rt_array_get, ... (several hundred)
+```
+
+Not one boundary this time but the capsule's whole symbol set, i.e. a
+link-architecture expectation about which archive owns what and how overrides
+work — and Mach-O's archive-member selection and weak-symbol semantics differ
+from ELF's, which is exactly the sort of thing a lane that has never run on this
+platform gets wrong. Untouched here.
+
+## Status summary
+
+| stage | macOS |
+|---|---|
+| Rust seed compiles | **fixed** (was E0609) |
+| C runtime compiles / push gate | **fixed** (was FAIL, now PASS 129 files) |
+| Rust authority publication | **fixed** (GNU `stat -Lc`, unconditional `/proc/self/stat`) |
+| Stage 2 native build | works — 834 units, 0 failed |
+| Stage 2 admission | blocked: procfs directory magic-links + `serialize_mir_function` SEGV |
+| Stage 4 compile (full CLI closure) | works — ~1,600 modules |
+| Stage 4 link gates 1-5 | **fixed** |
+| Stage 4 link gate 6 | open (runtime capsule symbol strength) |
+| native f64 correctness | **broken** — blocks deployment on its own |
