@@ -2919,10 +2919,27 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # The classification is a separate guard so it is exercisable by
     # `--selftest` without running a bootstrap.
     # doc/08_tracking/bug/bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md
+    #
+    # Pass EVERY log a stage-2 sub-step can write, not just the native-build
+    # one. `stage2_status` is set by the native-build AND by the post-build
+    # sanity gate, the receiver check and the admission publish, each of which
+    # writes its own file. On 2026-09-07 the build SUCCEEDED ("Build complete:
+    # 834 compiled, 0 cached, 0 failed") and the SANITY GATE failed with
+    # `native-capsule-source-mutated:...hello_world`; because only the
+    # native-build log was passed, this guard scanned a clean success log and
+    # reported UNDIAGNOSABLE, sending two separate runs to the wrong file. The
+    # guard now scans every `--log` and names the one that carried the reason.
     sh "${repo_root}/scripts/check/check-stage-log-diagnosable.shs" \
       --stage stage2 \
       --status "${stage2_status}" \
       --log "${log_dir}/stage2-native-build.log" \
+      --log "${stage2_sanity_evidence}.frontend-failure.log" \
+      --log "${stage2_sanity_evidence}.frontend-driver.log" \
+      --log "${stage2_sanity_evidence}.frontend-bootstrap-0.log.hello-world-positional" \
+      --log "${stage2_sanity_evidence}.frontend-bootstrap-1.log.hello-world-positional" \
+      --log "${stage2_sanity_evidence}.frontend-bootstrap-0.log" \
+      --log "${stage2_sanity_evidence}.frontend-bootstrap-1.log" \
+      --log "${stage2_receiver_log}" \
       --transcript "${stage3_provenance_dir}/stage2-command.transcript" >&2
     stage2_diag_status=$?
     if [ "${stage2_diag_status}" -ne 0 ]; then

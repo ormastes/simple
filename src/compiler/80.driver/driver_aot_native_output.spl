@@ -467,10 +467,11 @@ pub fn driver_native_capsule_result_reason_v1(
     if not _sffi_file_exists(capsule.object_path):
         return "object-missing:{capsule.object_path}"
     if capsule.cache_source != "":
-        if capsule.source_identity == "": return "source-identity-empty"
-        if driver_native_disk_source_identity(capsule.cache_source)
-                != capsule.source_identity:
-            return "source-identity-mismatch:{capsule.cache_source}"
+        if capsule.source_identity == "":
+            return "source-identity-empty:{capsule.cache_source}"
+        val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
+        if disk_identity != capsule.source_identity:
+            return "source-identity-mismatch:{capsule.cache_source}:frozen={capsule.source_identity}:disk={disk_identity}"
     val receipt_path = capsule.object_path + ".capsule-receipt"
     if not _sffi_file_exists(receipt_path):
         return "receipt-missing:{receipt_path}"
@@ -523,14 +524,25 @@ pub fn driver_native_collect_capsule_result_v1(
         return _collect_failure(module_name, "native-capsule-result-mismatch",
             "capsule-ok={capsule.ok} produced={object_path}"
                 + " capsule-object={capsule.object_path}")
-    if capsule.cache_source != "" and (
-        capsule.source_identity == ""
-        or driver_native_disk_source_identity(capsule.cache_source)
-            != capsule.source_identity):
-        return _collect_failure(module_name, "native-capsule-source-mutated",
-            "cache-source={capsule.cache_source}"
-                + " capsule-identity={capsule.source_identity}"
-                + " disk-identity={driver_native_disk_source_identity(capsule.cache_source)}")
+    # The two failing sub-conditions are reported SEPARATELY and both hashes
+    # are quoted. The old form collapsed "the frozen identity was never
+    # recorded" and "the file on disk changed since parse" into one opaque
+    # `native-capsule-source-mutated:<module>` string with no inputs, so a
+    # full Stage-2 bootstrap could only report that hello world failed and
+    # nothing about WHY. Naming which invariant fired, and printing the two
+    # digests plus the path each was computed from, is the same fail-closed
+    # rule with a diagnosable verdict -- nothing is relaxed.
+    if capsule.cache_source != "":
+        if capsule.source_identity == "":
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "frozen-identity-absent"
+                    + " cache-source={capsule.cache_source}")
+        val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
+        if disk_identity != capsule.source_identity:
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "cache-source={capsule.cache_source}"
+                    + " capsule-identity={capsule.source_identity}"
+                    + " disk-identity={disk_identity}")
     val receipt_reason = driver_native_capsule_result_reason_v1(capsule)
     if receipt_reason != "":
         return _collect_failure(module_name, "native-capsule-receipt-invalid",
