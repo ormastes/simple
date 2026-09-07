@@ -692,3 +692,134 @@ the pure Simple command path"). So the escape analysis above is argued from an
 enumerated write set and NOT yet corroborated by a run that actually frees. Do
 not treat this scope as proven safe until a self-hosted compiler has been built
 with it and has produced a correct binary.
+
+## Addendum 2026-09-07 — escape-set audit, a real compiled binary through the scoped path, and why the native measurement is still blocked (not by this boundary)
+
+Continuing the row above from a fresh session. Rebased the three landed commits
+(`feat(check)` reclaims gate + heap counters, `fix(check)` brk correction,
+`feat(mir)` the MIR scope itself, plus the two follow-up `docs(bug)` notes) onto
+current `origin/main` (clean cherry-picks, one additive merge conflict in this
+file resolved by keeping both addenda). `origin/main` did **not** yet carry any
+of this — `check-transient-scope-reclaims.shs` and
+`check-mir-transient-scope-boundary.shs` do not exist there and the MIR scope is
+still absent, so the prior session's "left undone rather than landed
+unvalidated" stance was correct and this row was still open.
+
+### 1. The escape-set audit the prior session called "argued, not corroborated" — now corroborated statically
+
+Re-derived the escape set for `lower_module_transient_scoped` from the actual
+call graph rather than trusting the commit message's enumeration:
+
+- **`rt_transient_heap_promote` is genuinely transitive.**
+  `collections.rs:1921-1971` walks Array elements, Tuple elements, Dict
+  keys+values, `RuntimeObject::fields()` (covers struct/class instances,
+  therefore every field of `self`), Closure captures, and Enum payload
+  (`transient_heap_children`, `collections.rs:1839-1885`). Promoting `self` as a
+  whole is therefore sound: no field of the 97-field `MirLowering` struct can be
+  missed by a hand list, because there is no hand list.
+- **The input `module: HirModule` is never mutated in place** by anything
+  `lower_module` reaches. Grepped every `<ident>.<field> =` and
+  `<ident>.<field>.(push|insert|remove|clear)(` pattern across all of
+  `src/compiler/50.mir/**` for the HIR-typed parameter names in scope
+  (`module`, `func`, `struct_def`, `class_def`, `hir_func`, `raw_func`,
+  `hir_module`). Every hit resolves to `self.builder.module` (the OUTPUT
+  `MirModule`, reached via the copy-modify-reassign idiom `var m =
+  bldr.module; m.x = ...; bldr.module = m`) or to `self.module` on
+  `MirModuleBuilder` — never to the HIR argument. This is the exact bug shape
+  the row's own precedent (`module_surfaces_freeze` UAF) warns about, and it
+  does not recur here: the only escape roots this boundary needs are the ones
+  already promoted (`lowered`, `self`).
+- **No cross-thread scope sharing.** The `--entry-closure` loop
+  (`driver_pipeline_lowering.spl:273-303`) is a plain sequential `while`, single
+  `direct_lowering` instance, no thread/actor spawn anywhere in it.
+  `TRANSIENT_HEAP_SCOPE` is `thread_local!`, so this is moot here, but worth
+  recording since it is exactly the kind of assumption that silently breaks if
+  someone later parallelises the loop.
+
+No new defect found; the boundary as landed is sound for the entry-closure call
+site specifically. The two OTHER `lower_module` call sites in the same file
+(bootstrap fixed-path at line ~234, the non-entry-closure fallback loop at line
+~328) remain deliberately unscoped, same as the prior session's design — not
+audited to the same depth here, out of scope for this pass.
+
+### 2. A real, running native binary through the scoped path (req. 2), not just a same-rc replay
+
+Rather than repeat the prior session's 24-module `--entry-closure` replay (which
+only proves "stops at the same place"), built an actual runnable artifact
+through the modified pipeline. `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` makes the
+entry-closure branch — and therefore `lower_module_transient_scoped` — the code
+path for *any* native-build, including a single trivial file, since
+`driver_pipeline_lowering.spl:239 if self.ctx.sources.len() > 0` always holds:
+
+```
+$ SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 \
+    /home/yoon/.cargo-target-mir/release/simple native-build hello.spl -o hello.out
+Linked: .../hello.out (34 KB) via clang
+$ ./hello.out
+hello from scoped MIR lowering
+$ echo $?
+0
+```
+
+This is a genuine improvement on the prior session's evidence: a real linked,
+executed, correct native binary produced via the scoped call site, not a run
+that merely reaches the same failure point. It is still an **interpreted-seed**
+compile (the seed's own Rust frontend/backend do the work; `MirLowering` is
+interpreted `.spl`), so it still only proves the FIRST half of req. 2
+(behaviour-neutral, produces a correct binary) — the reclamation-under-native-
+execution question (req. 1, the free path) is separate and addressed next.
+
+### 3. Native RSS/brk measurement of THIS boundary: still blocked, narrower gap than reported, still not worth the risk
+
+Re-ran the runtime-mechanism gate fresh (not reused numbers) to confirm the
+underlying primitive still reclaims on this host/build:
+`check-transient-scope-reclaims.shs` — `PASS -- 2 fixture(s) measured, scoped
+1036 kB vs unscoped 374232 kB (361x), identical exit status 124` (`--selftest`
+also green). This is the array/string mechanism, proven again, not the MIR
+boundary — restated here only so the two are not conflated.
+
+Attempted a smaller alternative to the full self-hosted bootstrap the prior
+session was blocked on (167 unresolved symbols): natively compiling a tiny
+probe that only `use compiler.mir._MirLowering.module_lowering.*` (not the
+whole compiler + LLVM backend). Import resolution and full frontend
+compilation of the entire `50.mir` + transitive `20.hir`/`00.common` dependency
+graph **succeeded** — a real improvement in diagnosis over "no self-hosted
+compiler can be built here" — but the **link** still fails, now on a smaller,
+different 59-symbol set (`rt_math_*`, `rt_simd_*`, `rt_coverage_*`, `rt_mmap`/
+`rt_msync`/`rt_munmap`, `rt_file_lock`/`rt_file_mmap_read_bytes`, `rt_exec`,
+`rt_process_run_with_limits`, others) pulled in transitively by modules 50.mir
+imports, not by anything the transient scope touches. `SIMPLE_ALLOW_UNRESOLVED_
+RUNTIME=1` would link it, but per this row's own prior finding that yields a
+NULL GOT slot per name and a SEGV on first call through one of them — the exact
+mechanism that crashed every self-hosted stage binary on hello world in the
+`rt_unwrap_or_trap` incident (2026-08-21) referenced above. Building a synthetic
+`HirModule` by hand to drive `lower_module_transient_scoped` without the
+frontend was also considered and rejected: the code's own comments record that
+a hand-duplicated `MirLowering` constructor once drifted 8 fields behind the
+struct and silently nil-filled the rest
+(`native_build_entry_struct_construction_buildfail_2026-07-20`), i.e. hand-built
+HIR/MIR structs are a known landmine in this codebase, and a wrong-by-
+construction fixture would produce a measurement that looks real and isn't.
+
+**Conclusion, stated as plainly as the prior session's:** this is genuinely
+closer than 2026-09-06 left it (167 unresolved symbols -> 59, all outside the
+scope's own dependency set; a real executed binary through the scoped path
+where before there was only a same-rc replay) but the native RSS/brk
+measurement of the MIR boundary specifically remains blocked on runtime-archive
+completeness — a linker/runtime-archive-selection concern, not a reclamation-
+design concern, and out of this session's scope per the task boundary (the
+sibling backend/runtime-archive lane owns that surface). Per this row's
+standing rule — a use-after-free in the compiler is worse than the memory it
+saves — landing an unmeasured-but-statically-audited scope, rather than forcing
+a measurement through `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1`, is the correct
+tradeoff.
+
+### 4. What this session adds to the gate surface
+
+No new gate script; `check-mir-transient-scope-boundary.shs` (landed
+2026-09-06) already does the job req. 3 asks for. Re-verified rather than
+re-built: `PASS — 9 invariant(s) checked` on the fixed tree,
+`FAIL — 3 invariant(s) checked ...: driver-entry-closure-loop-not-scoped;
+driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1) when pointed
+at `origin/main`'s pre-fix content via `--root` — discrimination re-proven
+against the real tree, not only its own fixtures.
