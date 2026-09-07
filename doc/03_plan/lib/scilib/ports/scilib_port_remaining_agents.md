@@ -51,6 +51,77 @@ described below — do not read their absence as green.
 
 ---
 
+## 0. Push plan — what ships, what does not, what is left
+
+> **Already shipped.** This section was written as a forward plan; it is
+> retained as the landing record because its per-group evidence table is
+> accurate and useful. The work went to PR #413 across several commits, not the
+> single commit described below.
+>
+> **Consequence you must know before bisecting or cherry-picking:** because it
+> landed as multiple commits, the INTERMEDIATE commits on that branch are not
+> each independently compilable. The `Index` migration reaches into df, scipy
+> and both test mirrors, and the blas relocation landed separately, so a commit
+> in the middle of the branch can sit at a seam. Only the branch TIP is claimed
+> good. Squash on merge, or take the tip — do not assume any single commit here
+> is a working tree on its own.
+
+
+### 0.1 Ships as ONE commit (all six groups together)
+
+They are one change: the ndarray signature migration reaches into df, scipy and
+both test mirrors, so splitting it leaves the tree uncompilable at the seam.
+
+| # | group | paths | why it is safe |
+|---|---|---|---|
+| A | ndarray `flat_*` restore + `Index` migration | `nogc_async_mut/ndarray/{mod,ndarray_impl_ops,ndarray_generators,ndarray_simd}.spl`, `nogc_async_mut/linalg/{mod,simd_ops}.spl`, `{nogc_async_mut,nogc_sync_mut}/df/{mod,df_io,df_transform}.spl`, `scipy/{integrate,interpolate,optimize,signal,sparse,spatial,stats}/mod.spl`, `test/{03_system/feature,feature}/scilib/*_spec.spl`, `test/01_unit/lib/nogc_async_mut/ndarray_view_bounds_spec.spl` | 388/388 sites wrapped, 0 double-wrapped; ndarray 7/7, df/scipy/unit spot-checks green |
+| B | math_block `MbScalar` | `common/science_math/{math_block,math_block_ops}.spl` | 11/11 `outcome=OK` |
+| C | ml nn re-export | `common/pure/nn/{loss,norm}.spl` **(new)**, `nogc_async_mut/ml/mod.spl` | 7/7 `outcome=OK` |
+| D | blas relocation | `common/science_math/{types,ffi_blas}.spl` **(new)**, `common/linalg/` **(new, 2 files)**, `common/science_math/blas.spl`, `nogc_sync_mut/linalg/{blas_cpu,blas_openblas,cuda_blas,fortran_wrapper}.spl`, and the two `D` **moves** | 18/18 `outcome=OK` |
+| E | lapack Layer A relocation | `common/science_math/ffi_lapack.spl` **(new)**, `nogc_sync_mut/linalg/lapack_lapacke.spl` | 9/10; the 1 red is pre-existing and blocked |
+| F | docs | 6 files in `doc/03_plan/lib/scilib/ports/`, `doc/08_tracking/bug/glob_import_shadows_explicit_alias_in_pattern_position_2026-09-06.md` **(new)**, 4 acceptance specs (tag drops) | evidence + tag bookkeeping |
+
+**Mandatory co-landing:** group A REQUIRES the peer's uncommitted
+`.V → .value` repair in `nogc_async_mut/ndarray/mod.spl` and
+`common/science_math/ndarray.spl`. HEAD still has 4 dangling `.V` **inside the
+`flat_*` bodies**. Land them together or `flat_f64` ships calling
+`self.len().V`.
+
+### 0.2 Does NOT ship
+
+- `test/03_system/feature/scilib/perf_sugar_spec.spl` — modified in the tree,
+  **not written by this session**, provenance unverified. Drop it from the
+  commit unless its author is identified.
+- Any `bootstrap/` artifact, `bin/` symlink, or seed rebuild output. None was
+  produced; if one appears, it is not from this work.
+
+### 0.3 Before pushing — non-negotiable
+
+Per `.claude/rules/vcs.md`: push via `sh scripts/check/land.shs`, **never** raw
+`jj git push` (it skips `.git/hooks/pre-push`, so the rules.sdl gates never
+run). Note the recorded macOS blockers — inert push gate, PR-protected `main`,
+`jj` backend corrupt on this host — so the realistic route is a detached
+`git worktree` + `gh pr create`. Re-run all five acceptance specs on the commit
+being pushed; a working-tree green is not evidence about committed content.
+
+### 0.4 What is LEFT (not done, in priority order)
+
+1. **`REQ-SCILIB-LAPACK-08`** — blocked on the seed resolver bug (§2). Needs a
+   seed fix; barred here. Lapack keeps `@tag:in-development` until then.
+2. **`lapack.md:625` clause 2** — `gesv(n: i64, a_buf: [f64], ...)` still leaks
+   primitives at the Layer B/C boundary. Box stays `[ ]`.
+3. **`blas.md:605`** — norm-Inf test with a non-zero max index does not exist;
+   the example only pins the absence of a Layer C `idamax`.
+4. **Nine unaudited checkboxes** (`lapack.md:633,637,639,640`,
+   `math_block.md:439,443,444,446,447`, `ml.md:579,580`) — their examples pass
+   but the full AC sentence was never checked. Audit before ticking (§3).
+5. **`cuda_fortran`, `df`, `perf_sugar`** — never swept. No claim is made about
+   them; measure first.
+6. **Optional cleanup:** `_raw_array_len` (`nogc_async_mut/ndarray/mod.spl:59`)
+   has zero callers repo-wide. Left alone deliberately as out of scope.
+
+---
+
 ## 1. Measured state (2026-09-07)
 
 Every row re-run by hand with the prebuilt seed, not taken from an agent report:
