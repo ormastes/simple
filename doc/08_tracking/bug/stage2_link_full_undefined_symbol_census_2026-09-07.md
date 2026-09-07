@@ -176,6 +176,123 @@ failed-link object set and diff against `linker_ground_truth.txt`
 (preserved alongside this doc's source data) to see instantly whether a
 regression reintroduced any of the 32.
 
+## Update 2026-09-07 (batch 2): 10 more bucket-2-misc symbols fixed
+
+Implemented on `work/stage2-link-symbols-batch2` (separate change from the 32
+above, and from the still-open #492/#493 PRs — checked both branches first to
+avoid duplicating their work; see "What #492/#493 already cover" below).
+Added to `src/runtime/runtime_native.c`: `rt_env_home`, `rt_env_vars`,
+`rt_file_open`, `rt_file_close`, `rt_file_exists_str`, `rt_file_hash`,
+`rt_file_canonicalize`, `rt_file_read_lines`, `rt_file_mmap_read_bytes`,
+`rt_dir_glob` — all previously counted in the "2-deferred: Rust-only, C-lane
+gap (misc)" row above (90 -> 80 remaining in that bucket).
+
+**Two real ABI divergences found by disassembling the kept object set**
+(`native-objects-8HIZif/mod_837.o`, `lib__nogc_sync_mut__sffi__fs__*`), not by
+reading the Rust signature or the `codegen/runtime_sffi.rs` `RuntimeFuncSpec`
+table:
+- `rt_file_open`: `RuntimeFuncSpec` declares 4 `I64` params, but the real
+  call only ever sets up 3 registers (path_ptr, path_len, mode), matching
+  `descriptor.rs`'s actual `(path_ptr, path_len, mode: i32)` and
+  `src/lib/nogc_sync_mut/sffi/fs.spl:130`'s `extern fn rt_file_open(path:
+  text, mode: i32) -> i32`. Implemented with the 3-arg shape, not
+  `RuntimeFuncSpec`'s 4.
+- `rt_dir_glob`: `directory.rs`'s Rust fn takes FOUR args (dir_ptr, dir_len,
+  pattern_ptr, pattern_len) and forwards to `rt_file_find`, but
+  `src/lib/nogc_sync_mut/sffi/fs.spl:18` declares
+  `extern fn rt_dir_glob(pattern: text) -> [text]` (one text arg) and the
+  real call sets up exactly two words (ptr, len). Porting the 4-arg Rust body
+  verbatim would have read the pattern's own (ptr,len) as a bogus
+  (dir_ptr,dir_len) pair. Implemented instead as a single-pattern `glob(3)`
+  call, matching the real 2-word call site.
+
+`rt_file_exists_str` and `rt_file_hash` both tail-call with zero argument
+setup (boxed `RuntimeValue` text handle passed straight through in x0), the
+same single-word-boxed-text shape as the `rt_remove` ABI fix on the
+#493 branch — decoded via the existing `rt_core_string_to_cpath` /
+`rt_core_string_bytes` helpers.
+
+**Explicitly NOT implemented in this batch, with reasons** (still counted in
+the "2-deferred: Rust-only, C-lane gap (misc)" row, 80 remaining):
+- `rt_array_sum`, `rt_array_sorted` — the Rust bodies
+  (`runtime/src/value/collections.rs`) operate on the Rust-tagged
+  `RuntimeArray` representation (`is_int`/`is_float`/`from_int`/`from_float`
+  on a `RuntimeValue`), a different value-tagging scheme than the
+  `RtCoreArray`/`RtCoreValue` representation this lane's `rt_array_new`/
+  `rt_array_push`/`rt_dict_*` family already uses. A mechanical port would
+  silently misread the C-side tagged values; needs the C-side decode, not a
+  mirror.
+- `rt_cli_handle_compile` — Rust body is `delegate_to_simple_binary("compile",
+  args)`: calls into the compiler pipeline. Out of scope per task instructions.
+- `rt_cli_run_tests_process_args` — Rust body calls `run_tests_with_args`,
+  i.e. the test runner/compiler pipeline. Out of scope per task instructions.
+- `rt_mmap` — Rust body (`file_io/file_ops.rs`) gates on
+  `runtime_capability_allowed(READ_FILE_CAPABILITY_ID)` /
+  `WRITE_FILE_CAPABILITY_ID`, the same capability-sandbox subsystem
+  (`security_runtime.rs`) as the explicitly-excluded `rt_exec`/`rt_process_*`
+  family — not a mechanical mirror.
+- `rt_execute_native` — sole Rust impl is in `security_runtime.rs`, same
+  capability-sandboxed family as `rt_exec`. Out of scope per task
+  instructions.
+- `rt_file_atomic_write_mode`, `rt_file_list_dir`, `rt_file_mode`,
+  `rt_fs_read_text` — 0 C, 0 Rust *native* implementation on either side
+  (confirmed unchanged from the original census). Out of scope per task
+  instructions; a different problem, not invented here.
+
+### What #492/#493 already cover (checked before starting, not re-touched)
+
+- PR #492 (`work/stage2-bucket2-rust-only`, open): `rt_file_fsync`,
+  `rt_file_lock`, `rt_file_unlock`, `rt_load_barrier`, `rt_store_barrier`, the
+  full `rt_log_*` family (7), `rt_madvise`, `rt_mem_attr_enabled`,
+  `rt_mem_attr_set_owner`, `rt_msync`, `rt_munmap`, `rt_path_basename`,
+  `rt_path_ext`, `rt_path_separator`, `rt_progress_*` (5), `rt_random_randint`,
+  `rt_random_uniform`, `rt_remove`, `rt_time_now_seconds`,
+  `rt_typed_bytes_u8_data_at` (30 total).
+- PR #493 (`work/stage2-simd-iofile`, open): the full `rt_io_file_*` family
+  (13) and the `rt_simd_*` family (23), plus a follow-up commit fixing
+  `rt_remove`'s ABI (boxed text handle, not a raw C-string pointer).
+
+### Verification (batch 2)
+
+- **Relink, isolating exactly this change's effect.** The kept object set's
+  own `libsimple_runtime.a` member `runtime_native.o` is a stale snapshot
+  (older than current `origin/main` — it predates an unrelated `rt_alloc`/
+  `rt_free`/etc. addition to `runtime_native.c` that must be compiled with
+  `-DSIMPLE_RUNTIME_MEMORY_OWNER=1`, matching the real build
+  (`native_project/tools.rs:561`), or it duplicate-conflicts against
+  `runtime_memory.o`). Correct methodology: compile `runtime_native.c` fresh
+  from current `origin/main` HEAD (before this change) as the baseline,
+  compile it again with this change applied, patch each into its own copy of
+  the archive, and relink both against the same untouched `spl_objects.rsp` +
+  capsule archive + `libunwind.so`. Before: **214** undefined symbols, 0
+  duplicates. After: **204**, 0 duplicates — exactly 10 fewer.
+  `comm -23 before after` = exactly the 10 symbols listed above, byte for
+  byte; `comm -13 before after` = empty (no new undefined symbol appeared).
+- **`cargo check --release --bin simple -j4`** (fresh `CARGO_TARGET_DIR`):
+  clean, `Finished` release profile in ~1m 05s, only pre-existing warnings.
+- **`sh scripts/check/check-c-runtime-compiles-push.shs`**: `PASS — 133
+  file(s) compiled, 0 errors (5 skipped for unavailable external
+  dependencies)`.
+- **Behavioural test**:
+  `src/runtime/test/rt_bootstrap_c_lane_fs_env_selfcheck.c` — 20 checks
+  against real filesystem/environment state: `rt_env_home`/`rt_env_vars`
+  against a just-`setenv`'d value; `rt_file_open`/`rt_file_close`/
+  `rt_file_exists_str` against a real file and a real fd (including a
+  double-close failure and a missing-file open returning -1);
+  `rt_file_hash` against the known SHA-256("abc") test vector, plus the
+  empty-not-nil failure case; `rt_file_canonicalize` popping a real ".."
+  component and joining a relative path onto the real `cwd`;
+  `rt_file_read_lines` splitting `\n`/`\r\n` correctly with no spurious
+  trailing empty line; `rt_file_mmap_read_bytes` preserving every byte
+  including `0x00`/`0xFF`; `rt_dir_glob` matching exactly the real files a
+  real glob pattern should match. All 20 PASS. **Non-vacuity proved**: a copy
+  of `runtime_native.c` with `rt_file_exists_str` deliberately forced to
+  always `return 0` was recompiled and relinked against the same selfcheck
+  harness — it failed exactly the one targeted assertion (`FAIL:
+  rt_file_exists_str finds a real file`, exit 1) while every other check
+  still passed, then the real implementation was restored and reverified
+  green (exit 0).
+
 ## Bucket 3/4 handoff (not touched here — per task instructions)
 
 See the table below; rows tagged `3-UFCS-dotted` and `4-lenient-unresolved-global`.
@@ -383,23 +500,23 @@ resolution is a name collision, not a fix.
 | `rt_array_sum` | compiler__backend__backend__llvm_type_mapper | — | src/compiler_rust/runtime/src/value/collection_tests.rs,src/compiler_rust/runtime/src/value/collections.rs, |
 | `rt_cli_handle_compile` | app__io__cli_ops | — | src/compiler_rust/runtime/src/value/cli_sffi.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_cli_run_tests_process_args` | app__io__cli_ops | — | src/compiler_rust/runtime/src/value/cli_sffi.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_dir_glob` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/directory.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_env_home` | lib__nogc_async_mut__env__platform | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_env_vars` | lib__nogc_async_mut__env__variables | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_dir_glob` | lib__nogc_sync_mut__sffi__fs | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/sffi/file_io/directory.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_env_home` | lib__nogc_async_mut__env__platform | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_env_vars` | lib__nogc_async_mut__env__variables | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_exec` | lib__nogc_sync_mut__sffi__system | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/cli_sffi.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_execute_native` | lib__nogc_sync_mut__sffi__system | — | src/compiler_rust/runtime/src/security_runtime.rs, |
 | `rt_file_atomic_write_mode` | lib__nogc_sync_mut__sffi__fs | — | — |
-| `rt_file_canonicalize` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_file_close` | lib__nogc_sync_mut__sffi__dynamic | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_file_exists_str` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
+| `rt_file_canonicalize` | lib__nogc_sync_mut__sffi__fs | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_close` | lib__nogc_sync_mut__sffi__dynamic | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_exists_str` | lib__nogc_sync_mut__sffi__fs | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
 | `rt_file_fsync` | compiler__driver__action_graph__persisted_graph | src/runtime/runtime.c, | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_file_hash` | lib__nogc_sync_mut__sffi__io | — | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
+| `rt_file_hash` | lib__nogc_sync_mut__sffi__io | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
 | `rt_file_list_dir` | lib__nogc_sync_mut__sffi__fs | — | — |
 | `rt_file_lock` | lib__nogc_sync_mut__io__file_ops | — | src/compiler_rust/runtime/src/lib.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_file_mmap_read_bytes` | lib__nogc_sync_mut__io__file_ops | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_mmap_read_bytes` | lib__nogc_sync_mut__io__file_ops | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_file_mode` | lib__nogc_sync_mut__sffi__fs | — | — |
-| `rt_file_open` | lib__nogc_sync_mut__sffi__fs | src/runtime/runtime_native.c, | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
-| `rt_file_read_lines` | lib__nogc_sync_mut__sffi__io | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_open` | lib__nogc_sync_mut__sffi__fs | src/runtime/runtime_native.c,; FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_read_lines` | lib__nogc_sync_mut__sffi__io | FIXED batch 2 (src/runtime/runtime_native.c) | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_file_unlock` | lib__nogc_sync_mut__io__file_ops | — | src/compiler_rust/runtime/src/lib.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_fs_read_text` | lib__nogc_sync_mut__sffi__fs | — | — |
 | `rt_get_host_target_code` | lib__nogc_sync_mut__sffi__system | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs, |
