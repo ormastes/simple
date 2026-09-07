@@ -3154,8 +3154,59 @@ impl LlvmBackend {
                         module
                             .get_function(spec.name)
                             .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
+                    } else if let Some(f) = called_func {
+                        f
+                    } else if qualified_owner_is_user_type {
+                        // Owner is a genuine (non-builtin) user type -- e.g.
+                        // `DbValue.to_text`. `fallback_name` is load-bearing
+                        // here: real Stage-2 binaries carry symbols spelled
+                        // exactly this way for cross-unit qualified user
+                        // methods (see the #4 fix comment above). Preserve the
+                        // existing behaviour.
+                        module.add_function(&fallback_name, fallback_fn_type, None)
                     } else {
-                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None))
+                        // Owner IS a builtin receiver (str/text/...), and
+                        // `runtime_func`/`called_func`/`runtime_spec` have all
+                        // already failed to find real backing for `method`.
+                        // `fallback_name` ("text.split_whitespace" etc.) was
+                        // never a real exported symbol -- it is MIR's
+                        // receiver-type qualifier, invented for builtin
+                        // dispatch, not a mangled name any compiled unit ever
+                        // emits. Blindly declaring it here is exactly the
+                        // "resolve by name, ignore the receiver type" defect
+                        // that hijacked `to_i64`, struct offsets, struct field
+                        // types, and `to_text` in this codebase: it silently
+                        // manufactures an extern that can never link, so a
+                        // real cross-unit UFCS method sharing a leaf with no
+                        // builtin (`str.split_whitespace`) surfaces as an
+                        // undefined symbol at Stage-2 link instead of running.
+                        //
+                        // The one resolution `use_map`/`import_map` can still
+                        // give us is by the BARE method name: those maps are
+                        // keyed on the imported symbol's own name (see
+                        // `collect_use_imports`), never on the "Type.method"
+                        // qualifier MIR synthesizes for a builtin-typed
+                        // receiver, so the `func_name`-keyed lookups above
+                        // never had a chance to find a real UFCS function
+                        // here. Try that lookup now; if it also comes up
+                        // empty, fail closed instead of guessing.
+                        let bare_resolved = self
+                            .use_map
+                            .get(method)
+                            .or_else(|| self.import_map.get(method))
+                            .map(|s| s.as_str());
+                        let bare_func = bare_resolved.and_then(|n| {
+                            module.get_function(n).or_else(|| module.get_function(&n.replace("_dot_", ".")))
+                        });
+                        match bare_func.or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
+                        {
+                            Some(f) => f,
+                            None => {
+                                return Err(CompileError::semantic(format!(
+                                    "cannot resolve method call `{func_name}`: receiver is a builtin type but `{method}` is neither a known runtime method nor a resolvable user definition (checked use_map/import_map for `{method}`)"
+                                )));
+                            }
+                        }
                     };
                     let declared_param_types = func.get_type().get_param_types();
                     let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
@@ -4465,5 +4516,118 @@ mod tests {
         assert!(!suffix_owner_matches("lib__common__target__PointerSize", "string"));
         assert!(!suffix_owner_matches("Vec4f", "f64"));
         assert!(suffix_owner_matches("f64", "f64"));
+    }
+
+    /// Regression test for the fifth instance of the "resolve UFCS calls by
+    /// name, ignoring the receiver type" defect family (see the four listed
+    /// in the #4 fix comment above `qualified_owner_is_user_type`): a real
+    /// user-defined free function (e.g. `mymod.wordtools.split_whitespace`,
+    /// a genuine stdlib-shaped UFCS method with NO compiler-builtin backing
+    /// on `text`) must still resolve to its real cross-unit symbol when the
+    /// receiver's static builtin type makes MIR qualify the call as
+    /// `text.split_whitespace`. `use_map`/`import_map` key on the BARE
+    /// imported name (see `collect_use_imports`), never on that
+    /// receiver-type qualifier, so every qualified lookup earlier in this
+    /// match arm (`direct_func`, the first `resolved` in the fallback) can
+    /// never find it -- only a bare-name lookup can.
+    #[test]
+    fn ufcs_builtin_receiver_user_method_resolves_via_bare_use_map() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("ufcs_builtin_receiver_resolve").unwrap();
+
+        // The real cross-unit definition, under its true mangled name --
+        // never spelled "text.split_whitespace" anywhere.
+        let mut real_fn = MirFunction::new(
+            "mymod__wordtools__split_whitespace".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        real_fn.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        real_fn.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        // MIR qualifies this the same way it qualifies a real
+        // `some_text.split_whitespace()` UFCS call on a builtin receiver --
+        // "text.split_whitespace" is not a real symbol anywhere.
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let mut use_map = HashMap::new();
+        use_map.insert(
+            "split_whitespace".to_string(),
+            "mymod__wordtools__split_whitespace".to_string(),
+        );
+        backend.set_use_map(use_map);
+
+        backend.compile_function(&real_fn).unwrap();
+        backend.compile_function(&caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @mymod__wordtools__split_whitespace(i64"),
+            "did not call the real cross-unit function:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@\"text.split_whitespace\""),
+            "declared a phantom extern for the MIR-synthesized qualifier instead of the real symbol:\n{ir}"
+        );
+        backend.verify().unwrap();
+    }
+
+    /// Sibling of the test above: when NEITHER a runtime shim NOR a real
+    /// user definition backs a builtin-receiver-qualified method call, this
+    /// must fail closed with a compile error rather than silently declaring
+    /// an extern spelled like the MIR qualifier -- a symbol no compiled unit
+    /// ever exports, and undefined at Stage-2 link. This is the check that
+    /// FAILS on the pre-fix shape: before this change, the fallback declared
+    /// `module.add_function("text.split_whitespace", ...)` unconditionally
+    /// and returned `Ok(())`.
+    #[test]
+    fn ufcs_builtin_receiver_unresolvable_method_fails_closed() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("ufcs_builtin_receiver_fail_closed").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let result = backend.compile_function(&caller);
+        assert!(
+            result.is_err(),
+            "must fail closed instead of silently declaring a phantom extern for an unresolvable builtin-receiver method"
+        );
     }
 }
