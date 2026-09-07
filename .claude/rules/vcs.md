@@ -128,6 +128,36 @@ Consequences for the release flow:
   and says so instead of failing open if it does not;
 - tag the commit that is already on `main`, never a local-only commit;
 - if you see the refusal, the fix is to land the commit, not to bypass the hook.
+
+### Verified end to end, and one trap
+
+Proven on 2026-09-07 against the real remote through the installed hook, with
+no `--no-verify`:
+
+```
+push-must-check: tag refs/tags/<probe> -> fd22bf49c05 is already published on
+                 refs/remotes/origin/main; 0 new commits, range gates do not apply
+ * [new tag]     <probe> -> <probe>
+```
+
+**Never use a `v`-prefixed name for a throwaway or probe tag.** Two rulesets
+cover `refs/tags/v*`: `spipe-vcs-v3-version-tag-creation` (rule `creation`) and
+`spipe-vcs-v3-version-tags` (rules `update`, `deletion`, `non_fast_forward`).
+The second lists **no bypass actors**, so a `v*` tag is immutable the moment it
+exists — `git push origin --delete` returns:
+
+```
+remote: error: GH013: Repository rule violations found for refs/tags/<name>.
+remote: - Cannot delete this tag
+```
+
+Not even the repository owner can remove it without first editing or deleting
+that ruleset. A mistyped or throwaway `v*` tag is therefore permanent. The
+verification above was run with such a name and left
+`vgate-probe-004312` behind, which is why this paragraph exists; see
+`doc/08_tracking/bug/stray_vgate_probe_tag_2026-09-07.md`. Probe with a name
+that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
+and which deletes cleanly.
 ## Pre-push guards
 
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
