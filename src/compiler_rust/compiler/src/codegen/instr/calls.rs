@@ -2567,7 +2567,13 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
-        | "rt_file_create_excl" => Some(&[0, 1]),
+        | "rt_file_create_excl"
+        // rt_file_copy_create_excl_no_follow / rt_file_link_create_excl_no_follow
+        // are (source_ptr, source_len, destination_ptr, destination_len) --
+        // same (ptr, len) x2 shape, see runtime/src/value/sffi/file_io/file_ops.rs
+        // and the pure-Simple twin table text_extern_abi.spl.
+        | "rt_file_copy_create_excl_no_follow"
+        | "rt_file_link_create_excl_no_follow" => Some(&[0, 1]),
         // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
         // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
         // phase_ptr, phase_len, source_index, path_ptr, path_len, ...).

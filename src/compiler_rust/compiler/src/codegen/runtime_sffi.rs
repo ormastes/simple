@@ -2008,6 +2008,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),               // text -> i64 (CRC32 checksum)
     RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),                 // path -> bool (alias for fsync)
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
+    RuntimeFuncSpec::new("rt_file_copy_create_excl_no_follow", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool (O_EXCL|O_NOFOLLOW)
+    RuntimeFuncSpec::new("rt_file_link_create_excl_no_follow", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool (link, O_NOFOLLOW)
     RuntimeFuncSpec::new("rt_mem_snapshot_open", &[I64, I64], &[I64]),        // path -> owned fd
     RuntimeFuncSpec::new(
         "rt_mem_snapshot_record",
