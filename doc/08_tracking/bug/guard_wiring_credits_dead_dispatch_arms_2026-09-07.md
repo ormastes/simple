@@ -45,6 +45,10 @@ Root cause per class:
   now sits at `tier=bootstrap` under an id WITHOUT the `push-` prefix
   (`signature-type-import-provenance`, `use-target-resolves`,
   `outline-parse-terminates` — manifest lines 57, 53, 62), so no push key exists.
+  Confirmed by history, not inferred: all three were demoted in one commit,
+  `4f21072c336` "perf(check): move whole-tree gates to bootstrap", which rewrote
+  `push-<id>, push, ..., tree` to `<id>, bootstrap, ..., automated` for each and
+  left every arm in place.
   `.claude/rules/vcs.md` already documents why two of them are not push gates
   (use-target-resolves RED with 3,274 new; outline-parse-terminates ERRORs without
   a deployed `bin/simple`). The rows moved; the arms were left behind.
@@ -56,9 +60,32 @@ Root cause per class:
 
 **3 guards** lose their only recognised wiring once dead arms stop counting:
 `check-signature-type-import-provenance.shs`, `check-use-target-resolves.shs`,
-`check-outline-parse-terminates.shs`. Measured directly: with the detector
-active and the manifest credit below disabled, the real tree reports
-`FAIL — 3 NEW unwired`.
+`check-outline-parse-terminates.shs`.
+
+Measured on the real tree at `8e8f700117e` with the detector active, the
+manifest credit below forced off, and the selftest bypassed. Two runs, because
+the credit and the detector move the number in opposite directions and only the
+second isolates this defect's own contribution:
+
+    # baseline as landed (725) - both effects visible
+    FAIL - 1596 guard(s) checked, 12 NEW unwired (725 baselined as known debt),
+           0 stale/bad baseline or opt-out line(s), 0 copied hook(s)
+    # the 12 = the 9 the manifest credit accounts for, plus the 3 below
+
+    # the 9 temporarily restored to the baseline (734) - this defect alone
+    FAIL - 1596 guard(s) checked, 3 NEW unwired (734 baselined as known debt),
+           0 stale/bad baseline or opt-out line(s), 0 copied hook(s)
+      unwired_guard=check-outline-parse-terminates.shs
+      unwired_guard=check-signature-type-import-provenance.shs
+      unwired_guard=check-use-target-resolves.shs
+
+The baseline was restored byte-identical afterwards (`cmp` against
+`8e8f700117e`). **Correction, stated rather than left to be found:** the commit
+message on `8e8f700117e` quotes that second verdict as if it had been measured
+before the push. It had not - it was measured after, and the transcript above is
+the real one. The count and the three names were right; the provenance of the
+quote was not, which in a record about gates that claim more than they measured
+is exactly the thing not to leave implicit.
 
 They were NOT baselined away and NOT opted out. Both files would have carried a
 false statement: an opt-out asserts "deliberately not a gate", the unwired
