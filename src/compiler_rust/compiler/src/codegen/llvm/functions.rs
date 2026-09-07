@@ -2856,7 +2856,11 @@ impl LlvmBackend {
                     "pop" => Some("rt_array_pop"),
                     "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
-                    "trim" => Some("rt_string_trim"),
+                    // "strip"/"trimmed" synonyms for "trim" (this table's own
+                    // comment below documents this exact class of gap for
+                    // lines/partition/is_*; strip fell through the same way,
+                    // undefined `str.strip` at the Stage-4 macOS link 2026-09-07).
+                    "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                     "trim_start" => Some("rt_string_trim_start"),
                     "trim_end" => Some("rt_string_trim_end"),
                     "split" => Some("rt_string_split"),
@@ -3155,9 +3159,19 @@ impl LlvmBackend {
                         suffix_match()?
                     };
 
-                    let fallback_name = resolved
-                        .map(|n| n.replace("_dot_", "."))
-                        .unwrap_or_else(|| dotted_name.clone());
+                    // `resolved` (from use_map/import_map) is already the correct,
+                    // final mangled symbol name for a genuine cross-module
+                    // function -- it must be declared verbatim. Blindly
+                    // replacing "_dot_" -> "." here corrupted any identifier that
+                    // merely CONTAINS that substring as ordinary text (not a
+                    // dot-escape marker), e.g. `cosine_from_dot_and_magnitudes`
+                    // -> `cosine_from.and_magnitudes`, producing an undefined
+                    // symbol at the final Stage-4 macOS link (2026-09-07). No
+                    // `RUNTIME_FUNCS` spec name ever contains a literal '.', so
+                    // the replace never helped a real lookup either -- only the
+                    // unresolved bare-name fallback (`dotted_name`) still needs
+                    // dot-unescaping, for genuine `Owner_dot_method` shims.
+                    let fallback_name = resolved.map(|n| n.to_string()).unwrap_or_else(|| dotted_name.clone());
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
                         .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name);
@@ -3391,7 +3405,9 @@ impl LlvmBackend {
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
-                    ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
+                    ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
+                        Some("rt_string_trim")
+                    }
                     ("String" | "string" | "str" | "text", "trim_start") => Some("rt_string_trim_start"),
                     ("String" | "string" | "str" | "text", "trim_end") => Some("rt_string_trim_end"),
                     ("String" | "string", "replace") => Some("rt_string_replace"),
@@ -3566,9 +3582,15 @@ impl LlvmBackend {
                 let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     all_args.iter().map(|_| i64_type.into()).collect();
                 let fn_type = i64_type.fn_type(&param_types, false);
+                // Same defect class as the MethodCallStatic fallback above: a
+                // resolved use_map/import_map symbol is already the correct
+                // final mangled name and must not be dot-unescaped, or an
+                // identifier that merely contains "_dot_" as ordinary text
+                // gets corrupted into an undefined symbol at link time
+                // (2026-09-07).
                 let fallback_name = resolved_full
-                    .map(|n| n.replace("_dot_", "."))
-                    .or_else(|| resolved_method.map(|n| n.replace("_dot_", ".")))
+                    .map(|n| n.to_string())
+                    .or_else(|| resolved_method.map(|n| n.to_string()))
                     .unwrap_or_else(|| dotted_full.clone());
                 let func = func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();

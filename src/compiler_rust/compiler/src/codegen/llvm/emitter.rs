@@ -336,7 +336,11 @@ impl LlvmEmitter<'_> {
             "char_code_at" => Some("rt_string_char_code_at"),
             "byte_at" => Some("rt_string_byte_at"),
             "join" => Some("rt_string_join"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" are synonyms for "trim" (see
+            // interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
+            // Missing here left `.strip()` on a text receiver unresolved as
+            // `str.strip` at the final Stage-4 macOS link (2026-09-07).
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "split" => Some("rt_string_split"),

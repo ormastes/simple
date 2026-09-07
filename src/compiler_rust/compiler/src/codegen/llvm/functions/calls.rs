@@ -2075,7 +2075,9 @@ impl LlvmBackend {
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
             "split" => Some("rt_string_split"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" synonyms for "trim" — see interpreter_method/
+            // string.rs; missing here left bare `.strip()` unresolved.
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "replace" => Some("rt_string_replace"),
@@ -2252,7 +2254,10 @@ impl LlvmBackend {
                 "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
                 "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
                 "is_whitespace" => Some("rt_string_is_whitespace"),
-                "trim" => Some("rt_string_trim"),
+                // "strip"/"trimmed" synonyms for "trim" — the qualified
+                // (`str.strip`) path had no entry, leaving the Stage-4 macOS
+                // final link with undefined `_str.strip` (2026-09-07).
+                "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
                 "repeat" => Some("lib__common__string_core__str_repeat"),
@@ -2612,7 +2617,20 @@ impl LlvmBackend {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         args.iter().map(|_| i64_type.into()).collect();
                     let fn_type = i64_type.fn_type(&param_types, false);
-                    module.add_function(&resolved_dotted, fn_type, None)
+                    // Declare using `resolved_name` (the already-correct,
+                    // fully-mangled cross-module symbol), NOT `resolved_dotted`.
+                    // Every prior lookup in this chain already tried the dotted
+                    // spelling and failed to find it IN-MODULE (expected: the
+                    // real definition lives in a different LLVM module/.o and
+                    // must be an extern declaration) -- reaching here means "no
+                    // RUNTIME_FUNCS spec matched", not "the dotted spelling was
+                    // ever confirmed correct". Blindly declaring `resolved_dotted`
+                    // corrupted any real symbol that merely CONTAINS "_dot_" as
+                    // ordinary text (e.g. `cosine_from_dot_and_magnitudes` ->
+                    // `cosine_from.and_magnitudes`), producing an undefined
+                    // symbol at the Stage-4 macOS final link (2026-09-07) even
+                    // though the correct name was available the whole time.
+                    module.add_function(resolved_name, fn_type, None)
                 }
             });
 
