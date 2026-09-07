@@ -3267,6 +3267,35 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_lexer_shallow_free_without_reclaiming_managed_array() {
+        let handler = EXTERN_DISPATCH
+            .get("rt_array_free")
+            .expect("lexer snapshot cleanup requires rt_array_free registration");
+        let managed = Value::array(vec![Value::Int(11), Value::Int(22)]);
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(
+            &[managed.clone()],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("managed array shallow-free dispatch should succeed");
+
+        assert_eq!(result, Value::Nil);
+        // `Value` has never exposed `as_array` -- the call that made 398665ef526
+        // delete this test instead of fixing it. Assert the same property
+        // directly: the managed array must still carry both original elements.
+        assert_eq!(managed, Value::array(vec![Value::Int(11), Value::Int(22)]));
+    }
+
+    #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
     }
