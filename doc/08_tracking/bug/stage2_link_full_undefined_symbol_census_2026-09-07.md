@@ -918,3 +918,109 @@ reference, e.g. x86 SSE2/AVX2 or NEON semantics depending on what the Rust
 side actually targets, not a passthrough). Each needs its own
 reference-semantics check before porting, per the task's own instruction not
 to guess.
+**138 - 75 (cranelift) - 38 (explicit exclusions) - 10 (UFCS/lenient) - 15
+138 needs either a design decision (cranelift), a compiler-producer fix
+1. **Baseline** (`origin/main` HEAD as of this session, `12c38e54be6`):
+- **25 = owner-decision, verified this session, not assumed:**
+| 2-deferred: cranelift JIT bridge | 75 | `rt_cranelift_*` — implemented in Rust (`codegen/cranelift_sffi.rs`, `interpreter_extern/cranelift.rs`) for the seed's own JIT; this archive is a plain native-AOT C lane with no JIT concept. Handed off — needs a design decision (stub vs. exclude the JIT-only call sites from this closure), not a mechanical port. |
+| 2-deferred: Rust-only, C-lane gap (misc) | 90 | Implemented in Rust (`runtime/src/value/**`, mostly `#[no_mangle] extern "C" fn`) but never ported to the core-C-bootstrap archive: `rt_file_*`/`rt_io_file_*` (file I/O), `rt_log_*`, `rt_random_*`, `rt_path_*`, `rt_env_*`, `rt_process_*`, `rt_dir_glob`, `rt_exec`, `rt_execute_native`, `rt_fs_read_text`, `rt_get_host_target_code`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`, `rt_mem_attr_*`, `rt_typed_bytes_u8_data_at`, the `rt_simd_*` SIMD-intrinsic family (add/sub/mul/and/or/xor/shl/shr over i32x4/i32x8/u8x16, AES round, carryless-multiply, xor_u64x2). Real bucket-2 debt, same shape as the fixed set, but 90 symbols is too large to port safely and individually-verify in this change's scope — each needs its own semantics check (e.g. the SIMD family needs intrinsic-level correctness, not just a libm passthrough). Handed off with this census as the punch list. |
+2. **Merged** all three open PR branches (`work/stage2-bucket2-rust-only`,
+   36 (#493) + 10 (#494), byte for byte. `comm -13` (newly appeared, i.e. a
+- **38 = the task's explicit exclusion list**, verified present in the 138:
+3. **`comm` cross-check**, sorted undefined-symbol lists from steps 1 and 2:
+- **75 = `rt_cranelift_*` bucket.** Unchanged from the original census
+accounting for #492/#493/#494, except [capability-sandboxed group, rt_array_sum/
+after the three open PRs land and the stated exclusions are applied, is
+    against a table" charter. `rt_native_build` DOES have a real
+    `Array.remove_at`, `CompilerDriver.compile_to_vhdl`,
+  a separately-tracked bucket, confirming this reading.
+Assigned scope per the task: "everything the census still marks unfixed after
+    assigning task's explicit exclusion list (unlike its `rt_cli_*` siblings,
+attached to this update because no source file changed — the verification
+(bucket-1) = 0.** No code was implemented in this session: the assigned scope,
+  - **Bucket-1 "no reference semantics" (15), re-verified fresh this
+    bucket-1 table row.
+    but it delegates into the compiler's own native-build pipeline — the same
+    (calls into the compiler pipeline, and this bootstrap C-lane cannot embed
+  capability-sandboxed (`rt_exec`, `rt_execute_native`,
+  classification: JIT bridge, needs a stub-vs-exclude design decision, not a
+### Classifying the 138 that remain after the three branches
+   `comm -23` (fixed by the branches) = **exactly 76 symbols** = 30 (#492) +
+   compiled `runtime_native.c` fresh, patched into a copy of
+   conflicts** (only the census doc itself conflicted, resolved by taking the
+Copied the read-only kept object set
+   copy of the archive, relinked. Result: **138 undefined symbols, 0
+default `mold` linker on this host does not accept `--error-limit`, hence the
+    `device`/`inode`/`size`, `close`) with no existing reference
+-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+   duplicates**.
+   duplicates** — matches the "246 -> 214" the FIXED-32 section above already
+    `DynamicBackendPluginLease.admitted_handle`, `GenericTemplate.is_err`,
+empty ... that is a complete and useful answer"): every symbol left in the
+empty. This is the answer the task pre-authorized ("if your remaining set is
+    excluded class as `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`
+explicit `-fuse-ld=lld`).
+    explicitly-excluded no-impl-either-side fs symbols, just not named in the
+    explicitly for whoever reads this next: `rt_native_build` is NOT on the
+    `extern "C" fn rt_native_build` (`src/compiler_rust/native_all/src/lib.rs:143`),
+-ffunction-sections -fdata-sections -fno-unwind-tables
+    `file_view_buffered.spl`, `pinned_archive_capability.spl`) describe a
+    "fix the producer, never a verifier"). Owned by the UFCS classifier
+-fno-asynchronous-unwind-tables -fno-stack-protector -fPIC -std=gnu11
+-fPIC -o out _main_stub.o _init_all.o @spl_objects.rsp -Wl,--start-group
+    identifiers to implement in `runtime_native.c` — they are UFCS/method
+    implementation, C or Rust, to mirror — same category as the four
+    implementation, would be inventing new security-sensitive behavior, not
+IS the relink `comm` cross-check above, run against unmodified branch content.
+  itself cited as "remaining" — the task's "63" already excludes cranelift as
+    lane per the original census; not touched.
+libsimple_runtime.a libsimple_bootstrap_mutex_runtime.a -Wl,--end-group
+   `libsimple_runtime.a`, relinked. Result: **214 undefined symbols, 0
+    `mapping_supported`, `map_copy`, `prefetch`, `pread_exact`,
+  mechanical port. `138 - 75 = 63`, which is the count the assigning task
+### Method: real relink, not arithmetic
+    `MirBuilder.emit_comment`, `str.split_whitespace`, `str.strip`, `Unit`,
+-mno-outline-atomics`; link with `clang++ -fuse-ld=lld -no-pie -Wl,-z,muldefs
+(`native-objects-8HIZif`) to a scratchpad, reconstructed the link command from
+`native_project/tools.rs`/`linker.rs` (compiler `clang` with `-Os
+   newest prose — irrelevant to compilation). Compiled the merged
+No `cargo check` / C-runtime-compile / relink-with-edit verification is
+no-impl-either-side fs symbols, sqlite (24)]." Worked this as ground truth via
+   overlap and no new breakage.
+    path-containment file-view abstraction (`open_beneath_no_follow`,
+    porting existing behavior — the opposite of this task's "implementation
+    producer bugs. Defining a same-named C symbol would silently paper over
+real relink, not by re-deriving branch content from prose.
+reference implementation (bucket-1) — none of it is a mechanical port like
+   regression) = **empty**. The three branches compose cleanly with no
+   reports, confirming the relink recipe is correct.
+    resolve-by-name misses and `lenient_types` HIR fallbacks, i.e. compiler
+rt_array_sorted, rt_cli_handle_compile/rt_cli_run_tests_process_args, the 4
+  `rt_cli_handle_compile`/`rt_cli_run_tests_process_args` (2),
+  `rt_file_atomic_write_mode`/`rt_file_list_dir`/`rt_file_mode`/
+  `rt_fs_read_text` (4), sqlite (24).
+  `rt_get_host_target_code` = 6), `rt_array_sum`/`rt_array_sorted` (2),
+    `rt_native_build` x1): grepped `src/runtime/`,
+  `rt_process_run_with_limits`, `rt_process_spawn_inherit`, `rt_mmap`,
+   `runtime_native.c` + `runtime_simd_dispatch.c` fresh, patched both into a
+    see below — and is NOT part of that "zero implementation" claim.)
+    semantics from the extern signature alone, with no reference
+    session** (`rt_file_view_*_v1` x9, `rt_pinned_archive_*_v1` x5,
+    session. Worth folding into the exclusion list text itself, not just this
+    `src/compiler_rust/runtime/src/`, and every `.spl` caller again — still
+_stubs.o libunwind.so -lpthread -ldl -lm -lstdc++ -Wl,--error-limit=0` — the
+    task's list. Implementing "beneath"/"no_follow" path-containment
+    the 14 `rt_file_view_*`/`rt_pinned_archive_*` symbols anywhere in the
+the 32/30/36/10 symbols the four landed/in-flight batches already cover.
+    Their `.spl` extern signatures (`read_only_file_view.spl`,
+    the pipeline that is bootstrapping it without circularity). Flagging this
+    the resolver defect rather than fix it (exactly what `.claude/rules` calls
+    tree. (`rt_native_build`, the 15th symbol in this bucket, is different —
+  - **UFCS dotted (7) + lenient-unresolved-global (3) = 10.**
+(UFCS/lenient), or an invented-from-scratch security contract with no
+## Update 2026-09-07 (batch 3): remaining scope is empty after the open PRs land
+    `virtual_source_store`, `rt_numeric.f64` are not linkable C-ABI
+    which are named) — it reads that way only by analogy, discovered this
+   with real `git merge` (not prose): all three merged with **zero code
+   `work/stage2-simd-iofile`, `work/stage2-fs-env-symbols`) onto `origin/main`
+    **zero C implementation, zero Rust `#[no_mangle]` implementation** for
