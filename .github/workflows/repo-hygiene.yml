@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master, develop]
   pull_request:
-    branches: [main, master, develop]
+    branches: [main, master, develop, 'release/**']
   workflow_dispatch:
 
 concurrency:
@@ -411,6 +411,25 @@ jobs:
         if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-cpu-hotloop-idiom|')) }}
         run: |
           sh scripts/check/check-cpu-hotloop-idiom.shs
+
+      # dual_fs effect-comparison gate: the switchable pure-Simple <-> native
+      # file I/O wrapper (src/lib/nogc_sync_mut/dual_fs/) must keep defaulting
+      # to today's native provider, and its acceptance spec must keep asserting
+      # that an effect comparison catches a write which returns `true` and
+      # writes nothing — the live shape of
+      # src/lib/nogc_sync_mut/file_system/file_ops.spl:60.
+      #
+      # --no-run deliberately: this runner has no deployed bin/simple, so the
+      # spec cannot be executed here and the gate would otherwise ERROR on
+      # every PR. --no-run still runs the 7 selftest fixtures, the
+      # switch-default check and the spec-assertion check, which is what
+      # catches a gutted spec or a drifted default. The full run (which
+      # executes the spec and exercises the real differential comparison) is
+      # the local/push-host invocation, without --no-run.
+      - name: dual_fs effect-comparison gate
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-dual-fs-effect-compare|')) }}
+        run: |
+          sh scripts/check/check-dual-fs-effect-compare.shs --no-run
 
       # UI backend-isolation: apps/examples/UI-libs must call rendering facades,
       # never declare/call rt_* backend externs or construct backend classes.
@@ -1183,6 +1202,23 @@ jobs:
           run_guard check-mcdc-native-runtime-perf.shs
           run_guard check-native-build-focused-entry-scope.shs
           run_guard check-native-build-shard-admission.shs
+          # Pure filesystem scan (no compiler, no runtime). Measured 2026-09-06
+          # on this aarch64 host at load ~39: scan alone 1.3s wall / 0.55s user
+          # over 16319 files; with --selftest 12.3s wall / 0.71s user (the
+          # selftest builds and rescans six fixture trees, so it is I/O-bound).
+          # Recomputes `module_prefix_from_path` (common_backend.rs:2929) over
+          # every .spl under src/ and fails when two distinct physical paths
+          # sanitise to one native module name -- the defect that broke EVERY
+          # whole-project `native-build` on 2026-09-06 and was found by a human
+          # running a build, not by any gate. Honestly RED at wiring time:
+          # "FAIL - 16319 checked, 99 collision(s)", the resurrected
+          # src/app/llm_caret/claude_full hyphen/underscore duplicate tree, which
+          # is still present at origin/main. This job is continue-on-error
+          # precisely so an honestly-red guard reports instead of blocking;
+          # deleting one side of those 99 pairs belongs to the owner of src/app,
+          # and there is deliberately NO baseline/allowlist flag here -- a
+          # colliding tree is unbuildable, not debt to be carried.
+          run_guard check-native-module-name-collision.shs --selftest
           # Pure text scan (no compiler, no runtime). Wired here rather than
           # opted out because it CAN run on a hosted runner -- it is red for a
           # REAL finding, not an environment gap: "FAIL - 48991 file(s)
@@ -1191,7 +1227,9 @@ jobs:
           # continue-on-error precisely so an honestly-red guard reports
           # instead of blocking; generating that baseline needs a reviewed
           # pass by an owner and is NOT done here.
+          run_guard check-no-stale-snapshot-rewind.shs --selftest
           run_guard check-no-windows-style-paths.shs
+          run_guard check-bootstrap-jobs-memory-clamp.shs
           run_guard check-pg-dispatch-port-prototype.shs
           run_guard check-pg-scalar-adapter-contract.shs
           run_guard check-pg-scalar-port-readiness.shs
@@ -1199,6 +1237,7 @@ jobs:
           run_guard check-prepare-sosix-qemu-linux-diagnostic-blocked-bundles.shs
           run_guard check-release-perf-baseline.shs --self-test
           run_guard check-release-version-consistency.shs
+          run_guard check-wffi-try-call-i64-out-zero-alloc.shs
           run_guard check-run-simpleos-qemu-guest-evidence.shs
           run_guard check-runtime-simd-utf8-native.shs
           run_guard check-rust-bootstrap-llvm-isolation.shs

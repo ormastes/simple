@@ -2840,9 +2840,23 @@ int64_t rt_string_len(int64_t string) {
     return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;
 }
 
+/* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
+ * `>= 0x10000` guard. The compiler lowers a `text` extern argument to the PAIR
+ * (rt_string_data(v), rt_string_len(v)) -- see text_extern_abi.spl and the
+ * disassembly of any natively compiled call site. A `text` LITERAL is not a
+ * heap RtCoreString: it is a bare pointer into `.rodata.str1.4`, which
+ * rt_core_as_string cannot decode. rt_string_len already handled that case and
+ * returned strlen(); this function did not, and returned NULL. The pair
+ * (NULL, 13) then hit `if (!ptr && len != 0) return 0;` in rt_text_arg_to_path,
+ * so EVERY text-ABI extern called with a string literal failed in a natively
+ * compiled binary. MEASURED 2026-09-07 on a stage-2-compiled probe:
+ * rt_file_size("/etc/hostname") = -1, while rt_file_size("/etc/" + "hostname")
+ * (a real heap string, same bytes) = 11. Pinned by
+ * scripts/check/check-text-literal-extern-abi.shs. */
 const uint8_t* rt_string_data(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
-    return s ? (const uint8_t*)s->data : NULL;
+    if (s) return (const uint8_t*)s->data;
+    return string >= 0x10000 ? (const uint8_t*)(uintptr_t)string : NULL;
 }
 
 int64_t rt_string_bytes(int64_t string) {
@@ -9282,10 +9296,42 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
     /* spl_file_read returns "" (not NULL) on open failure; the Rust definition
      * returns NIL, and Simple's `?? ""` only fires on nil. Probe openability. */
-    { FILE* probe = fopen(path, "rb"); if (!probe) return rt_nil; fclose(probe); }
-    char* content = spl_file_read(path);
-    if (!content) return rt_nil;
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
+    /* Read to EOF into a growable buffer and keep the BYTE COUNT. This used to
+     * call spl_file_read() and then strlen() the result, which stops at the
+     * first NUL byte: an ELF object's e_ident has one at offset 7, so a
+     * 1080-byte aarch64 `.o` came back as a NON-nil 7-byte text. That is not a
+     * cosmetic truncation. FileFingerprint.from_file
+     * (src/compiler/80.driver/driver_build/incremental.spl) documents "text read
+     * is nil for a missing OR non-UTF-8 file" and falls back to
+     * rt_file_hash_sha256 for binaries on exactly that nil -- a non-nil short
+     * read made that fallback DEAD on the native runtime, so the native capsule
+     * receipt recorded rt_hash_text of 7 bytes of ELF magic, a value identical
+     * for every aarch64 object ever emitted. An authenticated cache checkpoint
+     * keyed on a constant authenticates nothing. MEASURED 2026-09-07 against the
+     * linked C runtime: text_len=7 for a 1080-byte object, hash
+     * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
+     * report 0 and would silently yield "" (the spl_file_read comment records
+     * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
+    FILE* f = fopen(path, "rb");
+    if (!f) return rt_nil;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* content = (char*)malloc(cap);
+    if (!content) { fclose(f); return rt_nil; }
+    for (;;) {
+        if (len >= cap) {
+            size_t new_cap = cap * 2;
+            char* grown = (char*)realloc(content, new_cap);
+            if (!grown) { free(content); fclose(f); return rt_nil; }
+            content = grown;
+            cap = new_cap;
+        }
+        size_t n = fread(content + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    fclose(f);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
     free(content);
     return result;
 }
@@ -9395,13 +9441,55 @@ int64_t rt_file_read_regular_no_follow_bounded(
     return result;
 }
 
+/* RuntimeValue-ABI spelling of rt_file_read_text.
+ *
+ * THIS is the symbol natively compiled Simple code actually calls: `nm` on any
+ * binary built by `native-build --runtime-bundle core-c-bootstrap` lists
+ * `rt_file_read_text_rv` and does NOT list `rt_file_read_text`. When the
+ * strlen() truncation was repaired in the two (ptr, len) copies -- here and in
+ * runtime.c -- this sibling was missed, so the defect stayed live on the only
+ * path that matters. MEASURED 2026-09-07 with a natively built probe calling
+ * `FileFingerprint.from_file` on a 1032-byte aarch64 `.o`: content-len=7 and
+ * rt_hash_text=-8673224916767039355, which is exactly FNV-1a over the first 7
+ * bytes of the file -- the ELF e_ident up to its first NUL. Every aarch64
+ * object ever emitted hashes to that same constant, so the native capsule
+ * receipt authenticated nothing.
+ *
+ * Two contracts, both previously broken:
+ *   - the byte COUNT is the read length, never strlen(): binary content has
+ *     interior NULs and stopping at the first one is not a cosmetic truncation.
+ *   - an unreadable path returns NIL, never an empty string. Callers spell
+ *     `?? ""` and `if val content = ...`, which only fire on nil;
+ *     FileFingerprint.from_file's byte-level sha256 fallback for binaries is
+ *     guarded on exactly that nil and was dead code while this returned "".
+ * Do NOT size the buffer from fseek/ftell -- procfs and sysfs report 0 and
+ * would silently yield "" (spl_file_read's own comment records that incident).
+ * Pinned by scripts/check/check-native-text-abi-and-binary-read.shs. */
 int64_t rt_file_read_text_rv(int64_t path_value) {
+    /* RT_NIL == 3 (TAG_SPECIAL, payload 0); == RuntimeValue::NIL. */
+    const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
-    if (!path) return rt_string_new(NULL, 0);
-    char* content = spl_file_read(path);
+    if (!path) return rt_nil;
+    FILE* f = fopen(path, "rb");
     free(path);
-    if (!content) return rt_string_new(NULL, 0);
-    size_t len = strlen(content);
+    if (!f) return rt_nil;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* content = (char*)malloc(cap);
+    if (!content) { fclose(f); return rt_nil; }
+    for (;;) {
+        if (len >= cap) {
+            size_t new_cap = cap * 2;
+            char* grown = (char*)realloc(content, new_cap);
+            if (!grown) { free(content); fclose(f); return rt_nil; }
+            content = grown;
+            cap = new_cap;
+        }
+        size_t n = fread(content + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    fclose(f);
     int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
     free(content);
     return result;
