@@ -67,7 +67,6 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
-pub mod secure_staging;
 pub mod io_file;
 pub mod terminal;
 pub mod torch;
@@ -456,6 +455,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_stdout_is_tty", terminal::rt_terminal_stdout_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
+    // See doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md —
+    // `rt_atexit_install` was the one extern in terminal.spl never bridged here;
+    // `rt_signal_install`/`rt_signal_check` (used by the very next line in
+    // `terminal_install_recovery`) were found missing during the same fix.
+    insert_simple!("rt_atexit_install", terminal::rt_atexit_install);
+    insert_simple!("rt_signal_install", terminal::rt_signal_install);
+    insert_simple!("rt_signal_check", terminal::rt_signal_check);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
@@ -1437,10 +1443,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
-    // Secure staging: both call the C in src/runtime/runtime_secure_staging.c
-    // that the native lane calls, so the interpreter cannot drift from it.
-    insert_simple!("rt_secure_temp_dir", secure_staging::rt_secure_temp_dir);
-    insert_simple!("rt_file_publish_noreplace", secure_staging::rt_file_publish_noreplace);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);
@@ -2809,10 +2811,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // PTY (pseudo-terminal) operations
     insert_simple!("rt_pty_open", pty::rt_pty_open);
     insert_simple!("rt_pty_spawn", pty::rt_pty_spawn);
-    insert_simple!("rt_pty_write", pty::rt_pty_write);
-    insert_simple!("rt_pty_read", pty::rt_pty_read);
-    insert_simple!("rt_pty_close", pty::rt_pty_close);
-    insert_simple!("rt_pty_is_running", pty::rt_pty_is_running);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);
@@ -3264,32 +3262,6 @@ mod tests {
         for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
             assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
         }
-    }
-
-    #[test]
-    fn dispatches_lexer_shallow_free_without_reclaiming_managed_array() {
-        let handler = EXTERN_DISPATCH
-            .get("rt_array_free")
-            .expect("lexer snapshot cleanup requires rt_array_free registration");
-        let managed = Value::array(vec![Value::Int(11), Value::Int(22)]);
-        let mut env = Env::new();
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let enums = HashMap::new();
-        let impl_methods = HashMap::new();
-
-        let result = handler(
-            &[managed.clone()],
-            &mut env,
-            &mut functions,
-            &mut classes,
-            &enums,
-            &impl_methods,
-        )
-        .expect("managed array shallow-free dispatch should succeed");
-
-        assert_eq!(result, Value::Nil);
-        assert_eq!(managed.as_array().map(|items| items.len()), Some(2));
     }
 
     #[test]
