@@ -288,3 +288,57 @@ yet — promotion criteria in the record.
 (`MAX_PUSH_COMMITS` at `:77,222,242`) — the real cost bound is **unique trees, not
 commits** (the scan dedupes), so raising it is likely safe, but it needs its own
 selftest. Filed, not half-landed.
+
+---
+
+## Model policy for PR landing (added 2026-09-07, learned the hard way)
+
+**Conflict resolution requires a high-capability model. Never delegate it to a
+small one.**
+
+Evidence: a haiku agent asked to triage 43 unlanded branches reported "all 20
+candidates conflict, none landable" when **7 of 43 merged cleanly** — and one it
+labelled CONFLICT merged with zero conflicts. It then recommended discarding 12
+candidates it had **explicitly skipped and never examined**. Following that
+report would have thrown away 9 commits that were subsequently landed clean.
+
+A wrong conflict verdict is not a wasted run; it is silent data loss. The repo
+has already taken real clobbers this way (`a7fd32f9475` reverted 85 product
+files across ~19 PRs in one "take ours" resolution).
+
+### The split
+
+| Task | Model |
+|---|---|
+| Counting, grepping, clustering, running a fixed command list | small model is fine |
+| Comparison tables, capability probes, census work | small model is fine |
+| **Deciding what to discard** | **high model only** |
+| **Merge conflict adjudication** | **high model only** |
+| **Pushing to `main`** | **high model only** |
+
+A small model may *detect* a conflict (`git merge-tree | grep -c` is mechanical
+and reliable). It must not *resolve* one, and it must not conclude that
+conflicted work is disposable.
+
+### Fast path for NON-conflicted PRs
+
+Established 2026-09-07: five gates per PR from a fresh clean checkout is
+over-processing — `check-guard-wiring` alone costs minutes, and most gates check
+things a clean merge cannot have touched. The correct shape:
+
+```
+git merge-tree $(git merge-base $M $S) $M $S | grep -c '^<<<<<<<\|^changed in both'
+# 0 -> merge, then ONLY:
+sh scripts/check/check-tree-size-push.shs        $M..$NEW
+sh scripts/check/check-no-conflict-markers-push.shs $M..$NEW
+# both PASS -> push
+```
+
+Those two catch the actual disasters (a wiped/truncated tree, conflict-marker
+text committed into file content) and run in seconds. PR #479 landed this way in
+~30s. Run the heavier ratchets (`guard-wiring`, `rt-dual`, `source-list-parity`)
+**once at the end of a batch**, not per PR — they are for catching what a batch
+introduced, not what each individual clean merge did.
+
+Non-zero conflict count -> **skip and escalate to a high model**. Do not resolve,
+do not discard.
