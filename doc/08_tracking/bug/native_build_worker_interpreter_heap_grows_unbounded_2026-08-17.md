@@ -1168,3 +1168,114 @@ from `origin/main` at the same revision, and confirm `./hello` still prints
 issue until that measurement exists — it establishes the change is
 *source-level correct and consistent with the one proven precedent in this
 codebase*, not that it has been measured.
+(0x3f8bd14), `rt_dict_new` (0x3fa7050), `rt_string_new` (0x3f8f2f4) all resolve
+(0x3f90bc4); only `rt_alloc` (0x6941340) is the C one. So every array, dict and
+### 1. The seed's ~3.3 GB is the module-graph LOAD, not leaked interpreted values
+### 2. The self-hosted lane is the actual defect, and it is ~12x
+**3.30 GB is already resident before the worker executes one statement, and the
+### 3. What CAN be attacked without a collector: the multiplier in front of it
+### 4. Limits of this addendum, stated rather than papered over
+  a build path.
+`.../add_dir/add_dir.spl` both sanitising to one native module name. That pair
+## Addendum 2026-09-06 — the phase-B diagnosis above is WRONG for this workload
+  a live Stage 3 observed at ~30 min. Same job family, not the same instant. The
+A monotonically growing, fully-resident brk arena means millions of *small*
+analysis. No collector was built here.
+[anon]       4,810,236 kB   across 35 mmaps
+Anonymous:  42,355,160 kB
+are never reclaimed". The original phase-A/phase-B reading was inferred from a
+--backend llvm --mode dynload ... src/app/cli/bootstrap_main.spl`:
+  binaries dispatch `run src/app/cli/native_build_worker.spl` to a *baked-in*
+| candidate / workload | peak RSS | RSS at `worker_entry` | registry_count at entry |
+codegen emits no scope calls and per-frame scoping is unsound without escape
+compiler is Rust and freed by `Drop`; in the self-hosted binary the compiler IS
+compiler's entire 776-module closure for four minutes then adds only ~0.22 GB.
+  composition evidence (a single monotonic brk mapping vs. a Rust interpreter's
+**Correction to an earlier draft of this addendum:** this is NOT a stale
+deployed binary. `git log -- src/compiler/80.driver/driver_source_pipeline_loading.spl`
+# deployed stage2: FAIL — 2 probe(s) executed, ... open_rc=1,
+`driver_source_owner_text_copy` — and materialises that whole import graph into
+  Drop-managed structures) is what carries the conclusion, not the ratio alone.
+— effectively all 16,273 `.spl` files, 123 MB of source, held twice via
+| `--entry` alone (unbounded roots) | 145,840 kB | 0.7 s | **1** |
+`--entry-closure` run that completes in 5 s and 191 MB. A guard that grepped for
+| `--entry --entry-closure` | 191,756 kB | 5.3 s | 0 |
+`--entry <file>` without `--source` delegates to the Rust `rt_native_build` FFI
+| `--entry --source <fixture dir>` | 191,780 kB | 4.6 s | 0 |
+`--entry`-without-`--source` delegation above, which is present in current
+exists in `origin/main` and does NOT exist in `/home/yoon/bootstrap-wt`, which
+extending the break. The same job costs the seed 3.5 GB. **12x on identical
+#   fixture even with --source: rc=1)   <- fail-closed, never a pass
+[heap]      37,543,764 kB   in ONE glibc brk mapping
+`HEAP_ALLOCATION_REGISTRY`, and leaves it only via a hand-written
+(heap.rs:125) and `rt_transient_array_scope_*` exists in both runtimes, but
+  here cannot reach them until the next bootstrap ships the instrumented worker.
+  internal entry (`error: unsupported bootstrap internal entry` for any other
+into the `simple_runtime` range, alongside `rt_transient_array_scope_begin`
+is why that lane's Stage 3 runs on to 42 GB instead of aborting in 0.7 s.
+Its three assertions are: the `--source`-bounded build must exit 0
+it would flag a passing shape; an earlier version of the guard below did exactly
+  kind histogram.
+last touched it 2026-09-01 and the stage2 binary was built 2026-09-05 13:42, so
+live allocations that are never returned — allocations above `M_MMAP_THRESHOLD`
+Live bootstrap Stage 3, `stage2-admitted/simple run src/app/cli/native_build_worker.spl
+- `log_mem_snapshot` (`src/compiler/80.driver/driver_log_helpers.spl:239`) has
+Measured on the deployed stage2, same binary, same fixture, this repo:
+Measured this session on aarch64 (121 GB, 20 CPU, shared). Everything below is
+Mechanism, confirmed by symbol addresses in the deployed stage2 binary: the
+`native_build_worker.spl` now carries a gated probe (`SIMPLE_MEM_PROBE=1`) that
+New guard, RED on the deployed stage2 and fail-closed everywhere else:
+- **No per-kind attribution for the self-hosted lane.** The deployed stage
+`note: --entry without --source scans the DEFAULT source roots (whole project)`
+#   offender(s): outcome:rc=1(Build failed: native module name collision ...)
+**Only the second assertion has ever fired.** The RSS budget is a real threshold
+  path) and never interpret the file, so the `SIMPLE_MEM_PROBE` counters added
+  `perf_event_paranoid=4`); no seed was rebuilt, so nothing was measured that
+- `perf`/heaptrack attach is unavailable (`ptrace_scope=1`,
+poller; direct counters contradict it. The no-GC mechanism described above is
+(precondition, else ERROR); the unbounded build must also exit 0; and the
+prints the runtime's own heap counters at the worker's first and last
+real and still applies to the SELF-HOSTED lane (below); it is not what dominates
+representation of the compiler module graph — a real, bounded, one-shot working
+  required one.
+Rss:        42,386,084 kB
+# Rust seed:      ERROR — nothing was checked (candidate cannot build the
+  seed at 240 s, killed mid-compile of the 776-module closure; 42,386,084 kB is
+| seed, `--entry-closure --entry hello_world.spl` | 3,321,180 kB | 3,398,381,568 B | 0 |
+| seed, `--entry-closure --entry src/app/cli/bootstrap_main.spl` (240 s, killed) | 3,524,932 kB | 3,302,420,480 B | **257 objects / 6,424 B** |
+| seed, positional `src/app/cli/bootstrap_main.spl` (240 s, killed) | 3,764,752 kB | — | — |
+self-hosted binary links the **Rust** runtime for its allocator — `rt_array_new`
+set — and **not** "values allocated by the interpreted program during execution
+| shape | peak RSS | wall | rc |
+short-circuits the unbounded run before it can grow. Do not report the budget as
+sh scripts/check/check-native-build-entry-memory-budget.shs --candidate <bin>
+Simple heap registry holds 257 objects (6.4 kB) at that moment.** Compiling the
+So for this workload the seed's memory is the Rust interpreter's own
+source and is doing what it says.
+(`src/app/cli/bootstrap_main.spl:379-381`), which scans the DEFAULT source roots
+`src/app/llm_caret/claude_full/commands/add-dir/add-dir.spl` and
+(`src/compiler_rust/runtime/src/value/heap.rs:248`) into the process-global
+statement. At `worker_entry` — before `cli_native_build` is called at all:
+string the compiled compiler allocates goes through `register_heap_ptr`
+that and was corrected.
+- **The 12x is across two binaries and two run states.** 3,524,932 kB is the
+  The 37.5 GB is attributed by `smaps` to "brk, small, never freed", not to a
+the assertion that caught anything until it does.
+the deployed compiler already contains today's `nb_entry_closure` suppression.
+the interpreted-language heap. That is the whole 12x.
+the never-reclaimed heap before any codegen, for a two-line fixture.
+**The scan NOTE is not a usable signal.** bootstrap_main prints
+the seed.
+The unbounded run is *cheaper* only because it dies early: materialising the
+The whole-project scan comes from the `bootstrap_main.spl`
+**This needs a collector.** `HeapHeader` already carries `gc_color` bits
+unbounded peak RSS must stay within 2.00x of the bounded build and under 6 GB.
+`unregister_heap_ptr*` that compiled Simple code never emits. In the seed the
+`/usr/bin/time -v` peak RSS and `/proc/<pid>/smaps`, never a poller estimate.
+whenever `--entry` is given without `--source` — including on the bounded
+whole tree surfaces a collision between two files a hello world never imports —
+with real numbers but is unexercised, because in this tree the collision
+  worker probe added here is the only live reader of the `rt_heap_*` counters on
+work is not a working set; it is a defect.**
+would land in mmap, and any real reclamation would let glibc reuse instead of
+  **zero callers** — the phase-boundary snapshot facility is dead code. The
