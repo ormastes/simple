@@ -88,7 +88,35 @@ build produces. They are gated, not broken.
 
 ## 2. What REMAINS
 
-### The blocker: Stage 2 does not link — 139 undefined symbols
+### The blocker: Stage 2 does not link — 138 undefined symbols, and **none of them are implementable**
+
+**This was verified end to end at the close of the session.** All three open PRs
+(#492, #493, #494) were really merged together (0 code conflicts) and the kept
+object set relinked:
+
+```
+origin/main HEAD            214 undefined, 0 duplicates
++ #492 + #493 + #494        138 undefined, 0 duplicates
+comm -23 (fixed)            exactly 76 = 30 + 36 + 10, byte-for-byte
+comm -13 (regressed)        empty
+```
+
+So the three open PRs compose correctly and close 76. **The remaining 138 need
+owner decisions, not code** — an agent tasked with implementing them found the
+implementable set empty after exclusions, which is the useful answer:
+
+| remaining | count | why it is not implementable |
+|---|---|---|
+| `rt_cranelift_*` JIT bridge | 75 | needs a stub-vs-exclude **design decision**; the merged stubs are named traps, which is one valid answer |
+| explicit exclusions | 38 | capability-sandboxed (6, needs `security_runtime.rs`), array repr (2), cli pipeline (2), no-impl-either-side (4), sqlite caller-wiring (24) |
+| UFCS dotted + lenient global | 10 | **not C-ABI symbols at all** — compiler resolver bugs (`str.split_whitespace`, `MirBuilder.emit_comment`, `Unit`, `GenericTemplate.is_err`, …) |
+| no reference semantics | 15 | 14 `rt_file_view_*_v1`/`rt_pinned_archive_*_v1` have zero implementation and no contract to mirror — writing "beneath"/"no_follow" path-containment from scratch would be **inventing security-sensitive behaviour**. The 15th, `rt_native_build`, has a real `extern "C" fn` (`native_all/src/lib.rs:143`) but delegates into the compiler pipeline — same excluded class as `rt_cli_handle_compile` |
+
+**Do not "fix" the 15 by guessing at path-containment semantics.** That is the
+one place in this list where a wrong implementation is worse than an undefined
+symbol.
+
+### (historical) the original enumeration
 
 **Read `doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md` first.**
 It has a per-symbol table with declared / C / Rust columns.
