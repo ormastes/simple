@@ -57,8 +57,8 @@ Bucket definitions per the task:
 | Bucket | Count | Disposition |
 |---|---|---|
 | FIXED (1/2, mechanical) | 32 | Implemented this change — see below |
+| FIXED (bucket 2, cranelift JIT bridge) | 75 | `rt_cranelift_*` — NAMED-TRAP stubs implemented 2026-09-07, see "Bucket 2 cranelift JIT bridge: what was implemented" below |
 | 1-candidate, no reference semantics | 15 | `rt_file_view_*_v1` (9), `rt_pinned_archive_*_v1` (5), `rt_native_build` (1) — 0 C, 0 Rust *native* symbol, and no header/doc contract exists to mirror. Handed off. |
-| 2-deferred: cranelift JIT bridge | 75 | `rt_cranelift_*` — implemented in Rust (`codegen/cranelift_sffi.rs`, `interpreter_extern/cranelift.rs`) for the seed's own JIT; this archive is a plain native-AOT C lane with no JIT concept. Handed off — needs a design decision (stub vs. exclude the JIT-only call sites from this closure), not a mechanical port. |
 | 2-deferred: sqlite lane wiring | 24 | `rt_sqlite_*` — **deliberately excluded** from the core-C archive by design (`build_sqlite_runtime_object`'s doc comment in `native_project/tools.rs`: avoids forcing `-lsqlite3` on every native binary). The real bug is the caller not detecting sqlite usage and adding the on-demand object + `-lsqlite3` for *this* closure. Lane-wiring bug, not a runtime gap. Handed off. |
 | 2-deferred: Rust-only, C-lane gap (misc) | 90 (30 fixed 2026-09-07, 4 no-genuine-impl, 56 still open) | Implemented in Rust (`runtime/src/value/**`, mostly `#[no_mangle] extern "C" fn`) but never ported to the core-C-bootstrap archive: `rt_file_*`/`rt_io_file_*` (file I/O), `rt_log_*`, `rt_random_*`, `rt_path_*`, `rt_env_*`, `rt_process_*`, `rt_dir_glob`, `rt_exec`, `rt_execute_native`, `rt_fs_read_text`, `rt_get_host_target_code`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`, `rt_mem_attr_*`, `rt_typed_bytes_u8_data_at`, the `rt_simd_*` SIMD-intrinsic family (add/sub/mul/and/or/xor/shl/shr over i32x4/i32x8/u8x16, AES round, carryless-multiply, xor_u64x2). A follow-up session implemented the 30 lowest-risk/self-contained symbols of this bucket (see "Bucket 2 misc: what was implemented" below); the remaining 56 (fd-based `rt_io_file_*`, `rt_env_*`, `rt_exec`/`rt_execute_native`/`rt_process_*`/`rt_get_host_target_code`, `rt_dir_glob`, `rt_array_sum`/`rt_array_sorted`, `rt_cli_handle_compile`/`rt_cli_run_tests_process_args`, `rt_mmap`, the full `rt_simd_*` family) still need their own semantics checks and are handed off with this census as the punch list. |
 | 3: UFCS/method resolve-by-name | 7 | `Array.remove_at`, `CompilerDriver.compile_to_vhdl`, `DynamicBackendPluginLease.admitted_handle`, `GenericTemplate.is_err`, `MirBuilder.emit_comment`, `str.split_whitespace`, `str.strip`. Owned by the UFCS classifier agent already working this per the task's instructions — not touched here. |
@@ -153,6 +153,126 @@ parallel Rust-hosted lane (`build.rs`'s C-source whitelist already carries
   recipe as the pre-existing `rt_runtime_kind_probes_core_c_selfcheck.c`
   beside it): `PASS: bootstrap core-C lane atomic/math/time additions behave
   correctly`.
+
+## Bucket 2 cranelift JIT bridge: what was implemented (2026-09-07)
+
+Advisor-guided decision on the deferred design question above: **stubs, not a
+port.** Reachability check first (per the discriminating question — is the
+cranelift path ever live in this lane): `scripts/bootstrap/bootstrap-from-scratch.sh`
+defaults `backend=llvm` unless `--backend=cranelift` is passed explicitly
+(`bootstrap-from-scratch.sh:573-575`), and `src/lib/nogc_sync_mut/sffi/codegen.spl`
+is pulled into the Stage 2/3 closure only because it is part of the compiler's
+full source tree (`compiler.backend.backend.cranelift_codegen_adapter`,
+`compiler.backend.codegen`) — the actual `compile_cranelift_function` path
+(`src/compiler/70.backend/codegen.spl`) is never reached at runtime for a
+default (LLVM-backend) Stage 2/3 build. All 75 symbols are dead code for
+*this* lane. Porting the real Cranelift IR-builder semantics into C (option 1
+in the original write-up) was rejected: it would mean re-implementing a JIT
+codegen backend without the actual `cranelift-codegen` crate, which is
+inventing behaviour, not mirroring it, and does not fit a mechanical,
+individually-verifiable change.
+
+Implemented as **75 NAMED-TRAP stubs**, mirroring the exact pattern already
+established in `runtime_native.c` for the identical class of problem (GPU
+intrinsics, pattern-match/enum-construction traps): each stub calls the
+existing `rt_trap_unimplemented(const char *symbol)` helper (declared in
+`runtime.h:738`, defined in `runtime_native.c:13332`) with its own name, then
+returns a sentinel of the correct type. This is honest about being a stub — a
+fabricated return value (0, false, a bogus handle) would corrupt the caller's
+state if the dead-code assumption is ever wrong (e.g. someone passes
+`--backend=cranelift` to this lane); a loud, named abort is strictly better
+than the previous "linker refuses the whole binary" and *categorically*
+better than the alternative failure mode this bug class produces elsewhere — a
+tolerated-undefined symbol becoming a silent NULL-GOT SIGSEGV with no
+diagnostic at all.
+
+- **New file**: `src/runtime/runtime_cranelift_bridge_stub.c` (kept
+  separate from `runtime_native.c` specifically to avoid collision with the
+  concurrent "Rust-only misc" (90) bucket agent, who was also touching
+  `src/runtime/`). All 75 symbols, exactly matching the census table above —
+  verified by `comm` diff between the two symbol lists (extras: 0, missing: 0).
+- **Wiring**: `src/compiler_rust/compiler/src/pipeline/native_project/tools.rs`,
+  `build_c_runtime_library`'s `runtime_inputs`, added ONLY in the
+  `!include_stage4_hosted` branch (i.e. only for `build_core_c_runtime_library`
+  callers — the core-C-bootstrap lane this bug is about). Deliberately NOT
+  added to the `include_stage4_hosted` branch: the Stage4/hosted/`native_all`
+  lanes already link the REAL symbols (Rust `compiler/src/codegen/
+  cranelift_sffi.rs`, exported via `libsimple_compiler.so` / `native_all`),
+  and adding a second definition there would be an instant "symbol is already
+  defined" break.
+- **Baseline update**: `scripts/check/runtime_source_list_parity_baseline.txt`
+  gained one row, `runtime_cranelift_bridge_stub.c seed` (seed-only, same
+  shape as the pre-existing `runtime_cache_host_authority_v1.c seed` row) —
+  required or `check-runtime-source-list-parity.shs` reports it as an
+  unbaselined new file.
+- **Signatures**: taken verbatim from `src/lib/nogc_sync_mut/sffi/codegen.spl`'s
+  `extern fn rt_cranelift_*` declarations (the actual ABI contract every
+  caller compiles against) — `i64` -> `int64_t`, `bool` -> `bool`
+  (`stdbool.h`, already the convention for e.g. `rt_atomic_bool_compare_exchange`
+  in `runtime.h:1129`), `f64` -> `double` (matching `rt_math_pow`'s
+  `double`/`double` signature). One symbol in `codegen.spl`,
+  `rt_cranelift_new_aot_module` (the 2-arg, non-triple overload), is
+  deliberately NOT stubbed — it is not one of the 75 in the census table, and
+  stubbing it would have risked masking a real, already-resolved definition.
+
+### Verification
+
+- **Grep count, exactly one definition per symbol**: `grep -cE
+  '^(int64_t|bool|void) rt_cranelift_'` over the new file returns exactly 75,
+  and a `comm` diff between that set and the 75 backtick-quoted symbols in the
+  "Bucket 2 deferred: cranelift JIT bridge" table above is empty in both
+  directions (no extras, nothing missing).
+- **`clang -fsyntax-only`**: clean against the new file standalone.
+- **`sh scripts/check/check-c-runtime-compiles-push.shs`**: `PASS — 132
+  file(s) compiled, 0 errors (5 skipped for unavailable external
+  dependencies)`.
+- **`sh scripts/check/check-runtime-source-list-parity.shs`**: reports 2
+  pre-existing offenders (`runtime_backend_plugin.c` membership drift,
+  `test/rt_m3_atomic_publication_selfcheck.c` unbaselined) — confirmed by
+  `git diff --stat` to be untouched by this change (zero diff on either
+  file); `runtime_cranelift_bridge_stub.c` itself is NOT among the offenders,
+  i.e. this change introduced zero new parity drift.
+- **`cargo check --release --bin simple -j4`** (fresh `CARGO_TARGET_DIR`):
+  clean, `Finished `release` profile [optimized] target(s) in 1m 09s`, only
+  pre-existing unrelated warnings.
+- **Real relink of the actual failed object set**: copied the read-only kept
+  object set (`.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/
+  native-objects-8HIZif/`) to a scratch dir, compiled
+  `runtime_cranelift_bridge_stub.c` standalone with the same flags
+  `build_c_runtime_library` uses, `ar r`'d it into a copy of the kept
+  `libsimple_runtime.a`, and relinked with `clang++ @spl_objects.rsp ...
+  -Wl,--error-limit=0`. **Before: 246 undefined symbols** (this kept object
+  set predates the 32-symbol fix — its `libsimple_runtime.a` is an older
+  snapshot; the 214 figure in the top-of-file verification section was
+  measured on a differently-patched copy). **After: 171** (-75), **0 new
+  duplicate-symbol errors**. `comm -23` between the before/after undefined-symbol
+  lists is exactly the 75 symbols in `runtime_cranelift_bridge_stub.c` — no
+  accidental resolution of anything else, no new symbol introduced, no
+  regression.
+- **Behavioural test**:
+  `src/runtime/test/rt_cranelift_bridge_stub_named_trap_selfcheck.c` — forks
+  a child per representative signature shape (i64/bool/void returns, 1-7 i64
+  params, the one `double` param, the one `bool` param), asserts the PARENT
+  observes SIGABRT (not a silent return, not a segfault, not a hang) via
+  `WIFSIGNALED`/`WTERMSIG`, and asserts the child's captured stderr names the
+  exact symbol that was called (proving these are per-symbol NAMED traps, not
+  one generic message) — plus a distinguishability check that two different
+  stubs' traps never claim each other's name. Built and run standalone
+  against the new stub object plus `runtime_native.o` (`-Wl,--gc-sections` to
+  avoid pulling in `runtime_native.c`'s unrelated dependency graph, same
+  general recipe as the pre-existing `rt_mem_guard_native_selfcheck.c`
+  beside it): `SELFCHECK PASSED (0 failures)`.
+
+### What remains in this bucket
+
+Nothing — all 75 census-listed `rt_cranelift_*` symbols are now defined (as
+named traps) in the core-C-bootstrap lane. The underlying "real Cranelift
+support in the core-C-bootstrap lane" gap is NOT closed by this change and is
+not expected to be: if a future lane genuinely needs to run
+`--backend=cranelift` through `core-c-bootstrap`, every one of these 75 calls
+will abort loudly by design, and that is the correct signal to open a new,
+scoped design task (link the real Cranelift-backed Rust archive into that
+specific lane) rather than to guess at semantics here.
 
 ## Runnable check for future regressions
 
