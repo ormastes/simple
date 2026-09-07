@@ -4705,6 +4705,9 @@ mod tests {
         );
     }
 
+    /// A resolved cross-unit free function can arrive in MethodCallStatic when
+    /// its first parameter is a builtin. Its fully mangled name is exact symbol
+    /// evidence, not a synthetic `text.method` qualifier.
     #[test]
     fn already_mangled_project_method_call_is_declared_verbatim() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -4737,6 +4740,10 @@ mod tests {
         assert!(
             !ir.contains("@rt_len("),
             "canonical free function was hijacked by the len builtin:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@\"text.str_len\""),
+            "exact mangled free function was rewritten as a synthetic builtin qualifier: {ir}"
         );
         backend.verify().unwrap();
     }
