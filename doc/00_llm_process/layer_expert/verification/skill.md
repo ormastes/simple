@@ -47,8 +47,11 @@ that runs before every scan):
 - `scripts/check/verify-local-ci-receipt.shs` — the thing that decides
   admissibility. Fails closed on missing receipt, missing signature, absent or
   pre-8.0 OpenSSH, symlinked inputs, non-canonical payload, tamper, unknown
-  signer, missing change-id header, change-id or tree mismatch, manifest
-  mismatch, id-set drift, or any row not `pass`.
+  signer, an unbindable commit (no change-id header AND no patch-id — a merge or
+  an empty diff), an identity KIND mismatch, an identity-set or tree mismatch,
+  manifest mismatch, id-set drift, or any row not `pass`. It resolves BOTH
+  identity kinds, `change` and `patch`, and the kind is part of the signed bytes,
+  so a `patch` identity never satisfies a `change` one.
 
 Idioms to preserve when touching either: exit status read DIRECTLY into a
 variable on the line after the command, never through a pipe; the payload's
@@ -60,16 +63,19 @@ fail-open under a dirty checkout; `ssh-keygen -Y verify` exits **255** on tamper
 not 1, and a fixture pins that.
 
 CI consumer: the `code-idiom-gates` job of `.github/workflows/repo-hygiene.yml`.
-Three modes only — `sanity`, `escalate`, `full` — and the fail-closed hinge is
+FOUR modes — `docs`, `sanity`, `escalate`, `full` (the workflow's own header
+comment still says "THREE MODES, and only three"; it is stale, read the code) —
+and the fail-closed hinge is
 the INVERTED per-step `if:` (`!contains(steps.receipt.outputs.skip_ids,
 '|<row id>|')`). An empty, missing or unset `skip_ids` makes `contains` false, so
 the gate RUNS; a decision step that dies or emits nothing runs everything. Never
 replace that with a positive condition or a `needs:`/`if:` job gate — the
 obvious positive form is fail-OPEN, and a skipped job reports as passing.
-The conflict-class guards (conflict-tree, conflict-markers, tree-size) run in
-EVERY mode; they are advisory in `full` and blocking in `sanity`/`escalate`,
-where they are the only enforcement left. Promote them to blocking everywhere
-once each has been observed green in a CI run.
+The conflict-class guards (conflict-tree, conflict-markers, tree-size) are
+BLOCKING in every mode, gated only on `range != ''`; in `sanity` and `docs` they
+are the only enforcement left. Measured 8 s total on a CI-shaped range, so they
+fit the 60 s budget. They have not yet run on a CI runner — neither has any
+other part of this path.
 
 Reading order for a task in this area:
 `doc/07_guide/infra/local_ci_receipt/operator_guide.md` (task-oriented, with the
