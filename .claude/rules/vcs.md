@@ -172,6 +172,17 @@ which must ALSO have an exact-match `'<id>:<mode>:<command>'` case in
 the fail-closed `*)` default and returns 2, so a manifest row alone is not
 wiring and a dispatch case alone is dead code.
 
+The blocking `push-no-direct-rt` row scans the exact pushed commit and compares
+its forbidden-site count with the committed base of the outgoing range. This
+is a branch-delta ratchet: stale frozen counts already exceeded by `main` do
+not block a zero-delta topic, but one newly introduced site does. The tracked
+baseline remains authoritative outside this push-specific comparison mode.
+The interpreter-extern registry gap ratchet likewise compares the pushed tip
+with the outgoing range base, so existing mainline gaps cannot be attributed
+to an unrelated topic while a branch-added gap remains blocking.
+The SFFI v2 aggregate applies this policy to child-guard identities: the tip
+must introduce zero newly failing guards relative to the outgoing base.
+
 Several per-guard bullets below end with "Wired into
 `pre-push-conflict-tree-guard.shs`". **That phrase is stale for at least
 `check-seed-builds-push.shs`, `check-c-runtime-compiles-push.shs` (it is a

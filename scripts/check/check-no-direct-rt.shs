@@ -4,7 +4,7 @@
 # Counts are measured, never assumed. See:
 #   doc/03_plan/infra/binary_runtime_hardening/plan.md
 #   doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
-# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE]
+# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE] [--rev REV] [--baseline-rev REV]
 #
 # --roots (comma-separated repo-relative dirs, default "src,examples,tools,scripts,test"):
 # widened 2026-08-28 from src-only to also scan examples/, tools/, scripts/ and
@@ -69,6 +69,8 @@ set -u
 
 ROOT="$(pwd)"
 REV=""
+BASELINE_REV=""
+COUNT_ONLY=0
 SELFTEST_ONLY=0
 ROOTS="src,examples,tools,scripts,test"
 # --critical (or SIMPLE_RT_CRITICAL=1): phase-A error mode — ANY forbidden
@@ -101,10 +103,22 @@ while [ $# -gt 0 ]; do
     --root) shift; ROOT="$1" ;;
     --roots) shift; ROOTS="$1" ;;
     --rev) shift; REV="$1" ;;
+    --baseline-rev) shift; BASELINE_REV="$1" ;;
+    --count-only) COUNT_ONLY=1 ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
   shift
 done
+
+if [ -n "$BASELINE_REV" ] && [ -z "$REV" ]; then
+  echo "ERROR — nothing was checked: --baseline-rev requires --rev"
+  exit 2
+fi
+if [ -n "$BASELINE_REV" ] && { [ "$CRITICAL" -eq 1 ] || [ "$GENERATE_BASELINE" -eq 1 ]; }; then
+  echo "ERROR — nothing was checked: --baseline-rev is incompatible with --critical and --generate-baseline"
+  exit 2
+fi
+ORIGINAL_ROOT="$ROOT"
 
 # --rev <REV>: scan the COMMITTED tree at REV instead of the working checkout.
 #
@@ -536,12 +550,35 @@ selftest() {
     "PASS — 2 file(s) scanned (roots=src, src=0), forbidden=0, extern_decls=0 (baseline 9)") : ;;
     *) echo "ERROR — selftest failed: working-tree scan did not see the dirty edits, got [$st_wt_out]"; rm -rf "$st_dir"; exit 2 ;;
   esac
+  # fixtures 18-19: a push comparison ratchets against its committed base,
+  # independently of a stale tracked baseline. Unchanged debt passes; one new
+  # direct call fails. Both revisions deliberately retain baseline=0.
+  mkdir -p "$st_dir/l/src/lib" "$st_dir/l/scripts/check"
+  printf 'fn f(): rt_one()\n' > "$st_dir/l/src/lib/one.spl"
+  printf '0\n' > "$st_dir/l/scripts/check/no_direct_rt_baseline.txt"
+  : > "$st_dir/l/scripts/check/no_direct_rt_allowlist.txt"
+  ( cd "$st_dir/l" \
+    && git init -q . \
+    && git config user.email selftest@example.com \
+    && git config user.name selftest \
+    && git add -A && git commit -q -m base \
+    && printf 'harmless\n' > note.txt \
+    && git add note.txt && git commit -q -m unchanged ) >/dev/null 2>&1
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/l" --roots src --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1
+  st_relative_same_rc=$?
+  if [ "$st_relative_same_rc" != "0" ]; then echo "ERROR — selftest failed: unchanged committed debt did not pass base-relative ratchet (rc=$st_relative_same_rc)"; rm -rf "$st_dir"; exit 2; fi
+  ( cd "$st_dir/l" \
+    && printf 'fn g(): rt_two()\n' > src/lib/two.spl \
+    && git add src/lib/two.spl && git commit -q -m regression ) >/dev/null 2>&1
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/l" --roots src --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1
+  st_relative_new_rc=$?
+  if [ "$st_relative_new_rc" != "1" ]; then echo "ERROR — selftest failed: new committed debt did not fail base-relative ratchet (rc=$st_relative_new_rc)"; rm -rf "$st_dir"; exit 2; fi
   rm -rf "$st_dir"
 }
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 17 selftest fixture(s) checked"
+  echo "PASS — 19 selftest fixture(s) checked"
   exit 0
 fi
 
@@ -580,6 +617,14 @@ if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
   exit 2
 fi
 
+# Internal machine-readable path used to measure a committed comparison ref.
+# It deliberately stops before either the tracked-baseline or critical verdict.
+if [ "$COUNT_ONLY" -eq 1 ]; then
+  rt_off_done
+  echo "COUNT $forbidden"
+  exit 0
+fi
+
 echo "rt_boundary:"
 echo "  scanner_ran: true"
 echo "  roots: $ROOTS"
@@ -604,7 +649,21 @@ fi
 
 # ---- baseline ratchet ----
 # Read-only unless --generate-baseline was passed.
-if [ ! -f "$BASELINE_FILE" ]; then
+if [ -n "$BASELINE_REV" ]; then
+  baseline_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$ORIGINAL_ROOT" --roots "$ROOTS" --rev "$BASELINE_REV" --count-only 2>&1)
+  baseline_rc=$?
+  baseline_line=$(printf '%s\n' "$baseline_out" | tail -1)
+  case "$baseline_rc:$baseline_line" in
+    0:"COUNT "*) baseline=${baseline_line#COUNT } ;;
+    *)
+      rt_off_done
+      echo "ERROR — nothing was checked: could not measure baseline revision $BASELINE_REV"
+      exit 2 ;;
+  esac
+  case "$baseline" in *[!0-9]*|'') rt_off_done; echo "ERROR — invalid count from baseline revision $BASELINE_REV"; exit 2 ;; esac
+  BASELINE_FILE=""
+fi
+if [ -z "$BASELINE_REV" ] && [ ! -f "$BASELINE_FILE" ]; then
   if [ $GENERATE_BASELINE -eq 1 ]; then
     echo "$forbidden" > "$BASELINE_FILE"
     rt_off_done
@@ -615,8 +674,10 @@ if [ ! -f "$BASELINE_FILE" ]; then
   echo "ERROR — nothing was checked: no baseline at $BASELINE_FILE (run with --generate-baseline to record one)"
   exit 2
 fi
-baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
-if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+if [ -z "$BASELINE_REV" ]; then
+  baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
+  if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+fi
 
 if [ "$forbidden" -gt "$baseline" ]; then
   top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
@@ -636,6 +697,10 @@ rt_off_done
 if [ $GENERATE_BASELINE -eq 1 ]; then
   echo "$forbidden" > "$BASELINE_FILE"
   echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline updated $baseline -> $forbidden)"
+  exit 0
+fi
+if [ -n "$BASELINE_REV" ]; then
+  echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (base $BASELINE_REV: $baseline)"
   exit 0
 fi
 if [ "$forbidden" -lt "$baseline" ]; then

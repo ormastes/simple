@@ -24,11 +24,29 @@ audit grepped for `pub fn`, which this tree never writes (it uses bare
 `fn`), so it matched nothing while 10 function signatures and 3 struct
 fields carry primitives. Every count below is now paired with a scanned-file
 control that MUST be non-zero, the primitive audit matches the tree's real
-syntax (and is honestly RED), and the mock-backend audit RUNS every ndarray
+syntax, and the mock-backend audit RUNS every ndarray
 spec under SIMPLE_BLAS_BACKEND=mock in interpreter mode instead of grepping
 for a string no spec contains.
+AUDIT 2026-09-05 (second pass): the struct-field half of the primitive audit
+was UNSATISFIABLE as written — it counted every bare-primitive field, which
+includes the five that DEFINE the wrapper types the checkbox demands
+(`Float64 { value: f64 }`, `Index { value: i64 }`, ...). A wrapper over a
+primitive must hold a primitive, so the audit forbade its own remedy. It is
+now structural: a single-field newtype over a primitive is the wrapper
+boundary (counted separately as a non-vacuity control that MUST be non-zero),
+and a bare primitive on any OTHER struct is still a violation. The field-name
+class was simultaneously widened from `[a-z_]` to `[A-Za-z_]`, closing the
+hole a previous `value` -> `V` rename walked through; a planted control now
+replays that exact evasion and MUST be counted as a violation.
+CLOSED 2026-09-06: no longer tagged in-development — all 7 examples pass. Two
+real fixes closed the last two. REQ-07: `NDArray.flat_f32/f64/i64/bool` and
+`ndarray_sort_value_less` had been `_`-prefixed to duck REQ-06's
+"public fn" carve-out while 388 call sites in 46 files still called them, so
+14 of the 16 ndarray specs died on `method flat_f64 not found`; the names are
+restored. REQ-06: those five signatures now take `Index` instead of `i64` and
+every call site was migrated, so the audit is satisfied by wrapper types
+rather than by a name that hides from the regex.
 """
-# @tag:in-development
 # doc-path: doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md
 # @cover src/lib/nogc_async_mut/ndarray/
 # @cover src/lib/common/science_math/ndarray.spl
@@ -47,6 +65,41 @@ fn shell_count(cmd: text) -> i64:
     broken pipeline can never read as zero occurrences."""
     val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
     out.trim().to_i64() ?? -1
+
+val FIELD_AUDIT_AWK: text = "BEGIN{ins=0;nf=0;prim=0;bad=0;newtype=0}\n" +
+    "function flush(){if(ins&&prim>0){if(nf==1&&prim==1)newtype++;else bad+=prim};ins=0;nf=0;prim=0}\n" +
+    "/^(pub(\\([a-z]+\\))? )?(struct|class) [A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?:/{flush();ins=1;next}\n" +
+    "ins&&/^[[:space:]]+(pub[^ ]* )?(static )?fn /{flush();next}\n" +
+    "ins&&/^[^[:space:]]/{flush();next}\n" +
+    "ins&&/^[[:space:]]+(pub[^ ]* )?[A-Za-z_][A-Za-z0-9_]*: *[[A-Za-z_]/{nf++;" +
+    "if($0~/^[[:space:]]+(pub[^ ]* )?[A-Za-z_][A-Za-z0-9_]*: *(f64|i64|f32|i32|u64)[[:space:]]*$/)prim++;next}\n" +
+    "END{flush();print bad+0\" \"newtype+0}"
+
+fn field_audit(paths: text, column: text) -> i64:
+    """Structural struct-field audit. Walks each `struct` block and classifies
+    every bare-primitive field. Column `1` is `bad` — primitive fields on any
+    struct that is NOT a single-field newtype, i.e. the real violations. Column
+    `2` is `newtype` — the primitive-wrapper definitions (`Float64 { value: f64 }`),
+    which are the requirement's own remedy and are counted as a non-vacuity
+    control rather than an offence.
+
+    Field names are matched with `[A-Za-z_][A-Za-z0-9_]*`, not the old
+    lowercase-only class: renaming `value: f64` to `V: f64` is an evasion, not a
+    fix, and this class refuses it.
+
+    The column is selected with `cut`, not a second `awk`: a text literal that
+    contains `{...}` and is followed by a `+` concatenation silently swallows the
+    rest of the expression (see
+    `doc/08_tracking/bug/text_literal_brace_run_swallows_following_concatenation_2026-09-05.md`),
+    which made every count read 0 — a false PASS on this very audit."""
+    shell_count("awk '" + FIELD_AUDIT_AWK + "' $(find " + paths +
+        " -name '*.spl' 2>/dev/null | sort) | cut -d' ' -f" + column)
+
+fn field_audit_planted(source: text, column: text) -> i64:
+    """Same classifier, run over a planted fixture instead of the tree, so a
+    classifier that can no longer see an offender cannot read as a clean tree."""
+    shell_count("printf '" + source + "' | awk '" + FIELD_AUDIT_AWK +
+        "' | cut -d' ' -f" + column)
 
 fn files_scanned(paths: text) -> i64:
     """Control for every grep-based audit: the number of `.spl` files the
@@ -136,10 +189,34 @@ describe "plan: lib/scilib/ports/scilib_port_ndarray remains (final audit sweep)
             val fn_hits = shell_count("grep -rEc '^[[:space:]]*fn [a-zA-Z][^#]*(: *| -> *)(f64|i64|f32|i32|u64)\\b' " + NDARRAY_SRC + " | awk -F: '{s+=$2} END{print s+0}'")
             # evidence(computed): primitive-typed public fn signature count from the real ndarray tree
             expect(fn_hits).to_equal(0)  # oracle: 0 — Layer C signatures must be primitive-free (Float64/Index/Shape wrappers only)
-            step("Count struct fields declared with a bare primitive type")
-            val field_hits = shell_count("grep -rEc '^[[:space:]]+[a-z_][a-z0-9_]*: *(f64|i64|f32|i32|u64)[[:space:]]*$' " + NDARRAY_SRC + " | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): primitive-typed struct field count from the real ndarray tree
-            expect(field_hits).to_equal(0)  # oracle: 0 — exported struct fields must use the wrapper types
+            step("Count bare-primitive struct fields on structs that are NOT primitive-wrapper newtypes")
+            # AUDIT 2026-09-05: the previous form of this count matched EVERY bare
+            # primitive field, including the five that define the wrapper types
+            # themselves (`Float64 { value: f64 }`, `Index { value: i64 }`, ...).
+            # That made it unsatisfiable: the checkbox's own remedy is "use the
+            # wrapper types", and a wrapper over `f64` must hold an `f64`. Simple
+            # has no field-level privacy that is enforced (`pub` on a field is
+            # accepted but not checked — `.value` is read from 274 sites across
+            # four ndarray modules), and the wrapper structs cannot be made
+            # non-exported because they ARE the types in every Layer C signature.
+            # So the audit is now structural: a single-field newtype over a
+            # primitive is the wrapper boundary and is counted as `newtype`; a
+            # primitive field on anything else is still a violation.
+            val field_hits = field_audit(NDARRAY_SRC, "1")
+            # evidence(computed): non-newtype primitive struct field count from the real ndarray tree
+            expect(field_hits).to_equal(0)  # oracle: 0 — every struct except the primitive wrappers must use the wrapper types
+            step("Control: the wrapper-newtype boundary must be non-empty, or the exemption is scanning nothing")
+            val newtype_boundary = field_audit(NDARRAY_SRC, "2")
+            # @capture newtype_boundary is the number of single-field primitive wrapper structs the exemption recognises
+            expect(newtype_boundary > 0).to_equal(true)  # oracle: an exemption that matches no struct is not an exemption
+            step("Control: a planted multi-field struct with a primitive MUST be counted as a violation")
+            val planted_field = field_audit_planted("struct P:\\n    a: f64\\n    b: Index\\n", "1")
+            # @capture planted_field is the classifier's violation count on a struct that mixes a primitive with a wrapper field
+            expect(planted_field).to_equal(1)  # oracle: a classifier that cannot find a planted offender finds nothing
+            step("Control: the `value` -> `V` rename evasion MUST still be counted as a violation")
+            val planted_renamed = field_audit_planted("struct P:\\n    V: f64\\n    b: Index\\n", "1")
+            # @capture planted_renamed replays the reverted evasion: renaming the field did not change its type
+            expect(planted_renamed).to_equal(1)  # oracle: capitalising a field name is not a fix, and the field-name class refuses it
             step("Control: the fn pattern MUST hit a planted primitive signature, or the scan is broken")
             val planted = shell_count("printf 'fn ndarray_planted(x: f64) -> f64:\\n' | grep -Ec '^[[:space:]]*fn [a-zA-Z][^#]*(: *| -> *)(f64|i64|f32|i32|u64)\\b'")
             # @capture planted is the pattern's hit count on a line that carries a primitive parameter type
