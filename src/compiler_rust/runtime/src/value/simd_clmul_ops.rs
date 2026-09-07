@@ -248,40 +248,16 @@ unsafe fn xor_u64x2_neon(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
     out
 }
 
-// ---------------------------------------------------------------------------
-// `pub extern "C"` symbols for compiled-mode linkage parity.
-//
-// Mirrors Phase 1 / Phase 2 seed ABI: scalar lo/hi inputs and out-pointers
-// for the lo and hi halves of the 128-bit result. Once a Vec2u64 marshalling
-// layer lands these signatures can be tightened.
-// ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub extern "C" fn rt_simd_clmul_lo_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
-    let r = clmul_lo_u64([a_lo, a_hi], [b_lo, b_hi]);
-    unsafe {
-        *out_lo = r[0];
-        *out_hi = r[1];
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rt_simd_clmul_hi_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
-    let r = clmul_hi_u64([a_lo, a_hi], [b_lo, b_hi]);
-    unsafe {
-        *out_lo = r[0];
-        *out_hi = r[1];
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rt_simd_xor_u64x2(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
-    let r = xor_u64x2([a_lo, a_hi], [b_lo, b_hi]);
-    unsafe {
-        *out_lo = r[0];
-        *out_hi = r[1];
-    }
-}
+// NOTE (2026-09-07): the `#[no_mangle] pub extern "C" fn
+// rt_simd_{clmul_lo_u64,clmul_hi_u64,xor_u64x2}` wrappers formerly here have
+// been REMOVED as duplicate/wrong-ABI symbols — see
+// doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md.
+// `src/runtime/runtime_simd_dispatch.c` now provides these under the real
+// tagged-pointer (Vec2u64-as-i64-pointer) calling convention that
+// `src/lib/nogc_sync_mut/simd_crypto.spl`'s `extern fn rt_simd_clmul_lo_u64(a:
+// Vec2u64, b: Vec2u64) -> Vec2u64` actually declares; the 6-scalar-argument
+// Rust wrappers here never matched that declaration and were not in
+// `codegen::runtime_sffi::RUNTIME_FUNCS`, so nothing reachable called them.
 
 #[cfg(test)]
 mod tests {
