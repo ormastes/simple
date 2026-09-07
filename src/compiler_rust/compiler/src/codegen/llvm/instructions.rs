@@ -370,6 +370,38 @@ impl LlvmBackend {
             }
             (inkwell::values::BasicValueEnum::FloatValue(l), inkwell::values::BasicValueEnum::FloatValue(r)) => {
                 use inkwell::FloatPredicate;
+                // Class 1 fix (2026-09-07): `inkwell::values::BasicValueEnum` only
+                // distinguishes IntValue vs FloatValue, not f32 vs f64 — this arm
+                // matches for BOTH widths, so l and r can legitimately disagree
+                // (e.g. an f32 field feeding an f64 accumulator). LLVM's verifier
+                // rejects mismatched-width float ops outright: "Both operands to
+                // FCmp/[fadd|fsub|fmul|fdiv] instruction are not of the same
+                // type!" — measured on dom_color.spl / color.spl /
+                // helpers_text.spl once 9c67bd56fa4 started emitting real
+                // FloatValue types for f64 locals instead of raw tagged i64.
+                // Fix: widen the narrower (f32) side to f64 via build_float_ext.
+                // Never truncate f64 -> f32 here — that would silently drop
+                // precision to paper over a type mismatch.
+                let f64_type = self.context_ref().f64_type();
+                let (l, r) = if l.get_type() != r.get_type() {
+                    let l = if l.get_type() == f64_type {
+                        l
+                    } else {
+                        builder
+                            .build_float_ext(l, f64_type, "fmix_ext_l")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_ext", &e))?
+                    };
+                    let r = if r.get_type() == f64_type {
+                        r
+                    } else {
+                        builder
+                            .build_float_ext(r, f64_type, "fmix_ext_r")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_ext", &e))?
+                    };
+                    (l, r)
+                } else {
+                    (l, r)
+                };
                 match op {
                     BinOp::Add => Ok(builder
                         .build_float_add(l, r, "fadd")
@@ -402,6 +434,56 @@ impl LlvmBackend {
                             .build_float_compare(pred, l, r, "fcmp")
                             .map_err(|e| crate::error::factory::llvm_build_failed("fcmp", &e))?;
                         Ok(self.tagged_bool_from_i1(cmp, builder)?.into())
+                    }
+                    BinOp::Pow => {
+                        // Class 2 fix (2026-09-07): float Pow was never
+                        // implemented in this backend and hit the
+                        // `unsupported_operation("float binop", Pow)` fallback
+                        // below — measured as `Unsupported float binop: Pow` in
+                        // mir_instruction_graph.spl. Mirror the cranelift
+                        // backend's existing convention for the same op
+                        // (codegen/instr/core.rs, BinOp::Pow, is_float branch):
+                        // call the runtime's real f64-ABI `rt_math_pow`
+                        // (declared in src/runtime/runtime.h:767, defined
+                        // runtime/src/value/sffi/math.rs), promoting f32
+                        // operands to f64 first since rt_math_pow only takes/
+                        // returns f64, then narrowing the RESULT back to f32
+                        // only when both operands were already f32 above. This
+                        // is a final-value narrowing to the expression's own
+                        // declared type, not the operand-mismatch truncation
+                        // the class-1 fix above forbids.
+                        let common_ty = l.get_type();
+                        let (pl, pr) = if common_ty == f64_type {
+                            (l, r)
+                        } else {
+                            let pl = builder
+                                .build_float_ext(l, f64_type, "pow_ext_l")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_float_ext", &e))?;
+                            let pr = builder
+                                .build_float_ext(r, f64_type, "pow_ext_r")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_float_ext", &e))?;
+                            (pl, pr)
+                        };
+                        let rt_func = module.get_function("rt_math_pow").unwrap_or_else(|| {
+                            let fn_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
+                            module.add_function("rt_math_pow", fn_type, None)
+                        });
+                        let call_site = builder
+                            .build_call(rt_func, &[pl.into(), pr.into()], "pow")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_math_pow", &e))?;
+                        let pow_result = call_site
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| f64_type.const_zero().into())
+                            .into_float_value();
+                        let result = if common_ty == f64_type {
+                            pow_result
+                        } else {
+                            builder
+                                .build_float_trunc(pow_result, common_ty, "pow_trunc")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_float_trunc", &e))?
+                        };
+                        Ok(result.into())
                     }
                     _ => Err(crate::error::factory::unsupported_operation("float binop", &op)),
                 }
@@ -645,13 +727,35 @@ impl LlvmBackend {
                 Ok(result.into())
             }
             inkwell::values::BasicValueEnum::FloatValue(val) => {
-                let result = match op {
+                let result: inkwell::values::BasicValueEnum<'static> = match op {
                     UnaryOp::Neg => builder
                         .build_float_neg(val, "fneg")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_neg", &e))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_neg", &e))?
+                        .into(),
+                    UnaryOp::Not => {
+                        // Class 2 fix (2026-09-07): unary Not on a float was
+                        // never implemented in this backend — measured as
+                        // `Unsupported float unary op: Not` in font_sffi.spl.
+                        // Semantics verified against the interpreter's own
+                        // truthiness rule (value_impl.rs Value::truthy:
+                        // `Value::Float(f) => *f != 0.0`, combined with
+                        // interpreter/expr/ops.rs's `UnaryOp::Not =>
+                        // Value::Bool(!is_condition_present(...))`): `!x` is
+                        // true exactly when `x == 0.0`. Use an ordered
+                        // float-equal compare against the operand's own zero
+                        // (handles both f32 and f64 without a cross-width
+                        // promote) and box the i1 into the tagged bool ABI,
+                        // matching every other comparison in this file.
+                        use inkwell::FloatPredicate;
+                        let zero = val.get_type().const_zero();
+                        let cmp = builder
+                            .build_float_compare(FloatPredicate::OEQ, val, zero, "fnot_eq_zero")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_compare", &e))?;
+                        self.tagged_bool_from_i1(cmp, builder)?.into()
+                    }
                     _ => return Err(crate::error::factory::unsupported_operation("float unary op", &op)),
                 };
-                Ok(result.into())
+                Ok(result)
             }
             _ => {
                 let ctx = ErrorContext::new()
@@ -952,6 +1056,36 @@ impl LlvmBackend {
                 let cast = builder
                     .build_signed_int_to_float(iv, ft, "sitofp")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?;
+                Ok(cast.into())
+            }
+            // f32 <-> f64 when the value's actual width disagrees with the
+            // TARGET type this call was asked to coerce into (e.g. Store of
+            // an f64-typed literal `1.5` into a declared `let a: f32` local's
+            // f32 alloca, via memory_element_type in functions/memory.rs).
+            // Before this arm, this fell through to the untyped `_ => Ok(val)`
+            // catch-all below, which returns the value with NO cast at all —
+            // `build_store` then wrote an f64 value through an f32-typed
+            // pointer, corrupting the slot (measured 2026-09-07:
+            // `let a: f32 = 1.5; print(a)` printed `0.0` natively, `1.5` in
+            // the interpreter). This is a distinct case from the Class-1
+            // mixed-BINOP-operand fix in compile_binop (instructions.rs
+            // FloatValue/FloatValue arm), which harmonizes two operands
+            // toward f64 and never narrows — narrowing there would silently
+            // drop precision on an operand. Here the TARGET type is the
+            // authority (it is the declared slot type), so narrowing f64 ->
+            // f32 is the correct, intentional coercion, exactly like the
+            // existing int-narrowing arms above.
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::FloatType(ft)) if fv.get_type() != ft => {
+                let f64_type = self.context_ref().f64_type();
+                let cast = if ft == f64_type {
+                    builder
+                        .build_float_ext(fv, ft, "fext")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_ext", &e))?
+                } else {
+                    builder
+                        .build_float_trunc(fv, ft, "ftrunc")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_trunc", &e))?
+                };
                 Ok(cast.into())
             }
             // Types already match or close enough
