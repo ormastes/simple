@@ -1,0 +1,319 @@
+# A CI pipeline really runs its jobs, in order, on this host.
+#
+# @req ORCH-003 ORCH-006 ORCH-014
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** doc/01_research/os/container/simple_orchestrator_and_container_2026-09-06.md
+#
+# Requirements are the research doc's ORCH-001..016 table; the milestone table is
+# `.spipe/simple_orchestrator/state.md`; the design is §12 and §13 of the
+# research doc.
+#
+# ## Overview
+#
+# This is the CI application of the orchestration model. It EXECUTES: each job
+# launches a real host process and the receipt carries that process's real exit
+# code and real stdout. A fresh nonce is minted per run and must appear in the
+# job's output, so a receipt cannot be satisfied by fabricated text (research
+# §13.4).
+#
+# Every job here runs on the `native-process` lane, which is a host process with
+# only the advertised process controls — NOT a container. The container lane is
+# separately asserted to be refused as BLOCKED on this host rather than quietly
+# downgraded to a process (research §4.1, ORCH-006).
+#
+# ## Examples
+#
+# Three scenarios: a nonce round-trip, an upstream failure that stops its
+# dependent while an independent job still runs, and a `native-container` job
+# that is refused.
+
+use std.spec.*
+use app.io.mod.{current_time_ms}
+use std.io_runtime.{file_read}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, PodSpecV1}
+use std.common.contracts.orchestration.ci_v1.*
+use app.ci.pipeline_runner.*
+
+fn empty_job() -> JobV1:
+    JobV1(meta: ObjectMetaV1(name: "", ns: "", labels: {}), backoff_limit: 0,
+          template: PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: []))
+
+# A Job that runs `/usr/bin/busybox sh -c <script>` on the host process lane.
+fn shell_job(name: text, script: text) -> JobV1:
+    val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+              "kind: Job\n" +
+              "metadata:\n" +
+              "    name: " + name + "\n" +
+              "spec:\n" +
+              "    template:\n" +
+              "        spec:\n" +
+              "            os:\n" +
+              "                name: linux\n" +
+              "            runtimeClassName: native-process\n" +
+              "            containers:\n" +
+              "                - name: step\n" +
+              "                  command: [\"/usr/bin/busybox\", \"sh\", \"-c\", \"" + script + "\"]\n"
+    match decode_job(src):
+        case Ok(j): j
+        case Err(_): empty_job()
+
+fn container_job(name: text) -> JobV1:
+    val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+              "kind: Job\n" +
+              "metadata:\n" +
+              "    name: " + name + "\n" +
+              "spec:\n" +
+              "    template:\n" +
+              "        spec:\n" +
+              "            os:\n" +
+              "                name: linux\n" +
+              "            runtimeClassName: native-container\n" +
+              "            containers:\n" +
+              "                - name: step\n" +
+              "                  image: \"docker.io/library/busybox@sha256:aa\"\n"
+    match decode_job(src):
+        case Ok(j): j
+        case Err(_): empty_job()
+
+val F = "test/fixtures/orchestration/"
+
+fn fixture_pipeline(name: text) -> PipelineV1:
+    match decode_pipeline(file_read(F + name) ?? ""):
+        case Ok(p): p
+        case Err(_): PipelineV1(meta: ObjectMetaV1(name: "", ns: "", labels: {}), jobs: [])
+
+# The committed Job fixture, with its NONCE placeholder bound to this run.
+fn fixture_job(name: text, job_name: text, nonce: text) -> JobV1:
+    var src = file_read(F + name) ?? ""
+    src = src.replace("NONCE", nonce)
+    src = src.replace("name: echo-linux", "name: " + job_name)
+    match decode_job(src):
+        case Ok(j): j
+        case Err(_): empty_job()
+
+fn pipeline_from(body: text) -> PipelineV1:
+    val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+              "kind: Pipeline\n" +
+              "metadata:\n" +
+              "    name: runner-spec\n" +
+              "spec:\n" +
+              "    jobs:\n" + body
+    match decode_pipeline(src):
+        case Ok(p): p
+        case Err(_): PipelineV1(meta: ObjectMetaV1(name: "", ns: "", labels: {}), jobs: [])
+
+fn node(name: text, ref_name: text, after: text, policy: text) -> text:
+    var s = "        - name: " + name + "\n" +
+            "          jobTemplateRef: " + ref_name + "\n"
+    if after != "":
+        s = s + "          runAfter: [" + after + "]\n"
+    if policy != "":
+        s = s + "          runPolicy: " + policy + "\n"
+    s
+
+fn receipt_for(run: RunReceiptV1, name: text) -> JobReceiptV1:
+    for r in run.jobs:
+        if r.job_name == name:
+            return r
+    JobReceiptV1(job_name: name, attempt: -1, runtime_class: "", verdict: "MISSING",
+                 reason: "no receipt for this job", exit_code: -1, stdout: "", node_boot_id: "")
+
+fn run_or_empty(p: PipelineV1, t: Dict<text, JobV1>, id: text) -> RunReceiptV1:
+    match run_pipeline(p, t, id):
+        case Ok(rr): rr
+        case Err(r): RunReceiptV1(run_id: id, pipeline: "", verdict: "REJECTED:" + r.kind, jobs: [])
+
+describe "Simple CI runs a pipeline on this host":
+
+    it "runs every job in order and each receipt carries that run's fresh nonce":
+        """
+        An operator triggers a pipeline run. Two independent steps, then a step
+        that waits for both. Each step echoes the nonce the runner minted for
+        this run, so its receipt could not have been produced by an earlier run
+        or written by hand.
+        """
+        step("Mint a nonce for this run")
+        val nonce = "SIMPLEORCH-" + current_time_ms().to_text()
+
+        step("Build three jobs that each echo the nonce with their own name")
+        var t: Dict<text, JobV1> = {}
+        t["a"] = shell_job("a", "echo " + nonce + "-a")
+        t["b"] = shell_job("b", "echo " + nonce + "-b")
+        t["c"] = shell_job("c", "echo " + nonce + "-c")
+
+        step("Run a pipeline where c waits for a and b")
+        val p = pipeline_from(node("a", "a", "", "") + node("b", "b", "", "") +
+                              node("c", "c", "a, b", ""))
+        val run = run_or_empty(p, t, "run-nonce")
+
+        step("Confirm the whole run passed and produced three receipts in order")
+        expect(run.verdict).to_equal(VERDICT_PASS)
+        expect(run.jobs.len()).to_equal(3)
+        expect(run.jobs[0].job_name).to_equal("a")
+        expect(run.jobs[1].job_name).to_equal("b")
+        expect(run.jobs[2].job_name).to_equal("c")
+
+        step("Confirm each receipt reports a real exit code AND the nonce in real output")
+        for name in ["a", "b", "c"]:
+            val r = receipt_for(run, name)
+            expect(r.verdict).to_equal(VERDICT_PASS)
+            expect(r.exit_code).to_equal(0)
+            expect(r.runtime_class).to_equal("native-process")
+            expect(r.attempt).to_equal(1)
+            expect(r.stdout).to_contain(nonce + "-" + name)
+
+        step("Confirm the receipts are bound to this node's boot instance")
+        expect(receipt_for(run, "a").node_boot_id.len()).to_be_greater_than(0)
+
+    it "stops a dependent after its upstream fails while an independent job still runs":
+        """
+        A failed build must block what depends on it and must not block what does
+        not. A diagnostics step declared `runPolicy: always` still runs, and the
+        run verdict stays FAIL — collecting diagnostics never turns a failure
+        into a success.
+        """
+        step("Build a failing job, its dependent, an independent job, and an always-run collector")
+        val nonce = "SIMPLEORCH-" + current_time_ms().to_text()
+        var t: Dict<text, JobV1> = {}
+        t["fails"] = shell_job("fails", "echo " + nonce + "-fails; exit 3")
+        t["dependent"] = shell_job("dependent", "echo " + nonce + "-dependent")
+        t["independent"] = shell_job("independent", "echo " + nonce + "-independent")
+        t["collector"] = shell_job("collector", "echo " + nonce + "-collector")
+
+        step("Run the pipeline")
+        val p = pipeline_from(node("fails", "fails", "", "") +
+                              node("dependent", "dependent", "fails", "") +
+                              node("independent", "independent", "", "") +
+                              node("collector", "collector", "dependent", "always"))
+        val run = run_or_empty(p, t, "run-failprop")
+
+        step("Confirm the failing job reports its real non-zero exit code and its output")
+        val f = receipt_for(run, "fails")
+        expect(f.verdict).to_equal(VERDICT_FAIL)
+        expect(f.exit_code).to_equal(3)
+        expect(f.stdout).to_contain(nonce + "-fails")
+
+        step("Confirm the dependent never ran and says which upstream stopped it")
+        val d = receipt_for(run, "dependent")
+        expect(d.verdict).to_equal(VERDICT_NOT_RUN)
+        expect(d.exit_code).to_equal(0)
+        expect(d.stdout).to_equal("")
+        expect(d.reason).to_contain("fails")
+
+        step("Confirm the independent job still ran and passed")
+        val i = receipt_for(run, "independent")
+        expect(i.verdict).to_equal(VERDICT_PASS)
+        expect(i.exit_code).to_equal(0)
+        expect(i.stdout).to_contain(nonce + "-independent")
+
+        step("Confirm the always-policy collector ran despite the upstream failure")
+        val col = receipt_for(run, "collector")
+        expect(col.verdict).to_equal(VERDICT_PASS)
+        expect(col.stdout).to_contain(nonce + "-collector")
+
+        step("Confirm collecting diagnostics did not turn the run green")
+        expect(run.verdict).to_equal(VERDICT_FAIL)
+
+    it "refuses a native-container job on this host instead of running it as a process":
+        """
+        This host cannot start an OCI container unprivileged. The honest result
+        is a blocked job naming the probe's reason — never a host process
+        reported as a container.
+        """
+        step("Probe the host container lane")
+        val probe = probe_container_lane()
+
+        step("Run a pipeline with one native-container job and one process job")
+        val nonce = "SIMPLEORCH-" + current_time_ms().to_text()
+        var t: Dict<text, JobV1> = {}
+        t["boxed"] = container_job("boxed")
+        t["plain"] = shell_job("plain", "echo " + nonce + "-plain")
+        val p = pipeline_from(node("boxed", "boxed", "", "") + node("plain", "plain", "", ""))
+        val run = run_or_empty(p, t, "run-blocked")
+
+        step("Confirm the container job was refused, not executed")
+        val b = receipt_for(run, "boxed")
+        expect(b.verdict).to_equal(VERDICT_BLOCKED)
+        expect(b.runtime_class).to_equal("native-container")
+        expect(b.attempt).to_equal(0)
+        expect(b.exit_code).to_equal(0)
+        expect(b.stdout).to_equal("")
+
+        step("Confirm the refusal states why, matching the host probe")
+        expect(b.reason.len()).to_be_greater_than(0)
+        expect(b.reason).to_equal(probe.reason)
+
+        step("Confirm the independent process job still ran for real")
+        val plain = receipt_for(run, "plain")
+        expect(plain.verdict).to_equal(VERDICT_PASS)
+        expect(plain.stdout).to_contain(nonce + "-plain")
+
+        step("Confirm a blocked job leaves the run un-green")
+        expect(run.verdict).to_equal(VERDICT_BLOCKED)
+
+    it "runs the qualification pipeline fixture from disk end to end":
+        """
+        The pipeline and Job documents an operator would actually commit — the
+        four-job qualification fixture and its process-lane Job template — are
+        read from disk, expanded, and executed. This is the only example that
+        runs the committed fixtures rather than pipelines built in this spec.
+        """
+        step("Read the committed pipeline fixture")
+        val p = fixture_pipeline("ci_pipeline.sdn")
+        expect(p.meta.name).to_equal("orchestrator-qualification")
+        expect(p.jobs.len()).to_equal(4)
+
+        step("Bind its four template references to the committed process-lane Job")
+        val nonce = "SIMPLEORCH-" + current_time_ms().to_text()
+        var t: Dict<text, JobV1> = {}
+        for ref_name in ["echo-linux", "echo-probe", "echo-publish", "echo-evidence"]:
+            t[ref_name] = fixture_job("ci_job_process.sdn", ref_name, nonce)
+
+        step("Run it")
+        val run = run_or_empty(p, t, "run-fixture")
+
+        step("Confirm all four jobs ran in dependency order and the run passed")
+        expect(run.verdict).to_equal(VERDICT_PASS)
+        expect(run.jobs.len()).to_equal(4)
+        expect(run.jobs[0].job_name).to_equal("build-linux")
+        expect(run.jobs[1].job_name).to_equal("build-probe")
+        expect(run.jobs[2].job_name).to_equal("publish")
+        expect(run.jobs[3].job_name).to_equal("evidence")
+
+        step("Confirm the receipts name this pipeline and carry this run's nonce")
+        expect(run.pipeline).to_equal("orchestrator-qualification")
+        for r in run.jobs:
+            expect(r.verdict).to_equal(VERDICT_PASS)
+            expect(r.exit_code).to_equal(0)
+            expect(r.stdout).to_contain(nonce)
+
+    it "reports the container engine and its privilege as separate facts":
+        """
+        Podman is the default engine because its normal mode is rootless. But an
+        available engine and an unprivileged launch are independent facts: rootless
+        podman and a root docker daemon are both "an engine that answered". The
+        probe therefore reports engine and privilege separately, and a lane that is
+        unavailable claims neither.
+        """
+        step("Probe the container lane on this host")
+        val probe = probe_container_lane()
+
+        step("Confirm an unavailable lane claims no engine and no privilege")
+        if not probe.available:
+            expect(probe.engine).to_equal("")
+            expect(probe.privilege).to_equal(PRIVILEGE_UNKNOWN)
+            expect(probe.reason.len()).to_be_greater_than(0)
+
+        step("Confirm an available lane names one of the supported engines")
+        if probe.available:
+            expect([ENGINE_PODMAN, ENGINE_DOCKER, ENGINE_RUNC].contains(probe.engine)).to_be(true)
+
+        step("Confirm an available lane states root or rootless, never unknown")
+        if probe.available:
+            expect([PRIVILEGE_ROOTLESS, PRIVILEGE_ROOT].contains(probe.privilege)).to_be(true)
+
+        step("Confirm a rootless claim is never made for docker's root daemon")
+        if probe.engine == ENGINE_DOCKER:
+            expect(probe.privilege).to_equal(PRIVILEGE_ROOT)

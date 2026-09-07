@@ -1,0 +1,293 @@
+# Pipeline definitions expand into ordinary Jobs in dependency order.
+#
+# @req ORCH-003 ORCH-014
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** doc/01_research/os/container/simple_orchestrator_and_container_2026-09-06.md
+#
+# Requirements are the research doc's ORCH-001..016 table; the milestone table is
+# `.spipe/simple_orchestrator/state.md`; the design is §12 of the research doc.
+#
+# ## Overview
+#
+# CI is applied as a controller over the existing Job path, not as a second
+# scheduler: a `Pipeline` is a reusable definition that EXPANDS into ordinary
+# `Job` resources with declared dependencies. This spec pins the expansion —
+# deterministic order, and refusal of every unschedulable pipeline shape
+# (unresolved template, unknown dependency, self-edge, cycle).
+#
+# ## Examples
+#
+# `test/fixtures/orchestration/ci_pipeline.sdn` is the four-job diamond;
+# `ci_pipeline_cycle.sdn` is a two-job cycle; `ci_job_process.sdn` and
+# `ci_job_container.sdn` are the Job templates.
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, ObjectMetaV1, PodSpecV1}
+use std.common.contracts.orchestration.ci_v1.*
+
+val F = "test/fixtures/orchestration/"
+
+fn empty_job() -> JobV1:
+    JobV1(meta: ObjectMetaV1(name: "", ns: "", labels: {}), backoff_limit: 0,
+          template: PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: []))
+
+fn job_of(path: text) -> JobV1:
+    match decode_job(file_read(F + path) ?? ""):
+        case Ok(j): j
+        case Err(_): empty_job()
+
+fn job_rejection(path: text) -> RejectionV1:
+    match decode_job(file_read(F + path) ?? ""):
+        case Err(r): r
+        case Ok(_): RejectionV1(kind: "accepted", path: "", message: "accepted", line: 0, col: 0)
+
+fn pipeline_of(path: text) -> PipelineV1:
+    match decode_pipeline(file_read(F + path) ?? ""):
+        case Ok(p): p
+        case Err(_): PipelineV1(meta: ObjectMetaV1(name: "", ns: "", labels: {}), jobs: [])
+
+fn four_templates() -> Dict<text, JobV1>:
+    val j = job_of("ci_job_process.sdn")
+    var t: Dict<text, JobV1> = {}
+    t["echo-linux"] = j
+    t["echo-probe"] = j
+    t["echo-publish"] = j
+    t["echo-evidence"] = j
+    t
+
+fn expansion_rejection(p: PipelineV1, t: Dict<text, JobV1>) -> RejectionV1:
+    match expand_pipeline(p, t):
+        case Err(r): r
+        case Ok(_): RejectionV1(kind: "accepted", path: "", message: "accepted", line: 0, col: 0)
+
+fn order_names(p: PipelineV1, t: Dict<text, JobV1>) -> [text]:
+    var out: [text] = []
+    match expand_pipeline(p, t):
+        case Ok(ordered):
+            for e in ordered:
+                out.push(e.node.name)
+        case Err(_): out.push("REJECTED")
+    out
+
+describe "Simple CI pipeline expansion":
+
+    it "decodes a Job whose template runs on the host process lane":
+        """
+        A CI build step is an ordinary Job. Its pod template declares the
+        execution class and the executable to run, because a process lane has no
+        image entrypoint to inherit.
+        """
+        step("Decode the process-lane Job fixture")
+        val j = job_of("ci_job_process.sdn")
+
+        step("Confirm identity, backoff intent and execution class")
+        expect(j.meta.name).to_equal("echo-linux")
+        expect(j.meta.ns).to_equal("ci")
+        expect(j.backoff_limit).to_equal(0)
+        expect(j.template.runtime_class).to_equal("native-process")
+
+        step("Confirm the executable and its arguments survived decode")
+        val c = j.template.containers[0]
+        expect(c.command.len()).to_equal(2)
+        expect(c.command[0]).to_equal("/usr/bin/busybox")
+        expect(c.args[0]).to_contain("build-linux")
+        expect(c.image).to_equal("")
+
+    it "refuses a process-lane Job that names no executable":
+        """
+        A `native-process` container has no image entrypoint, so omitting
+        `command` would leave the runner guessing what to launch.
+        """
+        step("Decode a process-lane Job with command removed")
+        var src = file_read(F + "ci_job_process.sdn") ?? ""
+        src = src.replace("                  command: [\"/usr/bin/busybox\", \"echo\"]\n", "")
+        match decode_job(src):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the refusal names the missing command")
+                expect(r.kind).to_equal("missing_field")
+                expect(r.path).to_end_with(".command")
+
+    it "refuses a process-lane Job that also names an image":
+        """
+        An image reference on a lane that does not run images is a
+        contradiction, not a harmless extra field.
+        """
+        step("Decode a process-lane Job carrying an image as well as a command")
+        var src = file_read(F + "ci_job_process.sdn") ?? ""
+        src = src.replace("                  command:", "                  image: \"docker.io/library/busybox\"\n                  command:")
+        match decode_job(src):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the contradiction is refused")
+                expect(r.kind).to_equal("unexpected_field")
+                expect(r.message).to_contain("does not run an image")
+
+    it "orders a four-job diamond so every dependency precedes its dependents":
+        """
+        Two independent builds, a publish that waits for both, and an evidence
+        step that waits for publish. The expansion is deterministic, so the same
+        pipeline always yields the same sequence.
+        """
+        step("Decode the qualification pipeline")
+        val p = pipeline_of("ci_pipeline.sdn")
+        expect(p.meta.name).to_equal("orchestrator-qualification")
+        expect(p.jobs.len()).to_equal(4)
+
+        step("Expand it against the four Job templates")
+        val names = order_names(p, four_templates())
+
+        step("Confirm declaration order breaks the tie between the two builds")
+        expect(names.len()).to_equal(4)
+        expect(names[0]).to_equal("build-linux")
+        expect(names[1]).to_equal("build-probe")
+
+        step("Confirm publish follows both builds and evidence follows publish")
+        expect(names[2]).to_equal("publish")
+        expect(names[3]).to_equal("evidence")
+
+    it "refuses a pipeline whose jobs form a dependency cycle":
+        """
+        A cycle can never start, so it is refused at expansion rather than
+        deadlocking a run.
+        """
+        step("Expand a two-job cycle")
+        val r = expansion_rejection(pipeline_of("ci_pipeline_cycle.sdn"), four_templates())
+
+        step("Confirm the cycle is named as such")
+        expect(r.kind).to_equal("dependency_cycle")
+        expect(r.path).to_equal("spec.jobs")
+
+    it "refuses a job that depends on itself":
+        """
+        A self-edge is the smallest cycle and is reported at the job's own
+        runAfter, not as a generic graph failure.
+        """
+        step("Expand a pipeline whose only job lists itself in runAfter")
+        val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+                  "kind: Pipeline\n" +
+                  "metadata:\n" +
+                  "    name: selfish\n" +
+                  "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: a\n" +
+                  "          jobTemplateRef: echo-linux\n" +
+                  "          runAfter: [a]\n"
+        match decode_pipeline(src):
+            case Err(_): assert_true(false)
+            case Ok(p):
+                val r = expansion_rejection(p, four_templates())
+                step("Confirm the self-edge is reported at the job's runAfter")
+                expect(r.kind).to_equal("dependency_cycle")
+                expect(r.path).to_equal("spec.jobs.0.runAfter")
+
+    it "refuses a pipeline that references a Job nobody supplied":
+        """
+        Expansion resolves every template reference up front, so a run never
+        starts and then discovers a missing step.
+        """
+        step("Expand the qualification pipeline with one template withheld")
+        val p = pipeline_of("ci_pipeline.sdn")
+        var partial: Dict<text, JobV1> = {}
+        partial["echo-linux"] = job_of("ci_job_process.sdn")
+        val r = expansion_rejection(p, partial)
+
+        step("Confirm the unresolved reference is named")
+        expect(r.kind).to_equal("unresolved_reference")
+        expect(r.message).to_contain("echo-probe")
+
+    it "refuses a runAfter that names an undeclared job":
+        """
+        A dependency on a job the pipeline does not declare is a typo, and
+        treating it as satisfied would run the dependent step too early.
+        """
+        step("Expand a pipeline whose runAfter names a job it never declares")
+        val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+                  "kind: Pipeline\n" +
+                  "metadata:\n" +
+                  "    name: dangling\n" +
+                  "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: a\n" +
+                  "          jobTemplateRef: echo-linux\n" +
+                  "          runAfter: [ghost]\n"
+        match decode_pipeline(src):
+            case Err(_): assert_true(false)
+            case Ok(p):
+                val r = expansion_rejection(p, four_templates())
+                step("Confirm the dangling dependency is refused")
+                expect(r.kind).to_equal("unresolved_reference")
+                expect(r.message).to_contain("ghost")
+
+    it "refuses an unsupported runPolicy":
+        """
+        Only the two declared policies exist; an unrecognized one would silently
+        pick a behaviour the author did not choose.
+        """
+        step("Decode a pipeline job with an invented runPolicy")
+        val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+                  "kind: Pipeline\n" +
+                  "metadata:\n" +
+                  "    name: policy\n" +
+                  "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: a\n" +
+                  "          jobTemplateRef: echo-linux\n" +
+                  "          runPolicy: maybe\n"
+        match decode_pipeline(src):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the policy is refused at its own path")
+                expect(r.kind).to_equal("unsupported_run_policy")
+                expect(r.path).to_equal("spec.jobs.0.runPolicy")
+
+    it "refuses a Job document offered where a Pipeline is expected":
+        """
+        Kind is checked before anything else, so a mis-filed document fails
+        loudly instead of decoding into a half-populated pipeline.
+        """
+        step("Decode the Job fixture as a Pipeline")
+        match decode_pipeline(file_read(F + "ci_job_process.sdn") ?? ""):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the kind mismatch is reported")
+                expect(r.kind).to_equal("unsupported_kind")
+                expect(r.message).to_contain("Pipeline")
+
+    it "orders jobs that were declared out of dependency order":
+        """
+        Authors list steps in whatever order reads best. The dependent step here
+        is declared FIRST, so declaration order is not a valid execution order —
+        the expansion must reorder rather than pass the list through.
+        """
+        step("Declare the dependent job before the two it waits for")
+        val src = "apiVersion: " + CI_API_VERSION_V1 + "\n" +
+                  "kind: Pipeline\n" +
+                  "metadata:\n" +
+                  "    name: reversed\n" +
+                  "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: publish\n" +
+                  "          jobTemplateRef: echo-publish\n" +
+                  "          runAfter: [build-linux, build-probe]\n" +
+                  "        - name: build-linux\n" +
+                  "          jobTemplateRef: echo-linux\n" +
+                  "        - name: build-probe\n" +
+                  "          jobTemplateRef: echo-probe\n"
+        match decode_pipeline(src):
+            case Err(_): assert_true(false)
+            case Ok(p):
+                step("Confirm the declared order really is publish-first")
+                expect(p.jobs[0].name).to_equal("publish")
+
+                step("Expand it")
+                val names = order_names(p, four_templates())
+
+                step("Confirm both builds now precede publish")
+                expect(names.len()).to_equal(3)
+                expect(names[0]).to_equal("build-linux")
+                expect(names[1]).to_equal("build-probe")
+                expect(names[2]).to_equal("publish")

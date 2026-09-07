@@ -1,0 +1,86 @@
+# Block-sequence entries are separate key scopes for duplicate-key reporting.
+#
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** N/A
+#
+# ## Overview
+#
+# `parse_with_issues` reports a repeated mapping key so a strict consumer can
+# refuse it. A block sequence writes the same key once per entry — `- name: a`
+# then `- name: b` — and those are two different objects, not a repeated key.
+# Reporting them as duplicates made every strict consumer refuse any
+# multi-entry sequence.
+#
+# ## Examples
+#
+# Regression + generalization for
+# `doc/08_tracking/bug/sdn_block_sequence_entries_reported_as_duplicate_keys_2026-09-07.md`.
+
+use std.spec.*
+use std.common.sdn.parser.{parse_with_issues}
+
+fn issue_kinds(source: text) -> [text]:
+    var out: [text] = []
+    match parse_with_issues(source):
+        case Err(_): out.push("parse-error")
+        case Ok(p):
+            for issue in p.1:
+                out.push(issue.kind + "@" + issue.path)
+    out
+
+describe "SDN duplicate-key reporting across block sequences":
+
+    it "reports no duplicate when each sequence entry repeats the same key":
+        """
+        A reader lists several objects in a block sequence. Each entry names its
+        own `name`; that is the shape of a list, not a repeated key, so nothing
+        is reported.
+        """
+        step("Parse a four-entry sequence where every entry has name and ref")
+        val src = "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: a\n" +
+                  "          ref: one\n" +
+                  "        - name: b\n" +
+                  "          ref: two\n" +
+                  "        - name: c\n" +
+                  "          ref: three\n" +
+                  "        - name: d\n" +
+                  "          ref: four\n"
+        val kinds = issue_kinds(src)
+
+        step("Confirm the parse succeeded and reported nothing")
+        expect(kinds.len()).to_equal(0)
+
+    it "still reports a key genuinely repeated inside one sequence entry":
+        """
+        The fix must not blind the check: repeating a key within a single entry
+        is still a silent last-wins change of intent.
+        """
+        step("Parse a sequence whose second entry declares ref twice")
+        val src = "spec:\n" +
+                  "    jobs:\n" +
+                  "        - name: a\n" +
+                  "          ref: one\n" +
+                  "        - name: b\n" +
+                  "          ref: two\n" +
+                  "          ref: three\n"
+        val kinds = issue_kinds(src)
+
+        step("Confirm exactly the in-entry repeat is reported")
+        expect(kinds.len()).to_equal(1)
+        expect(kinds[0]).to_start_with("duplicate_key@")
+
+    it "still reports a repeated key in an ordinary mapping":
+        """
+        Mappings outside any sequence are unaffected by the sequence rule.
+        """
+        step("Parse a mapping that declares name twice")
+        val src = "metadata:\n    name: one\n    ns: ci\n    name: two\n"
+        val kinds = issue_kinds(src)
+
+        step("Confirm the repeat is reported at its own path")
+        expect(kinds.len()).to_equal(1)
+        expect(kinds[0]).to_equal("duplicate_key@metadata.name")

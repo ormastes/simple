@@ -1,0 +1,284 @@
+# Simple CI orchestration contract (ORCH-003, research §12).
+#
+# `Pipeline` is the reusable definition, `Job` the unit of finite work. A
+# pipeline is APPLIED by expanding it into ordinary Jobs with declared
+# dependencies — the Job path stays the single execution path, so CI never gets
+# a second scheduler (research §12.1).
+#
+# This module is pure: it decodes and orders, it never launches anything. The
+# strict-decode toolkit is reused from `resource_v1`, not copied.
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, ObjectMetaV1, PodSpecV1,
+    reject, as_dict, as_array, as_text, as_int, only_known, require,
+    decode_pod_spec, decode_meta}
+
+pub const CI_API_VERSION_V1 = "ci.simple/v1alpha1"
+
+# Run only when every dependency succeeded.
+pub const RUN_POLICY_ON_SUCCESS = "on-success"
+# Run even after an upstream failure — for diagnostics collection. It never
+# converts a failed run into a successful one (research §12.2).
+pub const RUN_POLICY_ALWAYS = "always"
+
+pub struct JobV1:
+    meta: ObjectMetaV1
+    backoff_limit: i64
+    template: PodSpecV1
+
+pub struct PipelineJobV1:
+    name: text
+    job_template_ref: text
+    run_after: [text]
+    run_policy: text
+
+pub struct PipelineV1:
+    meta: ObjectMetaV1
+    jobs: [PipelineJobV1]
+
+# One pipeline node paired with the Job it expands to, in execution order.
+pub struct OrderedJobV1:
+    node: PipelineJobV1
+    job: JobV1
+
+fn strict_top(source: text, kind: text) -> Result<(Dict<text, SdnValue>, Dict<text, SdnSpan>), RejectionV1>:
+    var spans: Dict<text, SdnSpan> = {}
+    match parse_with_spans_and_issues(source):
+        case Err(e):
+            return Err(RejectionV1(kind: "parse", path: "", message: e, line: 0, col: 0))
+        case Ok(parsed):
+            spans = parsed.1
+            val issues = parsed.2
+            if issues.len() > 0:
+                val issue = issues[0]
+                return Err(RejectionV1(kind: issue.kind, path: issue.path,
+                                       message: issue.message, line: issue.line, col: issue.col))
+            match as_dict(parsed.0, "", spans):
+                case Err(r): return Err(r)
+                case Ok(top):
+                    match only_known(top, ["apiVersion", "kind", "metadata", "spec"], "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(_): pass
+                    match require(top, "apiVersion", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(av):
+                            match as_text(av, "apiVersion", spans):
+                                case Err(r): return Err(r)
+                                case Ok(s):
+                                    if s != CI_API_VERSION_V1:
+                                        return Err(reject("unsupported_api_version", "apiVersion",
+                                            "unsupported apiVersion '" + s + "'", spans))
+                    match require(top, "kind", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(kv):
+                            match as_text(kv, "kind", spans):
+                                case Err(r): return Err(r)
+                                case Ok(k):
+                                    if k != kind:
+                                        return Err(reject("unsupported_kind", "kind",
+                                            "expected kind '" + kind + "', found '" + k + "'", spans))
+                    return Ok((top, spans))
+    Err(RejectionV1(kind: "internal", path: "", message: "strict_top fell through", line: 0, col: 0))
+
+pub fn decode_job(source: text) -> Result<JobV1, RejectionV1>:
+    var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
+    var backoff = 0
+    var template = PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: [])
+    match strict_top(source, "Job"):
+        case Err(r): return Err(r)
+        case Ok(parsed):
+            val top = parsed.0
+            val spans = parsed.1
+            match require(top, "metadata", "document", spans):
+                case Err(r): return Err(r)
+                case Ok(mv):
+                    match decode_meta(mv, "metadata", spans):
+                        case Err(r): return Err(r)
+                        case Ok(m): meta = m
+            match require(top, "spec", "document", spans):
+                case Err(r): return Err(r)
+                case Ok(sv):
+                    match as_dict(sv, "spec", spans):
+                        case Err(r): return Err(r)
+                        case Ok(sf):
+                            match only_known(sf, ["backoffLimit", "template"], "spec", spans):
+                                case Err(r): return Err(r)
+                                case Ok(_): pass
+                            if sf.contains_key("backoffLimit"):
+                                match as_int(sf["backoffLimit"], "spec.backoffLimit", spans):
+                                    case Err(r): return Err(r)
+                                    case Ok(n):
+                                        if n < 0:
+                                            return Err(reject("range", "spec.backoffLimit",
+                                                "backoffLimit must be >= 0", spans))
+                                        backoff = n
+                            match require(sf, "template", "spec", spans):
+                                case Err(r): return Err(r)
+                                case Ok(tv):
+                                    match as_dict(tv, "spec.template", spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(tf):
+                                            match only_known(tf, ["spec"], "spec.template", spans):
+                                                case Err(r): return Err(r)
+                                                case Ok(_): pass
+                                            match require(tf, "spec", "spec.template", spans):
+                                                case Err(r): return Err(r)
+                                                case Ok(tsv):
+                                                    match decode_pod_spec(tsv, "spec.template.spec", spans):
+                                                        case Err(r): return Err(r)
+                                                        case Ok(ps): template = ps
+    Ok(JobV1(meta: meta, backoff_limit: backoff, template: template))
+
+fn decode_pipeline_job(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<PipelineJobV1, RejectionV1>:
+    var name = ""
+    var ref_name = ""
+    var run_after: [text] = []
+    var policy = RUN_POLICY_ON_SUCCESS
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["name", "jobTemplateRef", "runAfter", "runPolicy"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            match require(fields, "name", path, spans):
+                case Err(r): return Err(r)
+                case Ok(nv):
+                    match as_text(nv, path + ".name", spans):
+                        case Err(r): return Err(r)
+                        case Ok(s): name = s
+            if name == "":
+                return Err(reject("empty_field", path + ".name", "pipeline job name is empty", spans))
+            match require(fields, "jobTemplateRef", path, spans):
+                case Err(r): return Err(r)
+                case Ok(rv):
+                    match as_text(rv, path + ".jobTemplateRef", spans):
+                        case Err(r): return Err(r)
+                        case Ok(s): ref_name = s
+            if ref_name == "":
+                return Err(reject("empty_field", path + ".jobTemplateRef",
+                    "jobTemplateRef is empty", spans))
+            if fields.contains_key("runAfter"):
+                val rpath = path + ".runAfter"
+                match as_array(fields["runAfter"], rpath, spans):
+                    case Err(r): return Err(r)
+                    case Ok(items):
+                        var i = 0
+                        while i < items.len():
+                            match as_text(items[i], rpath + "." + i.to_text(), spans):
+                                case Err(r): return Err(r)
+                                case Ok(s):
+                                    if run_after.contains(s):
+                                        return Err(reject("duplicate_dependency", rpath,
+                                            "duplicate runAfter entry '" + s + "'", spans))
+                                    run_after.push(s)
+                            i = i + 1
+            if fields.contains_key("runPolicy"):
+                match as_text(fields["runPolicy"], path + ".runPolicy", spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): policy = s
+                if policy != RUN_POLICY_ON_SUCCESS and policy != RUN_POLICY_ALWAYS:
+                    return Err(reject("unsupported_run_policy", path + ".runPolicy",
+                        "unsupported runPolicy '" + policy + "'", spans))
+    Ok(PipelineJobV1(name: name, job_template_ref: ref_name,
+                     run_after: run_after, run_policy: policy))
+
+pub fn decode_pipeline(source: text) -> Result<PipelineV1, RejectionV1>:
+    var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
+    var jobs: [PipelineJobV1] = []
+    match strict_top(source, "Pipeline"):
+        case Err(r): return Err(r)
+        case Ok(parsed):
+            val top = parsed.0
+            val spans = parsed.1
+            match require(top, "metadata", "document", spans):
+                case Err(r): return Err(r)
+                case Ok(mv):
+                    match decode_meta(mv, "metadata", spans):
+                        case Err(r): return Err(r)
+                        case Ok(m): meta = m
+            match require(top, "spec", "document", spans):
+                case Err(r): return Err(r)
+                case Ok(sv):
+                    match as_dict(sv, "spec", spans):
+                        case Err(r): return Err(r)
+                        case Ok(sf):
+                            match only_known(sf, ["jobs"], "spec", spans):
+                                case Err(r): return Err(r)
+                                case Ok(_): pass
+                            val jpath = "spec.jobs"
+                            match require(sf, "jobs", "spec", spans):
+                                case Err(r): return Err(r)
+                                case Ok(jv):
+                                    match as_array(jv, jpath, spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(items):
+                                            var i = 0
+                                            while i < items.len():
+                                                match decode_pipeline_job(items[i], jpath + "." + i.to_text(), spans):
+                                                    case Err(r): return Err(r)
+                                                    case Ok(pj):
+                                                        var seen: [text] = []
+                                                        for existing in jobs:
+                                                            seen.push(existing.name)
+                                                        if seen.contains(pj.name):
+                                                            return Err(reject("duplicate_pipeline_job", jpath,
+                                                                "duplicate pipeline job name '" + pj.name + "'", spans))
+                                                        jobs.push(pj)
+                                                i = i + 1
+                            if jobs.len() == 0:
+                                return Err(reject("empty_field", jpath, "spec.jobs must not be empty", spans))
+    Ok(PipelineV1(meta: meta, jobs: jobs))
+
+# Expand a Pipeline into its Jobs in a deterministic execution order.
+#
+# Refuses: a `jobTemplateRef` with no matching Job, a `runAfter` naming a job
+# the pipeline does not declare, a self-edge, and any dependency cycle. Order is
+# Kahn's algorithm with declaration-order tie-breaking, so the same pipeline
+# always expands to the same sequence.
+pub fn expand_pipeline(p: PipelineV1, templates: Dict<text, JobV1>) -> Result<[OrderedJobV1], RejectionV1>:
+    val no_spans: Dict<text, SdnSpan> = {}
+    var declared: [text] = []
+    for node in p.jobs:
+        declared.push(node.name)
+    var i = 0
+    while i < p.jobs.len():
+        val node = p.jobs[i]
+        val npath = "spec.jobs." + i.to_text()
+        if not templates.contains_key(node.job_template_ref):
+            return Err(reject("unresolved_reference", npath + ".jobTemplateRef",
+                "no Job named '" + node.job_template_ref + "' was supplied", no_spans))
+        for dep in node.run_after:
+            if dep == node.name:
+                return Err(reject("dependency_cycle", npath + ".runAfter",
+                    "job '" + node.name + "' depends on itself", no_spans))
+            if not declared.contains(dep):
+                return Err(reject("unresolved_reference", npath + ".runAfter",
+                    "runAfter names '" + dep + "', which this pipeline does not declare", no_spans))
+        i = i + 1
+
+    var ordered: [OrderedJobV1] = []
+    var placed: [text] = []
+    while ordered.len() < p.jobs.len():
+        var progressed = false
+        var j = 0
+        while j < p.jobs.len():
+            val node = p.jobs[j]
+            if not placed.contains(node.name):
+                var ready = true
+                for dep in node.run_after:
+                    if not placed.contains(dep):
+                        ready = false
+                if ready:
+                    ordered.push(OrderedJobV1(node: node, job: templates[node.job_template_ref]))
+                    placed.push(node.name)
+                    progressed = true
+            j = j + 1
+        if not progressed:
+            var stuck = ""
+            for node in p.jobs:
+                if not placed.contains(node.name) and stuck == "":
+                    stuck = node.name
+            return Err(reject("dependency_cycle", "spec.jobs",
+                "dependency cycle reaches job '" + stuck + "'", no_spans))
+    Ok(ordered)
