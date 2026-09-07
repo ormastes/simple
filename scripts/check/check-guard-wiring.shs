@@ -207,6 +207,52 @@ scan_wiring() {
                 done
         done < "$_wd/reffiles" >> "$_wd/hits"
     fi
+
+    # 3b. MANIFEST-DRIVEN INVOCATION IS REAL WIRING, and the textual BFS above
+    #     cannot see it. config/check/must_check_gates.sdn rows whose tier is
+    #     `bootstrap` and whose mode is `automated` are executed VERBATIM by
+    #     check-bootstrap-must-pass.shs -- `run_automated_gate "$_command"` ->
+    #     `sh -c "$_gate_command"` (:270-272, reached from the row loop at :538)
+    #     -- and that runner is driven from CI by
+    #     .github/workflows/rust-bootstrap-multiplatform.yml (also play-tests.yml
+    #     and aot-lane-fences.yml) through scripts/bootstrap/bootstrap-from-
+    #     scratch.sh. The manifest is a DATA file and bootstrap-from-scratch.sh
+    #     lives outside the guard node set, so neither ever enters the frontier
+    #     (only guard basenames do) and every edge they carry was silently
+    #     discarded. Nine guards that a CI lane genuinely runs on every bootstrap
+    #     were therefore recorded as unwired debt.
+    #
+    #     ONLY mode=automated is credited. An `external-receipt` row is
+    #     VALIDATED, never executed (validate_external_gate_receipt, :513), so it
+    #     is not an invocation and the receipt-verifier guard those rows name
+    #     stays in the baseline. (Deliberately not spelled out here: this file is
+    #     itself reached, so writing a guard's basename in a COMMENT would forge
+    #     the very edge this gate exists to disbelieve. Measured -- naming it
+    #     wired 10 guards by accident.) Push-tier rows are not credited here
+    #     either: they are
+    #     dispatched by hardcoded arms in check-push-must-pass.shs, which the
+    #     textual scan already sees -- and see the dead-arm exclusion in 3a for
+    #     why "an arm exists" is not the same as "an arm runs".
+    #
+    #     The edge is keyed on the runner's own path, so it only fires once the
+    #     runner is itself reached. If the runner ever becomes unreachable these
+    #     edges stop firing and the guards become orphans -- the ratchet FAILs,
+    #     which is the safe direction for a gate.
+    _bootrunner="$_root/scripts/check/check-bootstrap-must-pass.shs"
+    _manifest_file="$_root/config/check/must_check_gates.sdn"
+    if [ -f "$_bootrunner" ] && [ -f "$_manifest_file" ]; then
+        awk -F, -v R="$_bootrunner" '
+            /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+                tier=$2; mode=$4; cmd=$5
+                gsub(/[ \t]/, "", tier); gsub(/[ \t]/, "", mode)
+                if (tier != "bootstrap" || mode != "automated") next
+                while (match(cmd, /[A-Za-z0-9_.-]+\.shs/)) {
+                    printf "%s\t%s\n", R, substr(cmd, RSTART, RLENGTH)
+                    cmd = substr(cmd, RSTART + RLENGTH)
+                }
+            }' "$_manifest_file" >> "$_wd/hits" 2>/dev/null || :
+    fi
+
     # A file never counts as invoking itself.
     awk -F'\t' '{n=$1; sub(/.*\//,"",n); if (n != $2) print}' "$_wd/hits" |
         sort -u > "$_wd/edges"
@@ -419,6 +465,32 @@ selftest() {
     _assert "baselined guard that no longer exists is stale" "st-gone.shs" \
         "$(printf 'st-gone.shs\n' | comm -23 - "$_w/guards" | tr '\n' ' ' | sed 's/ *$//')"
 
+    # MANIFEST-CREDIT fixtures, on their own tree so the counts asserted above
+    # stay stable. A guard named in a tier=bootstrap, mode=automated row of
+    # config/check/must_check_gates.sdn is EXECUTED by
+    # check-bootstrap-must-pass.shs and must be reached even though no shell
+    # script names it; a guard named only in an external-receipt row is
+    # VALIDATED, not executed, and must stay an orphan.
+    _tm=$(mktemp -d) || return 1
+    mkdir -p "$_tm/scripts/check" "$_tm/config/check" "$_tm/.github/workflows"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/check-bootstrap-must-pass.shs"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/st-boot.shs"
+    printf '#!/bin/sh\n' > "$_tm/scripts/check/st-ext.shs"
+    printf 'run: sh scripts/check/check-bootstrap-must-pass.shs\n' \
+        > "$_tm/.github/workflows/w.yml"
+    {
+        echo 'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|'
+        echo '    st-boot, bootstrap, false, automated, "sh scripts/check/st-boot.shs", -, -, "executed"'
+        echo '    st-ext, bootstrap, false, external-receipt, "sh scripts/check/st-ext.shs", -, -, "validated only"'
+    } > "$_tm/config/check/must_check_gates.sdn"
+    printf '# fixture\n' > "$_tm/optout.txt"
+    _wm=$(mktemp -d) || return 1
+    scan_wiring "$_tm" "$_tm/optout.txt" "$_wm"
+    _assert "manifest automated row wires its guard" yes \
+        "$($GREP -qx 'st-boot.shs' "$_wm/reached" && echo yes || echo no)"
+    _assert "manifest external-receipt row does NOT wire its guard" yes \
+        "$($GREP -qx 'st-ext.shs' "$_wm/orphans" && echo yes || echo no)"
+
     # Hook-shape fixtures exercise the exact canonical-copy exception. This is
     # intentionally inside the gate's selftest so future broad exemptions or a
     # basename-only check cannot silently accept a stale launcher again.
@@ -458,13 +530,13 @@ selftest() {
     _assert "untracked hook symlink rejected" 1 \
         "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
 
-    rm -rf "$_t" "$_w" "$_w2" "$_hw"
+    rm -rf "$_t" "$_w" "$_w2" "$_hw" "$_tm" "$_wm"
     if [ "$_fail" -ne 0 ]; then
         echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 20/20 fixtures correct"
+    echo "check-guard-wiring: selftest 22/22 fixtures correct"
     return 0
 }
 
