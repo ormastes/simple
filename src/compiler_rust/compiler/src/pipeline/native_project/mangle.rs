@@ -223,6 +223,32 @@ pub(crate) fn mangle_mir(
         local_mangled.insert(func.name.clone(), mangled);
     }
 
+    // `expand_with_outlined` (codegen/shared.rs, called by both the LLVM/AOT
+    // and Cranelift/JIT backends) names a lambda's outlined body
+    // `"{parent_func_name}_outlined_{block_id}"`, using the PARENT's name AT
+    // OUTLINING TIME (i.e. after this mangling pass has already renamed the
+    // parent, since outlining runs later, per-backend, in `compile()`).
+    // `MirInst::ClosureCreate::func_name`, however, is baked at MIR-lowering
+    // time using the parent's name BEFORE mangling — e.g. `main` becomes
+    // `main_outlined_1`, but Phase 1 below renames the parent function itself
+    // to `spl_main` (entry) or `{prefix}__main` (non-entry), so the outlined
+    // function ends up defined as `spl_main_outlined_1` /
+    // `{prefix}__main_outlined_1` while the closure still points at the
+    // stale, never-defined `main_outlined_1`. `compile_closure_create`
+    // (codegen/llvm/functions/objects.rs) silently falls back to a NULL
+    // function pointer when `module.get_function(func_name)` misses, so
+    // every call through that closure VALUE loaded and called a null
+    // pointer — measured exit 133 (SIGTRAP) / 139 (SIGSEGV). Precompute the
+    // old-prefix -> new-prefix rename table here, before Phase 1 mutates
+    // `func.name`, so Phase 3 can rewrite `ClosureCreate::func_name` to match
+    // the name the outlined function will actually be given.
+    // See doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md.
+    let outlined_name_rename: Vec<(String, String)> = local_mangled
+        .iter()
+        .filter(|(old, new)| old.as_str() != new.as_str())
+        .map(|(old, new)| (format!("{old}_outlined_"), format!("{new}_outlined_")))
+        .collect();
+
     // Build local suffix index from this module's known names.
     let mut local_suffix_index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for resolved in local_mangled
@@ -452,6 +478,18 @@ pub(crate) fn mangle_mir(
                                 prefix,
                                 &mut unresolved_count,
                             );
+                        }
+                    }
+                    MirInst::ClosureCreate { func_name, .. } => {
+                        // Rewrite the stale pre-mangling outlined name (see
+                        // `outlined_name_rename` above) so it matches the
+                        // name `expand_with_outlined` will later give the
+                        // outlined function once it is actually emitted.
+                        for (old_prefix, new_prefix) in &outlined_name_rename {
+                            if let Some(suffix) = func_name.strip_prefix(old_prefix.as_str()) {
+                                *func_name = format!("{new_prefix}{suffix}");
+                                break;
+                            }
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {

@@ -80,3 +80,82 @@ Both reproductions above were run via the fast single-file native-build probe
 against `build/seedfix/bootstrap/simple run` (interpreter) for the same
 source. No fixture files were left in the tree; recreate from the snippets
 above to reproduce.
+
+## RESOLVED 2026-09-07 — root cause and fix
+
+Confirmed via `SIMPLE_DUMP_IR=1 SIMPLE_DUMP_IR_FILTER=main` (LLVM IR dump env
+vars already wired in `functions.rs::compile_function`). Two independent
+defects, both in the LLVM/native pipeline, both required to reproduce and fix
+in order:
+
+**Defect 1 — the LLVM backend never outlined lambda bodies into standalone
+functions.** `codegen::shared::expand_with_outlined` (used by the
+Cranelift/JIT `compile_all_functions` path) splits a lambda's body block out
+of its parent `MirFunction` into its own top-level function. The LLVM
+backend's `NativeBackend::compile` (`codegen/llvm/backend_core.rs`) iterated
+`module.functions` directly and never called it. The dumped IR for
+reproducer A showed the lambda body surviving only as `bb1: ; No
+predecessors!` still inside `@spl_main`, with no `@main_outlined_1` function
+anywhere in the module. `compile_closure_create`
+(`codegen/llvm/functions/objects.rs`) does
+`module.get_function(func_name).unwrap_or_else(|| i8_ptr_type.const_null())`
+— missing the function, it silently stored a NULL function pointer into the
+closure's fn-ptr slot. The indirect call then loaded and called that null
+pointer.
+  - Fix: `LlvmBackend::compile` now calls `expand_with_outlined(module)` and
+    rebinds `module` to a clone with the expanded function list, before any
+    other use of `module.functions`
+    (`codegen/llvm/backend_core.rs`, in `compile`).
+
+**Defect 2 (uncovered only after fixing #1) — the AOT name mangler never
+rewrote `ClosureCreate::func_name`.** `pipeline/native_project/mangle.rs`'s
+`mangle_mir` renames every local function with a body (`main` → `spl_main`
+for the entry module, others → `{prefix}__{name}`) in Phase 1, and rewrites
+`Call`/`InterpCall`/`MethodCallStatic` targets in Phase 3 — but had no arm
+for `MirInst::ClosureCreate`. `ClosureCreate::func_name` is baked at
+MIR-lowering time as `"{parent_name}_outlined_{block_id}"` using the
+PARENT's PRE-mangling name, while `expand_with_outlined` (which runs later,
+per-backend, off the POST-mangling MIR) names the actual outlined function
+after the parent's NEW (mangled) name. So even with Defect 1 fixed, the
+outlined function was genuinely defined (e.g. `@spl_main_outlined_1`), but
+the closure's `func_name` field still said the stale `main_outlined_1`
+(dumped IR: `declare weak i64 @spl_main_outlined_1(i64, i64)` alongside a
+`ClosureCreate` whose recorded name, per the MIR dump, remained
+`main_outlined_1`) — a second, independent miss on the same
+`module.get_function` lookup, same NULL-function-pointer consequence.
+  - Fix: `mangle_mir` now precomputes an old-prefix → new-prefix rename
+    table from `local_mangled` (only for names that actually change) before
+    Phase 1 mutates `func.name`, and Phase 3 gained a `ClosureCreate` arm
+    that rewrites `func_name` through that table
+    (`pipeline/native_project/mangle.rs`).
+
+This is NOT narrow to `main`: any local function whose name is mangled (i.e.
+every local function with a body compiled through this AOT pipeline) had the
+same closure-outlining name mismatch, so this second defect explains the
+broad "affects every closure call under native codegen" scope suspected but
+not confirmed in the original write-up above.
+
+### Verified before/after (aarch64-apple-darwin, LLVM backend, single-file probe)
+
+| Repro | Before | After | Interpreter |
+|---|---|---|---|
+| A (plain local closure) | exit 133 (SIGTRAP) | prints `10`, exit 0 | prints `10` |
+| B (closure read from a class field) | exit 139 (SIGSEGV) | prints `10`, exit 0 | prints `10` |
+
+`sh scripts/check/check-c-runtime-compiles-push.shs` — `PASS — 129 file(s)
+compiled, 0 errors (6 skipped for unavailable external dependencies)`.
+f64 regression check (the `9c67bd56fa4` fix in this same backend) re-verified
+unaffected: `val a: f64 = 1.5; val b: f64 = 2.5; println("{a + b}")` still
+prints `4.0` natively.
+
+Additional probes (capturing closures — the two original repros are both
+non-capturing) verified against the interpreter, all matching:
+
+| Probe | Native | Interpreter |
+|---|---|---|
+| one capture: `val k = 3; val f = \x: x * k; f(5)` | `15`, rc=0 | `15` |
+| two params/two captures: `val a=3; val b=4; val f = \x,y: x*a+y*b; f(5,6)` | `39`, rc=0 | `39` |
+| string capture: `val s = "ab"; val f = \x: "{s}{x}"; f(1)` | `ab1`, rc=0 | `ab1` |
+
+Full-CLI Stage-4 relink and `simple test` acceptance status: see the commit
+that lands this fix and, if present, a follow-up note below.
