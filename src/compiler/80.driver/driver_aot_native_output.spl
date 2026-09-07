@@ -278,6 +278,18 @@ fn driver_native_nonempty_failure_detail(detail: text) -> text:
 
 fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
                                        name: text, detail: text):
+    # Emit the detail HERE, at the moment it is known, in addition to storing
+    # it. The stored copy is not always readable back: on a REPEAT compile of a
+    # module name already built in this workspace, the end-of-build summary
+    # renders `reason: (none recorded — BUG in the producer: a non-OK unit must
+    # carry a diagnostic)` even though this function ran. Measured 2026-09-07;
+    # the first-ever compile of a name reports its reason, a repeat does not,
+    # and a fresh --cache-dir does not reset it. Streaming the text costs one
+    # line per FAILED module -- the same set the summary already names -- and
+    # cannot be lost by a later field read. This is what made the capsule
+    # source/disk digests readable at all.
+    print "[native-compile-failed] {name}: {detail}"
+    _sffi_stdout_flush()
     outcomes.record(BuildUnitOutcome(
         unit_id: unit_id, source_path: name,
         kind: driver_native_classify_module_failure_v1(detail),
@@ -434,9 +446,47 @@ fn driver_native_module_source_identity(
     identity
 
 fn driver_native_disk_source_identity(source_path: text) -> text:
-    match SourceFile.load(source_path):
-        case Ok(source): sha256_text(source.content)
-        case Err(_): ""
+    """sha256 of the bytes currently on disk at `source_path`; "" when absent.
+
+    Read the file DIRECTLY rather than through `SourceFile.load` + a
+    match-bound payload field. Measured 2026-09-07 on a Stage-2-compiled
+    compiler (sha256 a11d1c06…848a95): the previous form
+
+        match SourceFile.load(source_path):
+            case Ok(source): sha256_text(source.content)
+            case Err(_): ""
+
+    returned `sha256_text(source_path)` -- the digest of the PATH STRING --
+    because the `case Ok(source)` payload's `.content` read yielded field 0
+    (`path`) instead of `content`. Proven twice with distinct modules: for
+    `build/capsule-repro/sub/hw_fresh_a.spl` it produced
+    009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b, which is
+    exactly `sha256` of that path text, while the correct content digest is
+    2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a; the same
+    held for `hw_fresh_b.spl` (47d1543b…). Interpreted under the Rust seed the
+    identical expression returns the correct content digest, so this is a
+    native-codegen field-binding defect, not a source-level one. Its effect was
+    that EVERY capsule verification compared a content digest against a path
+    digest and reported `native-capsule-source-mutated`, which is what blocked
+    Stage 2's sanity gate on a three-line hello world.
+
+    Reading the raw bytes is also the STRICTLY CORRECT counterpart of the
+    frozen side: `source_identity` is `sha256_text(source.content)` over
+    content that `_driver_cached_entry_source_scan` obtained from a raw
+    `rt_file_read_text`, never through `SourceFile.load`. `SourceFile.load`
+    additionally strips a coverage-wrapper marker line
+    (`source_file_coverage_identity`), so for `simple_cov_*` /
+    `spipe_wrapped_*` inputs it would have disagreed with the frozen digest
+    even with correct codegen. The `""`-on-empty behaviour matches
+    `SourceFile.load`, which returns Err for an empty file.
+
+    The underlying field-binding defect is NOT fixed here and is tracked in
+    doc/08_tracking/bug/stage2_capsule_source_mutated_and_unreportable_reason_2026-09-07.md
+    -- it will misread any other `case Ok(record):` field read the same way.
+    """
+    val content = _sffi_file_read_text(source_path) ?? ""
+    if content == "": return ""
+    sha256_text(content)
 
 fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
@@ -450,9 +500,47 @@ fn driver_native_module_source_identity(
     if count == 1: identity else: ""
 
 fn driver_native_disk_source_identity(source_path: text) -> text:
-    match SourceFile.load(source_path):
-        case Ok(source): sha256_text(source.content)
-        case Err(_): ""
+    """sha256 of the bytes currently on disk at `source_path`; "" when absent.
+
+    Read the file DIRECTLY rather than through `SourceFile.load` + a
+    match-bound payload field. Measured 2026-09-07 on a Stage-2-compiled
+    compiler (sha256 a11d1c06…848a95): the previous form
+
+        match SourceFile.load(source_path):
+            case Ok(source): sha256_text(source.content)
+            case Err(_): ""
+
+    returned `sha256_text(source_path)` -- the digest of the PATH STRING --
+    because the `case Ok(source)` payload's `.content` read yielded field 0
+    (`path`) instead of `content`. Proven twice with distinct modules: for
+    `build/capsule-repro/sub/hw_fresh_a.spl` it produced
+    009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b, which is
+    exactly `sha256` of that path text, while the correct content digest is
+    2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a; the same
+    held for `hw_fresh_b.spl` (47d1543b…). Interpreted under the Rust seed the
+    identical expression returns the correct content digest, so this is a
+    native-codegen field-binding defect, not a source-level one. Its effect was
+    that EVERY capsule verification compared a content digest against a path
+    digest and reported `native-capsule-source-mutated`, which is what blocked
+    Stage 2's sanity gate on a three-line hello world.
+
+    Reading the raw bytes is also the STRICTLY CORRECT counterpart of the
+    frozen side: `source_identity` is `sha256_text(source.content)` over
+    content that `_driver_cached_entry_source_scan` obtained from a raw
+    `rt_file_read_text`, never through `SourceFile.load`. `SourceFile.load`
+    additionally strips a coverage-wrapper marker line
+    (`source_file_coverage_identity`), so for `simple_cov_*` /
+    `spipe_wrapped_*` inputs it would have disagreed with the frozen digest
+    even with correct codegen. The `""`-on-empty behaviour matches
+    `SourceFile.load`, which returns Err for an empty file.
+
+    The underlying field-binding defect is NOT fixed here and is tracked in
+    doc/08_tracking/bug/stage2_capsule_source_mutated_and_unreportable_reason_2026-09-07.md
+    -- it will misread any other `case Ok(record):` field read the same way.
+    """
+    val content = _sffi_file_read_text(source_path) ?? ""
+    if content == "": return ""
+    sha256_text(content)
 
 pub fn driver_native_capsule_result_reason_v1(
     capsule: FrozenNativeModuleCapsuleV1
