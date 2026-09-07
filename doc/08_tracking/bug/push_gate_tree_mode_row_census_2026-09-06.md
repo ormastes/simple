@@ -234,6 +234,42 @@ rotted rc=2
   selftest FAIL: --rev did not read committed content (exit 1): FAIL — 3 file(s) checked, 1 offender(s) (0 changed, 0 new, 1 stale-baseline, 0 stale-roster): zz_not_a_real_file.c
 ```
 
+### Injections measured 2026-09-07 for the three rows converted that day
+
+```
+=== port-io-single-owner, axis 1 (scan root -> checkout) ===
+rotted rc=2
+  selftest: fixture 4 --rev did not read committed content, got [FAIL — 2 declaring file(s) checked, 1 must not declare rt_port_* externs]
+  axis 2: N/A — this guard has no baseline and no allowlist file (stated in the script header)
+
+=== interpreter-extern-registry-gap, axis 1 (scan root -> checkout, baseline still from rev) ===
+rotted rc=2
+  selftest rev-reads-committed-content  FAIL(... FAIL — 3 symbol(s) checked, 1 new, 0 stale — new: rt_zz )
+=== interpreter-extern-registry-gap, axis 2 (baseline -> checkout, scan root still the rev) ===
+rotted rc=2
+  selftest rev-reads-committed-content  FAIL(... FAIL — 2 symbol(s) checked, 0 new, 1 stale — stale: rt_nonexistent )
+
+=== no-direct-rt, axis 1 (scan root -> checkout) ===
+rotted rc=2
+  ERROR — selftest failed: --rev did not read committed content, got [FAIL — forbidden direct rt_* count 2 exceeds baseline 1 (roots=src, src=2), extern_decls=0; top offenders: src/lib/two.spl:1 src/lib/one.spl:1 ]
+=== no-direct-rt, axis 2 (baseline -> checkout) ===
+rotted rc=2
+  ERROR — selftest failed: --rev did not read committed content, got [PASS — 1 file(s) scanned (roots=src, src=1), forbidden=1, extern_decls=0 (baseline 9)]
+=== no-direct-rt, axis 2b (ALLOWLIST -> checkout) ===
+rotted rc=2
+  ERROR — selftest failed: --rev did not read committed content, got [PASS — 1 file(s) scanned (roots=src, src=0), forbidden=0, extern_decls=0 (baseline 1)]
+```
+
+Note the shape of the two `no-direct-rt` axis-2 rots: both produce a **PASS**,
+not an error — a silently wrong read of the ratchet's own floor. That is the
+`rt-src-list` failure mode this section was written about, and it is now caught.
+
+**A ratchet can have MORE than two rot axes.** `no-direct-rt` has three,
+because its verdict depends on two separate data files (baseline and
+allowlist), and a conversion that moves one and not the other is still wrong.
+Count the data inputs before writing the fixture; "two axes" is a floor, not a
+specification.
+
 **Every future conversion must run BOTH injections.** A fixture proven on one
 axis is proven on one axis. (`type-walk` fixture 7 dirties only the allowlist,
 so its sources half rests on the real-repo tree-vs-rev comparison rather than on
@@ -250,12 +286,12 @@ the fixture — weaker, and stated here rather than glossed.)
 | 3 | `push-ui-slim-closure-cli-entry` | `check-ui-slim-closure.shs` | no | as above | TODO |
 | 4 | `push-ui-slim-pack-inventory` | `check-ui-slim-pack-inventory.shs` | no | `--rev`; also needs `config/ui/pack_prefixes.sdn` from the rev | TODO |
 | 5 | `push-c-runtime-compiles` | `check-c-runtime-compiles-push.shs` | **yes** | **materialise + `--root`** — it must feed real `.c`/`.h` files to `clang -fsyntax-only`. Already accepts `--root`, so the dispatch change is `git archive <rev> -- src/runtime` into a temp dir and pass it. Include paths must resolve inside the materialised tree. | TODO |
-| 6 | `push-no-direct-rt` | `check-no-direct-rt.shs --roots src` | **yes** | `--rev` over `':(glob)src/**/*.spl'` plus `no_direct_rt_baseline.txt` and `no_direct_rt_allowlist.txt` from the rev. Already accepts `--root`. Largest single win after the two below. | TODO |
+| 6 | `push-no-direct-rt` | `check-no-direct-rt.shs --roots src` | **yes** | `--rev` over `':(glob)<root>/**/*.spl'` for each `--roots` entry, plus `no_direct_rt_baseline.txt` and `no_direct_rt_allowlist.txt` from the rev. Implemented by relocating `ROOT` itself, since `ALLOWLIST` and `BASELINE_FILE` are both derived from it — so all three inputs move together and cannot drift apart. **THREE rot axes here, not two**: scan root, baseline, and allowlist; fixture 17 injects all three and each was verified caught (below). Measured at conversion: the working checkout scanned 16342 `.spl` where the commit has 16318 — 24 untracked files the gate was counting and no push contained. | **DONE 2026-09-07** |
 | 7 | `push-guard-wiring` | `check-guard-wiring.shs` | **yes** | `--rev`. Design settled, no split needed: the guard ENUMERATION switches from `git ls-files` to `git ls-tree -r --name-only $REV --` (a `git archive` extraction has no `.git`, so `ls-files` there returns nothing — fail-closed, but broken), while the installed-hook check stays on the working machine, since "is the hook installed here" really is a property of this host. One script, `--rev` gating one loop. | TODO |
 | 8 | `push-sosix-capsule-boundaries` | `check-sosix-capsule-boundaries.shs` | no | `--rev`; small (105 lines), accepts `--root` | TODO |
 | 9 | `push-perf-regression-tests` | `check-perf-regression-tests.shs` | no | `--rev` over source text | TODO |
 | 10 | `push-process-wait-eintr-retry` | `check-process-wait-eintr-retry.shs` | no | `--rev`; small (91 lines) | TODO |
-| 11 | `push-interpreter-extern-registry-gap` | `check-interpreter-extern-registry-gap.shs --scan-only` | **yes** | `--rev`; accepts `--root`. **RED at origin/main — see below.** | TODO |
+| 11 | `push-interpreter-extern-registry-gap` | `check-interpreter-extern-registry-gap.shs --scan-only` | **yes** | `--rev` over `':(glob)src/compiler/**/*.spl'` + `interpreter_extern/mod.rs` + the frozen baseline. The baseline path was previously resolved from `repo_root` and so did **not** follow `--root`; it now resolves against the scanned tree, which is what makes the second rot axis coverable at all. Fixture 7 injects both axes. No longer red at origin/main (repaired by another lane). Caveat recorded: the push row's `--scan-only` skips the selftest, so the fixture is enforced by the separate bootstrap-tier row `interpreter-extern-registry-gap-selftest`, not on the push path — the same is true of `push-type-walk-constructor-parity`. | **DONE 2026-09-07** |
 | 12 | `push-sffi-v2-authority` | `check-sffi-v2-authority.shs` | **yes** | 102-line wrapper over 46 separate `scripts/audit/*.shs` guards with **zero selftest**. Per-script `--rev` is infeasible, but the fix is still one commit: `git worktree add --detach $WORK $REV` then run the wrapper with cwd inside `$WORK`. A detached worktree (not `git archive`) is required precisely because the 46 sub-guards may run git themselves. Add the missing selftest in the same change — a 46-guard wrapper with no fixtures cannot be shown to discriminate at all. **RED at origin/main — see below.** | TODO |
 | 13 | `push-type-walk-constructor-parity` | `check-type-walk-constructor-parity.shs --scan-only` | **yes** | `--rev` — reads exactly 3 files | **DONE** |
 | 14 | `push-shs-path-conversion-equivalence` | `check-shs-path-conversion-equivalence.shs` | no | scan half is source text → `--rev`. The *exec* half needs `cygpath` and is NOT RUN off Windows; that half is genuinely host-scoped. | TODO (split) |

@@ -62,6 +62,14 @@
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs            # scan
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --root DIR
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs --rev REV
+#       Scan the COMMITTED tree at REV instead of the working checkout — the
+#       declared set, the registry AND the frozen baseline all come from REV.
+#       This is what the push hook passes; as a `tree`-mode row this gate read
+#       whatever happened to be checked out, which under concurrent agent load
+#       is not the commit being pushed. Selftest fixture 7 pins that the two
+#       paths disagree, on both rot axes. See
+#       doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --generate-baseline
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --selftest
 #
@@ -74,7 +82,10 @@ export LC_ALL
 self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$self_dir/../.." && pwd)
 
-BASELINE_DEFAULT="$repo_root/scripts/check/interpreter_extern_gap_baseline.txt"
+# The baseline path is resolved against the SCANNED tree, after --root/--rev are
+# known (see main): a scan of committed content compared against the working
+# copy's baseline is still a wrong-tree verdict.
+BASELINE_REL="scripts/check/interpreter_extern_gap_baseline.txt"
 
 # --- extraction -------------------------------------------------------------
 # $1 = tree root, $2 = out file. Declarations of `extern fn rt_*` in the
@@ -222,13 +233,58 @@ selftest() {
     _report wrapped-macro-rows-counted OK
   else _report wrapped-macro-rows-counted FAIL; _fail=1; fi
 
+  # 7. --rev must read COMMITTED content on BOTH of its halves, and the two
+  #    paths must DISAGREE. A fixture proving only that --rev does not crash is
+  #    worthless: the regression is a silently WRONG verdict.
+  #
+  #    Two independent rot axes are injected by the one fixture, per
+  #    doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md:
+  #      axis 1 — the SCAN ROOT reverts to the working checkout. The working
+  #               copy carries an extra unregistered extern rt_zz that is NOT
+  #               committed, so a rotted scan root yields FAIL/1 new.
+  #      axis 2 — the BASELINE reverts to the working checkout. The working
+  #               copy's baseline carries rt_nonexistent, which is absent from
+  #               the committed gap, so a rotted baseline yields FAIL/1 stale.
+  #    Either rot flips the verdict away from the asserted PASS below.
+  if ! command -v git >/dev/null 2>&1; then
+    _report rev-reads-committed-content "FAIL(git unavailable)"; _fail=1
+  else
+    mk_fixture "$_w/f7" "rt_a rt_b" "rt_a rt_b"
+    mkdir -p "$_w/f7/scripts/check"
+    printf '# frozen baseline\n' > "$_w/f7/scripts/check/interpreter_extern_gap_baseline.txt"
+    ( cd "$_w/f7" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest \
+      && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+    # WORKING COPY ONLY, never committed: axis-1 dirt and axis-2 dirt.
+    printf 'extern fn rt_zz() -> bool\n' > "$_w/f7/src/compiler/dirty.spl"
+    printf 'rt_nonexistent\n' >> "$_w/f7/scripts/check/interpreter_extern_gap_baseline.txt"
+
+    _got=$(sh "$0" --scan-only --root "$_w/f7" --rev HEAD 2>&1 | tail -1)
+    case "$_got" in
+      "check-interpreter-extern-registry-gap: PASS — 2 symbol(s) checked, 0 new, 0 stale")
+        _report rev-reads-committed-content OK ;;
+      *) _report rev-reads-committed-content "FAIL($_got)"; _fail=1 ;;
+    esac
+    # The SAME tree scanned as a working tree must disagree, proving the two
+    # paths differ rather than both being blind to the edits.
+    _got=$(sh "$0" --scan-only --root "$_w/f7" 2>&1 | tail -1)
+    case "$_got" in
+      "check-interpreter-extern-registry-gap: FAIL — 3 symbol(s) checked, 1 new, 1 stale — new: rt_zz"*"stale: rt_nonexistent"*)
+        _report working-tree-scan-must-differ OK ;;
+      *) _report working-tree-scan-must-differ "FAIL($_got)"; _fail=1 ;;
+    esac
+  fi
+
   rm -rf "$_w"
   return $_fail
 }
 
 # --- main -------------------------------------------------------------------
 ROOT="$repo_root"
-BASELINE="$BASELINE_DEFAULT"
+BASELINE=""
+REV=""
 MODE=scan
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -237,6 +293,8 @@ while [ $# -gt 0 ]; do
     --generate-baseline) MODE=generate ;;
     --root) ROOT=$2; shift ;;
     --baseline) BASELINE=$2; shift ;;
+    --rev) [ $# -ge 2 ] || { echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (--rev needs a value)"; exit 2; }
+           REV=$2; shift ;;
     -h|--help) sed -n '1,70p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -252,11 +310,49 @@ if [ "$MODE" != scan-only ]; then
 fi
 
 if [ "$MODE" = selftest ]; then
-  echo "check-interpreter-extern-registry-gap: PASS — 6 fixture(s) checked, selftest only"
+  echo "check-interpreter-extern-registry-gap: PASS — 7 fixture(s) checked, selftest only"
   exit 0
 fi
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+
+# --rev: read COMMITTED content, never the shared working copy. As a `tree`-mode
+# push row this gate scanned whatever happened to be checked out, which under
+# concurrent agent load is not the commit being pushed. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# BOTH inputs move to the revision, not just the sources: the declared set
+# (src/compiler/**/*.spl), the registry (interpreter_extern/mod.rs) AND the
+# frozen baseline. Scanning committed sources against the working copy's
+# baseline is still a wrong-tree verdict — that is the census's second rot axis,
+# and selftest fixture 7 injects it.
+if [ -n "$REV" ]; then
+  if [ "$MODE" = generate ] && [ -z "$BASELINE" ]; then
+    # Writing into the temp checkout would vanish with the trap: a silent no-op
+    # that looks like success.
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (--generate-baseline with --rev needs an explicit --baseline)"
+    exit 2
+  fi
+  if ! ( cd "$ROOT" && git rev-parse --verify --quiet "$REV^{commit}" ) >/dev/null 2>&1; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (not a commit in $ROOT: $REV)"
+    exit 2
+  fi
+  mkdir -p "$W/rev"
+  ( cd "$ROOT" && git archive "$REV" -- \
+      ':(glob)src/compiler/**/*.spl' \
+      src/compiler_rust/compiler/src/interpreter_extern/mod.rs \
+      "$BASELINE_REL" ) 2>/dev/null \
+    | tar -x -C "$W/rev" 2>/dev/null
+  if [ ! -d "$W/rev/src/compiler" ]; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (could not materialise $REV)"
+    exit 2
+  fi
+  ROOT="$W/rev"
+fi
+
+# Resolved AFTER --rev so the baseline follows the scanned tree. With neither
+# flag this resolves to exactly the path it always did.
+[ -n "$BASELINE" ] || BASELINE="$ROOT/$BASELINE_REL"
 
 if [ "$MODE" = generate ]; then
   extract_declared "$ROOT" "$W/declared"
