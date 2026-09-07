@@ -404,7 +404,23 @@ impl CompilerDriver:
                 lowering.prescan_module_struct_names(prescan_module)
             for hir_module in self.ctx.hir_modules:
                 val name = hir_module.name
-                var mir_module = lowering.lower_module(hir_module)
+                # Per-module transient scope -- same mechanism and escape-set
+                # proof as the --entry-closure loop above
+                # (lower_module_transient_scoped, module_lowering.spl:1213).
+                # `lower_module_transient_scoped` itself checks
+                # ambient_bootstrap_enabled() and falls back to plain
+                # lower_module() when SIMPLE_BOOTSTRAP=1, so this call site
+                # inherits that safety unconditionally: it never attempts to
+                # reclaim the arena while the flat `_bootstrap_mir_*` /
+                # `_bootstrap_fn_*` / `_bootstrap_hir_*` registries (whose
+                # reachability from this boundary is unproven) could be live.
+                val scoped_fallback = lowering.lower_module_transient_scoped(hir_module)
+                if scoped_fallback.is_err():
+                    self.ctx.add_error(
+                        "MIR lowering transient scope failed for {name}: {scoped_fallback.unwrap_err()}")
+                    log_phase("aot:lower_to_mir:transient_scope_failed module={name}")
+                    return false
+                var mir_module = scoped_fallback.unwrap()
                 mir_module.name = name
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":

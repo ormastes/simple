@@ -77,6 +77,26 @@ scan_tree() {
         _fails="${_fails}${_fails:+; }driver-still-calls-unscoped-lower_module"
     fi
 
+    # (2b) The non-entry-closure fallback loop (self.ctx.sources.len() <= 0,
+    #      shared `lowering` instance over self.ctx.hir_modules) must ALSO go
+    #      through the scoped wrapper. Landed alongside this check: before,
+    #      only the --entry-closure loop was scoped and this second loop
+    #      called lower_module directly.
+    _checked=$((_checked + 1))
+    if ! grep -q 'lowering\.lower_module_transient_scoped(hir_module)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-fallback-loop-not-scoped"
+    fi
+
+    # (2c) ... and it must not ALSO retain the bare call. Key on the exact
+    #      receiver/argument pair of the fallback loop (`lowering.lower_module
+    #      (hir_module)`) so this does not false-positive on the legitimate
+    #      bare call in the bootstrap-fixed branch (`bootstrap_lowering.
+    #      lower_module(bootstrap_hir)`, a different receiver and argument).
+    _checked=$((_checked + 1))
+    if grep -q 'lowering\.lower_module(hir_module)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-fallback-still-calls-unscoped-lower_module"
+    fi
+
     # (3) The wrapper exists.
     _checked=$((_checked + 1))
     if ! grep -q 'me lower_module_transient_scoped' "${_lower}"; then
@@ -172,6 +192,8 @@ selftest() {
     cat > "${_tmp}/fixed/${DRIVER_REL}" <<'EOF'
                     val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
                     var lowered_entry = scoped_entry.unwrap()
+                    val scoped_fallback = lowering.lower_module_transient_scoped(hir_module)
+                    var mir_module = scoped_fallback.unwrap()
 EOF
     cat > "${_tmp}/fixed/${LOWER_REL}" <<'EOF'
     me lower_module_transient_scoped(module: HirModule) -> Result<MirModule, text>:
@@ -231,6 +253,20 @@ EOF
     printf '        if not rt_transient_array_scope_begin():\n            return Ok(self.lower_module(module))\n' \
         >> "${_tmp}/noambient/${LOWER_REL}"
 
+    # Fixture G: the entry-closure loop is fixed but the fallback loop
+    # (self.ctx.sources.len() <= 0 branch) still calls lower_module directly.
+    # Must FAIL -- this is the exact pre-fix shape of the fallback loop that
+    # this session's change closes, isolated from fixture B so a scanner that
+    # only checks the entry-closure loop cannot pass it by accident.
+    _mk "${_tmp}/fallback_prefix"
+    cat > "${_tmp}/fallback_prefix/${DRIVER_REL}" <<'EOF'
+                    val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
+                    var lowered_entry = scoped_entry.unwrap()
+                for hir_module in self.ctx.hir_modules:
+                    var mir_module = lowering.lower_module(hir_module)
+EOF
+    cp "${_tmp}/fixed/${LOWER_REL}" "${_tmp}/fallback_prefix/${LOWER_REL}"
+
     # Fixture F: empty tree. Must check 0 invariants so the caller ERRORs.
     _mk "${_tmp}/empty"
     rm -f "${_tmp}/empty/${DRIVER_REL}" "${_tmp}/empty/${LOWER_REL}"
@@ -256,12 +292,13 @@ EOF
         esac
     }
 
-    _expect fixed     pass
-    _expect prefix    fail
-    _expect unpaired  fail
-    _expect noowner   fail
-    _expect noambient fail
-    _expect empty     vacuous
+    _expect fixed           pass
+    _expect prefix          fail
+    _expect unpaired        fail
+    _expect noowner         fail
+    _expect noambient       fail
+    _expect fallback_prefix fail
+    _expect empty           vacuous
 
     rm -rf "${_tmp}"
     if [ -n "${_st_fail}" ]; then
@@ -283,7 +320,7 @@ done
 # Selftest is unconditional and fatal, exactly like the sibling guards.
 selftest
 if [ "${SELFTEST_ONLY}" = "1" ]; then
-    echo "PASS — 6 selftest fixture(s) checked, scanner discriminates the pre-fix shape"
+    echo "PASS — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape"
     exit 0
 fi
 

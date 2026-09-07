@@ -4587,7 +4587,14 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
 
 /// Hash a text string and return as i64
 ///
-/// Uses the same compact byte hash as the pure collection benchmark/reference.
+/// Canonical algorithm: FNV-1a 64-bit (offset basis `14695981039346656037`,
+/// prime `1099511628211`) — MUST match the C runtime
+/// (`src/runtime/runtime_native.c` `rt_hash_text`), the interpreter extern
+/// (`src/compiler_rust/compiler/src/interpreter_extern/conversion.rs`
+/// `rt_hash_text`), and the pure-Simple twin
+/// (`src/runtime/simple_core/core_string.spl` `rt_hash_text`). Previously
+/// DJB2, which silently diverged from the C oracle — see
+/// doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
 #[no_mangle]
 pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     let len = rt_string_len(string);
@@ -4598,10 +4605,11 @@ pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     if data.is_null() {
         return 0;
     }
-    let mut hash = 5381u64;
+    let mut hash = 14695981039346656037u64;
     unsafe {
         for byte in std::slice::from_raw_parts(data, len as usize) {
-            hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(1099511628211u64);
         }
     }
     hash as i64

@@ -823,3 +823,222 @@ re-built: `PASS — 9 invariant(s) checked` on the fixed tree,
 driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1) when pointed
 at `origin/main`'s pre-fix content via `--root` — discrimination re-proven
 against the real tree, not only its own fixtures.
+
+## Addendum 2026-09-07 (session 2) — the second named-uncovered call site is now scoped; the third (ambient bootstrap) stays open with its blocker unchanged
+
+Continuing from the audit above. Of the two `lower_module` call sites this row's
+own MIR addendum named as "remaining, deliberately unscoped" (bootstrap
+fixed-path ~line 289-303, non-entry-closure fallback loop ~line 391-414 in
+current line numbers), one is now closed.
+
+### 1. The non-entry-closure fallback loop is scoped
+
+`driver_pipeline_lowering.spl`, the `if self.ctx.sources.len() <= 0:` branch
+(reached when the driver has HIR modules but no populated `ctx.sources` list —
+distinct from both the bootstrap-fixed branch above it, which returns first,
+and the `--entry-closure` branch, which requires `sources.len() > 0`). Before:
+`var mir_module = lowering.lower_module(hir_module)`, one shared `lowering`
+instance across `self.ctx.hir_modules`, never reclaimed — the same
+immortal-arena shape the entry-closure loop had before 2026-09-06. Changed to
+`lowering.lower_module_transient_scoped(hir_module)`, with the same fail-closed
+handling as the entry-closure site: an `Err` adds a compile error and returns
+`false` without touching `self.ctx.mir_modules[name]`.
+
+**Escape set: identical to the audited entry-closure boundary, verbatim, for a
+structural reason rather than by re-argument.** `lower_module_transient_scoped`
+(module_lowering.spl:1213) is the same function called from both sites, with
+the same three-part contract: (1) the returned `MirModule`, promoted; (2)
+everything `lower_module` writes into the `MirLowering` owner, promoted by
+promoting the owner as a whole (`promote_transient_owner`, walks all 97 fields
+transitively — no hand list to drift); (3) module-level mutable globals, none
+of which are reachable from `lower_module` on the non-ambient path (the 2026-09-07
+census earlier in this file already re-derived this by grepping every mutation
+site under `src/compiler/50.mir/**`, and that census does not vary by caller —
+it is a property of what `lower_module` touches, not of which loop calls it).
+**The critical safety property is that `lower_module_transient_scoped` checks
+`self.ambient_bootstrap_enabled()` internally and falls back to plain
+`self.lower_module(module)`, unscoped, whenever `SIMPLE_BOOTSTRAP=1`** — so this
+new call site never attempts to reclaim the arena while the flat
+`_bootstrap_mir_*` / `_bootstrap_fn_*` / `_bootstrap_hir_*` registries (whose
+reachability is proven NOT established, see below) could be live, regardless of
+which of the two branches reaches it. This is why the fix is "nearly free": no
+new escape-set argument was needed, only reuse of one already audited.
+
+**Live-repro caveat, stated rather than glossed over.** A concrete input that
+drives `self.ctx.sources.len() <= 0` while `self.ctx.hir_modules` is populated
+was not found in this session (grepped `src/compiler/80.driver/*.spl` and
+`src/compiler/80.driver/bootstrap_api*.spl` for a caller that fills
+`hir_modules` without also filling `sources`; none surfaced, meaning this
+branch's live trigger is likely an internal driver-API/test-harness compile path
+rather than the CLI `native-build`/`run` entry points this session's fixtures
+exercise). The change is therefore verified STATICALLY (identical contract,
+identical callee, fail-closed on error) and by the fact that it does not alter
+any other code path in the file — not by a paired before/after RSS run of this
+specific branch. Do not read the RSS numbers in the runtime-mechanism section
+below as measuring this boundary; they re-confirm the underlying primitive
+only, exactly as the prior addendum's own caveat about the MIR boundary said.
+
+### 2. Ratchet extended
+
+`check-mir-transient-scope-boundary.shs` gained two invariants (now 11, up from
+9): `driver-fallback-loop-not-scoped` (the fallback loop must call
+`lowering.lower_module_transient_scoped(hir_module)`) and
+`driver-fallback-still-calls-unscoped-lower_module` (it must not also retain
+the bare `lowering.lower_module(hir_module)` call — grepped on the exact
+receiver/argument pair so the bootstrap-fixed branch's legitimate bare call,
+`bootstrap_lowering.lower_module(bootstrap_hir)`, is not a false positive). A
+seventh selftest fixture (`fallback_prefix`) isolates this from the
+entry-closure fixtures and proves the two new invariants alone catch the
+pre-fix fallback shape. Verified against the real tree:
+`sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` ->
+`PASS — 7 selftest fixture(s) checked`; against the current (fixed) worktree ->
+`PASS — 11 invariant(s) checked`; against `origin/main`'s committed content (git
+show into a scratch tree, `--root`) -> `FAIL — 11 invariant(s) checked ...:
+driver-fallback-loop-not-scoped; driver-fallback-still-calls-unscoped-lower_module`
+— discrimination proven on the real pre-fix tree, not only synthetic fixtures.
+
+### 3. The third call site (bootstrap fixed-path, `SIMPLE_BOOTSTRAP=1 and not
+STAGE4`, line ~289-303) is deliberately left unscoped, and switching its
+receiver to `lower_module_transient_scoped` would be a no-op
+
+That branch's own guard condition IS `SIMPLE_BOOTSTRAP=1`, so
+`lower_module_transient_scoped` would immediately observe
+`ambient_bootstrap_enabled()==true` and fall back to plain `lower_module`
+every time — there is no state in which this specific call site would ever
+scope. Cosmetic substitution was rejected as noise. This branch also lowers
+exactly one module (`app.cli.bootstrap_main`) per invocation, not the hundreds
+the entry-closure/fallback loops lower, so it is not believed to be a
+significant contributor to the 37 GB regardless.
+
+**The actual location of the 37 GB remains the ambient-bootstrap path as a
+whole** (the Stage-3 worker that produced the 37,171,428 kB `[heap]`
+measurement runs with `SIMPLE_BOOTSTRAP=1`), and it is excluded from every
+scope in the tree — not just this one — for the same unresolved reason each
+prior session recorded: the flat `_bootstrap_mir_*` registries
+(`_MirLowering/bootstrap_globals.spl`), `mir_data.spl`'s `_bootstrap_fn_*`
+dicts, and 20.hir's `_bootstrap_hir_*` arrays are read from other parts of the
+compiler by name/index after `lower_module` returns, and no census in this
+session or prior ones has enumerated their write sites well enough to prove
+they are unreachable from a promoted root (the way the non-ambient globals were
+proven unreachable). `driver_promote_frontend_registry_owners()`
+(`driver_source_pipeline_parsing.spl:257`) was located as the requested
+template, but it promotes a DIFFERENT registry set (aspect/effect/rt_criticality/
+layer_eq, used by the frontend/parse-phase scope) — it is a pattern to copy, not
+a promoter that already covers the bootstrap MIR registries. Writing the
+bootstrap-registry equivalent (grep every write site across
+`bootstrap_globals.spl`, `mir_data.spl`'s bootstrap dicts, and 20.hir's
+bootstrap arrays, confirm none is written from outside 50.mir's reachable call
+graph or from a closure/callback, then add a
+`driver_promote_bootstrap_mir_registry_owners()`-shaped function and call it
+from inside `lower_module_transient_scoped`'s ambient-bootstrap branch instead
+of skipping the scope) is a full session's own work, not a same-session
+extension of this one, and was not attempted here given the remaining time
+budget and the standing rule that an unproven escape set is refused rather than
+forced.
+
+### 4. Backend/codegen emission lane: looked at, not scoped, escape set not
+attempted
+
+Two other loop candidates were read this session and rejected as targets for
+now, both because their escape sets were not judged provable inside this
+session's time budget, not because they were found unsafe:
+
+- **`optimize_mir_level` (`driver_pipeline_passes.spl:35`)**, the per-module MIR
+  optimization pass (`optimize_module_for_backend`, `60.mir_opt/mir_opt/mod.spl`
+  and its full pass pipeline, 1937 lines in `mod.spl` alone plus however many
+  pass files it dispatches to). The loop discards the pre-optimization
+  `MirModule` and keeps only the returned one, which is a plausible transient-
+  scope shape, but a proper escape-set census (every module-level `var` write
+  reachable from `pipeline_optimize`, across a much larger and less-audited
+  surface than 50.mir) was not done. Undertaking it without doing the grep-based
+  census this row insists on would repeat exactly the mistake this row's own
+  history warns against.
+- **`CodegenPipeline.compile_module` (`70.backend/codegen.spl:715`)**, the JIT
+  Cranelift lane. Read and set aside for a different reason: its per-module
+  state (`CraneliftCodegenState`) is mostly a handle onto native Cranelift
+  compiler state reached via `rt_cranelift_*` externs, not Simple-heap objects
+  registered in `HEAP_ALLOCATION_REGISTRY`, so a `.spl`-level transient scope
+  around it is unlikely to reclaim the thing this row is about; disposal there
+  is `release_codegen_module()` -> `codegen.free_module()`, a different
+  (already-explicit) reclamation path, not the immortal-heap defect.
+
+Both are recorded here as the next places to look, not as closed or ruled out.
+
+### 5. Verification, corrected after a re-check found the first pass over-claimed
+
+The first draft of this addendum reused the prior session's
+`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 ... native-build
+hello.spl` result as proof that a real binary ran through the modified file.
+**That reuse was wrong and is retracted.** Re-run with
+`SIMPLE_COMPILER_TRACE=1` added (which makes every `log_phase` call —
+including `aot:lower_to_mir:module:start/done`, present in the very function
+this session edited — print a `[BOOTSTRAP-PHASE]` line): zero such lines were
+printed, for either run. `SIMPLE_NATIVE_BUILD_RUST=1` routes the whole build
+through the seed's own compiled Rust native pipeline; for a zero-import
+`hello.spl` this apparently never touches the interpreted `.spl` driver
+(`driver_pipeline_lowering.spl`) at all, consistent with the total wall time
+(0.0s compile + ~4s link — far below the 15-30s the record's own reproducer
+needs just to load the compiler graph). So that command proves the SEED still
+emits correct binaries; it proves nothing about this session's edit, and the
+predecessor's 2026-09-07 §2 claim that it "exercises the entry-closure branch"
+should be read the same way going forward.
+
+**What was actually run instead, in order of how much it proves:**
+
+1. **Plain `native-build` (no `RUST=1`) and the direct
+   `SIMPLE_NATIVE_BUILD_WORKER=1 ... run src/app/cli/native_build_worker.spl`
+   reproducer, both against the same `hello.spl`** — both spawn/route through
+   the INTERPRETED `.spl` compiler graph (confirmed by the volume of
+   cross-module warnings emitted, matching the record's phase-A description),
+   and both fail identically: `error: semantic: unknown extern function:
+   rt_env_vars` (exit 1), before reaching MIR lowering. **This is a
+   pre-existing, unrelated defect, not introduced by this session and not
+   fixable within it**: `rt_env_vars` is registered in the codegen SFFI table
+   (`codegen/runtime_sffi.rs:1944`) and in `common/runtime_symbols.rs:803`, but
+   grepping `src/compiler_rust/compiler/src/interpreter_extern/*.rs` for it
+   returns nothing — it was never added to the INTERPRETER's extern table, on
+   any seed build available this session (all built 2026-09-06/07 from this
+   same tree lineage). Every full-graph interpreted compile is therefore
+   currently blocked, independent of anything in this row.
+2. **`/home/yoon/.cargo-target-mir/release/simple lint
+   src/compiler/80.driver/driver_pipeline_lowering.spl`** — lint does NOT
+   execute the interpreted whole-graph pipeline (it is a static frontend pass:
+   parse, resolve, type-check), so it is unaffected by the `rt_env_vars` gap
+   and DID complete: `Found 0 error(s), 7 warning(s), 0 auto-fix(es) available`.
+   All 7 warnings are pre-existing `RAW-RT-001`/`RAW-RT-002` (raw `rt_env_get`
+   calls already in the file before this session) and one pre-existing
+   duplicate-typed-argument style warning; none names anything this session
+   added. This is real evidence the edited file **parses and type-checks
+   cleanly** under the actual compiler frontend — it is not evidence the
+   fallback loop executes correctly at runtime.
+3. `sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` — `PASS
+   — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape`.
+4. `sh scripts/check/check-mir-transient-scope-boundary.shs` (this worktree) —
+   `PASS — 11 invariant(s) checked, per-module MIR lowering runs inside a paired
+   transient scope with both escaping roots promoted`.
+5. Same script against `origin/main`'s committed content — `FAIL — 11
+   invariant(s) checked ...: driver-fallback-loop-not-scoped;
+   driver-fallback-still-calls-unscoped-lower_module`.
+6. `SIMPLE_SEED=/home/yoon/.cargo-target-mir/release/simple sh
+   scripts/check/check-transient-scope-reclaims.shs` (mechanism re-proof, fresh,
+   not reused numbers) — `PASS -- 2 fixture(s) measured, scoped 1052 kB vs
+   unscoped 374236 kB (355x), identical exit status 124`. This is the
+   array/string primitive, re-confirmed on this host/build; it was never a
+   measurement of the fallback-loop boundary and is not claimed as one.
+
+**Stated plainly, matching this row's own standard of not overclaiming:** no
+session, including this one, has produced a paired before/after RSS/brk
+measurement OR a successful end-to-end run of ANY MIR-lowering transient scope
+(entry-closure, fallback, or otherwise) through the fully interpreted
+self-hosted pipeline. The entry-closure scope's "real running binary" evidence
+from 2026-09-07 needs the same re-check this addendum just gave its own
+claim — it was not re-verified with phase tracing in this session, so treat it
+as unconfirmed rather than re-affirmed. What IS established for the fallback
+loop specifically: it type-checks cleanly, it reuses a callee whose behavior
+is unconditionally safe under ambient bootstrap by construction, and the
+ratchet gate proves the source-level shape is correct and discriminates the
+pre-fix tree. No collector was designed. Per the task's own preference order,
+coverage extension was judged reachable and was done first; the ambient-
+bootstrap path (§3), the two backend/opt candidates (§4), and — newly found
+this pass — the missing `rt_env_vars` interpreter extern (blocks re-verifying
+ANY of this by full interpreted execution) are the next things to attempt.
