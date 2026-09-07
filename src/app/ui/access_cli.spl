@@ -38,8 +38,8 @@ use common.ui.access.{
     ui_access_surface_to_json
 }
 use std.nogc_sync_mut.io.http_sffi.{
-    HttpMethod,
-    HttpResponse,
+    SffiHttpMethod,
+    SffiHttpResponse,
     http_client_destroy,
     http_client_new,
     http_client_request,
@@ -282,7 +282,7 @@ fn _ui_access_execute_live(request: AccessRequest, port: i32) -> Result<AccessRe
     val route = ui_access_cli_route(request)?
     val base_url = "http://127.0.0.1:{port}"
     if request.descriptor.operation != ACCESS_OPERATION_ACT:
-        val body = _ui_access_http_once(HttpMethod.GET, base_url + route, "", request.timeout_ms)?
+        val body = _ui_access_http_once(SffiHttpMethod.GET, base_url + route, "", request.timeout_ms)?
         if request.descriptor.operation == ACCESS_OPERATION_LIST:
             return ui_access_window_result_from_snapshot_json(body)
         return _ui_access_read_result(request.descriptor.operation, body)
@@ -290,7 +290,7 @@ fn _ui_access_execute_live(request: AccessRequest, port: i32) -> Result<AccessRe
     val request_id = "ui-act-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
     val action_body = ui_access_cli_action_body(request, request_id)
     val started_at_us = time_now_unix_micros()
-    val action_result = match _ui_access_http_once(HttpMethod.POST, base_url + route, action_body, _ui_access_remaining_timeout(started_at_us, request.timeout_ms)?):
+    val action_result = match _ui_access_http_once(SffiHttpMethod.POST, base_url + route, action_body, _ui_access_remaining_timeout(started_at_us, request.timeout_ms)?):
         Err(e):
             e.set_request_id(request_id)
             return Err(e)
@@ -301,7 +301,7 @@ fn _ui_access_execute_live(request: AccessRequest, port: i32) -> Result<AccessRe
     val observation_timeout = match _ui_access_remaining_timeout(started_at_us, request.timeout_ms):
         Err(e): return Err(ui_access_post_dispatch_error(e, request_id))
         Ok(remaining): remaining
-    val observed = _ui_access_http_once(HttpMethod.GET, base_url + observation_route, "", observation_timeout)
+    val observed = _ui_access_http_once(SffiHttpMethod.GET, base_url + observation_route, "", observation_timeout)
     val observation = match observed:
         Err(e): return Err(ui_access_post_dispatch_error(e, request_id))
         Ok(body): body
@@ -323,15 +323,15 @@ pub fn ui_access_post_dispatch_error(error: AccessError, request_id: text) -> Ac
     correlated.set_request_id(request_id)
     correlated
 
-fn _ui_access_http_once(method: HttpMethod, url: text, body: text, timeout_ms: i64) -> Result<text, AccessError>:
+fn _ui_access_http_once(method: SffiHttpMethod, url: text, body: text, timeout_ms: i64) -> Result<text, AccessError>:
     val client = http_client_new()
     if not client.is_valid:
         return Err(AccessError.detailed("source_unavailable", "failed to create HTTP client", "", "Start a live GUI/web or TUI-web session", true, false))
     if not http_client_set_timeout(client, timeout_ms):
         http_client_destroy(client)
         return Err(AccessError.create("invalid_argument", "failed to configure finite HTTP timeout"))
-    val headers = if method == HttpMethod.POST: ["Content-Type: application/json", "Accept: application/json"] else: ["Accept: application/json"]
-    val response: HttpResponse = http_client_request(client, method, url, headers, body)
+    val headers = if method == SffiHttpMethod.POST: ["Content-Type: application/json", "Accept: application/json"] else: ["Accept: application/json"]
+    val response: SffiHttpResponse = http_client_request(client, method, url, headers, body)
     http_client_destroy(client)
     if response.is_ok:
         return Ok(response.body)
