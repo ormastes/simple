@@ -90,15 +90,23 @@
 # Usage:
 #   check-c-runtime-compiles-push.shs             # scan the working tree
 #   check-c-runtime-compiles-push.shs --root DIR  # scan an alternate root
+#   check-c-runtime-compiles-push.shs --rev REV   # compile the COMMITTED tree
 #   check-c-runtime-compiles-push.shs --selftest  # fixtures only, no scan
 #   check-c-runtime-compiles-push.shs --verbose   # echo per-file results
 #
-# NOTE ON RANGE: unlike the five range-based guards, this one checks the
-# WORKING TREE (or --root), not a BASE..NEW commit range. Compilability is a
-# property of a tree, not of a delta: a push that changes only a header can
-# break a .c file it never touched, so a changed-files-only scan would be
-# fail-open. Landing a specific commit means checking out / exporting that
-# commit and pointing --root at it.
+# NOTE ON RANGE: unlike the five range-based guards, this one checks a TREE,
+# not a BASE..NEW commit range. Compilability is a property of a tree, not of
+# a delta: a push that changes only a header can break a .c file it never
+# touched, so a changed-files-only scan would be fail-open.
+#
+# WHICH tree, though, is the thing this guard got wrong until 2026-09-07. As a
+# `tree`-mode push row it compiled the shared WORKING CHECKOUT, which under
+# concurrent agent load is not the commit being pushed. `--rev REV` now
+# materialises src/runtime at REV with `git archive` and compiles that — the
+# push hook passes the sha it read off stdin. Selftest fixture 12 pins that
+# the two paths disagree, on both rot axes (scan root/include path, and the
+# SKIP classifier's in-repo header lookup). See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
 
 set -u
 
@@ -108,6 +116,7 @@ SELF_NAME='check-c-runtime-compiles-push'
 # Configuration
 # ---------------------------------------------------------------------------
 CFG_ROOT=''
+CFG_REV=''
 CFG_VERBOSE=0
 CFG_SELFTEST_ONLY=0
 CFG_MAX_NAMES=12          # how many offender names to print in the verdict
@@ -406,6 +415,82 @@ selftest() {
     #    __APPLE__ half is preprocessed away and it is ordinary C.
     _expect fixture11_objc_compiles 0 "$_fx/src/runtime/fx_objc.c"
 
+    # 12 --rev must COMPILE THE COMMITTED TREE, and the two paths must
+    #    DISAGREE. A fixture that only proves --rev does not crash is
+    #    worthless: the regression is a silently WRONG verdict.
+    #
+    #    Two independent rot axes are injected by this one fixture
+    #    (doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md):
+    #      axis 1 — SCAN ROOT / include path revert to the working checkout.
+    #               The checkout carries an UNCOMMITTED broken .c, so a rotted
+    #               root reports FAIL instead of PASS.
+    #      axis 2 — the SKIP CLASSIFIER's "is this header ours?" lookup reverts
+    #               to the working checkout. That lookup is the second content
+    #               input this guard's verdict depends on: the checkout carries
+    #               an UNCOMMITTED zz_absent_sdk.h, so a rotted lookup turns a
+    #               genuine external-SDK SKIP into a FAIL.
+    _total=$((_total + 1))
+    if ! command -v git >/dev/null 2>&1; then
+        _bad="$_bad fixture12_rev_git_unavailable"
+    else
+        _rv="$TMPROOT/fxrev"
+        mkdir -p "$_rv/src/runtime"
+        printf 'int spl_fx12_ok(void) { return 0; }\n' >"$_rv/src/runtime/fx_r_ok.c"
+        printf '#include "zz_absent_sdk.h"\nint spl_fx12_needs(void) { return 0; }\n' \
+            >"$_rv/src/runtime/fx_r_needs.c"
+        ( cd "$_rv" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        # WORKING COPY ONLY, never committed.
+        printf 'int spl_fx12_broken(void) { return ; ; ) }\n' >"$_rv/src/runtime/fx_r_broken.c"
+        : >"$_rv/src/runtime/zz_absent_sdk.h"
+
+        _rvout=$(C_RUNTIME_COMPILES_SELFTEST_CHILD=1 sh "$0" --root "$_rv" --rev HEAD 2>&1 | tail -1)
+        _rvwt=$(C_RUNTIME_COMPILES_SELFTEST_CHILD=1 sh "$0" --root "$_rv" 2>&1 | tail -1)
+        case "$_rvout" in
+          "PASS — 1 file(s) compiled, 0 errors (1 skipped for unavailable external dependencies)")
+            case "$_rvwt" in
+              "FAIL — 1 file(s) failed to compile: src/runtime/fx_r_broken.c "*)
+                _pass=$((_pass + 1)) ;;
+              *) _bad="$_bad fixture12_working_tree_scan_did_not_differ(got=[$_rvwt])" ;;
+            esac ;;
+          *) _bad="$_bad fixture12_rev_did_not_read_committed_content(got=[$_rvout])" ;;
+        esac
+    fi
+
+    # 13 fail-closed on an INCOMPLETE materialisation. src/runtime is not
+    #    self-contained — two owned TUs include headers from src/compiler and
+    #    tools/ — and archiving only src/runtime silently downgraded both from
+    #    "compiled" to "external dependency unavailable" while still printing
+    #    PASS. Coverage loss wearing a green verdict is the exact fail-open
+    #    this guard exists to close, so an escaping include whose target IS in
+    #    the revision but is NOT in the materialised tree must ERROR.
+    _total=$((_total + 1))
+    if ! command -v git >/dev/null 2>&1; then
+        _bad="$_bad fixture13_scope_git_unavailable"
+    else
+        _sc="$TMPROOT/fxscope"
+        mkdir -p "$_sc/src/runtime" "$_sc/src/gen"
+        # A .inc, deliberately: it is in-repo and reachable by relative
+        # include, but matched by neither header glob.
+        printf 'static int spl_fx13_inc(void) { return 0; }\n' >"$_sc/src/gen/thing.inc"
+        printf '#include "../gen/thing.inc"\nint spl_fx13(void) { return spl_fx13_inc(); }\n' \
+            >"$_sc/src/runtime/esc.c"
+        ( cd "$_sc" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        _scout=$(C_RUNTIME_COMPILES_SELFTEST_CHILD=1 sh "$0" --root "$_sc" --rev HEAD 2>&1 | tail -1)
+        case "$_scout" in
+          "ERROR — nothing was checked (materialisation scope is incomplete at HEAD;"*"src/gen/thing.inc)")
+            _pass=$((_pass + 1)) ;;
+          *) _bad="$_bad fixture13_incomplete_scope_not_fail_closed(got=[$_scout])" ;;
+        esac
+    fi
+
     printf '%s: selftest %s/%s fixtures correct\n' "$SELF_NAME" "$_pass" "$_total"
     if [ "$_pass" -ne "$_total" ]; then
         printf '%s: FAILING FIXTURES:%s\n' "$SELF_NAME" "$_bad"
@@ -422,6 +507,7 @@ while [ $# -gt 0 ]; do
         --selftest) CFG_SELFTEST_ONLY=1; shift ;;
         --verbose|-v) CFG_VERBOSE=1; shift ;;
         --root) shift; [ $# -gt 0 ] || verdict_error "--root needs a value"; CFG_ROOT="$1"; shift ;;
+        --rev) shift; [ $# -gt 0 ] || verdict_error "--rev needs a value"; CFG_REV="$1"; shift ;;
         --help|-h)
             sed -n '2,60p' "$0"
             printf 'ERROR — nothing was checked (help requested)\n'
@@ -442,17 +528,114 @@ if [ -z "$CFG_ROOT" ]; then
     CFG_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || CFG_ROOT=''
     [ -n "$CFG_ROOT" ] || verdict_error "not inside a git repository and no --root given"
 fi
+# --rev <REV>: compile the COMMITTED tree at REV instead of the working
+# checkout. This guard must feed real files to a real compiler, so the
+# revision is MATERIALISED with `git archive` rather than read through
+# `git show` — the whole of src/runtime, headers and all, so that the include
+# paths and the SKIP classifier's "is this header ours?" lookup resolve inside
+# the materialised tree and never inside the checkout. Both are derived from
+# $CFG_ROOT, so repointing it moves every content input together.
+#
+# Why (2026-09-07): as a `tree`-mode push row this gate compiled whatever
+# happened to be checked out, which under concurrent agent load is not the
+# commit being pushed. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+if [ -n "$CFG_REV" ]; then
+    if ! ( cd "$CFG_ROOT" && git rev-parse --verify --quiet "$CFG_REV^{commit}" ) >/dev/null 2>&1; then
+        verdict_error "not a commit in $CFG_ROOT: $CFG_REV"
+    fi
+    _git_root="$CFG_ROOT"
+    mkdir -p "$TMPROOT/rev" || verdict_error "could not create the materialisation directory"
+    # src/runtime is not self-contained: two owned TUs reach OUT of it with
+    # relative includes (src/compiler/70.backend/.../simple_backend_plugin_v1.h
+    # and tools/counterpart/sdk/c/simple_counterpart_abi.h). Archiving only
+    # src/runtime silently reclassified both files from "compiled" to
+    # "external dependency unavailable" — 130 compiled/5 skipped in the
+    # checkout became 128/7 on the revision. That is a COVERAGE LOSS wearing a
+    # PASS, precisely the fail-open this guard exists to close, so the header
+    # trees come along. Headers only: archiving all of src/ would be gigabytes
+    # for a scan that reads C.
+    ( cd "$_git_root" && git archive "$CFG_REV" -- "$CFG_SCAN_DIR" ) 2>/dev/null \
+        | tar -x -C "$TMPROOT/rev" 2>/dev/null
+    [ -d "$TMPROOT/rev/$CFG_SCAN_DIR" ] || \
+        verdict_error "could not materialise $CFG_SCAN_DIR at $CFG_REV"
+    # Separate invocations, each tolerant of a no-match: `git archive` fails
+    # the WHOLE archive on a pathspec that matches nothing, so folding these
+    # into the required one above would break every revision that happens to
+    # carry no header outside src/runtime (and did break the selftest fixture).
+    # A miss here is not silent — the completeness check below turns any
+    # genuinely-needed-but-absent header into an ERROR.
+    for _hspec in ':(glob)src/**/*.h' ':(glob)tools/**/*.h'; do
+        ( cd "$_git_root" && git archive "$CFG_REV" -- "$_hspec" ) 2>/dev/null \
+            | tar -x -C "$TMPROOT/rev" 2>/dev/null || true
+    done
+    CFG_ROOT="$TMPROOT/rev"
+
+    # Fail closed if the materialisation scope is INCOMPLETE. Without this a
+    # future escaping include to something the globs above do not cover would
+    # repeat the coverage loss above and still report PASS: the file would just
+    # start "skipping". Every escaping relative include is resolved and must be
+    # present in the materialised tree whenever it exists in the revision.
+    rt_norm_path() {
+        _np_out=''
+        _np_ifs=$IFS; IFS=/
+        # shellcheck disable=SC2086  # deliberate word split on /
+        set -- $1
+        IFS=$_np_ifs
+        for _np_seg in "$@"; do
+            case "$_np_seg" in
+                ''|'.') continue ;;
+                '..') _np_out=${_np_out%/*} ;;
+                *) _np_out="$_np_out/$_np_seg" ;;
+            esac
+        done
+        printf '%s' "${_np_out#/}"
+    }
+    _escapes="$TMPROOT/escapes.txt"
+    : >"$_escapes"
+    find "$CFG_ROOT/$CFG_SCAN_DIR" -type f \( -name '*.c' -o -name '*.h' \) \
+        -not -path '*/vendor/*' 2>/dev/null | while IFS= read -r _ef; do
+        _edir=$(dirname "${_ef#"$CFG_ROOT"/}")
+        sed -n 's|^[[:space:]]*#include[[:space:]]*"\(\.\./[^"]*\)".*|\1|p' "$_ef" 2>/dev/null \
+        | while IFS= read -r _einc; do
+            rt_norm_path "$_edir/$_einc"
+            printf '\n'
+          done
+    done | LC_ALL=C sort -u | grep -v '^$' >"$_escapes"
+    _missing=''
+    while IFS= read -r _etgt; do
+        [ -n "$_etgt" ] || continue
+        [ -f "$CFG_ROOT/$_etgt" ] && continue
+        # Absent from the materialised tree. Only a defect if the REVISION has
+        # it — a genuinely external SDK header is absent from both and stays a
+        # legitimate SKIP.
+        if ( cd "$_git_root" && git cat-file -e "$CFG_REV:$_etgt" ) >/dev/null 2>&1; then
+            _missing="$_missing $_etgt"
+        fi
+    done <"$_escapes"
+    if [ -n "$_missing" ]; then
+        verdict_error "materialisation scope is incomplete at $CFG_REV; these in-repo headers are reached by a relative include but were not archived:$_missing"
+    fi
+fi
+
 [ -d "$CFG_ROOT/$CFG_SCAN_DIR" ] || \
     verdict_error "$CFG_ROOT/$CFG_SCAN_DIR does not exist"
 
 # ---------------------------------------------------------------------------
 # Selftest is FATAL and runs before every scan.
+#
+# Skipped only for the recursive child invocations made by fixture 12, which
+# would otherwise recurse without end. Those children exercise the real scan
+# path, which is the whole point of that fixture.
 # ---------------------------------------------------------------------------
-if ! selftest "$CC_BIN"; then
+if [ "${C_RUNTIME_COMPILES_SELFTEST_CHILD:-0}" != 1 ] && ! selftest "$CC_BIN"; then
     verdict_error "selftest failed -- the guard itself is not trustworthy"
 fi
 if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
-    verdict_pass "selftest only, no scan requested (8 fixture(s) correct)"
+    # $_total is set by selftest (POSIX sh has no locals), so this count cannot
+    # drift out of date the way the hardcoded "8" it replaces had — the guard
+    # already ran 11 fixtures while claiming 8.
+    verdict_pass "selftest only, no scan requested ($_total fixture(s) correct)"
 fi
 
 printf '%s: scanning %s/%s\n' "$SELF_NAME" "$CFG_ROOT" "$CFG_SCAN_DIR"
