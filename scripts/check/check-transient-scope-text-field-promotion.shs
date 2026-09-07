@@ -24,6 +24,17 @@
 #   interpreter, so tier 2 is native-only and its absence is reported, never
 #   counted as a pass.
 #
+# SCAN ROOT (--rev, added 2026-09-07). Bare, tier 1 reads the working checkout.
+# On this box ~20 agent sessions share one clone, so the checkout routinely holds
+# content that is NOT being pushed and lacks content that IS — a push gate that
+# reads it reports on the wrong tree. `--rev <sha>` materialises the three source
+# files out of the COMMITTED tree with `git show` and scans those instead. The
+# push-tier row uses --rev; see
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+# This guard has no baseline or allowlist file, so the census's second rot axis
+# (baseline-only rot) has no surface here; the selftest pins the scan-root axis
+# in BOTH directions instead of pinning one axis twice.
+#
 # Verdict is the last line of stdout:
 #   PASS  — <n> field(s) checked, ...                 exit 0
 #   FAIL  — ...                                       exit 1
@@ -32,10 +43,209 @@
 set -u
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-types_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_types.spl"
-freeze_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl"
-promote_file="$repo_root/src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+
+types_rel="src/compiler/20.hir/hir_lowering/module_surface_types.spl"
+freeze_rel="src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl"
+promote_rel="src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
 fixture_rel="test/fixture/transient_scope/text_field_promotion.spl"
+
+rev=""
+selftest_only=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --rev)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "ERROR — nothing was checked (--rev requires a revision argument)"
+                exit 2
+            fi
+            rev=$1
+            ;;
+        --selftest) selftest_only=1 ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        *)
+            echo "ERROR — nothing was checked (unknown argument $1)"
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+SCAN_TMP=""
+cleanup() { [ -n "$SCAN_TMP" ] && rm -rf "$SCAN_TMP"; }
+trap cleanup EXIT
+
+# --- Anti-rot selftest ----------------------------------------------------
+#
+# Fatal, runs before every scan (skipped only inside the fixtures themselves,
+# which would otherwise recurse). The load-bearing fixtures are 3 and 4: they
+# make the COMMITTED tree and the WORKING CHECKOUT disagree and require the bare
+# and --rev verdicts to disagree WITH THEM, in both directions. A fixture that
+# merely catches a crash would not notice a silently wrong read, which is the
+# actual defect class here.
+
+write_fixture_tree() {
+    # $1 = root, $2 = "clean" | "unpromoted"
+    _r=$1; _shape=$2
+    mkdir -p "$_r/src/compiler/20.hir/hir_lowering" "$_r/scripts/check"
+
+    {
+        echo 'class ModuleSurface:'
+        echo '    logical_name: text'
+        echo '    canonical_name: text'
+        echo '    package_name: text'
+        echo '    preferred_registry_name: text'
+        [ "$_shape" = unpromoted ] && echo '    stale_name: text'
+        echo ''
+        echo 'class Other:'
+        echo '    ignored_name: text'
+    } > "$_r/$types_rel"
+
+    {
+        echo 'pub(package) fn module_surfaces_freeze(registry: ModuleRegistry):'
+        echo '    surface.logical_name = intern(a)'
+        echo '    surface.canonical_name = intern(b)'
+        echo '    surface.package_name = intern(c)'
+        echo '    surface.preferred_registry_name = intern(d)'
+        [ "$_shape" = unpromoted ] && echo '    surface.stale_name = intern(e)'
+        echo ''
+        echo 'fn unrelated():'
+        echo '    surface.ignored_name = intern(z)'
+    } > "$_r/$freeze_rel"
+
+    {
+        echo 'fn module_surfaces_promote():'
+        echo '    rt_transient_heap_promote(surface.logical_name)'
+        echo '    rt_transient_heap_promote(surface.canonical_name)'
+        echo '    rt_transient_heap_promote(surface.package_name)'
+        echo '    rt_transient_heap_promote(surface.preferred_registry_name)'
+    } > "$_r/$promote_rel"
+}
+
+# verdict_of <root> [args...] -> echoes "rc|last stdout line"
+verdict_of() {
+    _root=$1; shift
+    _out=$(cd "$_root" && SIMPLE_TRANSIENT_CHECK_NO_SELFTEST=1 \
+        sh "$_root/scripts/check/$(basename "$0")" "$@" 2>/dev/null)
+    _rc=$?
+    printf '%s|%s\n' "$_rc" "$(printf '%s\n' "$_out" | tail -n 1)"
+}
+
+run_selftest() {
+    _t=$(mktemp -d "${TMPDIR:-/tmp}/transient-promo-selftest.XXXXXX") || return 1
+    _fail=0
+    _n=0
+
+    write_fixture_tree "$_t" clean
+    cp "$0" "$_t/scripts/check/$(basename "$0")" || { rm -rf "$_t"; return 1; }
+
+    if ! git -C "$_t" init -q 2>/dev/null; then rm -rf "$_t"; return 1; fi
+    git -C "$_t" config user.email selftest@example.invalid
+    git -C "$_t" config user.name selftest
+    git -C "$_t" add -A >/dev/null 2>&1
+    git -C "$_t" -c commit.gpgsign=false commit -q -m clean >/dev/null 2>&1 || { rm -rf "$_t"; return 1; }
+
+    # 1: clean checkout, bare -> PASS
+    _n=$((_n + 1))
+    case $(verdict_of "$_t") in
+        0\|PASS*) : ;;
+        *) echo "selftest fixture 1 (clean bare) expected PASS, got: $(verdict_of "$_t")" >&2; _fail=$((_fail + 1)) ;;
+    esac
+
+    # 2: clean commit, --rev HEAD -> PASS
+    _n=$((_n + 1))
+    case $(verdict_of "$_t" --rev HEAD) in
+        0\|PASS*) : ;;
+        *) echo "selftest fixture 2 (clean --rev) expected PASS, got: $(verdict_of "$_t" --rev HEAD)" >&2; _fail=$((_fail + 1)) ;;
+    esac
+
+    # 3 (SCAN-ROOT ROT, forward): commit clean, dirty the WORKING COPY with an
+    # unpromoted field. Bare must FAIL, --rev HEAD must PASS. Equal verdicts here
+    # mean --rev is not actually reading the revision.
+    write_fixture_tree "$_t" unpromoted
+    _n=$((_n + 1))
+    _bare=$(verdict_of "$_t")
+    _atrev=$(verdict_of "$_t" --rev HEAD)
+    case "$_bare" in 1\|FAIL*) : ;; *) echo "selftest fixture 3 (dirty bare) expected FAIL, got: $_bare" >&2; _fail=$((_fail + 1)) ;; esac
+    case "$_atrev" in 0\|PASS*) : ;; *) echo "selftest fixture 3 (dirty --rev) expected PASS, got: $_atrev" >&2; _fail=$((_fail + 1)) ;; esac
+    if [ "$_bare" = "$_atrev" ]; then
+        echo "selftest fixture 3: the checkout and the revision agreed; --rev is not reading the revision" >&2
+        _fail=$((_fail + 1))
+    fi
+
+    # 4 (SCAN-ROOT ROT, reverse): commit the BROKEN shape, restore a clean
+    # working copy. Bare must PASS and --rev HEAD must FAIL — the direction a
+    # push gate actually cares about, since it is the pushed commit that carries
+    # the defect while the shared checkout looks fine.
+    git -C "$_t" add -A >/dev/null 2>&1
+    git -C "$_t" -c commit.gpgsign=false commit -q -m unpromoted >/dev/null 2>&1 || { rm -rf "$_t"; return 1; }
+    write_fixture_tree "$_t" clean
+    _n=$((_n + 1))
+    _bare=$(verdict_of "$_t")
+    _atrev=$(verdict_of "$_t" --rev HEAD)
+    case "$_bare" in 0\|PASS*) : ;; *) echo "selftest fixture 4 (clean bare) expected PASS, got: $_bare" >&2; _fail=$((_fail + 1)) ;; esac
+    case "$_atrev" in 1\|FAIL*) : ;; *) echo "selftest fixture 4 (broken --rev) expected FAIL, got: $_atrev" >&2; _fail=$((_fail + 1)) ;; esac
+    if [ "$_bare" = "$_atrev" ]; then
+        echo "selftest fixture 4: the checkout and the revision agreed; --rev is not reading the revision" >&2
+        _fail=$((_fail + 1))
+    fi
+
+    # 5: an unresolvable revision is ERROR, never a pass.
+    _n=$((_n + 1))
+    case $(verdict_of "$_t" --rev deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) in
+        2\|ERROR*) : ;;
+        *) echo "selftest fixture 5 (bad rev) expected ERROR, got: $(verdict_of "$_t" --rev deadbeefdeadbeefdeadbeefdeadbeefdeadbeef)" >&2; _fail=$((_fail + 1)) ;;
+    esac
+
+    # 6: a subject that has vanished is ERROR, not a vacuous PASS.
+    _n=$((_n + 1))
+    : > "$_t/$types_rel"
+    case $(verdict_of "$_t") in
+        2\|ERROR*) : ;;
+        *) echo "selftest fixture 6 (no text fields) expected ERROR, got: $(verdict_of "$_t")" >&2; _fail=$((_fail + 1)) ;;
+    esac
+
+    rm -rf "$_t"
+    SELFTEST_N=$_n
+    [ "$_fail" -eq 0 ]
+}
+
+if [ "${SIMPLE_TRANSIENT_CHECK_NO_SELFTEST:-0}" != 1 ]; then
+    SELFTEST_N=0
+    if ! run_selftest; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    if [ "$selftest_only" -eq 1 ]; then
+        echo "PASS — $SELFTEST_N selftest fixture(s) checked, 0 misjudged"
+        exit 0
+    fi
+elif [ "$selftest_only" -eq 1 ]; then
+    echo "ERROR — nothing was checked (--selftest disabled by SIMPLE_TRANSIENT_CHECK_NO_SELFTEST)"
+    exit 2
+fi
+
+# --- Scan root ------------------------------------------------------------
+
+scan_root=$repo_root
+if [ -n "$rev" ]; then
+    SCAN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/transient-promo-rev.XXXXXX") || {
+        echo "ERROR — nothing was checked (mktemp failed)"
+        exit 2
+    }
+    scan_root=$SCAN_TMP
+    for rel in "$types_rel" "$freeze_rel" "$promote_rel"; do
+        mkdir -p "$scan_root/$(dirname "$rel")"
+        if ! git -C "$repo_root" show "$rev:$rel" > "$scan_root/$rel" 2>/dev/null; then
+            echo "ERROR — nothing was checked (cannot materialise $rel at $rev)"
+            exit 2
+        fi
+    done
+fi
+
+types_file="$scan_root/$types_rel"
+freeze_file="$scan_root/$freeze_rel"
+promote_file="$scan_root/$promote_rel"
 
 for f in "$types_file" "$freeze_file" "$promote_file"; do
     if [ ! -f "$f" ]; then
@@ -95,19 +305,33 @@ if [ "$checked" -eq 0 ]; then
     exit 2
 fi
 
+scope_note="working checkout"
+[ -n "$rev" ] && scope_note="committed tree at $rev"
+
 if [ -n "$missing" ]; then
-    echo "FAIL — $checked freeze-scope text field(s) checked, not promoted by module_surfaces_promote:$missing"
+    # The note goes BEFORE the verdict: this file's own header promises the
+    # verdict is the last line of stdout, and until 2026-09-07 the FAIL path
+    # broke that promise by trailing an explanation after it.
     echo "  Ending the registry retention scope free()s these while every ModuleSurface still holds the handle."
+    echo "FAIL — $checked freeze-scope text field(s) checked in the $scope_note, not promoted by module_surfaces_promote:$missing"
     exit 1
 fi
 
 # --- Tier 2: native fixture (opt-in) --------------------------------------
 
+# Under --rev tier 1 read the revision; building the WORKING COPY's fixture here
+# would mix evidence from two trees, so tier 2 is reported as not run rather than
+# quietly answering about a different tree.
+if [ -n "$rev" ]; then
+    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted (tier 2 not run under --rev: the native fixture is built from a checkout, not from a revision)"
+    exit 0
+fi
+
 compiler=${SIMPLE_NATIVE_COMPILER:-}
 runtime_path=${SIMPLE_NATIVE_RUNTIME_PATH:-}
 
 if [ -z "$compiler" ] || [ -z "$runtime_path" ]; then
-    echo "PASS — $checked freeze-scope text field(s) checked, all promoted (tier 2 not run: set SIMPLE_NATIVE_COMPILER and SIMPLE_NATIVE_RUNTIME_PATH to also execute $fixture_rel natively)"
+    echo "PASS — $checked freeze-scope text field(s) checked in the $scope_note, all promoted (tier 2 not run: set SIMPLE_NATIVE_COMPILER and SIMPLE_NATIVE_RUNTIME_PATH to also execute $fixture_rel natively)"
     exit 0
 fi
 
