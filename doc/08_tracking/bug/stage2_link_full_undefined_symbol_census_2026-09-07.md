@@ -586,6 +586,52 @@ resolution is a name collision, not a fix.
 | `rt_store_barrier` | lib__nogc_sync_mut__io__volatile_ops | — | src/compiler_rust/runtime/src/lib.rs, |
 | `rt_time_now_seconds` | lib__nogc_sync_mut__io__time_ops | src/runtime/runtime.c,src/runtime/runtime_time.c, | src/compiler_rust/runtime/src/value/sffi/time.rs,src/compiler_rust/runtime/src/value/mod.rs, |
 | `rt_typed_bytes_u8_data_at` | lib__common__crypto__sha256 | — | src/compiler_rust/runtime/src/lib.rs,src/compiler_rust/runtime/src/value/collections.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_dir_glob` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/sffi/file_io/directory.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_env_home` | lib__nogc_async_mut__env__platform | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_env_vars` | lib__nogc_async_mut__env__variables | — | src/compiler_rust/runtime/src/value/sffi/env_process.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_canonicalize` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_close` | lib__nogc_sync_mut__sffi__dynamic | — | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_exists_str` | lib__nogc_sync_mut__sffi__fs | — | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
+| `rt_file_hash` | lib__nogc_sync_mut__sffi__io | — | src/compiler_rust/runtime/src/value/cli_sffi.rs, |
+| `rt_file_mmap_read_bytes` | lib__nogc_sync_mut__io__file_ops | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_open` | lib__nogc_sync_mut__sffi__fs | src/runtime/runtime_native.c, | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_file_read_lines` | lib__nogc_sync_mut__sffi__io | — | src/compiler_rust/runtime/src/security_runtime.rs,src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs,src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_io_file_delete` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_exists` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_flush` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_created` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_flags` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_modified` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_meta_size` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_read` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_read_line` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_seek` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_set_permissions` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_write_all` | lib__nogc_sync_mut__sffi__fs | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_io_file_write` | lib__nogc_sync_mut__io__file | **FIXED 2026-09-07 (runtime_native.c)** | src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs, |
+| `rt_simd_add_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_add_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_add_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_byte_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_aes_round_last_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_aes_round_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_aes_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_and_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_and_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_clmul_hi_u64` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_clmul_lo_u64` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_mul_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_mul_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_or_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_or_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shl_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shl_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shr_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_shr_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_sub_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_sub_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_i32x4` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_i32x8` | lib__nogc_sync_mut__simd | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_int_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_u64x2` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_clmul_ops.rs,src/compiler_rust/runtime/src/value/mod.rs, |
+| `rt_simd_xor_u8x16` | lib__nogc_sync_mut__simd_crypto | **FIXED 2026-09-07 (runtime_simd_dispatch.c)** | src/compiler_rust/runtime/src/value/simd_byte_ops.rs, |
 
 ## Bucket 2 misc: what was implemented (2026-09-07, follow-up session, 30 of 90)
 

@@ -9927,6 +9927,284 @@ int64_t rt_io_file_read_all(int64_t fd) {
     return (int64_t)(uintptr_t)result;
 }
 
+/* ---------------------------------------------------------------------------
+ * Stage2 link census (doc/08_tracking/bug/
+ * stage2_link_full_undefined_symbol_census_2026-09-07.md), fd-based
+ * rt_io_file_* family. These back std.nogc_sync_mut.io.file's `FileHandle`/
+ * `File` exactly like rt_io_file_open/_close/_read_all above; the reference
+ * semantics are runtime/src/value/sffi/file_io/io_file.rs, which is never
+ * linked into this core-C-bootstrap archive. `rt_io_file_exists` and
+ * `rt_io_file_delete` are the only two of this group that take a `text`
+ * (path) rather than an `fd`; both are already registered in the seed's
+ * (ptr,len) text-ABI tables (codegen/instr/calls.rs:2603,
+ * codegen/runtime_sffi.rs:2101-2102), confirmed by symbol-grep -- no codegen
+ * change is needed here.
+ * ------------------------------------------------------------------------- */
+
+/* Read up to `size` bytes from `fd` via a single read() call (NOT a
+ * read-to-EOF loop like rt_io_file_read_all above) -- matches
+ * io_file.rs::rt_io_file_read exactly: buffer sized to `size`, truncated to
+ * the actual byte count returned. Empty (not NIL) at EOF; NIL on error. */
+int64_t rt_io_file_read(int64_t fd, int64_t size) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    if (size < 0) return rt_core_nil();
+    uint64_t usize = (uint64_t)size;
+    uint8_t* buf = NULL;
+    if (usize != 0) {
+        buf = (uint8_t*)malloc((size_t)usize);
+        if (!buf) return rt_core_nil();
+    }
+#if defined(_WIN32)
+    int n = 0;
+    if (usize != 0) {
+        n = _read((int)fd, buf, (unsigned int)(usize > UINT_MAX ? UINT_MAX : usize));
+    }
+#else
+    ssize_t n = 0;
+    if (usize != 0) {
+        do { n = read((int)fd, buf, (size_t)usize); } while (n < 0 && errno == EINTR);
+    }
+#endif
+    if (n < 0) { free(buf); return rt_core_nil(); }
+    SplArray* result = rt_byte_array_new_len((uint64_t)n);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) { free(buf); return rt_core_nil(); }
+    if (n != 0) memcpy(array->data, buf, (size_t)n);
+    free(buf);
+    return (int64_t)(uintptr_t)result;
+}
+
+/* Read one newline-terminated line, byte at a time -- matches
+ * io_file.rs::rt_io_file_read_line exactly: leaves fd positioned exactly
+ * after the newline (a buffered reader would over-consume and desync any
+ * subsequent seek/read on the same fd). NIL at EOF with nothing read. Any
+ * read() error discards everything accumulated so far and returns NIL --
+ * this is the Rust reference's behavior verbatim, not a partial-line
+ * fallback. */
+int64_t rt_io_file_read_line(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    size_t cap = 64, len = 0;
+    uint8_t* line = (uint8_t*)malloc(cap);
+    if (!line) return rt_core_nil();
+    for (;;) {
+        uint8_t byte_val;
+#if defined(_WIN32)
+        int n = _read((int)fd, &byte_val, 1);
+#else
+        ssize_t n;
+        do { n = read((int)fd, &byte_val, 1); } while (n < 0 && errno == EINTR);
+#endif
+        if (n == 0) break;
+        if (n < 0) { free(line); return rt_core_nil(); }
+        if (len == cap) {
+            size_t next_cap = cap * 2;
+            uint8_t* grown = (uint8_t*)realloc(line, next_cap);
+            if (!grown) { free(line); return rt_core_nil(); }
+            line = grown;
+            cap = next_cap;
+        }
+        line[len++] = byte_val;
+        if (byte_val == '\n') break;
+    }
+    if (len == 0) { free(line); return rt_core_nil(); }
+    int64_t result = rt_string_new(line, (uint64_t)len);
+    free(line);
+    return result;
+}
+
+/* Write `data` to `fd` via a single write() call. Returns the byte count
+ * written, or -1 on error -- matches io_file.rs::rt_io_file_write. */
+int64_t rt_io_file_write(int64_t fd, const uint8_t* data_ptr, uint64_t data_len) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    if (data_len != 0 && !data_ptr) return -1;
+#if defined(_WIN32)
+    int n = _write((int)fd, data_ptr, (unsigned int)(data_len > UINT_MAX ? UINT_MAX : data_len));
+    return (n < 0) ? -1 : (int64_t)n;
+#else
+    ssize_t n;
+    do { n = write((int)fd, data_ptr, (size_t)data_len); } while (n < 0 && errno == EINTR);
+    return (n < 0) ? -1 : (int64_t)n;
+#endif
+}
+
+/* Write all of `data` to `fd`, looping until every byte is written or an
+ * error/short-write occurs. Matches io_file.rs::rt_io_file_write_all
+ * (`file.write_all(data).is_ok()`). */
+bool rt_io_file_write_all(int64_t fd, const uint8_t* data_ptr, uint64_t data_len) {
+    if (fd < 0 || fd > INT_MAX) return false;
+    if (data_len != 0 && !data_ptr) return false;
+    uint64_t written = 0;
+    while (written < data_len) {
+        uint64_t remaining = data_len - written;
+#if defined(_WIN32)
+        int n = _write((int)fd, data_ptr + written,
+            (unsigned int)(remaining > UINT_MAX ? UINT_MAX : remaining));
+        if (n <= 0) return false;
+#else
+        ssize_t n;
+        do { n = write((int)fd, data_ptr + written, (size_t)remaining); } while (n < 0 && errno == EINTR);
+        if (n <= 0) return false;
+#endif
+        written += (uint64_t)n;
+    }
+    return true;
+}
+
+/* Seek. `whence`: 0 SEEK_SET, 1 SEEK_CUR, 2 SEEK_END. Returns the new
+ * absolute position, or -1 on error. Matches io_file.rs::rt_io_file_seek. */
+int64_t rt_io_file_seek(int64_t fd, int64_t offset, int64_t whence) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    int native_whence;
+    switch (whence) {
+        case 0:
+            if (offset < 0) return -1;
+            native_whence = SEEK_SET;
+            break;
+        case 1: native_whence = SEEK_CUR; break;
+        case 2: native_whence = SEEK_END; break;
+        default: return -1;
+    }
+#if defined(_WIN32)
+    __int64 pos = _lseeki64((int)fd, offset, native_whence);
+    return (pos < 0) ? -1 : (int64_t)pos;
+#else
+    off_t pos = lseek((int)fd, (off_t)offset, native_whence);
+    return (pos < 0) ? -1 : (int64_t)pos;
+#endif
+}
+
+/* Flush userspace buffers and sync data to disk. Rust: `file.flush()`
+ * (always Ok for a raw File) `&& file.sync_data()` (fdatasync semantics --
+ * data plus only the metadata needed to retrieve it, not full metadata).
+ * Matches io_file.rs::rt_io_file_flush. */
+bool rt_io_file_flush(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    return _commit((int)fd) == 0;
+#elif defined(__linux__) || defined(__ANDROID__)
+    int r;
+    do { r = fdatasync((int)fd); } while (r < 0 && errno == EINTR);
+    return r == 0;
+#else
+    int r;
+    do { r = fsync((int)fd); } while (r < 0 && errno == EINTR);
+    return r == 0;
+#endif
+}
+
+/* Toggle the read-only bit on the file behind `fd`. Matches Rust's
+ * `std::fs::Permissions::set_readonly` on Unix exactly: `true` clears all
+ * write bits (chmod a-w); `false` sets only the owner write bit (chmod u+w)
+ * -- NOT "restore previous mode". Matches io_file.rs::rt_io_file_set_permissions. */
+bool rt_io_file_set_permissions(int64_t fd, bool readonly) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    /* No fd-level readonly toggle in the Win32 CRT; report failure rather
+     * than silently doing nothing. The Rust reference is unix-only here
+     * (io_file.rs uses std::fs::Permissions, whose readonly semantics on
+     * Windows differ entirely from the Unix mode bits mirrored above). */
+    (void)readonly;
+    return false;
+#else
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return false;
+    mode_t mode = st.st_mode;
+    if (readonly) {
+        mode &= ~(mode_t)0222;
+    } else {
+        mode |= (mode_t)0200;
+    }
+    return fchmod((int)fd, mode) == 0;
+#endif
+}
+
+/* File size in bytes, or -1 on error. Matches io_file.rs::rt_io_file_meta_size. */
+int64_t rt_io_file_meta_size(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return -1;
+    return (int64_t)st.st_size;
+}
+
+/* Packed metadata flags, or -1 on error: bit0 is_file, bit1 is_dir,
+ * bit2 is_symlink, bit3 readonly. fstat resolves through the fd, so a
+ * symlink is never observable here (the fd already refers to its resolved
+ * target) -- matches Rust's `file.metadata()`, which fstats the same live
+ * descriptor and has the identical limitation. Matches
+ * io_file.rs::rt_io_file_meta_flags. */
+int64_t rt_io_file_meta_flags(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return -1;
+    int64_t flags = 0;
+    if (S_ISREG(st.st_mode)) flags |= 1;
+    if (S_ISDIR(st.st_mode)) flags |= 2;
+#if defined(S_ISLNK)
+    if (S_ISLNK(st.st_mode)) flags |= 4;
+#endif
+    if ((st.st_mode & 0222) == 0) flags |= 8;
+    return flags;
+}
+
+/* Modification time in seconds since the Unix epoch, 0 if unavailable.
+ * Matches io_file.rs::rt_io_file_meta_modified. */
+int64_t rt_io_file_meta_modified(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return 0;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return 0;
+    return (int64_t)st.st_mtime;
+}
+
+/* Creation ("birth") time in seconds since the Unix epoch, 0 if unavailable
+ * -- matches Rust's `metadata.created()`, which itself maps an
+ * ErrorKind::Unsupported (filesystems/platforms lacking birth-time support)
+ * to 0 in io_file.rs::secs_since_epoch. POSIX `struct stat` carries no birth
+ * time; Linux exposes it only via statx(STATX_BTIME). Matches
+ * io_file.rs::rt_io_file_meta_created. */
+int64_t rt_io_file_meta_created(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return 0;
+#if defined(__linux__)
+    struct statx stx;
+    if (statx((int)fd, "", AT_EMPTY_PATH, STATX_BTIME, &stx) == 0 &&
+        (stx.stx_mask & STATX_BTIME) != 0) {
+        return (int64_t)stx.stx_btime.tv_sec;
+    }
+    return 0;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return 0;
+    return (int64_t)st.st_birthtimespec.tv_sec;
+#else
+    (void)fd;
+    return 0;
+#endif
+}
+
+/* Whether `path` exists. Matches io_file.rs::rt_io_file_exists
+ * (`Path::new(p).exists()`). */
+bool rt_io_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+#if defined(_WIN32)
+    return _access(path, 0) == 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0;
+#endif
+}
+
+/* Delete `path`. Matches io_file.rs::rt_io_file_delete
+ * (`std::fs::remove_file(p).is_ok()`). */
+bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+#if defined(_WIN32)
+    return _unlink(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
