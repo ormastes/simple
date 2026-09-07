@@ -1282,6 +1282,18 @@ const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
 
 const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
 
+/// Undefined symbols a provider MAY carry without being required to.
+///
+/// `_tlv_bootstrap` is emitted by clang into any Mach-O object that declares a
+/// thread-local — `runtime_timestamp.c:15` defines `RT_TIME_THREAD_LOCAL` as
+/// `_Thread_local`, so every macOS build of that provider references it. It is
+/// resolved by dyld/libSystem, never by us. It cannot appear in an ELF object,
+/// so permitting it unconditionally weakens nothing on Linux while unblocking
+/// the Stage-4 link on Apple targets. Membership here only removes a symbol
+/// from `unexpected_undefined`; it is never treated as required, so a provider
+/// that does not reference it still validates.
+const STAGE4_C_PERMITTED_UNDEFINED: &[&str] = &["_tlv_bootstrap"];
+
 const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
     // NUL-terminating copies (commit 8d04ee87582) allocate with malloc/free and
     // need the string length; sqlite reads past the end without them.
@@ -1384,6 +1396,7 @@ fn validate_stage4_cli_c_provider_archive(
     let unexpected_undefined: Vec<&str> = actual_undefined
         .difference(&expected_undefined)
         .map(String::as_str)
+        .filter(|symbol| !STAGE4_C_PERMITTED_UNDEFINED.contains(symbol))
         .collect();
     if !missing.is_empty()
         || !unexpected.is_empty()
@@ -1647,11 +1660,16 @@ fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_
             .arg("-Wl,-undefined,error")
             .arg(format!("-Wl,-force_load,{}", archive.display()));
         if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
-            // These two ABI names are deliberately owned by the adjacent
+            // These three ABI names are deliberately owned by the adjacent
             // core-C capsule; every remaining undefined must resolve through
             // the macOS SDK's SQLite/System libraries in this strict probe.
+            // The set must stay in step with STAGE4_C_SQLITE_UNDEFINED and with
+            // validate_stage4_system_library_ownership, which both already list
+            // all three. `_rt_string_len` was missing here, so `_borrow_string`
+            // in runtime_sqlite.o failed this probe on every macOS Stage-4 link.
             command
                 .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_len")
                 .arg("-Wl,-U,_rt_string_new")
                 .arg("-lsqlite3");
         }
