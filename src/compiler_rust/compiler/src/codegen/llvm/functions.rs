@@ -536,6 +536,45 @@ impl LlvmBackend {
         Ok(())
     }
 
+    /// LLVM type to use when spilling/reloading a vreg to/from its
+    /// per-instruction cross-block alloca.
+    ///
+    /// `compile_function` spills EVERY vreg's value to its own alloca after
+    /// the defining instruction and reloads it before the next use (a naive
+    /// SSA-without-liveness scheme; see `vreg_map.clear()` after each
+    /// instruction below). Every one of those reload/store sites used to
+    /// hardcode `self.runtime_int_type()` (i64 on 64-bit targets), which is
+    /// correct for the general tagged-RuntimeValue ABI but WRONG for a plain
+    /// unboxed `f64`/`f32` vreg: the round trip bitcasts the double to i64 on
+    /// store (bit-exact) but then reloads it as a bare `IntValue` with no
+    /// cast back, so the very next instruction sees an integer holding the
+    /// double's raw bits instead of a float. `compile_binop` dispatches on
+    /// the LLVM value's actual kind (`IntValue` vs `FloatValue`), so it took
+    /// the INTEGER add path and summed the two doubles' bit patterns.
+    ///
+    /// Measured before this fix (`zz_sum.spl`, `var x = 1.5; print(x + 2.5)`,
+    /// native `core-c-bootstrap`, `aarch64-apple-darwin`): `x` reloaded as
+    /// `IntValue(0x3ff8000000000000)` (bits of 1.5), the literal `2.5` as
+    /// `IntValue(0x4004000000000000)`, `BinOp::Add` computed
+    /// `0x3ff8000000000000 + 0x4004000000000000 = 0x7ffc000000000000`, and
+    /// the program printed `NaN`. Using the vreg's real type (via
+    /// `vreg_types`) for every spill/reload site below, the same program
+    /// prints `4`, and `dotp([1.0,2.0],[3.0,4.0])` prints `11`, both matching
+    /// the interpreter.
+    #[cfg(feature = "llvm")]
+    fn native_slot_type(
+        &self,
+        vreg_types: &VRegTypes,
+        vreg: &crate::mir::VReg,
+    ) -> inkwell::types::BasicTypeEnum<'static> {
+        use crate::hir::TypeId as T;
+        match vreg_types.get(vreg).copied() {
+            Some(T::F64) => self.context_ref().f64_type().into(),
+            Some(T::F32) => self.context_ref().f32_type().into(),
+            _ => self.runtime_int_type().into(),
+        }
+    }
+
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
@@ -811,11 +850,11 @@ impl LlvmBackend {
             // At the start of each block, reload the vregs that are live-in to
             // that block. For the entry block, seed parameter vregs.
             if Some(block.id) == is_entry_block_id {
-                let i64_type = self.runtime_int_type();
                 for (i, _param) in func.params.iter().enumerate() {
                     let vreg = crate::mir::VReg(i as u32);
+                    let slot_type = self.native_slot_type(&vreg_types, &vreg);
                     if let Some(&alloca) = vreg_allocas.get(&vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(vreg, val);
                         }
                     }
@@ -856,10 +895,10 @@ impl LlvmBackend {
                 }
 
                 // Load only live-in vregs from allocas
-                let i64_type = self.runtime_int_type();
                 for vreg in &live_in {
+                    let slot_type = self.native_slot_type(&vreg_types, vreg);
                     if let Some(&alloca) = vreg_allocas.get(vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(*vreg, val);
                         }
                     }
@@ -873,13 +912,13 @@ impl LlvmBackend {
 
             // Compile each instruction by dispatching to helper methods
             for inst in &block.instructions {
-                let i64_type = self.runtime_int_type();
                 for used in inst.uses() {
                     if vreg_map.contains_key(&used) {
                         continue;
                     }
+                    let slot_type = self.native_slot_type(&vreg_types, &used);
                     if let Some(&alloca) = vreg_allocas.get(&used) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", used.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", used.0)) {
                             vreg_map.insert(used, val);
                         }
                     }
@@ -890,11 +929,11 @@ impl LlvmBackend {
                 // Store any newly defined vreg to its alloca (for cross-block access)
                 for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
-                        let rv_type = self.runtime_int_type();
-                        let i64_val = self
-                            .coerce_value_to_type(val, Some(rv_type.into()), builder)
+                        let slot_type = self.native_slot_type(&vreg_types, &d);
+                        let slot_val = self
+                            .coerce_value_to_type(val, Some(slot_type), builder)
                             .unwrap_or(val);
-                        let _ = builder.build_store(alloca, i64_val);
+                        let _ = builder.build_store(alloca, slot_val);
                     }
                 }
 
@@ -902,12 +941,12 @@ impl LlvmBackend {
             }
 
             // Compile terminator
-            let i64_type = self.runtime_int_type();
             match &block.terminator {
                 crate::mir::Terminator::Return(Some(v)) => {
                     if !vreg_map.contains_key(v) {
+                        let slot_type = self.native_slot_type(&vreg_types, v);
                         if let Some(&alloca) = vreg_allocas.get(v) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", v.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", v.0)) {
                                 vreg_map.insert(*v, val);
                             }
                         }
@@ -915,8 +954,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Branch { cond, .. } => {
                     if !vreg_map.contains_key(cond) {
+                        let slot_type = self.native_slot_type(&vreg_types, cond);
                         if let Some(&alloca) = vreg_allocas.get(cond) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", cond.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", cond.0)) {
                                 vreg_map.insert(*cond, val);
                             }
                         }
@@ -924,8 +964,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Switch { discriminant, .. } => {
                     if !vreg_map.contains_key(discriminant) {
+                        let slot_type = self.native_slot_type(&vreg_types, discriminant);
                         if let Some(&alloca) = vreg_allocas.get(discriminant) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", discriminant.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", discriminant.0)) {
                                 vreg_map.insert(*discriminant, val);
                             }
                         }
@@ -2815,7 +2856,11 @@ impl LlvmBackend {
                     "pop" => Some("rt_array_pop"),
                     "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
-                    "trim" => Some("rt_string_trim"),
+                    // "strip"/"trimmed" synonyms for "trim" (this table's own
+                    // comment below documents this exact class of gap for
+                    // lines/partition/is_*; strip fell through the same way,
+                    // undefined `str.strip` at the Stage-4 macOS link 2026-09-07).
+                    "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                     "trim_start" => Some("rt_string_trim_start"),
                     "trim_end" => Some("rt_string_trim_end"),
                     "split" => Some("rt_string_split"),
@@ -3114,9 +3159,19 @@ impl LlvmBackend {
                         suffix_match()?
                     };
 
-                    let fallback_name = resolved
-                        .map(|n| n.replace("_dot_", "."))
-                        .unwrap_or_else(|| dotted_name.clone());
+                    // `resolved` (from use_map/import_map) is already the correct,
+                    // final mangled symbol name for a genuine cross-module
+                    // function -- it must be declared verbatim. Blindly
+                    // replacing "_dot_" -> "." here corrupted any identifier that
+                    // merely CONTAINS that substring as ordinary text (not a
+                    // dot-escape marker), e.g. `cosine_from_dot_and_magnitudes`
+                    // -> `cosine_from.and_magnitudes`, producing an undefined
+                    // symbol at the final Stage-4 macOS link (2026-09-07). No
+                    // `RUNTIME_FUNCS` spec name ever contains a literal '.', so
+                    // the replace never helped a real lookup either -- only the
+                    // unresolved bare-name fallback (`dotted_name`) still needs
+                    // dot-unescaping, for genuine `Owner_dot_method` shims.
+                    let fallback_name = resolved.map(|n| n.to_string()).unwrap_or_else(|| dotted_name.clone());
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
                         .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name);
@@ -3350,7 +3405,9 @@ impl LlvmBackend {
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
-                    ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
+                    ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
+                        Some("rt_string_trim")
+                    }
                     ("String" | "string" | "str" | "text", "trim_start") => Some("rt_string_trim_start"),
                     ("String" | "string" | "str" | "text", "trim_end") => Some("rt_string_trim_end"),
                     ("String" | "string", "replace") => Some("rt_string_replace"),
@@ -3525,9 +3582,15 @@ impl LlvmBackend {
                 let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     all_args.iter().map(|_| i64_type.into()).collect();
                 let fn_type = i64_type.fn_type(&param_types, false);
+                // Same defect class as the MethodCallStatic fallback above: a
+                // resolved use_map/import_map symbol is already the correct
+                // final mangled name and must not be dot-unescaped, or an
+                // identifier that merely contains "_dot_" as ordinary text
+                // gets corrupted into an undefined symbol at link time
+                // (2026-09-07).
                 let fallback_name = resolved_full
-                    .map(|n| n.replace("_dot_", "."))
-                    .or_else(|| resolved_method.map(|n| n.replace("_dot_", ".")))
+                    .map(|n| n.to_string())
+                    .or_else(|| resolved_method.map(|n| n.to_string()))
                     .unwrap_or_else(|| dotted_full.clone());
                 let func = func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();

@@ -1994,6 +1994,7 @@ fn project_stage4_archive_closure(
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
     let localized_object = temp_dir.join(format!("{stem}_local.o"));
     let localize_path = temp_dir.join(format!("{stem}_localize.syms"));
+    let weaken_path = temp_dir.join(format!("{stem}_weaken.syms"));
     if inputs.is_empty() {
         return Err("Stage4 archive projection requires at least one input".to_string());
     }
@@ -2148,11 +2149,15 @@ fn project_stage4_archive_closure(
             // leaves the final link undefined (observed run 9, 2026-07-24).
             .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
             // Allowed-external runtime symbols are OWNED by the outer link (the
-            // Rust runtime's rt_heap_* accounting). The core-C archive ships
-            // WEAK fallbacks for them in the same object as rt_mem_snapshot_*,
-            // so the closure carries them; localizing a weak fallback would bind
-            // the capsule to a private copy the strong owner can never override.
-            // Keep them global; `verify` below insists they stay weak.
+            // Rust runtime's rt_heap_* accounting, or -- for the Stage4 Rust
+            // runtime projection -- every rt_/spl_ symbol the core-C providers
+            // also define). The closure carries them because `ld -r` cannot
+            // drop a symbol from an object it otherwise needs (Rust's codegen
+            // units bundle many functions per .o, so pulling in one requested
+            // root can pull its whole CGU's exports along as passengers, e.g.
+            // rt_array_get/rt_string_concat riding in with unrelated roots on
+            // aarch64-apple-darwin, 2026-09-07). Keep them global rather than
+            // localizing a copy the strong owner could never override.
             .filter(|raw| !allowed_external.contains(canonical_archive_symbol(raw)))
             .map(String::as_str)
             .collect::<Vec<_>>()
@@ -2167,9 +2172,41 @@ fn project_stage4_archive_closure(
         )
         .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
+        // Allowed-external symbols that are kept global (above) must yield to
+        // the owner at the final link, i.e. be WEAK, not strong. The core-C
+        // archive already ships its allowed-external fallbacks
+        // (rt_heap_live_bytes/rt_heap_peak_bytes) as source-level
+        // `__attribute__((weak))`, so weakening them again here is a no-op.
+        // The Rust runtime crate's rt_/spl_ C-ABI exports (rt_array_get,
+        // rt_string_concat, ...) have no such attribute available on stable
+        // Rust -- `#[no_mangle] pub extern "C" fn` is always STRONG -- so
+        // without this step every one of them that rides along in a closure
+        // (see above) trips "defines owner-provided runtime symbols STRONGLY"
+        // even though nothing about the source is wrong; the property this
+        // projection promises (owner-overridable) was previously only
+        // ASSUMED true of the input archive instead of being enforced by the
+        // tool that makes the promise. `--weaken-symbols` makes it true
+        // unconditionally, and the STRONGLY check below still verifies it.
+        let weaken_text = closure_defined
+            .keys()
+            .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &weaken_path,
+            if weaken_text.is_empty() {
+                String::new()
+            } else {
+                weaken_text + "\n"
+            },
+        )
+        .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
+
         let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg(format!("--weaken-symbols={}", weaken_path.display()))
             .arg("--remove-section=.init_array")
             .arg("--remove-section=.init_array.*")
             .arg("--remove-section=.ctors")

@@ -921,7 +921,7 @@ fn hosted_freebsd_cross_target_build_fails_closed() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
     let mut objects = Vec::new();
     for (index, source) in sources.iter().enumerate() {
@@ -3851,6 +3851,53 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
         ["rt_adjacent_capsule"]
     );
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
+}
+
+// Reproduces the macOS Stage4 link gate 2026-09-07: Rust's own C-ABI runtime
+// exports (`#[no_mangle] pub extern "C" fn rt_array_get`, etc. in
+// runtime/src/value/collections.rs) are always STRONG on stable Rust -- there
+// is no portable `#[linkage = "weak"]`. When one of those symbols shares an
+// object/codegen-unit with a requested root, `ld -r` cannot drop it from the
+// closure, so it rides along even though nothing requested it. If that
+// symbol is also owned by the core-C providers (an `allowed_external`
+// runtime symbol), the projection must demote it to WEAK so the outer C
+// definition can still win the final link -- the whole point of
+// `allowed_external`. Before the 2026-09-07 fix this fixture failed with
+// "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_stage4_rust_runtime_projection_weakens_owner_provided_passenger_symbol() {
+    let temp = tempfile::tempdir().unwrap();
+    // `rt_passenger_owned` sits in the SAME translation unit as the requested
+    // root `rt_projected_root2`, mimicking a Rust codegen unit that bundles
+    // multiple `#[no_mangle]` exports into one object: pulling in the root
+    // for liveness necessarily pulls in the passenger too, strong and all.
+    let rust_runtime = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_rust_runtime_source2",
+        &[r#"
+void rt_projected_root2(void) { }
+void rt_passenger_owned(void) { }
+"#],
+    );
+    let output = build_stage4_rust_runtime_projection_archive(
+        &rust_runtime,
+        &["rt_projected_root2".to_string()],
+        &["rt_passenger_owned".to_string()],
+        &temp.path().join("projection2"),
+    )
+    .unwrap();
+
+    let (defined, _undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    let weak = super::tools::archive_weak_global_symbols(&output).unwrap();
+    assert!(
+        defined.keys().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "passenger symbol must still be present (kept global, not localized): {defined:?}"
+    );
+    assert!(
+        weak.iter().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "owner-provided passenger symbol must be demoted to WEAK so the outer C definition can override it, found strong: {weak:?}"
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

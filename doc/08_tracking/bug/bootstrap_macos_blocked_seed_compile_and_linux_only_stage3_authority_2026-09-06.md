@@ -536,3 +536,147 @@ fix it.
 
 Each iteration costs a full Stage-4 rebuild (~50 min), so these should be
 batched into one change rather than verified one at a time.
+
+## Gate 5 resolved to two remaining defects, with a 60-second reproducer
+
+Five of the six symbols were half-backed boundaries in the C core and are fixed
+(webgpu teardown, SDL2 present, hosted selector, raw mmap — see the commit).
+What is left is `rt_numeric.f64`, and running it down produced two distinct
+defects plus a fast reproducer. Build this with
+`--runtime-bundle core-c-bootstrap` and the link fails in about a minute:
+
+```
+fn dotp(a: [f64], b: [f64]) -> f64:
+    var acc = 0.0
+    var n = a.len()
+    if b.len() < n:
+        n = b.len()
+    var i = 0
+    while i < n:
+        acc = acc + a[i] * b[i]
+        i = i + 1
+    acc
+```
+```
+Undefined symbols for architecture arm64:
+  "_rt_numeric.f64", referenced from: ..._dotp in mod_0.o
+```
+
+### Defect A — the emitted kernel name is malformed
+
+The SIMD dot-reduction lowering names its kernel `rt_numeric_dot_f64`
+(`pipeline/lowering.rs:1290-1292`), which is defined (`T`) in
+`libsimple_native_all.a` and the Rust `libsimple_runtime.a`. What reaches the
+object file is `rt_numeric.f64` — the name split at `_dot_`, this backend's
+escape for a `.` inside a mangled Simple identifier, into owner `rt_numeric` +
+member `f64`. Here `_dot_` is literal: it is a dot *product*.
+
+**The producing site was not found, and four candidates are ruled OUT by
+instrumentation, not by reading:** `split_enum_qualified_name`
+(`mir/lower/lowering_expr_call.rs`), and `resolve_call_target`, `resolve_name`
+and `resolve_method_call_static` (`pipeline/native_project/mangle.rs`) were each
+given an `eprintln!` on any name containing `numeric`, rebuilt, and re-probed —
+**none of them ever sees such a name**. Guards added there were therefore
+reverted rather than left in as unverified edits. `SIMPLE_DUMP_MIR` produces no
+output on this path either, so `codegen/common_backend.rs` is not the lane the
+native build uses. Whoever picks this up starts from a working 60-second
+reproducer and four eliminated suspects.
+
+### Defect B — the core-C lane has no f64 reduction kernels, and their ABI is not the Rust one
+
+`rt_numeric_sum_f64` and `rt_numeric_dot_f64` exist only in the Rust runtime,
+which `core-c-bootstrap` does not link, so the lowering's rewrite is
+unsatisfiable in this lane even with the name spelled correctly.
+
+C implementations were written, measured, and then **removed** rather than
+shipped. Two measurements say the call ABI is not the Rust `RuntimeValue` one:
+
+| version | `sumf([1.5, 2.5])` |
+|---|---|
+| returns boxed `rt_value_float(acc)` | `2.14e-315` — the returned tagged pointer read back as a raw double |
+| returns raw `double acc` | `2.5` — a real double, but only the last element |
+
+So the call site wants a raw `f64` return (not a boxed value), and reading
+elements with `rt_array_get` + `rt_core_as_float` does not recover them —
+consistent with the Rust lane's `pack_f64_array` packed representation rather
+than tagged slots.
+
+They were removed because a wrong `sum`/`dot` is worse than a link error: these
+kernels are substituted for *every* f64 accumulation loop, so silently wrong
+arithmetic would reach `Embedding.dot` (search/embeddings) and the spreadsheet
+formula engine with nothing to signal it. Getting this right needs the packed
+f64 array ABI pinned down first, with a behavioural test alongside
+`src/runtime/test/rt_core_exports_behaviour_selfcheck.c`.
+
+## Two findings that change what "finish the deploy" means
+
+### Native f64 accumulation is wrong in the core-C lane (new, reproducible)
+
+Refusing the reduction rewrite (see the `SIMPLE_NO_RUNTIME_NUMERIC_KERNELS`
+knob added to `classify_hir_simd_reduction`) gets the link past
+`rt_numeric.f64` — and reveals that the *plain loop* is also wrong:
+
+```
+fn sumf(a: [f64]) -> f64:
+    var acc = 0.0
+    var i = 0
+    while i < a.len():
+        acc = acc + a[i]
+        i = i + 1
+    acc
+```
+
+| lane | `sumf([1.5, 2.5])` |
+|---|---|
+| seed interpreter (`simple run`) | **4.0** — correct reference |
+| native, core-c-bootstrap, kernels ON | `2.5` (kernel ABI mismatch) |
+| native, core-c-bootstrap, kernels OFF | **`NaN`** |
+
+and the dot-product variant returns `0.0` where the interpreter gives `11`.
+
+So f64 accumulation in the native core-C lane is broken *independently of the
+kernels*. This is the concrete, minimal case behind the comment already sitting
+in `src/lib/common/search/types.spl`:
+
+```
+fn dot(other: Embedding<D>) -> f64:
+    """f64 dot product. UNRELIABLE on this repo's backends — see header."""
+```
+
+That file works around it with `dot_fixed` / `l2_sq_fixed` (integer fixed-point,
+"reliable path"). The comment is now backed by a reproducer and a reference
+value.
+
+**This is the reason a Stage-4 deploy should not be finished today.** A
+deployed compiler whose f64 sums produce `NaN` is worse than the current state,
+in which `bin/simple` is an honest Rust seed. Fix the f64 native path first.
+
+### Gate 6: the runtime capsule defines owner-provided symbols strongly
+
+Past gate 5, the link reaches a further macOS gate:
+
+```
+Build failed: Stage4 runtime capsule defines owner-provided runtime symbols
+STRONGLY (the outer runtime could not override them): _rt_actor_join,
+_rt_alloc, _rt_array_get, ... (several hundred)
+```
+
+Not one boundary this time but the capsule's whole symbol set, i.e. a
+link-architecture expectation about which archive owns what and how overrides
+work — and Mach-O's archive-member selection and weak-symbol semantics differ
+from ELF's, which is exactly the sort of thing a lane that has never run on this
+platform gets wrong. Untouched here.
+
+## Status summary
+
+| stage | macOS |
+|---|---|
+| Rust seed compiles | **fixed** (was E0609) |
+| C runtime compiles / push gate | **fixed** (was FAIL, now PASS 129 files) |
+| Rust authority publication | **fixed** (GNU `stat -Lc`, unconditional `/proc/self/stat`) |
+| Stage 2 native build | works — 834 units, 0 failed |
+| Stage 2 admission | blocked: procfs directory magic-links + `serialize_mir_function` SEGV |
+| Stage 4 compile (full CLI closure) | works — ~1,600 modules |
+| Stage 4 link gates 1-5 | **fixed** |
+| Stage 4 link gate 6 | open (runtime capsule symbol strength) |
+| native f64 correctness | **broken** — blocks deployment on its own |
