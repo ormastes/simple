@@ -25,6 +25,23 @@
 # A run that issued 0 requests is always ERROR, never a pass.
 
 SELF="check-llm-caret-server-serves.shs"
+
+# This guard speaks HTTP over bash's /dev/tcp, which no POSIX sh provides. Every
+# manifest-driven runner in this repo invokes a guard as `sh <script>`
+# (run_push_gate in scripts/check/check-push-must-pass.shs does `sh "$@"`), and
+# under dash line 83 died with "cannot create /dev/tcp/..." BEFORE any verdict
+# line was printed -- an exit 2 with empty stdout, which is indistinguishable
+# from a crash and is not a verdict. Re-exec under bash so the guard keeps its
+# verdict contract no matter which shell invoked it; with no bash at all, say so
+# as a real ERROR rather than dying silently.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    fi
+    echo "$SELF: ERROR — nothing was checked (needs bash for /dev/tcp; no bash on PATH)"
+    exit 2
+fi
+
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR" || { echo "$SELF: ERROR — cannot cd to repo root" >&2; echo "$SELF: ERROR — nothing was checked"; exit 2; }
 
@@ -217,6 +234,14 @@ fi
 # ---------------------------------------------------------------------------
 # Real end-to-end run against the actual server.
 # ---------------------------------------------------------------------------
+# A fresh checkout has no bin/simple: the symlink is created by
+# scripts/setup/setup.shs and is untracked. Without this precondition the guard
+# still reaches the same ERROR, but only after burning the full 60s
+# wait_for_port budget on a server that was never going to start -- unacceptable
+# on a gate that runs on every push. Fail closed and say why.
+[ -x "$ROOT_DIR/bin/simple" ] || \
+    err "no runnable bin/simple in this checkout (untracked; run scripts/setup/setup.shs)"
+
 PORT="$(pick_free_port)" || err "no free port found"
 
 timeout 90 bin/simple run src/app/llm_caret/main.spl --provider dummy --server --port "$PORT" \
