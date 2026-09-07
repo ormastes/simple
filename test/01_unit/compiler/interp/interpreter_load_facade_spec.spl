@@ -1,0 +1,113 @@
+use std.spec.{describe, it, expect}
+use compiler.interp.load_facade.{
+    InterpreterLoadErrorV1, InterpreterLoadResolverIdentityV1,
+    InterpreterLoadSnapshotIdentityV1, interpreter_load_plan_v1
+}
+use compiler.driver.cache.package_index_route.{
+    PackageArchiveAdmissionV1, PackageIndexRouteV1
+}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveLoadV1}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.dirty_module_record.{
+    DirtyModuleRecordV1, FrozenSourceReadSetV1
+}
+
+val DIGEST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val DIGEST_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val DIGEST_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+fn snapshot() -> InterpreterLoadSnapshotIdentityV1:
+    InterpreterLoadSnapshotIdentityV1("revision-1", DIGEST_A, DIGEST_B, DIGEST_C)
+
+fn resolver() -> InterpreterLoadResolverIdentityV1:
+    InterpreterLoadResolverIdentityV1(DIGEST_A, "root-generation-1", DIGEST_B)
+
+fn dirty() -> DirtyModuleRecordV1:
+    DirtyModuleRecordV1(
+        "pkg", "pkg.module", "/frozen/pkg/module.spl", "revision-1",
+        DIGEST_A, DIGEST_B, DIGEST_C, DIGEST_A, DIGEST_B, DIGEST_C,
+        DIGEST_A, [], [], [FrozenSourceReadSetV1(
+            "/frozen/pkg/module.spl", 0, 1, true, DIGEST_C)],
+        "root-generation-1", DIGEST_A, DIGEST_B)
+
+fn archive_with_producer(
+    package_identity: text, producer_digest: text
+) -> PackageArchiveAdmissionV1:
+    val receipt = PackageArchiveReceiptV1(
+        package_identity, DIGEST_C, DIGEST_A, DIGEST_B,
+        "root-generation-1", producer_digest, DIGEST_B, [], [], DIGEST_C)
+    PackageArchiveAdmissionV1(
+        package_identity, ["{package_identity}.module"],
+        [],
+        "/cache/{package_identity}.archive",
+        PackageArchiveLoadV1(
+            true, "ok", false, "/cache/{package_identity}.archive",
+            Some(receipt)))
+
+fn archive(package_identity: text) -> PackageArchiveAdmissionV1:
+    archive_with_producer(package_identity, DIGEST_A)
+
+describe("interpreter load facade"):
+    it("rejects invalid shared snapshot identity"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(true, "ok", [], [], [], []),
+            InterpreterLoadSnapshotIdentityV1("", DIGEST_A, DIGEST_B, DIGEST_C),
+            resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.invalid_snapshot_identity)
+
+    it("rejects invalid shared resolver identity"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(true, "ok", [], [], [], []), snapshot(),
+            InterpreterLoadResolverIdentityV1("", "root-generation-1", DIGEST_B))
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.invalid_resolver_identity)
+
+    it("rejects an invalid demand route"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(false, "index-invalid", [], [], [], []),
+            snapshot(), resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.invalid_route)
+
+    it("requires demand compilation for dirty packages without reading source"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(
+                true, "ok", ["/frozen/pkg/module.spl"], [dirty()], [], []),
+            snapshot(), resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.dirty_package_requires_compile)
+        expect(result.unwrap_err().diagnostic.package_identity).to_equal("pkg")
+
+    it("rejects an empty archive route"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(true, "ok", [], [], [], []),
+            snapshot(), resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.empty_route)
+
+    it("plans clean packages only from admitted archive authority"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(
+                true, "ok", [], [], [], [archive("pkg")]),
+            snapshot(), resolver())
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap().archives.len()).to_equal(1)
+        expect(result.unwrap().archives[0].package_identity).to_equal("pkg")
+
+    it("rejects duplicate package admissions"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(
+                true, "ok", [], [], [], [archive("pkg"), archive("pkg")]),
+            snapshot(), resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.duplicate_package)
+
+    it("rejects archive authority from another producer"):
+        val result = interpreter_load_plan_v1(
+            PackageIndexRouteV1(
+                true, "ok", [], [], [],
+                [archive_with_producer("pkg", DIGEST_C)]),
+            snapshot(), resolver())
+        expect(result.unwrap_err().error).to_equal(
+            InterpreterLoadErrorV1.archive_authority_mismatch)

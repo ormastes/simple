@@ -1,0 +1,91 @@
+"""Wire-neutral build progress snapshot contracts."""
+
+pub val BUILD_PROGRESS_SCHEMA_V1: text = "simple-build-progress-v1"
+pub val BUILD_PROGRESS_CURRENT_LIMIT_V1: i64 = 8
+
+pub enum BuildProgressState:
+    Running
+    Complete
+    Failed
+    Cancelled
+
+pub enum BuildLinkState:
+    NotStarted
+    Running
+    Complete
+    Failed
+
+pub struct BuildProgressSnapshot:
+    schema: text
+    build_id: text
+    sequence: i64
+    phase: text
+    subphase: text
+    state: BuildProgressState
+    verdict: text
+    total_files: i64
+    discovered_files: i64
+    planned_files: i64
+    queued_files: i64
+    compiling_files: i64
+    compiled_files: i64
+    cached_files: i64
+    failed_files: i64
+    remaining_files: i64
+    current_files: [text]
+    last_completed_file: text
+    error_count: i64
+    error_summary: text
+    link_state: BuildLinkState
+    link_input_count: i64
+    link_output: text
+    elapsed_ms: i64
+    heartbeat_ms: i64
+    files_per_second_milli: i64
+    eta_ms: i64
+    eta_confidence: text
+    cancellation_requested: bool
+    receipt_path: text
+    evidence_path: text
+
+pub enum BuildProgressPublishError:
+    InvalidSchema
+    InvalidBuildId
+    InvalidSequence
+    NonMonotonic
+    StaleBuild
+    CapacityExceeded
+    IoFailure
+
+pub fn build_progress_state_text(state: BuildProgressState) -> text:
+    match state:
+        BuildProgressState.Running: "running"
+        BuildProgressState.Complete: "complete"
+        BuildProgressState.Failed: "failed"
+        BuildProgressState.Cancelled: "cancelled"
+
+pub fn build_link_state_text(state: BuildLinkState) -> text:
+    match state:
+        BuildLinkState.NotStarted: "not_started"
+        BuildLinkState.Running: "running"
+        BuildLinkState.Complete: "complete"
+        BuildLinkState.Failed: "failed"
+
+pub fn validate_build_progress(snapshot: BuildProgressSnapshot) -> Result<(), BuildProgressPublishError>:
+    if snapshot.schema != BUILD_PROGRESS_SCHEMA_V1:
+        return Err(BuildProgressPublishError.InvalidSchema)
+    if snapshot.build_id == "":
+        return Err(BuildProgressPublishError.InvalidBuildId)
+    if snapshot.sequence < 0:
+        return Err(BuildProgressPublishError.InvalidSequence)
+    if snapshot.current_files.len() > BUILD_PROGRESS_CURRENT_LIMIT_V1:
+        return Err(BuildProgressPublishError.CapacityExceeded)
+    Ok(())
+
+pub fn validate_build_progress_successor(previous: BuildProgressSnapshot, next: BuildProgressSnapshot) -> Result<(), BuildProgressPublishError>:
+    validate_build_progress(next)?
+    if previous.build_id != next.build_id:
+        return Err(BuildProgressPublishError.StaleBuild)
+    if next.sequence <= previous.sequence or next.elapsed_ms < previous.elapsed_ms:
+        return Err(BuildProgressPublishError.NonMonotonic)
+    Ok(())

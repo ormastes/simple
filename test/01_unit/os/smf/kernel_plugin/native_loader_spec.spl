@@ -1,0 +1,138 @@
+# Purpose: fail-closed KPF admission over the existing SMF provider authority.
+# @req REQ-KPF-NATIVE-ADMISSION
+# @cover src/os/smf/kernel_plugin 85%
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use os.smf.kernel_plugin.native_loader.*
+use os.smf.provider_loader.{
+    ProviderAdmissionRequestV1, ProviderCallableEvidenceV1,
+    ProviderLoaderSessionV1, provider_admit_evidence_v1
+}
+use os.posix.dynlib.{DynLibKind}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SimpleProviderQueryV1, SimpleProviderQueryResultV1
+}
+use std.nogc_sync_mut.kernel_plugin.{KpfGenerationHandle, KpfGenerationTable, KpfSyncStatus}
+
+fn provider_id() -> KpfId128: KpfId128(hi: 11, lo: 12)
+fn composition_digest() -> KpfDigest256: KpfDigest256(w0: 21, w1: 22, w2: 23, w3: 24)
+
+fn loader_request() -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: "build/providers/lint.smf", artifact_kind: "smf",
+        expected_artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        granted_capability_bits: 7, required_capability_bits: 5,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 1)
+
+fn evidence() -> ProviderCallableEvidenceV1:
+    ProviderCallableEvidenceV1(
+        artifact_exists: true,
+        artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        loader_valid: true, query_symbol_address: 4096,
+        query_symbol_process_callable: true)
+
+fn query() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE, interface_id: 91,
+        minimum_major: 1, minimum_minor: 0, host_abi: 1,
+        target_offset: 0, target_length: 0, requested_capability_bits: 5)
+
+fn result() -> SimpleProviderQueryResultV1:
+    SimpleProviderQueryResultV1(
+        status: SIMPLE_PROVIDER_OK, provided_major: 1, provided_minor: 1,
+        descriptor_size: 60, interface_handle: 700, provider_context: 800,
+        provider_identity_digest: 900, implementation_digest: 901,
+        abi_digest: 902)
+
+fn policy(generation: KpfGenerationHandle) -> KpfSmfAdmissionPolicyV1:
+    KpfSmfAdmissionPolicyV1(
+        provider_id: provider_id(), composition_digest: composition_digest(),
+        generation: generation, interface_id: 91, interface_major: 1,
+        interface_minor: 0, expected_abi_digest: 902,
+        granted_capability_bits: 7, required_capability_bits: 5)
+
+describe "KPF SMF/native provider admission":
+    it "admits exact evidence and caches the operation table for the active generation":
+        step("publish the sealed generation before admitting provider evidence")
+        val generations = KpfGenerationTable.create(2, 2)
+        val published = generations.publish(provider_id(), composition_digest(), 1)
+        val receipt = kpf_smf_admit_evidence_v1(policy(published.current),
+            loader_request(), evidence(), query(), result(), generations.view(published.current))
+        assert_true(receipt.admitted)
+        assert_equal(receipt.status, KpfSmfAdmissionStatus.Admitted)
+        assert_equal(receipt.operation_table.interface_handle, 700u64)
+        assert_equal(receipt.operation_table.provider_context, 800u64)
+        assert_equal(receipt.operation_table.query_symbol_address, 4096)
+
+    it "rejects path digest capability ABI interface and generation mismatches":
+        step("mutate each exact admission authority independently")
+        val generations = KpfGenerationTable.create(2, 2)
+        val published = generations.publish(provider_id(), composition_digest(), 1)
+        var path_request = loader_request()
+        path_request.artifact_path = "../lint.smf"
+        assert_equal(kpf_smf_admit_evidence_v1(policy(published.current), path_request,
+            evidence(), query(), result(), generations.view(published.current)).status,
+            KpfSmfAdmissionStatus.LoaderRejected)
+        var wrong_digest = evidence()
+        wrong_digest.artifact_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        assert_equal(kpf_smf_admit_evidence_v1(policy(published.current), loader_request(),
+            wrong_digest, query(), result(), generations.view(published.current)).status,
+            KpfSmfAdmissionStatus.LoaderRejected)
+        var wrong_capability = policy(published.current)
+        wrong_capability.granted_capability_bits = 1
+        assert_equal(kpf_smf_admit_evidence_v1(wrong_capability, loader_request(), evidence(),
+            query(), result(), generations.view(published.current)).status,
+            KpfSmfAdmissionStatus.CapabilityMismatch)
+        var wrong_abi = policy(published.current)
+        wrong_abi.expected_abi_digest = 999
+        assert_equal(kpf_smf_admit_evidence_v1(wrong_abi, loader_request(), evidence(),
+            query(), result(), generations.view(published.current)).status,
+            KpfSmfAdmissionStatus.AbiDigestMismatch)
+        var wrong_interface = query()
+        wrong_interface.interface_id = 92
+        assert_equal(kpf_smf_admit_evidence_v1(policy(published.current), loader_request(),
+            evidence(), wrong_interface, result(), generations.view(published.current)).status,
+            KpfSmfAdmissionStatus.InterfaceMismatch)
+        val other = KpfGenerationTable.create(1, 1)
+        val other_published = other.publish(KpfId128(hi: 50, lo: 51), composition_digest(), 1)
+        assert_equal(kpf_smf_admit_evidence_v1(policy(other_published.current), loader_request(),
+            evidence(), query(), result(), other.view(other_published.current)).status,
+            KpfSmfAdmissionStatus.GenerationMismatch)
+
+    it "models unload as denied until both provider and generation pins are released":
+        step("exercise the explicit pin guard without loading an external artifact")
+        val generations = KpfGenerationTable.create(1, 1)
+        val published = generations.publish(provider_id(), composition_digest(), 1)
+        val generation_pin = generations.pin_active()
+        val receipt = kpf_smf_admit_evidence_v1(policy(published.current), loader_request(),
+            evidence(), query(), result(), generations.view(published.current))
+        val loader_admission = provider_admit_evidence_v1(loader_request(), evidence())
+        val loader = ProviderLoaderSessionV1(
+            library: DynLibKind.Invalid, admission: loader_admission,
+            open: true, next_pin_id: 2, live_pins: [1],
+            cli_invoke_symbol_address: 0, cli_invoke_process_callable: false)
+        val session = KpfSmfNativeSessionV1(loader: loader, receipt: receipt,
+            provider_pin_id: 1, generation_pin: generation_pin.handle,
+            pinned: true, open: true)
+        assert_equal(kpf_smf_unload_v1(session), KpfSmfAdmissionStatus.StillPinned)
+        assert_equal(generations.view(published.current).pin_count, 1u32)
+
+    it "rejects a replacement published between validation and exact generation pinning":
+        step("validate the first generation, publish a replacement, then pin the validated handle")
+        val generations = KpfGenerationTable.create(2, 2)
+        val first = generations.publish(provider_id(), composition_digest(), 1)
+        val first_policy = policy(first.current)
+        val validated = kpf_smf_admit_evidence_v1(first_policy, loader_request(), evidence(),
+            query(), result(), generations.view(first.current))
+        assert_true(validated.admitted)
+        val second = generations.publish(KpfId128(hi: 31, lo: 32),
+            KpfDigest256(w0: 41, w1: 42, w2: 43, w3: 44), 2)
+        assert_true(second.status.accepted())
+        val pin = kpf_smf_pin_policy_generation_v1(first_policy, generations)
+        assert_equal(pin.status.code(), KpfSyncStatus.GenerationNotActive.code())
+        assert_equal(generations.view(second.current).pin_count, 0u32)

@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+runtime=${SIMPLE_BIN:-bin/release/simple}
+case "$runtime" in
+  /*) ;;
+  *) runtime="$PWD/$runtime" ;;
+esac
+if [ ! -x "$runtime" ]; then
+  echo "STATUS: BLOCKED — compatible self-hosted runtime unavailable"
+  exit 2
+fi
+if ! "$runtime" --version >/dev/null 2>&1; then
+  echo "STATUS: BLOCKED — compatible self-hosted runtime unavailable"
+  exit 2
+fi
+
+probe=${TMPDIR:-/tmp}/simple-native-zero-work-crash-probe.$$
+root=${TMPDIR:-/tmp}/simple-native-zero-work-crash-root.$$
+"$runtime" native-build --source src/compiler --source src/lib --entry-closure \
+  --entry test/03_system/compiler/feature/native_zero_work_crash_probe.spl \
+  --output "$probe"
+
+for point in generation-write generation-rename generation-renamed-before-dir-fsync pointer-write pointer-rename; do
+  "$probe" reset "$root"
+  set +e
+  "$probe" crash "$root" "$point"
+  status=$?
+  set -e
+  [ "$status" -eq 86 ] || { echo "FAIL: crash point $point exited $status"; exit 1; }
+  "$probe" check-miss "$root"
+  "$probe" recover "$root"
+done
+"$probe" reset "$root"
+set +e
+"$probe" crash "$root" pointer-renamed-before-dir-fsync
+status=$?
+set -e
+[ "$status" -eq 86 ] || { echo "FAIL: post-pointer-rename crash exited $status"; exit 1; }
+"$probe" check-hit "$root"
+echo "PASS: generation/pointer process-kill recovery"

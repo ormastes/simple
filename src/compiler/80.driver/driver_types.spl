@@ -27,11 +27,18 @@ use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend.sdn.{SdnBackendImpl}
 use compiler.common.attributes.{VhdlHardwareMetadataFlatRow}
 use compiler.common.di.{DiContainer}
-use compiler.tools.aop.{AopWeaver, LogAspect}
-use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
 use compiler.common.compiler_services.{CompilerServices, create_default_services}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.driver.demand_mir_integration.{DemandMirIntegrationInputV1}
+use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1}
+use compiler.driver.action_graph.scc_publication_ownership.{SccPublicationOwnershipV1}
+use compiler.driver.cache.dirty_module_record.{DirtyModuleRecordV1}
+use compiler.hir.archive.interface_action_archive.{
+    SemanticContext, CompileActionRegistry
+}
 # HOISTED (2026-08-21): this was a FUNCTION-LOCAL `use` inside
 # `compute_options_hash` below. The parser DISCARDS function-local `use`
 # outright (10.frontend/core/parser_stmts.spl -> parse_use_stmt_inline returns a
@@ -491,7 +498,7 @@ class CompileContext:
     config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
     backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
     extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
-    aop: AopWeaver
+    aop: Any
     logger: BootLogger
     sources: [SourceFile]
     # Scalar owner projection of sources. Native value-record lowering can
@@ -553,6 +560,14 @@ class CompileContext:
     frozen_storage_sites: [MirStorageViewSiteBindingV1]
     frozen_storage_evidence: [MirTypedStorageViewEvidenceV1]
     frozen_storage_known_module_names: [text]
+    demand_mir_input: DemandMirIntegrationInputV1?
+    demand_mir_admission: MirAdmissionV1?
+    demand_compile_execution: DemandCompileExecutionV1?
+    demand_artifact_route: DemandArtifactRouteV1?
+    demand_scc_publication: SccPublicationOwnershipV1?
+    demand_dirty_modules: [DirtyModuleRecordV1]
+    archive_semantic_owner: SemanticContext
+    archive_action_owner: CompileActionRegistry
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
@@ -643,13 +658,6 @@ class CompileContext:
         else:
             BootLogger.from_env()
 
-        # Setup AOP
-        val aop_config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
-        val runtime_enabled = not options.release  # Runtime advice disabled in release builds
-        var aop = AopWeaver(advices: [], config: aop_config, logger: logger, runtime_enabled: runtime_enabled, runtime_allowlist: [])
-        if options.verbose:
-            aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
-
         CompileContext(
             options: options,
             native_target: options.native_target,
@@ -657,7 +665,7 @@ class CompileContext:
             config: config,
             backend: backend,
             extensions: extensions,
-            aop: aop,
+            aop: nil,
             logger: logger,
             sources: [],
             source_paths_owner: [],
@@ -689,8 +697,16 @@ class CompileContext:
             storage_registry_frozen_identity: "",
             frozen_storage_module_names: [],
             frozen_storage_sites: [],
-            frozen_storage_evidence: []
-            , frozen_storage_known_module_names: []
+            frozen_storage_evidence: [],
+            frozen_storage_known_module_names: [],
+            demand_mir_input: nil,
+            demand_mir_admission: nil,
+            demand_compile_execution: nil,
+            demand_artifact_route: nil,
+            demand_scc_publication: nil,
+            demand_dirty_modules: [],
+            archive_semantic_owner: SemanticContext([], []),
+            archive_action_owner: CompileActionRegistry([], [])
         )
 
     fn storage_binding_rows_well_formed() -> bool:

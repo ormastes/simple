@@ -468,6 +468,12 @@ impl Lowerer {
                 if f.is_pure() {
                     self.pure_functions.insert(f.name.clone());
                 }
+                if ret_ty != TypeId::ANY
+                    && !self.is_reference_type(ret_ty)
+                    && f.body.statements.iter().all(|statement| matches!(statement, Node::Pass(_)))
+                {
+                    self.proven_nonescaping_functions.insert(f.name.clone());
+                }
             }
             Node::Class(c) => {
                 let class_type_id = self.register_class(c)?;

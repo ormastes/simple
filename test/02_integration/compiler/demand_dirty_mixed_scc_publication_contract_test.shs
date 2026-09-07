@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+loading="$root/src/compiler/80.driver/driver_source_pipeline_loading.spl"
+lowering="$root/src/compiler/80.driver/driver_pipeline_lowering.spl"
+route="$root/src/compiler/80.driver/cache/package_index_route.spl"
+integration="$root/src/compiler/80.driver/action_graph/demand_compile_integration.spl"
+outputs="$root/src/compiler/80.driver/action_graph/scc_compile_outputs.spl"
+ownership="$root/src/compiler/80.driver/action_graph/scc_publication_ownership.spl"
+native="$root/src/compiler/80.driver/driver_aot_native_output.spl"
+smf="$root/src/compiler/80.driver/driver_aot_smf_output.spl"
+
+require() {
+    grep -Fq "$2" "$1" || {
+        printf 'missing production contract: %s in %s\n' "$2" "$1" >&2
+        exit 1
+    }
+}
+
+require "$route" 'dirty_modules: [DirtyModuleRecordV1]'
+require "$route" 'module_entries: [PackageModuleIndexEntryV1]'
+require "$loading" 'CombinedMirEvidenceBuilder('
+require "$loading" 'archive_evidence, dirty_evidence'
+require "$loading" 'route_capability_scope_register_v1('
+require "$loading" 'route_capability_scope_close_all_v1('
+require "$loading" 'self.ctx.demand_mir_admission = Some'
+require "$loading" 'self.ctx.sources = []'
+require "$lowering" 'self.ctx.demand_mir_admission != nil'
+require "$integration" 'fn demand_compile_complete_scc_outputs_v1('
+require "$integration" 'scc_compile_outputs_publish_v1('
+require "$outputs" 'output.compiler_action_succeeded'
+require "$outputs" 'output.mir_admission_digest != expected_mir_admission_digest'
+require "$outputs" 'package_archive_publish_scc_v1('
+require "$ownership" 'val package_image = cas_get(cache_root, entry!.manifest_digest)'
+require "$ownership" 'val interface_content = cas_get(cache_root, entry!.smf_metadata_digest)'
+require "$ownership" 'val action_content = cas_get(cache_root, entry!.action_digest)'
+require "$ownership" 'ownership.modules[index].object_path = object_path'
+require "$native" 'scc_publication_complete_object_v1('
+require "$native" 'demand_compile_complete_scc_outputs_v1('
+require "$native" 'driver_publish_demand_scc_outputs_v1(ctx)'
+require "$smf" 'scc_publication_complete_smf_v1('
+require "$smf" 'demand_compile_complete_scc_outputs_v1('
+
+if grep -Fq 'demand_mir_input_from_archives_v1(' "$loading"; then
+    printf 'legacy archive-only MIR branch remains\n' >&2
+    exit 1
+fi
+if grep -Fq 'demand_compile_publish_dirty_scc_v1' "$integration"; then
+    printf 'legacy raw SCC publication branch remains\n' >&2
+    exit 1
+fi
+
+archive_return_line=$(grep -n 'self.ctx.sources = \[\]' "$loading" | head -1 | cut -d: -f1)
+bootstrap_line=$(grep -n 'self.parse_bootstrap_default_root("./src/compiler")' "$loading" | head -1 | cut -d: -f1)
+test "$archive_return_line" -lt "$bootstrap_line"
+
+printf 'DEMAND_DIRTY_MIXED_SCC_PUBLICATION_STATIC_PASS\n'

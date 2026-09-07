@@ -70,7 +70,8 @@
 #
 # An explicit operator choice is honoured via $SIMPLE_BUILD_COMPILER, but it is
 # still capability-probed -- an explicit choice has to be able to do the job.
-# A deliberate seed selection warns rather than aborting (D1 route-around).
+# An explicit seed selection is rejected: operator intent cannot turn bootstrap
+# lineage into admitted self-hosted evidence.
 #
 # USAGE (as a command)
 # --------------------
@@ -96,10 +97,14 @@ simple_compiler_default_candidates() {
     # only one of them (as the reference implementation did) silently misses
     # half the staged compilers. Both are listed.
     printf '%s\n' \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage3/*/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage3/simple \
         "$_scs_root"/build/bootstrap/stage3/*/simple \
         "$_scs_root"/build/bootstrap/stage3/simple \
         "$_scs_root"/bootstrap/stage3/*/simple \
         "$_scs_root"/bootstrap/stage3/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage2/*/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage2/simple \
         "$_scs_root"/build/bootstrap/stage2/*/simple \
         "$_scs_root"/build/bootstrap/stage2/simple \
         "$_scs_root"/bootstrap/stage2/*/simple \
@@ -170,7 +175,10 @@ simple_compiler_is_seed() {
 simple_compiler_env_write_ok() {
     _scs_bin="$1"
     case "$_scs_bin" in /*) ;; *) _scs_bin="$PWD/$_scs_bin" ;; esac
-    _scs_dir="$(mktemp -d "${TMPDIR:-/tmp}/simple-compiler-probe.XXXXXX")" || return 1
+    [ -n "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ] || return 1
+    _scs_probe_root="${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/compiler-select"
+    mkdir -p "$_scs_probe_root" || return 1
+    _scs_dir="$(mktemp -d "$_scs_probe_root/simple-compiler-probe.XXXXXX")" || return 1
     printf 'fn main():\n    print("ok")\n' > "$_scs_dir/p.spl" 2>/dev/null || {
         rm -rf "$_scs_dir"; return 1; }
 
@@ -267,6 +275,24 @@ simple_compiler_usable() {
     [ -n "${1:-}" ] || return 1
     [ -f "$1" ] && [ -x "$1" ] || return 1
     simple_compiler_is_seed "$1" && return 1
+    case "$1" in
+        */bin/release/*/simple)
+            _scs_root=${SIMPLE_COMPILER_ROOT:-$(CDPATH= cd -- "$(dirname -- "$1")/../../.." 2>/dev/null && pwd -P)}
+            if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+                [ -f "$_scs_root/scripts/lib/simple-runtime-provenance.shs" ] || return 1
+                . "$_scs_root/scripts/lib/simple-runtime-provenance.shs"
+            fi
+            simple_runtime_provenance_admits "$1" "$_scs_root" || return 1
+            ;;
+        */release/*/simple)
+            _scs_root=${SIMPLE_COMPILER_ROOT:-$(CDPATH= cd -- "$(dirname -- "$1")/../.." 2>/dev/null && pwd -P)}
+            if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+                [ -f "$_scs_root/scripts/lib/simple-runtime-provenance.shs" ] || return 1
+                . "$_scs_root/scripts/lib/simple-runtime-provenance.shs"
+            fi
+            simple_runtime_provenance_admits "$1" "$_scs_root" || return 1
+            ;;
+    esac
     simple_compiler_env_write_ok "$1" || return 1
     if [ -n "${2:-}" ]; then
         simple_compiler_can_build_target "$1" "$2" || return 1
@@ -291,6 +317,15 @@ simple_compiler_select() {
         esac
         shift
     done
+    SIMPLE_COMPILER_ROOT=$_scs_sel_root
+    export SIMPLE_COMPILER_ROOT
+    if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+        [ -f "$_scs_sel_root/scripts/lib/simple-runtime-provenance.shs" ] || {
+            echo "error: runtime provenance library is missing" >&2
+            return 1
+        }
+        . "$_scs_sel_root/scripts/lib/simple-runtime-provenance.shs"
+    fi
 
     # Explicit operator choice: honoured, but still probed.
     if [ -n "${SIMPLE_BUILD_COMPILER:-}" ]; then
@@ -299,11 +334,17 @@ simple_compiler_select() {
             return 1
         fi
         if simple_compiler_is_seed "$SIMPLE_BUILD_COMPILER"; then
-            echo "warning: explicitly selected the Rust bootstrap seed: $SIMPLE_BUILD_COMPILER" >&2
-            echo "warning: artifacts built with it will FAIL the provenance guards" >&2
-            printf '%s\n' "$SIMPLE_BUILD_COMPILER"
-            return 0
+            echo "error: SIMPLE_BUILD_COMPILER is the Rust bootstrap seed, not an admitted self-hosted compiler: $SIMPLE_BUILD_COMPILER" >&2
+            return 1
         fi
+        case "$SIMPLE_BUILD_COMPILER" in
+            */bin/release/*/simple|*/release/*/simple)
+                simple_runtime_provenance_admits "$SIMPLE_BUILD_COMPILER" "$_scs_sel_root" || {
+                    echo "error: SIMPLE_BUILD_COMPILER provenance is missing or mismatched: $SIMPLE_BUILD_COMPILER" >&2
+                    return 1
+                }
+                ;;
+        esac
         if ! simple_compiler_env_write_ok "$SIMPLE_BUILD_COMPILER"; then
             echo "error: SIMPLE_BUILD_COMPILER failed the environment-write probe: $SIMPLE_BUILD_COMPILER" >&2
             return 1
@@ -330,6 +371,14 @@ simple_compiler_select() {
             [ "$_scs_quiet" -eq 1 ] || echo "  skip (Rust bootstrap seed): $_scs_cand" >&2
             continue
         fi
+        case "$_scs_cand" in
+            */bin/release/*/simple|*/release/*/simple)
+                if ! simple_runtime_provenance_admits "$_scs_cand" "$_scs_sel_root"; then
+                    [ "$_scs_quiet" -eq 1 ] || echo "  skip (missing or mismatched runtime provenance): $_scs_cand" >&2
+                    continue
+                fi
+                ;;
+        esac
         if ! simple_compiler_env_write_ok "$_scs_cand"; then
             [ "$_scs_quiet" -eq 1 ] || echo "  skip (failed environment-write probe): $_scs_cand" >&2
             continue

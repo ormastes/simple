@@ -9,7 +9,8 @@ export interface CliRunResult {
 }
 export declare class SimpleCliService {
     private readonly services;
-    constructor(services: ExtensionHostServices);
+    private readonly context?;
+    constructor(services: ExtensionHostServices, context?: vscode.ExtensionContext | undefined);
     resolveSimpleCommand(resolveFrom?: string): string;
     run(args: string[], options?: {
         cwd?: string;

@@ -1,0 +1,65 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.*
+
+fn environment(home: text?, xdg: text?, local: text?, user: text?, worktree: text?) -> StorageRootEnvironmentSnapshot:
+    StorageRootEnvironmentSnapshot(
+        user_root: user,
+        worktree_root: worktree,
+        home: home,
+        xdg_cache_home: xdg,
+        local_app_data: local,
+    )
+
+fn input(platform: StoragePlatform, cli_user: text?, cli_worktree: text?, env: StorageRootEnvironmentSnapshot) -> StorageRootResolverInput:
+    StorageRootResolverInput(
+        platform: platform,
+        cli: StorageRootOverrides(user_root: cli_user, worktree_root: cli_worktree),
+        environment: env,
+        canonical_worktree: "/repo/simple",
+        worktree_metadata: "gitdir=/repo/simple/.git",
+    )
+
+describe "centralized storage root resolver":
+    it "applies CLI then environment then platform precedence":
+        val resolved = inspect_storage_roots(input(
+            StoragePlatform.Linux,
+            Some("/cli/user/../cache"),
+            nil,
+            environment(Some("/home/alice"), Some("/xdg"), nil, Some("/env/user"), Some("/env/work")),
+        )).unwrap()
+        expect(resolved.roots.user_root.value).to_equal("/cli/cache")
+        expect(resolved.roots.worktree_root.value).to_equal("/env/work")
+        expect(resolved.receipts[0].detail).to_contain("source=cli")
+        expect(resolved.receipts[1].detail).to_contain("source=environment")
+
+    it "derives documented macOS Linux Windows and SimpleOS defaults":
+        val mac = resolve_storage_roots(input(StoragePlatform.MacOS, nil, nil, environment(Some("/Users/a"), nil, nil, nil, nil))).unwrap()
+        val linux = resolve_storage_roots(input(StoragePlatform.Linux, nil, nil, environment(Some("/home/a"), Some("/cache/a"), nil, nil, nil))).unwrap()
+        val windows = resolve_storage_roots(input(StoragePlatform.Windows, nil, nil, environment(nil, nil, Some("C:\\Users\\a\\AppData\\Local"), nil, nil))).unwrap()
+        val simpleos = resolve_storage_roots(input(StoragePlatform.SimpleOS, nil, nil, environment(nil, nil, nil, nil, nil))).unwrap()
+        expect(mac.user_root.value).to_equal("/Users/a/Library/Caches/simple/storage")
+        expect(linux.user_root.value).to_equal("/cache/a/simple/storage")
+        expect(windows.user_root.value).to_equal("C:/Users/a/AppData/Local/Simple/storage")
+        expect(simpleos.user_root.value).to_equal("/simple/storage")
+        expect(mac.worktree_root.value).to_equal("/repo/simple/.simple/storage")
+
+    it "fails closed when a platform user root is unavailable":
+        val missing_linux = resolve_storage_roots(input(StoragePlatform.Linux, nil, nil, environment(nil, nil, nil, nil, nil)))
+        val missing_windows = resolve_storage_roots(input(StoragePlatform.Windows, nil, nil, environment(nil, nil, nil, nil, nil)))
+        expect(missing_linux.is_err()).to_equal(true)
+        expect(missing_windows.is_err()).to_equal(true)
+
+    it "rejects empty unsafe relative and colliding explicit roots":
+        val env = environment(Some("/home/a"), nil, nil, nil, nil)
+        expect(resolve_storage_roots(input(StoragePlatform.Linux, Some(""), nil, env)).is_err()).to_equal(true)
+        expect(resolve_storage_roots(input(StoragePlatform.Linux, Some("/"), nil, env)).is_err()).to_equal(true)
+        expect(resolve_storage_roots(input(StoragePlatform.Linux, Some("relative"), nil, env)).is_err()).to_equal(true)
+        expect(resolve_storage_roots(input(StoragePlatform.Linux, Some("/same"), Some("/same"), env)).is_err()).to_equal(true)
+
+    it "binds deterministic worktree identity and inspection has no mutation API":
+        val first = inspect_storage_roots(input(StoragePlatform.MacOS, nil, nil, environment(Some("/Users/a"), nil, nil, nil, nil))).unwrap()
+        val second = inspect_storage_roots(input(StoragePlatform.MacOS, nil, nil, environment(Some("/Users/a"), nil, nil, nil, nil))).unwrap()
+        expect(first.roots.worktree_identity.w0).to_equal(second.roots.worktree_identity.w0)
+        expect(first.roots.worktree_identity.w3).to_equal(second.roots.worktree_identity.w3)
+        expect(first.inspection.warnings.len()).to_equal(0)
+        expect(first.receipts.len()).to_equal(2)

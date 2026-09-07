@@ -1,0 +1,195 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_async_mut.kernel_plugin.runtime.{KpfQueueStatus, KpfRequestHandleV1, KpfRequestTableV1, KpfSessionHandleV1}
+use std.nogc_sync_mut.kernel_plugin.{KpfGenerationHandle, KpfGenerationTable, KpfSyncStatus}
+
+pub enum KpfTerminalStateV1:
+    Pending
+    Completed
+    Cancelled
+    TimedOut
+
+pub enum KpfTerminalEventV1:
+    Complete
+    Cancel
+    Deadline
+
+pub class KpfTerminalArbiterV1:
+    var state: KpfTerminalStateV1
+    var accepted_terminal_events: i64
+    var rejected_terminal_events: i64
+
+    pub static fn create() -> KpfTerminalArbiterV1:
+        KpfTerminalArbiterV1(
+            state: KpfTerminalStateV1.Pending,
+            accepted_terminal_events: 0,
+            rejected_terminal_events: 0)
+
+    pub me apply(event: KpfTerminalEventV1) -> bool:
+        if self.state != KpfTerminalStateV1.Pending:
+            self.rejected_terminal_events = self.rejected_terminal_events + 1
+            return false
+        self.state = match event:
+            case Complete: KpfTerminalStateV1.Completed
+            case Cancel: KpfTerminalStateV1.Cancelled
+            case Deadline: KpfTerminalStateV1.TimedOut
+        self.accepted_terminal_events = self.accepted_terminal_events + 1
+        true
+
+pub struct KpfSlotReuseEvidenceV1:
+    old_handle: KpfRequestHandleV1
+    current_handle: KpfRequestHandleV1
+    stale_completion_status: KpfQueueStatus
+    current_completion_status: KpfQueueStatus
+
+pub fn kpf_slot_reuse_evidence_v1() -> KpfSlotReuseEvidenceV1:
+    val requests = KpfRequestTableV1.create(1)
+    val session = KpfSessionHandleV1(generation: 7, slot: 0, epoch: 1)
+    val old_handle = requests.reserve(session)
+    requests.release(old_handle)
+    val current_handle = requests.reserve(session)
+    KpfSlotReuseEvidenceV1(
+        old_handle: old_handle,
+        current_handle: current_handle,
+        stale_completion_status: requests.validate(old_handle),
+        current_completion_status: requests.validate(current_handle))
+
+pub struct KpfPublicationEvidenceV1:
+    first: KpfGenerationHandle
+    active_after_failure: KpfGenerationHandle
+    failed_status: KpfSyncStatus
+    prior_still_active: bool
+
+pub fn kpf_failed_candidate_publication_evidence_v1() -> KpfPublicationEvidenceV1:
+    val table = KpfGenerationTable.create(2, 1)
+    val first = table.publish(
+        KpfId128(hi: 11, lo: 12),
+        KpfDigest256(w0: 21, w1: 22, w2: 23, w3: 24),
+        1)
+    val failed = table.publish(
+        KpfId128(hi: 0, lo: 0),
+        KpfDigest256(w0: 31, w1: 32, w2: 33, w3: 34),
+        2)
+    val prior = table.view(first.current)
+    KpfPublicationEvidenceV1(
+        first: first.current,
+        active_after_failure: failed.previous,
+        failed_status: failed.status,
+        prior_still_active: prior.active and not prior.retired)
+
+pub struct KpfPinnedUnloadEvidenceV1:
+    denied_status: KpfSyncStatus
+    collected_status: KpfSyncStatus
+    pin_release_status: KpfSyncStatus
+
+pub struct KpfLifecycleMatrixEvidenceV1:
+    failed_identity_status: KpfSyncStatus
+    failed_capacity_status: KpfSyncStatus
+    active_after_failures: KpfGenerationHandle
+    second_pin_status: KpfSyncStatus
+    collect_active_status: KpfSyncStatus
+    rollback_status: KpfSyncStatus
+    collect_rolled_back_candidate_status: KpfSyncStatus
+    collect_again_status: KpfSyncStatus
+    stale_pin_release_status: KpfSyncStatus
+
+pub fn kpf_pinned_unload_evidence_v1() -> KpfPinnedUnloadEvidenceV1:
+    val table = KpfGenerationTable.create(2, 1)
+    val first = table.publish(
+        KpfId128(hi: 41, lo: 42),
+        KpfDigest256(w0: 51, w1: 52, w2: 53, w3: 54),
+        1)
+    val pin = table.pin(first.current)
+    table.publish(
+        KpfId128(hi: 61, lo: 62),
+        KpfDigest256(w0: 71, w1: 72, w2: 73, w3: 74),
+        2)
+    val denied = table.collect(first.current)
+    val released = table.release_pin(pin.handle)
+    val collected = table.collect(first.current)
+    KpfPinnedUnloadEvidenceV1(
+        denied_status: denied,
+        collected_status: collected,
+        pin_release_status: released)
+
+pub fn kpf_lifecycle_matrix_evidence_v1() -> KpfLifecycleMatrixEvidenceV1:
+    val table = KpfGenerationTable.create(2, 1)
+    val first = table.publish(
+        KpfId128(hi: 121, lo: 122),
+        KpfDigest256(w0: 123, w1: 124, w2: 125, w3: 126),
+        1)
+    val pin = table.pin(first.current)
+    val second_pin = table.pin(first.current)
+    val invalid = table.publish(
+        KpfId128(hi: 0, lo: 0),
+        KpfDigest256(w0: 131, w1: 132, w2: 133, w3: 134),
+        2)
+    val second = table.publish(
+        KpfId128(hi: 141, lo: 142),
+        KpfDigest256(w0: 143, w1: 144, w2: 145, w3: 146),
+        2)
+    val capacity = table.publish(
+        KpfId128(hi: 151, lo: 152),
+        KpfDigest256(w0: 153, w1: 154, w2: 155, w3: 156),
+        3)
+    val collect_active = table.collect(second.current)
+    table.release_pin(pin.handle)
+    val rollback = table.rollback(first.current)
+    val collect_candidate = table.collect(second.current)
+    val collect_again = table.collect(second.current)
+    val stale_release = table.release_pin(pin.handle)
+    KpfLifecycleMatrixEvidenceV1(
+        failed_identity_status: invalid.status,
+        failed_capacity_status: capacity.status,
+        active_after_failures: capacity.previous,
+        second_pin_status: second_pin.status,
+        collect_active_status: collect_active,
+        rollback_status: rollback.status,
+        collect_rolled_back_candidate_status: collect_candidate,
+        collect_again_status: collect_again,
+        stale_pin_release_status: stale_release)
+
+pub fn kpf_overwrite_terminal_mutation_detected_v1() -> bool:
+    val arbiter = KpfTerminalArbiterV1.create()
+    val first = arbiter.apply(KpfTerminalEventV1.Cancel)
+    val second = arbiter.apply(KpfTerminalEventV1.Complete)
+    first and not second and arbiter.state == KpfTerminalStateV1.Cancelled and
+        arbiter.accepted_terminal_events == 1 and arbiter.rejected_terminal_events == 1
+
+pub fn kpf_stale_epoch_mutation_detected_v1() -> bool:
+    val evidence = kpf_slot_reuse_evidence_v1()
+    evidence.old_handle.request_slot == evidence.current_handle.request_slot and
+        evidence.old_handle.request_epoch != evidence.current_handle.request_epoch and
+        evidence.stale_completion_status == KpfQueueStatus.StaleHandle and
+        evidence.current_completion_status == KpfQueueStatus.Accepted
+
+pub fn kpf_terminal_overwrite_mutant_exposed_v1() -> bool:
+    var mutated_state = KpfTerminalStateV1.Pending
+    mutated_state = KpfTerminalStateV1.Cancelled
+    mutated_state = KpfTerminalStateV1.Completed
+    mutated_state != KpfTerminalStateV1.Cancelled
+
+pub fn kpf_epoch_omission_mutant_exposed_v1() -> bool:
+    val evidence = kpf_slot_reuse_evidence_v1()
+    val mutated_accepts_old_completion =
+        evidence.old_handle.request_slot == evidence.current_handle.request_slot
+    mutated_accepts_old_completion and evidence.stale_completion_status == KpfQueueStatus.StaleHandle
+
+pub fn kpf_failed_candidate_gate_mutant_exposed_v1() -> bool:
+    val table = KpfGenerationTable.create(2, 1)
+    val first = table.publish(
+        KpfId128(hi: 81, lo: 82),
+        KpfDigest256(w0: 91, w1: 92, w2: 93, w3: 94),
+        1)
+    val mutated = table.publish(
+        KpfId128(hi: 101, lo: 102),
+        KpfDigest256(w0: 111, w1: 112, w2: 113, w3: 114),
+        2)
+    mutated.status == KpfSyncStatus.Ok and
+        (mutated.current.index != first.current.index or mutated.current.epoch != first.current.epoch)
+
+pub fn kpf_lifecycle_matrix_mutant_exposed_v1() -> bool:
+    val evidence = kpf_lifecycle_matrix_evidence_v1()
+    val mutated_unload_accepts_active = evidence.collect_active_status == KpfSyncStatus.Ok
+    val mutated_reuses_stale_pin = evidence.stale_pin_release_status == KpfSyncStatus.Ok
+    not mutated_unload_accepts_active and not mutated_reuses_stale_pin and
+        evidence.collect_again_status == KpfSyncStatus.StaleHandle

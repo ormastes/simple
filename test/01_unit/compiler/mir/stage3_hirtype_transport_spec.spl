@@ -1,0 +1,66 @@
+"""
+Minimal executable regression for a valid HirType tag crossing the HIR-to-MIR
+function-signature boundary. The retained Stage3 failure first became visible
+when lower_type observed a raw-zero kind after HIR had completed successfully.
+"""
+# @req REQ-SSPEC-COMPILER
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.mir.mir.*
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+fn hir_type_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+describe "Stage3 HirType signature transport invariant":
+    it "preserves a valid type tag from HIR publication through MIR signature lowering":
+        step("Lower the minimal fixture and pin the earliest observed failing boundary")
+        val path = "test/fixtures/compiler/hirtype_signature_transport_minimal.spl"
+        val source = file_read(path)
+        val parsed = parse_full_frontend(
+            source, path, "hirtype_signature_transport_minimal", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir = hir_lowering.lower_module(parsed)
+
+        var found = false
+        var hir_param_disc = -1
+        var hir_return_disc = -1
+        var mir_param_is_i64 = false
+        var mir_return_is_i64 = false
+        var mir_error_count = -1
+        var transport_receipts = -1
+
+        for function_ in hir.functions.values():
+            if function_.name == "carry_type":
+                found = true
+                val signature_param = function_.params[0]
+                hir_param_disc = hir_type_discriminant(signature_param.type_.kind)
+                hir_return_disc = hir_type_discriminant(function_.return_type.kind)
+
+                var mir_lowering = MirLowering.new(hir.symbols)
+                val mir_function = mir_lowering.lower_function(function_)
+                mir_error_count = mir_lowering.errors.len()
+                transport_receipts = mir_lowering.type_transport_receipts
+                if mir_function.signature.params.len() == 1:
+                    mir_param_is_i64 = mir_function.signature.params[0].kind == MirTypeKind.I64
+                mir_return_is_i64 = mir_function.signature.return_type.kind == MirTypeKind.I64
+
+        val expected_hir_disc = hir_type_discriminant(HirTypeKind.Int(64, true))
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(found).to_equal(true)
+        expect(hir_param_disc).to_equal(expected_hir_disc)
+        expect(hir_return_disc).to_equal(expected_hir_disc)
+        expect(hir_param_disc).to_be_greater_than(0)
+        expect(hir_return_disc).to_be_greater_than(0)
+        expect(mir_error_count).to_equal(0)
+        expect(transport_receipts).to_equal(0)
+        expect(mir_param_is_i64).to_equal(true)
+        expect(mir_return_is_i64).to_equal(true)

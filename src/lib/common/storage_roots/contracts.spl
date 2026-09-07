@@ -1,0 +1,236 @@
+"""
+# Centralized Storage Root Contracts
+
+Pure, platform-neutral contracts for the two-authority Simple storage model.
+This module performs no environment reads and no filesystem operations.
+
+```simple
+val roots = StorageRoots(
+    user_root: CanonicalPath(value: "/home/user/.simple/storage"),
+    worktree_root: CanonicalPath(value: "/repo/.simple/storage"),
+    user_source: RootSource.Explicit,
+    worktree_source: RootSource.Explicit,
+    policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+    worktree_identity: Digest256(w0: 1, w1: 2, w2: 3, w3: 4),
+)
+assert roots.user_root.value != roots.worktree_root.value
+```
+"""
+
+pub val SIMPLE_USER_STORAGE_ROOT: text = "SIMPLE_USER_STORAGE_ROOT"
+pub val SIMPLE_WORKTREE_STORAGE_ROOT: text = "SIMPLE_WORKTREE_STORAGE_ROOT"
+pub val STORAGE_ROOT_POLICY_VERSION_V1: u32 = 1u32
+
+pub struct CanonicalPath:
+    """Absolute, normalized path produced by a platform resolver."""
+    value: text
+
+pub struct Digest256:
+    """Stable 256-bit identity represented without language-private objects."""
+    w0: u64
+    w1: u64
+    w2: u64
+    w3: u64
+
+pub struct OperationId:
+    """Stable operation identity used to isolate concurrent storage work."""
+    value: text
+
+pub enum StorageRootKind:
+    User
+    Worktree
+
+pub enum RootSource:
+    Explicit
+    PlatformDefault
+    LegacyMigration
+
+pub enum StorageClass:
+    ReusableCache
+    Download
+    Package
+    Toolchain
+    Ephemeral
+    Build
+    TestArtifact
+    Evidence
+    ManagedWorktree
+
+pub enum StorageOwnership:
+    SimpleManaged
+    External
+
+pub struct StorageRoots:
+    """Immutable pair of authoritative roots resolved as one value."""
+    user_root: CanonicalPath
+    worktree_root: CanonicalPath
+    user_source: RootSource
+    worktree_source: RootSource
+    policy_version: u32
+    worktree_identity: Digest256
+
+pub struct RootResolutionInput:
+    """Inert resolver input supplied by an environment/platform owner."""
+    explicit_user_root: text?
+    explicit_worktree_root: text?
+    home_root: CanonicalPath
+    repository_root: CanonicalPath
+    worktree_metadata: text
+
+pub struct StorageRootInspection:
+    """Side-effect-free explanation of a proposed two-root resolution."""
+    roots: StorageRoots
+    warnings: [text]
+    legacy_inputs: [text]
+
+pub enum StorageRootError:
+    UnsetDefaultUnavailable
+    EmptyExplicitRoot
+    UnsafeRoot
+    RootsNotDistinct
+    InvalidWorktreeIdentity
+
+pub struct UserPathRequest:
+    storage_class: StorageClass
+    producer: text
+    schema: text
+    key: text
+
+pub struct WorktreePathRequest:
+    storage_class: StorageClass
+    producer: text
+    operation: OperationId
+    session: text
+    item: text
+
+pub enum StoragePathError:
+    EmptySegment
+    InvalidSegment
+    SegmentTooLong
+    OutsideRoot
+    SymlinkEscape
+    ProtectedData
+    CapacityExceeded
+
+pub struct EnvironmentBinding:
+    key: text
+    value: text
+    ownership: StorageOwnership
+
+pub struct StableEnvironment:
+    """Deterministically ordered child-process environment projection."""
+    bindings: [EnvironmentBinding]
+
+pub struct ToolStoragePolicy:
+    tool_id: text
+    preserve_external_overrides: bool
+    temporary_class: StorageClass
+
+pub struct StagingLease:
+    destination: CanonicalPath
+    staging_root: CanonicalPath
+    operation: OperationId
+    epoch: u64
+
+pub struct ArtifactEvidence:
+    digest: Digest256
+    byte_count: u64
+    item_count: u64
+
+pub struct PublishReceipt:
+    destination: CanonicalPath
+    evidence: ArtifactEvidence
+    operation: OperationId
+
+pub enum PublishError:
+    InvalidDestination
+    CrossFilesystemPublish
+    DestinationChanged
+    EvidenceMismatch
+    LeaseStale
+    CapacityExceeded
+
+pub enum CleanupIntent:
+    DryRun
+    RemoveContents
+    RemoveRoot
+
+pub struct CleanupRequest:
+    root_kind: StorageRootKind
+    target: CanonicalPath
+    intent: CleanupIntent
+    expected_root_identity: Digest256
+
+pub struct CleanupPlan:
+    root_kind: StorageRootKind
+    target: CanonicalPath
+    intent: CleanupIntent
+    expected_root_identity: Digest256
+    item_count: u64
+    byte_count: u64
+
+pub struct CleanupReceipt:
+    root_kind: StorageRootKind
+    target: CanonicalPath
+    intent: CleanupIntent
+    removed_item_count: u64
+    reclaimed_byte_count: u64
+
+pub enum CleanupError:
+    UnsafeRoot
+    OutsideRoot
+    SymlinkEscape
+    MarkerMissing
+    MarkerMismatch
+    LiveLease
+    ProtectedData
+    RootIdentityMismatch
+
+pub enum StorageReceiptKind:
+    Resolved
+    Reused
+    Created
+    Migrated
+    Published
+    Cleaned
+    Refused
+
+pub struct StorageReceipt:
+    kind: StorageReceiptKind
+    root_kind: StorageRootKind
+    path: CanonicalPath
+    operation: OperationId
+    detail: text
+
+pub enum StorageReceiptError:
+    CapacityExceeded
+    SinkUnavailable
+    InvalidReceipt
+
+pub trait StorageRootResolver:
+    """Resolve both roots atomically from inert caller-supplied input."""
+    fn inspect(input: RootResolutionInput) -> Result<StorageRootInspection, StorageRootError>
+    fn resolve(input: RootResolutionInput) -> Result<StorageRoots, StorageRootError>
+
+pub trait StoragePathPolicy:
+    """Derive validated descendants without consulting ambient state."""
+    fn user_path(roots: StorageRoots, request: UserPathRequest) -> Result<CanonicalPath, StoragePathError>
+    fn worktree_path(roots: StorageRoots, request: WorktreePathRequest) -> Result<CanonicalPath, StoragePathError>
+
+pub trait ChildStorageEnvironment:
+    """Project the frozen roots into a deterministic child environment."""
+    fn project(roots: StorageRoots, tool: ToolStoragePolicy) -> Result<StableEnvironment, StoragePathError>
+
+pub trait AtomicArtifactPublisher:
+    """Publish verified artifacts through destination-local staging."""
+    fn begin(destination: CanonicalPath, operation: OperationId) -> Result<StagingLease, PublishError>
+    fn commit(lease: StagingLease, evidence: ArtifactEvidence) -> Result<PublishReceipt, PublishError>
+
+pub trait SafeStorageCleanup:
+    """Plan and execute cleanup only for validated, owned storage."""
+    fn plan(roots: StorageRoots, request: CleanupRequest) -> Result<CleanupPlan, CleanupError>
+    fn execute(plan: CleanupPlan) -> Result<CleanupReceipt, CleanupError>
+
+pub trait StorageReceiptSink:
+    """Record stable receipts for every storage state transition."""
+    fn record(receipt: StorageReceipt) -> Result<(), StorageReceiptError>

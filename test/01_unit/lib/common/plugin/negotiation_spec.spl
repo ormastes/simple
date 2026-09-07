@@ -1,0 +1,50 @@
+use std.spec.*
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1, PluginAnswerV1, negotiate}
+
+fn offer(minor: i64, digests: [text]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("simple.aspect.Trace", 1, minor, "sha256:new")], digests, ["trace"], [])
+
+fn answer(major: i64, minor: i64, digest: text) -> PluginAnswerV1:
+    PluginAnswerV1(ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+        IfaceId("simple.aspect.Trace", major, minor, digest), 0, true,
+        ["trace"], "plugin", [])
+
+fn offer_abi(version: i64) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), version, false, "fixture",
+        [IfaceId("simple.aspect.Trace", 1, 3, "sha256:new")], [], ["trace"], [])
+
+fn answer_abi(version: i64) -> PluginAnswerV1:
+    PluginAnswerV1(ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+        IfaceId("simple.aspect.Trace", 1, 3, "sha256:new"), version, false,
+        ["trace"], "plugin", [])
+
+describe "mandatory plugin negotiation":
+    it "accepts an older compatible minor and accepted digest":
+        expect(negotiate(offer(3, ["sha256:old"]), answer(1, 1, "sha256:old")).code()).to_equal("OK-ABI-DEFERRED")
+
+    it "refuses asymmetric ABI epoch deferral":
+        var plugin = answer(1, 3, "sha256:new")
+        plugin.simple_abi_deferred = false
+        expect(negotiate(offer(3, []), plugin).code()).to_equal("PLUG-E-ABI-DEFER")
+
+    it "accepts matching ABI v1 and rejects a different ABI version":
+        val compatible = negotiate(offer_abi(1), answer_abi(1))
+        expect(compatible.accepted()).to_equal(true)
+        expect(compatible.code()).to_equal("OK")
+
+        val incompatible = negotiate(offer_abi(1), answer_abi(2))
+        expect(incompatible.accepted()).to_equal(false)
+        expect(incompatible.code()).to_equal("PLUG-E-ABI")
+
+    it "refuses a different interface major by name":
+        expect(negotiate(offer(3, []), answer(2, 3, "sha256:new")).code()).to_equal("PLUG-E-MAJOR")
+
+    it "mutation-red refuses a skipped digest comparison":
+        expect(negotiate(offer(3, []), answer(1, 3, "sha256:mutated")).code()).to_equal("PLUG-E-DIGEST")
+
+    it "refuses a non-canonical parameter schema before ABI checks":
+        var plugin = answer(1, 3, "sha256:new")
+        plugin.hdr = ParamHeader("PluginAnswerV1", 1, 0, 0)
+        expect(negotiate(offer(3, []), plugin).code()).to_equal("PLUG-E-SCHEMA")

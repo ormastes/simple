@@ -10,6 +10,7 @@ use app.io.process_ops.{process_run_timeout}
 use std.cli.log_modes.{parse_log_options}
 use app.cli.check_options.{check_option_error, check_worker_args, check_presentation_args}
 use app.check.targets.{expand_check_targets}
+use app.check.worker_failure.{check_worker_failure_diagnostic, check_worker_public_exit_code}
 
 val OUTPUT_LIMIT = 12000
 val CHECK_WORKER_TIMEOUT_MS = 300000
@@ -43,7 +44,7 @@ fn resolve_worker_binary() -> text:
     val (os_out, _os_err, os_code) = process_run_timeout("uname", ["-s"], 10000)
     val (arch_out, _arch_err, arch_code) = process_run_timeout("uname", ["-m"], 10000)
     if os_code != 0 or arch_code != 0:
-        return "bin/simple"
+        return ""
     val os_name = os_out.trim()
     var arch = arch_out.trim()
     if arch == "arm64":
@@ -58,11 +59,17 @@ fn resolve_worker_binary() -> text:
     elif os_name == "FreeBSD":
         triple = "{arch}-unknown-freebsd"
     else:
-        return "bin/simple"
+        return ""
     val candidate = "bin/release/{triple}/simple"
     if file_exists(candidate):
         return candidate
-    "bin/simple"
+    ""
+
+fn require_worker_binary() -> text:
+    val worker_bin = resolve_worker_binary()
+    if worker_bin == "":
+        eprint "ERROR: no admitted cached self-hosted check worker artifact is available"
+    worker_bin
 
 fn print_help():
     print "Usage: simple check <file.spl> [file2.spl ...]"
@@ -78,6 +85,7 @@ fn print_help():
     print "  --progress <summary|count|dot|none>"
     print "  --dots | --count | --no-progress"
     print "  --quiet | --verbose"
+    print "  --syntax-only                Parse only; semantic coverage is not claimed"
     print "  -h, --help                   Show this help"
 
 fn normalize_args(args: [text]) -> [text]:
@@ -127,12 +135,18 @@ fn print_bounded_stderr(output: text):
     else:
         eprint output
 
+fn print_worker_failure(worker_bin: text, code: i32, stdout: text, stderr: text):
+    print_bounded_stderr(stderr)
+    val diagnostic = check_worker_failure_diagnostic(worker_bin, code, stdout, stderr)
+    if diagnostic != "":
+        eprint diagnostic
+
 fn is_check_option(arg: text) -> bool:
     if arg == "--human" or arg == "--llm" or arg == "--json":
         return true
     if arg == "--quiet" or arg == "--verbose" or arg == "--dots":
         return true
-    if arg == "--count" or arg == "--no-progress":
+    if arg == "--count" or arg == "--no-progress" or arg == "--syntax-only":
         return true
     if arg.starts_with("--log-mode=") or arg.starts_with("--surface="):
         return true
@@ -159,8 +173,8 @@ fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
     val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
     print_bounded_stdout(stdout, as_json)
     if code != 0:
-        print_bounded_stderr(stderr)
-    code as i64
+        print_worker_failure(worker_bin, code, stdout, stderr)
+    check_worker_public_exit_code(code)
 
 fn run_worker_chunk(
     worker_bin: text,
@@ -182,8 +196,8 @@ fn run_worker_chunk(
     if terminal and not as_json:
         print_bounded_stdout(stdout, false)
     if terminal and code != 0:
-        print_bounded_stderr(stderr)
-    code as i64
+        print_worker_failure(worker_bin, code, stdout, stderr)
+    check_worker_public_exit_code(code)
 
 fn main() -> i64:
     val args = normalize_args(get_cli_args())
@@ -202,7 +216,9 @@ fn main() -> i64:
 
     val as_json = parse_log_options(args).log_mode == "json"
     val files = check_files_from_args(args)
-    val worker_bin = resolve_worker_binary()
+    val worker_bin = require_worker_binary()
+    if worker_bin == "":
+        return 1
     if files.len() == 0:
         return run_single_worker(worker_bin, args, as_json)
 

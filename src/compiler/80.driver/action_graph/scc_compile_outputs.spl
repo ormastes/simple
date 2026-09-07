@@ -1,0 +1,178 @@
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_publish_scc_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use std.common.crypto.sha256.{sha256_text}
+
+enum SccCompileOutputsErrorV1:
+    scc_identity_mismatch
+    member_set_incomplete
+    unexpected_member
+    duplicate_member
+    output_missing
+    output_placeholder
+    admission_mismatch
+    artifact_mismatch
+    diagnostic_order_invalid
+
+struct SccModuleCompileOutputV1:
+    entry: PackageModuleIndexEntryV1
+    package_image: text
+    package_image_digest: text
+    interface_content: text
+    interface_digest: text
+    action_content: text
+    action_digest: text
+    dependency_interface_digests: [text]
+    dependency_receipt_digest: text
+    read_set_digest: text
+    mir_admission_digest: text
+    baseline_artifact_identity: text
+    baseline_artifact_digest: text
+    diagnostics: [text]
+    compiler_action_identity: text
+    compiler_action_succeeded: bool
+    object_path: text
+    smf_path: text
+
+struct SccCompileOutputsV1:
+    scc_identity: text
+    scheduled_module_identities: [text]
+    modules: [SccModuleCompileOutputV1]
+
+fn scc_output_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn scc_output_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn scc_output_placeholder_v1(value: text) -> bool:
+    val lowered = value.to_lower()
+    lowered == "placeholder" or lowered == "todo" or lowered == "dummy" or
+        lowered == "pending" or lowered.starts_with("placeholder-") or
+        lowered.starts_with("todo-") or lowered.starts_with("dummy-")
+
+fn scc_output_sorted_unique_v1(values: [text]) -> [text]?:
+    val sorted = values.sorted()
+    var previous = ""
+    for value in sorted:
+        if not scc_output_text_valid_v1(value) or value == previous:
+            return nil
+        previous = value
+    Some(sorted)
+
+fn scc_output_diagnostics_valid_v1(values: [text]) -> bool:
+    var previous = ""
+    for value in values:
+        if value == "" or value.contains("\r") or
+                (previous != "" and value < previous):
+            return false
+        previous = value
+    true
+
+fn scc_compile_outputs_validate_v1(
+    outputs: SccCompileOutputsV1,
+    expected_scc_identity: text,
+    expected_mir_admission_digest: text,
+    expected_baseline_artifact_identity: text,
+    expected_baseline_artifact_digest: text
+) -> Result[[PackageArchivePublishInputV1], SccCompileOutputsErrorV1]:
+    if (not scc_output_text_valid_v1(expected_scc_identity) or
+            outputs.scc_identity != expected_scc_identity):
+        return Err(SccCompileOutputsErrorV1.scc_identity_mismatch)
+    val scheduled = scc_output_sorted_unique_v1(
+        outputs.scheduled_module_identities)
+    if scheduled == nil or scheduled!.len() == 0:
+        return Err(SccCompileOutputsErrorV1.member_set_incomplete)
+    if outputs.modules.len() != scheduled!.len():
+        return Err(SccCompileOutputsErrorV1.member_set_incomplete)
+    if (not scc_output_digest_valid_v1(expected_mir_admission_digest) or
+            not scc_output_text_valid_v1(expected_baseline_artifact_identity) or
+            not scc_output_digest_valid_v1(expected_baseline_artifact_digest)):
+        return Err(SccCompileOutputsErrorV1.admission_mismatch)
+
+    var seen: [text] = []
+    var publish_inputs: [PackageArchivePublishInputV1] = []
+    for output in outputs.modules:
+        val module_identity = output.entry.module_identity
+        if seen.contains(module_identity):
+            return Err(SccCompileOutputsErrorV1.duplicate_member)
+        if not scheduled!.contains(module_identity):
+            return Err(SccCompileOutputsErrorV1.unexpected_member)
+        seen = seen.push(module_identity)
+        if output.entry.scc_identity != expected_scc_identity:
+            return Err(SccCompileOutputsErrorV1.scc_identity_mismatch)
+        if (not output.compiler_action_succeeded or
+                output.package_image == "" or
+                output.interface_content == "" or
+                output.action_content == "" or
+                not scc_output_text_valid_v1(output.dependency_receipt_digest) or
+                not scc_output_text_valid_v1(output.read_set_digest) or
+                not scc_output_text_valid_v1(output.compiler_action_identity) or
+                (output.object_path == "" and output.smf_path == "")):
+            return Err(SccCompileOutputsErrorV1.output_missing)
+        if (scc_output_placeholder_v1(output.package_image) or
+                scc_output_placeholder_v1(output.interface_content) or
+                scc_output_placeholder_v1(output.action_content) or
+                scc_output_placeholder_v1(output.compiler_action_identity)):
+            return Err(SccCompileOutputsErrorV1.output_placeholder)
+        if (not scc_output_digest_valid_v1(output.package_image_digest) or
+                sha256_text(output.package_image) != output.package_image_digest or
+                not scc_output_digest_valid_v1(output.interface_digest) or
+                sha256_text(output.interface_content) != output.interface_digest or
+                not scc_output_digest_valid_v1(output.action_digest) or
+                sha256_text(output.action_content) != output.action_digest or
+                not scc_output_digest_valid_v1(output.dependency_receipt_digest) or
+                not scc_output_digest_valid_v1(output.read_set_digest)):
+            return Err(SccCompileOutputsErrorV1.artifact_mismatch)
+        if (output.mir_admission_digest != expected_mir_admission_digest or
+                output.entry.action_digest != output.action_digest):
+            return Err(SccCompileOutputsErrorV1.admission_mismatch)
+        if (output.baseline_artifact_identity != expected_baseline_artifact_identity or
+                output.baseline_artifact_digest != expected_baseline_artifact_digest):
+            return Err(SccCompileOutputsErrorV1.artifact_mismatch)
+        if not scc_output_diagnostics_valid_v1(output.diagnostics):
+            return Err(SccCompileOutputsErrorV1.diagnostic_order_invalid)
+        val dependencies = scc_output_sorted_unique_v1(
+            output.dependency_interface_digests)
+        if dependencies == nil:
+            return Err(SccCompileOutputsErrorV1.artifact_mismatch)
+        publish_inputs = publish_inputs.push(PackageArchivePublishInputV1(
+            output.entry, dependencies!, output.interface_content,
+            output.action_content, true))
+    val canonical_seen = scc_output_sorted_unique_v1(seen)
+    if canonical_seen == nil or canonical_seen!.len() != scheduled!.len():
+        return Err(SccCompileOutputsErrorV1.member_set_incomplete)
+    var member_index = 0
+    while member_index < scheduled!.len():
+        if canonical_seen![member_index] != scheduled![member_index]:
+            return Err(SccCompileOutputsErrorV1.member_set_incomplete)
+        member_index = member_index + 1
+    Ok(publish_inputs)
+
+fn scc_compile_outputs_publish_v1(
+    root: text,
+    authority: PackageArchiveAuthorityV1,
+    outputs: SccCompileOutputsV1,
+    expected_mir_admission_digest: text,
+    expected_baseline_artifact_identity: text,
+    expected_baseline_artifact_digest: text
+) -> Result[Unit, SccCompileOutputsErrorV1]:
+    val validated = scc_compile_outputs_validate_v1(
+        outputs, outputs.scc_identity, expected_mir_admission_digest,
+        expected_baseline_artifact_identity, expected_baseline_artifact_digest)
+    if validated.is_err():
+        return Err(validated.unwrap_err())
+    if not package_archive_publish_scc_v1(
+            root, outputs.scc_identity, authority, validated.unwrap()):
+        return Err(SccCompileOutputsErrorV1.artifact_mismatch)
+    Ok(Unit())
+
+export SccCompileOutputsErrorV1, SccModuleCompileOutputV1, SccCompileOutputsV1
+export scc_compile_outputs_validate_v1, scc_compile_outputs_publish_v1

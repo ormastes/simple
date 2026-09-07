@@ -1,0 +1,71 @@
+use std.spec.*
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionResultV1, BuildActionStateV1
+}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_compile_begin_v1
+}
+use compiler.driver.action_graph.artifact_service_bridge.{
+    demand_artifact_route_v1, demand_artifact_claim_owned_v1,
+    demand_artifact_commit_owned_v1
+}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, ForegroundBackendBudgetV1,
+    PrecompiledPlatformIdentityV1
+}
+use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1}
+
+fn test_artifact_route_v1():
+    val execution = demand_compile_begin_v1(
+        PackageIndexRouteV1(true, "ok", ["source.spl"], [], [], []),
+        DemandBackendIdentityV1(
+            "snapshot", "tree", "inventory", "semantic", "target", "variant",
+            PrecompiledPlatformIdentityV1(
+                "runtime-action", "runtime-abi", "std-action", "std-abi")),
+        ForegroundBackendBudgetV1(1, 64, 1000, false),
+        true, false, false, 1)
+    demand_artifact_route_v1(
+        execution,
+        artifact_service_profile_v1(
+            "test", "compat", ["semantic", "mir"], 1, true),
+        false, "owner", 1)
+
+describe "artifact route owner-result lifecycle":
+    it "restores the unchanged route owner after claim failure":
+        val rejected = demand_artifact_claim_owned_v1(
+            test_artifact_route_v1(), "missing", "lease", 64)
+        expect(rejected.claim.valid).to_be(false)
+        expect(rejected.route.execution.coordinator!.runtime[0].state)
+            .to_equal(BuildActionStateV1.pending)
+        expect(rejected.route.service.entries[0].state)
+            .to_equal(ArtifactRequestStateV1.queued)
+
+    it "restores the claimed owners after commit validation failure":
+        val claimed = demand_artifact_claim_owned_v1(
+            test_artifact_route_v1(), "source:source.spl", "lease", 64)
+        expect(claimed.claim.valid).to_be(true)
+        val rejected = demand_artifact_commit_owned_v1(
+            claimed.route, BuildActionResultV1(
+                "source:source.spl", "snapshot", true, false, "", "", [], 0))
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.route.execution.coordinator!.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.route.service.entries[0].state)
+            .to_equal(ArtifactRequestStateV1.leased)
+
+    it "publishes neither owner when service authority validation fails":
+        val claimed = demand_artifact_claim_owned_v1(
+            test_artifact_route_v1(), "source:source.spl", "lease", 64)
+        var authority_mismatch = claimed.route
+        authority_mismatch.service.profile.compatibility_id = "changed"
+        val rejected = demand_artifact_commit_owned_v1(
+            authority_mismatch, BuildActionResultV1(
+                "source:source.spl", "snapshot", true, false,
+                "artifact", "artifact", [], 0))
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.route.execution.coordinator!.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.route.service.entries[0].state)
+            .to_equal(ArtifactRequestStateV1.leased)

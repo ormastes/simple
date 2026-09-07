@@ -1,0 +1,157 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+storage_roots_init || exit 2
+server=
+producer_sha256=
+evidence_dir="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/compiler/macos-reverse-reference-m4/long-lived-residency"
+baseline_receipt=
+requested_arch=
+checker="$root/scripts/check/lib/macos-bootstrap-performance-evidence.shs"
+baseline_checker="$root/scripts/check/check-macos-m4-residency-baseline-receipt.shs"
+die() { echo "M4 RESIDENCY FAIL: $*" >&2; exit 1; }
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else printf '%s' "$1" | sha256sum | awk '{print $1}'; fi
+}
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+canonical_file() {
+  directory=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+  printf '%s/%s\n' "$directory" "$(basename -- "$1")"
+}
+now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000'
+}
+wait_for_id() {
+  wanted=$1; first_line=$2; deadline=$(( $(now_ms) + 10000 ))
+  while [ "$(now_ms)" -le "$deadline" ]; do
+    matches=$(tail -n "+$first_line" "$output" 2>/dev/null | grep -Fc "\"id\":\"$wanted\"" || true)
+    [ "$matches" -eq 0 ] || { [ "$matches" -eq 1 ] && return 0; return 1; }
+    kill -0 "$server_pid" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  return 1
+}
+request_first_line() { lines=$(wc -l <"$output"); echo $((lines + 1)); }
+require_success_response() {
+  wanted=$1; first_line=$2
+  response=$(tail -n "+$first_line" "$output" | grep -F "\"id\":\"$wanted\"")
+  [ "$(printf '%s\n' "$response" | wc -l | tr -d ' ')" -eq 1 ] || die "duplicate response for $wanted"
+  printf '%s\n' "$response" | grep -Fq '"result":' || die "missing result for $wanted"
+  printf '%s\n' "$response" | grep -Fq '"error"' && die "protocol error for $wanted"
+}
+verify_process_identity() {
+  kill -0 "$server_pid" 2>/dev/null || die "production MCP process exited"
+  current_start=$(ps -o lstart= -p "$server_pid" | sed 's/^[[:space:]]*//')
+  [ "$current_start" = "$process_start" ] || die "PID start identity changed"
+  current_executable=$(ps -o comm= -p "$server_pid" | sed 's/^[[:space:]]*//')
+  [ -n "$current_executable" ] || die "process executable identity unavailable"
+  current_executable=$(canonical_file "$current_executable") || die "process executable cannot be canonicalized"
+  [ "$current_executable" = "$server_canonical" ] || die "process executable identity changed"
+  [ "$(sha256_file "$current_executable")" = "$server_sha256" ] || die "process executable bytes changed"
+}
+sample_rss() {
+  rss=$(ps -o rss= -p "$server_pid" | awk 'NF { print $1; exit }')
+  case "$rss" in ''|*[!0-9]*) die "RSS unavailable for PID $server_pid" ;; esac
+  [ "$rss" -gt 0 ] || die "RSS is zero for PID $server_pid"
+  [ "$rss" -le "$observed_hwm" ] || observed_hwm=$rss
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --server=*) server=${arg#*=} ;;
+    --producer-sha256=*) producer_sha256=${arg#*=} ;;
+    --evidence-dir=*) evidence_dir=${arg#*=} ;;
+    --baseline-receipt=*) baseline_receipt=${arg#*=} ;;
+    --arch=*) requested_arch=${arg#*=} ;;
+    *) die "unknown option $arg" ;;
+  esac
+done
+[ -n "$server" ] && [ -x "$server" ] || die "production MCP server unavailable"
+[ "$requested_arch" = arm64 ] || [ "$requested_arch" = x86_64 ] ||
+  die "baseline architecture must be arm64 or x86_64"
+printf '%s' "$producer_sha256" | grep -Eq '^[0-9a-f]{64}$' || die "producer digest is required"
+[ -n "$baseline_receipt" ] || die "admitted per-architecture baseline receipt unavailable"
+[ -x "$baseline_checker" ] || die "baseline receipt checker unavailable"
+server_canonical=$(canonical_file "$server") || die "production MCP server path unavailable"
+server_sha256=$(sha256_file "$server_canonical")
+validated_baseline=$(sh "$baseline_checker" --receipt="$baseline_receipt" --arch="$requested_arch" \
+  --producer-sha256="$producer_sha256" --server-sha256="$server_sha256") ||
+  die "baseline receipt rejected"
+baseline_value() {
+  key=$1
+  count=$(printf '%s\n' "$validated_baseline" | awk -F= -v key="$key" '$1 == key { n++ } END { print n + 0 }')
+  [ "$count" -eq 1 ] || die "validated baseline has missing or duplicate $key"
+  printf '%s\n' "$validated_baseline" | awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }'
+}
+architecture=$(baseline_value architecture)
+authority_document_sha256=$(baseline_value authority_document_sha256)
+decision_source=$(baseline_value decision_source)
+baseline_rss_kib=$(baseline_value baseline_rss_kib)
+baseline_receipt_sha256=$(baseline_value baseline_receipt_sha256)
+baseline_evidence_sha256=$(baseline_value baseline_evidence_sha256)
+[ -x "$checker" ] || die "residency checker unavailable"
+command -v perl >/dev/null 2>&1 || die "perl monotonic clock unavailable"
+rm -rf "$evidence_dir"
+mkdir -p "$evidence_dir"
+input="$evidence_dir/server.in"
+output="$evidence_dir/server.out"
+error="$evidence_dir/server.err"
+samples="$evidence_dir/request-rss.tsv"
+mkfifo "$input"
+: >"$output"; : >"$error"
+exec 3<>"$input"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 "$server" 3>&- <"$input" >"$output" 2>"$error" &
+server_pid=$!
+trap 'exec 3>&- 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT HUP INT TERM
+process_start=$(ps -o lstart= -p "$server_pid" | sed 's/^[[:space:]]*//')
+[ -n "$process_start" ] || die "process start identity unavailable"
+verify_process_identity
+process_start_token=$(sha256_text "$server_pid|$process_start|$server_canonical|$server_sha256")
+
+init_id=m4-residency-init
+first_line=$(request_first_line)
+printf '%s\n' '{"jsonrpc":"2.0","id":"m4-residency-init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"m4-residency","version":"1"}}}' >&3
+wait_for_id "$init_id" "$first_line" || die "initialize response unavailable"
+require_success_response "$init_id" "$first_line"
+printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' >&3
+first_line=$(request_first_line)
+printf '%s\n' '{"jsonrpc":"2.0","id":"m4-residency-tools-1","method":"tools/list","params":{}}' >&3
+wait_for_id m4-residency-tools-1 "$first_line" || die "first tools/list unavailable"
+require_success_response m4-residency-tools-1 "$first_line"
+first_line=$(request_first_line)
+printf '%s\n' '{"jsonrpc":"2.0","id":"m4-residency-tools-2","method":"tools/list","params":{}}' >&3
+wait_for_id m4-residency-tools-2 "$first_line" || die "full tools/list unavailable"
+require_success_response m4-residency-tools-2 "$first_line"
+
+printf 'sequence\trequest_id\tpid\tprocess_start_token\texecutable_sha256\trss_kib\thwm_kib\n' >"$samples"
+observed_hwm=0
+sequence=1
+while [ "$sequence" -le 20 ]; do
+  request_id="m4-residency-$sequence"
+  first_line=$(request_first_line)
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":\"$request_id\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{\"paths\":\"test/fixtures/compiler/macos_reverse_reference_m4/base/main.spl\"}}}" >&3
+  wait_for_id "$request_id" "$first_line" || die "response unavailable for $request_id"
+  require_success_response "$request_id" "$first_line"
+  verify_process_identity
+  sample_rss
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sequence" "$request_id" "$server_pid" "$process_start_token" "$server_sha256" "$rss" "$observed_hwm" >>"$samples"
+  sequence=$((sequence + 1))
+done
+exec 3>&-
+wait "$server_pid" || die "production MCP server failed"
+trap - EXIT HUP INT TERM
+grep -q '"isError":true' "$output" && die "tool request failed"
+responses_sha256=$(sha256_file "$output")
+sh "$checker" residency-gate "$samples" "$evidence_dir/receipt.env" "$architecture" \
+  "$baseline_rss_kib" "$baseline_evidence_sha256" "$baseline_receipt_sha256" \
+  "$producer_sha256" "$server_sha256" "$responses_sha256" "$decision_source" \
+  "$authority_document_sha256"
+echo "PASS M4 long-lived residency: pid=$server_pid requests=20"

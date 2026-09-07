@@ -1,0 +1,57 @@
+# Deterministic C++ schema constants layered over the canonical KPF C ABI.
+
+use tool.kernel_plugin_schema.model.{KpfPackageIr}
+use tool.kernel_plugin_schema.abi_vectors.{KPF_ABI_LAYOUT_PREFIX_SIZE_V1, kpf_abi_layout_vectors_v1}
+
+fn _symbol_name(value: text) -> text:
+    var output = ""
+    for character in value:
+        if ((character >= 'a' and character <= 'z') or
+            (character >= 'A' and character <= 'Z') or
+                 (character >= '0' and character <= '9')):
+            output = output + "{character}"
+        else:
+            output = output + "_"
+    output
+
+# Emit a dependency-free C++17 header whose constants correspond exactly to
+# the generated Rust module and canonical C header.
+pub fn generate_cpp_schema_header(package_ir: KpfPackageIr) -> text:
+    var output = """#ifndef SIMPLE_KPF_GENERATED_SCHEMA_HPP
+#define SIMPLE_KPF_GENERATED_SCHEMA_HPP
+
+#include <array>
+#include <cstdint>
+
+namespace simple::kpf::generated {
+
+inline constexpr std::uint32_t abi_v1 = 1;
+"""
+    output = output + "inline constexpr char schema_digest[] = \"{package_ir.schema_digest}\";\n"
+    output = output + "inline constexpr std::uint64_t abi_layout_prefix_size_v1 = {KPF_ABI_LAYOUT_PREFIX_SIZE_V1};\n"
+    output = output + "struct AbiLayoutVectorV1 { const char *name; std::uint64_t available_size; std::uint64_t struct_size; std::uint64_t payload_offset; std::uint64_t payload_length; std::uint64_t required_alignment; std::uint64_t reserved0; bool expected_valid; };\n"
+    output = output + "constexpr bool validate_abi_layout_vector_v1(const AbiLayoutVectorV1 &vector) noexcept { return vector.struct_size >= abi_layout_prefix_size_v1 && vector.struct_size <= vector.available_size && vector.reserved0 == 0 && vector.required_alignment != 0 && (vector.required_alignment & (vector.required_alignment - 1)) == 0 && vector.payload_offset >= vector.struct_size && vector.payload_offset <= vector.available_size && vector.payload_offset % vector.required_alignment == 0 && vector.payload_length <= vector.available_size - vector.payload_offset; }\n"
+    val vectors = kpf_abi_layout_vectors_v1()
+    output = output + "inline constexpr std::array<AbiLayoutVectorV1, {vectors.len()}> abi_layout_vectors_v1{{{{\n"
+    for vector in vectors:
+        var expected = "false"
+        if vector.expected_valid:
+            expected = "true"
+        output = output + "    {\"{vector.name}\", {vector.available_size}, {vector.struct_size}, {vector.payload_offset}, {vector.payload_length}, {vector.required_alignment}, {vector.reserved0}, {expected}},\n"
+    output = output + "}};\n"
+    for interface_item in package_ir.interfaces:
+        val interface_name = _symbol_name(interface_item.name)
+        output = output + "\nnamespace interface_{interface_name} {\n"
+        output = output + "inline constexpr char id[] = \"{interface_item.interface_id}\";\n"
+        output = output + "inline constexpr std::uint32_t major = {interface_item.major};\n"
+        output = output + "inline constexpr std::uint64_t required_operation_mask = {interface_item.required_operation_mask}ULL;\n"
+        var operation_index = 0
+        while operation_index < interface_item.operations.len():
+            val operation_item = interface_item.operations[operation_index]
+            val operation_name = _symbol_name(operation_item.name)
+            output = output + "inline constexpr std::uint32_t operation_{operation_name}_slot = {operation_index};\n"
+            output = output + "inline constexpr char operation_{operation_name}_id[] = \"{operation_item.operation_id}\";\n"
+            operation_index = operation_index + 1
+        output = output + "} // namespace interface_{interface_name}\n"
+    output = output + "\n} // namespace simple::kpf::generated\n\n#endif\n"
+    output

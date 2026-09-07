@@ -7,7 +7,9 @@ use compiler.backend.backend_api.*
 use compiler.backend.backend.backend_types.{compileoptions_backend_kind, compileoptions_mode}
 use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default}
 use compiler.backend.backend_helpers.{backend_for_name}
-use compiler.backend.lua_backend.{LuaBackend}
+use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.backend.static_backend_registry.{
+    active_static_backend_table_v1, select_static_backend_v1}
 use std.log.{debug}
 
 # ============================================================================
@@ -89,7 +91,10 @@ class BackendFactory:
             case BuildMode.Debug:
                 BackendKind.Cranelift  # Fast compilation
             case BuildMode.Release:
-                BackendKind.Llvm       # Better optimization
+                if select_static_backend_v1(BackendKind.Llvm.to_text()).is_ok():
+                    BackendKind.Llvm
+                else:
+                    BackendKind.Cranelift
             case BuildMode.Test:
                 BackendKind.Interpreter  # No compilation overhead
             case BuildMode.Bootstrap:
@@ -108,43 +113,22 @@ class BackendFactory:
 
         debug("backend", "Creating backend: kind={kind}, target={target}")
 
-        # Create backend based on kind
-        match kind:
-            case BackendKind.Cranelift:
-                CraneliftBackend.create(target, options)
-
-            case BackendKind.Llvm:
-                LlvmBackend.create(target, options).with_target_opt_ctx(options.target_opt_ctx)
-
-            case BackendKind.Wasm:
-                WasmBackend.create(target, options)
-
-            case BackendKind.Interpreter:
-                InterpreterBackend.create(options)
-
-            case BackendKind.Lean:
-                LeanBackend.create(target, options)
-
-            case BackendKind.Byl:
-                BylBackend.create()
-
-            case BackendKind.Vhdl:
-                VhdlBackend.create(target, options)
-
-            case BackendKind.CCodegen:
-                CCodegenBackend.create(target, options)
-
-            case BackendKind.Cuda:
-                CudaBackend.create((8, 6))
-
-            case BackendKind.Vulkan:
-                VulkanBackend.create(target, options)
-
-            case BackendKind.IrTc:
-                IrTcBackend.create(target, options)
-
-            case BackendKind.Lua:
-                LuaBackend.create(target, options)
+        val selected_options = BackendCompileOptions(
+            target: target,
+            opt_level: options.opt_level,
+            debug_info: options.debug_info,
+            emit_assembly: options.emit_assembly,
+            emit_llvm_ir: options.emit_llvm_ir,
+            emit_mir: options.emit_mir,
+            verify_output: options.verify_output,
+            target_opt_ctx: options.target_opt_ctx,
+            backend_kind: options.backend_kind,
+            allowed_families: options.allowed_families
+        )
+        val codegen = CodegenFactory.create(kind, selected_options)
+        if not codegen.supports_target(target):
+            error("Backend {kind} does not support target {target}")
+        CompilerBackend(codegen: codegen, options: selected_options)
 
     static fn try_create(target: CodegenTarget, options: BackendCompileOptions)
         -> Result<Backend, BackendError>:
@@ -203,68 +187,19 @@ class BackendFactory:
         - Lean: All targets (verification only)
         - BYL: All targets (generated proof-model IR)
         """
-        match kind:
-            case BackendKind.Cranelift:
-                target.is_64bit()  # Cranelift 64-bit only
-
-            case BackendKind.Llvm:
-                true  # LLVM supports all targets
-
-            case BackendKind.Native:
-                match target:
-                    case X86_64 | AArch64 | Riscv64: true
-                    case AArch64_MacOS | X86_64_MacOS: true
-                    case Host: true
-                    case _: false
-
-            case BackendKind.Wasm:
-                target.is_wasm()  # Wasm backend for Wasm targets
-
-            case BackendKind.Interpreter:
-                true  # Interpreter supports all
-
-            case BackendKind.Lean:
-                true  # Lean backend for all (verification)
-
-            case BackendKind.Byl:
-                true  # BYL backend for generated proof-model IR
-
-            case BackendKind.Vhdl:
-                true  # VHDL backend is target-independent
-
-            case BackendKind.CCodegen:
-                true  # C backend generates portable C++20
-
-            case BackendKind.Cuda:
-                true
-
-            case BackendKind.Vulkan:
-                true
-
-            case BackendKind.IrTc:
-                match target:
-                    case Avr | I8086: true
-                    case _: false
-
-            case BackendKind.Lua:
-                true  # Lua backend generates portable Lua source
+        match select_static_backend_v1(kind.to_text()):
+            case Ok(entry):
+                val targets = entry.plugin.describe().targets
+                targets.contains("*") or targets.contains(target.to_text())
+            case Err(_):
+                false
 
     static fn available_backends() -> [BackendKind]:
         """List all available backends."""
-        [
-            BackendKind.Cranelift,
-            BackendKind.Llvm,
-            BackendKind.Wasm,
-            BackendKind.Interpreter,
-            BackendKind.Lean,
-            BackendKind.Byl,
-            BackendKind.Vhdl,
-            BackendKind.CCodegen,
-            BackendKind.Cuda,
-            BackendKind.Vulkan,
-            BackendKind.IrTc,
-            BackendKind.Lua
-        ]
+        var kinds: [BackendKind] = []
+        for entry in active_static_backend_table_v1():
+            kinds.push(entry.kind)
+        kinds
 
     static fn get_description(kind: BackendKind) -> text:
         """Get human-readable description of backend."""

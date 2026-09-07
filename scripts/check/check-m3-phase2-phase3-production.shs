@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+root=${1:-.}
+manifest="$root/src/compiler/00.common/cache/phase_compatibility_manifest.spl"
+path_io="$root/src/compiler/00.common/cache/phase_compatibility_path_io.spl"
+frontend="$root/src/compiler/10.frontend/frontend_parse_cache.spl"
+native="$root/src/compiler/80.driver/driver_aot_native_output.spl"
+authority="$root/src/compiler/80.driver/cache/phase_compatibility_admission.spl"
+receipt="$root/src/compiler/80.driver/cache/reverse_reference_receipt.spl"
+parsing="$root/src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+incremental="$root/src/compiler/80.driver/driver_build/incremental.spl"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+require() {
+  pattern=$1
+  file=$2
+  label=$3
+  if ! grep -Fq "$pattern" "$file"; then
+    echo "FAIL: $label" >&2
+    exit 1
+  fi
+}
+
+reject() {
+  pattern=$1
+  file=$2
+  label=$3
+  if grep -Fq "$pattern" "$file"; then
+    echo "FAIL: $label" >&2
+    exit 1
+  fi
+}
+
+require 'file_create_excl(manifest_path, encoded)' "$native" 'manifest publication is not exclusive'
+require 'm2_receipt_digest' "$manifest" 'manifest does not bind the immutable M2 receipt digest'
+require 'm2_owner_generation' "$manifest" 'manifest does not bind the exact M2 owner generation'
+require 'm2_root_generation' "$manifest" 'manifest does not bind the exact M2 root generation'
+require 'm2_consumer_identity' "$manifest" 'manifest items do not bind exact M2 projection consumers'
+require 'm2_receipt_digest: text' "$manifest" 'reuse expectation does not bind the exact M2 receipt digest'
+require 'm2_owner_generation: text' "$manifest" 'reuse expectation does not bind the M2 owner generation'
+require 'm2_root_generation: text' "$manifest" 'reuse expectation does not bind the M2 root generation'
+require 'm2-receipt-digest-mismatch' "$manifest" 'reuse does not reject a mismatched M2 receipt digest'
+require 'm2-key-generation-mismatch' "$manifest" 'reuse does not reject stale M2 key generations'
+require 'if manifest.m2_receipt_digest != expected.m2_receipt_digest:' "$manifest" 'reuse does not compare the exact M2 receipt digest'
+require 'manifest.m2_owner_generation != expected.m2_owner_generation or' "$manifest" 'reuse does not compare the exact M2 owner generation'
+require 'manifest.m2_root_generation != expected.m2_root_generation:' "$manifest" 'reuse does not compare the exact M2 root generation'
+require 'reverse_reference_read_current_admitted_v1' "$native" 'M3 publication does not canonically admit an immutable M2 receipt'
+reject 'reverse_reference_read_current_v1' "$native" 'M3 publication bypasses canonical no-follow CURRENT/receipt admission'
+require 'reverse_reference_receipt_digest_v1' "$native" 'M3 publication does not bind the admitted M2 receipt digest'
+require 'reverse_reference_key_encode_v1' "$native" 'M3 publication does not copy exact admitted M2 key frames'
+reject 'val key = ReverseReferenceKeyV1(' "$native" 'M3 synthesizes reverse-reference keys instead of consuming M2 receipt keys'
+require 'rt_path_absolute' "$path_io" 'filesystem canonicalization is absent'
+require 'if root != canonical_root:' "$path_io" 'manifest roots need not use canonical spelling'
+require 'if path != canonical_path:' "$path_io" 'Phase 2 artifacts need not use canonical spelling'
+require 'rt_file_is_regular_no_follow' "$path_io" 'Phase 2 reads can follow a symlink leaf'
+require 'destination-already-exists' "$path_io" 'Phase 3 immutable destinations can be replaced'
+require 'rt_path_separator() != "/"' "$path_io" 'non-Unix path rules are silently accepted'
+require 'destination-parent-not-canonical' "$path_io" 'Phase 3 parent symlink traversal is not rejected'
+require 'phase_compatibility_existing_manifest_io_v1' "$path_io" 'manifest reads do not reject symlink or canonical aliases'
+require 'phase_compatibility_read_manifest_io_v1(' "$authority" 'shared M3 authority reads the manifest without canonical no-follow admission'
+require 'phase_compatibility_read_manifest_io_v1(manifest_path)' "$native" 'published M3 manifest is verified through an unsafe second read'
+require 'reverse_reference_bind_admitted_published_keys_v1(' "$authority" 'M3 reuse bypasses exact current M2 receipt admission'
+require 'if not reverse_reference_receipt_contains_projection_v1(' "$receipt" 'M3 admission does not require exact key-and-consumer projection membership'
+require 'phase_compatibility_read_artifact_io_v1(' "$authority" 'frontend reuse does not consume one canonical no-follow artifact read'
+require 'phase_compatibility_read_artifact_io_v1(' "$native" 'native publication/reuse does not consume canonical no-follow artifact reads'
+reject 'rt_file_hash_sha256(item.artifact_path)' "$native" 'native reuse hashes an artifact through an unbound second read'
+reject 'rt_file_hash_sha256(object_tmp)' "$native" 'native staging verification bypasses canonical no-follow admission'
+reject 'rt_file_hash_sha256(receipt_path)' "$native" 'native receipt verification bypasses canonical no-follow admission'
+require 'phase_compatibility_read_manifest_io_v1(pointer_path)' "$receipt" 'M2 CURRENT is not read through canonical no-follow admission'
+require 'phase_compatibility_read_manifest_io_v1(receipt_path)' "$receipt" 'M2 immutable receipt is not read through canonical no-follow admission'
+reject 'phase2-compatible-frontend' "$authority" 'frontend retains a synthetic M2 owner generation'
+reject 'file_read_result(item.artifact_path)' "$authority" 'frontend hashes admitted bytes and then consumes a second unbound artifact read'
+reject 'frontend_parse_cache_import_phase2_v1' "$frontend" 'frontend still owns an env-driven M2 authority bypass'
+require 'manifest.phase3_cache_root, expected_capsule.object_path' "$native" 'native materialization is not canonically confined to Phase 3'
+require 'phase3-published-digest-mismatch' "$native" 'native final bytes are not verified'
+reject 'file_create_excl(expected_capsule.object_path, "")' "$native" 'native publication exposes an empty reserved final object'
+require 'phase_compatibility_stage_artifact_io_v1(' "$native" 'native bytes are not completed in exclusive no-follow staging'
+require 'phase_compatibility_publish_staged_io_v1(' "$native" 'native final publication is not atomic no-replace commit'
+require 'driver_import_phase2_frontend_v1()' "$parsing" 'frontend production parser does not invoke driver-owned M3 admission'
+require 'driver_admit_phase2_compatibility_manifest_v1(path, phase3_root)' "$native" 'native reuse bypasses shared M2 authority admission'
+require 'driver_materialize_phase2_native_v1(' "$native" 'native production compiler does not invoke M3 materialization'
+require 'schema=simple-phase2-phase3-reuse-ledger-v1 kind=native-object hits=' "$native" 'native reuse does not emit a complete hit/rejection ledger'
+require 'schema=simple-phase2-phase3-reuse-ledger-v1 kind=frontend hits=' "$authority" 'frontend reuse does not emit a complete hit/rejection ledger'
+require 'interface_digest: text' "$incremental" 'cache rows do not retain the source public interface'
+require 'interface_digest_of_source(current_source!) == recorded_interface' "$incremental" 'private-body edits do not prove interface stability'
+require 'selected_families = [' "$incremental" 'private-body invalidation does not select a minimal family set'
+require '"module-scc-artifact"' "$incremental" 'private-body invalidation omits native/SCC consumers'
+require '"emitted-symbol-relocation"' "$incremental" 'private-body invalidation omits relocation consumers'
+require 'An import proves interface consumption, not SCC membership.' "$incremental" 'ordinary imports are not distinguished from SCC peers'
+reject 'incremental_publish_module_scc_artifact_v1(dependency, source, deps_iface)' "$incremental" 'ordinary imports are promoted to SCC membership'
+require 'chmod -R a-w "${stage2_cache_absolute}"' "$bootstrap" 'Phase 2 cache is not made read-only before Phase 3'
+require 'cmp -s "${phase2_cache_before_stage3}"' "$bootstrap" 'Phase 2 mutation snapshot gate is absent'
+require 'phase2_manifest_sha_before_stage3' "$bootstrap" 'manifest immutability digest gate is absent'
+require 'mkdir -p "${stage3_provenance_cache}"' "$bootstrap" 'Phase 3 canonical root is not created before manifest publication'
+
+echo 'PASS: M3 production publication, admission, ownership, and materialization wiring'

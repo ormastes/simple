@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
+bridge="$root/src/compiler/80.driver/demand_mir_integration.spl"
+driver="$root/src/compiler/80.driver/driver_pipeline_lowering.spl"
+types="$root/src/compiler/80.driver/driver_types.spl"
+
+test -f "$bridge"
+grep -q 'hir_demand_close_v1' "$bridge"
+grep -q 'import_materialize_v1(materialization!, ImportDemandV1.mir)' "$bridge"
+grep -q 'materialization!.snapshot.tree_digest != input.snapshot.tree_digest' "$bridge"
+grep -q 'materialization!.snapshot.inventory_digest !=' "$bridge"
+grep -q 'MirDependencyStateV1.concrete' "$bridge"
+grep -q 'mir_admission_prove_v1' "$bridge"
+grep -q 'input.snapshot.tree_digest' "$bridge"
+grep -q 'input.snapshot.inventory_digest' "$bridge"
+grep -q 'demand_mir_input: DemandMirIntegrationInputV1?' "$types"
+grep -q 'demand_mir_admission: MirAdmissionV1?' "$types"
+grep -q 'demand_compile_execution: DemandCompileExecutionV1?' "$types"
+grep -q 'demand_artifact_route: DemandArtifactRouteV1?' "$types"
+grep -q 'demand_scc_publication: SccPublicationOwnershipV1?' "$types"
+grep -q 'demand_dirty_modules: \[DirtyModuleRecordV1\]' "$types"
+grep -q 'use compiler.driver.demand_mir_integration.{DemandMirIntegrationInputV1}' "$types"
+grep -q 'use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}' "$types"
+grep -q 'use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}' "$types"
+grep -q 'use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1}' "$types"
+grep -q 'use compiler.driver.action_graph.scc_publication_ownership.{SccPublicationOwnershipV1}' "$types"
+grep -q 'use compiler.driver.cache.dirty_module_record.{DirtyModuleRecordV1}' "$types"
+grep -q 'demand_mir_input: nil' "$types"
+grep -q 'demand_compile_execution: nil' "$types"
+grep -q 'demand_dirty_modules: \[\]' "$types"
+grep -q 'demand_compile_execution != nil' "$driver"
+grep -q 'legacy bypass is disabled' "$driver"
+grep -q 'if self.ctx.demand_mir_input != nil:' "$driver"
+grep -q 'demand_compile_bind_mir_admission_v1' "$driver"
+
+loading="$root/src/compiler/80.driver/driver_source_pipeline_loading.spl"
+actions="$root/src/compiler/80.driver/action_graph/demand_compile_integration.spl"
+backend="$root/src/compiler/80.driver/backend/demand_backend_plan.spl"
+grep -q 'CombinedMirEvidenceBuilder' "$loading"
+grep -q 'route.dirty_modules' "$loading"
+grep -q 'archive_evidence, dirty_evidence' "$loading"
+grep -q 'self.ctx.demand_mir_admission = Some' "$loading"
+grep -q 'route_capability_scope_close_all_v1' "$loading"
+grep -q 'snapshot_tree_digest' "$backend"
+grep -q 'snapshot_inventory_digest' "$backend"
+grep -q 'mir_admission_digest' "$actions"
+grep -q 'admission.snapshot_tree_digest != authority.scv_tree_id' "$actions"
+grep -q 'admission.snapshot_inventory_digest != authority.inventory_digest' "$actions"
+
+gate_line=$(grep -n 'if self.ctx.demand_mir_admission != nil:' "$driver" | head -1 | cut -d: -f1)
+skip_line=$(grep -n 'val skip_mir_lower = ' "$driver" | head -1 | cut -d: -f1)
+module_line=$(grep -n 'MirModule(' "$driver" | head -1 | cut -d: -f1)
+test "$gate_line" -lt "$skip_line"
+test "$gate_line" -lt "$module_line"
+
+if grep -Eq 'read_file|walk_dir|rt_file|source_contents|ctx\.sources' "$bridge"; then
+    echo 'demand MIR integration must not read live source' >&2
+    exit 1
+fi
+
+echo demand-mir-integration-contract-pass

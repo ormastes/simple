@@ -1,0 +1,51 @@
+use std.test.*
+use std.io_runtime.{read_file_text}
+use app.check.worker_failure.{check_worker_failure_diagnostic, check_worker_public_exit_code}
+use app.io.process_ops.{process_run_timeout}
+
+describe "quality entry launcher":
+    it "uses direct compiled quality command entrypoints":
+        val source = read_file_text("src/app/cli/_CliMain/main_and_help.spl")
+        val lint_start = source.find("elif str_eq(first, \"lint\"):") ?? -1
+        val duplicate_start = source.find("elif str_eq(first, \"duplicate-check\"):") ?? -1
+        val check_start = source.find("elif str_eq(first, \"check\"):") ?? -1
+        val coverage_start = source.find("elif str_eq(first, \"doc-coverage\"):") ?? -1
+        expect(lint_start).to_be_greater_than(-1)
+        expect(check_start).to_be_greater_than(-1)
+        val lint_route = source[lint_start:duplicate_start]
+        val check_route = source[check_start:coverage_start]
+        expect(lint_route).to_contain("return run_lint_command(filtered_args)")
+        expect(check_route).to_contain("return run_check(check_args)")
+        expect(lint_route.contains("_cli_frontend_delegate_binary")).to_equal(false)
+        expect(check_route.contains("_cli_frontend_delegate_binary")).to_equal(false)
+        expect(lint_route.contains("interpret_file")).to_equal(false)
+        expect(check_route.contains("interpret_file")).to_equal(false)
+
+    it "fails explicitly when no cached worker artifact is admitted":
+        val source = read_file_text("src/app/cli/check_entry.spl")
+        expect(source).to_contain("if worker_bin == \"\":")
+        expect(source).to_contain("no admitted cached self-hosted check worker artifact is available")
+        expect(source.contains("return \"bin/simple\"")).to_equal(false)
+
+    it "reports an otherwise silent worker failure":
+        val diagnostic = check_worker_failure_diagnostic("/tool/simple", -1, "", "")
+        expect(diagnostic).to_contain("/tool/simple")
+        expect(diagnostic).to_contain("exit status -1")
+        expect(check_worker_public_exit_code(-1)).to_equal(1)
+        expect(check_worker_public_exit_code(255)).to_equal(255)
+
+    it "preserves child diagnostics without fabricating a duplicate":
+        expect(check_worker_failure_diagnostic("/tool/simple", 1, "", "type error")).to_equal("")
+        expect(check_worker_failure_diagnostic("/tool/simple", 1, "parse error", "")).to_equal("")
+
+    it "preserves diagnostics and failure status from an invalid target":
+        val (stdout, stderr, code) = process_run_timeout(
+            "sh",
+            ["test/01_unit/app/cli/fixtures/check_worker_invalid_target.shs"],
+            5000
+        )
+        expect(code).to_equal(7)
+        expect(stderr).to_contain("invalid target")
+        expect(stderr).to_contain("type mismatch")
+        expect(check_worker_failure_diagnostic("sh", code, stdout, stderr)).to_equal("")
+        expect(check_worker_public_exit_code(code)).to_equal(7)

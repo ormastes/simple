@@ -1,0 +1,33 @@
+use std.spec.*
+use std.io.{file_read}
+use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platform_flags, native_cc_platform_flags}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions}
+use compiler.backend.linker._LinkerWrapper.native_linking.{NativeLinkConfig}
+
+describe "native binary strip contract":
+    it "keeps dead stripping and adds symbol stripping only when requested":
+        expect(CompileOptions.default().strip_output).to_be(false)
+        expect(NativeLinkOptions.default().strip_output).to_be(false)
+        expect(NativeLinkConfig.default().strip_output).to_be(false)
+        expect(native_direct_platform_flags("macos", "ld64", false)).to_equal(["-dead_strip"])
+        expect(native_direct_platform_flags("macos", "ld64", true)).to_equal(["-dead_strip", "-S", "-x"])
+        expect(native_direct_platform_flags("linux", "lld", true)).to_contain("--strip-all")
+        expect(native_cc_platform_flags("macos", false)).to_equal(["-Wl,-dead_strip"])
+        expect(native_cc_platform_flags("macos", true)).to_equal(["-Wl,-dead_strip", "-Wl,-S,-x"])
+        expect(native_cc_platform_flags("linux", true)).to_contain("-Wl,--strip-all")
+
+    it "transports the public strip option through the compiler and linker":
+        val cli = file_read("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+        val driver = file_read("src/compiler/80.driver/driver_aot_native_output.spl") ?? ""
+        val linker = file_read("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl") ?? ""
+        expect(cli).to_contain("options.strip_output = strip")
+        expect(driver).to_contain("strip_output: ctx.options.strip_output")
+        expect(linker).to_contain("strip_output: options.strip_output")
+
+    it "never converts stripping into unresolved-symbol tolerance":
+        val linker = file_read("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        expect(linker).to_contain("--strip-all")
+        expect(linker).to_contain("-dead_strip")
+        expect(linker).to_contain("unresolved_symbol_flags_for_unix_linker")
+        expect(linker).to_contain("if config.allow_duplicate_definitions")

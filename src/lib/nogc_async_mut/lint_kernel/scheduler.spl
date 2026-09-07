@@ -1,0 +1,41 @@
+use common.kernel_plugin.ids.KpfId128
+use common.lint_kernel.model.RuleDescriptorV1
+
+pub enum LintScheduleStatus:
+    Ready
+    CapacityExceeded
+    RequiredFactsUnavailable
+
+pub struct LintScheduleInputV1:
+    rules: [RuleDescriptorV1]
+    available_fact_bits: u64
+    maximum_rules: u32
+    maximum_batch_items: u32
+
+pub struct LintRuleWorkV1:
+    rule_id: KpfId128
+    provider_id: KpfId128
+    required_fact_bits: u64
+    batch_granularity: u32
+
+pub struct LintScheduleV1:
+    status: LintScheduleStatus
+    work: [LintRuleWorkV1]
+    planned_rule_count: u32
+    missing_fact_rule_count: u32
+
+pub fn lint_build_bounded_schedule(input: LintScheduleInputV1) -> LintScheduleV1:
+    if input.maximum_rules == 0 or input.maximum_batch_items == 0 or input.rules.len() > input.maximum_rules:
+        return LintScheduleV1(status: LintScheduleStatus.CapacityExceeded, work: [], planned_rule_count: 0, missing_fact_rule_count: 0)
+    var work: [LintRuleWorkV1] = []
+    var missing_fact_rule_count = 0u32
+    for rule in input.rules:
+        if rule.batch_granularity == 0 or rule.batch_granularity > input.maximum_batch_items:
+            return LintScheduleV1(status: LintScheduleStatus.CapacityExceeded, work: [], planned_rule_count: 0, missing_fact_rule_count: missing_fact_rule_count)
+        if (rule.required_fact_bits & input.available_fact_bits) != rule.required_fact_bits:
+            missing_fact_rule_count = missing_fact_rule_count + 1
+        else:
+            work.push(LintRuleWorkV1(rule_id: rule.rule_id, provider_id: rule.provider_id, required_fact_bits: rule.required_fact_bits, batch_granularity: rule.batch_granularity))
+    if missing_fact_rule_count > 0:
+        return LintScheduleV1(status: LintScheduleStatus.RequiredFactsUnavailable, work: work, planned_rule_count: work.len(), missing_fact_rule_count: missing_fact_rule_count)
+    LintScheduleV1(status: LintScheduleStatus.Ready, work: work, planned_rule_count: work.len(), missing_fact_rule_count: 0)

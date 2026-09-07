@@ -1,0 +1,78 @@
+use std.spec.*
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.lint_kernel.model.{ArtifactKeyV1, SourceSpanV1, DiagnosticV1}
+use std.editor.extensions.manifest.*
+use std.editor.kernel_plugin.facade.*
+use std.editor.tooling_client.*
+use std.tooling_kernel.*
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn snapshot(document: u64, language: u64, revision: u64, content: u64) -> ToolingDocumentSnapshotV1:
+    ToolingDocumentSnapshotV1(document_id: id(document), language_id: id(language), revision: revision, content_digest: digest(content))
+
+fn diagnostic(language: u64, revision: u64, start_byte: u64, end_byte: u64) -> DiagnosticV1:
+    val artifact = ArtifactKeyV1(workspace_id: id(1), language_id: id(language), path_id: id(2), target_id: id(3), configuration_digest: digest(10))
+    DiagnosticV1(rule_id: id(4), provider_id: id(5), severity: 2, category: 1, primary_span: SourceSpanV1(artifact: artifact, revision: revision, start_byte: start_byte, end_byte: end_byte), message_id: id(6), fix_digest: digest(20))
+
+fn command_handler(payload: text) -> Result<text, text>:
+    Ok("ran:" + payload)
+
+fn command_manifest() -> ExtensionManifest:
+    extension_manifest_basic("tooling-tests", "1.0.0", "", ["onCommand:tooling.test.run"], [ExtensionCommand(id: "tooling.test.run", title: "Run", category: "Test")], [])
+
+fn client() -> EditorToolingClientV1:
+    val workspace = ToolingWorkspaceV1.create(4, 4, 8, 16)
+    val facade = EditorKpfFacadeV1.create(7, 8)
+    facade.admit(command_manifest())
+    facade.register_command("tooling-tests", "tooling.test.run", "Run", command_handler)
+    facade.activate_event("onCommand:tooling.test.run", 0)
+    EditorToolingClientV1.create(workspace, facade, 4, 4)
+
+describe "native editor tooling client":
+    it "rejects stale results after the editor publishes a newer immutable snapshot":
+        var tooling = client()
+        val opened = tooling.open_snapshot("main.spl", snapshot(100, 10, 1, 40), 8)
+        val stale_request = tooling.begin_analysis(opened.handle).handle
+        expect(tooling.update_snapshot(opened.handle, snapshot(100, 10, 2, 41))).to_equal(EditorToolingClientStatusV1.Ok)
+        expect(tooling.publish_diagnostics(opened.handle, stale_request, digest(40), [diagnostic(10, 1, 2, 4)])).to_equal(EditorToolingClientStatusV1.Cancelled)
+        expect(tooling.diagnostics_for(opened.handle).len()).to_equal(0)
+
+    it "keeps quickfix anchors tied to the accepted snapshot without mutating editor text":
+        var tooling = client()
+        val opened = tooling.open_snapshot("main.spl", snapshot(101, 10, 1, 50), 8)
+        val request = tooling.begin_analysis(opened.handle).handle
+        expect(tooling.publish_diagnostics(opened.handle, request, digest(50), [diagnostic(10, 1, 3, 7)])).to_equal(EditorToolingClientStatusV1.Ok)
+        match tooling.quickfix_anchor(opened.handle, 0):
+            case Ok(anchor):
+                expect(anchor.start_byte).to_equal(3)
+                expect(anchor.end_byte).to_equal(7)
+                expect(tooling.anchor_is_current(anchor)).to_be(true)
+                expect(tooling.update_snapshot(opened.handle, snapshot(101, 10, 2, 51))).to_equal(EditorToolingClientStatusV1.Ok)
+                expect(tooling.anchor_is_current(anchor)).to_be(false)
+            case Err(_): expect(false).to_be(true)
+
+    it "disconnects sessions, cancels requests, and rejects further work":
+        var tooling = client()
+        val opened = tooling.open_snapshot("main.spl", snapshot(102, 10, 1, 60), 8)
+        val request = tooling.begin_analysis(opened.handle).handle
+        expect(tooling.disconnect()).to_equal(EditorToolingClientStatusV1.Ok)
+        expect(tooling.analysis_is_cancelled(request)).to_be(true)
+        expect(tooling.begin_analysis(opened.handle).status).to_equal(EditorToolingClientStatusV1.Disconnected)
+
+    it "isolates mixed-language sessions and routes commands and exact tests":
+        var tooling = client()
+        val simple_doc = tooling.open_snapshot("main.spl", snapshot(103, 10, 1, 70), 8)
+        val rust_doc = tooling.open_snapshot("lib.rs", snapshot(104, 11, 1, 71), 9)
+        expect(tooling.begin_analysis(simple_doc.handle).status).to_equal(EditorToolingClientStatusV1.Ok)
+        expect(tooling.begin_analysis(rust_doc.handle).status).to_equal(EditorToolingClientStatusV1.Ok)
+        val dispatched = tooling.dispatch_command("tooling.test.run", "command", 1)
+        expect(dispatched.status).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(dispatched.output).to_equal("ran:command")
+        expect(tooling.register_test(EditorToolingTestNodeV1(id: "simple::one", label: "one", document: simple_doc.handle, command_id: "tooling.test.run", payload: "simple::one"))).to_equal(EditorToolingClientStatusV1.Ok)
+        expect(tooling.run_test("simple::one", 2)).to_equal(EditorToolingClientStatusV1.Ok)
+        expect(tooling.run_test("rust::missing", 2)).to_equal(EditorToolingClientStatusV1.TestNotFound)

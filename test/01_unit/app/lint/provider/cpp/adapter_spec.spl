@@ -1,0 +1,103 @@
+use std.spec.{describe, it, expect}
+use common.kernel_plugin.ids.KpfDigest256
+use app.lint.provider.cpp.model.*
+use app.lint.provider.cpp.compile_database.{parse_compile_commands_v1, resolve_compile_command_v1}
+use os.tooling.clang_worker.protocol.parse_clang_structured_output_v1
+use os.tooling.clang_worker.runner.classify_clang_worker_result_v1
+use os.tooling.clang_worker.runner.clang_worker_default_limits_v1
+use app.lint.provider.cpp.adapter.run_selected_clang_tidy_v1
+
+fn _digest_v1() -> KpfDigest256:
+    KpfDigest256(1, 2, 3, 4)
+
+fn _toolchain_v1() -> CppToolchainFingerprintV1:
+    CppToolchainFingerprintV1("clang-tidy", "20.1.0", "x86_64-unknown-linux-gnu", "/toolchain/lib/clang/20", _digest_v1())
+
+fn _receipt_v1() -> TranslationUnitConfigReceiptV1:
+    TranslationUnitConfigReceiptV1("/workspace/a.cc", "/workspace", ["clang++", "-std=c++20", "-c", "a.cc"], "", "debug", "/workspace/build/compile_commands.json", true)
+
+describe "C and C++ lint provider contract":
+    it "selects one exact translation-unit command and records its authority":
+        val commands = [
+            CompileCommandV1("/workspace", "/workspace/a.cc", ["clang++", "-c", "a.cc"], "", "debug"),
+            CompileCommandV1("/workspace", "/workspace/b.cc", ["clang++", "-c", "b.cc"], "", "debug"),
+        ]
+        val selected = select_compile_command_v1(commands, "/workspace/a.cc", "debug", "/workspace/build/compile_commands.json")
+        expect(selected.status).to_equal(CompileCommandStatus.Selected)
+        expect(selected.state).to_equal(CppAnalysisState.Complete)
+        expect(selected.candidate_count).to_equal(1)
+        expect(selected.receipt != nil).to_equal(true)
+        if val receipt = selected.receipt:
+            expect(receipt.exact).to_equal(true)
+            expect(receipt.arguments[1]).to_equal("-c")
+            expect(receipt.compile_database_path).to_equal("/workspace/build/compile_commands.json")
+
+    it "does not claim analysis when an exact compile command is absent":
+        val selected = select_compile_command_v1([], "/workspace/missing.cc", "", "/workspace/build/compile_commands.json")
+        expect(selected.status).to_equal(CompileCommandStatus.Missing)
+        expect(selected.state).to_equal(CppAnalysisState.NotAnalyzed)
+        expect(selected.receipt).to_be_nil()
+        val result = run_selected_clang_tidy_v1(selected, "/fake/clang-tidy-wrapper", [], 1, _toolchain_v1(), clang_worker_default_limits_v1())
+        expect(result.state).to_equal(CppAnalysisState.NotAnalyzed)
+        expect(result.exit_code).to_equal(0)
+
+    it "reports ambiguous translation-unit configurations as partial":
+        val commands = [
+            CompileCommandV1("/workspace", "/workspace/a.cc", ["clang++", "-DLEFT"], "", ""),
+            CompileCommandV1("/workspace", "/workspace/a.cc", ["clang++", "-DRIGHT"], "", ""),
+        ]
+        val selected = select_compile_command_v1(commands, "/workspace/a.cc", "", "/workspace/build/compile_commands.json")
+        expect(selected.status).to_equal(CompileCommandStatus.Ambiguous)
+        expect(selected.state).to_equal(CppAnalysisState.Partial)
+        expect(selected.candidate_count).to_equal(2)
+
+    it "parses compile_commands JSON without inventing fallback flags":
+        val content = "[" + "{\"directory\":\"/workspace\",\"file\":\"/workspace/a.cc\",\"arguments\":[\"clang++\",\"-std=c++20\",\"-c\",\"a.cc\"],\"configuration_id\":\"debug\"}" + "]"
+        val parsed = parse_compile_commands_v1(content)
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.commands.len()).to_equal(1)
+        val selected = resolve_compile_command_v1(content, "/workspace/a.cc", "debug", "/workspace/build/compile_commands.json")
+        expect(selected.status).to_equal(CompileCommandStatus.Selected)
+
+    it "fails closed on malformed compile databases":
+        val selected = resolve_compile_command_v1("{bad", "/workspace/a.cc", "", "/workspace/build/compile_commands.json")
+        expect(selected.status).to_equal(CompileCommandStatus.Malformed)
+        expect(selected.state).to_equal(CppAnalysisState.NotAnalyzed)
+
+    it "normalizes structured clang diagnostics and caller-applied fixes":
+        val output = "[" + "{\"rule\":\"modernize-use-nullptr\",\"severity\":\"warning\",\"path\":\"/workspace/a.cc\",\"start_byte\":10,\"end_byte\":14,\"message\":\"use nullptr\",\"fixes\":[{\"start_byte\":10,\"end_byte\":14,\"replacement\":\"nullptr\",\"machine_applicable\":true}]}" + "]"
+        val parsed = parse_clang_structured_output_v1(output, 7)
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.diagnostics.len()).to_equal(1)
+        expect(parsed.diagnostics[0].revision).to_equal(7)
+        expect(parsed.diagnostics[0].fixes[0].replacement).to_equal("nullptr")
+        expect(parsed.diagnostics[0].fixes[0].machine_applicable).to_equal(true)
+
+    it "fails closed on malformed tool output":
+        val result = classify_clang_worker_result_v1("not-json", "", 0, false, "", 7, _receipt_v1(), _toolchain_v1())
+        expect(result.state).to_equal(CppAnalysisState.Failed)
+        expect(result.failure).to_equal(CppToolFailure.MalformedOutput)
+        expect(result.diagnostics.len()).to_equal(0)
+
+    it "rejects diagnostics without explicit byte ranges or normalized severity":
+        val missing_range = "[" + "{\"rule\":\"x\",\"severity\":\"warning\",\"path\":\"a.cc\",\"message\":\"bad\"}" + "]"
+        val unknown_severity = "[" + "{\"rule\":\"x\",\"severity\":\"fatalish\",\"path\":\"a.cc\",\"start_byte\":0,\"end_byte\":1,\"message\":\"bad\"}" + "]"
+        expect(parse_clang_structured_output_v1(missing_range, 1).valid).to_equal(false)
+        expect(parse_clang_structured_output_v1(unknown_severity, 1).valid).to_equal(false)
+
+    it "distinguishes timeout from crash":
+        val timeout = classify_clang_worker_result_v1("", "", -1, true, "timeout", 7, _receipt_v1(), _toolchain_v1())
+        val crash = classify_clang_worker_result_v1("", "boom", 139, false, "", 7, _receipt_v1(), _toolchain_v1())
+        expect(timeout.failure).to_equal(CppToolFailure.TimedOut)
+        expect(crash.failure).to_equal(CppToolFailure.Crashed)
+        expect(crash.reason).to_contain("boom")
+
+    it "binds clangd metadata to the exact compile configuration and toolchain":
+        val metadata = clangd_session_metadata_v1("/workspace", _receipt_v1(), _toolchain_v1(), 11)
+        expect(metadata.authoritative).to_equal(true)
+        expect(metadata.configuration_id).to_equal("debug")
+        expect(metadata.document_revision).to_equal(11)
+        expect(cpp_toolchain_fingerprint_complete_v1(metadata.toolchain)).to_equal(true)
+
+    it "rejects incomplete toolchain fingerprints":
+        expect(cpp_toolchain_fingerprint_complete_v1(cpp_unknown_toolchain_v1("clang-tidy"))).to_equal(false)

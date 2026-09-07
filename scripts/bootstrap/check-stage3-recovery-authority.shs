@@ -1,0 +1,540 @@
+#!/bin/sh
+set +e
+set -u
+
+schema=simple-bootstrap-stage3-recovery-preflight-v1
+status=refused
+reason=arguments-invalid
+source_root=unavailable
+output_dir=unavailable
+parent_sha256=unavailable
+stage2_admission_sha256=unavailable
+source_snapshot_sha256=unavailable
+runtime_snapshot_sha256=unavailable
+tool_authority_sha256=unavailable
+planner_receipt_sha256=unavailable
+backend=unavailable
+abi_policy=unavailable
+free_bytes=unavailable
+minimum_free_bytes=unavailable
+receipt_emitted=0
+last_check=startup
+tmp_root=
+
+recovery_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+recovery_repo_root=$(CDPATH= cd -- "${recovery_script_dir}/../.." && pwd -P) || exit 70
+. "${recovery_script_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${recovery_repo_root}" || exit 70
+
+emit_receipt() {
+  receipt_emitted=1
+  printf '%s\n' \
+    "schema=$schema" \
+    "status=$status" \
+    "reason=$reason" \
+    "source_root=$source_root" \
+    "output_dir=$output_dir" \
+    "parent_sha256=$parent_sha256" \
+    "stage2_admission_sha256=$stage2_admission_sha256" \
+    "source_snapshot_sha256=$source_snapshot_sha256" \
+    "runtime_snapshot_sha256=$runtime_snapshot_sha256" \
+    "tool_authority_sha256=$tool_authority_sha256" \
+    "planner_receipt_sha256=$planner_receipt_sha256" \
+    "backend=$backend" \
+    "abi_policy=$abi_policy" \
+    "free_bytes=$free_bytes" \
+    "minimum_free_bytes=$minimum_free_bytes"
+}
+
+cleanup_and_report_unexpected_exit() {
+  exit_code=$?
+  trap - 0 HUP INT TERM
+  if [ "$receipt_emitted" -eq 0 ]; then
+    status=refused
+    reason=internal-command-failure
+    printf 'stage3 recovery authority: unexpected exit=%s check=%s\n' \
+      "$exit_code" "$last_check" >&2
+    emit_receipt || true
+  fi
+  [ -z "$tmp_root" ] || rm -rf -- "$tmp_root"
+  exit "$exit_code"
+}
+
+trap cleanup_and_report_unexpected_exit 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+finish() {
+  status=$1
+  reason=$2
+  code=$3
+  printf 'stage3 recovery authority: status=%s reason=%s\n' \
+    "$status" "$reason" >&2
+  emit_receipt
+  exit "$code"
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: check-stage3-recovery-authority.shs \
+  --source-root=PATH --output-dir=PATH --planner-receipt=PATH \
+  --expected-parent-sha256=HEX64 \
+  --expected-source-snapshot-sha256=HEX64 \
+  --minimum-free-bytes=N
+EOF
+}
+
+canonical_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  recovery_canonical_dir=$(CDPATH= cd -- "$1" && pwd -P) || return 1
+  [ "$recovery_canonical_dir" = "$1" ] || return 1
+  printf '%s\n' "$recovery_canonical_dir"
+}
+
+canonical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  recovery_canonical_parent=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+  recovery_canonical_file="$recovery_canonical_parent/$(basename -- "$1")"
+  [ "$recovery_canonical_file" = "$1" ] || return 1
+  printf '%s\n' "$recovery_canonical_file"
+}
+
+is_sha256() {
+  case "$1" in
+    ''|*[!0-9a-f]*) return 1 ;;
+    *) [ "${#1}" -eq 64 ] ;;
+  esac
+}
+
+manifest_value() {
+  recovery_manifest_key=$1
+  recovery_manifest_file=$2
+  recovery_manifest_count=$(awk -F= -v key="$recovery_manifest_key" \
+    '$1 == key { count++ } END { print count + 0 }' \
+    "$recovery_manifest_file") || return 1
+  [ "$recovery_manifest_count" -eq 1 ] || return 1
+  sed -n "s/^${recovery_manifest_key}=//p" "$recovery_manifest_file"
+}
+
+exact_equal_receipt_keys() {
+  recovery_exact_file=$1
+  recovery_exact_keys=$2
+  recovery_actual_keys=$(sed -e 's/=.*//' -e 's/: .*$/:/' "$recovery_exact_file" | tr '\n' ' ' | sed 's/ $//') || return 1
+  [ "$recovery_actual_keys" = "$recovery_exact_keys" ]
+}
+
+transcript_args_sha256() {
+  perl -MDigest::SHA -e '
+    use strict; use warnings;
+    my $sha = Digest::SHA->new(256);
+    my $seen_schema = 0;
+    while (<>) {
+      chomp;
+      if (!$seen_schema) {
+        $_ eq "schema=simple-bootstrap-command-transcript-v2" or exit 2;
+        $seen_schema = 1;
+        next;
+      }
+      my ($kind, $declared, $payload) = /^(cwd|host-env|explicit-env|executable|argv):(\d+):(.*)$/
+        or exit 2;
+      length($payload) == $declared or exit 2;
+      next unless $kind eq "explicit-env" || $kind eq "argv";
+      $sha->add(length($payload) . ":" . $payload . "\n");
+    }
+    $seen_schema or exit 2;
+    print $sha->hexdigest, "\n";
+  ' "$1"
+}
+
+transcript_executable() {
+  awk '
+    /^executable:[0-9]+:/ {
+      declared=$0; sub(/^executable:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^executable:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      count++; value=payload
+    }
+    END { if (count != 1) exit 1; print value }
+  ' "$1"
+}
+
+transcript_explicit_env_names() {
+  awk '
+    /^explicit-env:[0-9]+:/ {
+      declared=$0; sub(/^explicit-env:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^explicit-env:[0-9]+:/, "", payload)
+      if (length(payload) != declared || payload !~ /^[A-Z_][A-Z0-9_]*=/) exit 2
+      name=payload; sub(/=.*/, "", name)
+      if (seen[name]++) exit 2
+      names = names (names == "" ? "" : " ") name
+    }
+    END { if (names == "") exit 1; print names }
+  ' "$1"
+}
+
+policy_value() {
+  recovery_policy_key=$1
+  awk -v key="$recovery_policy_key" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$2"
+}
+
+source_root_arg=
+output_arg=
+planner_arg=
+expected_parent=
+expected_source=
+minimum_arg=
+seen_source_root=0
+seen_output_dir=0
+seen_planner_receipt=0
+seen_expected_parent=0
+seen_expected_source=0
+seen_minimum_free=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source-root=*)
+      [ "$seen_source_root" -eq 0 ] || finish refused duplicate-source-root 2
+      seen_source_root=1; source_root_arg=${1#*=} ;;
+    --output-dir=*)
+      [ "$seen_output_dir" -eq 0 ] || finish refused duplicate-output-dir 2
+      seen_output_dir=1; output_arg=${1#*=} ;;
+    --planner-receipt=*)
+      [ "$seen_planner_receipt" -eq 0 ] || finish refused duplicate-planner-receipt 2
+      seen_planner_receipt=1; planner_arg=${1#*=} ;;
+    --expected-parent-sha256=*)
+      [ "$seen_expected_parent" -eq 0 ] || finish refused duplicate-expected-parent-sha256 2
+      seen_expected_parent=1; expected_parent=${1#*=} ;;
+    --expected-source-snapshot-sha256=*)
+      [ "$seen_expected_source" -eq 0 ] || finish refused duplicate-expected-source-snapshot-sha256 2
+      seen_expected_source=1; expected_source=${1#*=} ;;
+    --minimum-free-bytes=*)
+      [ "$seen_minimum_free" -eq 0 ] || finish refused duplicate-minimum-free-bytes 2
+      seen_minimum_free=1; minimum_arg=${1#*=} ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage; finish refused unknown-argument 2 ;;
+  esac
+  shift
+done
+
+[ -n "$source_root_arg" ] || finish refused source-root-required 2
+source_root=$source_root_arg
+[ -n "$output_arg" ] || finish refused output-dir-required 2
+output_dir=$output_arg
+[ -n "$planner_arg" ] || finish refused planner-receipt-required 2
+[ -n "$expected_parent" ] || finish refused expected-parent-sha256-required 2
+is_sha256 "$expected_parent" || finish refused expected-parent-sha256-invalid 2
+parent_sha256=$expected_parent
+[ -n "$expected_source" ] || finish refused expected-source-snapshot-sha256-required 2
+is_sha256 "$expected_source" || finish refused expected-source-snapshot-sha256-invalid 2
+source_snapshot_sha256=$expected_source
+[ -n "$minimum_arg" ] || finish refused minimum-free-bytes-required 2
+case "$minimum_arg" in ''|*[!0-9]*) finish refused minimum-free-bytes-invalid 2 ;; esac
+[ "$minimum_arg" -gt 0 ] 2>/dev/null || finish refused minimum-free-bytes-invalid 2
+minimum_free_bytes=$minimum_arg
+
+source_root=$(canonical_dir "$source_root_arg" 2>/dev/null) || {
+  source_root=$source_root_arg
+  finish refused source-root-not-canonical 1
+}
+output_dir=$(canonical_dir "$output_arg" 2>/dev/null) || {
+  output_dir=$output_arg
+  finish refused output-dir-not-canonical 1
+}
+case "$output_dir" in "$source_root"/build/*) ;; *) finish refused output-dir-outside-source-build 1 ;; esac
+recovery_git_root=$(git -C "$source_root" rev-parse --show-toplevel 2>/dev/null || true)
+[ "$recovery_git_root" = "$source_root" ] || finish refused source-root-not-git-worktree 1
+
+# Live ownership is resolved before any Stage 2 artifact or Stage 3 candidate is
+# inspected. A verified writer produces PENDING. A process that resembles a
+# writer but has the wrong CWD fails closed instead of being trusted by PID.
+relative_output=${output_dir#"$source_root"/}
+process_rows=$(ps -axo pid=,command= 2>/dev/null || true)
+while IFS= read -r process_row; do
+  [ -n "$process_row" ] || continue
+  process_pid=${process_row%% *}
+  process_command=${process_row#* }
+  case "$process_pid" in ''|*[!0-9]*|"$$") continue ;; esac
+  case "$process_command" in
+    *bootstrap-from-scratch.sh*|*resume-stage3-from-admitted.sh*|*native-build*) ;;
+    *) continue ;;
+  esac
+  process_matches=0
+  case "$process_command" in
+    *"$output_dir"*|*"--output=$relative_output"*|*"--output $relative_output"*|*"--resume-stage3-from-admitted=$relative_output"*)
+      process_matches=1 ;;
+  esac
+  if [ "$output_dir" = "$source_root/build/bootstrap" ]; then
+    case "$process_command" in
+      *bootstrap-from-scratch.sh*--stop-after-stage3*) process_matches=1 ;;
+    esac
+  fi
+  [ "$process_matches" -eq 1 ] || continue
+  process_cwd=$(lsof -a -p "$process_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+  process_cwd=$(canonical_dir "$process_cwd" 2>/dev/null || true)
+  [ -n "$process_cwd" ] || finish refused live-owner-cwd-unverifiable 1
+  [ "$process_cwd" = "$source_root" ] || finish refused live-owner-cwd-mismatch 1
+  finish pending live-output-owner 3
+done <<EOF
+$process_rows
+EOF
+
+if [ -e "$output_dir.lock" ] || [ -L "$output_dir.lock" ]; then
+  [ -d "$output_dir.lock" ] && [ ! -L "$output_dir.lock" ] || \
+    finish refused output-lock-invalid 1
+  lock_pid=$(sed -n '1p' "$output_dir.lock/pid" 2>/dev/null || true)
+  case "$lock_pid" in ''|*[!0-9]*) finish refused output-lock-owner-invalid 1 ;; esac
+  if kill -0 "$lock_pid" 2>/dev/null; then
+    finish refused live-lock-owner-unverified 1
+  fi
+  finish refused stale-output-lock 1
+fi
+
+last_check=free-space-query
+free_kib=$(df -Pk "$output_dir" 2>/dev/null | awk 'END { print $4 }') || \
+  finish refused free-space-query-failed 1
+case "$free_kib" in ''|*[!0-9]*) finish refused free-space-unavailable 1 ;; esac
+free_bytes=$((free_kib * 1024))
+[ "$free_bytes" -ge "$minimum_free_bytes" ] || finish refused insufficient-free-bytes 1
+
+guard_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || \
+  finish refused guard-root-unavailable 1
+BOOTSTRAP_STAGE3_FACADE_PATH="$guard_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$source_root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+last_check=stage3-authority-facade
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" 2>/dev/null || finish refused stage3-authority-facade-invalid 1
+last_check=planner-verifier
+. "$guard_root/scripts/check/lib/bootstrap-planner-admission-bound.shs" 2>/dev/null || \
+  finish refused planner-verifier-invalid 1
+
+last_check=host-platform
+platform=$(bootstrap_stage3_host_platform 2>/dev/null) || finish refused unsupported-host 1
+stage2_dir="$output_dir/stage2/$platform"
+stage3_dir="$output_dir/stage3/$platform"
+produced="$stage2_dir/simple"
+admitted="$stage3_dir/stage2-admitted/simple"
+admission="$stage3_dir/stage2-admitted/admission.env"
+parent_sanity="$stage2_dir/stage2-sanity.receipt"
+parent_provenance="$stage2_dir/stage2-provenance.receipt"
+sanity="$stage3_dir/stage2-sanity.env"
+receiver="$stage3_dir/stage2-receiver.env"
+receiver_log="$stage3_dir/stage2-receiver.log"
+source_snapshot="$stage3_dir/source-inputs-before.txt"
+git_snapshot="$stage3_dir/git-state-before.env"
+runtime_snapshot="$stage3_dir/runtime-admitted.txt"
+tool_snapshot="$stage3_dir/tool-authority-before.txt"
+runtime="$stage3_dir/stage2-runtime-authority"
+transcript="$stage3_dir/stage2-command.transcript"
+stage2_cache="$stage3_dir/stage2-native-cache"
+stage3_cache="$stage3_dir/stage3-native-cache"
+
+for required_file in "$produced" "$admitted" "$admission" "$parent_sanity" \
+  "$parent_provenance" "$sanity" "$receiver" "$receiver_log" \
+  "$source_snapshot" "$git_snapshot" "$runtime_snapshot" "$tool_snapshot" \
+  "$transcript"; do
+  canonical_file "$required_file" >/dev/null 2>&1 || \
+    finish refused required-stage2-authority-file-missing 1
+done
+for required_dir in "$runtime" "$stage2_cache" "$stage3_cache"; do
+  canonical_dir "$required_dir" >/dev/null 2>&1 || \
+    finish refused required-stage2-authority-directory-missing 1
+done
+
+actual_parent_sha=$(bootstrap_stage3_hash_file "$produced" 2>/dev/null || true)
+[ "$actual_parent_sha" = "$expected_parent" ] || finish refused produced-parent-sha256-mismatch 1
+[ "$(bootstrap_stage3_hash_file "$admitted")" = "$expected_parent" ] || \
+  finish refused admitted-parent-sha256-mismatch 1
+
+phase_snapshot_count=0
+phase_snapshot=
+for phase_candidate in "$source_root"/build/phase_snapshots/phase*_phase2_*/simple; do
+  [ -f "$phase_candidate" ] && [ ! -L "$phase_candidate" ] || continue
+  [ "$(bootstrap_stage3_hash_file "$phase_candidate" 2>/dev/null || true)" = \
+    "$expected_parent" ] || continue
+  phase_snapshot=$phase_candidate
+  phase_snapshot_count=$((phase_snapshot_count + 1))
+done
+[ "$phase_snapshot_count" -eq 1 ] || finish refused immutable-phase-snapshot-not-unique 1
+canonical_file "$phase_snapshot" >/dev/null 2>&1 || finish refused immutable-phase-snapshot-not-canonical 1
+
+exact_equal_receipt_keys "$parent_sanity" \
+  'schema stage2-sanity: candidate_sha256 admission_receipt_path admission_receipt_sha256' || \
+  finish refused parent-sanity-key-set-invalid 1
+[ "$(manifest_value schema "$parent_sanity" 2>/dev/null || true)" = \
+  simple-bootstrap-stage2-parent-sanity-v1 ] || finish refused parent-sanity-schema-invalid 1
+[ "$(sed -n '2p' "$parent_sanity")" = 'stage2-sanity: pass' ] || \
+  finish refused parent-sanity-status-invalid 1
+exact_equal_receipt_keys "$parent_provenance" \
+  'schema stage2-provenance: authority candidate_sha256 admission_receipt_path source_snapshot_sha256 runtime_snapshot_sha256 tool_authority_sha256 admission_receipt_sha256' || \
+  finish refused parent-provenance-key-set-invalid 1
+[ "$(manifest_value schema "$parent_provenance" 2>/dev/null || true)" = \
+  simple-bootstrap-stage2-parent-provenance-v1 ] || finish refused parent-provenance-schema-invalid 1
+[ "$(sed -n '2p' "$parent_provenance")" = 'stage2-provenance: pure-simple' ] || \
+  finish refused parent-provenance-status-invalid 1
+case "$(manifest_value authority "$parent_provenance" 2>/dev/null || true)" in
+  explicit-full-bootstrap-stage2-trust-root|\
+  admitted-pure-simple-runtime-stage2-trust-root) ;;
+  *) finish refused parent-provenance-authority-invalid 1 ;;
+esac
+
+admission_keys='schema status candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 simple_abi_policy simple_abi_version simple_abi_deferred sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3'
+exact_equal_receipt_keys "$admission" "$admission_keys" || finish refused stage2-admission-key-set-invalid 1
+stage2_admission_sha256=$(bootstrap_stage3_hash_file "$admission" 2>/dev/null || true)
+is_sha256 "$stage2_admission_sha256" || finish refused stage2-admission-unhashable 1
+
+for parent_receipt in "$parent_sanity" "$parent_provenance"; do
+  [ "$(manifest_value admission_receipt_path "$parent_receipt" 2>/dev/null || true)" = "$admission" ] || \
+    finish refused parent-admission-path-mismatch 1
+  [ "$(manifest_value admission_receipt_sha256 "$parent_receipt" 2>/dev/null || true)" = \
+    "$stage2_admission_sha256" ] || finish refused parent-admission-digest-stale 1
+  [ "$(manifest_value candidate_sha256 "$parent_receipt" 2>/dev/null || true)" = \
+    "$expected_parent" ] || finish refused parent-receipt-candidate-mismatch 1
+done
+
+[ "$(manifest_value source_snapshot_path "$admission" 2>/dev/null || true)" = "$source_snapshot" ] || \
+  finish refused admission-source-path-mismatch 1
+[ "$(manifest_value runtime_snapshot_path "$admission" 2>/dev/null || true)" = "$runtime_snapshot" ] || \
+  finish refused admission-runtime-path-mismatch 1
+[ "$(manifest_value tool_authority_path "$admission" 2>/dev/null || true)" = "$tool_snapshot" ] || \
+  finish refused admission-tool-path-mismatch 1
+[ "$(manifest_value candidate_path "$admission" 2>/dev/null || true)" = "$admitted" ] || \
+  finish refused admission-candidate-path-mismatch 1
+
+actual_source_sha=$(bootstrap_stage3_hash_file "$source_snapshot" 2>/dev/null || true)
+[ "$actual_source_sha" = "$expected_source" ] || finish refused source-snapshot-sha256-mismatch 1
+source_snapshot_sha256=$actual_source_sha
+runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$runtime_snapshot" 2>/dev/null || true)
+tool_authority_sha256=$(bootstrap_stage3_hash_file "$tool_snapshot" 2>/dev/null || true)
+is_sha256 "$runtime_snapshot_sha256" || finish refused runtime-snapshot-unhashable 1
+is_sha256 "$tool_authority_sha256" || finish refused tool-authority-unhashable 1
+for snapshot_binding in \
+  "source_snapshot_sha256:$source_snapshot_sha256" \
+  "runtime_snapshot_sha256:$runtime_snapshot_sha256" \
+  "tool_authority_sha256:$tool_authority_sha256"; do
+  snapshot_key=${snapshot_binding%%:*}
+  snapshot_expected=${snapshot_binding#*:}
+  [ "$(manifest_value "$snapshot_key" "$admission" 2>/dev/null || true)" = "$snapshot_expected" ] || \
+    finish refused "admission-${snapshot_key}-mismatch" 1
+  [ "$(manifest_value "$snapshot_key" "$parent_provenance" 2>/dev/null || true)" = "$snapshot_expected" ] || \
+    finish refused "parent-${snapshot_key}-mismatch" 1
+done
+
+policy_manifest="$source_root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+canonical_file "$policy_manifest" >/dev/null 2>&1 || finish refused kernel-policy-authority-missing 1
+k1_policy=$(policy_value k1_policy "$policy_manifest" 2>/dev/null || true)
+abi_policy=$(policy_value simple_abi_policy "$policy_manifest" 2>/dev/null || true)
+manifest_policy=$(policy_value plugin_manifest_policy "$policy_manifest" 2>/dev/null || true)
+coverage_policy=$(policy_value coverage_cutover_policy "$policy_manifest" 2>/dev/null || true)
+[ "$k1_policy" = llvm-cranelift ] || finish refused k1-policy-drift 1
+[ "$abi_policy" = v1 ] || finish refused abi-policy-drift 1
+[ "$manifest_policy" = simple-sdn ] || finish refused manifest-policy-drift 1
+[ "$coverage_policy" = atomic-apk-only ] || finish refused coverage-policy-drift 1
+[ "$(manifest_value simple_abi_policy "$admission" 2>/dev/null || true)" = "$abi_policy" ] || \
+  finish refused admission-abi-policy-mismatch 1
+
+backend=$(bootstrap_stage3_transcript_argv_value_after "$transcript" --backend 2>/dev/null || true)
+case "$backend" in llvm|llvm-lib) [ "$k1_policy" = llvm-cranelift ] || finish refused backend-policy-mismatch 1 ;; cranelift) ;; *) finish refused backend-invalid 1 ;; esac
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --target 2>/dev/null || true)" = "$platform" ] || \
+  finish refused stage2-target-binding-mismatch 1
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --cache-dir 2>/dev/null || true)" = "$stage2_cache" ] || \
+  finish refused stage2-cache-binding-mismatch 1
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --runtime-path 2>/dev/null || true)" = "$runtime" ] || \
+  finish refused stage2-runtime-binding-mismatch 1
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --runtime-bundle 2>/dev/null || true)" = core-c-bootstrap ] || \
+  finish refused stage2-runtime-bundle-binding-mismatch 1
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --entry 2>/dev/null || true)" = src/app/cli/bootstrap_main.spl ] || \
+  finish refused stage2-entry-binding-mismatch 1
+stage2_mode=$(bootstrap_stage3_transcript_argv_value_after "$transcript" --mode 2>/dev/null || true)
+case "$stage2_mode" in dynload|static) ;; *) finish refused stage2-mode-binding-mismatch 1 ;; esac
+stage2_threads=$(bootstrap_stage3_transcript_argv_value_after "$transcript" --threads 2>/dev/null || true)
+case "$stage2_threads" in ''|*[!0-9]*|0) finish refused stage2-threads-binding-mismatch 1 ;; esac
+[ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" -o 2>/dev/null || true)" = "$produced" ] || \
+  finish refused stage2-candidate-binding-mismatch 1
+[ "$(transcript_executable "$transcript" 2>/dev/null || true)" = "$runtime/simple" ] || \
+  finish refused stage2-executable-binding-mismatch 1
+for env_binding in \
+  "SIMPLE_ABI_POLICY:$abi_policy" \
+  "SIMPLE_KERNEL_K1_POLICY:$k1_policy" \
+  "SIMPLE_PLUGIN_MANIFEST_POLICY:$manifest_policy" \
+  "SIMPLE_COVERAGE_CUTOVER_STATE:$coverage_policy" \
+  "SIMPLE_NO_STUB_FALLBACK:1" \
+  "SIMPLE_BINARY:$runtime/simple" \
+  "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT:$stage3_cache"; do
+  env_name=${env_binding%%:*}
+  env_expected=${env_binding#*:}
+  [ "$(bootstrap_stage3_transcript_explicit_env_value "$transcript" "$env_name" 2>/dev/null || true)" = \
+    "$env_expected" ] || finish refused "stage2-transcript-${env_name}-mismatch" 1
+done
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform") || \
+  finish refused stage2-canonical-environment-unavailable 1
+[ "$(transcript_explicit_env_names "$transcript" 2>/dev/null || true)" = "$expected_env_names" ] || \
+  finish refused stage2-transcript-environment-set-mismatch 1
+stage2_args_sha=$(transcript_args_sha256 "$transcript" 2>/dev/null || true)
+is_sha256 "$stage2_args_sha" || finish refused stage2-transcript-invalid 1
+[ "$(manifest_value build_args_sha256 "$admission" 2>/dev/null || true)" = "$stage2_args_sha" ] || \
+  finish refused stage2-build-args-binding-mismatch 1
+
+SIMPLE_ABI_POLICY=$abi_policy
+export SIMPLE_ABI_POLICY
+last_check=stage2-admission-verification
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$admission" "$admitted" "$source_snapshot" "$runtime_snapshot" \
+  "$tool_snapshot" "$stage2_args_sha" "$sanity" "$receiver" "$source_root" \
+  >/dev/null 2>&1 || finish refused stage2-admission-invalid 1
+
+planner_receipt=$(canonical_file "$planner_arg" 2>/dev/null || true)
+[ -n "$planner_receipt" ] || finish refused planner-receipt-missing-or-noncanonical 1
+case "$planner_receipt" in "$source_root"/build/*) ;; *) finish refused planner-receipt-unconfined 1 ;; esac
+planner_receipt_sha256=$(bootstrap_stage3_hash_file "$planner_receipt" 2>/dev/null || true)
+last_check=planner-receipt-verification
+bootstrap_planner_v2_verify "$planner_receipt" "$source_root" >/dev/null 2>&1 || \
+  finish refused planner-receipt-invalid 1
+[ "$(bootstrap_planner_v2_field target "$planner_receipt" 2>/dev/null || true)" = //bootstrap:stage3 ] || \
+  finish refused planner-target-mismatch 1
+[ "$(bootstrap_planner_v2_field platform "$planner_receipt" 2>/dev/null || true)" = "$platform" ] || \
+  finish refused planner-platform-mismatch 1
+bootstrap_planner_v2_verify_parent_compiler_binding \
+  "$planner_receipt" "$produced" "$admitted" >/dev/null 2>&1 || \
+  finish refused planner-parent-binding-mismatch 1
+[ "$(bootstrap_planner_v2_field parent_stage2_sanity_path "$planner_receipt" 2>/dev/null || true)" = "$parent_sanity" ] || \
+  finish refused planner-sanity-binding-mismatch 1
+[ "$(bootstrap_planner_v2_field parent_stage2_provenance_path "$planner_receipt" 2>/dev/null || true)" = "$parent_provenance" ] || \
+  finish refused planner-provenance-binding-mismatch 1
+[ "$(bootstrap_planner_v2_field runtime_dir "$planner_receipt" 2>/dev/null || true)" = "$runtime" ] || \
+  finish refused planner-runtime-binding-mismatch 1
+
+tmp_root=$(mktemp -d "${SIMPLE_BOOTSTRAP_TMP_ROOT}/stage3-recovery-preflight.XXXXXX" 2>/dev/null || true)
+[ -n "$tmp_root" ] || finish refused temporary-evidence-directory-unavailable 1
+fresh_source="$tmp_root/source.snapshot"
+fresh_git="$tmp_root/git-state.env"
+fresh_runtime="$tmp_root/runtime.snapshot"
+fresh_tool="$tmp_root/tool-authority.snapshot"
+last_check=fresh-source-snapshot
+bootstrap_stage3_source_snapshot "$fresh_source" "$source_root" >/dev/null 2>&1 || \
+  finish refused fresh-source-snapshot-failed 1
+cmp -s "$source_snapshot" "$fresh_source" || finish refused source-snapshot-stale 1
+last_check=fresh-git-snapshot
+bootstrap_stage3_git_state "$source_root" "$fresh_git" >/dev/null 2>&1 || \
+  finish refused fresh-git-snapshot-failed 1
+cmp -s "$git_snapshot" "$fresh_git" || finish refused git-snapshot-stale 1
+last_check=fresh-runtime-snapshot
+bootstrap_stage3_directory_snapshot "$fresh_runtime" "$runtime" >/dev/null 2>&1 || \
+  finish refused fresh-runtime-snapshot-failed 1
+cmp -s "$runtime_snapshot" "$fresh_runtime" || finish refused runtime-snapshot-stale 1
+stage2_path=$(bootstrap_stage3_transcript_host_value "$transcript" PATH 2>/dev/null || true)
+[ -n "$stage2_path" ] || finish refused stage2-tool-path-missing 1
+last_check=fresh-tool-authority-snapshot
+bootstrap_stage3_tool_authority_snapshot "$fresh_tool" "$stage2_path" "$source_root" \
+  >/dev/null 2>&1 || finish refused fresh-tool-authority-snapshot-failed 1
+cmp -s "$tool_snapshot" "$fresh_tool" || finish refused tool-authority-stale 1
+planner_git=$(bootstrap_planner_v2_field git_state_path "$planner_receipt" 2>/dev/null || true)
+cmp -s "$planner_git" "$fresh_git" || finish refused planner-git-state-stale 1
+planner_runtime_snapshot=$(bootstrap_planner_v2_field runtime_snapshot_path "$planner_receipt" 2>/dev/null || true)
+cmp -s "$planner_runtime_snapshot" "$fresh_runtime" || finish refused planner-runtime-snapshot-stale 1
+
+last_check=authority-complete
+finish pass authority-complete 0

@@ -1,0 +1,49 @@
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, pinned_archive_close_v1
+}
+use compiler.driver.smf.package_image_v1.{PackageImageV1}
+use compiler.loader.provider_admission.state.{
+    ProviderAdmissionV1, ProviderAdmissionReceiptV1
+}
+use compiler.loader.provider_admission.admission.{provider_admit_metadata_v1}
+use compiler.loader.shared_contract.package_image_loader_adapter.{
+    LoaderSmfAuthorityV1, LoaderSmfContractV1,
+    package_image_to_loader_contract_v1
+}
+
+enum PackageImageLoaderEntryErrorV1:
+    provider_metadata_rejected
+    loader_adapter_rejected
+
+struct PackageImageLoaderRequestV1:
+    image: PackageImageV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+    authority: LoaderSmfAuthorityV1
+    provider_admission: ProviderAdmissionV1?
+
+struct PackageImageLoaderAdmissionV1:
+    contract: LoaderSmfContractV1
+    provider_receipt: ProviderAdmissionReceiptV1?
+
+fn package_image_loader_admit_v1(
+    request: PackageImageLoaderRequestV1
+) -> Result<PackageImageLoaderAdmissionV1, PackageImageLoaderEntryErrorV1>:
+    var provider_receipt: ProviderAdmissionReceiptV1? = nil
+    if request.provider_admission != nil:
+        val admitted = provider_admit_metadata_v1(request.provider_admission!)
+        if admitted.is_err():
+            _ = pinned_archive_close_v1(request.capability)
+            return Err(PackageImageLoaderEntryErrorV1.provider_metadata_rejected)
+        provider_receipt = Some(admitted.unwrap())
+
+    val adapted = package_image_to_loader_contract_v1(
+        request.image, request.receipt, request.capability, request.authority)
+    if adapted.is_err():
+        return Err(PackageImageLoaderEntryErrorV1.loader_adapter_rejected)
+    Ok(PackageImageLoaderAdmissionV1(adapted.unwrap(), provider_receipt))
+
+export PackageImageLoaderEntryErrorV1
+export PackageImageLoaderRequestV1, PackageImageLoaderAdmissionV1
+export package_image_loader_admit_v1

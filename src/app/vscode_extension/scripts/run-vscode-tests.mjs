@@ -1,12 +1,26 @@
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { prepareVscodeTestStorage } from './vscode-test-storage.mjs';
+import { downloadAndUnzipVSCode } from '@vscode/test-electron';
+import { prepareVscodeTestBundle } from './vscode-test-bundle.mjs';
 
 const command = process.platform === 'win32' ? 'vscode-test.cmd' : 'vscode-test';
 const args = process.argv.slice(2);
+const testStorage = prepareVscodeTestStorage(process.env, process.cwd());
+const bundle = await prepareVscodeTestBundle({
+    userStorageRoot: testStorage.environment.SIMPLE_USER_STORAGE_ROOT,
+    version: process.env.SIMPLE_VSCODE_TEST_VERSION || 'stable',
+    platform: process.env.SIMPLE_VSCODE_TEST_PLATFORM,
+    download: downloadAndUnzipVSCode,
+});
 const child = spawn(command, args, {
     detached: process.platform !== 'win32',
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+        ...testStorage.environment,
+        SIMPLE_VSCODE_TEST_EXECUTABLE: bundle.executablePath,
+    },
 });
 const testProcessMarker = `${process.cwd()}/.vscode-test`;
 
@@ -53,6 +67,7 @@ function finish(code) {
         return;
     }
     settled = true;
+    testStorage.cleanup();
     if (lingerTimer) {
         clearTimeout(lingerTimer);
     }

@@ -1,0 +1,241 @@
+use compiler.hir.demand.deferred_body.{
+    DeferredHirBodyV1, HirDemandDependencyKindV1, HirDemandReadV1,
+    deferred_hir_body_validate_v1, hir_demand_identity_valid_v1,
+    hir_demand_sorted_unique_text_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+enum HirDemandErrorV1:
+    invalid_snapshot
+    duplicate_body
+    invalid_body
+    missing_root
+    missing_dependency
+    unsupported_operation
+
+struct HirDemandRequestV1:
+    body_identity: text
+    operation: text
+
+struct HirDemandSccV1:
+    identity: text
+    members: [text]
+    dependencies: [text]
+
+struct HirDemandSetV1:
+    snapshot_revision: text
+    body_identities: [text]
+    operations: [text]
+    generic_shapes: [text]
+    providers: [text]
+    deferred_bodies: [text]
+    recorded_reads: [HirDemandReadV1]
+    sccs: [HirDemandSccV1]
+    digest: text
+
+fn hir_demand_find_body_v1(
+    bodies: [DeferredHirBodyV1], identity: text
+) -> DeferredHirBodyV1?:
+    for body in bodies:
+        if body.identity == identity:
+            return Some(body)
+    nil
+
+fn hir_demand_reaches_v1(
+    bodies: [DeferredHirBodyV1], selected: [text], from_identity: text,
+    to_identity: text
+) -> bool:
+    var pending: [text] = [from_identity]
+    var visited: [text] = []
+    while pending.len() > 0:
+        val current = pending[pending.len() - 1]
+        pending.pop()
+        if current == to_identity:
+            return true
+        if visited.contains(current):
+            continue
+        visited.push(current)
+        val body = hir_demand_find_body_v1(bodies, current)
+        if body == nil:
+            continue
+        for dependency in body!.dependencies:
+            if (dependency.kind == HirDemandDependencyKindV1.body and
+                    selected.contains(dependency.identity) and
+                    not visited.contains(dependency.identity)):
+                pending.push(dependency.identity)
+    false
+
+fn hir_demand_scc_identity_v1(
+    snapshot_revision: text, members: [text]
+) -> text:
+    var encoded = "simple/hir-demand-scc/v1|{snapshot_revision}"
+    for member in members:
+        encoded = encoded + "|{member}"
+    sha256_text(encoded)
+
+fn hir_demand_sccs_v1(
+    bodies: [DeferredHirBodyV1], selected: [text], snapshot_revision: text
+) -> [HirDemandSccV1]:
+    var groups: [HirDemandSccV1] = []
+    for identity in selected:
+        var already_grouped = false
+        for group in groups:
+            if group.members.contains(identity):
+                already_grouped = true
+        if already_grouped:
+            continue
+        var members: [text] = []
+        for candidate in selected:
+            if (hir_demand_reaches_v1(bodies, selected, identity, candidate) and
+                    hir_demand_reaches_v1(bodies, selected, candidate, identity)):
+                members.push(candidate)
+        val canonical_members = hir_demand_sorted_unique_text_v1(members)!
+        groups.push(HirDemandSccV1(
+            hir_demand_scc_identity_v1(snapshot_revision, canonical_members),
+            canonical_members, []))
+    var completed: [HirDemandSccV1] = []
+    for group in groups:
+        var dependencies: [text] = []
+        for member in group.members:
+            val body = hir_demand_find_body_v1(bodies, member)!
+            for dependency in body.dependencies:
+                if (dependency.kind != HirDemandDependencyKindV1.body or
+                        group.members.contains(dependency.identity)):
+                    continue
+                for target_group in groups:
+                    if target_group.members.contains(dependency.identity):
+                        dependencies.push(target_group.identity)
+        completed.push(HirDemandSccV1(
+            group.identity, group.members,
+            hir_demand_sorted_unique_text_v1(dependencies)!))
+    var result: [HirDemandSccV1] = []
+    var remaining = completed
+    while remaining.len() > 0:
+        var selected_index = 0
+        var index = 1
+        while index < remaining.len():
+            if remaining[index].members[0] < remaining[selected_index].members[0]:
+                selected_index = index
+            index = index + 1
+        result.push(remaining[selected_index])
+        remaining.remove(selected_index)
+    result
+
+fn hir_demand_sorted_reads_v1(reads: [HirDemandReadV1]) -> [HirDemandReadV1]:
+    var pending = reads
+    var result: [HirDemandReadV1] = []
+    while pending.len() > 0:
+        var selected = 0
+        var index = 1
+        while index < pending.len():
+            val candidate = "{pending[index].owner_identity}|" +
+                "{pending[index].dependency_identity}|{pending[index].facet}|" +
+                pending[index].digest
+            val current = "{pending[selected].owner_identity}|" +
+                "{pending[selected].dependency_identity}|{pending[selected].facet}|" +
+                pending[selected].digest
+            if candidate < current:
+                selected = index
+            index = index + 1
+        result.push(pending[selected])
+        pending.remove(selected)
+    result
+
+fn hir_demand_digest_v1(demand: HirDemandSetV1) -> text:
+    var encoded = "simple/hir-demand-set/v1|{demand.snapshot_revision}"
+    for identity in demand.body_identities:
+        encoded = encoded + "|body:{identity}"
+    for operation in demand.operations:
+        encoded = encoded + "|operation:{operation}"
+    for shape in demand.generic_shapes:
+        encoded = encoded + "|shape:{shape}"
+    for provider in demand.providers:
+        encoded = encoded + "|provider:{provider}"
+    for identity in demand.deferred_bodies:
+        encoded = encoded + "|deferred:{identity}"
+    for read in demand.recorded_reads:
+        encoded = encoded + "|read:{read.owner_identity}:{read.dependency_identity}:" +
+            "{read.facet}:{read.digest}"
+    for group in demand.sccs:
+        encoded = encoded + "|scc:{group.identity}"
+    sha256_text(encoded)
+
+fn hir_demand_close_v1(
+    snapshot_revision: text, bodies: [DeferredHirBodyV1],
+    requests: [HirDemandRequestV1]
+) -> Result<HirDemandSetV1, HirDemandErrorV1>:
+    if not hir_demand_identity_valid_v1(snapshot_revision):
+        return Err(HirDemandErrorV1.invalid_snapshot)
+    var known: [text] = []
+    for body in bodies:
+        if known.contains(body.identity):
+            return Err(HirDemandErrorV1.duplicate_body)
+        known.push(body.identity)
+        if deferred_hir_body_validate_v1(body, snapshot_revision) != "ok":
+            return Err(HirDemandErrorV1.invalid_body)
+    var pending_bodies: [text] = []
+    var operations: [text] = []
+    for request in requests:
+        val body = hir_demand_find_body_v1(bodies, request.body_identity)
+        if body == nil:
+            return Err(HirDemandErrorV1.missing_root)
+        if (not hir_demand_identity_valid_v1(request.operation) or
+                not body!.operations.contains(request.operation)):
+            return Err(HirDemandErrorV1.unsupported_operation)
+        pending_bodies.push(request.body_identity)
+        operations.push("{request.body_identity}:{request.operation}")
+    var selected_bodies: [text] = []
+    var generic_shapes: [text] = []
+    var providers: [text] = []
+    var reads: [HirDemandReadV1] = []
+    var deferred: [text] = []
+    var cursor = 0
+    while cursor < pending_bodies.len():
+        val identity = pending_bodies[cursor]
+        cursor = cursor + 1
+        if selected_bodies.contains(identity):
+            continue
+        val body = hir_demand_find_body_v1(bodies, identity)
+        if body == nil:
+            return Err(HirDemandErrorV1.missing_dependency)
+        selected_bodies.push(identity)
+        if not body!.materialized:
+            deferred.push(identity)
+        for read in body!.recorded_reads:
+            reads.push(read)
+        for dependency in body!.dependencies:
+            if dependency.kind == HirDemandDependencyKindV1.body:
+                pending_bodies.push(dependency.identity)
+            elif dependency.kind == HirDemandDependencyKindV1.operation:
+                val target = hir_demand_find_body_v1(bodies, dependency.identity)
+                if target == nil:
+                    return Err(HirDemandErrorV1.missing_dependency)
+                if (dependency.required_operation == "" or
+                        not target!.operations.contains(dependency.required_operation)):
+                    return Err(HirDemandErrorV1.unsupported_operation)
+                pending_bodies.push(dependency.identity)
+                operations.push("{dependency.identity}:{dependency.required_operation}")
+            elif dependency.kind == HirDemandDependencyKindV1.generic_shape:
+                generic_shapes.push(dependency.identity)
+            else:
+                providers.push(dependency.identity)
+    val canonical_bodies = hir_demand_sorted_unique_text_v1(selected_bodies)!
+    val canonical_operations = hir_demand_sorted_unique_text_v1(operations)!
+    val canonical_shapes = hir_demand_sorted_unique_text_v1(generic_shapes)!
+    val canonical_providers = hir_demand_sorted_unique_text_v1(providers)!
+    val canonical_deferred = hir_demand_sorted_unique_text_v1(deferred)!
+    val canonical_reads = hir_demand_sorted_reads_v1(reads)
+    val groups = hir_demand_sccs_v1(bodies, canonical_bodies, snapshot_revision)
+    val provisional = HirDemandSetV1(
+        snapshot_revision, canonical_bodies, canonical_operations,
+        canonical_shapes, canonical_providers, canonical_deferred, canonical_reads,
+        groups, "")
+    Ok(HirDemandSetV1(
+        provisional.snapshot_revision, provisional.body_identities,
+        provisional.operations, provisional.generic_shapes,
+        provisional.providers, provisional.deferred_bodies,
+        provisional.recorded_reads, provisional.sccs,
+        hir_demand_digest_v1(provisional)))
+
+export HirDemandErrorV1, HirDemandRequestV1, HirDemandSccV1, HirDemandSetV1
+export hir_demand_close_v1, hir_demand_digest_v1

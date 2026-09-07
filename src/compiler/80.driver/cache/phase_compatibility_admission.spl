@@ -1,0 +1,165 @@
+# Driver-owned M2 authority admission and M3 frontend materialization.
+
+use std.io_runtime.{env_get_opt, file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{reverse_reference_key_decode_v1}
+use compiler.common.cache.phase_compatibility_manifest.{
+    PHASE_COMPATIBILITY_FRONTEND_V1,
+    PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+    PhaseCompatibilityManifestDecodeV1,
+    PhaseCompatibilityExpectationV1,
+    phase_compatibility_manifest_decode_v1,
+    phase_compatibility_admit_v1
+}
+use compiler.common.cache.phase_compatibility_path_io.{
+    phase_compatibility_canonical_directory_io_v1,
+    phase_compatibility_existing_artifact_io_v1,
+    phase_compatibility_destination_io_v1,
+    phase_compatibility_read_manifest_io_v1,
+    phase_compatibility_read_artifact_io_v1
+}
+use compiler.driver.cache.reverse_reference_receipt.{
+    reverse_reference_bind_admitted_published_keys_v1
+}
+use compiler.frontend.frontend_parse_cache.{
+    FRONTEND_CACHE_ENTRY_VERSION,
+    frontend_parse_cache_dir,
+    frontend_parse_cache_store_phase3_immutable_v1
+}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+fn driver_phase_compatibility_reject_v1(
+    reason: text
+) -> PhaseCompatibilityManifestDecodeV1:
+    PhaseCompatibilityManifestDecodeV1(false, reason, nil)
+
+fn driver_admit_phase2_compatibility_manifest_v1(
+    manifest_path: text,
+    expected_phase3_root: text
+) -> PhaseCompatibilityManifestDecodeV1:
+    val manifest_read = phase_compatibility_read_manifest_io_v1(manifest_path)
+    if not manifest_read.valid:
+        return driver_phase_compatibility_reject_v1(manifest_read.reason)
+    val decoded = phase_compatibility_manifest_decode_v1(manifest_read.content)
+    if not decoded.valid or decoded.manifest == nil:
+        return decoded
+    val manifest = decoded.manifest.unwrap()
+    val phase2 = phase_compatibility_canonical_directory_io_v1(
+        manifest.phase2_cache_root)
+    if not phase2.valid:
+        return driver_phase_compatibility_reject_v1(
+            "phase2-" + phase2.reason)
+    val phase3 = phase_compatibility_canonical_directory_io_v1(
+        expected_phase3_root)
+    if not phase3.valid or manifest.phase3_cache_root != phase3.canonical_root:
+        return driver_phase_compatibility_reject_v1("wrong-phase3-cache-root")
+    if phase2.canonical_root == phase3.canonical_root:
+        return driver_phase_compatibility_reject_v1("shared-writable-cache")
+    val cache = phase_compatibility_existing_artifact_io_v1(
+        phase2.canonical_root, manifest.m2_cache_path)
+    if not cache.valid:
+        return driver_phase_compatibility_reject_v1(
+            "m2-cache-" + cache.reason)
+    var key_frames: [text] = []
+    var consumers: [text] = []
+    for item in manifest.items:
+        key_frames = key_frames.push(item.key_frame)
+        consumers = consumers.push(item.m2_consumer_identity)
+    val binding = reverse_reference_bind_admitted_published_keys_v1(
+        phase2.canonical_root, cache.canonical_path,
+        manifest.m2_receipt_digest, manifest.m2_owner_generation,
+        manifest.m2_root_generation, key_frames, consumers)
+    if binding != "ok":
+        return driver_phase_compatibility_reject_v1(binding)
+    PhaseCompatibilityManifestDecodeV1(true, "ok", Some(manifest))
+
+fn driver_import_phase2_frontend_v1() -> text:
+    val manifest_path = env_get_opt(
+        "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ") ?? ""
+    if manifest_path == "":
+        return "disabled"
+    val expected_phase3_root = env_get_opt(
+        "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT") ?? ""
+    val admitted = driver_admit_phase2_compatibility_manifest_v1(
+        manifest_path, expected_phase3_root)
+    if not admitted.valid or admitted.manifest == nil:
+        return "manifest-rejected:" + admitted.reason
+    val manifest = admitted.manifest.unwrap()
+    val phase3_frontend_root = frontend_parse_cache_dir()
+    val phase3_destination = phase_compatibility_destination_io_v1(
+        manifest.phase3_cache_root,
+        phase3_frontend_root + "/m3-admission-probe")
+    if not phase3_destination.valid:
+        return "manifest-rejected:phase3-frontend-cache-outside-root"
+    val provider = FRONTEND_CACHE_ENTRY_VERSION + ":" + FLAT_POOL_CODEC_VERSION
+    var reused: i64 = 0
+    var rejected: i64 = 0
+    for item in manifest.items:
+        if item.kind != PHASE_COMPATIBILITY_FRONTEND_V1:
+            continue
+        val decoded = reverse_reference_key_decode_v1(item.key_frame)
+        if not decoded.valid or decoded.key == nil:
+            print "[M3] reject frontend reason=corrupt-key path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val key = decoded.key.unwrap()
+        val artifact_name = item.artifact_path.substring(
+            item.artifact_path.last_index_of("/") + 1, item.artifact_path.len())
+        if not artifact_name.ends_with(".fpc"):
+            print "[M3] reject frontend reason=wrong-artifact-name path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val frontend_key = artifact_name.substring(0, artifact_name.len() - 4)
+        if key.registry_kind != "semantic" or
+                key.owner_generation != manifest.m2_owner_generation or
+                key.root_generation != manifest.m2_root_generation or
+                key.subject_identity != item.m2_consumer_identity or
+                key.projection_kind != "direct-import-export" or
+                frontend_key.len() != 64 or
+                file_hash_sha256_or_empty(key.subject_identity) != frontend_key:
+            print "[M3] reject frontend reason=wrong-key-binding path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val artifact = phase_compatibility_read_artifact_io_v1(
+            manifest.phase2_cache_root, item.artifact_path)
+        if not artifact.valid:
+            print "[M3] reject frontend reason={artifact.reason} path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val expectation = PhaseCompatibilityExpectationV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, decoded.digest,
+            manifest.m2_receipt_digest, manifest.m2_owner_generation,
+            manifest.m2_root_generation,
+            PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            provider, "target-neutral", 1)
+        val decision = phase_compatibility_admit_v1(
+            manifest, expectation, sha256_text(artifact.content))
+        if not decision.reused:
+            print "[M3] reject frontend reason={decision.reason} path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val nl = artifact.content.index_of("\n")
+        if nl < 0 or nl + 1 >= artifact.content.len():
+            print "[M3] reject frontend reason=corrupt-frontend-record path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        val phase3_final = phase3_frontend_root + "/" + frontend_key + ".fpc"
+        val final_admission = phase_compatibility_destination_io_v1(
+            manifest.phase3_cache_root, phase3_final)
+        if not final_admission.valid:
+            print "[M3] reject frontend reason={final_admission.reason} path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        if not frontend_parse_cache_store_phase3_immutable_v1(
+                frontend_key,
+                artifact.content.substring(nl + 1, artifact.content.len())):
+            print "[M3] reject frontend reason=phase3-materialize-failed path={item.artifact_path}"
+            rejected = rejected + 1
+            continue
+        reused = reused + 1
+        print "[M3] reuse frontend reason={decision.reason} path={item.artifact_path}"
+    print "[M3 ledger] schema=simple-phase2-phase3-reuse-ledger-v1 kind=frontend hits={reused} rejections={rejected}"
+    "reused={reused}"
+
+export driver_admit_phase2_compatibility_manifest_v1
+export driver_import_phase2_frontend_v1

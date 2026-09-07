@@ -39,6 +39,8 @@ use std.io_runtime.{
     file_hash_sha256_or_empty, dir_create_all, getpid,
     file_move_cross_device, file_delete
 }
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
@@ -133,6 +135,21 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     val _cleaned = file_delete(tmp)
     false
 
+pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text) -> bool:
+    if key == "" or blob == "" or not frontend_parse_cache_enabled():
+        return false
+    val dir = frontend_parse_cache_dir()
+    val _made = dir_create_all(dir)
+    val final_path = frontend_parse_cache_path(key)
+    val encoded = frontend_parse_cache_header() + "\n" + blob
+    if not file_create_excl(final_path, encoded):
+        return false
+    if file_hash_sha256_or_empty(final_path) != sha256_text(encoded):
+        val _deleted = file_delete(final_path)
+        return false
+    _fe_cache_stores = _fe_cache_stores + 1
+    true
+
 pub fn frontend_parse_cache_note_hit():
     _fe_cache_hits = _fe_cache_hits + 1
 
@@ -152,5 +169,6 @@ export FRONTEND_CACHE_ENTRY_VERSION
 export frontend_parse_cache_scope, frontend_parse_cache_enabled
 export frontend_parse_cache_dir, frontend_parse_cache_key
 export frontend_parse_cache_load, frontend_parse_cache_store
+export frontend_parse_cache_store_phase3_immutable_v1
 export frontend_parse_cache_note_hit, frontend_parse_cache_note_miss
 export frontend_parse_cache_hits, frontend_parse_cache_misses

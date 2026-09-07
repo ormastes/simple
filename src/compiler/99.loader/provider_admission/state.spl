@@ -1,0 +1,138 @@
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{PinnedArchiveCapability}
+use compiler.driver.smf.package_image_v1.{PackageImageV1}
+
+val PROVIDER_ADMISSION_WAIT_BUDGET_V1: i64 = 65536
+
+enum ProviderAdmissionStateV1:
+    unrequested
+    admitting
+    admitted
+    rejected
+
+enum ProviderModeV1:
+    pure_simple
+    foreign
+    shadow_compare
+
+enum ProviderAdmissionErrorV1:
+    invalid_descriptor
+    invalid_package_image
+    invalid_archive_capability
+    package_identity_mismatch
+    abi_mismatch
+    dependency_mismatch
+    invalid_dual_mode_policy
+    admission_conflict
+    wait_exhausted
+    cached_rejection
+
+struct ProviderDescriptorV1:
+    provider_identity: text
+    package_identity: text
+    abi_digest: text
+    dependency_digests: [text]
+    mode: ProviderModeV1
+    shadow_provider_identity: text
+    effectful: bool
+
+struct ProviderAdmissionAuthorityV1:
+    image: PackageImageV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+    required_abi_digest: text
+    required_dependency_digests: [text]
+
+struct ProviderEffectPolicyV1:
+    effect_owner_identity: text
+    shadow_metadata_only: bool
+
+struct ProviderAdmissionReceiptV1:
+    provider_identity: text
+    package_identity: text
+    archive_digest: text
+    receipt_digest: text
+    abi_digest: text
+    dependency_digests: [text]
+    mode: ProviderModeV1
+    effect_policy: ProviderEffectPolicyV1
+    owner: bool
+    waited: bool
+
+struct ProviderAdmissionFailureV1:
+    error: ProviderAdmissionErrorV1
+    provider_identity: text
+    package_identity: text
+    archive_digest: text
+
+struct ProviderExecutionTicketV1:
+    provider_identity: text
+    package_identity: text
+    archive_digest: text
+    effect_owner_identity: text
+
+class ProviderAdmissionV1:
+    descriptor: ProviderDescriptorV1
+    authority: ProviderAdmissionAuthorityV1
+    atomic_state: AtomicI64
+    failure: ProviderAdmissionFailureV1?
+    receipt: ProviderAdmissionReceiptV1?
+
+fn provider_admission_new_v1(
+    descriptor: ProviderDescriptorV1,
+    authority: ProviderAdmissionAuthorityV1
+) -> ProviderAdmissionV1:
+    ProviderAdmissionV1(
+        descriptor, authority, atomic_i64_new(0), nil, nil)
+
+fn provider_admission_state_v1(
+    admission: ProviderAdmissionV1
+) -> ProviderAdmissionStateV1:
+    match admission.atomic_state.load(MemoryOrdering.Acquire):
+        case 0: ProviderAdmissionStateV1.unrequested
+        case 1: ProviderAdmissionStateV1.admitting
+        case 2: ProviderAdmissionStateV1.admitted
+        case _: ProviderAdmissionStateV1.rejected
+
+fn provider_admission_try_claim_v1(admission: ProviderAdmissionV1) -> bool:
+    admission.atomic_state.compare_exchange(
+        0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+fn provider_admission_publish_v1(
+    admission: ProviderAdmissionV1,
+    receipt: ProviderAdmissionReceiptV1
+) -> bool:
+    admission.receipt = Some(receipt)
+    admission.atomic_state.compare_exchange(
+        1, 2, MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+fn provider_admission_reject_v1(
+    admission: ProviderAdmissionV1,
+    error: ProviderAdmissionErrorV1
+) -> bool:
+    admission.failure = Some(ProviderAdmissionFailureV1(
+        error, admission.descriptor.provider_identity,
+        admission.descriptor.package_identity,
+        admission.authority.image.archive_digest))
+    admission.atomic_state.compare_exchange(
+        1, -1, MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+fn provider_execution_ticket_v1(
+    receipt: ProviderAdmissionReceiptV1
+) -> Result[ProviderExecutionTicketV1, ProviderAdmissionErrorV1]:
+    if receipt.effect_policy.effect_owner_identity != receipt.provider_identity:
+        return Err(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
+    Ok(ProviderExecutionTicketV1(
+        receipt.provider_identity, receipt.package_identity,
+        receipt.archive_digest, receipt.effect_policy.effect_owner_identity))
+
+export PROVIDER_ADMISSION_WAIT_BUDGET_V1
+export ProviderAdmissionStateV1, ProviderModeV1, ProviderAdmissionErrorV1
+export ProviderDescriptorV1, ProviderAdmissionAuthorityV1
+export ProviderEffectPolicyV1, ProviderAdmissionReceiptV1
+export ProviderAdmissionFailureV1, ProviderExecutionTicketV1
+export ProviderAdmissionV1
+export provider_admission_new_v1, provider_admission_state_v1
+export provider_admission_try_claim_v1, provider_admission_publish_v1
+export provider_admission_reject_v1, provider_execution_ticket_v1

@@ -1,0 +1,79 @@
+use std.async.cancellation.{CancellationToken}
+
+enum BufferedFileViewErrorV1:
+    cancelled
+    invalid_range
+    short_read
+    identity_changed
+    read_failed
+
+struct FileViewIdentityV1:
+    device: u64
+    inode: u64
+    size: u64
+    snapshot_digest: text
+
+fn file_view_identity_equal_v1(left: FileViewIdentityV1, right: FileViewIdentityV1) -> bool:
+    left.device == right.device and left.inode == right.inode and
+        left.size == right.size and left.snapshot_digest == right.snapshot_digest
+
+fn file_view_range_valid_v1(size: u64, offset: u64, length: u64) -> bool:
+    if offset > size or length > size:
+        return false
+    offset + length >= offset and offset + length <= size
+
+fn file_view_buffered_read_v1(
+    descriptor: i64,
+    identity: FileViewIdentityV1,
+    offset: u64,
+    length: u64,
+    cancellation: CancellationToken
+) -> Result[[u8], BufferedFileViewErrorV1]:
+    if cancellation.is_cancelled():
+        return Err(BufferedFileViewErrorV1.cancelled)
+    if not file_view_range_valid_v1(identity.size, offset, length):
+        return Err(BufferedFileViewErrorV1.invalid_range)
+    val before = file_view_descriptor_identity_v1(descriptor, identity.snapshot_digest)
+    if before == nil or not file_view_identity_equal_v1(identity, before!):
+        return Err(BufferedFileViewErrorV1.identity_changed)
+    var payload: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        payload = rt_file_view_pread_exact_v1(descriptor, offset, length)
+    if cancellation.is_cancelled():
+        return Err(BufferedFileViewErrorV1.cancelled)
+    if payload == nil:
+        return Err(BufferedFileViewErrorV1.read_failed)
+    if payload!.len().to_u64() != length:
+        return Err(BufferedFileViewErrorV1.short_read)
+    val after = file_view_descriptor_identity_v1(descriptor, identity.snapshot_digest)
+    if after == nil or not file_view_identity_equal_v1(identity, after!):
+        return Err(BufferedFileViewErrorV1.identity_changed)
+    Ok(payload!)
+
+fn file_view_descriptor_identity_v1(
+    descriptor: i64, snapshot_digest: text
+) -> FileViewIdentityV1?:
+    var device: i64 = -1
+    var inode: i64 = -1
+    var size: i64 = -1
+    unsafe(capabilities: [ffi]):
+        device = rt_file_view_device_v1(descriptor)
+        inode = rt_file_view_inode_v1(descriptor)
+        size = rt_file_view_size_v1(descriptor)
+    if device < 0 or inode < 0 or size < 0:
+        return nil
+    Some(FileViewIdentityV1(
+        device.to_u64(), inode.to_u64(), size.to_u64(), snapshot_digest))
+
+@unsafe(reason: "bounded positioned read from an already pinned descriptor", capabilities: [ffi])
+extern fn rt_file_view_pread_exact_v1(descriptor: i64, offset: u64, length: u64) -> [u8]?
+@unsafe(reason: "device identity for an already pinned descriptor", capabilities: [ffi])
+extern fn rt_file_view_device_v1(descriptor: i64) -> i64
+@unsafe(reason: "inode identity for an already pinned descriptor", capabilities: [ffi])
+extern fn rt_file_view_inode_v1(descriptor: i64) -> i64
+@unsafe(reason: "size identity for an already pinned descriptor", capabilities: [ffi])
+extern fn rt_file_view_size_v1(descriptor: i64) -> i64
+
+export BufferedFileViewErrorV1, FileViewIdentityV1
+export file_view_identity_equal_v1, file_view_range_valid_v1
+export file_view_buffered_read_v1, file_view_descriptor_identity_v1

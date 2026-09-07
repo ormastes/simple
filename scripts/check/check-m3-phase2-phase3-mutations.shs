@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+root=${1:-.}
+root=$(cd "$root" && pwd)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+temporary_root=$(storage_roots_mktemp macos-m2-m3-mutations)
+
+cleanup() {
+  find "$temporary_root" -depth -delete
+}
+trap cleanup EXIT
+
+files='scripts/check/check-m3-phase2-phase3-production.shs
+src/compiler/00.common/cache/phase_compatibility_manifest.spl
+src/compiler/00.common/cache/phase_compatibility_path_io.spl
+src/compiler/10.frontend/frontend_parse_cache.spl
+src/compiler/80.driver/driver_aot_native_output.spl
+src/compiler/80.driver/cache/phase_compatibility_admission.spl
+src/compiler/80.driver/cache/reverse_reference_receipt.spl
+src/compiler/80.driver/driver_source_pipeline_parsing.spl
+src/compiler/80.driver/driver_build/incremental.spl
+scripts/bootstrap/bootstrap-from-scratch.sh'
+
+echo "$files" | while IFS= read -r file; do
+  mkdir -p "$temporary_root/$(dirname "$file")"
+  cp "$root/$file" "$temporary_root/$file"
+done
+
+checker="$temporary_root/scripts/check/check-m3-phase2-phase3-production.shs"
+sh "$checker" "$temporary_root" >/dev/null
+echo 'PASS baseline production structure'
+
+mutate() {
+  label=$1
+  file=$2
+  old=$3
+  new=$4
+  target="$temporary_root/$file"
+  OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/' "$target"
+  if cmp -s "$root/$file" "$target"; then
+    echo "FAIL mutation absent: $label" >&2
+    exit 1
+  fi
+  if sh "$checker" "$temporary_root" >/dev/null 2>&1; then
+    echo "FAIL mutation survived: $label" >&2
+    exit 1
+  fi
+  cp "$root/$file" "$target"
+  echo "PASS mutation rejected: $label"
+}
+
+mutate receipt-digest src/compiler/00.common/cache/phase_compatibility_manifest.spl \
+  'if manifest.m2_receipt_digest != expected.m2_receipt_digest:' 'if false:'
+mutate owner-generation src/compiler/00.common/cache/phase_compatibility_manifest.spl \
+  'manifest.m2_owner_generation != expected.m2_owner_generation or' 'false or'
+mutate root-generation src/compiler/00.common/cache/phase_compatibility_manifest.spl \
+  'manifest.m2_root_generation != expected.m2_root_generation:' 'false:'
+mutate projection-membership src/compiler/80.driver/cache/reverse_reference_receipt.spl \
+  'if not reverse_reference_receipt_contains_projection_v1(' 'if not reverse_reference_receipt_contains_key_v1('
+mutate manifest-nofollow src/compiler/80.driver/cache/phase_compatibility_admission.spl \
+  'phase_compatibility_read_manifest_io_v1(manifest_path)' 'rt_file_read_text(manifest_path)'
+mutate artifact-nofollow src/compiler/80.driver/cache/phase_compatibility_admission.spl \
+  'phase_compatibility_read_artifact_io_v1(' 'rt_file_read_text('
+mutate current-nofollow src/compiler/80.driver/driver_aot_native_output.spl \
+  'reverse_reference_read_current_admitted_v1' 'reverse_reference_read_current_v1'
+mutate CURRENT-nofollow src/compiler/80.driver/cache/reverse_reference_receipt.spl \
+  'phase_compatibility_read_manifest_io_v1(pointer_path)' 'rt_file_read_text(pointer_path)'
+mutate receipt-nofollow src/compiler/80.driver/cache/reverse_reference_receipt.spl \
+  'phase_compatibility_read_manifest_io_v1(receipt_path)' 'rt_file_read_text(receipt_path)'
+mutate native-artifact-second-read src/compiler/80.driver/driver_aot_native_output.spl \
+  'val observed = sha256_text(artifact.content)' 'val observed = rt_file_hash_sha256(item.artifact_path)'
+mutate native-driver-bypass src/compiler/80.driver/driver_aot_native_output.spl \
+  'driver_admit_phase2_compatibility_manifest_v1(path, phase3_root)' 'phase_compatibility_manifest_decode_v1(path)'
+mutate frontend-driver-bypass src/compiler/80.driver/driver_source_pipeline_parsing.spl \
+  'driver_import_phase2_frontend_v1()' 'frontend_parse_cache_import_phase2_v1()'
+mutate private-interface-cutoff src/compiler/80.driver/driver_build/incremental.spl \
+  'interface_digest_of_source(current_source!) == recorded_interface' 'false'
+mutate ordinary-import-scc-promotion src/compiler/80.driver/driver_build/incremental.spl \
+  'An import proves interface consumption, not SCC membership.' 'incremental_publish_module_scc_artifact_v1(dependency, source, deps_iface)'
+mutate native-reuse-ledger src/compiler/80.driver/driver_aot_native_output.spl \
+  'schema=simple-phase2-phase3-reuse-ledger-v1 kind=native-object hits=' 'schema=removed kind=native-object hits='
+mutate frontend-reuse-ledger src/compiler/80.driver/cache/phase_compatibility_admission.spl \
+  'schema=simple-phase2-phase3-reuse-ledger-v1 kind=frontend hits=' 'schema=removed kind=frontend hits='
+
+echo 'PASS: 16/16 structural mutations rejected'

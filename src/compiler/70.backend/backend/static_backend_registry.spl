@@ -1,0 +1,148 @@
+use common.plugin.iface_id.{IfaceId}
+use compiler.backend.backend.backend_types.{BackendKind, BackendCompileOptions, CodegenTarget, CompileError}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.backend.backend_port.{BACKEND_PORT_ERROR_MAJOR, BACKEND_PORT_IFACE_DIGEST, BackendDescV1, BackendPortV1, BackendPlugin, StaticBackendPluginV1, CodegenParamsV1, backend_port_host_iface, backend_plugin_from_port_v1, codegen_params_v1}
+export use compiler.backend.backend.static_backend_types.{BackendLinkClass, StaticBackendEntryV1}
+
+pub enum StaticBackendSelectionError:
+    NotFound(text)
+    MajorMismatch(text, i64, i64)
+    DigestMismatch(text)
+    InvalidTable(text)
+
+var _k1_static_backend_table_v1: [StaticBackendEntryV1] = []
+var _k1_static_backend_policy_v1: text = ""
+var _k1_static_backend_table_installed_v1: bool = false
+var _full_static_backend_table_v1: [StaticBackendEntryV1] = []
+var _full_static_backend_table_installed_v1: bool = false
+
+impl StaticBackendSelectionError:
+    fn code() -> text:
+        match self:
+            case NotFound(_): "PLUG-E-NOTFOUND"
+            case MajorMismatch(_, _, _): BACKEND_PORT_ERROR_MAJOR
+            case DigestMismatch(_): "PLUG-E-DIGEST"
+            case InvalidTable(_): "PLUG-E-TABLE"
+
+pub fn static_backend_entry_v1(kind: BackendKind, link_class: BackendLinkClass,
+        port: BackendPortV1, output_kind: CodegenOutputKind) -> StaticBackendEntryV1:
+    StaticBackendEntryV1(kind, link_class, backend_plugin_from_port_v1(port), output_kind)
+
+pub fn static_backend_table_v1() -> [StaticBackendEntryV1]:
+    _k1_static_backend_table_v1
+
+fn _table_is_sorted_v1(table: [StaticBackendEntryV1]) -> bool:
+    var previous = ""
+    for entry in table:
+        val name = entry.plugin.describe().name
+        if name == "" or name <= previous or name != entry.kind.to_text():
+            return false
+        previous = name
+    true
+
+pub fn validate_k1_static_backend_table_v1(policy: text,
+        table: [StaticBackendEntryV1]) -> bool:
+    if not _table_is_sorted_v1(table):
+        return false
+    if policy == "llvm-cranelift":
+        return table.len() == 3 and
+            table[0].kind == BackendKind.Cranelift and
+            table[0].link_class == BackendLinkClass.KernelLinked and
+            table[1].kind == BackendKind.Interpreter and
+            table[1].link_class == BackendLinkClass.KernelLinked and
+            table[2].kind == BackendKind.Llvm and
+            table[2].link_class == BackendLinkClass.KernelLinked
+    false
+
+pub fn install_k1_static_backend_table_v1(policy: text,
+        table: [StaticBackendEntryV1]) -> bool:
+    if not validate_k1_static_backend_table_v1(policy, table):
+        return false
+    if _k1_static_backend_table_installed_v1:
+        return _k1_static_backend_policy_v1 == policy
+    _k1_static_backend_table_v1 = table
+    _k1_static_backend_policy_v1 = policy
+    _k1_static_backend_table_installed_v1 = true
+    true
+
+pub fn installed_k1_static_backend_policy_v1() -> text:
+    _k1_static_backend_policy_v1
+
+pub fn installed_k1_static_backend_table_v1() -> [StaticBackendEntryV1]:
+    _k1_static_backend_table_v1
+
+pub fn install_full_static_backend_table_v1(policy: text,
+        table: [StaticBackendEntryV1]) -> bool:
+    if _full_static_backend_table_installed_v1:
+        return _k1_static_backend_policy_v1 == policy
+    if not _k1_static_backend_table_installed_v1 or
+            _k1_static_backend_policy_v1 != policy or
+            not _table_is_sorted_v1(table):
+        return false
+    for required in _k1_static_backend_table_v1:
+        var found = false
+        for entry in table:
+            if entry.kind == required.kind and
+                    entry.link_class == BackendLinkClass.KernelLinked:
+                found = true
+        if not found:
+            return false
+    for entry in table:
+        if entry.link_class == BackendLinkClass.KernelLinked:
+            var authorized = false
+            for required in _k1_static_backend_table_v1:
+                if entry.kind == required.kind:
+                    authorized = true
+            if not authorized:
+                return false
+    _full_static_backend_table_v1 = table
+    _full_static_backend_table_installed_v1 = true
+    true
+
+pub fn active_static_backend_table_v1() -> [StaticBackendEntryV1]:
+    if _full_static_backend_table_installed_v1:
+        return _full_static_backend_table_v1
+    _k1_static_backend_table_v1
+
+fn _entry_name(entry: StaticBackendEntryV1) -> text:
+    entry.plugin.describe().name
+
+pub fn negotiate_static_backend_entry_v1(host_iface: IfaceId, entry: StaticBackendEntryV1) -> Result<StaticBackendEntryV1, StaticBackendSelectionError>:
+    val name = _entry_name(entry)
+    val iface = entry.plugin.iface()
+    if iface.name != host_iface.name:
+        return Err(StaticBackendSelectionError.NotFound(name))
+    if iface.major != host_iface.major:
+        return Err(StaticBackendSelectionError.MajorMismatch(name, host_iface.major, iface.major))
+    if iface.abi_digest != host_iface.abi_digest or iface.abi_digest != BACKEND_PORT_IFACE_DIGEST:
+        return Err(StaticBackendSelectionError.DigestMismatch(name))
+    Ok(entry)
+
+pub fn select_static_backend_v1(name: text, table: [StaticBackendEntryV1] = active_static_backend_table_v1()) -> Result<StaticBackendEntryV1, StaticBackendSelectionError>:
+    var previous = ""
+    for entry in table:
+        val entry_name = _entry_name(entry)
+        if entry_name == "" or entry_name <= previous or entry_name != entry.kind.to_text():
+            return Err(StaticBackendSelectionError.InvalidTable(entry_name))
+        previous = entry_name
+        if entry_name == name:
+            return negotiate_static_backend_entry_v1(backend_port_host_iface(), entry)
+    Err(StaticBackendSelectionError.NotFound(name))
+
+pub class StaticBackendCodegenV1:
+    entry: StaticBackendEntryV1
+    params: CodegenParamsV1
+
+impl Codegen for StaticBackendCodegenV1:
+    fn backend_kind() -> BackendKind: self.entry.kind
+    fn backend_name() -> text: _entry_name(self.entry)
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>: self.entry.plugin.run(self.params, module)
+    fn supports_target(target: CodegenTarget) -> bool:
+        val targets = self.entry.plugin.describe().targets
+        if targets.contains("*"): return true
+        targets.contains(target.to_text())
+    fn output_kind() -> CodegenOutputKind: self.entry.output_kind
+
+pub fn static_backend_codegen_v1(entry: StaticBackendEntryV1, options: BackendCompileOptions) -> Codegen:
+    StaticBackendCodegenV1(entry, codegen_params_v1(options.target.to_text(), "configured", "configured", options))

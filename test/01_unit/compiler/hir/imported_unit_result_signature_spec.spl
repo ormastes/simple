@@ -1,0 +1,70 @@
+# Purpose and audience: executable regression evidence for compiler engineers.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+
+Proves that an imported callable returning a unit-valued `Result` uses the
+canonical `()` type and does not ask the importing module to resolve a
+nonexistent `Unit` declaration.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/hir/imported_unit_result_signature_spec.spl`.
+
+## Compatibility and limitations
+
+Covers imported callable signature lowering; runtime archive installation is
+covered by its owning integration tests.
+"""
+
+# @manual: primary
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "canonical unit in imported Result signatures":
+    it "keeps the production archive owner on the canonical unit spelling":
+        step("inspect the production archive staging signature")
+        val source = rt_file_read_text(
+            "src/compiler/20.hir/archive/interface_action_archive.spl") ?? ""
+        expect(source).to_contain(
+            ") -> Result[(), InterfaceActionArchiveErrorV1]:")
+        expect(source).to_not_contain("Result[Unit, InterfaceActionArchiveErrorV1]")
+        expect(source).to_not_contain("Ok(Unit())")
+
+    it "lowers the owner signature without resolving a Unit declaration":
+        step("lower an imported Result[(), E] callable")
+        val logger = Logger(level: 0)
+        val owner_source =
+            "enum InstallError:\n    rejected\n\n" +
+            "fn stage() -> Result[(), InstallError]:\n    Ok(())\n\n" +
+            "export InstallError, stage"
+        val importer_source =
+            "use archive.owner.{stage}\n\nfn load() -> bool:\n    stage().is_ok()"
+        val owner = parse_full_frontend(
+            owner_source, "archive.owner", "archive.owner", logger)
+        val importer = parse_full_frontend(
+            importer_source, "driver.loader", "driver.loader", logger)
+        var modules: Dict<text, Module> = {}
+        modules["archive.owner"] = owner
+        val sources = [SourceFile(
+            path: "archive/owner.spl", content: owner_source,
+            module_name: "archive.owner")]
+        val surfaces_result = module_surfaces_from_modules(modules, sources)
+        expect(surfaces_result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module(
+            "driver.loader", surfaces_result.unwrap())
+        _ = lowering.lower_module(importer)
+        for diagnostic in lowering.diagnostic_messages:
+            expect(diagnostic.contains("unresolved type: Unit")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)

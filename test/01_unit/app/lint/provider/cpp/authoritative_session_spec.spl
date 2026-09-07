@@ -1,0 +1,75 @@
+use std.spec.{describe, it, expect}
+use common.kernel_plugin.ids.KpfDigest256
+use app.lint.provider.cpp.model.*
+use app.lint.provider.cpp.worker.cpp_lint_worker_default_limits_v1
+use app.lint.provider.cpp.session.*
+use os.tooling.clang_worker.clangd_session.ClangdLifecycleStateV1
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(value, value + 1, value + 2, value + 3)
+
+fn toolchain(tool: text) -> CppToolchainFingerprintV1:
+    CppToolchainFingerprintV1(tool, "20.1.0", "arm64-apple-darwin", "/toolchain/lib/clang/20", digest(20))
+
+fn database() -> text:
+    "[{\"directory\":\"/workspace\",\"file\":\"/workspace/a.cc\",\"arguments\":[\"clang++\",\"-std=c++20\",\"-c\",\"a.cc\"],\"configuration_id\":\"debug\"}]"
+
+fn session(database_content: text) -> AuthoritativeCppToolingSessionV1:
+    AuthoritativeCppToolingSessionV1.create(
+        "/workspace", database_content, "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug",
+        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clangd.shs", ["--compile-commands-dir=/workspace/build"], toolchain("clangd"),
+        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", toolchain("clang-tidy"), cpp_lint_worker_default_limits_v1(),
+    )
+
+describe "authoritative C++ IDE and lint session":
+    it "retains clangd and publishes exact clang-tidy results for one snapshot":
+        var owner = session(database())
+        val started = owner.start()
+        expect(started.state).to_equal(ClangdLifecycleStateV1.Active)
+        expect(started.authoritative).to_equal(true)
+        val ticket = owner.begin_revision(7, digest(70))
+        val run = owner.run_lint(ticket)
+        val publication = owner.publish(ticket, run)
+        expect(publication.status).to_equal(CppSessionStatusV1.Ready)
+        expect(publication.accepted_diagnostics).to_equal(1)
+        expect(publication.receipt.authoritative).to_equal(true)
+        expect(publication.receipt.compile_configuration_fingerprint.len()).to_equal(64)
+        expect(publication.receipt.clangd_toolchain_fingerprint.len()).to_equal(64)
+        expect(publication.receipt.clang_tidy_toolchain_fingerprint.len()).to_equal(64)
+        expect(owner.close().state).to_equal(ClangdLifecycleStateV1.Closed)
+
+    it "cancels superseded work and rejects stale publication":
+        var owner = session(database())
+        owner.start()
+        val old_ticket = owner.begin_revision(7, digest(70))
+        val old_run = owner.run_lint(old_ticket)
+        owner.begin_revision(8, digest(80))
+        val stale = owner.publish(old_ticket, old_run)
+        expect(stale.status).to_equal(CppSessionStatusV1.Cancelled)
+        expect(stale.accepted_diagnostics).to_equal(0)
+        val current_ticket = owner.active_ticket
+        val current_run = owner.run_lint(current_ticket)
+        owner.current_digest = digest(81)
+        val mismatched = owner.publish(current_ticket, current_run)
+        expect(mismatched.status).to_equal(CppSessionStatusV1.Stale)
+        expect(mismatched.accepted_diagnostics).to_equal(0)
+        owner.close()
+
+    it "makes cancellation idempotent and suppresses diagnostics":
+        var owner = session(database())
+        owner.start()
+        val ticket = owner.begin_revision(9, digest(90))
+        expect(owner.cancel(ticket)).to_equal(CppSessionStatusV1.Cancelled)
+        expect(owner.cancel(ticket)).to_equal(CppSessionStatusV1.Cancelled)
+        val run = owner.run_lint(ticket)
+        val publication = owner.publish(ticket, run)
+        expect(publication.status).to_equal(CppSessionStatusV1.Cancelled)
+        expect(publication.accepted_diagnostics).to_equal(0)
+        owner.close()
+
+    it "is explicitly incomplete when compile_commands lacks the translation unit":
+        var owner = session("[]")
+        val started = owner.start()
+        expect(started.state).to_equal(ClangdLifecycleStateV1.Failed)
+        expect(started.authoritative).to_equal(false)
+        expect(started.reason).to_contain("exact compile command")

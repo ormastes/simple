@@ -1,0 +1,421 @@
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageTldrHeaderV1, config_variant_digest_v1,
+    package_tldr_header_validate_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexGenerationV1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_register_source_alias_v1,
+    reverse_reference_register_module_scc_peer_v1
+}
+
+struct PackageSccGroupV1:
+    identity: text
+    members: [text]
+    dependencies: [text]
+
+struct PackageSccWaveV1:
+    ordinal: i64
+    groups: [PackageSccGroupV1]
+
+struct PackageCompileScheduleV1:
+    valid: bool
+    reason: text
+    variant_digest: text
+    dirty_packages: [text]
+    groups: [PackageSccGroupV1]
+    waves: [PackageSccWaveV1]
+
+struct PackageCompileResultV1:
+    group_identity: text
+    package_identity: text
+    action_key: text
+    interface_archive_digest: text
+    action_archive_digest: text
+    success: bool
+
+struct PackagePublicationBatchV1:
+    valid: bool
+    reason: text
+    ordered_results: [PackageCompileResultV1]
+
+struct PackageIndexScheduleConsumptionV1:
+    valid: bool
+    reason: text
+    package_order: [text]
+    waves: [[text]]
+
+fn package_scc_sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var result: [text] = []
+    for value in sorted:
+        if value == "" or value.contains("\n") or value.contains("\r"):
+            return []
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn package_scc_find_header_v1(
+    headers: [PackageTldrHeaderV1], module_identity: text
+) -> PackageTldrHeaderV1?:
+    for header in headers:
+        if header.module_identity == module_identity:
+            return Some(header)
+    nil
+
+fn package_scc_package_dependencies_v1(
+    headers: [PackageTldrHeaderV1], package_identity: text
+) -> [text]:
+    var dependencies: [text] = []
+    for header in headers:
+        if header.package_identity != package_identity:
+            continue
+        for imported in header.direct_imports:
+            val target = package_scc_find_header_v1(headers, imported)
+            if target != nil and target!.package_identity != package_identity:
+                dependencies = dependencies.push(target!.package_identity)
+    package_scc_sorted_unique_v1(dependencies)
+
+fn package_scc_package_reaches_v1(
+    headers: [PackageTldrHeaderV1], from_package: text, to_package: text
+) -> bool:
+    var pending: [text] = [from_package]
+    var visited: [text] = []
+    while pending.len() > 0:
+        val current = pending[pending.len() - 1]
+        pending.pop()
+        if current == to_package:
+            return true
+        if visited.contains(current):
+            continue
+        visited = visited.push(current)
+        for dependency in package_scc_package_dependencies_v1(headers, current):
+            if not visited.contains(dependency):
+                pending = pending.push(dependency)
+    false
+
+fn package_scc_identity_v1(members: [text], variant_digest: text) -> text:
+    val canonical = package_scc_sorted_unique_v1(members)
+    var encoded = "simple/package-scc/v1|{variant_digest}|{canonical.len()}"
+    for member in canonical:
+        encoded = encoded + "|{member.len()}:{member}"
+    sha256_text(encoded)
+
+fn package_scc_group_for_package_v1(
+    headers: [PackageTldrHeaderV1], package_identity: text,
+    variant_digest: text
+) -> PackageSccGroupV1:
+    var members: [text] = []
+    for candidate in headers:
+        if (package_scc_package_reaches_v1(
+                headers, package_identity, candidate.package_identity) and
+                package_scc_package_reaches_v1(
+                    headers, candidate.package_identity, package_identity)):
+            members = members.push(candidate.package_identity)
+    members = package_scc_sorted_unique_v1(members)
+    PackageSccGroupV1(
+        package_scc_identity_v1(members, variant_digest), members, [])
+
+fn package_scc_find_group_v1(
+    groups: [PackageSccGroupV1], package_identity: text
+) -> PackageSccGroupV1?:
+    for group in groups:
+        if group.members.contains(package_identity):
+            return Some(group)
+    nil
+
+fn package_scc_sort_groups_v1(groups: [PackageSccGroupV1]) -> [PackageSccGroupV1]:
+    var pending = groups
+    var result: [PackageSccGroupV1] = []
+    while pending.len() > 0:
+        var selected = 0
+        var index = 1
+        while index < pending.len():
+            if pending[index].members[0] < pending[selected].members[0]:
+                selected = index
+            index = index + 1
+        result = result.push(pending[selected])
+        pending.remove(selected)
+    result
+
+fn package_scc_sort_declared_ids_v1(
+    ready_ids: [text], group_ids: [text], group_members: [[text]]
+) -> [text]:
+    var pending = ready_ids
+    var result: [text] = []
+    while pending.len() > 0:
+        var selected = 0
+        var selected_key = ""
+        var candidate_index = 0
+        while candidate_index < pending.len():
+            var key = ""
+            var group_index = 0
+            while group_index < group_ids.len():
+                if group_ids[group_index] == pending[candidate_index]:
+                    key = group_members[group_index][0]
+                group_index = group_index + 1
+            if selected_key == "" or key < selected_key:
+                selected = candidate_index
+                selected_key = key
+            candidate_index = candidate_index + 1
+        result = result.push(pending[selected])
+        pending.remove(selected)
+    result
+
+fn package_scc_build_groups_v1(
+    headers: [PackageTldrHeaderV1], variant_digest: text
+) -> [PackageSccGroupV1]:
+    var groups: [PackageSccGroupV1] = []
+    for header in headers:
+        if package_scc_find_group_v1(groups, header.package_identity) != nil:
+            continue
+        groups = groups.push(package_scc_group_for_package_v1(
+            headers, header.package_identity, variant_digest))
+    var completed: [PackageSccGroupV1] = []
+    for group in groups:
+        var dependencies: [text] = []
+        for header in headers:
+            if header.package_identity != group.members[0] and
+                    not group.members.contains(header.package_identity):
+                continue
+            for imported in header!.direct_imports:
+                val target = package_scc_find_header_v1(headers, imported)
+                if target == nil:
+                    continue
+                val dependency_group = package_scc_find_group_v1(
+                    groups, target!.package_identity)
+                if dependency_group != nil and dependency_group!.identity != group.identity:
+                    dependencies = dependencies.push(dependency_group!.identity)
+        completed = completed.push(PackageSccGroupV1(
+            group.identity, group.members,
+            package_scc_sorted_unique_v1(dependencies)))
+    package_scc_sort_groups_v1(completed)
+
+fn package_scc_dirty_closure_v1(
+    headers: [PackageTldrHeaderV1], roots: [text]
+) -> [text]:
+    var dirty = package_scc_sorted_unique_v1(roots)
+    var cursor = 0
+    while cursor < dirty.len():
+        val header = package_scc_find_header_v1(headers, dirty[cursor])
+        if header != nil:
+            for dependent in header!.reverse_dependents:
+                if not dirty.contains(dependent):
+                    dirty = dirty.push(dependent)
+        cursor = cursor + 1
+    package_scc_sorted_unique_v1(dirty)
+
+fn package_scc_schedule_v1(
+    headers: [PackageTldrHeaderV1], variant: ConfigVariantKeyV1,
+    dirty_roots: [text]
+) -> PackageCompileScheduleV1:
+    val variant_digest = config_variant_digest_v1(variant)
+    if variant_digest == "":
+        return PackageCompileScheduleV1(
+            false, "variant-invalid", "", [], [], [])
+    var seen_modules: [text] = []
+    for header in headers:
+        if seen_modules.contains(header.module_identity):
+            return PackageCompileScheduleV1(
+                false, "duplicate-module:{header.module_identity}",
+                variant_digest, [], [], [])
+        seen_modules = seen_modules.push(header.module_identity)
+        if package_tldr_header_validate_v1(header) != "ok":
+            return PackageCompileScheduleV1(
+                false, "metadata-invalid:{header.module_identity}",
+                variant_digest, [], [], [])
+        if config_variant_digest_v1(header.variant) != variant_digest:
+            return PackageCompileScheduleV1(
+                false, "variant-mismatch:{header.module_identity}",
+                variant_digest, [], [], [])
+        for imported in header.direct_imports:
+            val target = package_scc_find_header_v1(headers, imported)
+            if target == nil or not target!.reverse_dependents.contains(header.module_identity):
+                return PackageCompileScheduleV1(
+                    false, "reverse-edge-invalid:{header.module_identity}:{imported}",
+                    variant_digest, [], [], [])
+        for dependent in header.reverse_dependents:
+            val target = package_scc_find_header_v1(headers, dependent)
+            if target == nil or not target!.direct_imports.contains(header.module_identity):
+                return PackageCompileScheduleV1(
+                    false, "direct-edge-invalid:{header.module_identity}:{dependent}",
+                    variant_digest, [], [], [])
+    val roots = package_scc_sorted_unique_v1(dirty_roots)
+    for root in roots:
+        if package_scc_find_header_v1(headers, root) == nil:
+            return PackageCompileScheduleV1(
+                false, "dirty-root-missing:{root}", variant_digest, [], [], [])
+    val dirty_modules = package_scc_dirty_closure_v1(headers, roots)
+    var dirty_headers: [PackageTldrHeaderV1] = []
+    var dirty_packages: [text] = []
+    for header in headers:
+        if dirty_modules.contains(header.module_identity):
+            dirty_headers = dirty_headers.push(header)
+            dirty_packages = dirty_packages.push(header.package_identity)
+    val groups = package_scc_build_groups_v1(dirty_headers, variant_digest)
+    var committed: [text] = []
+    var waves: [PackageSccWaveV1] = []
+    while committed.len() < groups.len():
+        var ready: [PackageSccGroupV1] = []
+        for group in groups:
+            if committed.contains(group.identity):
+                continue
+            var blocked = false
+            for dependency in group.dependencies:
+                if not committed.contains(dependency):
+                    blocked = true
+            if not blocked:
+                ready = ready.push(group)
+        ready = package_scc_sort_groups_v1(ready)
+        if ready.len() == 0:
+            return PackageCompileScheduleV1(
+                false, "condensation-cycle", variant_digest,
+                package_scc_sorted_unique_v1(dirty_packages), groups, waves)
+        waves = waves.push(PackageSccWaveV1(waves.len(), ready))
+        for group in ready:
+            committed = committed.push(group.identity)
+    PackageCompileScheduleV1(
+        true, "ok", variant_digest,
+        package_scc_sorted_unique_v1(dirty_packages), groups, waves)
+
+fn package_scc_publication_batch_v1(
+    group: PackageSccGroupV1, results: [PackageCompileResultV1]
+) -> PackagePublicationBatchV1:
+    if results.len() != group.members.len():
+        return PackagePublicationBatchV1(false, "partial-group-result", [])
+    var ordered: [PackageCompileResultV1] = []
+    for member in group.members:
+        var found: PackageCompileResultV1? = nil
+        for result in results:
+            if result.package_identity == member:
+                if found != nil:
+                    return PackagePublicationBatchV1(false, "duplicate-package-result", [])
+                found = Some(result)
+        if found == nil or not found!.success or found!.group_identity != group.identity:
+            return PackagePublicationBatchV1(false, "invalid-package-result:{member}", [])
+        ordered = ordered.push(found!)
+    PackagePublicationBatchV1(true, "ok", ordered)
+
+fn package_scc_consume_index_schedule_v1(
+    generation: PackageModuleIndexGenerationV1, package_schedule: [text]
+) -> PackageIndexScheduleConsumptionV1:
+    val requested = package_scc_sorted_unique_v1(package_schedule)
+    if package_schedule.len() > 0 and requested.len() == 0:
+        return PackageIndexScheduleConsumptionV1(
+            false, "package-schedule-invalid", [], [])
+    var group_ids: [text] = []
+    var group_members: [[text]] = []
+    for package_identity in requested:
+        var found = false
+        var declared_scc = ""
+        for entry in generation.entries:
+            if entry.package_identity == package_identity:
+                found = true
+                if declared_scc == "":
+                    declared_scc = entry.scc_identity
+                elif declared_scc != entry.scc_identity:
+                    return PackageIndexScheduleConsumptionV1(
+                        false, "package-scc-inconsistent:{package_identity}", [], [])
+        if not found or declared_scc == "":
+            return PackageIndexScheduleConsumptionV1(
+                false, "scheduled-package-missing:{package_identity}", [], [])
+        var existing_group = -1
+        var group_index = 0
+        while group_index < group_ids.len():
+            if group_ids[group_index] == declared_scc:
+                existing_group = group_index
+            group_index = group_index + 1
+        if existing_group < 0:
+            group_ids = group_ids.push(declared_scc)
+            group_members = group_members.push([package_identity])
+        else:
+            group_members[existing_group] = package_scc_sorted_unique_v1(
+                group_members[existing_group].push(package_identity))
+    var group_dependencies: [[text]] = []
+    var group_index = 0
+    while group_index < group_ids.len():
+        var dependencies: [text] = []
+        for entry in generation.entries:
+            if not group_members[group_index].contains(entry.package_identity):
+                continue
+            for imported in entry.direct_imports:
+                var target_package = ""
+                var target_scc = ""
+                for candidate in generation.entries:
+                    if candidate.module_identity == imported:
+                        target_package = candidate.package_identity
+                        target_scc = candidate.scc_identity
+                if (requested.contains(target_package) and target_scc != "" and
+                        target_scc != group_ids[group_index]):
+                    dependencies = dependencies.push(target_scc)
+        group_dependencies = group_dependencies.push(
+            package_scc_sorted_unique_v1(dependencies))
+        group_index = group_index + 1
+    var committed: [text] = []
+    var waves: [[text]] = []
+    var package_order: [text] = []
+    while committed.len() < group_ids.len():
+        var ready: [text] = []
+        group_index = 0
+        while group_index < group_ids.len():
+            if not committed.contains(group_ids[group_index]):
+                var blocked = false
+                for dependency in group_dependencies[group_index]:
+                    if not committed.contains(dependency):
+                        blocked = true
+                if not blocked:
+                    ready = ready.push(group_ids[group_index])
+            group_index = group_index + 1
+        ready = package_scc_sort_declared_ids_v1(
+            package_scc_sorted_unique_v1(ready), group_ids, group_members)
+        if ready.len() == 0:
+            return PackageIndexScheduleConsumptionV1(
+                false, "declared-scc-condensation-cycle", [], waves)
+        var wave_packages: [text] = []
+        for group_id in ready:
+            group_index = 0
+            while group_index < group_ids.len():
+                if group_ids[group_index] == group_id:
+                    for package_identity in group_members[group_index]:
+                        wave_packages = wave_packages.push(package_identity)
+                group_index = group_index + 1
+            committed = committed.push(group_id)
+        wave_packages = package_scc_sorted_unique_v1(wave_packages)
+        waves = waves.push(wave_packages)
+        for package_identity in wave_packages:
+            package_order = package_order.push(package_identity)
+    package_scc_publish_reverse_reference_peers_v1(
+        generation, group_ids)
+    PackageIndexScheduleConsumptionV1(true, "ok", package_order, waves)
+
+fn package_scc_publish_reverse_reference_peers_v1(
+    generation: PackageModuleIndexGenerationV1, scheduled_sccs: [text]
+):
+    # This is the production package-index SCC authority. Publish source-level
+    # peers only after the declared condensation schedule has validated.
+    for scc_identity in scheduled_sccs:
+        var sources: [text] = []
+        for entry in generation.entries:
+            if entry.scc_identity == scc_identity:
+                reverse_reference_owner_register_source_alias_v1(
+                    entry.module_identity, entry.source_identity)
+                reverse_reference_owner_register_source_alias_v1(
+                    entry.package_identity, entry.source_identity)
+                sources = sources.push(entry.source_identity)
+        sources = package_scc_sorted_unique_v1(sources)
+        var encoded = "simple/module-scc-reverse-reference/v1|{scc_identity.len()}:{scc_identity}|{sources.len()}"
+        for source in sources:
+            encoded = encoded + "|{source.len()}:{source}"
+        val scc_digest = sha256_text(encoded)
+        for subject in sources:
+            for consumer in sources:
+                reverse_reference_register_module_scc_peer_v1(
+                    subject, consumer, scc_digest)
+
+export PackageSccGroupV1, PackageSccWaveV1, PackageCompileScheduleV1
+export PackageCompileResultV1, PackagePublicationBatchV1
+export PackageIndexScheduleConsumptionV1
+export package_scc_identity_v1, package_scc_schedule_v1
+export package_scc_publication_batch_v1
+export package_scc_consume_index_schedule_v1

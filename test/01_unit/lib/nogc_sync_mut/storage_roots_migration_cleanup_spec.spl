@@ -1,0 +1,116 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.migration.*
+use std.nogc_sync_mut.storage_roots.cleanup.*
+
+fn roots() -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: "/users/a/storage"),
+        worktree_root: CanonicalPath(value: "/repo/.simple/storage"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.Explicit,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1u64, w1: 2u64, w2: 3u64, w3: 4u64),
+    )
+
+fn evidence() -> ArtifactEvidence:
+    ArtifactEvidence(digest: Digest256(w0: 8u64, w1: 7u64, w2: 6u64, w3: 5u64), byte_count: 100u64, item_count: 2u64)
+
+fn marker(kind: StorageRootKind, storage_class: StorageClass) -> StorageOwnershipMarker:
+    StorageOwnershipMarker(
+        schema_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        root_kind: kind,
+        root_identity: roots().worktree_identity,
+        storage_class: storage_class,
+        cleanup_managed: true,
+        producer: "compiler",
+    )
+
+fn entry(path: text, storage_class: StorageClass) -> CleanupObservedEntry:
+    CleanupObservedEntry(
+        path: CanonicalPath(value: path),
+        byte_count: 50u64,
+        storage_class: storage_class,
+        is_symlink: false,
+        is_state: false,
+        is_credentials: false,
+        is_signing_material: false,
+        is_source: false,
+        is_vcs: false,
+        is_managed_worktree: false,
+    )
+
+describe "storage compatibility migration":
+    it "maps all three legacy inputs without changing root authority":
+        val build = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.RepositoryBuild, path: CanonicalPath(value: "/repo/build"), present: true), "compiler", OperationId(value: "migrate-build"), evidence()).unwrap()
+        val cache = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.SimpleCache, path: CanonicalPath(value: "/old/cache"), present: true), "compiler", OperationId(value: "migrate-cache"), evidence()).unwrap()
+        val native = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.NativeBuildCache, path: CanonicalPath(value: "/old/native"), present: true), "compiler", OperationId(value: "migrate-native"), evidence()).unwrap()
+        expect(build.destination.value).to_equal("/repo/.simple/storage/build")
+        expect(cache.destination.value).to_equal("/users/a/storage/cache/legacy-simple-cache")
+        expect(native.destination.value).to_equal("/users/a/storage/cache/native-build/compiler")
+        expect(build.observed_receipt.detail).to_contain("copy-verify-retain")
+
+    it "publishes only a verified destination-local copy with matching marker":
+        val plan = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.SimpleCache, path: CanonicalPath(value: "/legacy/cache"), present: true), "compiler", OperationId(value: "cache-copy"), evidence()).unwrap()
+        val published = verify_compatibility_promotion(plan, evidence(), plan.marker).unwrap()
+        expect(published.staging.value).to_start_with("/users/a/storage/cache/.simple-stage-")
+        expect(published.marker_path.value).to_equal("/users/a/storage/cache/legacy-simple-cache/.simple-storage-owner-v1")
+        expect(published.receipt.detail).to_contain("legacy-retained=true")
+
+    it "rejects missing sources evidence mismatch and marker mismatch":
+        val missing = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.SimpleCache, path: CanonicalPath(value: "/legacy/cache"), present: false), "compiler", OperationId(value: "cache-copy"), evidence())
+        expect(missing.is_err()).to_equal(true)
+        val plan = plan_compatibility_migration(roots(), LegacyStorageInput(kind: LegacyStorageKind.SimpleCache, path: CanonicalPath(value: "/legacy/cache"), present: true), "compiler", OperationId(value: "cache-copy"), evidence()).unwrap()
+        val wrong_evidence = ArtifactEvidence(digest: evidence().digest, byte_count: 99u64, item_count: 2u64)
+        expect(verify_compatibility_promotion(plan, wrong_evidence, plan.marker).is_err()).to_equal(true)
+        val wrong_marker = marker(StorageRootKind.Worktree, StorageClass.ReusableCache)
+        expect(verify_compatibility_promotion(plan, evidence(), wrong_marker).is_err()).to_equal(true)
+
+describe "safe storage cleanup":
+    it "keeps dry-run non-destructive and reports deterministic totals":
+        val request = CleanupRequest(root_kind: StorageRootKind.User, target: CanonicalPath(value: "/users/a/storage/cache/tool"), intent: CleanupIntent.DryRun, expected_root_identity: roots().worktree_identity)
+        val observed = CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [entry("/users/a/storage/cache/tool/a", StorageClass.ReusableCache), entry("/users/a/storage/cache/tool/b", StorageClass.ReusableCache)])
+        val authorized = plan_safe_cleanup(roots(), request, observed).unwrap()
+        val receipt = cleanup_receipt_after_removal(authorized, 2u64, 100u64).unwrap()
+        expect(authorized.plan.item_count).to_equal(2u64)
+        expect(authorized.plan.byte_count).to_equal(100u64)
+        expect(receipt.removed_item_count).to_equal(0u64)
+        expect(receipt.reclaimed_byte_count).to_equal(0u64)
+
+    it "refuses unmarked outside-root symlink and live-lease cleanup":
+        val request = CleanupRequest(root_kind: StorageRootKind.User, target: CanonicalPath(value: "/users/a/storage/cache/tool"), intent: CleanupIntent.RemoveContents, expected_root_identity: roots().worktree_identity)
+        val clean_entries = [entry("/users/a/storage/cache/tool/a", StorageClass.ReusableCache)]
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: nil, live_lease_count: 0u64, entries: clean_entries)).is_err()).to_equal(true)
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: CanonicalPath(value: "/outside"), marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: clean_entries)).is_err()).to_equal(true)
+        var linked = entry("/users/a/storage/cache/tool/a", StorageClass.ReusableCache)
+        linked.is_symlink = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [linked])).is_err()).to_equal(true)
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 1u64, entries: clean_entries)).is_err()).to_equal(true)
+
+    it "never removes state credentials source VCS signing material or worktrees":
+        val request = CleanupRequest(root_kind: StorageRootKind.User, target: CanonicalPath(value: "/users/a/storage/cache/tool"), intent: CleanupIntent.RemoveContents, expected_root_identity: roots().worktree_identity)
+        var protected = entry("/users/a/storage/cache/tool/state", StorageClass.ReusableCache)
+        protected.is_state = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [protected])).is_err()).to_equal(true)
+        var credentials = entry("/users/a/storage/cache/tool/token", StorageClass.ReusableCache)
+        credentials.is_credentials = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [credentials])).is_err()).to_equal(true)
+        var source = entry("/users/a/storage/cache/tool/source.spl", StorageClass.ReusableCache)
+        source.is_source = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [source])).is_err()).to_equal(true)
+        var vcs = entry("/users/a/storage/cache/tool/.git", StorageClass.ReusableCache)
+        vcs.is_vcs = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [vcs])).is_err()).to_equal(true)
+        var signing = entry("/users/a/storage/cache/tool/key", StorageClass.ReusableCache)
+        signing.is_signing_material = true
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [signing])).is_err()).to_equal(true)
+        val worktree = entry("/users/a/storage/cache/tool/worktree", StorageClass.ManagedWorktree)
+        expect(plan_safe_cleanup(roots(), request, CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [worktree])).is_err()).to_equal(true)
+
+    it "requires exact destructive completion evidence":
+        val request = CleanupRequest(root_kind: StorageRootKind.User, target: CanonicalPath(value: "/users/a/storage/cache/tool"), intent: CleanupIntent.RemoveContents, expected_root_identity: roots().worktree_identity)
+        val observed = CleanupObservation(canonical_target: request.target, marker: Some(marker(StorageRootKind.User, StorageClass.ReusableCache)), live_lease_count: 0u64, entries: [entry("/users/a/storage/cache/tool/a", StorageClass.ReusableCache)])
+        val authorized = plan_safe_cleanup(roots(), request, observed).unwrap()
+        expect(cleanup_receipt_after_removal(authorized, 0u64, 0u64).is_err()).to_equal(true)
+        val receipt = cleanup_receipt_after_removal(authorized, 1u64, 50u64).unwrap()
+        expect(receipt.removed_item_count).to_equal(1u64)
+        expect(receipt.reclaimed_byte_count).to_equal(50u64)

@@ -21,7 +21,11 @@
 #   ORDERED — probe order is semantic there (mirrors plan §1.1).
 
 use std.common.crypto.sha256.{sha256_text}
-use std.common.crypto.types.{crypto_text_to_bytes as text_to_bytes}
+export use compiler.common.cache.canonical_identity.{
+    canon_str, canon_nat, canon_field, canon_seq}
+use compiler.common.cache.canonical_identity.{
+    canonical_identity_sort_texts, canonical_identity_text_lt,
+    canonical_identity_text_le}
 
 # ============================================================================
 # Structs (mirror Model.lean: Dep, ActionKey)
@@ -62,26 +66,10 @@ struct ResolutionProbe:
 # ============================================================================
 
 fn action_key_text_lt(a: text, b: text) -> bool:
-    val ab = text_to_bytes(a)
-    val bb = text_to_bytes(b)
-    val an = ab.len()
-    val bn = bb.len()
-    var i = 0
-    while i < an and i < bn:
-        val ca = ab[i] as i64
-        val cb = bb[i] as i64
-        if ca < cb:
-            return true
-        if ca > cb:
-            return false
-        i = i + 1
-    an < bn
+    canonical_identity_text_lt(a, b)
 
-# Mirrors Lean strLe: a < b || a == b
 fn action_key_text_le(a: text, b: text) -> bool:
-    if action_key_text_lt(a, b):
-        return true
-    a == b
+    canonical_identity_text_le(a, b)
 
 # Mirrors Lean depLe: lexicographic on (module_id, iface_digest).
 fn action_dep_le(a: ActionDep, b: ActionDep) -> bool:
@@ -97,25 +85,6 @@ fn action_dep_lt(a: ActionDep, b: ActionDep) -> bool:
     if a.module_id == b.module_id:
         return action_key_text_lt(a.iface_digest, b.iface_digest)
     false
-
-fn action_key_text_sift_down(mut items: [text], root_index: i64, heap_len: i64):
-    var root = root_index
-    while true:
-        val left = root * 2 + 1
-        if left >= heap_len:
-            return
-        var largest = root
-        if action_key_text_lt(items[largest], items[left]):
-            largest = left
-        val right = left + 1
-        if right < heap_len and action_key_text_lt(items[largest], items[right]):
-            largest = right
-        if largest == root:
-            return
-        val temporary = items[root]
-        items[root] = items[largest]
-        items[largest] = temporary
-        root = largest
 
 fn action_dep_sift_down(mut items: [ActionDep], root_index: i64, heap_len: i64):
     var root = root_index
@@ -136,25 +105,6 @@ fn action_dep_sift_down(mut items: [ActionDep], root_index: i64, heap_len: i64):
         items[largest] = temporary
         root = largest
 
-# Canonically orders text exactly like Lean strLe/sortStrs. Equal text values
-# are observationally identical, so heapsort stability cannot change encoding.
-fn action_key_sort_texts(items: [text]) -> [text]:
-    var out = items
-    if out.len() < 2:
-        return out
-    var start = out.len() / 2
-    while start > 0:
-        start = start - 1
-        action_key_text_sift_down(out, start, out.len())
-    var end = out.len()
-    while end > 1:
-        end = end - 1
-        val temporary = out[0]
-        out[0] = out[end]
-        out[end] = temporary
-        action_key_text_sift_down(out, 0, end)
-    out
-
 # Canonically orders dependencies exactly like Lean depLe/sortDeps. ActionDep
 # contains only the two ordering fields, so equal tuples are indistinguishable.
 fn action_key_sort_deps(items: [ActionDep]) -> [ActionDep]:
@@ -174,24 +124,8 @@ fn action_key_sort_deps(items: [ActionDep]) -> [ActionDep]:
         action_dep_sift_down(out, 0, end)
     out
 
-# ============================================================================
-# Canonical encoding primitives (serialised Lean `Canon` constructors)
-# ============================================================================
-
-fn canon_str(s: text) -> text:
-    "S" + "{s.len()}" + ":" + s
-
-fn canon_nat(n: i64) -> text:
-    "N" + "{n}" + ";"
-
-fn canon_field(tag: text, encoded_value: text) -> text:
-    "F" + "{tag.len()}" + ":" + tag + encoded_value
-
-fn canon_seq(encoded_items: [text]) -> text:
-    var body = ""
-    for item in encoded_items:
-        body = body + item
-    "Q" + "{encoded_items.len()}" + ":" + body
+fn action_key_sort_texts(items: [text]) -> [text]:
+    canonical_identity_sort_texts(items)
 
 # Mirrors Lean encodeDep.
 fn canon_dep(d: ActionDep) -> text:

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
+cd "$root"
+
+require() {
+    grep -F "$2" "$1" >/dev/null || {
+        echo "missing demand compile production contract: $1 :: $2" >&2
+        exit 1
+    }
+}
+
+reject() {
+    if grep -F "$2" "$1" >/dev/null; then
+        echo "forbidden demand compile production contract: $1 :: $2" >&2
+        exit 1
+    fi
+}
+
+loading=src/compiler/80.driver/driver_source_pipeline_loading.spl
+mir=src/compiler/80.driver/demand_mir_integration.spl
+lowering=src/compiler/80.driver/driver_pipeline_lowering.spl
+graph=src/compiler/80.driver/action_graph/demand_compile_integration.spl
+
+require "$loading" '"package-resolution"'
+require "$loading" 'demand_compile_source_open_v1(&mut open_execution)'
+require "$loading" 'demand_compile_section_reads_v1('
+reject "$loading" 'demand_compile_section_read_v1(&mut read_execution)'
+require "$graph" 'counters.cache_hit_count = counters.cache_hit_count + 1'
+require "$graph" 'counters.cache_miss_count = counters.cache_miss_count + 1'
+require "$graph" 'counters.action_scheduled_count = counters.action_scheduled_count + 1'
+require "$graph" 'counters.action_completed_count = counters.action_completed_count + 1'
+reject "$graph" 'demand_compile_counter_cache_hit_v1(&mut counters)'
+reject "$graph" 'demand_compile_counter_cache_miss_v1(&mut counters)'
+reject "$graph" 'demand_compile_counter_action_scheduled_v1(&mut counters)'
+reject "$graph" 'demand_compile_counter_action_completed_v1(&mut execution.counters)'
+require "$mir" 'counters, "hir-demand", hir_started_ns'
+require "$mir" 'counters, "mir-admission", mir_started_ns'
+require "$lowering" 'demand_mir_integrate_measured_v1('
+require "$graph" '"baseline-backend"'
+require "$graph" '"llvm-promotion"'
+require "$graph" 'demand_compile_complete_scc_outputs_v1('
+require "$graph" 'scc_compile_outputs_publish_v1('
+require "$loading" 'rt_env_get("SIMPLE_SCV_REVISION_ID") ?? ""'
+require "$loading" 'rt_env_get("SIMPLE_SCV_TREE_ID") ?? ""'
+require "$loading" 'rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""'
+require "$loading" 'rt_env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? ""'
+require "$loading" 'rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""'
+require "$loading" 'persistent package index admission failed:'
+
+echo demand-compile-production-integration-static-pass
