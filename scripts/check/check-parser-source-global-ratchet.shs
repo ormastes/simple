@@ -20,23 +20,101 @@
 # not evidence. --selftest runs first, unconditionally, and is fatal.
 #
 # Usage: sh scripts/check/check-parser-source-global-ratchet.shs \
-#            [--root DIR] [--generate-baseline] [--selftest-only]
+#            [--root DIR] [--rev REV] [--generate-baseline] [--selftest-only]
+#
+# --rev REV reads the COMMITTED tree at REV instead of the working checkout.
+# Both inputs move together: the scanned sources AND the frozen baseline come
+# from REV, because the census found two independent rot axes and a conversion
+# that moves only the scan root still reverts the baseline to the shared
+# working copy.  See
+#   doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md
+#
+# Materialisation is `git ls-tree` + `git checkout-index`, deliberately NOT
+# `git archive`.  `git archive` honours `export-ignore` from the revision's own
+# .gitattributes, and this repository's .gitattributes carries
+# `build export-ignore`, which silently drops 24 TRACKED .spl files under a
+# `build/` path component (src/app/build/**, src/lib/*/engine/build/**) out of
+# any archive.  A scan that cannot see a tracked file is a fail-open scan, so
+# the materialised file count is asserted against `git ls-tree` and a shortfall
+# is ERROR, never a pass.  Selftest fixture st-rev-scope replays exactly that.
 
 set -u
 
 ROOT="$(pwd)"
+REPO_ROOT="$(pwd)"
+REV=""
+MATERIALISED=""
 GENERATE_BASELINE=0
 SELFTEST_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root) ROOT="${2:-}"; [ -n "$ROOT" ] || { echo "ERROR — --root needs a directory"; exit 2; }; shift 2 ;;
+    --root) ROOT="${2:-}"; [ -n "$ROOT" ] || { echo "ERROR — --root needs a directory"; exit 2; }; REPO_ROOT="$ROOT"; shift 2 ;;
+    --rev) REV="${2:-}"; [ -n "$REV" ] || { echo "ERROR — --rev needs a revision"; exit 2; }; shift 2 ;;
     --generate-baseline) GENERATE_BASELINE=1; shift ;;
     --selftest-only) SELFTEST_ONLY=1; shift ;;
     --selftest) SELFTEST_ONLY=1; shift ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
 done
+
+BASELINE_REL="scripts/check/parser_source_global_baseline.txt"
+
+cleanup_materialised() {
+  [ -n "$MATERIALISED" ] && rm -rf "$MATERIALISED"
+  MATERIALISED=""
+}
+trap cleanup_materialised EXIT INT TERM
+
+# materialise_rev REPO REV DEST
+#
+# Writes the tracked src/**.spl of REV plus REV's baseline file into DEST, then
+# FAILS CLOSED when the materialised count differs from the count git itself
+# reports for the revision.  checkout-index is used because it is not filtered
+# by export-ignore; see the header for why `git archive` cannot be used here.
+materialise_rev() {
+  _repo="$1"; _rev="$2"; _dest="$3"
+  ( cd "$_repo" && git rev-parse --verify --quiet "$_rev^{commit}" ) >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked (revision not found: $_rev)"; exit 2; }
+
+  _list="$_dest.list"
+  ( cd "$_repo" && git ls-tree -r -z --name-only "$_rev" -- src ) 2>/dev/null \
+    | tr '\0' '\n' | grep '\.spl$' > "$_list" || :
+  _want=$(grep -c . "$_list" 2>/dev/null | tr -d ' ')
+  [ -n "$_want" ] || _want=0
+  if [ "$_want" -eq 0 ]; then
+    rm -f "$_list"
+    echo "ERROR — nothing was checked (revision $_rev has no tracked src/**.spl)"; exit 2
+  fi
+
+  _idx="$_dest.index"
+  ( cd "$_repo" && GIT_INDEX_FILE="$_idx" git read-tree "$_rev" ) >/dev/null 2>&1 || {
+    rm -f "$_list" "$_idx"
+    echo "ERROR — nothing was checked (cannot read tree $_rev)"; exit 2; }
+  ( cd "$_repo" && tr '\n' '\0' < "$_list" \
+      | GIT_INDEX_FILE="$_idx" git checkout-index --prefix="$_dest/" -z --stdin ) >/dev/null 2>&1 || {
+    rm -f "$_list" "$_idx"
+    echo "ERROR — nothing was checked (cannot materialise $_rev)"; exit 2; }
+  rm -f "$_idx"
+
+  # Counted WITHOUT -type f on purpose: 11 tracked src/**.spl are symlinks
+  # (src/app/lint/main.spl -> ../../compiler/90.tools/lint/main.spl and the
+  # src/app/leak_finder/* aliases). git ls-tree lists them, so the completeness
+  # assertion must count them too or it would report a false shortfall of 11.
+  # They are aliases of files that live under src/compiler and are scanned
+  # there, and scan_dir's own -type f filter skips them identically on BOTH
+  # paths, so no content is lost either way.
+  _got=$(find "$_dest/src" -name '*.spl' 2>/dev/null | wc -l | tr -d ' ')
+  rm -f "$_list"
+  if [ "$_got" -ne "$_want" ]; then
+    echo "ERROR — nothing was checked (materialisation of $_rev is incomplete: $_got of $_want tracked src/**.spl; export-ignore or a filtered pathspec is dropping tracked files)"
+    exit 2
+  fi
+
+  mkdir -p "$_dest/scripts/check"
+  ( cd "$_repo" && git show "$_rev:$BASELINE_REL" ) > "$_dest/$BASELINE_REL" 2>/dev/null || {
+    echo "ERROR — nothing was checked (revision $_rev has no $BASELINE_REL)"; exit 2; }
+}
 
 PATTERN='current_core_source_get\|current_core_source_set'
 
@@ -86,15 +164,152 @@ run_selftest() {
     rm -rf "$_tmp"; echo "ERROR — selftest fixture 'empty' expected 0 files, got $SCAN_FILES"; exit 2
   fi
   rm -rf "$_tmp"
+  run_rev_selftest
 }
 
-run_selftest
+# ------------------------------------------------------- rev-mode selftest
+# Four fixtures, each a real git repository, each driving THIS script twice —
+# once bare (working checkout) and once with --rev HEAD.  Three of them REQUIRE
+# THE TWO VERDICTS TO DISAGREE, because a fixture that only proves "--rev
+# passes" cannot tell a correct read from a broken one.  The two rot axes are
+# injected separately, and in both directions:
+#   st-rev-source    dirty SOURCE only              -> tree FAIL, rev PASS
+#   st-rev-baseline  dirty BASELINE only            -> tree FAIL, rev PASS
+#   st-rev-broken    clean checkout, broken commit  -> tree PASS, rev FAIL
+# The fourth pins the materialisation SCOPE, which no verdict comparison can
+# reach: a tracked .spl under a `build/` component carries the only offending
+# site, so a `git archive` materialisation would drop it and report PASS.
+# $0 is resolved to an ABSOLUTE path here because every fixture run below `cd`s
+# into its own repository first; a relative $0 dies with "cannot open".
+case "$0" in
+  /*) SELF="$0" ;;
+  *)  SELF="$(pwd)/$0" ;;
+esac
+
+rev_fixture_init() {
+  _d="$1"
+  mkdir -p "$_d/src/app" "$_d/scripts/check"
+  ( cd "$_d" \
+    && git init -q . \
+    && git config user.email selftest@example.invalid \
+    && git config user.name selftest \
+    && git config commit.gpgsign false ) >/dev/null 2>&1
+}
+
+rev_fixture_commit() {
+  ( cd "$1" && git add -A && git commit -q -m "$2" ) >/dev/null 2>&1
+}
+
+# rev_run DIR ARGS... -> sets REV_RC and REV_OUT.  PSGR_SELFTEST_CHILD stops the
+# child from re-entering this selftest (which would recurse without bound).
+rev_run() {
+  _d="$1"; shift
+  REV_OUT=$( cd "$_d" && PSGR_SELFTEST_CHILD=1 sh "$SELF" "$@" 2>&1 )
+  REV_RC=$?
+}
+
+rev_expect() {
+  _name="$1"; _want="$2"; _got="$3"
+  if [ "$_got" -ne "$_want" ]; then
+    echo "ERROR — selftest fixture '$_name' expected exit $_want, got $_got"
+    printf '%s\n' "$REV_OUT" | tail -3
+    exit 2
+  fi
+}
+
+rev_expect_disagree() {
+  _name="$1"; _a="$2"; _b="$3"
+  if [ "$_a" -eq "$_b" ]; then
+    echo "ERROR — selftest fixture '$_name' did not DISAGREE (both exit $_a); the revision read is not distinguishable from the checkout read"
+    exit 2
+  fi
+}
+
+run_rev_selftest() {
+  _rt="${TMPDIR:-/tmp}/parser-source-ratchet-rev.$$"
+  rm -rf "$_rt"
+
+  # -- st-rev-source: scan-root rot.  SOURCE dirty and uncommitted.
+  _d="$_rt/source"; rev_fixture_init "$_d"
+  printf 'fn f() -> text:\n    "hello"\n' > "$_d/src/app/a.spl"
+  printf '0\n' > "$_d/scripts/check/parser_source_global_baseline.txt"
+  rev_fixture_commit "$_d" clean
+  printf 'fn f() -> text:\n    current_core_source_get()\n' > "$_d/src/app/a.spl"
+  rev_run "$_d"; _tree_rc=$REV_RC
+  rev_expect st-rev-source-tree 1 "$_tree_rc"
+  rev_run "$_d" --rev HEAD; _rev_rc=$REV_RC
+  rev_expect st-rev-source-rev 0 "$_rev_rc"
+  rev_expect_disagree st-rev-source "$_tree_rc" "$_rev_rc"
+
+  # -- st-rev-baseline: baseline-only rot.  Sources identical on both paths;
+  # only the BASELINE file differs between the checkout and the commit.
+  _d="$_rt/baseline"; rev_fixture_init "$_d"
+  printf 'fn f() -> text:\n    current_core_source_get()\n' > "$_d/src/app/a.spl"
+  printf 'fn g(s: text):\n    current_core_source_set(s)\n' > "$_d/src/app/b.spl"
+  printf '2\n' > "$_d/scripts/check/parser_source_global_baseline.txt"
+  rev_fixture_commit "$_d" "baseline 2 matches 2 sites"
+  printf '0\n' > "$_d/scripts/check/parser_source_global_baseline.txt"
+  rev_run "$_d"; _tree_rc=$REV_RC
+  rev_expect st-rev-baseline-tree 1 "$_tree_rc"
+  rev_run "$_d" --rev HEAD; _rev_rc=$REV_RC
+  rev_expect st-rev-baseline-rev 0 "$_rev_rc"
+  rev_expect_disagree st-rev-baseline "$_tree_rc" "$_rev_rc"
+
+  # -- st-rev-broken: the other direction.  The checkout is clean at baseline
+  # while the COMMIT carries the regression, so a working-checkout read passes
+  # content that must be rejected.
+  _d="$_rt/broken"; rev_fixture_init "$_d"
+  printf 'fn f() -> text:\n    "hello"\n' > "$_d/src/app/a.spl"
+  printf '0\n' > "$_d/scripts/check/parser_source_global_baseline.txt"
+  rev_fixture_commit "$_d" clean
+  printf 'fn f() -> text:\n    current_core_source_get()\n' > "$_d/src/app/a.spl"
+  rev_fixture_commit "$_d" regression
+  printf 'fn f() -> text:\n    "hello"\n' > "$_d/src/app/a.spl"
+  rev_run "$_d"; _tree_rc=$REV_RC
+  rev_expect st-rev-broken-tree 0 "$_tree_rc"
+  rev_run "$_d" --rev HEAD; _rev_rc=$REV_RC
+  rev_expect st-rev-broken-rev 1 "$_rev_rc"
+  rev_expect_disagree st-rev-broken "$_tree_rc" "$_rev_rc"
+
+  # -- st-rev-scope: the materialisation must not be filtered by export-ignore.
+  # The offending site lives ONLY in a tracked file under a `build/` component,
+  # which is exactly the shape of the 24 real files `git archive` drops here.
+  _d="$_rt/scope"; rev_fixture_init "$_d"
+  mkdir -p "$_d/src/app/build"
+  printf 'build export-ignore\n' > "$_d/.gitattributes"
+  printf 'fn f() -> text:\n    "hello"\n' > "$_d/src/app/a.spl"
+  printf 'fn h() -> text:\n    current_core_source_get()\n' > "$_d/src/app/build/x.spl"
+  printf '0\n' > "$_d/scripts/check/parser_source_global_baseline.txt"
+  rev_fixture_commit "$_d" "site hidden behind export-ignore"
+  rev_run "$_d" --rev HEAD; _rev_rc=$REV_RC
+  if [ "$_rev_rc" -ne 1 ]; then
+    rm -rf "$_rt"
+    echo "ERROR — selftest fixture 'st-rev-scope' expected FAIL (exit 1) but got $_rev_rc: the materialisation is dropping a TRACKED .spl under an export-ignored path, which is a fail-open scan"
+    exit 2
+  fi
+
+  rm -rf "$_rt"
+}
+
+if [ "${PSGR_SELFTEST_CHILD:-0}" != 1 ]; then
+  run_selftest
+fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 3 selftest fixture(s) checked, scanner behaves"
+  echo "PASS — 7 selftest fixture(s) checked, scanner behaves and the revision read is distinguishable from the checkout read"
   exit 0
 fi
 
 # ------------------------------------------------------------------- scan
+if [ -n "$REV" ]; then
+  if [ $GENERATE_BASELINE -eq 1 ]; then
+    echo "ERROR — --generate-baseline writes the working tree and cannot be combined with --rev"; exit 2
+  fi
+  MATERIALISED=$(mktemp -d "${TMPDIR:-/tmp}/parser-source-ratchet-rev.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create a temp directory)"; exit 2; }
+  materialise_rev "$REPO_ROOT" "$REV" "$MATERIALISED"
+  ROOT="$MATERIALISED"
+fi
+
 [ -d "$ROOT/src" ] || { echo "ERROR — nothing was checked (no src/ under $ROOT)"; exit 2; }
 
 read_scan "$ROOT/src"
@@ -106,7 +321,7 @@ if [ "$scanned" -eq 0 ]; then
   exit 2
 fi
 
-BASELINE_FILE="$ROOT/scripts/check/parser_source_global_baseline.txt"
+BASELINE_FILE="$ROOT/$BASELINE_REL"
 
 if [ $GENERATE_BASELINE -eq 1 ]; then
   echo "$sites" > "$BASELINE_FILE"
@@ -132,5 +347,9 @@ fi
 if [ "$sites" -lt "$baseline" ]; then
   echo "note: parser-source globals improved ($sites < baseline $baseline); tighten deliberately with --generate-baseline."
 fi
-echo "PASS — $scanned file(s) scanned, parser-source globals=$sites (baseline $baseline)"
+if [ -n "$REV" ]; then
+  echo "PASS — $scanned file(s) scanned at $REV, parser-source globals=$sites (baseline $baseline)"
+else
+  echo "PASS — $scanned file(s) scanned, parser-source globals=$sites (baseline $baseline)"
+fi
 exit 0
