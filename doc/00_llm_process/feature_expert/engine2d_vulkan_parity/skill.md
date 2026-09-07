@@ -62,3 +62,14 @@ compared byte for byte. This is a measurement harness, not a renderer.
   loop and REPORT the attempt count; never smooth it away silently.
 - Machine swing is ~36%, wider than the ±20% the NFR used to claim. Report
   ranges from same-run pairs, not a best run.
+
+## Cross-reference — 2026-09-06 GPU/2D honesty sweep
+
+Vulkan's five-way readback provenance (`backend_vulkan.spl:1468-1519`:
+`completion_unknown` / `readback_failed` / `cpu_fallback` / `device_readback` /
+`host_cache_after_device_copy`, all five emitted in one readback body) is the repo's reference for an honest provenance
+ladder; DirectX's Linux lane was stamping `device_readback` for CPU pixels until
+PR #410. Full findings, plus the two unpinned `vulkan_session.spl` seams
+(`create_command_buffer()` has no session guard; `_cleanup()`'s zeroing is
+vacuous, not a leak) and the self-mocking-spec hazard class, live in
+[engine2d_font_offload](../engine2d_font_offload/skill.md) § 2026-09-06.
