@@ -537,6 +537,161 @@ pub unsafe extern "C" fn rt_file_write_text(
     std::fs::write(path_str, content_str).is_ok()
 }
 
+/// Copy `source` to `destination`, refusing to overwrite an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_copy_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — that giant monolithic C runtime is NOT compiled
+/// into this crate (see the file whitelist in `runtime/build.rs`'s
+/// `compile_c_runtime_sources`), so a native build needs a real definition of
+/// this symbol here too, or linking fails with `undefined symbol`.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file (a symlinked or
+/// missing source fails); `destination` is opened with
+/// `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` at mode `0600` (an existing path —
+/// regular file or symlink — fails with `EEXIST`/`ELOOP` before any data is
+/// touched); the bytes are copied and `fsync`ed; any failure along the way
+/// removes the partially-written destination before returning `false`.
+/// Unsupported on Windows, matching the C `#if defined(_WIN32)` branch.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let mut input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        match input.metadata() {
+            Ok(m) if m.is_file() => {}
+            _ => return false,
+        }
+
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(destination_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let ok = std::io::copy(&mut input, &mut output).is_ok() && output.sync_all().is_ok();
+        drop(output);
+        drop(input);
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        ok
+    }
+}
+
+/// Hard-link `source` to `destination`, refusing to replace an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_link_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — same "not compiled into this crate" gap as
+/// `rt_file_copy_create_excl_no_follow` above.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file; `link(2)` itself
+/// refuses an existing `destination` (`EEXIST`, whether that path is a
+/// regular file or a symlink); after linking, the destination is re-stat'd
+/// (`lstat`, i.e. `symlink_metadata`, never following) and must be a regular
+/// file with the SAME device/inode as the originally-opened source — a
+/// mismatch (e.g. `source` was swapped between the open and the link) removes
+/// the destination and fails. Unsupported on Windows, matching the C `#if`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let source_meta = match input.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => return false,
+        };
+
+        if std::fs::hard_link(source_path, destination_path).is_err() {
+            drop(input);
+            return false;
+        }
+
+        let ok = match std::fs::symlink_metadata(destination_path) {
+            Ok(dest_meta) => {
+                dest_meta.file_type().is_file()
+                    && dest_meta.dev() == source_meta.dev()
+                    && dest_meta.ino() == source_meta.ino()
+            }
+            Err(_) => false,
+        };
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        drop(input);
+        ok
+    }
+}
+
 /// Synchronize file contents and metadata with durable storage.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bool {
@@ -1658,6 +1813,83 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    /// Runnable proof for `rt_file_copy_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_copy_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (would overwrite).
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
+    }
+
+    /// Runnable proof for `rt_file_link_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_link_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (now hard-linked to source).
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
     }
 
     #[cfg(unix)]
