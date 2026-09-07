@@ -33,7 +33,11 @@
 #include <stdlib.h>
 
 extern int64_t rt_time_now_seconds(void);
-extern int64_t rt_remove(const char* path);
+/* rt_remove takes a single boxed RuntimeValue text handle (see the code
+ * comment beside its definition for the disassembly evidence), not a raw
+ * C-string pointer -- box the path with rt_string_new before calling it. */
+extern int64_t rt_remove(int64_t path_value);
+extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 extern int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 
 extern int64_t rt_progress_clock_now_nanos(void);
@@ -97,9 +101,11 @@ static void check_time_remove_fsync(void) {
         close(fd);
         CHECK(rt_file_fsync((const uint8_t*)path, (uint64_t)strlen(path)) == 1,
               "rt_file_fsync on an existing regular file returns 1");
-        CHECK(rt_remove(path) == 0, "rt_remove on an existing file returns 0");
+        int64_t boxed_path = rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+        CHECK(rt_remove(boxed_path) == 0, "rt_remove on an existing file returns 0");
         CHECK(access(path, F_OK) != 0, "rt_remove must actually unlink the file");
-        CHECK(rt_remove(path) < 0, "rt_remove on a now-missing file returns a negative errno");
+        int64_t boxed_path2 = rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+        CHECK(rt_remove(boxed_path2) < 0, "rt_remove on a now-missing file returns a negative errno");
     }
 }
 

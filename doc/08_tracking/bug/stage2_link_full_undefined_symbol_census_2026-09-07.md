@@ -472,12 +472,49 @@ resolution is a name collision, not a fix.
 
 ## Bucket 2 misc: what was implemented (2026-09-07, follow-up session, 30 of 90)
 
+**Provenance / baseline note:** this session's worktree is `origin/main` — the
+"FIXED (bucket 1/2, mechanical, 32)" section and table above describe
+`work/stage2-link-census`'s own `runtime_native.c` (PR #489, unmerged at the
+time of this pass), NOT this session's copy of the file. This pass's baseline
+undefined count is therefore the full **246**, not the 214 that branch
+reports; its own relink counts below (246 -> 216) are relative to that same
+246, not a further reduction from 214. This document itself is a copy of that
+branch's file into this session's tree (`git show
+work/stage2-link-census:doc/...`), so a merge of both PRs will conflict on
+this path — the two `runtime_native.c` hunks are independent and
+symbol-disjoint (verified: zero overlap between the 32 names in the table
+above and the 30 named below), so the resolution is a textual union, not a
+semantic one. `cargo check` cannot by itself catch a seed-link duplicate
+(it doesn't link) — that's moot for this change specifically because it adds
+zero Rust and `runtime_native.c` is not in `build.rs`'s source list, so the
+actual link-time proof is the relink step below, not `cargo check`.
+
 Working strictly within "2-deferred: Rust-only, C-lane gap (misc)" (90
 symbols). Skipped per the task's own exclusion list and not touched:
 cranelift JIT bridge (75, separate bucket), sqlite lane wiring (24, separate
 bucket), the 15 "no reference semantics" symbols (`rt_file_view_*_v1`,
 `rt_pinned_archive_*_v1`, `rt_native_build`), UFCS dotted (7) and lenient
 unresolved global (3) — all separate buckets/owners.
+
+**ABI correction found and fixed during review (`rt_remove`):** the first
+draft mirrored `runtime.c`'s literal `int64_t rt_remove(const char* path)`
+signature. Disassembling the real call site in the kept failed-link object
+set (`mod_765.o`,
+`lib__nogc_async_mut__io__file__AsyncDir.remove`: `str x30,[sp,#-16]!; bl
+rt_remove` with **zero** argument setup) proves the caller passes exactly one
+machine word straight through in `x0` — which, by this file's own convention
+for every other single-word `text` argument (`rt_http_get`'s `url_value`,
+`rt_file_atomic_write`'s `path_value`, both decoded via
+`rt_core_as_string`/`rt_core_string_to_cpath`), is a boxed `RuntimeValue`
+handle, not a raw C-string pointer. `runtime.c`'s `const char*` signature
+therefore looks like the same class of pre-existing single-word-vs-raw-pointer
+defect this file's own `rt_file_open_stream` comment warns about elsewhere —
+out of scope to fix in `runtime.c` itself (different file/lane), so the
+shipped `runtime_native.c` definition takes `int64_t path_value` and decodes
+it via `rt_core_string_to_cpath`, matching `rt_file_atomic_write`'s
+convention instead of copying `runtime.c` verbatim. Re-verified after the
+fix: same 246 -> 216 relink delta, 0 new duplicates, selfcheck still passes
+(updated to box the path with `rt_string_new` before calling).
 
 **Implemented (30), all added to `src/runtime/runtime_native.c`** (already an
 archive member, no whitelist change): `rt_time_now_seconds`, `rt_remove`,

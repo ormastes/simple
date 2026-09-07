@@ -9453,23 +9453,36 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
     return (int64_t)time(NULL);
 }
 
-/* Mirrors runtime.c's rt_remove exactly: POSIX file-deletion wrapper taking a
- * single NUL-terminated C-string word, NOT the (ptr,len) tagged-text ABI.
- * `extern fn rt_remove(path: text) -> i64`
+/* Same POSIX file-deletion semantics as runtime.c's rt_remove, but NOT its
+ * `const char* path` signature: `extern fn rt_remove(path: text) -> i64`
  * (src/lib/nogc_sync_mut/io/dir_entry_ops.spl:13) has no
- * codegen/runtime_sffi.rs / text_arg_indices entry -- there is no genuine
- * Rust-native `rt_remove` anywhere (collections.rs deliberately renamed its
- * own removal function to `rt_collection_remove` to avoid colliding with
- * this exact symbol, per that file's own comment) -- so the call site never
- * expands `path` into a (ptr,len) pair and this single-word C-string
- * signature is the one already in effect. */
-SPL_CORE_C_WEAK int64_t rt_remove(const char* path) {
+ * codegen/runtime_sffi.rs / text_arg_indices entry, so `path` is never
+ * expanded into a (ptr,len) pair -- disassembling the real call site in the
+ * kept failed-link object set (mod_765.o,
+ * lib__nogc_async_mut__io__file__AsyncDir.remove: `str x30,[sp,#-16]!; bl
+ * rt_remove` with ZERO argument setup) confirms the caller passes exactly
+ * ONE machine word straight through in x0, which in every other single-word
+ * `text` call site in this file (rt_http_get's url_value, rt_file_atomic_write's
+ * path_value) is the boxed RuntimeValue handle, not a raw C-string pointer.
+ * runtime.c's own `const char*` signature therefore looks like the same
+ * pre-existing single-word-vs-raw-pointer defect this file's rt_file_open_stream
+ * comment warns about elsewhere -- out of scope to fix here (different file,
+ * different lane), so this weak definition decodes the boxed handle via
+ * rt_core_string_to_cpath, matching rt_file_atomic_write's convention, rather
+ * than copying runtime.c's apparently-unsound signature verbatim. */
+SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
     if (!path) return -1;
     struct stat st;
-    if (stat(path, &st) != 0) return -(int64_t)errno;
-    if (S_ISDIR(st.st_mode))
-        return rmdir(path) == 0 ? 0 : -(int64_t)errno;
-    return unlink(path) == 0 ? 0 : -(int64_t)errno;
+    if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
+    int64_t rc;
+    if (S_ISDIR(st.st_mode)) {
+        rc = rmdir(path) == 0 ? 0 : -(int64_t)errno;
+    } else {
+        rc = unlink(path) == 0 ? 0 : -(int64_t)errno;
+    }
+    free(path);
+    return rc;
 }
 
 static int rt_bucket2_fsync_path(const char* path) {
