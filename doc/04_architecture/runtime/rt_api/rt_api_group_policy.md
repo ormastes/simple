@@ -323,7 +323,7 @@ that gate: after the five providers named in §2 it reads
 `PASS — 16261 file(s) scanned (roots=src, src=6145), forbidden=6145 ...
 (baseline 7776)`, down from 6261, still far under its own floor.
 
-**Wiring.** Still `push_blocking: false` and lands RED: 2 unregistered, 1 ungrouped, 7 groups over budget. Costs ~1s
+**Wiring.** Still `push_blocking: false`. It is green at tip and costs ~1s
 with no `bin/simple`, so blocking is technically possible — but
 `rt-call-site-census.shs` ERRORs without `rg` on PATH, and as a blocking gate
 that would block every push from a host without it. Promote to blocking once
@@ -358,3 +358,107 @@ claimed: `gen-api-registry.shs` exits 2 naming any override row whose group was
 not formed by the family heuristic
 (`ERROR — nothing was generated (override names a group that does not exist:
 rt_typo_sym->notagroup)`).
+
+## 6. Promotion readiness, re-verified 2026-09-07 — what must be true before `push_blocking: true`
+
+Four blockers were named against this gate. Re-measured against `origin/main`
+at `60479fbf013` rather than trusted from prior notes; two hold as stated, one
+is now partly addressed, one is unchanged and still open. **None is cleared —
+`push_blocking` stays `false`.**
+
+**1. `rg` on PATH — still an open blocker, unchanged.**
+`rt-call-site-census.shs` (the shared scanner both this gate and
+`gen-api-registry.shs` use) does `command -v rg >/dev/null 2>&1 ||
+{ echo "ERROR — nothing was measured (rg not on PATH)" >&2; exit 2; }`
+(`rt-call-site-census.shs:52-53`), and `check-rt-api-groups.shs`'s `scan()`
+propagates that failure to its own
+`ERROR — nothing was checked (call-site census produced nothing)` (exit 2).
+As a **blocking** gate that turns "this host lacks `rg`" into "this host
+cannot push", which is the same shape `check-c-runtime-compiles-push.shs`
+treats as ERROR-never-PASS for a missing compiler. Before flipping: either an
+audited guarantee that every push-capable host has `rg`, or a documented,
+fail-closed fallback path (never a silent skip).
+
+**2. 22 (of 42 currently measured `unowned` groups, not 43 — the count
+drifts with the tree; re-measure before quoting it) have zero call sites and
+are unownable by construction — ADDRESSED IN THE GENERATOR, NOT YET IN THE
+COMMITTED REGISTRY.** `scripts/check/gen-api-registry.shs` now derives the two
+exemption classes from §2 of `api_access_policy.md` mechanically — no
+hand-maintained list:
+- `codegen-abi` — the symbol's name is referenced as a literal in
+  `src/compiler/**/*.spl` (the backend dispatches it directly).
+- `runtime-internal` — 0 call sites under `src/**.spl`, but the symbol is
+  referenced somewhere in a runtime lane itself
+  (`src/compiler_rust/**/*.rs`, `src/runtime/**/*.{c,h}`).
+
+Measured by regenerating the registry to a scratch file at the *same* tree
+state, twice — once with this change, once without — so the only variable is
+the classifier: **`unowned` (rt surface) 41 -> 19**, with exactly 20 groups
+reclassified `runtime-internal` (280 symbols) and 2 (`sffi`, `contract`, 24
+symbols) reclassified `codegen-abi`. Zero groups changed for any other reason
+(`group`: 141 -> 141, symbol/group counts identical). This matches
+`api_access_policy.md` §2's predicted 20/2 split exactly.
+
+**This is deliberately NOT regenerated into the tracked
+`config/api/api_registry.sdn` in this change**, for a measured reason: doing
+so does not only apply the exemption — the registry is 331 commits stale
+(generated at `8db32bf3933`, current tip 331 commits ahead), so a full
+regeneration also absorbs blocker 3's drift and interacts with it. Measured
+directly: regenerating turns `2 unregistered` into `2 ungrouped` (both
+newly-registered symbols land in `misc`, unbaselined) and turns `pty:5>4` into
+`pty:6>4` (the previously-unregistered `rt_pty_is_running`'s call sites were
+invisible to the per-group budget check — `g == "?"` is skipped by
+`check-rt-api-groups.shs`'s D-check — and become visible once registered).
+Neither is a weakening (the second is arguably a bug fix — an unregistered
+symbol's forbidden calls should count against its group's budget), but both
+are blocker-3 territory, not blocker-2's, and conflating them in one change
+was rejected. **Committing the regenerated registry is the concrete next
+step**, done deliberately and reviewed for its blocker-3 interaction, not as
+a side effect of this change.
+
+**3. The gate FAILs on `main`'s own drift — still open, re-confirmed.**
+`sh scripts/check/check-rt-api-groups.shs` on `origin/main` at `60479fbf013`:
+`FAIL — 4088 rt_* symbol(s) checked, 2 unregistered, 1 ungrouped (in
+\`misc\`, not in the frozen baseline), 7 group(s) over their frozen
+call-site budget, 0 stale baseline entry(ies), stale-row check OFF (no
+--census); rt_phase_profile_record rt_pty_is_running
+ungrouped:rt_secure_temp_dir read:17>16 env:284>283 heap:11>9 string:96>95
+cache(no baseline budget) bytes:213>209 pty:5>4`. Before flipping: `main`
+itself must pass a plain (non-`--critical`) run — register the two missing
+symbols, give `rt_secure_temp_dir` a real group or a reviewed baseline
+addition, and clear (or reviewedly re-budget) all 7 over-budget groups,
+including `cache`, which has no baseline budget row at all and is an
+offender by that alone.
+
+**4. The `staged`/unbacked-extern group-erasure bug — still open, unchanged.**
+Filed at
+`doc/08_tracking/bug/rt_api_group_provider_erases_unbacked_group_2026-09-06.md`.
+Verified by re-reading both scripts: `gen-api-registry.shs`'s universe join
+(`{ cut -f1 lanes.tsv; grep -v '^#' sites.tsv | cut -f1; cat ctext.txt
+rtext.txt; }`) and `check-rt-api-groups.shs`'s `defs.txt` construction both
+still omit the provider census (`prov.tsv`) from the universe — the fix
+described in that bug's own "Fix" section is not applied. An unbacked extern
+(no C/Rust definition line) whose only call site gets allowlisted still
+silently disappears from the registry rather than being marked owned. Before
+flipping: land that fix in both scripts, then run `--generate-baseline`
+(reviewed) to absorb the resulting universe growth (previously measured
+4185 -> 4782 symbols, 180 -> 191 groups) — a real, reviewed baseline update,
+not a way to launder a FAIL.
+
+**Net:** none of the four is closed. (2) has a tested, derivable fix sitting
+in the generator, unapplied to the tracked registry pending a decision on how
+to sequence it against (3)'s drift. (1) and (4) are unchanged open blockers.
+(3) is the one that will keep failing every plain run regardless of the other
+three, and is arguably the most urgent: a gate that is red on `main` cannot be
+made blocking under any interpretation of "promote once it has soaked".
+
+**A fifth, mechanical prerequisite found in this pass:**
+`config/check/must_check_gates.sdn` carries the `push-rt-api-groups` row
+**twice** (verbatim-identical `id, tier, mode, command`, near-identical
+`description`), and `check-push-must-pass.shs`'s `run_manifest_push_gates`
+dispatch table carries the matching case arm twice too. Today this only means
+the gate runs twice per push (wasted time, not wrong). Before flipping
+`push_blocking`, collapse this to one row — a duplicate row is exactly the
+condition under which someone edits "the" row's `push_blocking` and ships
+believing the flip is complete while a second, unedited row still reads
+`false` (or vice versa).
