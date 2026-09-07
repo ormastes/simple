@@ -260,6 +260,25 @@ rotted rc=2
   ERROR — selftest failed: --rev did not read committed content, got [PASS — 1 file(s) scanned (roots=src, src=0), forbidden=0, extern_decls=0 (baseline 1)]
 ```
 
+```
+=== c-runtime-compiles, axis 1 (scan root + include path -> checkout) ===
+rotted rc=2
+  FAILING FIXTURES: fixture12_rev_did_not_read_committed_content(got=[FAIL — 1 file(s) failed to compile: src/runtime/fx_r_broken.c (2 compiled clean, 0 skipped ...)]) fixture13_incomplete_scope_not_fail_closed(got=[PASS — 1 file(s) compiled, 0 errors ...])
+=== c-runtime-compiles, axis 2 (SKIP classifier's in-repo header lookup -> checkout) ===
+rotted rc=2
+  FAILING FIXTURES: fixture12_rev_did_not_read_committed_content(got=[FAIL — 1 file(s) failed to compile: src/runtime/fx_r_needs.c (1 compiled clean, 0 skipped ...)])
+```
+
+**A materialising conversion has a third failure mode the two axes do not
+name: an INCOMPLETE archive.** It does not produce a FAIL, it produces a
+quieter PASS — files drop out of the compiled set into "skipped for an
+unavailable external dependency" and the verdict still says PASS. Caught here
+only by diffing the skip lists between the two paths. Any conversion that
+materialises a SUBSET of the tree must diff its per-file classification
+against the working-tree run before landing, and should fail closed on a
+reference that escapes the archived scope (`check-c-runtime-compiles-push.shs`
+fixture 13 is the worked example).
+
 Note the shape of the two `no-direct-rt` axis-2 rots: both produce a **PASS**,
 not an error — a silently wrong read of the ratchet's own floor. That is the
 `rt-src-list` failure mode this section was written about, and it is now caught.
@@ -285,7 +304,7 @@ the fixture — weaker, and stated here rather than glossed.)
 | 2 | `push-ui-slim-closure-tui-entry` | `check-ui-slim-closure.shs` | no | `--rev` (import-closure over `.spl` source text) — blocked: needs the bootstrap seed to compute deps | TODO |
 | 3 | `push-ui-slim-closure-cli-entry` | `check-ui-slim-closure.shs` | no | as above | TODO |
 | 4 | `push-ui-slim-pack-inventory` | `check-ui-slim-pack-inventory.shs` | no | `--rev`; also needs `config/ui/pack_prefixes.sdn` from the rev | TODO |
-| 5 | `push-c-runtime-compiles` | `check-c-runtime-compiles-push.shs` | **yes** | **materialise + `--root`** — it must feed real `.c`/`.h` files to `clang -fsyntax-only`. Already accepts `--root`, so the dispatch change is `git archive <rev> -- src/runtime` into a temp dir and pass it. Include paths must resolve inside the materialised tree. | TODO |
+| 5 | `push-c-runtime-compiles` | `check-c-runtime-compiles-push.shs` | **yes** | **materialise + `--rev`** (implemented inside the script, not in the dispatcher, so it is fixture-testable). Include paths and the SKIP classifier's in-repo header lookup both derive from the scan root, so repointing it moves them together — that is the second rot axis and fixture 12 injects it. **Trap found and closed here: `src/runtime` is NOT self-contained.** Two owned TUs reach out of it (`src/compiler/70.backend/.../simple_backend_plugin_v1.h`, `tools/counterpart/sdk/c/simple_counterpart_abi.h`), so archiving only `src/runtime` silently turned **130 compiled / 5 skipped into 128 / 7** — a coverage loss wearing a PASS. Fixed by also archiving `':(glob)src/**/*.h'` and `':(glob)tools/**/*.h'` (separate tolerant `git archive` invocations: one no-match pathspec fails the WHOLE archive), and fixture 13 now FAILS CLOSED when any escaping relative include resolves to something present in the revision but absent from the materialised tree. | **DONE 2026-09-07** |
 | 6 | `push-no-direct-rt` | `check-no-direct-rt.shs --roots src` | **yes** | `--rev` over `':(glob)<root>/**/*.spl'` for each `--roots` entry, plus `no_direct_rt_baseline.txt` and `no_direct_rt_allowlist.txt` from the rev. Implemented by relocating `ROOT` itself, since `ALLOWLIST` and `BASELINE_FILE` are both derived from it — so all three inputs move together and cannot drift apart. **THREE rot axes here, not two**: scan root, baseline, and allowlist; fixture 17 injects all three and each was verified caught (below). Measured at conversion: the working checkout scanned 16342 `.spl` where the commit has 16318 — 24 untracked files the gate was counting and no push contained. | **DONE 2026-09-07** |
 | 7 | `push-guard-wiring` | `check-guard-wiring.shs` | **yes** | `--rev`. Design settled, no split needed: the guard ENUMERATION switches from `git ls-files` to `git ls-tree -r --name-only $REV --` (a `git archive` extraction has no `.git`, so `ls-files` there returns nothing — fail-closed, but broken), while the installed-hook check stays on the working machine, since "is the hook installed here" really is a property of this host. One script, `--rev` gating one loop. | TODO |
 | 8 | `push-sosix-capsule-boundaries` | `check-sosix-capsule-boundaries.shs` | no | `--rev`; small (105 lines), accepts `--root` | TODO |
