@@ -4441,8 +4441,13 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
+    // `defined` is a BTreeMap<String, usize>, not a set, so intersect over its keys.
+    // Trim the leading '_' the same way the rest of this test does (Mach-O mangling).
     assert_eq!(
-        defined.intersection(&secure_staging).count(),
+        defined
+            .keys()
+            .filter(|symbol| secure_staging.contains(symbol.trim_start_matches('_')))
+            .count(),
         0,
         "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
     );
