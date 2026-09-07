@@ -70,6 +70,10 @@ typedef SSIZE_T ssize_t;
 #define popen  _popen
 #define pclose _pclose
 
+/* MSVC has no strtok_r; strtok_s takes the same (str, delim, &context)
+ * argument order, so a straight #define is safe. */
+#define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
+
 /* MSVC has no ftruncate; _chsize_s is the CRT equivalent. */
 static int rt_msvc_ftruncate(int fd, long long length) {
     return _chsize_s(fd, length) == 0 ? 0 : -1;
@@ -11107,6 +11111,294 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
     return (const uint8_t*)s->data;
 }
 
+/* ================================================================
+ * Bucket-2 core-C-bootstrap lane gap (2026-09-07 stage2 link census):
+ * rt_env_home / rt_env_vars (env_process.rs), rt_file_open / rt_file_close
+ * (descriptor.rs), rt_file_exists_str (cli_sffi.rs), rt_file_canonicalize /
+ * rt_file_read_lines / rt_file_mmap_read_bytes (file_ops.rs), rt_dir_glob
+ * (directory.rs). rt_file_hash is added later in this file, immediately
+ * after the rt_file_hash_sha256 helper it wraps.
+ *
+ * ABI confirmed by disassembling the real call sites in the kept
+ * failed-link object set
+ * (.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/
+ * native-objects-8HIZif/mod_837.o, lib__nogc_sync_mut__sffi__fs__*), not
+ * just by reading the Rust signature or the codegen/runtime_sffi.rs
+ * RuntimeFuncSpec table -- two of these diverge from what a naive port of
+ * the Rust body would produce:
+ *   - rt_file_open: RuntimeFuncSpec declares 4 I64 params, but the real
+ *     call (file_open in mod_837.o) only ever sets up 3 registers
+ *     (path_ptr, path_len, mode), matching descriptor.rs's actual
+ *     `(path_ptr: *const u8, path_len: u64, mode: i32)` exactly, and
+ *     src/lib/nogc_sync_mut/sffi/fs.spl:130 declares
+ *     `extern fn rt_file_open(path: text, mode: i32) -> i32` (one text +
+ *     one int = 3 words after (ptr,len) expansion). Implemented with that
+ *     3-arg signature, not RuntimeFuncSpec's 4.
+ *   - rt_dir_glob: directory.rs's Rust fn takes FOUR args (dir_ptr, dir_len,
+ *     pattern_ptr, pattern_len) and forwards to rt_file_find, but
+ *     src/lib/nogc_sync_mut/sffi/fs.spl:18 declares
+ *     `extern fn rt_dir_glob(pattern: text) -> [text]` -- ONE text arg --
+ *     and the real call (dir_glob in mod_837.o) sets up exactly two words
+ *     (ptr, len) before tail-calling. Porting the 4-arg Rust body verbatim
+ *     would read the pattern's own (ptr,len) as a bogus (dir_ptr,dir_len)
+ *     pair and dereference garbage for the real pattern text -- implemented
+ *     instead as a single-pattern glob(3) call, matching the actual 2-word
+ *     call site.
+ *   - rt_file_exists_str tail-calls with ZERO argument setup
+ *     (`str x30,[sp,#-16]!; bl rt_file_exists_str`), i.e. the boxed
+ *     RuntimeValue text handle passes straight through in x0, matching
+ *     cli_sffi.rs's `RuntimeValue` (not (ptr,len)) parameter -- decoded here
+ *     via the existing rt_core_string_to_cpath, the same helper rt_remove's
+ *     ABI fix uses for the identical single-word-boxed-text shape.
+ * ---------------------------------------------------------------- */
+
+#if !defined(_WIN32)
+#include <glob.h>
+extern char** environ;
+#endif
+
+/* env_process.rs: rt_env_home() -> RuntimeValue (nil if HOME/USERPROFILE
+ * unset). Zero-arg call, confirmed at every call site (mod_748/798/832/840). */
+int64_t rt_env_home(void) {
+    const char* home = getenv("HOME");
+#if defined(_WIN32)
+    if (!home || home[0] == '\0') home = getenv("USERPROFILE");
+#endif
+    if (!home || home[0] == '\0') return rt_core_nil();
+    return rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+}
+
+/* env_process.rs rt_env_all/rt_env_vars: array of (key, value) 2-tuples,
+ * one per process environment variable. Order is whatever the OS yields.
+ * Zero-arg call, confirmed at every call site (mod_751/809/840). */
+int64_t rt_env_vars(void) {
+    SplArray* out = rt_array_new(0);
+    if (!out) return rt_core_nil();
+#if defined(_WIN32)
+    char** env = _environ;
+#else
+    char** env = environ;
+#endif
+    for (int64_t i = 0; env && env[i]; i++) {
+        const char* entry = env[i];
+        const char* eq = strchr(entry, '=');
+        if (!eq) continue;
+        size_t key_len = (size_t)(eq - entry);
+        const char* value = eq + 1;
+        int64_t key_str = rt_string_new((const uint8_t*)entry, (uint64_t)key_len);
+        int64_t value_str = rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+        int64_t pair = rt_tuple_new(2);
+        if (pair != rt_core_nil()) {
+            rt_tuple_set(pair, 0, key_str);
+            rt_tuple_set(pair, 1, value_str);
+        }
+        rt_array_push(out, pair);
+    }
+    return (int64_t)(uintptr_t)out;
+}
+
+/* descriptor.rs: rt_file_open(path_ptr, path_len, mode) -> fd (-1 on
+ * error). mode: 0=ReadOnly, 1=ReadWrite, 2=WriteOnly. NOT the
+ * RuntimeFuncSpec's declared 4-I64-param shape -- see the file-header note
+ * above; the real call site only ever sets up these 3 words. */
+int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return -1;
+    int fd = -1;
+#if defined(_WIN32)
+    switch (mode) {
+        case 0: fd = _open(path, _O_RDONLY | _O_BINARY); break;
+        case 1: fd = _open(path, _O_RDWR | _O_BINARY); break;
+        case 2: fd = _open(path, _O_WRONLY | _O_BINARY); break;
+        default: fd = -1; break;
+    }
+#else
+    switch (mode) {
+        case 0: fd = open(path, O_RDONLY); break;
+        case 1: fd = open(path, O_RDWR); break;
+        case 2: fd = open(path, O_WRONLY); break;
+        default: fd = -1; break;
+    }
+#endif
+    free(path);
+    return (int32_t)fd;
+}
+
+/* descriptor.rs: rt_file_close(fd) -> success (1) / failure (0). close(2)'s
+ * return code is real, not a constant -- it is where deferred write-back
+ * errors (ENOSPC/EIO/EDQUOT) surface, mirroring descriptor.rs's own
+ * documented rationale. */
+int8_t rt_file_close(int32_t fd) {
+#if defined(_WIN32)
+    return (int8_t)(_close(fd) == 0 ? 1 : 0);
+#else
+    return (int8_t)(close(fd) == 0 ? 1 : 0);
+#endif
+}
+
+/* cli_sffi.rs: rt_file_exists_str(path: RuntimeValue) -> bool. Single boxed
+ * text handle passes straight through -- see the file-header ABI note. */
+int8_t rt_file_exists_str(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return 0;
+    struct stat st;
+    int8_t exists = (int8_t)(stat(path, &st) == 0 ? 1 : 0);
+    free(path);
+    return exists;
+}
+
+/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue
+ * (nil on failure). Deliberately NOT realpath(3)/std::fs::canonicalize --
+ * file_ops.rs's own comment says libc::realpath segfaults in self-hosted
+ * binaries -- so this is a pure lexical normalization: make absolute
+ * (joining the cwd when relative), then drop "." components and pop on
+ * ".." components, without touching the filesystem or resolving symlinks. */
+int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    char* abs = NULL;
+    if (path[0] == '/') {
+        abs = spl_strdup(path);
+    } else {
+        /* rt_getcwd() (runtime.h), not raw getcwd(3): already used the same
+         * way elsewhere in this file (see the realpath fallback a few
+         * hundred lines above) and portable across the WIN32 branch, unlike
+         * a bare getcwd/_getcwd call. */
+        char* cwd = rt_getcwd();
+        if (!cwd) { free(path); return rt_core_nil(); }
+        size_t need = strlen(cwd) + 1 + strlen(path) + 1;
+        abs = (char*)malloc(need);
+        if (abs) snprintf(abs, need, "%s/%s", cwd, path);
+        free(cwd);
+    }
+    free(path);
+    if (!abs) return rt_core_nil();
+
+    char* out = (char*)malloc(strlen(abs) + 2);
+    if (!out) { free(abs); return rt_core_nil(); }
+    out[0] = '/';
+    size_t out_len = 1;
+
+    char* saveptr = NULL;
+    char* tok = strtok_r(abs, "/", &saveptr);
+    while (tok) {
+        if (strcmp(tok, ".") == 0) {
+            /* skip */
+        } else if (strcmp(tok, "..") == 0) {
+            if (out_len > 1) {
+                size_t i = out_len - 1;
+                while (i > 0 && out[i - 1] != '/') i--;
+                out_len = i > 1 ? i - 1 : 1;
+            }
+        } else {
+            size_t tok_len = strlen(tok);
+            if (out_len > 1) out[out_len++] = '/';
+            memcpy(out + out_len, tok, tok_len);
+            out_len += tok_len;
+        }
+        tok = strtok_r(NULL, "/", &saveptr);
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)out_len);
+    free(out);
+    free(abs);
+    return result;
+}
+
+/* file_ops.rs: rt_file_read_lines(path_ptr, path_len) -> RuntimeValue array
+ * of text, one per line (nil on failure). Matches Rust's `.lines()`: split
+ * on '\n', a trailing '\r' is stripped from each line, and a final trailing
+ * newline does NOT produce a spurious empty trailing element. */
+int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return rt_core_nil();
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return rt_core_nil(); }
+    char* content = (char*)malloc((size_t)size + 1);
+    if (!content) { fclose(f); return rt_core_nil(); }
+    size_t got = size > 0 ? fread(content, 1, (size_t)size, f) : 0;
+    fclose(f);
+    if (got != (size_t)size) { free(content); return rt_core_nil(); }
+    content[size] = '\0';
+
+    SplArray* out = rt_array_new(0);
+    if (!out) { free(content); return rt_core_nil(); }
+    size_t start = 0;
+    for (size_t i = 0; i < (size_t)size; i++) {
+        if (content[i] != '\n') continue;
+        size_t end = i;
+        if (end > start && content[end - 1] == '\r') end--;
+        rt_array_push(out, rt_string_new((const uint8_t*)content + start, (uint64_t)(end - start)));
+        start = i + 1;
+    }
+    if (start < (size_t)size) {
+        size_t end = (size_t)size;
+        if (end > start && content[end - 1] == '\r') end--;
+        rt_array_push(out, rt_string_new((const uint8_t*)content + start, (uint64_t)(end - start)));
+    }
+    free(content);
+    return (int64_t)(uintptr_t)out;
+}
+
+/* file_ops.rs: rt_file_mmap_read_bytes(path_ptr, path_len) -> RuntimeValue
+ * byte array (nil on failure). Named for the Rust side's mmap-flavoured
+ * fast path, but semantically just "read the whole file as bytes" --
+ * file_ops.rs's own body is `std::fs::read` + `bytes_to_runtime_array`, not
+ * an actual mmap(2). Uses the same byte-array representation
+ * (rt_byte_array_new_len / RT_CORE_ARRAY_FLAG_BYTES) as that helper. */
+int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return rt_core_nil();
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return rt_core_nil(); }
+    SplArray* arr = rt_byte_array_new_len((uint64_t)size);
+    RtCoreArray* array = rt_core_array_ptr(arr);
+    if (!array) { fclose(f); return rt_core_nil(); }
+    if (size > 0) {
+        size_t got = fread(array->data, 1, (size_t)size, f);
+        fclose(f);
+        if (got != (size_t)size) return rt_core_nil();
+    } else {
+        fclose(f);
+    }
+    return (int64_t)(uintptr_t)arr;
+}
+
+/* directory.rs: rt_dir_glob(pattern_ptr, pattern_len) -> RuntimeValue array
+ * of text (empty array on no match or error). Single-pattern glob(3) call,
+ * matching the real 2-word call site -- see the file-header ABI note; the
+ * Rust fn's 4-arg (dir, pattern) shape is NOT what this lane's callers pass. */
+int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
+    SplArray* out = rt_array_new(0);
+    if (!out) return rt_core_nil();
+#if !defined(_WIN32)
+    char* pattern = rt_core_text_arg_to_cstr(pattern_ptr, pattern_len);
+    if (!pattern) return (int64_t)(uintptr_t)out;
+    glob_t results;
+    memset(&results, 0, sizeof(results));
+    int rc = glob(pattern, 0, NULL, &results);
+    free(pattern);
+    if (rc == 0) {
+        for (size_t i = 0; i < results.gl_pathc; i++) {
+            const char* p = results.gl_pathv[i];
+            rt_array_push(out, rt_string_new((const uint8_t*)p, (uint64_t)strlen(p)));
+        }
+    }
+    globfree(&results);
+#else
+    (void)pattern_ptr;
+    (void)pattern_len;
+#endif
+    return (int64_t)(uintptr_t)out;
+}
+
 int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     static atomic_uint_fast64_t sequence = 0;
     RtCoreString* path_string = rt_core_as_string(path_value);
@@ -12108,6 +12400,21 @@ int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
         snprintf(hex + i * 8, 9, "%08x", state[i]);
     }
     return rt_string_new((const uint8_t*)hex, 64u);
+}
+
+/* cli_sffi.rs: rt_file_hash(path: RuntimeValue) -> hex SHA-256 text, or an
+ * EMPTY (not nil) text on any failure, matching the Rust body exactly
+ * (`rt_string_new("".as_ptr(), 0)` on every error path). Single boxed text
+ * handle passes straight through (tail call, zero argument setup at the
+ * real call site, mod_838.o file_hash) -- same shape as rt_file_exists_str
+ * above and rt_remove's ABI fix. Thin wrapper over rt_file_hash_sha256. */
+int64_t rt_file_hash(int64_t path_value) {
+    uint64_t len = 0;
+    const uint8_t* bytes = rt_core_string_bytes(path_value, &len);
+    if (!bytes) return rt_string_new(NULL, 0);
+    int64_t hex = rt_file_hash_sha256(bytes, len);
+    if (hex == rt_core_nil()) return rt_string_new(NULL, 0);
+    return hex;
 }
 
 /* Run `cmd` through the shell and return captured stdout as a runtime string
