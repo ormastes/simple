@@ -1007,29 +1007,21 @@ pub use numeric_kernels::{
     rt_numeric_mul_f32, rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64, rt_numeric_xor_sum_u64,
 };
 
-// Phase 1 SIMD int bitwise/shift/arithmetic `#[no_mangle]` wrappers
-// (rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x{4,8}) were REMOVED
-// 2026-09-07 as dead/wrong-ABI duplicates of the C implementations in
-// runtime_simd_dispatch.c — see
-// doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md.
-// The private lane-kernel functions (`add_i32x4` etc.) are still used
-// directly by `compiler/src/interpreter_extern/simd.rs` and are not
-// re-exported here.
+// Re-export Phase 1 SIMD int bitwise / shift / arithmetic SFFI symbols.
+pub use simd_int_ops::{
+    rt_simd_add_i32x4, rt_simd_add_i32x8, rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_mul_i32x4, rt_simd_mul_i32x8,
+    rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8, rt_simd_shr_i32x4, rt_simd_shr_i32x8,
+    rt_simd_sub_i32x4, rt_simd_sub_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
+};
 
-// Phase 2 (seed) SIMD byte SFFI symbol `rt_simd_add_u8x16` was REMOVED for
-// the same reason (see above); `rt_simd_xor_u8x16` was never re-exported
-// here either.
+// Re-export Phase 2 (seed) SIMD byte SFFI symbol.
+pub use simd_byte_ops::rt_simd_add_u8x16;
 
-// Re-export Phase 2 SIMD AES round SFFI symbols. Unlike the removals above,
-// these ARE the correct, RUNTIME_FUNCS-registered, actively-used ABI, so
-// they stay; the C definitions of the same two names in
-// runtime_simd_dispatch.c are weak-linked so these win when both are linked
-// (see that file's SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 gate).
+// Re-export Phase 2 SIMD AES round SFFI symbols.
 pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 
-// Phase 3 SIMD u64x2 + PCLMUL SFFI symbols (rt_simd_clmul_lo_u64,
-// rt_simd_clmul_hi_u64, rt_simd_xor_u64x2) were REMOVED 2026-09-07 for the
-// same dead/wrong-ABI reason as the Phase 1 symbols above.
+// Re-export Phase 3 SIMD u64x2 + PCLMUL SFFI symbols.
+pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
 
 // Re-export regex SFFI functions
 pub use sffi::{

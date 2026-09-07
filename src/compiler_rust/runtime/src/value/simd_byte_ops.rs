@@ -158,12 +158,108 @@ fn xor_u8x16_impl(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     ]
 }
 
-// NOTE (2026-09-07): the `#[no_mangle] pub extern "C" fn rt_simd_{add,xor}_u8x16`
-// wrappers formerly here have been REMOVED as duplicate/wrong-ABI symbols —
-// see doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md.
-// `src/runtime/runtime_simd_dispatch.c` now provides these under the real
-// tagged-pointer calling convention (confirmed by disassembling real compiled
-// call sites); nothing in this crate called the 33-scalar-argument wrappers.
+// ---------------------------------------------------------------------------
+// `pub extern "C"` symbol for compiled-mode linkage parity.
+//
+// Mirrors Phase 1's lane-array-shaped ABI: 16 + 16 + *mut u8 = 33 args.
+// Once a Vec16u8 marshalling layer lands, this signature can be tightened.
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn rt_simd_add_u8x16(
+    a0: u8,
+    a1: u8,
+    a2: u8,
+    a3: u8,
+    a4: u8,
+    a5: u8,
+    a6: u8,
+    a7: u8,
+    a8: u8,
+    a9: u8,
+    a10: u8,
+    a11: u8,
+    a12: u8,
+    a13: u8,
+    a14: u8,
+    a15: u8,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+    b7: u8,
+    b8: u8,
+    b9: u8,
+    b10: u8,
+    b11: u8,
+    b12: u8,
+    b13: u8,
+    b14: u8,
+    b15: u8,
+    out: *mut u8,
+) {
+    let r = add_u8x16(
+        [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15],
+        [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15],
+    );
+    unsafe {
+        for (i, lane) in r.iter().enumerate() {
+            *out.add(i) = *lane;
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn rt_simd_xor_u8x16(
+    a0: u8,
+    a1: u8,
+    a2: u8,
+    a3: u8,
+    a4: u8,
+    a5: u8,
+    a6: u8,
+    a7: u8,
+    a8: u8,
+    a9: u8,
+    a10: u8,
+    a11: u8,
+    a12: u8,
+    a13: u8,
+    a14: u8,
+    a15: u8,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+    b7: u8,
+    b8: u8,
+    b9: u8,
+    b10: u8,
+    b11: u8,
+    b12: u8,
+    b13: u8,
+    b14: u8,
+    b15: u8,
+    out: *mut u8,
+) {
+    let r = xor_u8x16(
+        [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15],
+        [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15],
+    );
+    unsafe {
+        for (i, lane) in r.iter().enumerate() {
+            *out.add(i) = *lane;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
