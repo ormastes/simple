@@ -35,3 +35,5 @@ dev-done
 - push: Fixed the analogous interpreter-extern push ratchet after current main proved independently red; its 9-fixture selftest and exact SciLib tip/base scan pass with zero branch-added gaps.
 - push: Converted the blocking SFFI v2 aggregate to an exact committed-base failure-set ratchet; five focused fixtures distinguish unchanged red mainline debt from a newly failing topic guard.
 - push: Reproduced the main-test-runnable clean-fixture parse failure on the current debug seed and restored positional construction for the reserved `auto` field; reopened the prematurely closed portability bug.
+- impl: Replaced three false-green math-block absence checks with behavioral transpose/axis-reduction assertions and compiled text/LaTeX renderer regression contracts.
+- verify: Rust compiler library and test targets type-check; executing Rust unit tests is blocked by tracked TODO-286 (duplicate `rt_simd_*` link symbols).

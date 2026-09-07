@@ -118,6 +118,18 @@ being pushed; a working-tree green is not evidence about committed content.
 5. **Optional cleanup:** `_raw_array_len` (`nogc_async_mut/ndarray/mod.spl:59`)
    has zero callers repo-wide. Left alone deliberately as out of scope.
 
+### 0.5 Continuation audit (2026-09-08)
+
+The math-block acceptance file contained three false-green absence assertions:
+`.T`, axis-aware reductions, and `\cdot` rendering all passed precisely because
+the required behavior was missing. They now use behavioral `m{}` assertions or
+compiled renderer regression contracts. Parser/evaluator/rendering support was
+implemented and `cargo check -p simple-compiler --tests` passes. The executable
+Rust unit-test target remains blocked at link time by active `TODO-286`, where
+the C and Rust runtimes export duplicate `rt_simd_*` symbols. The math plan rows
+therefore remain open until a rebuilt self-hosted binary runs the corrected
+acceptance scenarios; no historical green result is reused.
+
 ---
 
 ## 1. Measured state (2026-09-07)
