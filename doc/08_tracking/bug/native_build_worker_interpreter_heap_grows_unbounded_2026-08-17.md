@@ -1042,3 +1042,129 @@ coverage extension was judged reachable and was done first; the ambient-
 bootstrap path (§3), the two backend/opt candidates (§4), and — newly found
 this pass — the missing `rt_env_vars` interpreter extern (blocks re-verifying
 ANY of this by full interpreted execution) are the next things to attempt.
+
+## Addendum 2026-09-07 — the ambient-bootstrap census, and the fix
+
+The previous addendum left the ambient-bootstrap exclusion in
+`lower_module_transient_scoped` (`50.mir/_MirLowering/module_lowering.spl`) in
+place because "the `_bootstrap_mir_*` / `_bootstrap_fn_*` / `_bootstrap_hir_*`
+registries' write-sites were never censused to the same rigour as the
+non-ambient set." This addendum is that census, run against
+`origin/main@a44cad728e5` from a fresh worktree on `work/mir-bootstrap-transient-census`.
+
+### Census table
+
+Every `_bootstrap_mir_*`, `_bootstrap_fn_*` and `_bootstrap_hir_*` registry,
+grepped exhaustively (assignment, `.push`, `.pop`, dict-index-assign, `.remove`)
+across the whole tree — not reasoned from shape.
+
+| registry family | declared at | write sites | written during MIR lowering? | outlives per-module scope? |
+|---|---|---|---|---|
+| `_bootstrap_mir_functions`, `_function_names`, `_function_modules`, `_function_return_type_tags`, `_function_return_unsigned`, `_function_param_starts`, `_function_param_counts`, `_function_param_type_tags`, `_module_count_value` (9 vars, statics below) | `50.mir/_MirLowering/bootstrap_globals.spl:95-111` | ALL confined to `bootstrap_globals.spl`: `bootstrap_mir_functions_add` (:177-205), `bootstrap_mir_modules_add` (:253-300), plus the flat-bridge helpers `bootstrap_lower_flat_hir_module_to_mir` (:388-508), `bootstrap_lower_hir_globals_to_mir_module_for_target` (:813-932), `bootstrap_lower_extra_hir_module_to_mir_for_target` (:936-1047). Called from `module_lowering.spl:1438,1456,2009` (inside `lower_module`, reached via `lower_module_transient_scoped`) AND from `driver_bootstrap.spl:169,195,216,289` (the SIMPLE_BOOTSTRAP_REAL_LLVM lane, which runs with NO transient scope active at all — ambient-safe by construction, contributes to the 37 GB but not to the UAF risk). | YES, on the entry-closure path (`module_lowering.spl:1429-1456`, gated on `ambient_bootstrap_enabled()`). | YES — read in `bootstrap_llvm_name_index_ensure` (:638-695) from **70.backend** (`_MirToLlvm/core_codegen.spl:2818,2827`, `bootstrap_llvm_exact_function_index`/`bootstrap_llvm_module_local_function_index`), a phase that runs strictly after every per-module MIR scope has begun-and-ended. Also read cross-module by later-lowered modules via `bootstrap_mir_function_*_at` accessors during backend codegen. |
+| `_bootstrap_mir_static_modules/_symbol_ids/_names/_type_tags/_init_kinds/_init_payloads/_alignments/_visibilities` (8 vars) | `bootstrap_globals.spl:104-111` | Same functions as above (`bootstrap_mir_modules_add`, copy-modify-reassign pattern at :258-299). | YES, same path. | YES, read via `bootstrap_mir_static_*_at` accessors (:748-773), used by 70.backend to emit global data after the lowering loop ends. |
+| `_bootstrap_function_value_names` | `bootstrap_globals.spl:112` | `bootstrap_function_value_names_reset` (:114), `bootstrap_register_function_value_module` (:117-123) | YES | Lower risk than the two families above (reset per-module, drained into `lowering.current_function_names` at :413, which is covered by `promote_transient_owner()`'s whole-`self` walk) — but the global var itself is still live heap that could be read by a subsequent module before its own reset if ordering ever changes, so promoted defensively. |
+| `_bootstrap_fn_ret_types`, `_ret_hir_types`, `_ret_hir_ambig`, `_ret_shapes`, `_ret_shape_ambig`, `_ret_ok_shapes`, `_ret_ok_shape_ambig`, `_param_hir_types`, `_param_defaults`, `_param_defaults_ambig` (10 Dicts) | `50.mir/mir_data.spl:917-1048` | ALL confined to `mir_data.spl`'s 6 `bootstrap_fn_*_register` functions (:919,940,959,989,1011,1056), each a `dict[name] = value` in-place mutation. Called from `module_lowering.spl:1154-1211` (prescan, before the module's own functions lower) and `:1429` (per-function, inside `lower_module`), all inside `lower_module_transient_scoped`. Also called from `bootstrap_globals.spl:145-149,384,860-861,983-986` (same flat-bridge helpers as above). | YES | YES by explicit design — `mir_data.spl:911-916`'s own comment: "the registry must accumulate across ALL closure modules because cross-module call sites need the callee module's declared types" — i.e. module N+1's lowering reads a value module N wrote. This is the single strongest piece of evidence in the whole census: the code's own author already documented the cross-scope read requirement. |
+| `_bootstrap_hir_functions`, `_hir_module_names/_symbols/_functions/_constants/_enums/_structs/_classes`, `_hir_entry_index`, `_hir_module_committed_count` | `20.hir/hir_lowering/_Items/lowering_helpers.spl:50-72` | `bootstrap_hir_modules_reset/_add/_add_from_module` (:94-159) | YES, but in the **HIR** lowering phase, not MIR — **OUT OF SCOPE for this fix**, and already solved: `bootstrap_hir_modules_promote_last()` (:198-219) promotes both the newly-committed row AND all seven outer owner arrays, called from `driver_hir_pipeline_lowering.spl:159` inside `lower_streaming_surface_source`'s own per-file transient scope (:131-165), which begins/pauses/promotes/ends before MIR lowering ever starts. `bootstrap_hir_modules_rollback_last` (:220-238) additionally undoes a partial commit on promotion failure — a rollback discipline this fix's MIR side does not need to replicate because `lower_module_transient_scoped`'s existing convention already treats ANY `Err` as fatal-abort-the-compile (see `driver_pipeline_lowering.spl:355-361`, "never continue on a half-reclaimed lowering"), so a promotion failure just aborts rather than needing a partial-row rollback. | N/A to this fix; this family is the reference implementation the MIR fix mirrors. |
+
+### Dict/Array transitivity, verified against the runtime source (not assumed)
+
+`rt_transient_heap_promote` (`compiler_rust/runtime/src/value/collections.rs:1921-1966`)
+walks the reachable graph via `transient_heap_children` (:1838-1889) and calls
+`rt_transient_raw_promote`/removes each visited object from the active scope's
+kill-list (`scope.objects.retain(...)`) rather than copying — so aliasing
+across structures (confirmed separately for `_bootstrap_mir_functions`'
+`MirFunction.name` fields by `driver_types.spl:1286-1288`'s "aliased from
+OUTSIDE the dict ... by `_bootstrap_mir_functions`" comment) is safe: promotion
+removes an object from the CURRENT scope's free-list, it does not clone it.
+`transient_heap_children`'s `Dict` arm (:1857-1874) walks every bucket's
+key+value pair, `Array`'s arm walks the element slice — both covering the
+"outer container, not just the pushed element" requirement, because `.push()`/
+dict-insert can reallocate backing storage while a scope is active, and only
+promoting the container adopts that reallocation too (the same reasoning
+`bootstrap_hir_modules_promote_last` already documents for its own outer
+arrays).
+
+### Conclusion: (a) — promotable, and the change is made
+
+The registries are promotable, following the `_bootstrap_hir_*` family's
+already-proven pattern exactly. Change made on `work/mir-bootstrap-transient-census`:
+
+- `bootstrap_mir_registries_promote()` added (`bootstrap_globals.spl`, after
+  `_bootstrap_function_value_names`'s declaration) — promotes all 17 `_bootstrap_mir_*`
+  arrays plus `_bootstrap_function_value_names`.
+- `bootstrap_fn_registries_promote()` added (`mir_data.spl`, after the last
+  `bootstrap_fn_param_defaults_lookup`, exported) — promotes all 10
+  `_bootstrap_fn_*` Dicts.
+- `lower_module_transient_scoped` (`module_lowering.spl`): the
+  `if self.ambient_bootstrap_enabled(): return Ok(self.lower_module(module))`
+  early-return is **removed** — the ambient-bootstrap path now takes the same
+  scoped route as every other module. Both new promote calls are inserted
+  after `self.promote_transient_owner()` and before `rt_transient_array_scope_end()`,
+  each following the existing fail-closed convention (promotion failure ->
+  `rt_transient_array_scope_end()` + `Err(...)`, which the caller already
+  treats as fatal).
+- `_bootstrap_hir_*` (20.hir) is untouched — it is a different phase with its
+  own already-working scope, not part of this escape set.
+
+### Gate extension (done, and proven to fail on pre-fix content)
+
+`scripts/check/check-mir-transient-scope-boundary.shs` check (8) previously
+asserted the ambient-bootstrap exclusion **must stay** (`ambient_bootstrap_enabled()`
+present in the wrapper body). It now asserts the opposite invariant: both
+`bootstrap_mir_registries_promote()` and `bootstrap_fn_registries_promote()`
+must appear in the wrapper body. Fixture E (`noambient`) is repurposed from
+"guard removed" (previously a FAIL case under the OLD invariant) to "guard
+removed AND registries not promoted" (the real hazard shape under the NEW
+invariant) — still a required FAIL fixture.
+
+Verified directly, not just via the fixture:
+
+```
+$ sh scripts/check/check-mir-transient-scope-boundary.shs --selftest
+PASS — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape
+
+$ sh scripts/check/check-mir-transient-scope-boundary.shs   # this worktree, fixed
+PASS — 12 invariant(s) checked, per-module MIR lowering runs inside a paired
+transient scope with both escaping roots promoted
+
+$ sh scripts/check/check-mir-transient-scope-boundary.shs --root <origin/main checkout>
+FAIL — 12 invariant(s) checked in <root>: bootstrap-mir-registries-not-promoted;
+bootstrap-fn-registries-not-promoted
+```
+
+The last run extracted `origin/main@a44cad728e5`'s committed
+`driver_pipeline_lowering.spl` and `module_lowering.spl` into an isolated temp
+tree (not this worktree, not the shared checkout) and ran the extended gate
+against it — proving the new assertion genuinely discriminates real pre-fix
+content, not just the synthetic selftest fixtures.
+
+### What this addendum does NOT establish — stated plainly, not papered over
+
+Per the task's own hard constraint (a second bootstrap must not contend with
+the one already running on this host) and the pre-existing, unrelated
+`rt_env_vars` interpreter-extern gap this record's previous addendum already
+found (blocks running the full interpreted `.spl` compiler graph end-to-end —
+see above), this session did **not**:
+
+1. Rebuild a self-hosted `bin/simple` from this changed source and run a real
+   `SIMPLE_BOOTSTRAP=1` native compile of a hello-world fixture through it.
+   Source-level verification only: the gate script's static scan, and the
+   changed code's structural identity with the already-proven, already-running
+   `_bootstrap_hir_*` promotion pattern (same runtime primitives, same
+   promote-the-outer-container discipline, same fail-closed-on-promote-failure
+   convention).
+2. Measure before/after peak RSS or `[heap]` brk from `/proc/<pid>/smaps_rollup`
+   on a natively compiled fixture, for the same reason (needs a rebuilt
+   compiler binary to exercise the changed `.spl` source).
+3. Prove the resulting binary's output is unchanged for a hello-world program.
+
+These three are the genuine residual gap. The right time to close them is the
+next session that already has a freshly bootstrapped `bin/simple` reflecting
+this change (or once the in-flight bootstrap on this host completes and frees
+the machine) — at that point: `SIMPLE_BOOTSTRAP=1 bin/simple native-build
+hello.spl`, compare `/proc/<pid>/smaps_rollup` `[heap]` Rss against a run built
+from `origin/main` at the same revision, and confirm `./hello` still prints
+`Hello, world!`. Do not treat this addendum's conclusion (a) as closing the
+issue until that measurement exists — it establishes the change is
+*source-level correct and consistent with the one proven precedent in this
+codebase*, not that it has been measured.

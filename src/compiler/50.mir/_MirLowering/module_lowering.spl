@@ -1245,16 +1245,27 @@ impl MirLowering:
            `std.common.mcdc.model`, `std.nogc_sync_mut.io.process_ops`,
            `std.nogc_sync_mut.sffi.system`) declares a module-level `var`.
 
-        AMBIENT BOOTSTRAP IS EXCLUDED, deliberately. That path writes the flat
-        `_bootstrap_mir_*` registries (`_MirLowering/bootstrap_globals.spl`),
-        `mir_data.spl`'s `_bootstrap_fn_*` dicts and 20.hir's
-        `_bootstrap_hir_*` arrays. Those are NOT reachable from either
-        promoted root, so freeing the arena would dangle them. That escape set
-        is not proven here, so the scope is not taken there and the path runs
-        byte-for-byte as before — a narrower boundary is the correct answer to
-        an unproven one."""
-        if self.ambient_bootstrap_enabled():
-            return Ok(self.lower_module(module))
+        AMBIENT BOOTSTRAP escape set, now enumerated and promoted (previously
+        excluded -- see
+        doc/08_tracking/bug/native_build_worker_interpreter_heap_grows_unbounded_2026-08-17.md
+        for the census). That path additionally writes the flat
+        `_bootstrap_mir_*` registries (`_MirLowering/bootstrap_globals.spl`)
+        and `mir_data.spl`'s `_bootstrap_fn_*` dicts. Both accumulate ACROSS
+        modules by design (a later module's cross-module call/prescan lookup
+        reads an earlier module's row) and are read again after the whole
+        entry-closure loop ends (70.backend's `bootstrap_llvm_name_index_ensure`
+        reads `_bootstrap_mir_function_names`), so a value written into them
+        during module i's scope must survive module i's `scope_end`.
+        `bootstrap_mir_registries_promote` / `bootstrap_fn_registries_promote`
+        promote every OUTER array/dict (not just the newly pushed/inserted
+        element), matching 20.hir's proven `bootstrap_hir_modules_promote_last`
+        pattern (hir_lowering/_Items/lowering_helpers.spl), because `.push()`/
+        dict-insert can reallocate the backing store while a scope is active
+        and that reallocation must be adopted too. 20.hir's `_bootstrap_hir_*`
+        arrays are OUT OF SCOPE here -- they are written and promoted inside
+        their OWN per-file transient scope in
+        `driver_hir_pipeline_lowering.spl:lower_streaming_surface_source`,
+        a phase that completes before this one ever runs."""
         # The scope is thread-local and non-reentrant: `begin` returns false
         # when one is already live. Reclamation is an optimisation and must
         # never be the reason a module fails to lower, so a refused scope
@@ -1274,6 +1285,12 @@ impl MirLowering:
         if not self.promote_transient_owner():
             val _ended_owner = rt_transient_array_scope_end()
             return Err("MIR lowering owner promotion failed for {module.name}")
+        if not bootstrap_mir_registries_promote():
+            val _ended_mir_registries = rt_transient_array_scope_end()
+            return Err("bootstrap MIR registry promotion failed for {module.name}")
+        if not bootstrap_fn_registries_promote():
+            val _ended_fn_registries = rt_transient_array_scope_end()
+            return Err("bootstrap fn registry promotion failed for {module.name}")
         if not rt_transient_array_scope_end():
             return Err("transient MIR scope end failed for {module.name}")
         Ok(lowered)

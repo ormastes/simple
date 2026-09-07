@@ -163,12 +163,19 @@ scan_tree() {
     ')
     [ "${_unpaired}" = "0" ] || _fails="${_fails}${_fails:+; }unpaired-error-returns=${_unpaired}"
 
-    # (8) The ambient-bootstrap exclusion must still be there. That path writes
-    #     the flat _bootstrap_* registries, which neither promoted root
-    #     reaches; removing this guard turns the scope into a use-after-free.
+    # (8) The ambient-bootstrap path is no longer excluded (see the census in
+    #     doc/08_tracking/bug/native_build_worker_interpreter_heap_grows_unbounded_2026-08-17.md),
+    #     but that is safe ONLY because the flat `_bootstrap_mir_*` /
+    #     `_bootstrap_fn_*` registries those modules write are now promoted
+    #     out of the scope before it ends. A tree that dropped the exclusion
+    #     WITHOUT adding both promotions is the exact use-after-free shape the
+    #     exclusion used to guard against, so both calls are mandatory.
     _checked=$((_checked + 1))
-    printf '%s\n' "${_body}" | grep -q 'ambient_bootstrap_enabled()' \
-        || _fails="${_fails}${_fails:+; }ambient-bootstrap-exclusion-removed"
+    printf '%s\n' "${_body}" | grep -q 'bootstrap_mir_registries_promote()' \
+        || _fails="${_fails}${_fails:+; }bootstrap-mir-registries-not-promoted"
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'bootstrap_fn_registries_promote()' \
+        || _fails="${_fails}${_fails:+; }bootstrap-fn-registries-not-promoted"
 
     echo "SCAN_RESULT ${_checked} ${_fails}"
 }
@@ -197,8 +204,6 @@ selftest() {
 EOF
     cat > "${_tmp}/fixed/${LOWER_REL}" <<'EOF'
     me lower_module_transient_scoped(module: HirModule) -> Result<MirModule, text>:
-        if self.ambient_bootstrap_enabled():
-            return Ok(self.lower_module(module))
         if not rt_transient_array_scope_begin():
             return Ok(self.lower_module(module))
         val lowered: MirModule = self.lower_module(module)
@@ -211,6 +216,12 @@ EOF
         if not self.promote_transient_owner():
             val _e3 = rt_transient_array_scope_end()
             return Err("owner promote failed")
+        if not bootstrap_mir_registries_promote():
+            val _e4 = rt_transient_array_scope_end()
+            return Err("mir registries promote failed")
+        if not bootstrap_fn_registries_promote():
+            val _e5 = rt_transient_array_scope_end()
+            return Err("fn registries promote failed")
         if not rt_transient_array_scope_end():
             return Err("end failed")
         Ok(lowered)
@@ -244,14 +255,16 @@ EOF
     sed 's/self\.promote_transient_owner()/true/' \
         "${_tmp}/fixed/${LOWER_REL}" > "${_tmp}/noowner/${LOWER_REL}"
 
-    # Fixture E: the ambient-bootstrap exclusion removed. Must FAIL.
+    # Fixture E: the ambient-bootstrap exclusion is gone (as intended, per the
+    # 2026-08-17 bug's census) but the bootstrap MIR/fn registries the
+    # exclusion used to protect are NOT promoted before scope end. This is
+    # the exact use-after-free shape: the flat `_bootstrap_mir_*`/
+    # `_bootstrap_fn_*` accumulators get freed with the arena, then read by a
+    # later module or by 70.backend after the loop ends. Must FAIL.
     _mk "${_tmp}/noambient"
     cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/noambient/${DRIVER_REL}"
-    grep -v 'ambient_bootstrap_enabled()' "${_tmp}/fixed/${LOWER_REL}" \
-        | grep -v 'return Ok(self.lower_module(module))$' > "${_tmp}/noambient/${LOWER_REL}"
-    # keep the begin-fallback return so only the ambient guard is missing
-    printf '        if not rt_transient_array_scope_begin():\n            return Ok(self.lower_module(module))\n' \
-        >> "${_tmp}/noambient/${LOWER_REL}"
+    grep -v 'bootstrap_mir_registries_promote()\|bootstrap_fn_registries_promote()\|mir registries promote failed\|fn registries promote failed\|val _e4 = rt_transient_array_scope_end()\|val _e5 = rt_transient_array_scope_end()' \
+        "${_tmp}/fixed/${LOWER_REL}" > "${_tmp}/noambient/${LOWER_REL}"
 
     # Fixture G: the entry-closure loop is fixed but the fallback loop
     # (self.ctx.sources.len() <= 0 branch) still calls lower_module directly.
