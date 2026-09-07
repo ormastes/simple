@@ -84,6 +84,50 @@ jj --ignore-working-copy restore --from <chosen-side> --to <ROOT> <paths...>
 
 Side policy is per-path: paths whose latest truth is local restore from the pre-rebase local tip sha; paths already superseded upstream restore from `main@origin` (verify by symbol-grep on origin first). `--ignore-working-copy` is required — it skips the WC snapshot and dodges "Concurrent checkout" races.
 
+
+## Pushing a release tag
+
+`git push origin refs/tags/vX.Y.Z[-pre.N]` goes through the same pre-push hook
+as a branch push, and **needs no `--no-verify`** as of 2026-09-07.
+
+A tag push carries zero new commits, so every range-scoped gate is vacuous on
+it: the range resolves to 0 commits and the guards correctly answer `ERROR —
+nothing was checked` (exit 2) rather than a false pass. Until this was fixed the
+first blocking row killed the push — measured pushing `v1.0.1-beta.1`,
+`BLOCKING gate push-conflict-markers failed (exit 2)`, on a commit that was
+already on `origin/main` and had already passed those same gates through PRs
+#457 and #458. The only way through was `--no-verify`, which disables *every*
+gate rather than only the vacuous ones, on the one push where provenance matters
+most.
+
+`check-push-must-pass.shs` now recognises `refs/tags/*` and admits it **fail
+closed**, on one condition it verifies rather than assumes:
+
+```
+push-must-check: tag refs/tags/vX.Y.Z -> <commit> is already published on
+                 refs/remotes/<remote>/main; 0 new commits, range gates do not apply
+```
+
+The tag is admitted only when its target commit is already an ancestor of the
+push remote's `main` — i.e. the content was gated when it landed through a PR. A
+tag pointing at unpublished content is **refused**:
+
+```
+tag refs/tags/vX.Y.Z points at <commit>, which is not published on
+refs/remotes/<remote>/main; land the commit through a pull request first
+```
+
+That is deliberate. A tag push is not an admission path for content that has
+never been through the gates, and this is what stops "skip the checks for
+releases" from becoming a hole. The conflict-tree union still runs over the tag
+in every case, because it is not range-scoped.
+
+Consequences for the release flow:
+
+- fetch first — the check needs `refs/remotes/<remote>/main` to exist locally,
+  and says so instead of failing open if it does not;
+- tag the commit that is already on `main`, never a local-only commit;
+- if you see the refusal, the fix is to land the commit, not to bypass the hook.
 ## Pre-push guards
 
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
