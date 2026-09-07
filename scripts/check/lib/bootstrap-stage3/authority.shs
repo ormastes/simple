@@ -1775,10 +1775,21 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         "$bootstrap_stage3_hosted_receipt=0400" \
         "$bootstrap_stage3_hosted_path=0400" || return 1
     if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" != 1 ]; then
+        # Same platform limitation as the sibling tolerance a few lines above
+        # (the $win check on deps/receipt/hosted-path, and the uname-gated
+        # writability scan before it): chmod on a DIRECTORY is a no-op on
+        # MSYS/MinGW/Cygwin -- measured directly (`chmod 0500 d` returns rc=0
+        # and leaves the directory at 755) -- so asserting exact mode 0500 on
+        # $bootstrap_stage3_hosted_root unconditionally fails 100% of the time
+        # on Windows, regardless of retries. This block was missed when that
+        # tolerance was added; do not "fix" it back to a bare equality check.
+        # Existence, non-symlink, and directory-ness stay asserted everywhere;
+        # only the exact-mode equality is relaxed, and only on those platforms.
         perl -MFcntl=:mode -e '
             my @st = lstat($ARGV[0]);
-            @st && !S_ISLNK($st[2]) && S_ISDIR($st[2]) &&
-                S_IMODE($st[2]) == oct("0500") or exit 1;
+            @st && !S_ISLNK($st[2]) && S_ISDIR($st[2]) or exit 1;
+            my $win = $^O =~ /^(?:MSWin32|msys|cygwin)$/;
+            exit 1 unless $win || S_IMODE($st[2]) == oct("0500");
         ' "$bootstrap_stage3_hosted_root" || return 1
     fi
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=$bootstrap_stage3_hosted_relative
