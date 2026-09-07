@@ -588,13 +588,24 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
     return false;
 }
 
-/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only). */
+/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only).
+ *
+ * The teardown half was missing: std.gpu.engine2d.webgpu_sffi declares six
+ * rt_webgpu_* externs, this file backfilled only is_available/init/
+ * create_surface, and a core-C Stage-4 link of any closure reaching that
+ * module therefore failed with "requested symbols have no archive owner:
+ * rt_webgpu_destroy_surface, rt_webgpu_shutdown" (macOS, 2026-09-06).
+ * Same fail-closed contract as the three above: this lane has no wgpu
+ * provider, so acquisition already returns unavailable and teardown has
+ * nothing to release. */
 bool rt_webgpu_is_available(void) { return false; }
 bool rt_webgpu_init(void) { return false; }
 int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
     (void)width; (void)height;
     return 0;
 }
+bool rt_webgpu_shutdown(void) { return false; }
+bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
@@ -650,6 +661,32 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_create_window(const char* title,
     (void)title; (void)width; (void)height;
     return 0;
 }
+/* Present is reached from std.io.window_sffi's frame path, which the io
+   package hub re-exports, so a core-C Stage-4 link of almost any CLI closure
+   requests it even though nothing calls it here. Missing while its two
+   siblings above were present; same weak fail-closed contract, and
+   rt_sdl2_create_window already returned 0, so no window can exist to
+   present to. runtime_sdl2.c owns the real implementation and overrides this
+   weak definition whenever that TU is in the link. */
+SPL_HOSTED_UNAVAILABLE_WEAK bool rt_sdl2_present_rgba(int64_t window_handle,
+                                                       SplArray* pixels,
+                                                       int64_t width,
+                                                       int64_t height) {
+    (void)window_handle; (void)pixels; (void)width; (void)height;
+    return false;
+}
+
+/* Host-surface selector. The real implementation is Rust-only
+   (src/runtime/hosted/select.rs); a core-C link has no hosted surface at all,
+   so it must answer SEL_REFUSED (-2) = "no verified native arm".
+   NOT 0 — that is SEL_WINIT, a real selector that os/compositor/
+   hosted_backend.spl brings up as SDL2, so returning it here would claim a
+   surface this lane cannot provide. -1 is SEL_NONE ("unset, fall through to
+   host default") and would be just as wrong. Keep in sync with the constants
+   at select.rs:46-57. */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_hosted_select_surface(void) {
+    return -2;
+}
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
     return false;
@@ -669,6 +706,28 @@ int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_o
     (void)path; (void)args; (void)gc_log; (void)gc_off;
     fprintf(stderr, "simple: --fork requires hosted interpreter support\n");
     return 1;
+}
+
+/* Raw mmap for the SMF loader (src/compiler/99.loader/smf_mmap_native.spl).
+   Exactly the runtime.c-not-an-archive-member case documented above: the only
+   definition is platform/unix_common.h:365, reached solely through
+   platform/platform.h, which runtime.c:35 is the sole TU to include -- and
+   runtime.c is not a core-C archive member. Without this, a core-C Stage-4
+   link of the full CLI failed with "requested symbols have no archive owner:
+   rt_mmap_raw" (macOS, 2026-09-06). This is real functionality, not a
+   fail-closed backfill: the loader must actually map. Kept byte-for-byte
+   equivalent to the unix_common.h implementation, including its refusal to
+   admit W|X, and confined to the standalone lane so it can never collide with
+   that definition in a link that does carry runtime.c. */
+int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
+                    int64_t fd, int64_t offset) {
+    if (length <= 0 || offset < 0) return -1;
+    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
+    void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot,
+                        (int)flags, (int)fd, (off_t)offset);
+    if (result == MAP_FAILED) return -1;
+    return (int64_t)(uintptr_t)result;
 }
 #endif
 

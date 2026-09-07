@@ -536,3 +536,74 @@ fix it.
 
 Each iteration costs a full Stage-4 rebuild (~50 min), so these should be
 batched into one change rather than verified one at a time.
+
+## Gate 5 resolved to two remaining defects, with a 60-second reproducer
+
+Five of the six symbols were half-backed boundaries in the C core and are fixed
+(webgpu teardown, SDL2 present, hosted selector, raw mmap — see the commit).
+What is left is `rt_numeric.f64`, and running it down produced two distinct
+defects plus a fast reproducer. Build this with
+`--runtime-bundle core-c-bootstrap` and the link fails in about a minute:
+
+```
+fn dotp(a: [f64], b: [f64]) -> f64:
+    var acc = 0.0
+    var n = a.len()
+    if b.len() < n:
+        n = b.len()
+    var i = 0
+    while i < n:
+        acc = acc + a[i] * b[i]
+        i = i + 1
+    acc
+```
+```
+Undefined symbols for architecture arm64:
+  "_rt_numeric.f64", referenced from: ..._dotp in mod_0.o
+```
+
+### Defect A — the emitted kernel name is malformed
+
+The SIMD dot-reduction lowering names its kernel `rt_numeric_dot_f64`
+(`pipeline/lowering.rs:1290-1292`), which is defined (`T`) in
+`libsimple_native_all.a` and the Rust `libsimple_runtime.a`. What reaches the
+object file is `rt_numeric.f64` — the name split at `_dot_`, this backend's
+escape for a `.` inside a mangled Simple identifier, into owner `rt_numeric` +
+member `f64`. Here `_dot_` is literal: it is a dot *product*.
+
+**The producing site was not found, and four candidates are ruled OUT by
+instrumentation, not by reading:** `split_enum_qualified_name`
+(`mir/lower/lowering_expr_call.rs`), and `resolve_call_target`, `resolve_name`
+and `resolve_method_call_static` (`pipeline/native_project/mangle.rs`) were each
+given an `eprintln!` on any name containing `numeric`, rebuilt, and re-probed —
+**none of them ever sees such a name**. Guards added there were therefore
+reverted rather than left in as unverified edits. `SIMPLE_DUMP_MIR` produces no
+output on this path either, so `codegen/common_backend.rs` is not the lane the
+native build uses. Whoever picks this up starts from a working 60-second
+reproducer and four eliminated suspects.
+
+### Defect B — the core-C lane has no f64 reduction kernels, and their ABI is not the Rust one
+
+`rt_numeric_sum_f64` and `rt_numeric_dot_f64` exist only in the Rust runtime,
+which `core-c-bootstrap` does not link, so the lowering's rewrite is
+unsatisfiable in this lane even with the name spelled correctly.
+
+C implementations were written, measured, and then **removed** rather than
+shipped. Two measurements say the call ABI is not the Rust `RuntimeValue` one:
+
+| version | `sumf([1.5, 2.5])` |
+|---|---|
+| returns boxed `rt_value_float(acc)` | `2.14e-315` — the returned tagged pointer read back as a raw double |
+| returns raw `double acc` | `2.5` — a real double, but only the last element |
+
+So the call site wants a raw `f64` return (not a boxed value), and reading
+elements with `rt_array_get` + `rt_core_as_float` does not recover them —
+consistent with the Rust lane's `pack_f64_array` packed representation rather
+than tagged slots.
+
+They were removed because a wrong `sum`/`dot` is worse than a link error: these
+kernels are substituted for *every* f64 accumulation loop, so silently wrong
+arithmetic would reach `Embedding.dot` (search/embeddings) and the spreadsheet
+formula engine with nothing to signal it. Getting this right needs the packed
+f64 array ABI pinned down first, with a behavioural test alongside
+`src/runtime/test/rt_core_exports_behaviour_selfcheck.c`.
