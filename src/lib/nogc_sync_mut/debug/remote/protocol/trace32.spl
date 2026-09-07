@@ -88,6 +88,30 @@ impl Trace32Client:
     fn halt() -> Result<text, text>:
         self.run_command("Break")
 
+    # Wait up to `timeout_ms` for the target to reach a stop, then force a
+    # halt. Ported from `app.debug.remote.protocol.trace32.Trace32Client`
+    # (the only prior implementation of this method), which the
+    # `nogc_sync_mut` stdlib port of this class never carried over. This is
+    # a real, load-bearing call site: `Trace32Adapter.wait_halt`
+    # (src/lib/nogc_sync_mut/debug/remote/exec/adapter_trace32.spl) wires it
+    # in as `wait_halt_fn` for `RemoteExecutionManager`. It went undetected
+    # under native-build because nothing forced this call graph reachable
+    # until the closure-outlining fix in
+    # doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md
+    # made more of the program's real control flow visible to the linker.
+    fn wait_for_stop(timeout_ms: i32) -> Result<text, text>:
+        val secs = Trace32Client.wait_seconds(timeout_ms)
+        shell("sleep {secs}")
+        self.halt()
+
+    static fn wait_seconds(timeout_ms: i32) -> i32:
+        if timeout_ms <= 0:
+            return 1
+        val whole = timeout_ms / 1000
+        if whole < 1:
+            return 1
+        whole
+
     fn resume() -> Result<text, text>:
         self.run_command("Go")
 
