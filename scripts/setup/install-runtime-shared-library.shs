@@ -1,0 +1,92 @@
+#!/bin/sh
+# Install libsimple_runtime as a real, versioned shared library.
+#
+# Cargo emits the cdylib as a bare `libsimple_runtime.so`, but the library now
+# carries DT_SONAME=libsimple_runtime.so.<major> (set in
+# src/compiler_rust/runtime/build.rs). A consumer therefore records
+# `libsimple_runtime.so.<major>` in DT_NEEDED, and ld.so will NOT find a file
+# named plain `libsimple_runtime.so`. That is not a bug: it is the whole point
+# of a SONAME, and it is why an install step -- not just a build -- is required.
+#
+# The conventional three-name layout is created:
+#   libsimple_runtime.so.<major>.<minor>.<patch>   real file
+#   libsimple_runtime.so.<major>          -> real  runtime (the SONAME; ld.so resolves this)
+#   libsimple_runtime.so                  -> .<major>  link-time (`-lsimple_runtime`)
+#
+# The static archive is installed alongside, never instead: freestanding and
+# bootstrap lanes still link `libsimple_runtime.a`, and SimpleOS has no dynamic
+# loader at all (doc/05_design/runtime/dynamic_library/shared_runtime_libraries.md).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+usage() {
+    cat <<'USAGE'
+usage: install-runtime-shared-library.shs --build-dir DIR --prefix DIR [--version X.Y.Z]
+
+  --build-dir DIR  cargo target dir holding libsimple_runtime.so (and .a)
+  --prefix DIR     install root; libraries land in <prefix>/lib
+  --version X.Y.Z  library version (default: read from runtime/Cargo.toml)
+USAGE
+}
+
+build_dir=""
+prefix=""
+version=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --build-dir) build_dir="${2:?--build-dir needs a value}"; shift 2 ;;
+        --prefix)    prefix="${2:?--prefix needs a value}"; shift 2 ;;
+        --version)   version="${2:?--version needs a value}"; shift 2 ;;
+        -h|--help)   usage; exit 0 ;;
+        *) echo "ERROR — unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$build_dir" ] || { echo "ERROR — nothing was installed (--build-dir is required)" >&2; exit 2; }
+[ -n "$prefix" ]    || { echo "ERROR — nothing was installed (--prefix is required)" >&2; exit 2; }
+
+if [ -z "$version" ]; then
+    version=$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/ { print $2; exit }' \
+        "$ROOT_DIR/src/compiler_rust/runtime/Cargo.toml" 2>/dev/null || true)
+fi
+[ -n "$version" ] || { echo "ERROR — nothing was installed (could not determine version)" >&2; exit 2; }
+major=${version%%.*}
+
+soname="libsimple_runtime.so.${major}"
+real="libsimple_runtime.so.${version}"
+src_so="${build_dir}/libsimple_runtime.so"
+src_a="${build_dir}/libsimple_runtime.a"
+
+[ -f "$src_so" ] || { echo "ERROR — nothing was installed (missing $src_so)" >&2; exit 2; }
+
+libdir="${prefix}/lib"
+mkdir -p "$libdir"
+
+# Install the real file, then swing the symlinks. cp to a temp name + mv keeps
+# the operation atomic for a reader that is mid-dlopen.
+cp -f "$src_so" "${libdir}/${real}.new"
+mv -f "${libdir}/${real}.new" "${libdir}/${real}"
+ln -sf "$real" "${libdir}/${soname}"
+ln -sf "$soname" "${libdir}/libsimple_runtime.so"
+
+installed=1
+# The static archive is installed ALONGSIDE, not replaced -- freestanding
+# targets and the bootstrap Stage 4 link still require it.
+if [ -f "$src_a" ]; then
+    cp -f "$src_a" "${libdir}/libsimple_runtime.a.new"
+    mv -f "${libdir}/libsimple_runtime.a.new" "${libdir}/libsimple_runtime.a"
+    installed=$((installed + 1))
+fi
+
+# Verify the SONAME actually made it, rather than trusting the build.
+if command -v readelf >/dev/null 2>&1; then
+    actual=$(readelf -d "${libdir}/${real}" 2>/dev/null \
+        | awk -F'[][]' '/SONAME/ { print $2; exit }')
+    if [ "$actual" != "$soname" ]; then
+        echo "FAIL — installed library SONAME is '${actual:-<none>}', expected '${soname}'" >&2
+        exit 1
+    fi
+fi
+
+echo "PASS — ${installed} artifact(s) installed to ${libdir} (soname=${soname}, real=${real})"

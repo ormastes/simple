@@ -20,6 +20,10 @@ use std.nogc_sync_mut.path.{dirname}
 # reporting success, surfacing later as `native-capsule-receipt-invalid`.
 # `file_write_exact`/`file_read_nullable` are uniquely named and rt-backed, so
 # they cannot be captured by the same-arity `file_write_text` overload set.
+# The flat function registry is keyed on NAME ALONE, so a mock anywhere in the
+# import closure hijacks the call site -- the same hazard this file's own header
+# already records at :34-40 for `file_read_bytes`. See
+# doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
     compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
@@ -151,6 +155,12 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
 # real and unambiguous.
 @always_inline
 fn _sffi_file_write_text(path: text, content: text) -> bool:
+    # `file_write_exact` is the one-call runtime status (io_runtime.spl:250):
+    # every caller below writes into `cache_scope_root`, which
+    # `_sffi_dir_create(cache_scope_root, true)` has already created, so the
+    # create-parent-and-retry policy of `file_write` would only mask a genuinely
+    # missing directory. Callers here treat `false` as a hard build error and
+    # need the honest status.
     unsafe(capabilities: [ffi]):
         file_write_exact(path, content)
 
@@ -237,6 +247,35 @@ fn driver_native_classify_module_failure_v1(detail: text) -> BuildOutcomeKind:
 # Record one FAILED module and keep going. The whole point of accumulating
 # rather than returning: ONE build must name EVERY bad module, instead of each
 # defect costing a full ~20-minute run to discover.
+# Last line of defence for the "(none recorded — BUG in the producer)" summary.
+#
+# `BuildOutcomeSet.reason_block_for` is right that a non-OK unit must carry a
+# diagnostic, and it is right to say so loudly rather than print silence. But it
+# can only print what the producer handed it, and the AOT lane's `Err` payload
+# is destroyed on the compiled stage-2 crossing (see `_aot_compile_failure`), so
+# the summary was accusing the producer of a bug it could not avoid. The real
+# reason is already on stdout by the time this runs; what this restores is the
+# INVARIANT -- every non-OK unit carries a non-empty, self-describing reason
+# that names where the text was lost, so the summary is never mistaken for
+# "failed for no reason".
+#
+# This is deliberately NOT a substitute for the payload fix: an empty detail
+# here is itself evidence of the crossing defect, and says so.
+# `detail != ""` alone is NOT a sufficient emptiness test on this path. The
+# payload that reaches here can be a corrupt tagged word (the `<invalid-heap:0x…>`
+# shape in the bug record), which compares unequal to `""` and yet renders as
+# nothing downstream -- so a value that passed this guard still arrived at
+# `reason_block_for` as empty, which is precisely how a "non-empty" detail became
+# "(none recorded)". Test the LENGTH as well: it is a different lowering path
+# from text comparison, so the two together catch both the empty and the corrupt
+# case. Anything non-positive is treated as lost.
+fn driver_native_nonempty_failure_detail(detail: text) -> text:
+    if detail != "" and detail.len() > 0:
+        return detail
+    "diagnostic lost crossing the AOT Result boundary (see the 'error: AOT "
+        + "compile error' line above for the real reason); tracked in "
+        + "doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md"
+
 fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
                                        name: text, detail: text):
     outcomes.record(BuildUnitOutcome(
@@ -442,11 +481,37 @@ pub fn driver_native_capsule_result_reason_v1(
         expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
     val actual = _sffi_file_read_text(receipt_path) ?? ""
     if actual != expected:
+        # Report LENGTHS, not the two blobs: the receipt is ~1.3 KB and the
+        # difference is what matters. A length pair that is equal while the texts
+        # differ localises the mismatch to content; an unequal pair localises it
+        # to truncation on read.
         return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}"
     ""
 
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
     driver_native_capsule_result_reason_v1(capsule) == ""
+
+# The owner-only cache checkpoint is the ONE failure path in this file that never
+# printed anything: `_compile_selected_module` routes its failures through
+# `_aot_compile_failure` (which prints at the raising site), but a capsule that
+# COMPILED fine and then failed collection returned a bare tag to a caller that
+# only stored it. Measured 2026-09-06 on the rejected stage-2: the object file and
+# its capsule-receipt were both produced on disk, so the compile succeeded and the
+# build still failed -- with the summary saying "(none recorded)", because the
+# stored tag arrived empty. Print here for the same reason `_aot_compile_failure`
+# prints: a diagnostic that only travels by return value is lost exactly when it
+# is needed. Literal line first (nothing can silence it), then the tag and the
+# detail BARE, so a collapsed interpolation localises rather than erases.
+fn _collect_failure(module_name: text, tag: text, detail: text) -> text:
+    print "error: native capsule collection failed -- module, tag and detail follow"
+    _sffi_stdout_flush()
+    print module_name
+    print tag
+    print detail
+    _sffi_stdout_flush()
+    print "error:   tag-len={tag.len()} detail-len={detail.len()}"
+    _sffi_stdout_flush()
+    "{tag}:{module_name}: {detail}"
 
 pub fn driver_native_collect_capsule_result_v1(
     batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
@@ -455,15 +520,21 @@ pub fn driver_native_collect_capsule_result_v1(
     """Owner-only authenticated cache checkpoint for one completed capsule."""
     val capsule = frozen_native_capsule_batch_find_v1(batch, module_name)
     if not capsule.ok or object_path != capsule.object_path:
-        return "native-capsule-result-mismatch:{module_name}"
+        return _collect_failure(module_name, "native-capsule-result-mismatch",
+            "capsule-ok={capsule.ok} produced={object_path}"
+                + " capsule-object={capsule.object_path}")
     if capsule.cache_source != "" and (
         capsule.source_identity == ""
         or driver_native_disk_source_identity(capsule.cache_source)
             != capsule.source_identity):
-        return "native-capsule-source-mutated:{module_name}"
+        return _collect_failure(module_name, "native-capsule-source-mutated",
+            "cache-source={capsule.cache_source}"
+                + " capsule-identity={capsule.source_identity}"
+                + " disk-identity={driver_native_disk_source_identity(capsule.cache_source)}")
     val receipt_reason = driver_native_capsule_result_reason_v1(capsule)
     if receipt_reason != "":
-        return "native-capsule-receipt-invalid:{module_name}:{receipt_reason}"
+        return _collect_failure(module_name, "native-capsule-receipt-invalid",
+            receipt_reason)
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:
@@ -471,7 +542,8 @@ pub fn driver_native_collect_capsule_result_v1(
             [], [object_path], capsule.module_witness)
         build_cache.save()
         return ""
-    "native-capsule-fingerprint-failed:{module_name}"
+    _collect_failure(module_name, "native-capsule-fingerprint-failed",
+        "FileFingerprint.from_file returned nil for {capsule.cache_source}")
 
 pub fn driver_native_capsule_inputs_valid_v1(
     capsule: FrozenNativeModuleCapsuleV1, backend_name: text, target: text,
@@ -1267,13 +1339,19 @@ impl CompilerDriver:
                             capsules, build_cache, name, obj_path)
                         if collect_error != "":
                             module_unit_id = module_unit_id + 1
+                            # Wrapped like the two Err sites below: `collect_error
+                            # != ""` admitted it, but that test does not survive a
+                            # corrupt payload, so an unwrapped detail could still
+                            # reach the summary as "(none recorded)".
                             driver_native_record_module_failure(module_outcomes,
-                                module_unit_id, name, collect_error)
+                                module_unit_id, name,
+                                driver_native_nonempty_failure_detail(collect_error))
                         cache_miss_count = cache_miss_count + 1
                     case Err(e):
                         module_unit_id = module_unit_id + 1
                         driver_native_record_module_failure(module_outcomes,
-                            module_unit_id, name, e)
+                            module_unit_id, name,
+                            driver_native_nonempty_failure_detail(e))
                         cache_miss_count = cache_miss_count + 1
             else:
                 # `unstable` and `unit_timeout_ms` were omitted here. Partial
@@ -1344,7 +1422,8 @@ impl CompilerDriver:
                     for unit_err in build_result.errors:
                         module_unit_id = module_unit_id + 1
                         driver_native_record_module_failure(module_outcomes,
-                            module_unit_id, unit_err[0], unit_err[1])
+                            module_unit_id, unit_err[0],
+                            driver_native_nonempty_failure_detail(unit_err[1]))
                     val first_err = build_result.errors[0]
                     log_build_progress("native_compile", "modules",
                         cache_hit_count + build_result.stats.completed,
@@ -1547,6 +1626,67 @@ impl CompilerDriver:
 # Single-ParserModule Compilation Helper (for ParallelBuilder)
 # ============================================================================
 
+# Emit an AOT failure reason at its RAISING site, then return it.
+#
+# The `Err` payload of this lane does not survive the return crossing on the
+# compiled self-hosted (stage-2) binary. It first surfaced as
+# `AOT compile error in <unit>: <invalid-heap:0x…>` -- the payload rendered as a
+# misdecoded tagged word -- and, once the raising site moved behind
+# `_finish_selected_module_compile`, degraded further to an EMPTY payload, which
+# `BuildOutcomeSet.reason_block_for` prints as
+# "(none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)".
+# Measured 2026-09-06: the SAME source interpreted under the seed prints the real
+# text ("scalar object-path AOT is available only for builtin LLVM"), so the
+# message is correct where it is raised and is destroyed only on the way out.
+#
+# Printing here makes the diagnostic independent of that crossing: if the payload
+# is lost the operator still has the reason, and the summary's fallback below
+# still names a non-empty producer site. This does NOT paper over the ABI defect
+# -- it is tracked separately in
+# doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md --
+# it removes that defect's ability to blind every failure on this path.
+# CORRECTED 2026-09-06 -- an earlier revision of this comment claimed as measured
+# fact that this function ran 222 times and printed 222 empty lines. That claim is
+# REFUTED by later evidence from the same run: the object file (1080 bytes) and
+# its capsule-receipt were both present on disk, so `_compile_frozen_module_capsule`
+# returned `Ok` and this function was NOT on the failing path at all. The failing
+# path is the collection checkpoint below. What IS measured: the log carries one
+# unexplained blank line per failure and not one `error: AOT compile error in ...`
+# line; the ORIGIN of that blank line is unidentified, and this comment does not
+# claim otherwise.
+#
+# The hardening below is kept because it is correct for the path it guards, and
+# because the payload corruption it defends against is independently recorded in
+# doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md
+# (`err.to_text()` rendering as `<invalid-heap:0x…>`): a diagnostic that depends
+# on interpolating a possibly-corrupt operand can be silenced together with the
+# literal text around it. Three
+# independent statements, ordered most-robust first, so a collapse localises the
+# corruption instead of erasing the message:
+#   1. a pure-literal line -- no operands, so nothing can silence it. Its
+#      presence alone proves this function ran, which is the fact that was
+#      unobtainable before.
+#   2. `print name` / `print detail` BARE -- a bare print of a text value does
+#      not build an interpolated temporary, so it survives crossings that
+#      collapse `"{...}"`. This is the line that carries the real reason.
+#   3. the lengths, via i64 interpolation -- a different lowering path from text
+#      interpolation, so a zero/garbage length distinguishes "the payload is
+#      empty" from "the payload is corrupt" without guessing.
+# A blank line from (2) with a non-zero length from (3) is positive evidence of
+# the text-crossing defect, not an absence of evidence.
+fn _aot_compile_failure(name: text, detail: text) -> Result<text, text>:
+    print "error: AOT compile error -- unit, reason and lengths follow on the next lines"
+    _sffi_stdout_flush()
+    print "error:   unit (bare):"
+    print name
+    _sffi_stdout_flush()
+    print "error:   reason (bare):"
+    print detail
+    _sffi_stdout_flush()
+    print "error:   name-len={name.len()} reason-len={detail.len()}"
+    _sffi_stdout_flush()
+    Err("AOT compile error in {name}: {detail}")
+
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
@@ -1554,15 +1694,15 @@ fn _compile_frozen_module_capsule(
 ) -> Result<text, text>:
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
     if not batch.ok:
-        return Err("AOT compile error in {name}: invalid-capsule-batch")
+        return _aot_compile_failure(name, "invalid-capsule-batch")
     val capsule = frozen_native_capsule_batch_find_v1(batch, name)
     if not capsule.ok or capsule.module_name != name:
-        return Err("AOT compile error in {name}: capsule-not-found")
+        return _aot_compile_failure(name, "capsule-not-found")
     if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
         is_release, opt_level, provider_receipt_hash):
-        return Err("AOT compile error in {name}: capsule-identity-mismatch")
+        return _aot_compile_failure(name, "capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
-        return Err("AOT compile error in {name}: capsule-registry-mismatch")
+        return _aot_compile_failure(name, "capsule-registry-mismatch")
     val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
@@ -1578,18 +1718,18 @@ fn _compile_frozen_module_capsule(
         case Err(error): return Err(error)
         case Ok(object_path):
             if not capsule.identity_valid():
-                return Err("AOT compile error in {name}: capsule-mir-lease-violated")
+                return _aot_compile_failure(name, "capsule-mir-lease-violated")
             if object_path != capsule.object_path:
-                return Err("AOT compile error in {name}: capsule-object-path-mismatch")
+                return _aot_compile_failure(name, "capsule-object-path-mismatch")
             val object_fp = FileFingerprint.from_file(object_path)
             if not object_fp.?:
-                return Err("AOT compile error in {name}: capsule-object-fingerprint-failed")
+                return _aot_compile_failure(name, "capsule-object-fingerprint-failed")
             val receipt_path = capsule.object_path + ".capsule-receipt"
             var receipt = ""
             if val fp = object_fp:
                 receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
-                return Err("AOT compile error in {name}: capsule-receipt-write-failed")
+                return _aot_compile_failure(name, "capsule-receipt-write-failed")
             # Do not trust the write's own bool. A `file_write_text` name
             # collision (a same-arity stdlib shadow returning `()`) once made
             # this call a silent no-op that still read as success, so the
@@ -1597,7 +1737,7 @@ fn _compile_frozen_module_capsule(
             # opaque `native-capsule-receipt-invalid`. Read the receipt back and
             # fail at the write site with a name that says what happened.
             if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
-                return Err("AOT compile error in {name}: capsule-receipt-write-unverified")
+                return _aot_compile_failure(name, "capsule-receipt-write-unverified")
             Ok(object_path)
 
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
@@ -1606,11 +1746,11 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             frozen_target_cpu: text,
                             backend_session: BackendSession?) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
-        return Err("AOT compile error in {name}: storage-snapshot-module-mismatch")
+        return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0:
-        return Err("AOT compile error in {name}: MIR module has no functions")
+        return _aot_compile_failure(name, "MIR module has no functions")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"
@@ -1631,31 +1771,72 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         val diagnostic_dir = secure_temp_dir_raw(
             dirname(obj_path), "simple-aot-diagnostic")
         if diagnostic_dir == "":
-            return Err("AOT compile error in {name}: diagnostic staging unavailable")
+            return _aot_compile_failure(name, "diagnostic staging unavailable")
         val diagnostic_path = diagnostic_dir + "/message"
         val status = session.compile_aot_into_path(
             mir_module, is_release, opt_level, frozen_target_cpu,
             storage_snapshot.sites, obj_path, diagnostic_path)
         if status != 0:
-            var detail = "backend object-path status {status}"
+            # Deliver the reason from INSIDE the arm that binds it. This block
+            # used to hoist the payload into a `var detail` in the enclosing
+            # frame and call `_aot_compile_failure(name, detail)` afterwards;
+            # the reason then arrived as `reason-len=-1` while strace showed the
+            # diagnostic bytes reaching the process (`read(...) = 32`).
+            #
+            # nil vs NULL-data-pointer is STILL NOT PINNED, and the obvious way
+            # to pin it does not work -- recorded here so nobody spends the
+            # hours again. `rt_string_len` returns -1 for any word it cannot
+            # decode as a heap string when that word is < 0x10000
+            # (runtime_native.c), which covers BOTH nil (3) and 0, so the length
+            # alone cannot separate them. `rt_core_print_value_to` COULD (its
+            # RT_VALUE_SPECIAL_NIL arm writes nothing, while word 0 carries
+            # RT_VALUE_TAG_INT and prints `0`) -- but the native lane never
+            # reaches it: `print` lowers to `rt_println`, not `rt_println_value`
+            # (llvm_lib_translate_expr.spl:600), and `rt_println` takes a
+            # `const char*`, so the argument is `rt_string_data(v)`, which is
+            # NULL for 3 and for 0 alike. MEASURED 2026-09-07: the bare line IS
+            # empty and reason-len IS -1, which is consistent with both words
+            # and therefore discriminates neither. A discriminator has to come
+            # from a runtime entry point that sees the raw word.
+            #
+            # Both fixes below are correct for either word, which is why they do
+            # not wait on that answer:
+            #   1. the crossing itself -- `_aot_compile_failure` is now called
+            #      inside the arm, the same rule `_finish_selected_module_compile`
+            #      below already documents for `err.to_text()`.
+            #   2. the guard -- `message != ""` is TRUE for a nil, so the old
+            #      code overwrote a good interpolated default with the nil it had
+            #      just been handed. `message.len() > 0` rejects nil (-1) and
+            #      empty (0) alike, so a corrupt payload now falls through to the
+            #      literal default instead of erasing it.
+            # Cleanup is reported by printing, never by interpolating the reason
+            # into a longer string: an operand that can be corrupt must not be
+            # able to silence the text around it.
             match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
                 case Ok(message):
-                    if message != "":
-                        detail = message
+                    if message.len() > 0:
+                        if not dir_remove(diagnostic_dir, true):
+                            print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
+                            _sffi_stdout_flush()
+                        return _aot_compile_failure(name, message)
                 case Err(_): ()
             if not dir_remove(diagnostic_dir, true):
-                detail = "{detail}; diagnostic staging cleanup failed: {diagnostic_dir}"
-            return Err("AOT compile error in {name}: {detail}")
+                print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
+                _sffi_stdout_flush()
+            return _aot_compile_failure(name, "backend object-path status {status}")
         match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
             case Ok(message):
-                if message != "":
+                # `.len() > 0`, not `!= ""`: a nil payload compares UNEQUAL to
+                # "" and would print an empty warning line. -1 (nil) and 0
+                # (empty) are both rejected here.
+                if message.len() > 0:
                     print "warning: backend AOT: {message}"
             case Err(_): ()
         if not dir_remove(diagnostic_dir, true):
             print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         if (not file_is_regular_no_follow(obj_path)
             or file_size_raw(obj_path) <= 0):
-            return Err("AOT compile error in {name}: invalid object output")
+            return _aot_compile_failure(name, "invalid object output")
         return Ok(obj_path)
     _finish_selected_module_compile(
         compile_module_with_backend_target_cpu_storage_bindings(
@@ -1669,7 +1850,10 @@ fn _finish_selected_module_compile(
     # Keep Result and optional object-code payloads inside their binding scope.
     match compiled:
         case Err(err):
-            Err("AOT compile error in {name}: {err.to_text()}")
+            # Render the payload to text HERE, inside the arm that binds it.
+            # `_aot_compile_failure` then emits it before this frame returns,
+            # so the reason survives even when the Err crossing does not.
+            _aot_compile_failure(name, err.to_text())
         case Ok(module):
             if val obj_bytes = module.object_code:
                 val obj_path = "{output_base}.{name}.o"
@@ -1681,8 +1865,9 @@ fn _finish_selected_module_compile(
                     case Ok(_):
                         Ok(obj_path)
                     case Err(e):
-                        Err("Failed to write object file {obj_path}: {e}")
+                        _aot_compile_failure(name,
+                            "failed to write object file {obj_path}: {e}")
             else:
-                Err("Backend produced no object code for {name}")
+                _aot_compile_failure(name, "backend produced no object code")
         case _:
-            Err("AOT compile error in {name}: backend result not Ok")
+            _aot_compile_failure(name, "backend result not Ok")

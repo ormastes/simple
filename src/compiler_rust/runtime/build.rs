@@ -9,6 +9,7 @@ mod runtime_export_scan;
 mod runtime_signature_scan;
 
 fn main() {
+    emit_cdylib_soname();
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
     println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
@@ -138,6 +139,45 @@ fn main() {
     generated.push_str("];\n");
 
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
+}
+
+/// Give the `cdylib` a real shared-library identity instead of leaving it a
+/// build by-product.
+///
+/// Without a SONAME an ELF consumer records the *path it was linked against*
+/// in `DT_NEEDED`, so the library cannot be installed, versioned, or resolved
+/// by `ld.so` from a system directory. `rustc-cdylib-link-arg` is the right
+/// lever because it applies ONLY to the cdylib link step: the `rlib` and
+/// `staticlib` outputs of this same crate are unaffected, which is what keeps
+/// the freestanding/static lane (`libsimple_runtime.a`, and the
+/// `simple-native-all` archive that Stage 4 actually links) byte-for-byte
+/// unchanged. Putting `-soname` in `.cargo/config.toml` rustflags would
+/// instead stamp it onto every crate in the workspace, including binaries.
+///
+/// The version is taken from `CARGO_PKG_VERSION_MAJOR` so the SONAME tracks a
+/// deliberate ABI break rather than every patch release.
+fn emit_cdylib_soname() {
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".to_string());
+    match target_os.as_str() {
+        // ELF platforms: DT_SONAME.
+        "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-soname,libsimple_runtime.so.{major}"
+            );
+        }
+        // Mach-O: the install name is the SONAME equivalent. `@rpath` keeps the
+        // dylib relocatable so a consumer picks it up via its own LC_RPATH.
+        "macos" | "ios" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libsimple_runtime.{major}.dylib"
+            );
+        }
+        // PE/COFF has no SONAME concept: the DLL name is embedded in the import
+        // library that rustc emits alongside the DLL. Nothing to do.
+        _ => {}
+    }
 }
 
 /// Emit the canonical callable ABI for symbols that are also declared by the

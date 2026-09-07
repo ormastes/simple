@@ -1,5 +1,21 @@
 use std.spec
 use std.io_runtime.{file_read}
+use compiler.mir.mir_lowering.{bootstrap_mir_functions_reset, bootstrap_mir_functions_add,
+    bootstrap_llvm_exact_function_index, bootstrap_llvm_module_local_function_index}
+use compiler.mir.mir_instructions.{MirFunction, MirSignature, MirType, MirTypeKind, BlockId}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+
+fn signature_index_stub_function(name: text) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 0),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType(kind: MirTypeKind.I64)),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId(id: 0),
+        span: Span.empty()
+    )
 
 describe "bootstrap flat LLVM receiver ownership":
     it "resolves user signatures through scalar bootstrap ids":
@@ -46,6 +62,47 @@ describe "bootstrap flat LLVM receiver ownership":
         expect(core.contains("print \"[bootstrap-real-llvm] statics")).to_equal(false)
         expect(helpers.contains("llvm_bootstrap_string_globals_add(decl)\n            # The flat bootstrap emitter consumes")).to_equal(true)
         expect(helpers.contains("return global_name\n        self.string_globals = self.string_globals.push(decl)")).to_equal(true)
+
+    it "resolves bootstrap signature names through the flat scalar index without scanning the table":
+        """The flat index owner replaces the per-query full table scan recorded in
+        doc/08_tracking/bug/bootstrap_llvm_signature_lookup_linear_scan_perf_2026-08-16.md.
+        It must preserve exact-name uniqueness with fail-closed duplicates,
+        emitted-`main` handling, and module-scoped basename uniqueness, and must
+        hand back nothing but scalar row indices."""
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_functions_add("a.f", signature_index_stub_function("a.f"), 0)
+        bootstrap_mir_functions_add("b.f", signature_index_stub_function("b.f"), 1)
+        bootstrap_mir_functions_add("main", signature_index_stub_function("main"), 0)
+        bootstrap_mir_functions_add("a.dup", signature_index_stub_function("a.dup"), 0)
+        bootstrap_mir_functions_add("a.dup", signature_index_stub_function("a.dup"), 0)
+
+        # exact canonical resolution
+        expect(bootstrap_llvm_exact_function_index("a.f")).to_equal(0)
+        expect(bootstrap_llvm_exact_function_index("b.f")).to_equal(1)
+        expect(bootstrap_llvm_exact_function_index("absent.symbol")).to_equal(-1)
+        # emitted `main` name handling: both spellings reach the same row
+        expect(bootstrap_llvm_exact_function_index("main")).to_equal(2)
+        expect(bootstrap_llvm_exact_function_index("__simple_main")).to_equal(2)
+        # duplicate canonical providers fail closed instead of lending an ABI
+        expect(bootstrap_llvm_exact_function_index("a.dup")).to_equal(-1)
+        # module-scoped basename uniqueness: `f` belongs to whichever module asked
+        expect(bootstrap_llvm_module_local_function_index("f", 0)).to_equal(0)
+        expect(bootstrap_llvm_module_local_function_index("f", 1)).to_equal(1)
+        expect(bootstrap_llvm_module_local_function_index("f", 2)).to_equal(-1)
+        expect(bootstrap_llvm_module_local_function_index("f", -1)).to_equal(-1)
+
+        # a second provider spelled exactly `__simple_main` makes the emitted
+        # spelling ambiguous, while plain `main` still resolves
+        bootstrap_mir_functions_add("__simple_main", signature_index_stub_function("__simple_main"), 2)
+        expect(bootstrap_llvm_exact_function_index("__simple_main")).to_equal(-1)
+        expect(bootstrap_llvm_exact_function_index("main")).to_equal(2)
+
+        # a reset invalidates the built tables rather than serving stale rows
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_functions_add("z.only", signature_index_stub_function("z.only"), 0)
+        expect(bootstrap_llvm_exact_function_index("a.f")).to_equal(-1)
+        expect(bootstrap_llvm_exact_function_index("z.only")).to_equal(0)
+        bootstrap_mir_functions_reset()
 
     it "keeps runtime names out of local suffix ownership":
         val core = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")

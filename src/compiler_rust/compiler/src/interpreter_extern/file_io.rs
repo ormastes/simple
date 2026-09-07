@@ -1693,9 +1693,229 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
 
+/// Path-argument guard mirroring the C runtime's `secure_copy_path`
+/// (`src/runtime/runtime_secure_staging.c`): a path must be non-empty, shorter
+/// than the runtime's 4096-byte buffer, and free of embedded NUL bytes. The C
+/// lane rejects these before touching the filesystem and so must this one, or
+/// the interpreter would accept inputs the native lane refuses.
+fn secure_path_ok(value: &str) -> bool {
+    !value.is_empty() && value.len() < 4096 && !value.as_bytes().contains(&0)
+}
+
+/// Create a fresh, private (0700) staging directory under `parent`.
+///
+/// Interpreter twin of the native `rt_secure_temp_dir`
+/// (`src/runtime/runtime_secure_staging.c`, `runtime.c`, `runtime_native.c`).
+/// The native lane uses `mkdtemp(3)` plus an explicit `chmod(0700)`; this lane
+/// uses `tempfile`'s `mkdtemp`-equivalent and applies the same explicit
+/// narrowing, so both lanes agree that the directory is unguessable, freshly
+/// created (never pre-existing), and unreadable by other users.
+///
+/// Args: (parent, prefix). The prefix may not contain a path separator — that
+/// would let a caller escape `parent`. Returns the new directory's path, or the
+/// EMPTY STRING on any failure, which is the failure signal the native lane
+/// uses (`rt_string_new(NULL, 0)`).
+pub fn rt_secure_temp_dir(args: &[Value]) -> Result<Value, CompileError> {
+    let parent = extract_path(args, 0)?;
+    let prefix = extract_path(args, 1)?;
+    let failed = || Ok(Value::text(String::new()));
+
+    if !secure_path_ok(&parent) || !secure_path_ok(&prefix) || prefix.len() >= 128 {
+        return failed();
+    }
+    // A separator in the prefix would escape `parent`; the C lane rejects both
+    // separators regardless of host, so this one does too.
+    if prefix.contains('/') || prefix.contains('\\') {
+        return failed();
+    }
+
+    let Ok(dir) = tempfile::Builder::new()
+        .prefix(&format!("{}-", prefix))
+        .tempdir_in(&parent)
+    else {
+        return failed();
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mkdtemp` already creates at 0700, but the native lane chmods
+        // explicitly rather than trusting the umask-independent default, and a
+        // silent widening here would be exactly the class of defect this
+        // extern exists to prevent. On failure the directory is removed so a
+        // caller never receives a path to a too-permissive directory.
+        if fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).is_err() {
+            let _ = fs::remove_dir(dir.path());
+            return failed();
+        }
+    }
+
+    // The caller owns the directory's lifetime from here, exactly as with the
+    // native lane; dropping the `TempDir` guard must not delete it.
+    let path = dir.keep();
+    Ok(Value::text(path.to_string_lossy().to_string()))
+}
+
+/// Publish `staged` to `destination` atomically, REFUSING to replace an
+/// existing destination.
+///
+/// Interpreter twin of the native `rt_file_publish_noreplace`. The no-replace
+/// guarantee is the entire point of this extern: a plain rename would silently
+/// clobber a destination another process had already published, so it is never
+/// used on any lane. On Linux this is `renameat2(RENAME_NOREPLACE)`; where that
+/// syscall is unavailable (older kernels return ENOSYS, some filesystems
+/// EINVAL) it falls back to `link(2)` + `unlink(2)`, which PRESERVES the
+/// guarantee because `link` fails with EEXIST rather than replacing.
+///
+/// Returns the native lane's status convention:
+///   *  1 — published; `staged` no longer exists
+///   *  0 — refused; `destination` already exists and is untouched
+///   * -1 — error (bad arguments, missing staged file, unwritable directory)
+pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> {
+    let staged = extract_path(args, 0)?;
+    let destination = extract_path(args, 1)?;
+    if !secure_path_ok(&staged) || !secure_path_ok(&destination) {
+        return Ok(Value::Int(-1));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+        // Built through CString so a path that cannot be represented as a
+        // C string is an error rather than a silently truncated publish.
+        if let (Ok(from), Ok(to)) = (CString::new(staged.as_str()), CString::new(destination.as_str())) {
+            // `renameat2` is not exposed by every libc flavor this seed builds
+            // against, so it is issued as a raw syscall exactly as the C
+            // runtime does.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    RENAME_NOREPLACE,
+                )
+            };
+            if rc == 0 {
+                return Ok(Value::Int(1));
+            }
+            let err = std::io::Error::last_os_error();
+            let raw = err.raw_os_error().unwrap_or(0);
+            if raw == libc::EEXIST {
+                return Ok(Value::Int(0));
+            }
+            // Anything other than "this kernel/filesystem lacks the syscall"
+            // is a real error; only ENOSYS/EINVAL fall through to the link
+            // fallback, matching the C lane.
+            if raw != libc::ENOSYS && raw != libc::EINVAL {
+                return Ok(Value::Int(-1));
+            }
+        } else {
+            return Ok(Value::Int(-1));
+        }
+    }
+
+    // Fallback (and the non-Linux path). `hard_link` refuses an existing
+    // destination on every supported platform, so the no-replace guarantee
+    // survives; `fs::rename` would NOT and must never be substituted here.
+    match fs::hard_link(&staged, &destination) {
+        Ok(()) => {
+            let _ = fs::remove_file(&staged);
+            Ok(Value::Int(1))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(Value::Int(0)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The no-replace guarantee, exercised against the INTERPRETER lane.
+    ///
+    /// This is the check that a symbol-resolution test cannot stand in for: a
+    /// registered extern that silently replaced the destination would resolve
+    /// fine and still destroy a published artifact. The C lane has its own
+    /// twin of this in `test/01_unit/runtime/secure_staging_runtime_test.c`.
+    #[cfg(unix)]
+    #[test]
+    fn publish_noreplace_refuses_to_overwrite_and_temp_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().expect("parent temp dir");
+        let parent_path = parent.path().to_string_lossy().to_string();
+
+        // --- rt_secure_temp_dir returns a fresh 0700 directory ---------------
+        let staging = rt_secure_temp_dir(&[Value::text(parent_path.clone()), Value::text("stage".to_string())])
+            .expect("secure_temp_dir call");
+        let Value::Str(staging_path) = staging else {
+            panic!("rt_secure_temp_dir must return text, got {:?}", staging);
+        };
+        let staging_path = staging_path.as_ref().clone();
+        assert!(!staging_path.is_empty(), "empty string is the failure signal");
+        let meta = fs::metadata(&staging_path).expect("staging dir exists");
+        assert!(meta.is_dir(), "staging path must be a directory");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "staging dir must be private to the owner"
+        );
+        assert!(
+            staging_path.starts_with(&parent_path),
+            "staging dir must live under the requested parent"
+        );
+
+        // A prefix carrying a separator must be refused, not allowed to escape.
+        assert_eq!(
+            rt_secure_temp_dir(&[Value::text(parent_path.clone()), Value::text("../evil".to_string())]).unwrap(),
+            Value::text(String::new())
+        );
+
+        // --- publish onto a free destination succeeds ------------------------
+        let staged = format!("{}/module.o", staging_path);
+        let destination = format!("{}/module.o", parent_path);
+        fs::write(&staged, b"first").expect("write staged");
+        assert_eq!(
+            rt_file_publish_noreplace(&[Value::text(staged.clone()), Value::text(destination.clone())]).unwrap(),
+            Value::Int(1),
+            "publishing onto a free destination must report 1"
+        );
+        assert!(!Path::new(&staged).exists(), "staged file is consumed on publish");
+        assert_eq!(fs::read(&destination).unwrap(), b"first");
+
+        // --- THE GUARANTEE: a second publish must REFUSE, not replace --------
+        fs::write(&staged, b"second").expect("write second staged");
+        assert_eq!(
+            rt_file_publish_noreplace(&[Value::text(staged.clone()), Value::text(destination.clone())]).unwrap(),
+            Value::Int(0),
+            "publishing onto an existing destination must refuse with 0"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"first",
+            "the existing destination must be byte-for-byte untouched"
+        );
+        assert!(
+            Path::new(&staged).exists(),
+            "a refused publish must leave the staged file in place"
+        );
+
+        // --- a missing staged file is an error, not a silent success ---------
+        assert_eq!(
+            rt_file_publish_noreplace(&[
+                Value::text(format!("{}/absent.o", staging_path)),
+                Value::text(format!("{}/absent-dest.o", parent_path)),
+            ])
+            .unwrap(),
+            Value::Int(-1)
+        );
+
+        fs::remove_file(&staged).ok();
+        fs::remove_dir_all(&staging_path).ok();
+    }
 
     static FILE_EXISTS_PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
 

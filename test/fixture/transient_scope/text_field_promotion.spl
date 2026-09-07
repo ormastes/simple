@@ -1,0 +1,94 @@
+# Minimal reproduction of the Stage-3 `value_struct_layouts` SIGSEGV mechanism.
+#
+# A class carrier is born (and promoted) in transient array scope A. Scope A
+# ends. In a LATER scope B a freshly allocated text is assigned into one of the
+# carrier's fields. `rt_transient_heap_promote(carrier)` cannot reach that text,
+# because the carrier's raw allocation is no longer registered in B's scope
+# table, so ending B frees the string while the carrier still holds the handle.
+#
+# That is exactly what `module_surfaces_freeze` does to
+# `ModuleSurface.logical_name` inside the phase-2 registry retention scope.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+class Carrier:
+    name: text
+    other: text
+
+fn fresh_name(seed: text) -> text:
+    seed + "|logical_name"
+
+fn churn_the_freed_storage() -> i64:
+    var churn: [text] = []
+    var churn_index = 0
+    while churn_index < 40000:
+        churn = churn.push("[hir-reexport-chase-unresolved] facade=filler item={churn_index}")
+        churn_index = churn_index + 1
+    churn.len()
+
+# Returns 0 when the field survived scope B, 1 when it did not, 2 on a scope
+# API failure. `apply_fix` is the one-line correction under test.
+fn field_survives_registry_scope(apply_fix: bool) -> i64:
+    # --- Scope A: the carrier itself is born and promoted here. ---
+    if not rt_transient_array_scope_begin():
+        print "FAIL: scope A begin"
+        return 2
+    var carrier = Carrier(name: "unset", other: "unset")
+    if not rt_transient_array_scope_pause():
+        print "FAIL: scope A pause"
+        return 2
+    val promoted_carrier = rt_transient_heap_promote(carrier)
+    if not rt_transient_array_scope_end():
+        print "FAIL: scope A end"
+        return 2
+
+    # --- Scope B: the registry/freeze scope. A fresh text lands in the field. ---
+    if not rt_transient_array_scope_begin():
+        print "FAIL: scope B begin"
+        return 2
+    carrier.name = fresh_name("compiler.hir.hir_definitions")
+    if not rt_transient_array_scope_pause():
+        print "FAIL: scope B pause"
+        return 2
+    # This is the call `module_surfaces_promote` already made, and it is a no-op
+    # for the field: the carrier is not a scope-B allocation, so the graph walk
+    # that would have reached `carrier.name` never runs.
+    val promoted_again = rt_transient_heap_promote(carrier)
+    var field_promoted = false
+    if apply_fix:
+        field_promoted = rt_transient_heap_promote(carrier.name)
+    if not rt_transient_array_scope_end():
+        print "FAIL: scope B end"
+        return 2
+    print "  scope A carrier promoted={promoted_carrier} scope B carrier promoted={promoted_again} field promoted={field_promoted}"
+
+    val entries = churn_the_freed_storage()
+    val expected = "compiler.hir.hir_definitions|logical_name"
+    val observed = carrier.name
+    print "  churn entries={entries}"
+    print "  expected={expected}"
+    print "  observed={observed}"
+    if observed == expected:
+        return 0
+    1
+
+fn main() -> i64:
+    print "case A: no explicit field promotion (the pre-fix shape)"
+    val unfixed = field_survives_registry_scope(false)
+    print "case B: explicit field promotion (the fix)"
+    val fixed = field_survives_registry_scope(true)
+    print "unfixed={unfixed} fixed={fixed}"
+    if unfixed == 2 or fixed == 2:
+        print "RESULT: INCONCLUSIVE (transient scope API unavailable)"
+        return 2
+    if unfixed == 1 and fixed == 0:
+        print "RESULT: REPRODUCED and FIXED — the unpromoted field is freed, the promoted one survives"
+        return 0
+    if unfixed == 0 and fixed == 0:
+        print "RESULT: NOT REPRODUCED — the unpromoted field survived on this runtime"
+        return 3
+    print "RESULT: FIX INEFFECTIVE — the promoted field did not survive"
+    1
