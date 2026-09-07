@@ -172,3 +172,76 @@ pub fn rt_terminal_get_size(_args: &[Value]) -> Result<Value, CompileError> {
         _ => Ok(Value::Tuple(vec![Value::Int(80), Value::Int(24)])),
     }
 }
+
+/// `rt_atexit_install` — install a process-exit latch, mirroring
+/// `rt_atexit_install` in `src/runtime/runtime.c:2732` /
+/// `runtime_hosted_signal.c:44`. `src/lib/nogc_sync_mut/tui/terminal.spl:50`
+/// declares and calls this (`terminal_install_recovery`, `:78`) but this
+/// interpreter bridge never registered it, so any TUI entry that falls back
+/// to the tree-walking interpreter died with `unknown extern function:
+/// rt_atexit_install`. See
+/// doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md.
+///
+/// The C runtime's counterpart installs a real `atexit()` handler that a
+/// paired `rt_atexit_check()` later polls; `rt_atexit_check` has no caller
+/// and no interpreter bridge anywhere in this crate, so there is nothing that
+/// would ever read a latch here. Returning success (matching the C
+/// implementation's return value once installed) is therefore sufficient —
+/// registering a real `atexit` handler nobody polls would be dead code.
+pub fn rt_atexit_install(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+// ---------------------------------------------------------------------------
+// Signal latches (`rt_signal_install` / `rt_signal_check`)
+//
+// `terminal.spl:48-49` declares these alongside `rt_atexit_install` and
+// `terminal_install_recovery()` (`:76-80`) calls `rt_signal_install` on the
+// line right after `rt_atexit_install` — so bridging `rt_atexit_install`
+// alone still leaves the same TUI entry dying one call later with
+// `unknown extern function: rt_signal_install`. Mirrors
+// `src/runtime/runtime.c:2650,2706-2730` (`_signal_flags` + `rt_signal_install`
+// / `rt_signal_check`): a `sigaction`-installed handler sets a flag; the
+// check function reads-and-clears it. Real work (not a stub) because caret's
+// resize handling (`terminal_resize_pending`) depends on it actually firing.
+// ---------------------------------------------------------------------------
+
+const RT_SIGNAL_MAX: usize = 32;
+static RT_SIGNAL_FLAGS: [std::sync::atomic::AtomicBool; RT_SIGNAL_MAX] =
+    [const { std::sync::atomic::AtomicBool::new(false) }; RT_SIGNAL_MAX];
+
+extern "C" fn rt_signal_handler(signum: libc::c_int) {
+    if signum >= 0 && (signum as usize) < RT_SIGNAL_MAX {
+        RT_SIGNAL_FLAGS[signum as usize].store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `rt_signal_install(signal_num)` — install the shared handler for
+/// `signal_num`, returning `1` on success / `0` on an out-of-range signal or
+/// a failed `sigaction`.
+pub fn rt_signal_install(args: &[Value]) -> Result<Value, CompileError> {
+    let signal_num = args.first().map(|v| v.as_int()).transpose()?.unwrap_or(-1);
+    if !(0..RT_SIGNAL_MAX as i64).contains(&signal_num) {
+        return Ok(Value::Int(0));
+    }
+    let ok = unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = rt_signal_handler as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(signal_num as libc::c_int, &sa, std::ptr::null_mut()) == 0
+    };
+    Ok(Value::Int(if ok { 1 } else { 0 }))
+}
+
+/// `rt_signal_check(signal_num)` — read-and-clear the latch for
+/// `signal_num`, returning `1` if it had fired since the last check, else
+/// `0` (including for an out-of-range signal).
+pub fn rt_signal_check(args: &[Value]) -> Result<Value, CompileError> {
+    let signal_num = args.first().map(|v| v.as_int()).transpose()?.unwrap_or(-1);
+    if !(0..RT_SIGNAL_MAX as i64).contains(&signal_num) {
+        return Ok(Value::Int(0));
+    }
+    let fired = RT_SIGNAL_FLAGS[signal_num as usize].swap(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(Value::Int(if fired { 1 } else { 0 }))
+}

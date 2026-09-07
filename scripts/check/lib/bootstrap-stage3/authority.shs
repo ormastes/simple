@@ -1185,12 +1185,20 @@ bootstrap_stage3_tool_authority_snapshot() (
 bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
-    IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
-        bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
-        return 1
-    case "$bootstrap_stage3_directory_snapshot_pid" in
-        ''|0|*[!0-9]*) return 1 ;;
-    esac
+    # The pid is used only to pin the trusted /proc/<pid>/fd magic-link arm
+    # below. A host without procfs can never present such a root, so leave the
+    # pid empty there: the arm cannot match and the "/proc/*) return 1" arm
+    # still rejects every other /proc path, keeping this fail-closed.
+    if [ -r /proc/self/stat ]; then
+        IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
+            bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
+            return 1
+        case "$bootstrap_stage3_directory_snapshot_pid" in
+            ''|0|*[!0-9]*) return 1 ;;
+        esac
+    else
+        bootstrap_stage3_directory_snapshot_pid=''
+    fi
     case "$bootstrap_stage3_directory_snapshot_root" in
         "/proc/$bootstrap_stage3_directory_snapshot_pid/fd/"[1-9]*)
             expr "$bootstrap_stage3_directory_snapshot_root" : \
@@ -1656,7 +1664,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_hosted_path")" = \
         "$bootstrap_stage3_hosted_expected" ] || return 1
-    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
+    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root" 2>/dev/null || stat -Lf '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
     bootstrap_stage3_hosted_root_dev=$1
     bootstrap_stage3_hosted_root_ino=$2
     perl -MFile::Find -MFcntl=:mode -e '
