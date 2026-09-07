@@ -16,6 +16,7 @@ use compiler.backend.backend.backend_helpers.{
 }
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.backend.linker.linker_wrapper_helpers.{write_elf_bytes_to_file}
 
 class BuiltinBackendCompileAdapter:
     """One factory-created Codegen object retained for a backend session."""
@@ -45,9 +46,44 @@ class BuiltinBackendCompileAdapter:
         diagnostic_path: text
     ) -> i64:
         if self.kind != BackendKind.Llvm:
-            backend_aot_write_diagnostic(diagnostic_path,
-                "scalar object-path AOT is available only for builtin LLVM")
-            return 1
+            # Only LLVM has a direct module->object-file emitter
+            # (`compile_llvm_module_to_object_path`). This used to hard-fail
+            # every other builtin backend with "scalar object-path AOT is
+            # available only for builtin LLVM", which is a statement about the
+            # EMITTER, not about the backend's ability to produce an object:
+            # `compile_aot_module` below is the same in-memory AOT route the
+            # non-session lane uses (`_finish_selected_module_compile` in
+            # driver_aot_native_output.spl) and it supports Cranelift fully.
+            # Because an admitted BackendSession makes the driver take the
+            # object-path branch unconditionally, that refusal made
+            # `native-build --backend cranelift <file>.spl` (the POSITIONAL
+            # form, which is the only one that runs the pure-Simple driver --
+            # `--entry` delegates to the Rust seed extern at
+            # bootstrap_main.spl:378-382) fail with no object produced.
+            # Publish the in-memory object bytes at object_path instead, so the
+            # object-path contract holds for every builtin backend.
+            match self.compile_aot_module(module, is_release, opt_level,
+                target_cpu, storage_bindings):
+                case Err(err):
+                    # Render the payload into an owned text and persist it
+                    # HERE, while its producing frame is still live: this is
+                    # the same eager-capture discipline the diagnostic file
+                    # exists for, and the reason an AOT failure is nameable.
+                    backend_aot_write_diagnostic(diagnostic_path,
+                        "{self.kind.to_text()} object-path AOT failed: {err.to_text()}")
+                    return 1
+                case Ok(compiled):
+                    if val object_bytes = compiled.object_code:
+                        match write_elf_bytes_to_file(object_path, object_bytes):
+                            case Ok(_): return 0
+                            case Err(write_error):
+                                backend_aot_write_diagnostic(diagnostic_path,
+                                    "failed to write object file {object_path}: {write_error}")
+                                return 1
+                    else:
+                        backend_aot_write_diagnostic(diagnostic_path,
+                            "{self.kind.to_text()} backend produced no object code")
+                        return 1
         compile_llvm_module_to_object_path(
             module, is_release, opt_level, target_cpu, storage_bindings,
             object_path, diagnostic_path)

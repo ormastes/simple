@@ -69,7 +69,15 @@ impl PlatformLinkConfig {
             // compression and terminal-info libraries. Cargo supplies these when it
             // links the seed; native-build must carry the same transitive contract.
             // `--as-needed` keeps them out of binaries that do not retain LLVM code.
-            libraries: vec!["pthread", "dl", "m", "unwind", "sqlite3", "z", "zstd", "tinfo"],
+            // No `unwind`: Simple has no exceptions, and the residual `_Unwind_*`
+            // references that do exist come from prebuilt sysroot crates (`std`'s
+            // backtrace support, `compiler_builtins`). Those are `@GCC_*`-versioned
+            // and are defined ONLY by `libgcc_s.so.1`, which the compiler driver
+            // adds automatically. Measured on aarch64-linux-gnu: `libgcc_s.so.1`
+            // defines 18 `_Unwind_*`; `libunwind.so.8` defines ZERO. `-lunwind`
+            // therefore resolved nothing and only broke links on hosts that ship
+            // `libunwind.so.8` without the `libunwind.so` dev symlink.
+            libraries: vec!["pthread", "dl", "m", "sqlite3", "z", "zstd", "tinfo"],
             library_search_paths: vec![],
             system_scan_libs: vec![
                 "/lib/x86_64-linux-gnu/libc.so.6",

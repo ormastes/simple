@@ -368,8 +368,42 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
            not rt_transient_heap_promote(surface.export_route_target_names) or
            not rt_transient_heap_promote(surface.export_route_is_glob):
             return false
+        if not module_surface_promote_freeze_names(surface):
+            return false
         surface_index = surface_index + 1
     rt_transient_heap_promote(registry)
+
+fn module_surface_promote_freeze_names(surface: ModuleSurface) -> bool:
+    """Promote the four scalar texts `module_surfaces_freeze` re-assigns.
+
+    `module_surfaces_freeze` (module_surface_registry_index.spl) overwrites
+    `logical_name`, `canonical_name`, `package_name` and
+    `preferred_registry_name` with FRESHLY allocated strings, and it runs inside
+    the registry retention scope. The surface's own raw allocation belongs to an
+    older, already-ended per-file scope, so the graph walk inside
+    `rt_transient_heap_promote(registry)` never reaches those strings: ending the
+    scope free()s them and every later reader holds a dangling handle. That is
+    the Stage-3 `phase3:hir:validate:value_struct_layouts` SIGSEGV — the freed
+    `logical_name` is what `validation_module_keys` carries, so the validator
+    built nil/garbage node keys and dereferenced a nil `HirStruct`. See
+    doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md
+
+    A field that is ALREADY persistent returns false from the first promote and
+    that is not an error: `canonical_name` aliases `logical_name`, and an empty
+    `preferred_registry_name` is a shared literal. The post-condition below is
+    what fails closed, because a second promote reports true only for a value
+    that is STILL owned by the dying scope.
+    """
+    val _logical = rt_transient_heap_promote(surface.logical_name)
+    val _canonical = rt_transient_heap_promote(surface.canonical_name)
+    val _package = rt_transient_heap_promote(surface.package_name)
+    val _preferred = rt_transient_heap_promote(surface.preferred_registry_name)
+    if rt_transient_heap_promote(surface.logical_name) or
+       rt_transient_heap_promote(surface.canonical_name) or
+       rt_transient_heap_promote(surface.package_name) or
+       rt_transient_heap_promote(surface.preferred_registry_name):
+        return false
+    true
 
 pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
     module_surfaces_frozen_alignment(registry)

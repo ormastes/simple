@@ -863,6 +863,62 @@ mod tests {
         assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_INVALID_ARGUMENT);
     }
 
+    /// Status table for the allocation-free scalar transport. These four cases
+    /// plus the null-output case below are asserted identically against the C
+    /// provider by `test/harness/wffi_i64_alloc_count_c_harness.c`, so the two
+    /// lanes cannot drift apart on the contract.
+    #[test]
+    fn try_call_i64_out_matches_the_cross_lane_status_table() {
+        let args = rt_array_new(2);
+        assert!(rt_array_push(args, RuntimeValue::from_int(3)));
+        assert!(rt_array_push(args, RuntimeValue::from_int(4)));
+        let fptr = i64_two_args as usize as i64;
+
+        let mut value = -1i64;
+        assert_eq!(spl_wffi_try_call_i64_out(fptr, args, 2, &mut value), WFFI_OK);
+        assert_eq!(value, 7);
+
+        value = -1;
+        assert_eq!(spl_wffi_try_call_i64_out(0, args, 2, &mut value), WFFI_NULL_FUNCTION);
+        assert_eq!(value, 0);
+
+        value = -1;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(fptr, args, 3, &mut value),
+            WFFI_INVALID_ARGUMENT
+        );
+        assert_eq!(value, 0);
+
+        value = -1;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(fptr, args, 9, &mut value),
+            WFFI_UNSUPPORTED_SIGNATURE
+        );
+        assert_eq!(value, 0);
+    }
+
+    #[test]
+    fn try_call_i64_out_rejects_a_null_output_slot() {
+        let args = rt_array_new(0);
+        assert_eq!(
+            spl_wffi_try_call_i64_out(i64_zero as usize as i64, args, 0, std::ptr::null_mut()),
+            WFFI_INVALID_ARGUMENT
+        );
+    }
+
+    /// A foreign zero must stay distinguishable from a bridge failure on the
+    /// scalar transport too: status zero with a zero output is a real result.
+    #[test]
+    fn try_call_i64_out_preserves_a_valid_foreign_zero() {
+        let args = rt_array_new(0);
+        let mut value = -1i64;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(i64_zero as usize as i64, args, 0, &mut value),
+            WFFI_OK
+        );
+        assert_eq!(value, 0);
+    }
+
     #[test]
     fn checked_boolean_transport_preserves_bool_and_failure_identity() {
         let mut value = false;

@@ -1,5 +1,11 @@
 # SPipe Dev Agent - Developer Lead
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For `self approve`, `approve PR`, or `author cannot approve`, route immediately
+to `spipe self-review-guide`. It is the canonical protected status workflow;
+never retry GitHub author `APPROVED`.
+
 **Role:** Analyze the task (feature/bug/todo/quality), refine it into a clear goal with acceptance criteria.
 **Blinders:** ONLY goal refinement, task categorization, and acceptance criteria. No code, no architecture, no tests.
 **Context budget:** sub-40% — read the request, write the state file, done.
@@ -39,10 +45,6 @@ This agent CREATES the initial state file. All subsequent agents read and append
        file:line and the unblock condition
      - Must-check ledger v3 rows with a named owner and actionable unblock
        condition for TODO/blocked work; PASS rows use `none`
-     - Must-check receipt rows earn PASS only through
-       `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
-       <repo-relative-committed-receipt>`; automated evidence remains
-       source-fingerprint scoped and push reads evidence from the pushed ref
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
