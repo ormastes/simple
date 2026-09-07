@@ -50,6 +50,31 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). Seed is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` (MDSOC+ section)
 
+## No external SQLite — use Simple's embedded SQL
+
+**Never link or call the real `libsqlite3`.** Simple ships its own embedded SQL
+/ DB engine and the `rt_sqlite_*` surface is a *mimic* of the SQLite API, not a
+binding to it. The name is API shape, not a dependency.
+
+- Engine: `src/lib/nogc_sync_mut/db/dbfs_engine/` (arena, attr_index,
+  checkpoint + checkpoint_ring, file_meta, fs_driver, and `fts/` — bm25,
+  trigram, fuzzy, search), plus `src/lib/nogc_sync_mut/db/` (`db_query.spl`,
+  `db_persistence.spl`, `cardinality_estimator.spl`, `filter_in.spl`, `accel.spl`,
+  `dbfs_driver`).
+- Externs: declared in `src/lib/nogc_sync_mut/io/sqlite_sffi.spl` and
+  `src/lib/nogc_sync_mut/sffi/host.spl`; consumed by
+  `src/lib/nogc_sync_mut/database/sql/statement.spl`.
+
+So when `rt_sqlite_*` symbols are undefined at link, the fix is to back them
+with the embedded engine — **not** to add `-lsqlite3` to a link line, and not to
+install a dev package. `src/runtime/runtime_sqlite.c` is a C wrapper over the
+real library and is *not* the model to follow; whether it is deleted, kept for a
+non-bootstrap lane, or reimplemented on the embedded engine is an owner
+decision (todo 285).
+
+If a mapping gap exists between an extern and the embedded engine, **name the
+gap** rather than filling it with a call into an external database.
+
 ## Owned-Code Scope
 - For code counts, reviews, verification scans, and summaries, ignore vendored or third-party runtime source unless the user explicitly asks to inspect it.
 - External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`, `test/05_perf/ui_slim/ref/vendor/**` (pinned C reference libraries for the slim-UI benchmarks).

@@ -6,6 +6,11 @@ alwaysApply: true
 - **NEVER over-engineer** - only make requested changes
 - **Pure Simple first / C boundary / asm-minimization** — see `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run twin gate: `scripts/check/check-dual-run-shadow.shs`)
 - **NEVER add unused code** - delete completely
+- **NEVER link external SQLite.** `rt_sqlite_*` is a *mimic* of the SQLite API
+  over Simple's own embedded engine (`src/lib/nogc_sync_mut/db/dbfs_engine/`),
+  not a binding to `libsqlite3`. Undefined `rt_sqlite_*` symbols are backed with
+  the embedded engine; never with `-lsqlite3` or a dev package. See CLAUDE.md
+  § "No external SQLite".
 - **DO NOT ADD REPORT TO GIT** unless requested
 - **NEVER convert TODO/FIXME to NOTE** - implement or delete entirely
 - For MCP/LSP/tool-server work: review startup path, hot request paths, cache strategy, startup/latency/RSS targets
