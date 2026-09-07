@@ -509,6 +509,18 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
+    } else {
+        // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
+        // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
+        // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
+        // lane (this branch, include_stage4_hosted == false) needs these: the
+        // real symbols are defined in Rust
+        // (compiler/src/codegen/cranelift_sffi.rs) and already exported by
+        // libsimple_compiler.so / native_all, which is what
+        // build_stage4_c_runtime_library's lane links. Adding them there too
+        // would be an immediate "symbol is already defined" break -- keep
+        // this in the include_stage4_hosted == false arm only.
+        runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
