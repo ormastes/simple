@@ -1,16 +1,13 @@
 ---
 name: release
-description: Version bump and release. Accepts version argument (major/first, minor/second, patch/third, or exact X.Y.Z). Defaults to patch. Updates all version locations, CHANGELOG, commits, tags, asks before push.
+description: Prepare and promote stable or prerelease Simple releases from isolated sessions and immutable admitted candidates.
 ---
 
-# Release — Version Bump and Tag
+# Protected Simple Release
 
-## Usage
+Use [the software-release guide](../../../doc/07_guide/infra/software_release.md) and `release/version.sdn` as the canonical product-version authority.
 
-- No args or `patch`/`third`: bump patch (0.9.3 -> 0.9.4)
-- `minor`/`second`: bump minor (0.9.3 -> 0.10.0)
-- `major`/`first`: bump major (0.9.3 -> 1.0.0)
-- `X.Y.Z`: set exact version
+## Procedure
 
 1. Require a prior verification `STATUS: PASS`, including one `bin/simple test test --whole --mode=interpreter` result and current SPipe/manual evidence.
 2. Start an isolated release session: one `work/release/...` branch, one worktree, exact protected target SHA, and private outputs. Never author in the main worktree.
@@ -25,22 +22,18 @@ description: Version bump and release. Accepts version argument (major/first, mi
 11. Ask before any push or publication. Draft, attach exact assets, verify, then publish immutably.
 12. Rollback redeploys an earlier admitted release. Withdrawal preserves tag/assets/history. Corrections receive a new version.
 
-1. Read current version from the root `VERSION` file
-2. Calculate new version
-3. Update all version locations:
-   - `VERSION` — entire file
-   - `src/app/cli/cli_helpers.spl` — hardcoded fallback in `get_version()`
-   - `src/app/cli/_CliMain/args_and_os_commands.spl` — hardcoded fallback in `get_version()`
-   - `src/app/cli/bootstrap_main.spl` — hardcoded in `bootstrap_version()`
-4. Update `CHANGELOG.md` with new section
-5. Commit: `jj commit -m "chore: release vX.Y.Z"`
-6. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
-7. Ask before push — do NOT push without user approval
+Use `simple release version-check|beta-prepare|backport-check|candidate-check|promote-check|withdraw-check` for the pure validation boundaries.
 
 For protected PR integration, explicitly self-attest high-capability/high-effort PASS with zero P0/P1, then dispatch `SPipe Self Review Admission`. GitHub forbids PR authors from submitting an `APPROVED` review on their own PR; this is a required status check, not provider or independent approval. Ordinary code/text is default allow absent an external operator deny/constrain, using `code`, `text`, exact `file`, immediate `directory_files`, and descendant `directory_recursive` scopes. The trusted default-branch workflow resolves/re-resolves protected target/ruleset, head, base, merge-base, and diff before a ten-minute result. If rejected or invalidated, follow the reason: state drift/expiry needs a fresh exact-head review and dispatch; deny needs policy-owner action or an eligible independent route; uncovered scope needs a smaller diff or new constraint; unsafe/secret material must be removed and any credential rotated. Never use author `APPROVED`, a stale check, or weaker candidate/release/publication authority as remediation. The generic Actions App is not an independent security boundary. Candidate admission accepts only `spipe-review-admission/1`; keep release-environment approval separate.
 
-## Push
+For `self approve`, `approve PR`, or `author cannot approve`, run `spipe self-review-guide`; this is the canonical exact-head status workflow, not provider `APPROVED`.
 
-After commit/tag, ask before pushing. If approved, use jj linear sync:
+For the repository mutation boundary, use
+`scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
+`spipe-review-receipt/1`. It fetches both remote heads before creating the
+private branch/worktree, emits `spipe-reviewed-fix-preparation/1`, and stops
+before push or protected integration.
+
+Never move `main` or `release/*` directly, broadly push every local tag, create unsigned/lightweight release tags, delete or move published tags, rebuild during promotion, or substitute seed/old/source-only artifacts.
 
 Live rulesets, signing, protected pushes, and publication require explicit authority. Do not confuse a local plan PASS with a live release PASS.

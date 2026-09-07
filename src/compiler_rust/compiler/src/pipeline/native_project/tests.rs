@@ -3937,6 +3937,105 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     }
 }
 
+/// The Stage4 compiler entry may link the SHARED runtime.
+///
+/// Pre-fix this test fails at the lane assertion: `dynamic-runtime` was not a
+/// name `resolve_runtime_lane` knew, so it fell through to `core-c-bootstrap`,
+/// and `selected_runtime_library` then short-circuited every authorized Stage4
+/// entry onto the core-C static archive -- hard-erroring "Stage4 compiler entry
+/// requires the core-c-bootstrap runtime lane" for any other lane. The shared
+/// `libsimple_runtime.so` was therefore unreachable and the Stage4 link died
+/// with 167 unresolved `rt_*` symbols. Simple does not unwind, so nothing about
+/// that archive was load-bearing for the compiler binary.
+///
+/// The other two assertions pin the scope of the change: the lane is refused for
+/// a non-Stage4 entry, and it is never inferred -- only an explicit
+/// `--runtime-bundle dynamic-runtime` selects it.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
+    let old_bundle = std::env::var_os("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+    let old_runtime_path = std::env::var_os("SIMPLE_RUNTIME_PATH");
+    unsafe {
+        std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+        std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let shared = runtime_dir.join("libsimple_runtime.so");
+    std::fs::write(&shared, b"\x7fELF-not-really-but-non-empty").unwrap();
+
+    let entry = temp.path().join("src/compiler/80.driver/main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+
+    let dynamic_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out/simple"))
+        .config(dynamic_config)
+        .entry_file(entry.clone());
+    assert!(builder.is_authorized_stage4_compiler_entry());
+    assert_eq!(builder.resolve_runtime_lane().display_name(), "dynamic-runtime");
+
+    // THE regression assertion: pre-fix this was
+    // Err("Stage4 compiler entry requires the core-c-bootstrap runtime lane").
+    let (selected, is_native_all) = builder
+        .selected_runtime_library(temp.path())
+        .expect("the Stage4 compiler entry must be allowed onto the dynamic runtime lane")
+        .expect("the dynamic lane must select a runtime library");
+    assert_eq!(selected, shared);
+    assert!(!is_native_all);
+
+    // Scope 1: the lane is refused for an entry that is not the Stage4 compiler.
+    let other_entry = temp.path().join("src/app/tool/main.spl");
+    std::fs::create_dir_all(other_entry.parent().unwrap()).unwrap();
+    std::fs::write(&other_entry, "fn main() -> i64: 0\n").unwrap();
+    let other_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let other = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("other-out"))
+        .config(other_config)
+        .entry_file(other_entry);
+    let err = other
+        .selected_runtime_library(temp.path())
+        .expect_err("only the Stage4 compiler entry may use the dynamic lane");
+    assert!(err.contains("dynamic-runtime lane is available only"), "{err}");
+
+    // Scope 2: the lane is never inferred. Without the explicit bundle the same
+    // Stage4 entry still resolves to the core-C lane it always did.
+    let auto_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir),
+        ..Default::default()
+    };
+    let auto = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("auto-out"))
+        .config(auto_config)
+        .entry_file(entry);
+    assert_eq!(auto.resolve_runtime_lane().display_name(), "core-c-bootstrap");
+
+    match old_compiler_entry {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+    match old_bundle {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE") },
+    }
+    match old_runtime_path {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_RUNTIME_PATH") },
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_standalone_compiler_driver_selects_dedicated_backfill_without_bootstrap_env() {
@@ -4441,8 +4540,13 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
+    // `defined` is a BTreeMap<String, usize>, not a set, so intersect over its keys.
+    // Trim the leading '_' the same way the rest of this test does (Mach-O mangling).
     assert_eq!(
-        defined.intersection(&secure_staging).count(),
+        defined
+            .keys()
+            .filter(|symbol| secure_staging.contains(symbol.trim_start_matches('_')))
+            .count(),
         0,
         "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
     );

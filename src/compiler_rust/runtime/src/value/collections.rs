@@ -510,6 +510,26 @@ pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Raw bytes of a `[u8]` that is stored in the PACKED representation, or
+/// `None` for any other array (boxed-element arrays, non-arrays, corrupt
+/// headers).
+///
+/// Unlike `byte_array_bytes` this never touches the boxed-element path, so it
+/// cannot mask an out-of-range element into a byte: a packed array's elements
+/// are `u8` by construction. That makes it usable as a fast path by callers
+/// whose contract REJECTS out-of-range elements (`rt_bytes_to_text`) — for a
+/// packed array the rejection can never fire, so skipping the per-element
+/// check is behaviour-preserving rather than a relaxation.
+pub(crate) fn packed_byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || !array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec())
+}
+
 /// Write bytes into either native representation of Simple `[u8]`.
 pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
     let Some(array) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
@@ -4138,7 +4158,38 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
         // the same display formatter the print path uses (rt_value_to_string
         // wraps value_to_display_string) before reading it as UTF-8, so
         // `[1,2,3].join(",")` renders bare ints instead of empty strings.
+        //
+        // PERF (2026-09-06): an element that is ALREADY a heap String needs no
+        // rendering at all — its UTF-8 bytes are exactly what we append. The
+        // unconditional `rt_value_to_string` below cost TWO allocations per
+        // element (a Rust `String` inside `value_to_display_string`, then a
+        // fresh interned `RuntimeValue` string via `rt_string_new`) purely to
+        // read back bytes the element already owned. Measured on the codegen
+        // (Cranelift JIT) lane, `[text].join("")` cost ~237 ns PER ELEMENT
+        // regardless of element length, which made every accumulate-into-
+        // `[text]`-then-join loop in the stdlib (base64's `_bytes_to_text`,
+        // among others) two orders of magnitude slower than the equivalent
+        // `[u8]` loop at ~2 ns/element. Reading an already-String element
+        // directly removes both allocations and is byte-for-byte identical:
+        // `value_to_display_string` on a String value returns that string's
+        // own contents unchanged. Non-String elements keep the old path
+        // exactly, so `[1,2,3].join(",")` is unaffected.
+        // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
         let elem = rt_array_get(array, i);
+        if elem.heap_type() == Some(HeapObjectType::String) {
+            let elem_len = rt_string_len(elem);
+            if elem_len > 0 {
+                let elem_data = rt_string_data(elem);
+                unsafe {
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                        elem_data,
+                        elem_len as usize,
+                    ));
+                    result.push_str(s);
+                }
+            }
+            continue;
+        }
         let elem_str = rt_value_to_string(elem);
         let elem_len = rt_string_len(elem_str);
         if elem_len > 0 {
@@ -4193,6 +4244,34 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
         s.trim().parse::<i64>().unwrap_or(0)
+    }
+}
+
+/// Receiver-dispatched `.to_i64()` / `.to_int()` for the native lanes when the
+/// receiver TYPE WAS ERASED. Twin of the C runtime's `rt_to_int_dynamic`
+/// (`src/runtime/runtime_native.c`); both must exist, because a natively built
+/// program links exactly one of the two runtimes and the compiler emits this
+/// call without knowing which.
+///
+/// The LLVM codegen used to match `to_i64`/`to_int` in an unconditional
+/// integer-cast block and emit a coercion to i64. A `text` handle IS an i64 in
+/// this ABI, so that coercion was the IDENTITY and `text.to_i64()` evaluated to
+/// the handle's own word. Measured 2026-09-07 on the aarch64 Stage 2 candidate:
+/// `native_build_shard_threads` compiled all three of its
+/// `args[i].to_i64() ?? 0` sites to no call at all, so `--threads 1` became a
+/// heap address and the build fanned out to 79 shard workers for a single unit.
+///
+/// Routing bare `to_i64` unconditionally to `rt_string_to_int` is NOT the fix:
+/// that returns 0 for a non-string, which would silently zero every erased
+/// NUMERIC `.to_i64()`. Dispatch on the receiver instead, with an IDENTITY
+/// fallback that is byte-identical to the cast block's previous behaviour for
+/// everything that is not a heap string — so the genuinely-i64 case is
+/// bit-for-bit unchanged.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    match value.heap_type() {
+        Some(HeapObjectType::String) => rt_string_to_int(value),
+        _ => value.to_raw() as i64,
     }
 }
 

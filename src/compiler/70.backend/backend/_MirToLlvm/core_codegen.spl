@@ -15,6 +15,7 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at,
     bootstrap_mir_function_return_unsigned_at, bootstrap_mir_function_param_count_at,
     bootstrap_mir_function_param_type_tag_at,
+    bootstrap_llvm_exact_function_index, bootstrap_llvm_module_local_function_index,
     bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
@@ -707,6 +708,15 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index, ir_handle)
             block_i = block_i + 1
 
+        # Validate against the complete MIR body after every block has been
+        # translated. This preserves legal cross-block forward references,
+        # while rejecting a Call destination whose definition was silently
+        # lost by staged payload dispatch before external LLVM assembly sees
+        # malformed `%lN` text.
+        val missing_call_destination = self.first_unemitted_call_destination(body)
+        if missing_call_destination >= 0:
+            panic("compile error: LLVM Call destination %l{missing_call_destination} was not emitted")
+
         if ir_handle >= 0:
             val closing = "\n}\n"
             _sffi_string_builder_push(ir_handle, closing)
@@ -714,6 +724,27 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me first_unemitted_call_destination(body: MirBody) -> i64:
+        """Return the first MIR Call destination without an emitted LLVM SSA
+        definition, or -1 when every value-producing Call was emitted."""
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        var block_i = 0
+        while block_i < body.blocks.len():
+            val instructions = body.blocks[block_i].instructions
+            var instruction_i = 0
+            while instruction_i < instructions.len():
+                val inst = instructions[instruction_i]
+                if _sffi_enum_discriminant(inst.kind) == call_disc:
+                    # Typed accessor, not raw payload/tuple decoding -- see
+                    # MirInst.bootstrap_call_dest_local_id. -1 covers both a
+                    # void Call and a non-Call, so nothing to account for.
+                    val dest_id = inst.bootstrap_call_dest_local_id()
+                    if dest_id >= 0 and not self.defined_locals.contains_key(dest_id):
+                        return dest_id
+                instruction_i = instruction_i + 1
+            block_i = block_i + 1
+        -1
 
     me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64, ir_handle: i64):
         """Translate a MIR basic block."""
@@ -879,6 +910,30 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
+        # Dispatch Call by DISCRIMINANT, before the structural match below, for
+        # the same reason LoadGlobal/GlobalAddr/StoreGlobal are dispatched that
+        # way above: a Call that falls into the structural match and fails to
+        # bind its payload silently selects a wildcard arm, so no
+        # `%lN = call ...` definition is emitted even though a later terminator
+        # still references that destination -- malformed `%lN` text handed
+        # straight to LLVM. `translate_call_at`'s own decode still ends in
+        # `case _: return`, so the check below is what makes that silent exit
+        # loud.
+        # Returning HERE also keeps the tail `mark_instruction_dest_defined_at`
+        # off Call: that method marks a Call destination optimistically from the
+        # MIR inventory, which would defeat the emission receipt in
+        # `translate_call_at` and make both this panic and
+        # `first_unemitted_call_destination` vacuous.
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        if _sffi_enum_discriminant(inst_kind) == call_disc:
+            if bootstrap_debug:
+                print "[mir-to-llvm] instruction:call-discriminant index={index}"
+            self.translate_call_at(instructions, index, ir_handle)
+            val call_dest_id = inst.bootstrap_call_dest_local_id()
+            if call_dest_id >= 0 and not self.defined_locals.contains_key(call_dest_id):
+                panic("compile error: LLVM Call destination %l{call_dest_id} was not emitted")
+            return
+
         match inst_kind:
             case Move(dest, src): self.translate_copy_move(dest, src, true)
             case BinOp(dest, op, left, right): self.translate_binop(dest, op, left, right)
@@ -897,10 +952,12 @@ impl MirTextCodegen for MirToLlvm:
             case SetField(base, field, value): self.llvm_set_field_impl(base, field, value)
             case Cast(dest, operand, target): self.translate_cast_dispatch(dest, operand, target)
             case Bitcast(dest, operand, target): self.llvm_bitcast_impl(dest, operand, target)
-            case Call(_, _, _):
-                if bootstrap_debug:
-                    print "[mir-to-llvm] instruction:call index={index}"
-                self.translate_call_at(instructions, index, ir_handle)
+            # The discriminant dispatch above owns Call and returns, so this
+            # arm is unreachable; kept only so the match stays exhaustive,
+            # matching LoadGlobal/StoreGlobal/GlobalAddr above. Restoring a
+            # body here would make the emitted-destination panic vacuous by
+            # giving Call a second, unguarded path.
+            case Call(_, _, _): ()
             case CallIndirect(dest, ptr, args, sig): self.llvm_call_indirect_impl(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.llvm_intrinsic_impl(dest, name, args)
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
@@ -1267,13 +1324,17 @@ impl MirTextCodegen for MirToLlvm:
         val direct = self.function_return_unsigned.get(func_name)
         if direct.?:
             return direct.unwrap()
-        if not func_name.starts_with("@"):
-            return false
-        val bare = func_name[1:]
-        # `.has()` + index, not `.get() ?? false` — under native codegen a
-        # Dict<_, bool> hit storing `true` collapses to false via `?? false`
-        # (dict_native_pitfalls.md), silently marking unsigned returns as signed.
-        if self.function_return_unsigned.has(bare): self.function_return_unsigned[bare] else: false
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            # `.has()` + index, not `.get() ?? false` — under native codegen a
+            # Dict<_, bool> hit storing `true` collapses to false via `?? false`
+            # (dict_native_pitfalls.md), silently marking unsigned returns as signed.
+            if self.function_return_unsigned.has(bare):
+                return self.function_return_unsigned[bare]
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_mir_function_return_unsigned_at(bootstrap_index)
+        false
 
     me remember_function_param_types(name: text, param_tys: [text]):
         if name == "":
@@ -1352,6 +1413,12 @@ impl MirTextCodegen for MirToLlvm:
                         val ret_src_unsigned = if self.unsigned_locals.contains_key(return_local_id): self.unsigned_locals[return_local_id] else: false
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:ret-threaded-abi index={block_index} type={ret_ty} value={val_str} src={ret_src_ty}"
+                        # Keep impossible return conversions fail-closed, but
+                        # attribute them to the exact MIR terminator. This is
+                        # diagnostic context only: a floating value is never a
+                        # legal text/pointer return and no cast is synthesized.
+                        if is_float_type(self.valid_llvm_type(ret_src_ty)) and ret_ty == "ptr":
+                            panic("compile error: LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
                         val ret_val = self.value_as_type_signed(val_str, ret_src_ty, ret_ty, ret_src_unsigned)
                         self.builder.emit_ret(ret_ty, ret_val)
                         if bootstrap_debug:
@@ -2182,6 +2249,16 @@ impl MirTextCodegen for MirToLlvm:
                 _sffi_string_builder_push(ir_handle, emitted_call)
             else:
                 self.builder.emit(call_line)
+        # Mark only after the call line has actually reached its output sink.
+        # This keeps defined_locals an emission receipt instead of an optimistic
+        # MIR-destination inventory and makes the discriminant-dispatch check in
+        # translate_instruction_at fail immediately rather than handing
+        # malformed `%lN` text to LLVM. Every `has_dest` path above emits a
+        # `%name = call ...` line before reaching here (the only early exit is
+        # the `case _: return` in the decode, which emits nothing), so the tail
+        # is the single correct receipt site.
+        if has_dest:
+            self.defined_locals[dest_id] = true
         if bootstrap_debug:
             print "[mir-to-llvm] call:emit index={index} present={has_dest}"
 
@@ -2390,15 +2467,17 @@ impl MirTextCodegen for MirToLlvm:
             if ty == nil or ty == "nil":
                 return ""
             return ty
-        if not func_name.starts_with("@"):
-            return ""
-        val bare = func_name[1:]
-        val bare_hit = self.function_return_types.get(bare)
-        if bare_hit.?:
-            val bare_ty = bare_hit.unwrap()
-            if bare_ty == nil or bare_ty == "nil":
-                return ""
-            return bare_ty
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_return_types.get(bare)
+            if bare_hit.?:
+                val bare_ty = bare_hit.unwrap()
+                if bare_ty == nil or bare_ty == "nil":
+                    return ""
+                return bare_ty
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_llvm_static_type_text(bootstrap_mir_function_return_type_tag_at(bootstrap_index), self.native_int_type)
         ""
 
     me lookup_function_param_type(func_name: text, index: i64) -> text:
@@ -2409,15 +2488,17 @@ impl MirTextCodegen for MirToLlvm:
             if index < param_tys.len():
                 return param_tys[index]
             return ""
-        if not func_name.starts_with("@"):
-            return ""
-        val bare = func_name[1:]
-        val bare_hit = self.function_param_types.get(bare)
-        if bare_hit.?:
-            val bare_param_tys = bare_hit.unwrap()
-            if index < bare_param_tys.len():
-                return bare_param_tys[index]
-            return ""
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_param_types.get(bare)
+            if bare_hit.?:
+                val bare_param_tys = bare_hit.unwrap()
+                if index < bare_param_tys.len():
+                    return bare_param_tys[index]
+                return ""
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0 and index >= 0 and index < bootstrap_mir_function_param_count_at(bootstrap_index):
+            return bootstrap_llvm_static_type_text(bootstrap_mir_function_param_type_tag_at(bootstrap_index, index), self.native_int_type)
         ""
 
     me lookup_function_param_count(func_name: text) -> i64:
@@ -2428,12 +2509,14 @@ impl MirTextCodegen for MirToLlvm:
         val direct = self.function_param_types.get(func_name)
         if direct.?:
             return direct.unwrap().len()
-        if not func_name.starts_with("@"):
-            return -1
-        val bare = func_name[1:]
-        val bare_hit = self.function_param_types.get(bare)
-        if bare_hit.?:
-            return bare_hit.unwrap().len()
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_param_types.get(bare)
+            if bare_hit.?:
+                return bare_hit.unwrap().len()
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_mir_function_param_count_at(bootstrap_index)
         -1
 
     me mark_ptr_local(id: i64):
@@ -2717,6 +2800,32 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:emit index={index} type={g_ty}"
+
+    me bootstrap_llvm_function_index_for_name(func_name: text) -> i64:
+        """Flat-bootstrap row backing `func_name`'s signature, or -1.
+
+        Authority lives in the immutable scalar tables owned by
+        `_MirLowering/bootstrap_globals.spl`, NOT on this receiver: the tables
+        are keyed by a bounded integer digest and probed by binary search, so a
+        query costs a walk of one equal-digest run instead of a scan of the
+        whole function table. Nothing beyond two i64 row indices crosses back —
+        no `MirType`, no per-function array, no receiver-owned dictionary. See
+        doc/08_tracking/bug/bootstrap_llvm_signature_lookup_linear_scan_perf_2026-08-16.md."""
+        val lookup_name = if func_name.starts_with("@"): func_name[1:] else: func_name
+        # Exact canonical names resolve first; the owner reports -1 for a
+        # duplicate provider so an ambiguous name fails closed rather than
+        # silently lending the first provider's ABI.
+        val exact_index = bootstrap_llvm_exact_function_index(lookup_name)
+        if exact_index >= 0:
+            return exact_index
+        # Runtime-owned names must never borrow a same-suffix pure-Simple ABI.
+        if mir_runtime_owned_call_name(lookup_name):
+            return -1
+        # An authored basename belongs only to the current flat module, and only
+        # when exactly one function in that module provides it.
+        if self.current_bootstrap_module >= 0 and not lookup_name.contains("."):
+            return bootstrap_llvm_module_local_function_index(lookup_name, self.current_bootstrap_module)
+        -1
 
 fn bootstrap_llvm_static_index(module_index: i64, symbol_id: i64) -> i64:
     if module_index < 0:

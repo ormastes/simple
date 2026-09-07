@@ -50,6 +50,16 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host-gpu"
             | "host_gpu"
             | "gpu"
+            // Link the SHARED runtime (libsimple_runtime.so) rather than a
+            // static archive. Accepted only for the Stage4 compiler entry --
+            // `selected_runtime_library` refuses it for anything else -- so
+            // naming it here widens the CLI vocabulary, not the set of entries
+            // whose link changes.
+            | "dynamic-runtime"
+            | "dynamic_runtime"
+            | "dynamic"
+            | "shared-runtime"
+            | "shared_runtime"
     )
 }
 
@@ -321,7 +331,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     i += 2;
                 } else {
                     eprintln!(
-                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu)"
+                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime)"
                     );
                     return 1;
                 }
@@ -464,7 +474,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime, runtime",
             runtime_bundle
         );
         return 1;

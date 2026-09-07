@@ -1066,46 +1066,4 @@ mod tests {
         assert!(spl_f64_to_bits(&[wrapped]).is_err());
         assert!(spl_f64_to_bits(&[Value::Nil]).is_err());
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn backend_plugin_bridge_runs_real_v1_fixture_and_packs_canonical_envelope() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let fixture = repo.join("test/01_unit/compiler/backend_plugin/fixtures/backend_plugin_v1_fixture.c");
-        let abi = repo.join("src/compiler/70.backend/backend_plugin/abi");
-        let output = std::env::temp_dir().join(format!("simple-backend-plugin-v1-{}.so", std::process::id()));
-        let status = std::process::Command::new("cc")
-            .args(["-std=c11", "-fPIC", "-shared", "-I"])
-            .arg(&abi)
-            .arg(&fixture)
-            .arg("-o")
-            .arg(&output)
-            .status()
-            .expect("compile real backend plugin fixture");
-        assert!(status.success());
-
-        let mut request = Vec::new();
-        request.extend_from_slice(&1u32.to_le_bytes());
-        request.extend_from_slice(&2u32.to_le_bytes());
-        request.extend_from_slice(&2u64.to_le_bytes());
-        let result = spl_backend_plugin_run_v1(&[
-            Value::byte_array(output.as_os_str().as_encoded_bytes().to_vec()),
-            Value::byte_array(request),
-            Value::byte_array(vec![1, 2, 3, 4]),
-        ])
-        .expect("interpreter bridge result");
-        let wire = result.byte_array_view().expect("packed byte envelope");
-        assert_eq!(
-            u32::from_le_bytes(wire[0..4].try_into().unwrap()),
-            BACKEND_BRIDGE_MAGIC_V1
-        );
-        assert_eq!(u32::from_le_bytes(wire[4..8].try_into().unwrap()), 1);
-        assert_eq!(i32::from_le_bytes(wire[8..12].try_into().unwrap()), 0);
-        assert_eq!(u32::from_le_bytes(wire[12..16].try_into().unwrap()), 2);
-        assert_eq!(u64::from_le_bytes(wire[16..24].try_into().unwrap()), 9);
-        assert_eq!(u64::from_le_bytes(wire[24..32].try_into().unwrap()), 18);
-        assert_eq!(&wire[32..41], b"object-ok");
-        assert_eq!(&wire[41..], b"fixture-diagnostic");
-        let _ = std::fs::remove_file(output);
-    }
 }

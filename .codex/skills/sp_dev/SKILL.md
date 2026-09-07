@@ -15,6 +15,14 @@ goal refinement and acceptance criteria, then continue through research, design,
 SSpec scenarios executed through SPipe, implementation, refactor, verification,
 and ship handoff:
 
+For bug fixes, claim the bug record before source edits, reproduce the exact
+failure first, and fix the pure-Simple owner (`src/compiler`/`src/lib`/`src/app`)
+before Rust/runtime. Rust/runtime edits require evidence that the pure layer
+delegates correctly and the defect is below that boundary. Add both the exact
+reproducer and at least one similar/adjacent root-cause regression; document
+why when no meaningful adjacent case exists. Resolve the ownership tag only
+after the fix and evidence land.
+
 ```
 /sp_dev <description of what to build or fix>
 ```
@@ -52,18 +60,15 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
-For must-check hook work in linked Git worktrees, remember that the hooks
-directory is shared. Install the stable `scripts/hooks/pre-push-worktree-launcher`
-and let it resolve the active worktree; never bind the shared hook to one
-worktree's absolute dispatcher path.
+## Protected PR self-review handoff
 
-Check the canonical hook wiring before installing or repairing it. On Unix-like
-hosts, run:
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
 
-```sh
-sh scripts/setup/install-must-check-hooks.shs --check ||
-  sh scripts/setup/install-must-check-hooks.shs --install
-```
+If the user or an agent says `self approve`, `approve PR`, or `author cannot
+approve`, run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`) and follow its exact-head
+review, protected dispatch, and exact-head poll. This is the canonical
+discovery entry point.
 
 If `spipe` is absent or returns `unknown command: self-review-guide`, first
 fetch and fast-forward the current `main`, then initialize the pinned plugin:
@@ -73,13 +78,20 @@ and `git submodule update --init .spipe/spipe`. Run the
 means a stale installation; it does not authorize falling back to author
 `gh pr review --approve`.
 
-```powershell
-& scripts/setup/install-must-check-hooks.ps1 -Check
-if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
-```
+When a lane reaches protected PR integration, tell the operator and future LLM
+that GitHub forbids a PR author from submitting an `APPROVED` review on their
+own PR. `SPipe Self Review Admission` is a short-lived required status check,
+not provider or independent approval. Ordinary code/text is eligible by default
+absent an external operator deny/constrain; exact scopes are `code`, `text`,
+`file`, immediate `directory_files`, and descendant `directory_recursive`.
 
-See `doc/07_guide/tooling/must_check_tiering.md` for the tier contract and
-linked-worktree launcher details.
+Record the exact rejection/invalidation reason and remediation in the lane log.
+State drift or expiry requires a fresh exact-head high-effort review with zero
+P0/P1 and a new dispatch. A deny requires policy-owner action or an eligible
+independent route; uncovered scope requires a smaller diff or new constraint;
+unsafe/secret material must be removed and exposed credentials rotated. Never
+attempt author `APPROVED`, reuse a stale check, or weaken candidate, release,
+merge, signing, or publication authority.
 
 For every acceptance criterion, record one passing result and do not rerun the
 same unchanged green command. Stop after three verify/fix cycles for one
@@ -95,8 +107,6 @@ post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
-The completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and bind every
-automated bootstrap gate to the exact validated Stage 4 candidate.
 
 For bootstrap/compiler debugging, keep normal SPipe verification on the
 default-off path. Use `--diagnostics=test` for progress and coarse phase
@@ -153,6 +163,16 @@ For release-bound SPipe lanes, the final test-runner evidence is
 spec/long-test discovery and execute both `.spl` comment doctests and configured
 Markdown code fences; a narrower `--all`, `--only-slow`, or smoke run is not
 release evidence.
+
+When a lane changes Markdown examples, source doc comments, doctest discovery,
+or the test manifest, keep registration and execution aligned through the
+canonical test-runner extractors. Runnable Markdown uses closed, non-empty
+`simple`, `spl`, or `sdoctest` fences; runnable source documentation uses
+closed, non-empty `#`/`##`/`///` fences, fenced docstrings, or docstring
+`sdoctest:` sections. Use
+`text` fences for non-runnable examples. Run the changed file explicitly, and
+use `--refresh-manifest` after bulk moves; the normal manifest refresh is
+TTL-based with size/mtime incremental reuse.
 
 For work spanning multiple host or capability rows, keep every unavailable
 row's acceptance-criterion IDs active. Reuse its authoritative TODO and plan,
@@ -348,6 +368,9 @@ matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
 Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
+Production CUDA font loading may use only Simple-generated PTX bound to an
+immutable package/tracked manifest hash and program version. Ignored `build/`
+output and a caller-provided adjacent hash are evidence, not trust anchors.
 For HTML-backed GUI modernization, pair screenshot or bitmap evidence with
 structured Electron interaction evidence. A pass needs visible controls to
 receive focus, keyboard/input, pointer, and click events, or the wrapper must
@@ -447,9 +470,11 @@ tested, run `scripts/check/check-gui-widget-renderdoc-goal-status.shs`; require
 `gui_widget_renderdoc_goal_blocked_gate_count=0`. Normal non-Mac runs may report
 `incomplete`, but release or completion claims must use `--strict` with real
 Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence. Defer
-Windows and Linux claims until platform-specific runbooks validate the same
-evidence keys and RDOC gate contract.
+Windows claims until the Windows runbook validates the same evidence keys and
+RDOC gate contract; Linux claims use the Linux render-log comparison below.
 For Linux Vulkan render-log comparison, require the aggregate audit to expose
+`linux_vulkan_render_log_compare_blocked_gate_count`,
+`linux_vulkan_render_log_compare_blocked_gates`,
 `linux_vulkan_render_log_compare_renderdoc_simple_env_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic`,
@@ -459,7 +484,62 @@ For Linux Vulkan render-log comparison, require the aggregate audit to expose
 `linux_vulkan_render_log_compare_renderdoc_electron_env_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status`, and
 `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic`; an env file
-that exists without a real `RDOC` artifact remains a blocker.
+that exists without a real `RDOC` artifact remains a blocker. Browser capture
+failures must keep `renderdoc-chrome-rdc` and/or `renderdoc-electron-rdc`
+visible in the blocked-gate list; a summarized reason alone is not enough for a
+completion claim.
+For SimpleOS hardening work that combines Vulkan-over-2D, RenderDoc, LLVM,
+SIMD, and QEMU GPU access, use
+`scripts/check/check-simpleos-hardening-evidence-matrix.shs` as the canonical
+handoff aggregate. Current completion requires
+`simpleos_hardening_mission_critical_release_status=pass`,
+`simpleos_hardening_mission_critical_release_blockers=none`,
+`simpleos_hardening_mission_critical_prereqs_status=ready`,
+`simpleos_hardening_matrix_passed=26/26`,
+`simpleos_hardening_riscv_rtl_sby_proof_status=pass`,
+`simpleos_hardening_gui_renderdoc_vulkan_status=pass`,
+`simpleos_hardening_llvm_port_status=pass`,
+`simpleos_hardening_cpu_simd_status=pass`,
+`simpleos_hardening_formal_lean_proofs_status=pass`,
+`simpleos_hardening_formal_riscv_dual_track_status=pass`,
+`simpleos_hardening_formal_critical_concurrency_status=pass`,
+`simpleos_hardening_formal_memory_safety_status=pass`, and
+`simpleos_hardening_formal_storage_integrity_status=pass`, plus
+`simpleos_hardening_qemu_virtio_gpu_access_status=pass` and
+`simpleos_hardening_stale_reports=none`; update the generated
+manual for `test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl`
+when that row contract changes. If `reason=stale-static-reports`, refresh the
+named source reports before claiming completion. If mission-critical prereq or
+RTL/SBY wrappers change, require their `--self-test` forms, and treat missing
+strict RVFI readiness as a completion blocker rather than a formal proof pass.
+
+For SimpleOS QEMU host-GPU external-host evidence, follow the postponement and
+resume contract in `doc/07_guide/platform/simpleos/qemu_system_tests.md` and
+the existing-TODO matrix in
+`doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+Postpone only prepared Windows DirectX, macOS Metal, NVIDIA CUDA, and the
+non-current native-host portions of TODO 563, TODO 569, and TODO 570; their
+current Linux Vulkan portions remain active.
+Resume only on the prepared native host with a pure-Simple compiler accepted by
+`simple_binary_is_valid`. Never promote source inspection, emulation,
+screenshots, cached reports, synthetic handles, or CPU mirrors to native PASS;
+require device-origin readback, stable identity, exact CPU-oracle parity,
+correlated IDs, and final high-capability review.
+
+For RV32/RV64 baremetal compiler/firmware lanes, keep runtime-value ABI fixes at
+the compiler/runtime owner boundary: do not paper over `rv_type` width bugs with
+firmware-local `rt_*` shims or broad all-`i64` predeclares. Add the smallest IR
+regression that proves the failing scalar shape (for example RV32 call-result
+`!=` literal emits `icmp`, not `rt_native_neq`) and verify both the wrapper
+result marker and any subsystem serial `FAIL` lines separately. For the RV32
+NVMe firmware boot wrapper, run
+`sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test` when
+marker handling changes so fake-QEMU evidence proves missing PASS and serial
+`FAIL` paths fail closed. Use
+`sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs` to expose RV32/RV64
+wrapper coverage status; run `--strict` before any completion or release claim
+so missing RV64 wrapper/spec coverage remains a blocker instead of becoming a
+silent gap.
 
 For Tauri2 mobile renderer parity, use
 `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
@@ -513,6 +593,20 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
+Performance and memory lanes use the four-tier contract in
+`doc/07_guide/compiler/performance_diagnostics.md`: fast typed lints, MIR
+transforms plus remarks, bounded deep analysis, and profile-guided diagnosis.
+Start with algorithmic complexity, then allocations/copies, layout/locality,
+loop-invariant work, and dispatch overhead. A source-level bound is static
+evidence, not a timing or RSS result; record `unverified` or
+`AnalysisIncomplete(reason)` when execution or proof is unavailable. Risky
+optimizer changes need paired semantic and structural SSpec evidence, while a
+missed optimization normally belongs in a remark rather than a default warning.
+Keep the local audit, architecture, detail design, agent plan, relevant
+`doc/07_guide` page, executable SSpec, and mirrored `doc/06_spec` manual current
+in the same lane. The canonical research baseline is
+`doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`.
+
 Minimize runtime coupling first in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
 benchmark code should use Simple facades instead of new raw runtime calls,
 env/CLI shortcuts, direct backend field poking, or tool-local runtime aliases.
@@ -522,6 +616,11 @@ generated native code, fix the Simple compiler/codegen/runtime owner path with
 the smallest reproducer and gate; only edit `src/runtime/**` when the lane is
 explicitly runtime-owned or the bug is proven there. Do not hide a
 compiler/runtime bug by normalizing an `rt_*` workaround in feature code.
+
+For nil/optional failures, fix the owner lowering/type/runtime path instead of
+making `nil` displayable or adding local `rt_*` shims. `nil` is absence like an
+empty `Option`; SPipe scenarios should assert `to_be_nil()` or unwrap/default
+before field access, method calls, or user-facing output.
 
 Before adding any new `rt_*` import, extern, wrapper, alias, runtime-backed
 fixture bypass, or direct backend field access outside `src/runtime/**`, stop
@@ -544,8 +643,13 @@ solve an SPipe failure by adding `rt_*` plumbing must also add or cite a focused
 gate proving the facade/codegen/runtime boundary, not just the feature output.
 
 Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
-for runtime-adjacent lanes and treat any new raw env/process/runtime access
-outside owner modules as a fix-before-done issue.
+for runtime-adjacent app/gc lanes and treat any new raw env/process runtime
+imports or calls outside owner modules as a fix-before-done issue.
+For process/signal hardening, also require the
+`doc/07_guide/runtime/process_kill_safety.md` rule: every kill/wait path rejects
+`pid <= 0` before signaling or reaping. Seed runtime changes to that guard need
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` before
+they affect deployed binaries.
 
 Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
@@ -610,6 +714,132 @@ exists, and cite the canonical implementation paths such as
 `src/lib/common/ui/window_scene_draw_ir.spl`, and
 `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 
+## Shared multilingual font work
+
+Apply these rules to work touching bundled fonts, shaping, glyph material,
+font GPU emission, or GUI/Web/2D/3D text.
+
+1. Pin the CLDR ranking input and reproducibly regenerate the selected top ten;
+   retain rank 11 only as the cutoff witness, never as a selected-language row.
+2. Keep exactly ten product categories and immutable URL, revision, license,
+   Reserved Font Name (RFN), hash, byte-size, embedded name, table, and
+   default-axis metadata for every bundled free-font candidate.
+3. Keep an honest 10x10 matrix whose only statuses are `native`, `fallback`,
+   `not-designed-for-script`, and `unavailable`. Promote a cell only through an
+   executable, exact-face-bound shaping and corpus gate; codepoint presence is
+   not acceptance.
+4. Reuse the canonical `FontRenderer`, transient `FontRenderBatch`, and common
+   atlas ownership. Do not create another renderer, atlas, cache, or private
+   font draw path.
+5. Web and GUI producers emit `DrawIrComposition`; Engine2D lowers its text
+   through `draw_text`. Engine3D HUD/world text is a separate consumer lane,
+   never a shortcut for Web, GUI, Draw IR, or 2D.
+   The canonical WM frame path is `SharedWmScene -> DrawIrComposition ->
+   Engine2D`; `shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are
+   compatibility renderers, not equivalent completion paths. Canonical
+   SimpleOS runner/readiness targets select `gui_entry_desktop.spl`; direct
+   legacy `wm_entry.spl` files remain compatibility-only and are not evidence.
+   Hosted `HostCompositor.render_frame_engine2d` now owns the persistent
+   canonical source route. Source ownership is not executable/device proof,
+   and immediate compatibility retries remain non-completion paths.
+   In this lane `WebIR` means the existing web semantic/layout model; do not
+   invent a second drawing IR or store glyph/atlas/native material in it.
+   Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,
+   positions, and logical clusters. Its SDN form must round-trip those arrays;
+   `font-shaping=selected-pure-simple` without a valid payload fails closed.
+   Atlases, face handles, backend resources, and caches remain transient
+   `FontRenderer`/Engine2D material.
+6. GPU proof climbs `emission -> compile -> submission -> fence -> device-origin
+   readback -> CPU parity`; stop and report the first unavailable rung.
+   `unavailable` is never PASS.
+   Compile evidence must include the Simple-emitted font companion and its
+   versioned exported symbol; CUDA font GPU execution and runtime promotion must
+   load that verified artifact, not a handwritten or independently generated
+   parallel blob.
+   Vulkan promotion additionally requires the validated precompiled-SPIR-V
+   artifact mode and its exact pinned hash; runtime GLSL is diagnostic execution
+   only.
+   Straight-ARGB compositing is `FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION = 2`;
+   retained CUDA PTX and Vulkan SPIR-V with another version are stale and must
+   be regenerated and re-pinned before promotion, never trusted by bypassing the check.
+   Admission is two-phase and aggregates only `PORTABLE_COMPUTE_TARGETS`:
+   candidate generation must match `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, set
+   `candidate_compiled=true` and `artifact_validated=true`, and record compiler
+   plus validator path/version/SHA-256 (`spirv-val` is mandatory for Vulkan).
+   Stale pins keep `pinned_verified=false` and cannot promote. Only independent
+   review may update tracked source/artifact pins; a reproducing run must then
+   set `pinned_verified=true`. Never repin merely to make the first run green.
+7. Shaping and material preparation fail closed unless every required operation
+   completed. Hosted runs remain bound to the exact live face handle and
+   generation. Registered-only SimpleOS runs are the bounded exception: exact
+   validated registered bytes bind through the existing shaper with
+   handle/generation `0`, then only a handle-free glyph payload may cross Draw
+   IR to the existing selected-byte `FontRenderer`/`FontRenderBatch` path.
+8. Freeze these five primary SSpec phrases exactly:
+   `Load the pinned multilingual font manifest`;
+   `Accept exact-face-bound simple-script shaping`;
+   `Prepare one shared font batch for 2D and 3D`;
+   `Emit the selected font composite program and plan compilation`;
+   `Prove native submission and device readback`.
+   Resolved-host, completion, and folded secondary detail phrases are defined
+   by `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not introduce
+   vocabulary outside that plan. Mirrored manuals under `doc/06_spec` are `.md`
+   only.
+9. Lower-model sidecars may implement or audit bounded lanes and generated
+   manuals, but the final done mark and manual-quality judgment require a
+   higher-capability review.
+10. WM/GUI/Web/2D selected-font evidence must bind Web layout and Draw IR paint
+    to one stable manifest identity and the same ordered advances. Preserving
+    `font-family` metadata or selecting a TTF only during paint is incomplete;
+    Web producers use the HTML/WebIR-to-DrawIR owner and GUI producers use
+    `widget_tree_to_draw_ir`; a private widget command collector is not evidence.
+    A dispatch PASS must submit that exact composition; an unrelated frame event
+    leaves dispatch `not_requested`. Preserve the executor's exact readback source.
+    Unstyled legacy Draw IR must remain bitmap-compatible. A synthetic
+    composition proves the contract only; production-route acceptance must
+    exercise the real hosted frame owner and canonical SimpleOS entry, with
+    platform backends limited to final-pixel presentation.
+11. SimpleOS font-host claims must reuse `FontAssetCandidate`, stage the exact
+    pinned bytes through every applicable disk/initramfs builder, and prove
+    guest path/length/hash plus glyph and framebuffer evidence. Host-repository
+    asset presence is not guest proof. Source wiring or a serial marker is not
+    pixel proof; retain the independent QEMU `pmemsave` crop and evidence record.
+    After registered-only mode begins, accepted Arabic/Urdu and Hindi shaping
+    must use the exact registered bytes without host font ABI or filesystem
+    access. Source/unit/SPipe coverage never substitutes for the QEMU crop.
+12. Runtime font configuration uses the one text-layout-owned
+    `FontRenderConfig` beside `FontRenderBatch`. Evidence
+    must vary and assert every family/category/language/script, size,
+    weight/style, hinting, antialiasing, atlas-policy, target, and execution-
+    policy identity dimension through bitmap, selected-vector, shaped, 2D, and
+    3D paths. `Suggested` tries the named target first, then the remaining
+    canonical GPU order, then CPU; `Preferred` tries the named target then CPU;
+    `Required` tries the named target only. Unsupported modes/CTM reject before
+    cache/backend mutation. `Suggested(auto)` uses the engine's executable
+    font-adapter order; Preferred/Required with `auto` and unknown targets
+    reject before mutation. Batch evidence carries config identity, target,
+    and policy; the config object never crosses WebIR or Draw IR.
+13. NFR-008 promotion uses `VulkanFontCompositeEvidence` and
+    `vulkan_font_stage_evidence_ready`, then persists the observation through
+    `FontPerfBudgetEvidence`, `read_font_perf_evidence`, and
+    `expect_font_perf_budget`. Treat `queue_device` as the fused
+    submit-through-device-completion interval, never sum it with the later
+    fence-observation `sync` interval, and record offscreen presentation as
+    `not-applicable-offscreen` while still requiring device readback.
+14. Interpreter diagnostics reuse `build_interpreter_result_wrapper` through
+    the canonical test runner or `src/app/test/font_evidence_runner.spl`.
+    Before trusting them, require exit 1 and the distinct canonical failure
+    markers from
+    `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
+    `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`; reject
+    2/124/139 and retain commands, binary SHA-256, and logs per `$system_test`.
+    They never replace native evidence.
+15. AC-13 source review must reject font owners that import raw `rt_mutex_*`
+    calls instead of the existing mutex facade, mutable module-global engine
+    pools, or unsynchronized scalar generation counters used by hosted paths.
+    Freestanding initialization constraints justify a facade repair, not a
+    second raw-runtime owner or a hosted data race.
+
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing
 `use std.spipe` remains an alias, and UI/SGTTI/Draw IR helpers must layer inside
@@ -653,12 +883,53 @@ dependencies must miss the interpreter/incremental cache and any SMF/JIT cache
 that could otherwise reuse stale code. Add focused specs near the cache owner
 instead of relying only on broad loader suites.
 
+For Lean or BYL formal-verification lanes, keep generated backend output
+separate from handwritten proof additions. Regeneration should update generated
+obligations without overwriting stable theorem files, and SPipe evidence should
+name the generated artifact plus the durable proof entry points that must still
+check after regeneration. Treat BYL as generated proof-model interchange, not
+as a Lean replacement: claims are proved only by the lane's checked Lean command
+or by the target hardware proof command. If a generator renames or removes an
+export consumed by a manual theorem, update the generator manifest/contract and
+the manual proof in the same lane before handoff. Added proof intent belongs in
+manual theorem/constraint files; generated Lean or BYL files should only gain it
+when the generator contract is updated in the same lane.
+For RISC-V lanes that combine generated RTL sidecars with Lean/BYL proof
+models, cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the
+aggregate SPipe evidence gate after regeneration.
+Keep the generated pieces and the added proof layer divided in the SPipe manual
+text: generated Lean/BYL/RTL artifacts prove regeneration shape, while manual
+constraint/theorem files prove the property claim. A future regeneration must
+be able to replace generated files without deleting the cited manual proof
+entry point.
+For flight-level or mission-critical robust-software lanes, use
+`doc/07_guide/app/spipe/mission_critical_robust_sw.md` as the operator-facing
+gate contract before accepting release or hardening evidence.
+For SimpleOS mission-critical RISC-V evidence, also cite
+`sh scripts/check/check-riscv-rtl-sby-proof.shs` and
+`sh scripts/check/check-simpleos-mission-critical-release.shs`; release evidence
+requires `release_blockers=none`. When changing the release wrapper, run
+`sh scripts/check/check-simpleos-mission-critical-release.shs --self-test`. A
+missing `sby`, `yosys`, or SMT solver is a blocked prerequisite state, not a
+proof pass.
+Starvation, fairness, race-condition, scheduler, channel, lock, or
+resource-lifecycle claims require a concurrency/resource model gate or an
+explicit blocker; a single interleaving test is not formal evidence. Wrapper
+self-tests for process/coroutine/resource rows must strip at least one
+row-backed theorem instead of only checking unrelated formal rows.
+The SPipe manual and lane state must name the model scope, generated artifact,
+durable theorem/constraint file, and exact command or wrapper that checked the
+claim after regeneration. If any one of those is missing, report the lane as
+blocked or incomplete rather than upgrading generated BYL/Lean/RTL output into
+proof evidence.
+
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
-file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the
-guide aligned with the current wrapper contract (native-first, probe-stamped,
-no silent source fallback in production), the direct-`rt_*` guard policy, the
-interface-cache/source-mtime contract, and the latest local smoke numbers from
-`scripts/check/check-mcp-native-smoke.shs`.
+file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Local
+Simple MCP is source-hosted through `bin/simple src/app/mcp/main.spl`; validate
+that exact script path and restart the client after source changes. Native
+artifact builds and `scripts/check/check-mcp-native-smoke.shs` are required
+only when packaging, deployment, or release paths changed. Keep the direct
+`rt_*` guard policy and interface-cache/source-mtime contract current.
 Use `bin/simple deps fast|normal|deep <entry.spl>` and
 `doc/07_guide/compiler/deps_tool.md` when a startup or tool-server change claims
 dependency-closure reduction; record before/after file counts and the concrete
@@ -679,8 +950,10 @@ native raw Metal readback evidence on macOS. A production renderer pass must
 also forward `scripts/check/check-wm-browser-event-routing-evidence.shs` under
 `production_gui_web_renderer_parity_event_routing_*` and require focus, window
 move/maximize, title-command keyboard input, body text input, pointer down/up,
-and `blur_or_tolerance=false`; render/capture parity without interaction
-delivery is incomplete evidence.
+`performance.now()` availability with a positive delta, at least two
+`requestAnimationFrame` ticks, CSS animation application, and
+`blur_or_tolerance=false`; render/capture parity without interaction delivery
+and browser timing/animation proof is incomplete evidence.
 For GUI/web queue proof, runtime queue/drain receipts are necessary but not
 sufficient. Production proof requires same-frame backend `device_readback`, a
 positive backend handle, and matching checksum; runtime-only, synthetic-handle,
@@ -695,6 +968,23 @@ When a workflow or tool contract changes, update the matching `doc/07_guide`,
 `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
 `.claude/agents/spipe/`, and `.gemini/commands/` instructions before handoff. Treat stale process docs
 as unfinished work, not release cleanup.
+
+For a protected GitHub publication, keep the handoff state explicit:
+`unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,
+`awaiting-independent-approval`, `awaiting-required-checks`, `merge-blocked`,
+or `merged`. A high-capability, high-effort exact-head review that reports zero
+P0/P1 findings may dispatch the trusted default-branch `SPipe Self Review
+Admission` workflow with `PASS:0:0`. That short-lived required check is
+self-attested admission, not a GitHub provider `APPROVED` review or independent
+authentication. Never have the PR author's credential call
+`gh pr review --approve`; use the scoped admission when policy permits, or an
+eligible independent provider reviewer when provider approval is required.
+After a push, base/PR edit, policy/ruleset change, or expiry, treat the old
+admission as invalid and perform a new exact-state review before redispatch.
+`--no-verify` skips local Git hooks only and never bypasses repository
+protection or required checks. See `doc/07_guide/app/devhub.md`,
+`doc/07_guide/infra/self_review_policy_db.md`, and
+`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
 
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex
@@ -713,6 +1003,14 @@ If other Codex, Claude, or Gemini sessions are active, identify the lane this
 dirty files into the feature just because they are present in the shared
 checkout. Preserve other-agent work, report it separately, and commit only the
 intentional lane unless the user requests a combined integration.
+
+When auditing Codex sessions before lane ownership or completion decisions,
+order rollouts by embedded start time rather than modification time. Treat a
+live process/open rollout, an unmatched `task_started`, a `task_complete`, and
+the latest explicit thread-goal status as separate facts. Never infer goal
+completion from a completed turn; require the goal status itself to be
+`complete`. Summarize objectives without exposing credentials or unrelated
+prompt content.
 
 For scenario-oriented work, the SPipe loop also includes generated manual
 review. After SSpec `.spl` scenarios are written or changed, generate the
@@ -769,10 +1067,10 @@ commands:
 
 ## Session update 2026-07-18
 
-SimpleOS desktop bring-up continues through the C1-C8 baremetal codegen 
-landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed 
-import-alias resolution, receiver-binding under --entry-closure, NVMe DMA 
-zero-address guard, interpreter stack overflow, i64 print precision. Canonical 
+SimpleOS desktop bring-up continues through the C1-C8 baremetal codegen
+landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed
+import-alias resolution, receiver-binding under --entry-closure, NVMe DMA
+zero-address guard, interpreter stack overflow, i64 print precision. Canonical
 reference guide (in progress): doc/07_guide/os/baremetal_simple_codegen_landmines.md.
 
 ## Verification tiering (build infra)
@@ -788,6 +1086,30 @@ expensive gates through `scripts/check/check-bootstrap-must-pass.shs`. Ledger v3
 rows must name a non-empty owner; TODO/blocked rows require an actionable
 non-`none` unblock condition, while PASS rows require
 `unblock_condition=none`. The push consumer must fail closed on violations.
+External host, device, installed-provider, and benchmark rows use registry mode
+`external-receipt` and the registry-owned semantic validator. A generic
+hash-bound receipt or prose artifact is not promotion authority: require the
+exact gate acceptance-ID matrix and separate committed command, target,
+toolchain, and observation blobs whose hashes are recomputed. Require the
+evidence summary to carry a valid signature from a repository-pinned independent
+reviewer key, plus a final validator PASS.
+Keep that validator bootstrap-owned; the bounded push consumer only validates
+the committed ledger and evidence hashes.
+For source-decidable external gates, add a narrow registry-owned semantic
+oracle after common signature/hash validation; RISC-V sharing requires an
+exhaustive disjoint HEAD inventory with bilateral and specialization evidence.
+Performance external gates require narrow numeric validators over retained raw
+artifacts; binary-size parity hashes and sizes the committed stripped binaries
+and derives `Simple <= Go` itself. Interpreter-startup parity requires ordered
+trial-interleaved raw process-launch samples for Simple/Python/Bun/Go, exact
+Simple interpreter-mode receipts, recomputed p50/p95, strict cold+warm
+comparisons, and the live canonical Stage 4 chain.
+Rust/Go benchmark parity requires a runtime-fed equal-work fixture, rotated
+trial-interleaved raw samples, recomputed p50/p95, equality-or-better Simple
+latency against both references, and the same canonical Stage 4 authority.
+When a push guard's default command also runs mutation fixtures, register its
+scan-only mode in the push tier and retain the self-test as a distinct required
+bootstrap row.
 
 ## Log-retention convention (debug/perf instrumentation)
 

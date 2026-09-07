@@ -17,6 +17,21 @@ pub(crate) enum NativeRuntimeLane {
     SimpleCore,
     CoreCBootstrap,
     HostGpu,
+    /// Link the Stage4 compiler entry against the SHARED runtime
+    /// (`libsimple_runtime.so` / `.dylib`) instead of a static archive.
+    ///
+    /// Simple does not unwind, so the compiler binary has no reason to be
+    /// forced onto the static core-C archive: that archive carries only the
+    /// bootstrap C ABI subset, and the missing remainder is what produced the
+    /// 167 unresolved `rt_*` symbols at the Stage4 link. The shared runtime
+    /// exports the full surface and resolves at load time, which is why this
+    /// lane needs none of the capsule/projection machinery the archive lanes
+    /// require (see `linker.rs`, `dynamic_runtime_lane`).
+    ///
+    /// EXPLICIT OPT-IN ONLY. `resolve_runtime_lane` never infers it, so no
+    /// existing entry, script, or bootstrap stage changes behaviour unless it
+    /// asks for `--runtime-bundle dynamic-runtime` by name.
+    DynamicRuntime,
 }
 
 impl NativeRuntimeLane {
@@ -25,6 +40,7 @@ impl NativeRuntimeLane {
             Self::SimpleCore => "simple-core",
             Self::CoreCBootstrap => "core-c-bootstrap",
             Self::HostGpu => "host-gpu",
+            Self::DynamicRuntime => "dynamic-runtime",
         }
     }
 }
@@ -42,6 +58,70 @@ pub(super) fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
 
 fn runtime_bundle_requests_host_gpu(value: &str) -> bool {
     matches!(value, "host-gpu" | "host_gpu" | "gpu")
+}
+
+pub(super) fn runtime_bundle_requests_dynamic_runtime(value: &str) -> bool {
+    matches!(
+        value,
+        "dynamic-runtime" | "dynamic_runtime" | "dynamic" | "shared-runtime" | "shared_runtime"
+    )
+}
+
+/// File name of the shared runtime for this host's linker flavor.
+fn shared_runtime_library_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libsimple_runtime.dylib"
+    } else if cfg!(target_os = "windows") {
+        "simple_runtime.dll"
+    } else {
+        "libsimple_runtime.so"
+    }
+}
+
+/// True when `path` is a shared object rather than a static archive.
+///
+/// Used by the linker to pick `-L`/`-l`/`-rpath` emission over the archive
+/// retention-root machinery, which only has meaning for `.a` members.
+pub(crate) fn is_shared_runtime_library(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    name.ends_with(".so") || name.ends_with(".dylib") || name.ends_with(".dll") || name.contains(".so.")
+}
+
+/// Locate `libsimple_runtime.so` for the dynamic lane.
+///
+/// Every root is an EXPLICIT authority, deliberately mirroring
+/// `bootstrap_hosted_native_all_runtime`: the operator's `--runtime-path`, the
+/// process-wide runtime path override, `SIMPLE_RUNTIME_PATH`, and the running
+/// compiler's own runtime authority search dirs. There is no cwd-relative scan.
+fn find_dynamic_runtime_library(runtime_path: Option<&Path>) -> Option<PathBuf> {
+    let name = shared_runtime_library_name();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(rp) = runtime_path {
+        roots.push(rp.to_path_buf());
+    }
+    if let Some(dir) = super::RUNTIME_PATH_OVERRIDE.get() {
+        roots.push(dir.clone());
+    }
+    if let Ok(env_path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+        if !env_path.is_empty() {
+            roots.push(PathBuf::from(env_path));
+        }
+    }
+    // Widen each explicit root with the runtime-authority layout (bootstrap/,
+    // per-triple subdirs) that the staged bootstrap trees actually use.
+    let explicit: Vec<PathBuf> = roots.clone();
+    for root in &explicit {
+        roots.extend(runtime_authority_search_dirs(root));
+    }
+
+    for root in roots {
+        for candidate in [root.join(name), root.join("deps").join(name)] {
+            if matches!(std::fs::metadata(&candidate), Ok(meta) if meta.is_file() && meta.len() > 0) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn runtime_bundle_requests_hosted(value: &str) -> bool {
@@ -256,7 +336,15 @@ impl NativeProjectBuilder {
             value if runtime_bundle_requests_simple_core(value) => return NativeRuntimeLane::SimpleCore,
             value if runtime_bundle_requests_core_c_bootstrap(value) => return NativeRuntimeLane::CoreCBootstrap,
             value if runtime_bundle_requests_host_gpu(value) => return NativeRuntimeLane::HostGpu,
+            value if runtime_bundle_requests_dynamic_runtime(value) => return NativeRuntimeLane::DynamicRuntime,
             _ => {}
+        }
+        if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+            .ok()
+            .as_deref()
+            .is_some_and(runtime_bundle_requests_dynamic_runtime)
+        {
+            return NativeRuntimeLane::DynamicRuntime;
         }
         if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
             .ok()
@@ -375,13 +463,48 @@ impl NativeProjectBuilder {
         }
         let lane = self.resolve_runtime_lane();
         if self.is_authorized_stage4_compiler_entry() {
-            if lane != NativeRuntimeLane::CoreCBootstrap {
-                return Err("Stage4 compiler entry requires the core-c-bootstrap runtime lane".to_string());
+            // The rejection below is the SAME intent 6c97e5709ad landed: a
+            // Stage4 compiler entry that asks for a lane it will not get must
+            // be told so, never silently re-routed to core-C. `DynamicRuntime`
+            // honours that intent rather than overriding it -- it is an
+            // explicit, named request that is answered with exactly the runtime
+            // it asked for, and it is the only lane added here.
+            match lane {
+                NativeRuntimeLane::CoreCBootstrap => {
+                    let core_dir = temp_dir.join("core_c_runtime");
+                    let core = build_core_c_runtime_library(&core_dir)
+                        .ok_or_else(|| "failed to build the Stage4 core-C runtime archive".to_string())?;
+                    return Ok(Some((core, false)));
+                }
+                NativeRuntimeLane::DynamicRuntime => {
+                    let shared = find_dynamic_runtime_library(self.config.runtime_path.as_deref()).ok_or_else(|| {
+                        format!(
+                            "native-build could not find `{}` for the dynamic-runtime lane; pass --runtime-path or set SIMPLE_RUNTIME_PATH to the directory holding it",
+                            shared_runtime_library_name()
+                        )
+                    })?;
+                    return Ok(Some((shared, false)));
+                }
+                _ => {
+                    return Err(format!(
+                        "Stage4 compiler entry requires the core-c-bootstrap or dynamic-runtime runtime lane (asked for `{}`)",
+                        lane.display_name()
+                    ))
+                }
             }
-            let core_dir = temp_dir.join("core_c_runtime");
-            let core = build_core_c_runtime_library(&core_dir)
-                .ok_or_else(|| "failed to build the Stage4 core-C runtime archive".to_string())?;
-            return Ok(Some((core, false)));
+        }
+        // The dynamic lane is scoped to the Stage4 compiler entry on purpose.
+        // Every other entry keeps whatever archive it links today; widening the
+        // lane is a separate, reviewable change, not a side effect of this one.
+        if lane == NativeRuntimeLane::DynamicRuntime {
+            let entry = self
+                .entry_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            return Err(format!(
+                "the dynamic-runtime lane is available only to the Stage4 compiler entry; `{entry}` is not one"
+            ));
         }
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
         let (native_all_name, runtime_name) = runtime_archive_names(super::effective_target().linker_flavor());
@@ -457,6 +580,8 @@ impl NativeProjectBuilder {
                     }
                 }
                 NativeRuntimeLane::HostGpu => {}
+                // Unreachable: the dynamic lane returns above.
+                NativeRuntimeLane::DynamicRuntime => {}
             }
         };
 
@@ -506,6 +631,8 @@ impl NativeProjectBuilder {
                     }
                 }
                 NativeRuntimeLane::HostGpu => {}
+                // Unreachable: the dynamic lane returns above.
+                NativeRuntimeLane::DynamicRuntime => {}
             }
         }
 
