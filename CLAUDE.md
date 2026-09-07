@@ -56,7 +56,13 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 / DB engine and the `rt_sqlite_*` surface is a *mimic* of the SQLite API, not a
 binding to it. The name is API shape, not a dependency.
 
-- Engine: `src/lib/nogc_sync_mut/db/dbfs_engine/` (arena, attr_index,
+- **SQL engine: `src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl`**
+  — a real, already-consumed pure-Simple SQL engine over
+  `dbfs_engine/sql_parser.spl`'s recursive-descent parser. It already provides
+  typed `CREATE TABLE`, parameterized DML, `SELECT` with `WHERE`/joins, real
+  transactions, `last_insert_rowid`, `changes`, and error messages. **Start
+  here** — do not conclude the capability is missing without reading it.
+- Storage/index engine: `src/lib/nogc_sync_mut/db/dbfs_engine/` (arena, attr_index,
   checkpoint + checkpoint_ring, file_meta, fs_driver, and `fts/` — bm25,
   trigram, fuzzy, search), plus `src/lib/nogc_sync_mut/db/` (`db_query.spl`,
   `db_persistence.spl`, `cardinality_estimator.spl`, `filter_in.spl`, `accel.spl`,
