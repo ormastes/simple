@@ -57,6 +57,65 @@ entries:
   # K1, not K0: it is link policy behind the driver, not kernel identity.
   - K1|src/compiler/90.tools/header_gen/shared_lib_flags.spl
   - P_STATIC|src/compiler/90.tools/**
+  # --- kernel_plugin_adapter file-level classification (2026-09-07) ---------
+  # Arrived unclassified with the PR #319 kernel-plugin migration. This is a
+  # plugin ADAPTER directory, i.e. a boundary: the interface half is kernel,
+  # the implementation half is not, so the five files do NOT share a tier.
+  # Cited to kernel_pluggable_partition.md §3 per file, #481's convention.
+  # Comments sit on their OWN lines — `manifest_rows` captures the glob to
+  # end-of-line, so a trailing `#` would become part of the glob.
+  #
+  # §3 "`BackendPort` (the codegen interface) — K0 — The interface is K0;
+  # implementations are not", and §1 leg 1 "Interface identity is
+  # `(name, major, abi_digest)`". contract.spl IS that identity for the
+  # CompilerDriverV1 seam: COMPILER_DRIVER_KPF_{INTERFACE,PROVIDER}_ID +
+  # COMPILER_DRIVER_KPF_SCHEMA_DIGEST plus the versioned param objects
+  # (Request/Result/ReceiptV1, §4.2). Its only import is
+  # common.kernel_plugin.ids (not under src/compiler); no plugin surface.
+  - K0|src/compiler/kernel_plugin_adapter/contract.spl
+  # §3 "Interface/ABI digest computation — K0 — Identity must be computed by
+  # the party it protects." codec.spl fixes the exact byte layout that
+  # COMPILER_DRIVER_KPF_SCHEMA_DIGEST names (16-byte request, 40-byte result,
+  # fail-closed on length and on an unknown status ordinal). §3 Value ABI row
+  # applies too: "the surface every param object crosses; nothing sits under
+  # it." Imports only its own contract (K0).
+  - K0|src/compiler/kernel_plugin_adapter/codec.spl
+  # §3 "Non-bootstrap backends ... P-static — Same `BackendPort`; not needed
+  # for the fixpoint; statically linked for the reasons in §3.2."
+  # session.spl is the IMPLEMENTATION side of the seam above: two coexisting
+  # placements (CompilerDriverKpfStaticSessionV1 over the in-process driver
+  # provider, CompilerDriverKpfWorkerSessionV1 over the SMF worker transport).
+  # Not K0 by the §2 membership test — a KPF host loads it and checks it, not
+  # itself. Not K1 either: K1 requires "exactly one implementation must be
+  # present for the fixpoint", and both placements are linked while neither is
+  # on the bootstrap path (nothing under src/ imports this module; only
+  # test/03_system/compiler/feature/kernel_plugin/
+  # compiler_driver_kpf_adapter_spec.spl does). §3.2 reason 1 is why it stays
+  # static rather than P-dyn.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/session.spl
+  # §3 "Target descriptors ... P-static (data) — Descriptor records, not code."
+  # startup_proof.spl is a zero-import table asserting that the root CLI's
+  # Help/Version intents load no provider and only Compile dispatches (§6
+  # startup budget). Deliberately NOT the api_surface.spl precedent: that file
+  # is K0 because a K0 computation (the interface digest) is taken OVER it,
+  # whereas nothing in the kernel consumes this table — its only reader is the
+  # system spec above. §6 says "Plan Phase 7 pins this with a startup-time
+  # gate"; when that gate lands in K0 and imports this module, KERNEL-CLOSURE-
+  # 003 will force the K0 question then, which is the correct time to ask it.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/startup_proof.spl
+  # The package barrel; it re-exports all four modules above, so its honest
+  # floor is the weakest member (P_STATIC). Note the checker cannot see this:
+  # its import scan matches `use`/`pub use` only, and `export use` is invisible
+  # to it, so a K0 row here would launder the P_STATIC re-exports rather than
+  # be caught. Classified by inspection, not by what the scan can prove.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/__init__.spl
+  # NOTE: the `rules:` projection lower in this file is a SEPARATE parser
+  # (sh `case`, where `*` crosses `/`), so its catch-all
+  # `K0|src/compiler/*.spl` already classifies these five and reports no
+  # unclassified input. It is deliberately left alone: the two blocks already
+  # diverge for aop.spl, weaving/** and driver_aot_vhdl_output.spl, and
+  # editing it changes the bootstrap kernel-inputs hash, which cannot be
+  # verified without a bootstrap run.
   - K0|src/compiler/00.common/**
   - K0|src/compiler/10.frontend/**
   - K0|src/compiler/15.blocks/**
