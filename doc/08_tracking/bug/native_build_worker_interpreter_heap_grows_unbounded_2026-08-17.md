@@ -964,33 +964,81 @@ session's time budget, not because they were found unsafe:
 
 Both are recorded here as the next places to look, not as closed or ruled out.
 
-### 5. Verification
+### 5. Verification, corrected after a re-check found the first pass over-claimed
 
-- `sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` — `PASS
-  — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape`.
-- `sh scripts/check/check-mir-transient-scope-boundary.shs` (this worktree) —
-  `PASS — 11 invariant(s) checked, per-module MIR lowering runs inside a paired
-  transient scope with both escaping roots promoted`.
-- Same script against `origin/main`'s committed content — `FAIL — 11
-  invariant(s) checked ...: driver-fallback-loop-not-scoped;
-  driver-fallback-still-calls-unscoped-lower_module`.
-- `SIMPLE_SEED=/home/yoon/.cargo-target-mir/release/simple sh
-  scripts/check/check-transient-scope-reclaims.shs` (mechanism re-proof, fresh,
-  not reused numbers) — `PASS -- 2 fixture(s) measured, scoped 1052 kB vs
-  unscoped 374236 kB (355x), identical exit status 124`. This is the
-  array/string primitive, re-confirmed on this host/build; it is NOT a
-  measurement of the fallback-loop boundary (see the live-repro caveat in §1).
-- Real compiled binary through the modified file: `SIMPLE_NATIVE_BUILD_RUST=1
-  SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 /home/yoon/.cargo-target-mir/release/simple
-  native-build hello.spl -o hello.out` -> `Linked: .../hello.out (34 KB) via
-  clang`, `Build complete: 1 compiled, 0 cached, 0 failed`; `./hello.out` prints
-  `hello from scoped MIR lowering (fallback-loop extension)` and exits 0. This
-  exercises the entry-closure branch of the same file (proving the edit did not
-  break compilation/linking/execution of anything else in
-  `driver_pipeline_lowering.spl`), not the fallback branch itself, per the
-  caveat above.
-- No collector was designed. Per the task's own preference order, coverage
-  extension was judged reachable and was done first; the ambient-bootstrap
-  path (§3) and the two backend/opt candidates (§4) are the next things to
-  attempt, each needing its own escape-set census before any scope is added
-  there.
+The first draft of this addendum reused the prior session's
+`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 ... native-build
+hello.spl` result as proof that a real binary ran through the modified file.
+**That reuse was wrong and is retracted.** Re-run with
+`SIMPLE_COMPILER_TRACE=1` added (which makes every `log_phase` call —
+including `aot:lower_to_mir:module:start/done`, present in the very function
+this session edited — print a `[BOOTSTRAP-PHASE]` line): zero such lines were
+printed, for either run. `SIMPLE_NATIVE_BUILD_RUST=1` routes the whole build
+through the seed's own compiled Rust native pipeline; for a zero-import
+`hello.spl` this apparently never touches the interpreted `.spl` driver
+(`driver_pipeline_lowering.spl`) at all, consistent with the total wall time
+(0.0s compile + ~4s link — far below the 15-30s the record's own reproducer
+needs just to load the compiler graph). So that command proves the SEED still
+emits correct binaries; it proves nothing about this session's edit, and the
+predecessor's 2026-09-07 §2 claim that it "exercises the entry-closure branch"
+should be read the same way going forward.
+
+**What was actually run instead, in order of how much it proves:**
+
+1. **Plain `native-build` (no `RUST=1`) and the direct
+   `SIMPLE_NATIVE_BUILD_WORKER=1 ... run src/app/cli/native_build_worker.spl`
+   reproducer, both against the same `hello.spl`** — both spawn/route through
+   the INTERPRETED `.spl` compiler graph (confirmed by the volume of
+   cross-module warnings emitted, matching the record's phase-A description),
+   and both fail identically: `error: semantic: unknown extern function:
+   rt_env_vars` (exit 1), before reaching MIR lowering. **This is a
+   pre-existing, unrelated defect, not introduced by this session and not
+   fixable within it**: `rt_env_vars` is registered in the codegen SFFI table
+   (`codegen/runtime_sffi.rs:1944`) and in `common/runtime_symbols.rs:803`, but
+   grepping `src/compiler_rust/compiler/src/interpreter_extern/*.rs` for it
+   returns nothing — it was never added to the INTERPRETER's extern table, on
+   any seed build available this session (all built 2026-09-06/07 from this
+   same tree lineage). Every full-graph interpreted compile is therefore
+   currently blocked, independent of anything in this row.
+2. **`/home/yoon/.cargo-target-mir/release/simple lint
+   src/compiler/80.driver/driver_pipeline_lowering.spl`** — lint does NOT
+   execute the interpreted whole-graph pipeline (it is a static frontend pass:
+   parse, resolve, type-check), so it is unaffected by the `rt_env_vars` gap
+   and DID complete: `Found 0 error(s), 7 warning(s), 0 auto-fix(es) available`.
+   All 7 warnings are pre-existing `RAW-RT-001`/`RAW-RT-002` (raw `rt_env_get`
+   calls already in the file before this session) and one pre-existing
+   duplicate-typed-argument style warning; none names anything this session
+   added. This is real evidence the edited file **parses and type-checks
+   cleanly** under the actual compiler frontend — it is not evidence the
+   fallback loop executes correctly at runtime.
+3. `sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` — `PASS
+   — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape`.
+4. `sh scripts/check/check-mir-transient-scope-boundary.shs` (this worktree) —
+   `PASS — 11 invariant(s) checked, per-module MIR lowering runs inside a paired
+   transient scope with both escaping roots promoted`.
+5. Same script against `origin/main`'s committed content — `FAIL — 11
+   invariant(s) checked ...: driver-fallback-loop-not-scoped;
+   driver-fallback-still-calls-unscoped-lower_module`.
+6. `SIMPLE_SEED=/home/yoon/.cargo-target-mir/release/simple sh
+   scripts/check/check-transient-scope-reclaims.shs` (mechanism re-proof, fresh,
+   not reused numbers) — `PASS -- 2 fixture(s) measured, scoped 1052 kB vs
+   unscoped 374236 kB (355x), identical exit status 124`. This is the
+   array/string primitive, re-confirmed on this host/build; it was never a
+   measurement of the fallback-loop boundary and is not claimed as one.
+
+**Stated plainly, matching this row's own standard of not overclaiming:** no
+session, including this one, has produced a paired before/after RSS/brk
+measurement OR a successful end-to-end run of ANY MIR-lowering transient scope
+(entry-closure, fallback, or otherwise) through the fully interpreted
+self-hosted pipeline. The entry-closure scope's "real running binary" evidence
+from 2026-09-07 needs the same re-check this addendum just gave its own
+claim — it was not re-verified with phase tracing in this session, so treat it
+as unconfirmed rather than re-affirmed. What IS established for the fallback
+loop specifically: it type-checks cleanly, it reuses a callee whose behavior
+is unconditionally safe under ambient bootstrap by construction, and the
+ratchet gate proves the source-level shape is correct and discriminates the
+pre-fix tree. No collector was designed. Per the task's own preference order,
+coverage extension was judged reachable and was done first; the ambient-
+bootstrap path (§3), the two backend/opt candidates (§4), and — newly found
+this pass — the missing `rt_env_vars` interpreter extern (blocks re-verifying
+ANY of this by full interpreted execution) are the next things to attempt.
