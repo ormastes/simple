@@ -130,6 +130,7 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #include <netdb.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -9425,6 +9426,371 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     if (len != 0) memcpy(buf, ptr, (size_t)len);
     buf[(size_t)len] = '\0';
     return 1;
+}
+
+/* -----------------------------------------------------------------------
+ * Bucket 2 (Rust-only, core-C-bootstrap lane gap) additions -- 2026-09-07.
+ * See doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md.
+ * Every symbol below has a genuine `#[no_mangle] extern "C"` Rust twin (or,
+ * where noted, a C twin in a file this archive cannot link wholesale) --
+ * mirrored here so build_core_c_runtime_library's archive
+ * (native_project/tools.rs) carries a definition too. rt_time_now_seconds,
+ * rt_remove and rt_file_fsync also live in runtime.c; rt_progress_* also
+ * live in runtime_timestamp.c; both are compiled alongside this file in the
+ * pure-Simple backend lane (70.backend/backend/runtime_compiler.spl:515-516),
+ * so those seven are `weak` -- exactly the existing rt_atomic_* convention
+ * above -- so linking both TUs together still resolves to one definition.
+ * ------------------------------------------------------------------------- */
+#if defined(_MSC_VER)
+#define SPL_CORE_C_WEAK
+#else
+#define SPL_CORE_C_WEAK __attribute__((weak))
+#endif
+
+/* ---- mirrors runtime.c (rt_time_now_seconds / rt_remove / rt_file_fsync) --- */
+
+SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
+    return (int64_t)time(NULL);
+}
+
+/* Same POSIX file-deletion semantics as runtime.c's rt_remove, but NOT its
+ * `const char* path` signature: `extern fn rt_remove(path: text) -> i64`
+ * (src/lib/nogc_sync_mut/io/dir_entry_ops.spl:13) has no
+ * codegen/runtime_sffi.rs / text_arg_indices entry, so `path` is never
+ * expanded into a (ptr,len) pair -- disassembling the real call site in the
+ * kept failed-link object set (mod_765.o,
+ * lib__nogc_async_mut__io__file__AsyncDir.remove: `str x30,[sp,#-16]!; bl
+ * rt_remove` with ZERO argument setup) confirms the caller passes exactly
+ * ONE machine word straight through in x0, which in every other single-word
+ * `text` call site in this file (rt_http_get's url_value, rt_file_atomic_write's
+ * path_value) is the boxed RuntimeValue handle, not a raw C-string pointer.
+ * runtime.c's own `const char*` signature therefore looks like the same
+ * pre-existing single-word-vs-raw-pointer defect this file's rt_file_open_stream
+ * comment warns about elsewhere -- out of scope to fix here (different file,
+ * different lane), so this weak definition decodes the boxed handle via
+ * rt_core_string_to_cpath, matching rt_file_atomic_write's convention, rather
+ * than copying runtime.c's apparently-unsound signature verbatim. */
+SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
+    int64_t rc;
+    if (S_ISDIR(st.st_mode)) {
+        rc = rmdir(path) == 0 ? 0 : -(int64_t)errno;
+    } else {
+        rc = unlink(path) == 0 ? 0 : -(int64_t)errno;
+    }
+    free(path);
+    return rc;
+}
+
+static int rt_bucket2_fsync_path(const char* path) {
+    if (!path) return 0;
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+#ifdef _WIN32
+    int ok = fflush(file) == 0;
+#else
+    int ok = fsync(fileno(file)) == 0;
+#endif
+    fclose(file);
+    return ok ? 1 : 0;
+}
+SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_bucket2_fsync_path(path);
+}
+
+/* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
+
+#if defined(_MSC_VER)
+#define RT_BUCKET2_TLS __declspec(thread)
+#else
+#define RT_BUCKET2_TLS _Thread_local __attribute__((tls_model("initial-exec")))
+#endif
+static RT_BUCKET2_TLS bool rt_bucket2_progress_initialized = false;
+static RT_BUCKET2_TLS int64_t rt_bucket2_progress_start_nanos = 0;
+
+SPL_CORE_C_WEAK int64_t rt_progress_clock_now_nanos(void) {
+    struct timespec now = {0, 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000000000LL + (int64_t)now.tv_nsec;
+}
+SPL_CORE_C_WEAK bool rt_progress_tls_is_initialized(void) { return rt_bucket2_progress_initialized; }
+SPL_CORE_C_WEAK int64_t rt_progress_tls_start_nanos(void) { return rt_bucket2_progress_start_nanos; }
+SPL_CORE_C_WEAK void rt_progress_tls_store_start_nanos(int64_t start_nanos) {
+    rt_bucket2_progress_start_nanos = start_nanos;
+    rt_bucket2_progress_initialized = true;
+}
+SPL_CORE_C_WEAK void rt_progress_tls_clear(void) {
+    rt_bucket2_progress_start_nanos = 0;
+    rt_bucket2_progress_initialized = false;
+}
+
+#undef SPL_CORE_C_WEAK
+
+/* ---- lib.rs: rt_load_barrier / rt_store_barrier -- plain memory fences --- */
+
+void rt_load_barrier(void) { atomic_thread_fence(memory_order_acquire); }
+void rt_store_barrier(void) { atomic_thread_fence(memory_order_release); }
+
+/* ---- file_io/path.rs: rt_path_basename / rt_path_ext / rt_path_separator -- */
+
+/* Mirrors Rust's Path::file_name(): last non-empty component, "" if the path
+ * is empty or ends in a final ".."/"." component or is all separators. */
+static void rt_bucket2_path_basename_into(const char* path, size_t len, const char** out, size_t* out_len) {
+    size_t end = len;
+    while (end > 0 && path[end - 1] == '/') end--;
+    if (end == 0) { *out = ""; *out_len = 0; return; }
+    size_t start = end;
+    while (start > 0 && path[start - 1] != '/') start--;
+    size_t comp_len = end - start;
+    if (comp_len == 0 || (comp_len == 1 && path[start] == '.') ||
+        (comp_len == 2 && path[start] == '.' && path[start + 1] == '.')) {
+        *out = ""; *out_len = 0; return;
+    }
+    *out = path + start; *out_len = comp_len;
+}
+int64_t rt_path_basename(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr && path_len != 0) return rt_string_new(NULL, 0);
+    const char* base; size_t base_len;
+    rt_bucket2_path_basename_into((const char*)path_ptr, (size_t)path_len, &base, &base_len);
+    return rt_string_new((const uint8_t*)base, (uint64_t)base_len);
+}
+/* Mirrors Rust's Path::extension(): text after the last '.' in the basename,
+ * unless the basename has no '.' or the '.' is its first byte (e.g. ".bashrc"
+ * has no extension per Rust semantics). */
+int64_t rt_path_ext(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr && path_len != 0) return rt_string_new(NULL, 0);
+    const char* base; size_t base_len;
+    rt_bucket2_path_basename_into((const char*)path_ptr, (size_t)path_len, &base, &base_len);
+    for (size_t i = base_len; i > 0; i--) {
+        if (base[i - 1] == '.') {
+            if (i - 1 == 0) break; /* leading dot: no extension */
+            return rt_string_new((const uint8_t*)(base + i), (uint64_t)(base_len - i));
+        }
+    }
+    return rt_string_new(NULL, 0);
+}
+int64_t rt_path_separator(void) {
+    static const uint8_t sep[1] = { '/' };
+    return rt_string_new(sep, 1);
+}
+
+/* ---- sffi/random.rs: rt_random_randint / rt_random_uniform -------------- */
+
+/* This archive cannot link the real rt_random_next/rt_random_seed (Rust-only,
+ * not part of this bucket), so this mirrors random.rs's self-contained LCG
+ * (LCG_A=1_664_525, LCG_C=1_013_904_223, LCG_M=2^32, seeded from wall-clock
+ * microseconds) with an independent static state -- not thread-safe, matching
+ * this lane's general no-locking convention (e.g. rt_atomic_* excepted). */
+static uint64_t rt_bucket2_random_state = 0;
+static int rt_bucket2_random_initialized = 0;
+#define RT_BUCKET2_LCG_A 1664525ULL
+#define RT_BUCKET2_LCG_C 1013904223ULL
+#define RT_BUCKET2_LCG_M 4294967296ULL /* 2^32 */
+#define RT_BUCKET2_LCG_M_F 4294967296.0
+static uint64_t rt_bucket2_random_next(void) {
+    if (!rt_bucket2_random_initialized) {
+        struct timespec ts = {0, 0};
+        uint64_t micros = 0;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            micros = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
+        }
+        rt_bucket2_random_state = micros % RT_BUCKET2_LCG_M;
+        rt_bucket2_random_initialized = 1;
+    }
+    rt_bucket2_random_state = (RT_BUCKET2_LCG_A * rt_bucket2_random_state + RT_BUCKET2_LCG_C) % RT_BUCKET2_LCG_M;
+    return rt_bucket2_random_state;
+}
+int64_t rt_random_randint(int64_t min, int64_t max) {
+    if (min > max) return min;
+    uint64_t range = (uint64_t)(max - min + 1);
+    return min + (int64_t)(rt_bucket2_random_next() % range);
+}
+double rt_random_uniform(double min, double max) {
+    double r = (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
+    return min + r * (max - min);
+}
+
+/* ---- collections.rs: rt_typed_bytes_u8_data_at --------------------------- */
+
+int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index) {
+    return (int64_t)(*((const uint8_t*)(intptr_t)data_ptr + index));
+}
+
+/* ---- heap.rs: rt_mem_attr_enabled / rt_mem_attr_set_owner ---------------- */
+
+static int rt_bucket2_mem_attr_gate = -1; /* -1 unresolved, 0 off, 1 on */
+int64_t rt_mem_attr_enabled(void) {
+    if (rt_bucket2_mem_attr_gate < 0) {
+        const char* v = getenv("SIMPLE_MEM_ATTR");
+        rt_bucket2_mem_attr_gate = (v && strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return rt_bucket2_mem_attr_gate;
+}
+/* heap.rs's rt_mem_attr_set_owner records a thread-local "current owner" tag
+ * consulted by the Rust allocator's attribution bookkeeping (per-owner live/
+ * peak/alloc counters). This lane's allocator (runtime_memory.c, compiled
+ * with -DSIMPLE_RUNTIME_MEMORY_OWNER=1) has no such attribution table to
+ * consult, so there is nothing for the tag to feed here -- mirrored only to
+ * the documented calling convention (null check, enabled gate, bounded
+ * thread-local copy), with no attribution side effect since none exists in
+ * this lane. Known limitation, not invented behaviour. */
+#define RT_BUCKET2_MEM_ATTR_OWNER_MAX 128
+static _Thread_local char rt_bucket2_mem_attr_owner[RT_BUCKET2_MEM_ATTR_OWNER_MAX];
+void rt_mem_attr_set_owner(const uint8_t* name_ptr, uint64_t name_len) {
+    if (!name_ptr || !rt_mem_attr_enabled()) return;
+    size_t n = (size_t)name_len;
+    if (n >= RT_BUCKET2_MEM_ATTR_OWNER_MAX) n = RT_BUCKET2_MEM_ATTR_OWNER_MAX - 1;
+    memcpy(rt_bucket2_mem_attr_owner, name_ptr, n);
+    rt_bucket2_mem_attr_owner[n] = '\0';
+}
+
+/* ---- log_sffi.rs: rt_log_* family ----------------------------------------
+ * .spl declares these with raw i64 params (app/io/mod.spl:133-145), not
+ * `text` -- the (ptr,len) split already happens at the Simple call site, so
+ * no codegen/runtime_sffi.rs or text_arg_indices registration is needed
+ * (same as the pre-existing rt_log_target_device_write_bytes(ptr,len)
+ * externs in nogc_async_mut_noalloc/log/targets.spl). Not thread-safe
+ * (single static level + a bounded linear-scan scope table), matching this
+ * lane's general no-locking convention; the Rust twin uses a Mutex<HashMap>.
+ * --------------------------------------------------------------------- */
+static int64_t rt_bucket2_log_global_level = 4; /* INFO, matches log_sffi.rs default */
+#define RT_BUCKET2_LOG_SCOPE_MAX 64
+#define RT_BUCKET2_LOG_SCOPE_NAME_MAX 64
+typedef struct { char name[RT_BUCKET2_LOG_SCOPE_NAME_MAX]; size_t name_len; uint8_t level; } RtBucket2LogScope;
+static RtBucket2LogScope rt_bucket2_log_scopes[RT_BUCKET2_LOG_SCOPE_MAX];
+static size_t rt_bucket2_log_scope_count = 0;
+
+void rt_log_set_global_level(int64_t level) {
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    rt_bucket2_log_global_level = level;
+}
+int64_t rt_log_get_global_level(void) { return rt_bucket2_log_global_level; }
+
+static RtBucket2LogScope* rt_bucket2_log_scope_find(const uint8_t* scope_ptr, uint64_t scope_len) {
+    if (!scope_ptr || scope_len == 0) return NULL;
+    for (size_t i = 0; i < rt_bucket2_log_scope_count; i++) {
+        if (rt_bucket2_log_scopes[i].name_len == (size_t)scope_len &&
+            memcmp(rt_bucket2_log_scopes[i].name, scope_ptr, (size_t)scope_len) == 0) {
+            return &rt_bucket2_log_scopes[i];
+        }
+    }
+    return NULL;
+}
+void rt_log_set_scope_level(const uint8_t* scope_ptr, uint64_t scope_len, int64_t level) {
+    if (!scope_ptr || scope_len == 0) return;
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    RtBucket2LogScope* existing = rt_bucket2_log_scope_find(scope_ptr, scope_len);
+    if (existing) { existing->level = (uint8_t)level; return; }
+    if (scope_len >= RT_BUCKET2_LOG_SCOPE_NAME_MAX) return; /* name too long to record */
+    if (rt_bucket2_log_scope_count >= RT_BUCKET2_LOG_SCOPE_MAX) return; /* table full */
+    RtBucket2LogScope* slot = &rt_bucket2_log_scopes[rt_bucket2_log_scope_count++];
+    memcpy(slot->name, scope_ptr, (size_t)scope_len);
+    slot->name_len = (size_t)scope_len;
+    slot->level = (uint8_t)level;
+}
+int64_t rt_log_get_scope_level(const uint8_t* scope_ptr, uint64_t scope_len) {
+    RtBucket2LogScope* existing = rt_bucket2_log_scope_find(scope_ptr, scope_len);
+    if (existing) return existing->level;
+    return rt_log_get_global_level();
+}
+void rt_log_clear_scope_levels(void) { rt_bucket2_log_scope_count = 0; }
+
+void rt_log_emit(int64_t level, const uint8_t* scope_ptr, uint64_t scope_len,
+                  const uint8_t* msg_ptr, uint64_t msg_len) {
+    int64_t current_level = rt_log_get_scope_level(scope_ptr, scope_len);
+    if (level > current_level) return;
+    const char* prefix;
+    switch (level) {
+        case 0: return; /* Off */
+        case 1: prefix = "[FATAL]"; break;
+        case 2: prefix = "[ERROR]"; break;
+        case 3: prefix = "[WARN] "; break;
+        case 4: prefix = "[INFO] "; break;
+        case 5: prefix = "[DEBUG]"; break;
+        case 6: prefix = "[TRACE]"; break;
+        case 7: prefix = "[VERB] "; break;
+        default: prefix = "[LOG]  "; break;
+    }
+    if (!scope_ptr || scope_len == 0) { scope_ptr = (const uint8_t*)"app"; scope_len = 3; }
+    if (!msg_ptr || msg_len == 0) { msg_ptr = (const uint8_t*)""; msg_len = 0; }
+    fprintf(stderr, "%s [%.*s] %.*s\n", prefix, (int)scope_len, (const char*)scope_ptr,
+            (int)msg_len, (const char*)msg_ptr);
+}
+int64_t rt_log_is_enabled(int64_t level, const uint8_t* scope_ptr, uint64_t scope_len) {
+    int64_t current_level = rt_log_get_scope_level(scope_ptr, scope_len);
+    return level <= current_level ? 1 : 0;
+}
+
+/* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
+
+bool rt_munmap(int64_t addr, int64_t size) {
+    if (addr <= 0 || size <= 0) return false;
+    return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
+}
+bool rt_msync(int64_t addr, int64_t size) {
+    if (addr <= 0 || size <= 0) return false;
+    return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
+}
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
+    if (addr <= 0 || size <= 0) return false;
+    int native_advice;
+    switch (advice) {
+        case 0: native_advice = MADV_NORMAL; break;
+        case 1: native_advice = MADV_RANDOM; break;
+        case 2: native_advice = MADV_SEQUENTIAL; break;
+        case 3: native_advice = MADV_WILLNEED; break;
+        case 4: native_advice = MADV_DONTNEED; break;
+        default: return false;
+    }
+    return madvise((void*)(intptr_t)addr, (size_t)size, native_advice) == 0;
+}
+
+/* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
+
+/* Acquire an exclusive OS file lock (flock); mirrors file_ops.rs's
+ * rt_file_lock exactly, including its EINTR-retry / timeout-poll shape. The
+ * returned descriptor must be consumed exactly once by rt_file_unlock. */
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    if (timeout_secs <= 0) {
+        for (;;) {
+            if (flock(fd, LOCK_EX) == 0) return (int64_t)fd;
+            if (errno != EINTR) { close(fd); return -1; }
+        }
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_secs;
+    for (;;) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { close(fd); return -1; }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            close(fd);
+            return -1;
+        }
+        struct timespec sleep_for = {0, 50000000L}; /* 50ms */
+        nanosleep(&sleep_for, NULL);
+    }
+}
+bool rt_file_unlock(int64_t handle) {
+    int fd = (int)handle;
+    if (fd < 0) return false;
+    bool unlocked = flock(fd, LOCK_UN) == 0;
+    bool closed = close(fd) == 0;
+    return unlocked && closed;
 }
 
 /* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
