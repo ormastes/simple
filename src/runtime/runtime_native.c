@@ -703,6 +703,148 @@ SPL_CORE_C_WEAK bool rt_atomic_int_compare_exchange(int64_t handle, int64_t curr
         &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
 }
 
+/* Stage2 bootstrap link (core-C-only lane): the rest of the `rt_atomic_int_*`
+ * / `rt_atomic_bool_*` family (store, swap, fetch ops, free, and the whole bool
+ * side) was missing from this archive -- new/load/compare_exchange above were
+ * the only three ever ported here. `runtime.c` implements the complete
+ * family already (see its "Atomic handles" section) but that file cannot be
+ * added to this archive wholesale (collides with Rust-owned rt_* APIs; see
+ * `build_c_runtime_library` in native_project/tools.rs), so this mirrors its
+ * exact semantics (SplAtomicInt/SplAtomicBool, seq_cst throughout,
+ * malloc/free-backed handles) under the existing `SPL_CORE_C_WEAK` fallback
+ * convention used by the three functions immediately above. */
+SPL_CORE_C_WEAK void rt_atomic_int_store(int64_t handle, int64_t new_value) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return;
+    atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_swap(int64_t handle, int64_t new_value) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t delta) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_add_explicit(&value->value, delta, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t delta) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_sub_explicit(&value->value, delta, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_and_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_or_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_xor_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK void rt_atomic_int_free(int64_t handle) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return;
+    free(value);
+}
+
+typedef struct RtCoreAtomicBool {
+    atomic_bool value;
+} RtCoreAtomicBool;
+
+SPL_CORE_C_WEAK int64_t rt_atomic_bool_new(bool initial) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)malloc(sizeof(RtCoreAtomicBool));
+    if (!value) return 0;
+    atomic_init(&value->value, initial);
+    return (int64_t)(intptr_t)value;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_load(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    return value ? atomic_load_explicit(&value->value, memory_order_seq_cst) : false;
+}
+
+SPL_CORE_C_WEAK void rt_atomic_bool_store(int64_t handle, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return;
+    atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_swap(int64_t handle, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_compare_exchange(int64_t handle, bool current, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    return value && atomic_compare_exchange_strong_explicit(
+        &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
+}
+
+/* `<stdatomic.h>` has no `atomic_fetch_and/or_explicit` overload accepted
+ * uniformly for `atomic_bool` across toolchains (GCC's generic-atomics
+ * expansion rejects it: "operand type incompatible with argument 1 of
+ * __atomic_fetch_and", though clang accepts it). A CAS-retry loop is
+ * portable and has the exact same seq_cst fetch-then-combine semantics as
+ * the fetch_add/fetch_and family above, just spelled out instead of using
+ * the (here, non-portable) built-in fetch primitive. No `atomic_fetch_not`
+ * exists in `<stdatomic.h>` either; fetch-not is fetch-xor(true) (0^1=1,
+ * 1^1=0), the same reduction Rust's `rt_atomic_bool_fetch_not` uses
+ * (`fetch_xor(true, SeqCst)`, runtime/src/value/sffi/atomic.rs). */
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_and(int64_t handle, bool operand) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, current && operand,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+        /* current is refreshed by a failed CAS; retry with the new value. */
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_or(int64_t handle, bool operand) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, current || operand,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_not(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, !current,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK void rt_atomic_bool_free(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return;
+    free(value);
+}
+
 /* rt_thread_sleep is NOT defined here.  runtime_thread.c is the canonical
  * OS-thread provider (see native_project/tools.rs: "runtime_thread.c owns both
  * rt_thread_* and rt_pool_*") and is compiled into every archive that also
@@ -6320,6 +6462,79 @@ int64_t rt_black_box(int64_t value) {
 
 double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
+}
+
+/* Stage2 bootstrap link (core-C-only lane): `rt_simple_abi_version` and
+ * `rt_simple_abi_version_deferred` are already defined in `runtime.c`
+ * (lines 35-41) but that file is excluded from this archive wholesale
+ * (collides with Rust-owned rt_* APIs; see the `build_c_runtime_library`
+ * comment in native_project/tools.rs). Both are one-line reads of the same
+ * `SIMPLE_ABI_VERSION`/`SIMPLE_ABI_VERSION_DEFERRED` macros `runtime.h`
+ * already defines and this file already includes -- verbatim mirror. */
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
+
+/* Stage2 bootstrap link (core-C-only lane, no Rust runtime): these eleven
+ * inverse-trig/log/hyperbolic wrappers are `extern fn` in `.spl` and already
+ * implemented natively in Rust (runtime/src/value/sffi/math.rs, each a
+ * one-line libm passthrough), but that Rust crate is not linked into this
+ * lane, and `runtime.c` -- which also has no independent implementation of
+ * these, only the C standard library does -- is excluded from the bootstrap
+ * archive wholesale (collides with Rust-owned rt_* APIs; see the
+ * `build_c_runtime_library` comment in native_project/tools.rs). Mirrors the
+ * Rust side's semantics exactly: a direct <math.h> passthrough, same as
+ * `rt_math_pow` immediately above. */
+double rt_math_asin(double x) {
+    return asin(x);
+}
+
+double rt_math_acos(double x) {
+    return acos(x);
+}
+
+double rt_math_atan(double x) {
+    return atan(x);
+}
+
+double rt_math_atan2(double y, double x) {
+    return atan2(y, x);
+}
+
+double rt_math_sinh(double x) {
+    return sinh(x);
+}
+
+double rt_math_cosh(double x) {
+    return cosh(x);
+}
+
+double rt_math_tanh(double x) {
+    return tanh(x);
+}
+
+double rt_math_floor(double x) {
+    return floor(x);
+}
+
+double rt_math_ceil(double x) {
+    return ceil(x);
+}
+
+double rt_math_log(double x) {
+    return log(x);
+}
+
+double rt_math_log10(double x) {
+    return log10(x);
+}
+
+double rt_math_log2(double x) {
+    return log2(x);
 }
 
 /* Fault limits are process policy for the pure-Simple runner and its child
@@ -12013,6 +12228,21 @@ int64_t rt_time_now_ns(void) {
 }
 
 int64_t rt_time_now_nanos(void) {
+    return rt_time_now_ns();
+}
+
+/* Stage2 bootstrap link (core-C-only lane): `rt_time_monotonic_ns` is
+ * `extern fn` in 8 `.spl` files (std.sffi.time, the perf tracer/benchmark/
+ * profiler, and driver cache/counter code) and had ZERO implementation
+ * anywhere -- neither C nor Rust defines a real-symbol
+ * `rt_time_monotonic_ns` (the Rust `interpreter_extern::time::rt_time_monotonic_ns`
+ * is an interpreter dispatch shim, `fn(&[Value]) -> Result<Value,
+ * CompileError>`, not a `#[no_mangle] extern "C" fn`, so it never appears as
+ * a linkable native symbol). `rt_time_now_ns` immediately above is already
+ * the monotonic (`CLOCK_MONOTONIC`) nanosecond clock this repo uses
+ * elsewhere -- never wall-clock -- so this is a plain alias under the name
+ * codegen actually looked for. */
+int64_t rt_time_monotonic_ns(void) {
     return rt_time_now_ns();
 }
 

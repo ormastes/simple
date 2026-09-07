@@ -101,6 +101,15 @@ int64_t rt_time_now_nanos(void) {
 #endif
 }
 
+/* `rt_time_monotonic_ns` is the name codegen actually emits for the same
+ * `.spl`-level `extern fn rt_time_monotonic_ns() -> i64` contract (see
+ * std.sffi.time and the perf tracer/profiler/benchmark modules); this lane
+ * never defined it, only the differently-named `rt_time_now_nanos` above.
+ * Plain alias -- same CLOCK_MONOTONIC clock, never wall-clock. */
+int64_t rt_time_monotonic_ns(void) {
+    return rt_time_now_nanos();
+}
+
 /* ---- Monotonic clock: microseconds (= nanos / 1000) ---- */
 int64_t rt_time_now_micros(void) {
     int64_t nanos = rt_time_now_nanos();
