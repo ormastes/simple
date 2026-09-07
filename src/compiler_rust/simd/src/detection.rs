@@ -100,11 +100,13 @@ impl SimdTier {
 
     pub fn best_available_implementation(self) -> SimdTier {
         match self {
-            // X86_64Avx512 is no longer downgraded: the byte-search kernels
-            // have a real 512-bit implementation (see
-            // `runtime/src/value/byte_kernels.rs`), and every other kernel
-            // still resolves the tier through its AVX2 arm, so selecting it
-            // is correct everywhere and faster where it is implemented.
+            // X86_64Avx512 is no longer downgraded. Real 512-bit kernels now
+            // exist for byte search (`runtime/src/value/byte_kernels.rs`),
+            // UTF-8 (`utf8_kernels.rs`) and the numeric providers
+            // (`numeric_kernels.rs`). Any kernel that has not been widened yet
+            // still resolves this tier through its own AVX2 arm — every
+            // `SimdTier` match is exhaustive — so selecting AVX-512 is correct
+            // everywhere and faster wherever it is implemented.
             Self::Aarch64Sve | Self::Aarch64Sve2 => Self::Aarch64Neon,
             Self::Wasm128 => Self::Scalar,
             other => other,
