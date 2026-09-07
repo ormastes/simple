@@ -26,4 +26,9 @@ When project work changes this layer's public contract, source ownership, tests,
 
 Template: [layer_skill.md](../../template/layer_skill.md)
 
+- 2026-09-08 enum-pattern aliases: `interpreter_patterns.rs` resolves a
+  qualified pattern's imported `EnumType` alias before comparing the runtime
+  enum identity. Preserve the positive explicit-alias case and the negative
+  conflicting-glob control in the focused Rust regression.
+
 - 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.

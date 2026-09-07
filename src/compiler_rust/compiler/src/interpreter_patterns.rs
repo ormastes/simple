@@ -10,7 +10,20 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, BLOCK_SCOPED_ENUMS};
+use super::{Classes, Enums, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
+
+fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
+    if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
+        return true;
+    }
+
+    MODULE_GLOBALS.with(|cell| {
+        matches!(
+            cell.borrow().get(pattern_name),
+            Some(Value::EnumType { enum_name }) if enum_name == value_name
+        )
+    })
+}
 
 /// Check if a pattern is a catch-all that covers any value.
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
@@ -321,8 +334,7 @@ pub(crate) fn pattern_matches(
                 // Pattern::Enum{name:"Result"}, so user-defined enums with variants named
                 // Some/None/Ok/Err would otherwise fail to match. The variant name check
                 // on line 245 prevents cross-variant leakage.
-                let enum_matches =
-                    enum_name == "_" || enum_name == ve || matches!(enum_name.as_str(), "Option" | "Result");
+                let enum_matches = pattern_enum_name_matches(enum_name, ve);
                 if enum_matches && variant == vv {
                     // Both have no payload
                     if payload.is_none() && value_payload.is_none() {
@@ -639,8 +651,15 @@ pub(crate) fn check_enum_exhaustiveness(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use simple_parser::ast::Pattern;
     use simple_parser::Parser;
+    use crate::interpreter::MODULE_GLOBALS;
     use crate::interpreter::evaluate_module;
+    use crate::value::Value;
+
+    use super::pattern_matches;
 
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
@@ -648,6 +667,53 @@ mod tests {
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn explicit_enum_alias_matches_canonical_value_despite_conflicting_glob_name() {
+        MODULE_GLOBALS.with(|cell| {
+            let mut globals = cell.borrow_mut();
+            globals.insert(
+                "LapackError".to_string(),
+                Value::EnumType {
+                    enum_name: "ScienceLinalgError".to_string(),
+                },
+            );
+            globals.insert(
+                "LinalgError".to_string(),
+                Value::EnumType {
+                    enum_name: "GlobLinalgError".to_string(),
+                },
+            );
+        });
+
+        let pattern = Pattern::Enum {
+            name: "LapackError".to_string(),
+            variant: "Singular".to_string(),
+            payload: None,
+        };
+        let matching_value = Value::Enum {
+            enum_name: "ScienceLinalgError".to_string(),
+            variant: "Singular".to_string(),
+            payload: None,
+        };
+        let conflicting_value = Value::Enum {
+            enum_name: "GlobLinalgError".to_string(),
+            variant: "Singular".to_string(),
+            payload: None,
+        };
+        let mut bindings = HashMap::new();
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+
+        assert!(pattern_matches(&pattern, &matching_value, &mut bindings, &enums, &classes).unwrap());
+        assert!(!pattern_matches(&pattern, &conflicting_value, &mut bindings, &enums, &classes).unwrap());
+
+        MODULE_GLOBALS.with(|cell| {
+            let mut globals = cell.borrow_mut();
+            globals.remove("LapackError");
+            globals.remove("LinalgError");
+        });
     }
 
     // --- `case Some(p)` over a nullable `T?` (JIT parity) ---

@@ -37,3 +37,8 @@ dev-done
 - push: Reproduced the main-test-runnable clean-fixture parse failure on the current debug seed and restored positional construction for the reserved `auto` field; reopened the prematurely closed portability bug.
 - impl: Replaced three false-green math-block absence checks with behavioral transpose/axis-reduction assertions and compiled text/LaTeX renderer regression contracts.
 - verify: Rust compiler library and test targets type-check; executing Rust unit tests is blocked by tracked TODO-286 (duplicate `rt_simd_*` link symbols).
+- impl: Fixed qualified enum-pattern alias resolution and removed all 23 duplicate Rust SIMD exports, leaving the C tagged-value runtime as the sole external ABI owner.
+- verify: Focused alias regression linked and passed (1/1); rebuilt hosted compiler ran the unchanged LAPACK acceptance spec 10/10, then the strengthened decomposition/error-path version returned exit 0 after replacing false-green source-count probes.
+- verify: Corrected math-block acceptance passed 11/11; the two shipped feature specs passed 23/23 and 40/40 with the mock backend, closing the five formerly unchecked math-block rows with behavioral evidence.
+- audit: Expanded the ML compliance oracle to include the shipped `common/science_math/ml_*` modules, closing the TODO-residue row while exposing eight real primitive public signatures; recorded that boundary migration, LAPACK workspace/CPU evidence, and unavailable CUDA-host proof in an active handoff with prerequisite, resume command, artifact, owner, and reviewer.
+- fix: Corrected the SciLib runtime-shim gate to invoke the shipped `verify_symbols.shs` rather than the nonexistent `verify_symbols.sh`.

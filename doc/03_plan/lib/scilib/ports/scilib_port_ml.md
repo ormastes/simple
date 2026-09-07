@@ -576,7 +576,7 @@ bin/simple build lint src/lib/gc_async_mut/ml/
 
 Check:
 - [x] Zero `skip()` calls in any ml spec — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ml_*_spec.spl src/lib/common/science_math/ml_*.spl` → 0 call sites across 4 files (shipped ml = `src/lib/common/science_math/ml_linear.spl`, `ml_metrics.spl`; specs `test/03_system/feature/scilib/ml_linear_spec.spl`, `ml_metrics_spec.spl`)
-- [ ] Zero TODO→NOTE conversions anywhere in ml source or specs
+- [x] Zero TODO→NOTE conversions anywhere in ml source or specs — verified 2026-09-08 across both shipped source roots (`src/lib/nogc_async_mut/ml/` and `src/lib/common/science_math/ml_*.spl`) and both spec locations; the acceptance oracle now scans all four rather than silently omitting `common/science_math`.
 - [ ] Zero primitive types (`f64`, `i64`, `bool`, `str`) in any public function signature or exported struct field
 - [x] `nn/loss` and `nn/norm` are re-exported (grep for `pub use common.pure.nn`); no duplicate definition
       — CLOSED via option (a), 2026-09-06. The 2026-09-05 note below it was **empirically wrong** on
