@@ -2741,9 +2741,60 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // A qualified receiver is TYPE EVIDENCE and must not be thrown
+                // away in favour of a leaf-name shim. `XTri.to_text` names a
+                // USER method that merely shares its leaf with the builtin
+                // `to_text -> rt_to_string` alias below; rewriting it by leaf
+                // silently changes the call target, and `rt_to_string` renders
+                // any non-string receiver as `<enum@0x...>` / `<value:0x...>` /
+                // `<invalid-heap:0x...>` instead of running the user's method.
+                //
+                // This is the SAME predicate that already guards the sibling
+                // qualified-redirect site (`functions/calls.rs`, the
+                // `qualified_runtime_method_owner_is_builtin(func_name_raw)`
+                // gate) and the exact case its doc comment names: "Imported
+                // user methods can share leaves such as `to_text`, `get`, or
+                // `len`". The LLVM `MethodCallStatic` arm was left without it.
+                // The Cranelift twin (`codegen/instr/calls.rs`,
+                // `codegen/instr/closures_structs.rs`) carries the same
+                // unguarded leaf table and is NOT fixed here — it is off the
+                // LLVM-built Stage-2 path, but CI exercises both backends.
+                //
+                // The `direct_func` block above already returns whenever the
+                // target symbol is resolvable in THIS LLVM module — so the gap
+                // bites only a CROSS-UNIT call, which is why it is invisible in
+                // a single-file `native-build` and fatal in the multi-unit
+                // (`--source ... --entry ...`) project lane that emits Stage 2.
+                //
+                // Measured 2026-09-07 on the aarch64 Stage-2 candidate: the
+                // whole 152 MB binary carried only 4 `.to_text` symbols for 218
+                // `fn to_text` definitions in source, and
+                // `BuiltinBackendCompileAdapter.compile_aot_into_path` called
+                // `rt_to_string` where `BackendKind.to_text` should have been.
+                // `--backend cranelift` therefore reached
+                // `compile_module_with_backend_target_cpu_storage_bindings`
+                // with the backend NAME `<enum@0x2ced1710>`, fell through that
+                // function's `var kind = BackendKind.Llvm` default, and ran the
+                // LLVM lane; there `config.triple.to_text()` was hijacked the
+                // same way, so `llc` was invoked with
+                // `-mtriple=<invalid-heap:0x13dedef1>`, which `/bin/sh -c`
+                // parses as an input REDIRECT (`cannot open
+                // invalid-heap:0x...: No such file`, exit 2) -> "backend
+                // object-path status 1" on the Stage-2 hello-world probe.
+                //
+                // A bare (unqualified) name still reaches the table: that is a
+                // genuinely erased receiver, where `rt_to_string` is correct.
+                let qualified_owner_is_user_type = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    dotted.contains('.') && !super::qualified_runtime_method_owner_is_builtin(func_name)
+                };
+
                 // Map well-known methods to runtime functions
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
-                let runtime_func = match method {
+                let runtime_func = if qualified_owner_is_user_type {
+                    None
+                } else {
+                    match method {
                     // Copied verbatim from Cranelift lines 3163-3200
                     "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
@@ -2838,7 +2889,8 @@ impl LlvmBackend {
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
-                    _ => None,
+                        _ => None,
+                    }
                 };
 
                 if let Some(rt_name) = runtime_func {
