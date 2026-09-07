@@ -742,7 +742,22 @@ selftest() {
         _line() { printf '%s\n' "$2" | $GREP -m1 "$1" || :; }
         _seen() { printf '%s\n' "$2" | $GREP -q "$1" && echo yes || echo no; }
 
-        _revout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" --rev HEAD 2>&1)
+        # GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM=/dev/null on these two child
+        # invocations ONLY (never exported into this shell): the child runs
+        # the real script end to end, including scan_installed_hooks, which
+        # calls `git rev-parse --git-path hooks` against the fixture repo.
+        # A host with a global core.hooksPath (e.g. any machine with
+        # `git lfs install --global`, which is common) makes that resolve to
+        # the HOST's global hook files instead of the fixture's empty
+        # `$_rt/.git/hooks`, so the fixture was reporting the host's unrelated
+        # git-lfs hooks as "non-canonical" and failing this assertion on any
+        # such host -- a false selftest failure with nothing to do with
+        # --rev or scan_wiring. Isolating just these two subshells fixes the
+        # fixture without changing hook-resolution behaviour for the real
+        # scan of this repo (that scan must keep seeing the host's actual
+        # installed hooks, so the isolation must not leak past these lines).
+        _revout=$(cd "$_rt" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" --rev HEAD 2>&1)
         _revrc=$?
         _assert "--rev exits 0 on the committed tree" 0 "$_revrc"
         _assert "--rev enumerates only committed guards" "guard_total=320" \
@@ -754,7 +769,8 @@ selftest() {
 
         # The SAME tree scanned as a working tree must DISAGREE on BOTH axes,
         # proving the two paths differ rather than both being blind.
-        _wtout=$(cd "$_rt" && GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" 2>&1)
+        _wtout=$(cd "$_rt" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            GUARD_WIRING_SELFTEST_CHILD=1 sh "$_self" 2>&1)
         _wtrc=$?
         _assert "working-tree scan exits 1 on the dirty tree" 1 "$_wtrc"
         _assert "working-tree scan sees the uncommitted guard" yes \
