@@ -44,3 +44,61 @@ disconnected, and active. Execution mode additionally depends on a resident
 context and is one of `unavailable`, `snapshot`, or `physical_pages`. Only the
 active state with a resident context maps to `physical_pages`; this readiness
 integration does not itself provide tensor kernels or parity evidence.
+
+## Production activation wave
+
+The first production activation is owned by
+`std.gc_async_mut.slang.model_executor.paged_executor`. One serial owner holds the backend,
+execution namespace, provider pool, `KvPageManager`, provider-handle mapping,
+and lifecycle state. Logical `KvPageId` values never cross SFFI; only the
+provider handle recorded by the manager is passed to `physical_page_*` calls.
+The independently negotiated lightweight-request extension supplies
+tokenizer/output storage and a generation-safe request identity without a
+legacy llama context. Physical activation requires it; snapshot requests retain
+their existing contexts and behavior.
+
+Engine load attempts activation only after complete provider negotiation and a
+successful model-specific pool creation. Pool rejection remains distinct from
+model incompatibility: absent explicit support evidence, readiness reports
+`model-support-unknown`. Generation dispatch changes to physical pages only
+after the owner is installed. Every other state retains the complete snapshot
+path and its diagnostic reason.
+
+The owner tokenizes through backend request helpers and reads exact token IDs.
+Cold prefill reserves all exclusive pages, stages one complete ordered table,
+executes once, and commits once. Prefix lookup requires the same execution
+namespace plus exact token comparison after hash lookup. Full sealed pages are
+shared; an occupied tail is copied into exclusive staging. Exact repeats
+recompute their final token with `physical_page_boundary_logits`. Decode either
+copies the sealed occupied tail or appends a new page at an aligned boundary.
+No cursor, logical table, cache record, or logits state advances before provider
+commit succeeds.
+
+Prefix admission and eviction use `KvPageManager` reference accounting. Its
+identity, telemetry, storage-shape, and bounded-construction contract lives in
+`core.page_contract`; `core.page_manager` remains the sole mutable lifecycle
+owner.
+Eviction drops cache references only; physical release waits until cache and
+request references are both zero. Physical bytes, logical metadata, exact token
+identities, and transient COW pages have independent bounds. Fallback is an
+activation-time decision: unavailable, unsupported, or failed physical
+activation leaves snapshot dispatch installed. Once a request starts through
+an active physical owner, any capacity or execution failure terminates that
+request; it is never replayed through snapshot mode, even before output.
+
+Unload stops admission, aborts live transactions, closes or cancels requests,
+evicts prefixes, releases unreferenced provider pages, destroys the pool, and
+then closes the backend. A busy failure preserves owner state so cleanup can be
+resumed safely.
+
+Activation requires owner-path real-model parity over cold multi-page prefill,
+aligned and partial-tail reuse, exact-repeat boundary logits, and several decode
+steps. It also requires deterministic eviction, capacity exhaustion,
+transaction-failure, cancellation, unload/reload, and stale-handle tests.
+Benchmark snapshot versus physical cold, repeated-prefix, alternating-prefix,
+and eviction workloads with identical model settings; record TTFT, decode
+latency, throughput, peak RSS, physical bytes, copied rows, and reused/prefilled
+tokens. No speedup or memory-saving claim is made before those measurements.
+
+Parallel execution, continuous batching, GPU paged attention, quantized KV,
+spill, and distributed transport remain outside this activation wave.

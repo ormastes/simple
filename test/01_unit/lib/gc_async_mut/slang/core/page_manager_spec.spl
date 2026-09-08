@@ -39,6 +39,16 @@ describe "Slang KV page admission and identity":
         expect(pages.page_occupied(page).unwrap()).to_equal(3)
         expect(pages.abort_page(page).is_ok()).to_equal(true)
         expect(pages.page_state(page).unwrap_err()).to_equal(KvPageError.InvalidPage)
+        expect(pages.peek_reclaimed_provider_handle()).to_equal(91u64)
+        expect(pages.acknowledge_reclaimed_provider_handle(90u64)).to_equal(false)
+        expect(pages.peek_reclaimed_provider_handle()).to_equal(91u64)
+        expect(pages.acknowledge_reclaimed_provider_handle(91u64)).to_equal(true)
+        expect(pages.peek_reclaimed_provider_handle()).to_equal(0u64)
+
+        val retried = pages.reserve_page("tenant-a", 92u64).unwrap()
+        expect(pages.abort_page(retried).is_ok()).to_equal(true)
+        expect(pages.take_reclaimed_provider_handles()).to_equal([92u64])
+        expect(pages.take_reclaimed_provider_handles()).to_equal([])
 
     it "applies page and byte limits before reservation":
         step("enforce reservation-first page and byte admission")
@@ -66,6 +76,7 @@ describe "Slang KV request ownership":
         step("enforce the request block-table capacity")
         var pages = manager(4, 2, 2, 1)
         val request = pages.create_request("tenant-a").unwrap()
+        expect(pages.sole_active_request().unwrap()).to_equal(request)
         val first = pages.reserve_page("tenant-a", 1u64).unwrap()
         pages.update_writable(first, 4, 1u64)
         pages.seal_page(first)
@@ -75,6 +86,7 @@ describe "Slang KV request ownership":
         expect(pages.attach_sealed(request, first).is_ok()).to_equal(true)
         expect(pages.attach_sealed(request, second).unwrap_err()).to_equal(KvPageError.RequestBlockTableFull)
         expect(pages.close_request(request).is_ok()).to_equal(true)
+        expect(pages.sole_active_request().unwrap_err()).to_equal(KvPageError.InvalidRequest)
         expect(pages.request_page_count(request).unwrap_err()).to_equal(KvPageError.InvalidRequest)
 
     it "keeps one private writable tail and appends within page bounds":
@@ -92,6 +104,30 @@ describe "Slang KV request ownership":
         expect(pages.seal_request_tail(request).is_ok()).to_equal(true)
         expect(pages.append_rows(request, 1, 32u64).unwrap_err()).to_equal(KvPageError.CowRequired)
 
+    it "evicts unpinned LRU prefixes to reserve request headroom":
+        step("fill the admitted pool with two cached one-page prefixes")
+        var pages = manager(2, 2, 2, 2)
+        val first_request = pages.create_request("tenant-a").unwrap()
+        val first = pages.reserve_page("tenant-a", 41u64).unwrap()
+        pages.update_writable(first, 1, 101u64)
+        pages.seal_page(first)
+        pages.attach_sealed(first_request, first)
+        pages.publish_prefix(first_request, 101u64, [1])
+        pages.close_request(first_request)
+        val second_request = pages.create_request("tenant-a").unwrap()
+        val second = pages.reserve_page("tenant-a", 42u64).unwrap()
+        pages.update_writable(second, 1, 102u64)
+        pages.seal_page(second)
+        pages.attach_sealed(second_request, second)
+        pages.publish_prefix(second_request, 102u64, [2])
+        pages.close_request(second_request)
+
+        step("admit one page by evicting the oldest reusable prefix")
+        expect(pages.admit_page_headroom(1)).to_equal(true)
+        expect(pages.telemetry().allocated_pages).to_equal(1)
+        expect(pages.telemetry().prefix_evictions).to_equal(1u64)
+        expect(pages.peek_reclaimed_provider_handle()).to_equal(41u64)
+
 describe "Slang KV copy-on-write publication":
     it "commits a verified partial-tail copy without changing reference cardinality":
         step("copy a sealed partial tail into a private writable page")
@@ -108,6 +144,36 @@ describe "Slang KV copy-on-write publication":
         expect(pages.page_reference_count(destination).unwrap()).to_equal(1)
         expect(pages.page_state(source).unwrap_err()).to_equal(KvPageError.InvalidPage)
 
+    it "commits a copy and decoded rows as one owner-atomic transition":
+        step("publish the private tail with its newly decoded row")
+        var pages = manager()
+        val request = pages.create_request("tenant-a").unwrap()
+        val source = pages.reserve_page("tenant-a", 13u64).unwrap()
+        pages.update_writable(source, 2, 44u64)
+        pages.seal_page(source)
+        pages.attach_sealed(request, source)
+        val reservation = pages.prepare_cow(request, 14u64).unwrap()
+        val destination = pages.commit_cow_append_and_seal(
+            reservation, 44u64, 1, 45u64).unwrap()
+        expect(pages.request_page_at(request, 0).unwrap()).to_equal(destination)
+        expect(pages.page_occupied(destination).unwrap()).to_equal(3)
+        expect(pages.page_state(destination).unwrap()).to_equal(KvPageState.Sealed)
+
+    it "rejects overflowing decoded rows without consuming the COW reservation":
+        step("preserve the source and reservation after an impossible append")
+        var pages = manager()
+        val request = pages.create_request("tenant-a").unwrap()
+        val source = pages.reserve_page("tenant-a", 15u64).unwrap()
+        pages.update_writable(source, 2, 46u64)
+        pages.seal_page(source)
+        pages.attach_sealed(request, source)
+        val reservation = pages.prepare_cow(request, 16u64).unwrap()
+        expect(pages.commit_cow_append_and_seal(
+            reservation, 46u64, 9223372036854775807, 47u64).unwrap_err()).to_equal(
+                KvPageError.InvalidOccupiedRows)
+        expect(pages.request_page_at(request, 0).unwrap()).to_equal(source)
+        expect(pages.abort_cow(reservation).is_ok()).to_equal(true)
+
     it "keeps the source authoritative when copy verification fails and allows abort":
         step("abort a failed copy-on-write reservation transaction")
         var pages = manager()
@@ -120,6 +186,20 @@ describe "Slang KV copy-on-write publication":
         expect(pages.commit_cow(reservation, 99u64).unwrap_err()).to_equal(KvPageError.HashMismatch)
         expect(pages.request_page_at(request, 0).unwrap()).to_equal(source)
         expect(pages.abort_cow(reservation).is_ok()).to_equal(true)
+
+    it "replaces a sealed tail with a shorter boundary-recompute copy":
+        step("retain all but the boundary row in private COW staging")
+        var pages = manager()
+        val request = pages.create_request("tenant-a").unwrap()
+        val source = pages.reserve_page("tenant-a", 27u64).unwrap()
+        pages.update_writable(source, 3, 88u64)
+        pages.seal_page(source)
+        pages.attach_sealed(request, source)
+        val reservation = pages.prepare_cow_rows(request, 28u64, 2, 89u64).unwrap()
+        val destination = pages.commit_cow(reservation, 89u64).unwrap()
+        expect(pages.page_occupied(destination).unwrap()).to_equal(2)
+        expect(pages.page_state(destination).unwrap()).to_equal(KvPageState.Writable)
+        expect(pages.page_state(source).unwrap_err()).to_equal(KvPageError.InvalidPage)
 
     it "allows one bounded reservation per request and cancellation releases it":
         step("bind a COW reservation to its request lifetime")
@@ -157,6 +237,54 @@ describe "Slang KV prefix cache":
         val fork = pages.fork_prefix(prefix).unwrap()
         expect(pages.request_page_count(fork).unwrap()).to_equal(1)
         expect(pages.page_reference_count(page).unwrap()).to_equal(3)
+
+    it "attaches a prefix only to a live empty request in the same namespace":
+        step("pin a validated prefix onto an explicitly owned request")
+        var pages = manager()
+        val source_request = pages.create_request("tenant-a").unwrap()
+        val page = pages.reserve_page("tenant-a", 32u64).unwrap()
+        pages.update_writable(page, 4, 81u64)
+        pages.seal_page(page)
+        pages.attach_sealed(source_request, page)
+        val prefix = pages.publish_prefix(source_request, 702u64, [1, 2, 3, 4]).unwrap()
+        val target = pages.create_request("tenant-a").unwrap()
+        expect(pages.attach_prefix_to_empty_request(target, prefix).is_ok()).to_equal(true)
+        expect(pages.request_page_at(target, 0).unwrap()).to_equal(page)
+
+        step("reject a closed target without changing prefix references")
+        val closed = pages.create_request("tenant-a").unwrap()
+        pages.close_request(closed)
+        val references_before = pages.page_reference_count(page).unwrap()
+        expect(pages.attach_prefix_to_empty_request(closed, prefix).unwrap_err()).to_equal(
+            KvPageError.InvalidRequest)
+        expect(pages.page_reference_count(page).unwrap()).to_equal(references_before)
+
+        step("create and attach through one owner-atomic operation")
+        val atomic_target = pages.create_request_from_prefix(prefix).unwrap()
+        expect(pages.request_page_at(atomic_target, 0).unwrap()).to_equal(page)
+
+    it "selects the longest exact stored prefix of candidate tokens":
+        step("route an extending prompt through the longest namespace-local prefix")
+        var pages = manager(6, 4, 3, 4)
+        val short_request = pages.create_request("tenant-a").unwrap()
+        val short_page = pages.reserve_page("tenant-a", 71u64).unwrap()
+        pages.update_writable(short_page, 2, 1u64)
+        pages.seal_page(short_page)
+        pages.attach_sealed(short_request, short_page)
+        val short_prefix = pages.publish_prefix(short_request, 21u64, [1, 2]).unwrap()
+        val long_request = pages.create_request("tenant-a").unwrap()
+        val long_page = pages.reserve_page("tenant-a", 72u64).unwrap()
+        pages.update_writable(long_page, 4, 2u64)
+        pages.seal_page(long_page)
+        pages.attach_sealed(long_request, long_page)
+        val long_prefix = pages.publish_prefix(long_request, 22u64, [1, 2, 3, 4]).unwrap()
+        val selected = pages.find_longest_prefix("tenant-a", [1, 2, 3, 4, 5]).unwrap()
+        expect(selected).to_equal(long_prefix)
+        expect(pages.prefix_token_count(selected).unwrap()).to_equal(4)
+        expect(pages.prefix_page_count(selected).unwrap()).to_equal(1)
+        expect(pages.prefix_page_at(selected, 0).unwrap()).to_equal(long_page)
+        expect(pages.find_longest_prefix("tenant-b", [1, 2, 3, 4]).unwrap_err()).to_equal(KvPageError.InvalidPrefix)
+        expect(pages.fork_prefix(short_prefix).is_ok()).to_equal(true)
 
     it "evicts the least-recently-used prefix deterministically":
         step("evict the oldest exact prefix when the table is full")

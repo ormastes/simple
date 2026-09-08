@@ -18,6 +18,7 @@
  */
 
 #define SLANG_CAP_PHYSICAL_PAGED_KV INT64_C(32)
+#define SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS INT64_C(64)
 #define SLANG_PHYSICAL_PAGE_ABI_V1 INT64_C(1)
 
 int64_t slang_ggml_page_abi_version(void);
@@ -33,6 +34,11 @@ int64_t slang_ggml_page_pool_create(int64_t execution_namespace,
                                     int64_t page_capacity,
                                     int64_t byte_limit);
 int64_t slang_ggml_page_pool_destroy(int64_t pool_handle);
+
+/* Creates tokenizer/output/request identity without allocating a legacy llama
+ * context. This separately negotiated extension is required for production
+ * physical-mode memory qualification. */
+int64_t slang_ggml_page_request_create(int64_t pool_handle, int64_t n_ctx);
 
 /* Pages start request-private and writable. Seal makes a page immutable.
  * Release succeeds only after all references and active borrows have drained.

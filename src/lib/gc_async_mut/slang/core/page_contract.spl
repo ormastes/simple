@@ -1,0 +1,247 @@
+# codex-impl
+#
+# Stable identities, state contracts, storage shape, and bounded construction
+# for the single-owner Slang KV page manager. Mutable lifecycle transitions
+# remain in page_manager.spl.
+
+const KV_U64_MAX: u64 = 0xffffffffffffffffu64
+
+pub enum KvPageState:
+    Free
+    Writable
+    Sealed
+    Retired
+
+pub enum KvPageError:
+    InvalidConfiguration
+    InvalidNamespace
+    InvalidProviderHandle
+    PagePoolFull
+    RequestTableFull
+    PrefixTableFull
+    RequestBlockTableFull
+    InvalidPage
+    InvalidRequest
+    InvalidPrefix
+    WrongNamespace
+    InvalidTransition
+    InvalidOccupiedRows
+    HashMismatch
+    ExactTokensMismatch
+    CowRequired
+    CowNotRequired
+    StaleReservation
+    Busy
+    GenerationExhausted
+
+pub struct KvPageId:
+    pool_generation: u64
+    slot_generation: u64
+    slot: i64
+
+pub struct KvRequestId:
+    pool_generation: u64
+    slot_generation: u64
+    slot: i64
+
+pub struct KvPrefixId:
+    pool_generation: u64
+    slot_generation: u64
+    slot: i64
+
+pub struct KvCowReservation:
+    request: KvRequestId
+    source: KvPageId
+    destination: KvPageId
+    occupied_rows: i64
+    source_occupied_rows: i64
+    source_checksum: u64
+
+pub struct KvPageTelemetry:
+    allocated_pages: i64
+    allocated_bytes: i64
+    page_high_water: i64
+    byte_high_water: i64
+    active_requests: i64
+    active_prefixes: i64
+    cache_references: i64
+    request_references: i64
+    active_reservations: i64
+    reservation_high_water: i64
+    reservation_attempts: u64
+    cow_commits: u64
+    cow_aborts: u64
+    prefix_hits: u64
+    prefix_misses: u64
+    prefix_evictions: u64
+    stale_rejects: u64
+    busy_rejects: u64
+
+fn _kv_counter_next(value: u64) -> u64:
+    if value == KV_U64_MAX:
+        return value
+    value + 1u64
+
+fn _kv_tokens_equal(left: [i64], right: [i64]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn _kv_tokens_are_prefix(prefix: [i64], candidate: [i64]) -> bool:
+    if prefix.len() > candidate.len():
+        return false
+    var index = 0
+    while index < prefix.len():
+        if prefix[index] != candidate[index]:
+            return false
+        index = index + 1
+    true
+
+fn _kv_copy_bools(source: [bool]) -> [bool]:
+    var result: [bool] = []
+    for value in source:
+        result.push(value)
+    result
+
+fn _kv_copy_i64s(source: [i64]) -> [i64]:
+    var result: [i64] = []
+    for value in source:
+        result.push(value)
+    result
+
+fn _kv_copy_u64s(source: [u64]) -> [u64]:
+    var result: [u64] = []
+    for value in source:
+        result.push(value)
+    result
+
+fn _kv_copy_pages(source: [KvPageId]) -> [KvPageId]:
+    var result: [KvPageId] = []
+    for value in source:
+        result.push(value)
+    result
+
+pub class KvPageManager:
+    pool_generation: u64
+    page_tokens: i64
+    page_bytes: i64
+    page_capacity: i64
+    request_capacity: i64
+    prefix_capacity: i64
+    request_block_capacity: i64
+    admitted_page_limit: i64
+    admitted_byte_limit: i64
+    page_states: [KvPageState]
+    page_generations: [u64]
+    page_namespaces: [text]
+    page_provider_handles: [u64]
+    page_occupied_rows: [i64]
+    page_checksums: [u64]
+    page_cache_refs: [i64]
+    page_request_refs: [i64]
+    request_active: [bool]
+    request_generations: [u64]
+    request_namespaces: [text]
+    request_pages: [[KvPageId]]
+    request_cow_pages: [[KvPageId]]
+    prefix_active: [bool]
+    prefix_generations: [u64]
+    prefix_namespaces: [text]
+    prefix_hashes: [u64]
+    prefix_tokens: [[i64]]
+    prefix_pages: [[KvPageId]]
+    prefix_last_used: [u64]
+    reclaimed_provider_handles: [u64]
+    clock: u64
+    telemetry_value: KvPageTelemetry
+
+impl KvPageManager:
+    static fn create(pool_generation: u64, page_tokens: i64, page_bytes: i64,
+                     page_capacity: i64, request_capacity: i64,
+                     prefix_capacity: i64, request_block_capacity: i64,
+                     byte_limit: i64) -> Result<KvPageManager, KvPageError>:
+        if (pool_generation == 0u64 or page_tokens <= 0 or page_bytes <= 0 or
+            page_capacity <= 0 or request_capacity <= 0 or prefix_capacity <= 0 or
+            request_block_capacity <= 0 or byte_limit < page_bytes):
+            return Err(KvPageError.InvalidConfiguration)
+        var page_states: [KvPageState] = []
+        var page_generations: [u64] = []
+        var page_namespaces: [text] = []
+        var page_provider_handles: [u64] = []
+        var page_occupied_rows: [i64] = []
+        var page_checksums: [u64] = []
+        var page_cache_refs: [i64] = []
+        var page_request_refs: [i64] = []
+        var page_index = 0
+        while page_index < page_capacity:
+            page_states.push(KvPageState.Free)
+            page_generations.push(1u64)
+            page_namespaces.push("")
+            page_provider_handles.push(0u64)
+            page_occupied_rows.push(0)
+            page_checksums.push(0u64)
+            page_cache_refs.push(0)
+            page_request_refs.push(0)
+            page_index = page_index + 1
+        var request_active: [bool] = []
+        var request_generations: [u64] = []
+        var request_namespaces: [text] = []
+        var request_pages: [[KvPageId]] = []
+        var request_cow_pages: [[KvPageId]] = []
+        var request_index = 0
+        while request_index < request_capacity:
+            request_active.push(false)
+            request_generations.push(1u64)
+            request_namespaces.push("")
+            request_pages.push([])
+            request_cow_pages.push([])
+            request_index = request_index + 1
+        var prefix_active: [bool] = []
+        var prefix_generations: [u64] = []
+        var prefix_namespaces: [text] = []
+        var prefix_hashes: [u64] = []
+        var prefix_tokens: [[i64]] = []
+        var prefix_pages: [[KvPageId]] = []
+        var prefix_last_used: [u64] = []
+        var prefix_index = 0
+        while prefix_index < prefix_capacity:
+            prefix_active.push(false)
+            prefix_generations.push(1u64)
+            prefix_namespaces.push("")
+            prefix_hashes.push(0u64)
+            prefix_tokens.push([])
+            prefix_pages.push([])
+            prefix_last_used.push(0u64)
+            prefix_index = prefix_index + 1
+        Ok(KvPageManager(
+            pool_generation: pool_generation, page_tokens: page_tokens,
+            page_bytes: page_bytes, page_capacity: page_capacity,
+            request_capacity: request_capacity, prefix_capacity: prefix_capacity,
+            request_block_capacity: request_block_capacity,
+            admitted_page_limit: page_capacity, admitted_byte_limit: byte_limit,
+            page_states: page_states, page_generations: page_generations,
+            page_namespaces: page_namespaces,
+            page_provider_handles: page_provider_handles,
+            page_occupied_rows: page_occupied_rows, page_checksums: page_checksums,
+            page_cache_refs: page_cache_refs, page_request_refs: page_request_refs,
+            request_active: request_active, request_generations: request_generations,
+            request_namespaces: request_namespaces, request_pages: request_pages,
+            request_cow_pages: request_cow_pages,
+            prefix_active: prefix_active, prefix_generations: prefix_generations,
+            prefix_namespaces: prefix_namespaces, prefix_hashes: prefix_hashes,
+            prefix_tokens: prefix_tokens, prefix_pages: prefix_pages,
+            prefix_last_used: prefix_last_used, reclaimed_provider_handles: [], clock: 0u64,
+            telemetry_value: KvPageTelemetry(
+                allocated_pages: 0, allocated_bytes: 0, page_high_water: 0,
+                byte_high_water: 0, active_requests: 0, active_prefixes: 0,
+                cache_references: 0, request_references: 0,
+                active_reservations: 0, reservation_high_water: 0,
+                reservation_attempts: 0u64, cow_commits: 0u64, cow_aborts: 0u64,
+                prefix_hits: 0u64, prefix_misses: 0u64,
+                prefix_evictions: 0u64, stale_rejects: 0u64,
+                busy_rejects: 0u64)))

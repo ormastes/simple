@@ -1,233 +1,11 @@
 # codex-impl
 #
-# Single-owner reference manager for Slang physical KV pages. This module owns
-# identities, block tables, references, reservations and atomic publication. It
-# deliberately owns no tensor memory and makes no paged-attention claim; a
-# physical provider must bind provider_handle before S4 can be advertised.
+# Single-owner mutable lifecycle transitions for Slang physical KV pages.
 
-const KV_U64_MAX: u64 = 0xffffffffffffffffu64
-
-pub enum KvPageState:
-    Free
-    Writable
-    Sealed
-    Retired
-
-pub enum KvPageError:
-    InvalidConfiguration
-    InvalidNamespace
-    InvalidProviderHandle
-    PagePoolFull
-    RequestTableFull
-    PrefixTableFull
-    RequestBlockTableFull
-    InvalidPage
-    InvalidRequest
-    InvalidPrefix
-    WrongNamespace
-    InvalidTransition
-    InvalidOccupiedRows
-    HashMismatch
-    ExactTokensMismatch
-    CowRequired
-    CowNotRequired
-    StaleReservation
-    Busy
-    GenerationExhausted
-
-pub struct KvPageId:
-    pool_generation: u64
-    slot_generation: u64
-    slot: i64
-
-pub struct KvRequestId:
-    pool_generation: u64
-    slot_generation: u64
-    slot: i64
-
-pub struct KvPrefixId:
-    pool_generation: u64
-    slot_generation: u64
-    slot: i64
-
-pub struct KvCowReservation:
-    request: KvRequestId
-    source: KvPageId
-    destination: KvPageId
-    occupied_rows: i64
-    source_checksum: u64
-
-pub struct KvPageTelemetry:
-    allocated_pages: i64
-    allocated_bytes: i64
-    page_high_water: i64
-    byte_high_water: i64
-    active_requests: i64
-    active_prefixes: i64
-    cache_references: i64
-    request_references: i64
-    active_reservations: i64
-    reservation_high_water: i64
-    reservation_attempts: u64
-    cow_commits: u64
-    cow_aborts: u64
-    prefix_hits: u64
-    prefix_misses: u64
-    prefix_evictions: u64
-    stale_rejects: u64
-    busy_rejects: u64
-
-fn _kv_counter_next(value: u64) -> u64:
-    if value == KV_U64_MAX:
-        return value
-    value + 1u64
-
-fn _kv_tokens_equal(left: [i64], right: [i64]) -> bool:
-    if left.len() != right.len():
-        return false
-    var index = 0
-    while index < left.len():
-        if left[index] != right[index]:
-            return false
-        index = index + 1
-    true
-
-fn _kv_copy_bools(source: [bool]) -> [bool]:
-    var result: [bool] = []
-    for value in source:
-        result.push(value)
-    result
-
-fn _kv_copy_i64s(source: [i64]) -> [i64]:
-    var result: [i64] = []
-    for value in source:
-        result.push(value)
-    result
-
-fn _kv_copy_pages(source: [KvPageId]) -> [KvPageId]:
-    var result: [KvPageId] = []
-    for value in source:
-        result.push(value)
-    result
-
-pub class KvPageManager:
-    pool_generation: u64
-    page_tokens: i64
-    page_bytes: i64
-    page_capacity: i64
-    request_capacity: i64
-    prefix_capacity: i64
-    request_block_capacity: i64
-    admitted_page_limit: i64
-    admitted_byte_limit: i64
-    page_states: [KvPageState]
-    page_generations: [u64]
-    page_namespaces: [text]
-    page_provider_handles: [u64]
-    page_occupied_rows: [i64]
-    page_checksums: [u64]
-    page_cache_refs: [i64]
-    page_request_refs: [i64]
-    request_active: [bool]
-    request_generations: [u64]
-    request_namespaces: [text]
-    request_pages: [[KvPageId]]
-    request_cow_pages: [[KvPageId]]
-    prefix_active: [bool]
-    prefix_generations: [u64]
-    prefix_namespaces: [text]
-    prefix_hashes: [u64]
-    prefix_tokens: [[i64]]
-    prefix_pages: [[KvPageId]]
-    prefix_last_used: [u64]
-    clock: u64
-    telemetry_value: KvPageTelemetry
+export use std.gc_async_mut.slang.core.page_contract.{KvPageState, KvPageError, KvPageId, KvRequestId, KvPrefixId, KvCowReservation, KvPageTelemetry, KvPageManager}
+use std.gc_async_mut.slang.core.page_contract.{KV_U64_MAX, _kv_counter_next, _kv_tokens_equal, _kv_tokens_are_prefix, _kv_copy_bools, _kv_copy_i64s, _kv_copy_u64s, _kv_copy_pages}
 
 impl KvPageManager:
-    static fn create(pool_generation: u64, page_tokens: i64, page_bytes: i64,
-                     page_capacity: i64, request_capacity: i64,
-                     prefix_capacity: i64, request_block_capacity: i64,
-                     byte_limit: i64) -> Result<KvPageManager, KvPageError>:
-        if (pool_generation == 0u64 or page_tokens <= 0 or page_bytes <= 0 or
-            page_capacity <= 0 or request_capacity <= 0 or prefix_capacity <= 0 or
-            request_block_capacity <= 0 or byte_limit < page_bytes):
-            return Err(KvPageError.InvalidConfiguration)
-        var page_states: [KvPageState] = []
-        var page_generations: [u64] = []
-        var page_namespaces: [text] = []
-        var page_provider_handles: [u64] = []
-        var page_occupied_rows: [i64] = []
-        var page_checksums: [u64] = []
-        var page_cache_refs: [i64] = []
-        var page_request_refs: [i64] = []
-        var page_index = 0
-        while page_index < page_capacity:
-            page_states.push(KvPageState.Free)
-            page_generations.push(1u64)
-            page_namespaces.push("")
-            page_provider_handles.push(0u64)
-            page_occupied_rows.push(0)
-            page_checksums.push(0u64)
-            page_cache_refs.push(0)
-            page_request_refs.push(0)
-            page_index = page_index + 1
-        var request_active: [bool] = []
-        var request_generations: [u64] = []
-        var request_namespaces: [text] = []
-        var request_pages: [[KvPageId]] = []
-        var request_cow_pages: [[KvPageId]] = []
-        var request_index = 0
-        while request_index < request_capacity:
-            request_active.push(false)
-            request_generations.push(1u64)
-            request_namespaces.push("")
-            request_pages.push([])
-            request_cow_pages.push([])
-            request_index = request_index + 1
-        var prefix_active: [bool] = []
-        var prefix_generations: [u64] = []
-        var prefix_namespaces: [text] = []
-        var prefix_hashes: [u64] = []
-        var prefix_tokens: [[i64]] = []
-        var prefix_pages: [[KvPageId]] = []
-        var prefix_last_used: [u64] = []
-        var prefix_index = 0
-        while prefix_index < prefix_capacity:
-            prefix_active.push(false)
-            prefix_generations.push(1u64)
-            prefix_namespaces.push("")
-            prefix_hashes.push(0u64)
-            prefix_tokens.push([])
-            prefix_pages.push([])
-            prefix_last_used.push(0u64)
-            prefix_index = prefix_index + 1
-        Ok(KvPageManager(
-            pool_generation: pool_generation, page_tokens: page_tokens,
-            page_bytes: page_bytes, page_capacity: page_capacity,
-            request_capacity: request_capacity, prefix_capacity: prefix_capacity,
-            request_block_capacity: request_block_capacity,
-            admitted_page_limit: page_capacity, admitted_byte_limit: byte_limit,
-            page_states: page_states, page_generations: page_generations,
-            page_namespaces: page_namespaces,
-            page_provider_handles: page_provider_handles,
-            page_occupied_rows: page_occupied_rows, page_checksums: page_checksums,
-            page_cache_refs: page_cache_refs, page_request_refs: page_request_refs,
-            request_active: request_active, request_generations: request_generations,
-            request_namespaces: request_namespaces, request_pages: request_pages,
-            request_cow_pages: request_cow_pages,
-            prefix_active: prefix_active, prefix_generations: prefix_generations,
-            prefix_namespaces: prefix_namespaces, prefix_hashes: prefix_hashes,
-            prefix_tokens: prefix_tokens, prefix_pages: prefix_pages,
-            prefix_last_used: prefix_last_used, clock: 0u64,
-            telemetry_value: KvPageTelemetry(
-                allocated_pages: 0, allocated_bytes: 0, page_high_water: 0,
-                byte_high_water: 0, active_requests: 0, active_prefixes: 0,
-                cache_references: 0, request_references: 0,
-                active_reservations: 0, reservation_high_water: 0,
-                reservation_attempts: 0u64, cow_commits: 0u64, cow_aborts: 0u64,
-                prefix_hits: 0u64, prefix_misses: 0u64,
-                prefix_evictions: 0u64, stale_rejects: 0u64,
-                busy_rejects: 0u64)))
 
     fn telemetry() -> KvPageTelemetry:
         self.telemetry_value
@@ -262,6 +40,20 @@ impl KvPageManager:
             return Err(KvPageError.InvalidRequest)
         Ok(self.request_pages[slot].len())
 
+    fn sole_active_request() -> Result<KvRequestId, KvPageError>:
+        var selected = -1
+        var index = 0
+        while index < self.request_capacity:
+            if self.request_active[index]:
+                if selected >= 0:
+                    return Err(KvPageError.Busy)
+                selected = index
+            index = index + 1
+        if selected < 0:
+            return Err(KvPageError.InvalidRequest)
+        Ok(KvRequestId(pool_generation: self.pool_generation,
+            slot_generation: self.request_generations[selected], slot: selected))
+
     fn request_page_at(request: KvRequestId, index: i64) -> Result<KvPageId, KvPageError>:
         val slot = self._request_slot(request)
         if slot < 0:
@@ -270,8 +62,71 @@ impl KvPageManager:
             return Err(KvPageError.InvalidPage)
         Ok(self.request_pages[slot][index])
 
-    me reserve_page(namespace: text, provider_handle: u64) -> Result<KvPageId, KvPageError>:
-        if namespace == "":
+    fn prefix_token_count(prefix: KvPrefixId) -> Result<i64, KvPageError>:
+        val slot = self._prefix_slot(prefix)
+        if slot < 0:
+            return Err(KvPageError.InvalidPrefix)
+        Ok(self.prefix_tokens[slot].len())
+
+    fn prefix_page_count(prefix: KvPrefixId) -> Result<i64, KvPageError>:
+        val slot = self._prefix_slot(prefix)
+        if slot < 0:
+            return Err(KvPageError.InvalidPrefix)
+        Ok(self.prefix_pages[slot].len())
+
+    fn prefix_page_at(prefix: KvPrefixId, index: i64) -> Result<KvPageId, KvPageError>:
+        val slot = self._prefix_slot(prefix)
+        if slot < 0 or index < 0 or index >= self.prefix_pages[slot].len():
+            return Err(KvPageError.InvalidPrefix)
+        Ok(self.prefix_pages[slot][index])
+
+    me take_reclaimed_provider_handles() -> [u64]:
+        val result = _kv_copy_u64s(self.reclaimed_provider_handles)
+        self.reclaimed_provider_handles = []
+        result
+
+    fn peek_reclaimed_provider_handle() -> u64:
+        if self.reclaimed_provider_handles.len() == 0:
+            return 0u64
+        self.reclaimed_provider_handles[0]
+
+    me acknowledge_reclaimed_provider_handle(handle: u64) -> bool:
+        if (handle == 0u64 or self.reclaimed_provider_handles.len() == 0 or
+            self.reclaimed_provider_handles[0] != handle):
+            return false
+        var remaining: [u64] = []
+        var index = 1
+        while index < self.reclaimed_provider_handles.len():
+            remaining.push(self.reclaimed_provider_handles[index])
+            index = index + 1
+        self.reclaimed_provider_handles = remaining
+        true
+
+    me admit_page_headroom(required_pages: i64) -> bool:
+        if required_pages < 0 or required_pages > self.admitted_page_limit:
+            return false
+        if (required_pages > 0 and
+            self.page_bytes > self.admitted_byte_limit / required_pages):
+            return false
+        val required_bytes = required_pages * self.page_bytes
+        while (self.telemetry_value.allocated_pages > self.admitted_page_limit - required_pages or
+               self.telemetry_value.allocated_bytes > self.admitted_byte_limit - required_bytes):
+            val victim = self._lru_reusable_prefix_slot()
+            if victim < 0:
+                self.telemetry_value.busy_rejects = _kv_counter_next(
+                    self.telemetry_value.busy_rejects)
+                return false
+            val pages_before = self.telemetry_value.allocated_pages
+            self._evict_prefix_slot(victim)
+            if self.telemetry_value.allocated_pages == pages_before and
+               self._lru_reusable_prefix_slot() < 0:
+                self.telemetry_value.busy_rejects = _kv_counter_next(
+                    self.telemetry_value.busy_rejects)
+                return false
+        true
+
+    me reserve_page(scope_key: text, provider_handle: u64) -> Result<KvPageId, KvPageError>:
+        if scope_key == "":
             return Err(KvPageError.InvalidNamespace)
         if provider_handle == 0u64:
             return Err(KvPageError.InvalidProviderHandle)
@@ -288,7 +143,7 @@ impl KvPageManager:
         if slot < 0:
             return Err(KvPageError.PagePoolFull)
         self.page_states[slot] = KvPageState.Writable
-        self.page_namespaces[slot] = namespace
+        self.page_namespaces[slot] = scope_key
         self.page_provider_handles[slot] = provider_handle
         self.page_occupied_rows[slot] = 0
         self.page_checksums[slot] = 0u64
@@ -329,8 +184,8 @@ impl KvPageManager:
         self._reclaim_page(slot)
         Ok(())
 
-    me create_request(namespace: text) -> Result<KvRequestId, KvPageError>:
-        if namespace == "":
+    me create_request(scope_key: text) -> Result<KvRequestId, KvPageError>:
+        if scope_key == "":
             return Err(KvPageError.InvalidNamespace)
         var slot = -1
         var index = 0
@@ -342,7 +197,7 @@ impl KvPageManager:
         if slot < 0:
             return Err(KvPageError.RequestTableFull)
         self.request_active[slot] = true
-        self.request_namespaces[slot] = namespace
+        self.request_namespaces[slot] = scope_key
         self.request_pages[slot] = []
         self.request_cow_pages[slot] = []
         self.telemetry_value.active_requests = self.telemetry_value.active_requests + 1
@@ -454,14 +309,30 @@ impl KvPageManager:
         val request_slot = self._request_slot(request)
         if request_slot < 0 or self.request_pages[request_slot].len() == 0:
             return Err(KvPageError.InvalidRequest)
+        val source = self.request_pages[request_slot][self.request_pages[request_slot].len() - 1]
+        val source_slot = self._page_slot(source)
+        if source_slot < 0:
+            return Err(KvPageError.InvalidPage)
+        if self.page_occupied_rows[source_slot] >= self.page_tokens:
+            return Err(KvPageError.CowNotRequired)
+        self.prepare_cow_rows(request, provider_handle,
+            self.page_occupied_rows[source_slot], self.page_checksums[source_slot])
+
+    me prepare_cow_rows(request: KvRequestId, provider_handle: u64,
+                        retained_rows: i64,
+                        retained_checksum: u64) -> Result<KvCowReservation, KvPageError>:
+        val request_slot = self._request_slot(request)
+        if request_slot < 0 or self.request_pages[request_slot].len() == 0:
+            return Err(KvPageError.InvalidRequest)
         if self.request_cow_pages[request_slot].len() != 0:
             return Err(KvPageError.Busy)
         val source = self.request_pages[request_slot][self.request_pages[request_slot].len() - 1]
         val source_slot = self._page_slot(source)
         if source_slot < 0 or self.page_states[source_slot] != KvPageState.Sealed:
             return Err(KvPageError.CowNotRequired)
-        if self.page_occupied_rows[source_slot] >= self.page_tokens:
-            return Err(KvPageError.CowNotRequired)
+        if retained_rows < 0 or retained_rows > self.page_occupied_rows[source_slot] or
+           retained_rows >= self.page_tokens:
+            return Err(KvPageError.InvalidOccupiedRows)
         val destination = match self.reserve_page(self.request_namespaces[request_slot], provider_handle):
             case Err(error): return Err(error)
             case Ok(value): value
@@ -472,8 +343,9 @@ impl KvPageManager:
             self.telemetry_value.reservation_high_water = self.telemetry_value.active_reservations
         Ok(KvCowReservation(
             request: request, source: source, destination: destination,
-            occupied_rows: self.page_occupied_rows[source_slot],
-            source_checksum: self.page_checksums[source_slot]))
+            occupied_rows: retained_rows,
+            source_occupied_rows: self.page_occupied_rows[source_slot],
+            source_checksum: retained_checksum))
 
     me commit_cow(reservation: KvCowReservation, copied_checksum: u64) -> Result<KvPageId, KvPageError>:
         val request_slot = self._request_slot(reservation.request)
@@ -493,7 +365,7 @@ impl KvPageManager:
             self.page_states[destination_slot] != KvPageState.Writable or
             self.page_request_refs[destination_slot] != 0 or
             self.page_cache_refs[destination_slot] != 0 or
-            self.page_occupied_rows[source_slot] != reservation.occupied_rows):
+            self.page_occupied_rows[source_slot] != reservation.source_occupied_rows):
             return Err(KvPageError.StaleReservation)
         if copied_checksum != reservation.source_checksum:
             return Err(KvPageError.HashMismatch)
@@ -509,6 +381,21 @@ impl KvPageManager:
         self._reclaim_if_unreferenced(source_slot)
         self.telemetry_value.cow_commits = _kv_counter_next(self.telemetry_value.cow_commits)
         Ok(reservation.destination)
+
+    me commit_cow_append_and_seal(reservation: KvCowReservation,
+                                  copied_checksum: u64,
+                                  appended_rows: i64,
+                                  final_checksum: u64) -> Result<KvPageId, KvPageError>:
+        val destination_slot = self._page_slot(reservation.destination)
+        if (destination_slot < 0 or reservation.occupied_rows < 0 or
+            reservation.occupied_rows > self.page_tokens or appended_rows <= 0 or
+            appended_rows > self.page_tokens - reservation.occupied_rows):
+            return Err(KvPageError.InvalidOccupiedRows)
+        val destination = self.commit_cow(reservation, copied_checksum)?
+        self.page_occupied_rows[destination_slot] = reservation.occupied_rows + appended_rows
+        self.page_checksums[destination_slot] = final_checksum
+        self.page_states[destination_slot] = KvPageState.Sealed
+        Ok(destination)
 
     me abort_cow(reservation: KvCowReservation) -> Result<(), KvPageError>:
         val request_slot = self._request_slot(reservation.request)
@@ -564,9 +451,9 @@ impl KvPageManager:
         self._touch_prefix(slot)
         Ok(self._prefix_id(slot))
 
-    me find_prefix(namespace: text, key_hash: u64,
+    me find_prefix(scope_key: text, key_hash: u64,
                    exact_tokens: [i64]) -> Result<KvPrefixId, KvPageError>:
-        val slot = self._find_prefix_slot(namespace, key_hash, exact_tokens)
+        val slot = self._find_prefix_slot(scope_key, key_hash, exact_tokens)
         if slot < 0:
             self.telemetry_value.prefix_misses = _kv_counter_next(self.telemetry_value.prefix_misses)
             return Err(KvPageError.InvalidPrefix)
@@ -574,33 +461,103 @@ impl KvPageManager:
         self._touch_prefix(slot)
         Ok(self._prefix_id(slot))
 
+    me find_longest_prefix(scope_key: text,
+                           candidate_tokens: [i64]) -> Result<KvPrefixId, KvPageError>:
+        var selected = -1
+        var index = 0
+        while index < self.prefix_capacity:
+            if (self.prefix_active[index] and self.prefix_namespaces[index] == scope_key and
+                self.prefix_tokens[index].len() <= candidate_tokens.len() and
+                _kv_tokens_are_prefix(self.prefix_tokens[index], candidate_tokens) and
+                (selected < 0 or self.prefix_tokens[index].len() > self.prefix_tokens[selected].len())):
+                selected = index
+            index = index + 1
+        if selected < 0:
+            self.telemetry_value.prefix_misses = _kv_counter_next(self.telemetry_value.prefix_misses)
+            return Err(KvPageError.InvalidPrefix)
+        self.telemetry_value.prefix_hits = _kv_counter_next(self.telemetry_value.prefix_hits)
+        self._touch_prefix(selected)
+        Ok(self._prefix_id(selected))
+
     me fork_prefix(prefix: KvPrefixId) -> Result<KvRequestId, KvPageError>:
+        self.create_request_from_prefix(prefix)
+
+    me create_request_from_prefix(prefix: KvPrefixId) -> Result<KvRequestId, KvPageError>:
         val prefix_slot = self._prefix_slot(prefix)
         if prefix_slot < 0:
             return Err(KvPageError.InvalidPrefix)
         if self.prefix_pages[prefix_slot].len() > self.request_block_capacity:
             return Err(KvPageError.RequestBlockTableFull)
-        for page in self.prefix_pages[prefix_slot]:
+        val attached = _kv_copy_pages(self.prefix_pages[prefix_slot])
+        for page in attached:
             val page_slot = self._page_slot(page)
             if page_slot < 0 or self.page_states[page_slot] != KvPageState.Sealed:
                 return Err(KvPageError.InvalidPage)
-        val request = match self.create_request(self.prefix_namespaces[prefix_slot]):
-            case Err(error): return Err(error)
-            case Ok(value): value
+        var request_slot = -1
+        var index = 0
+        while index < self.request_capacity:
+            if not self.request_active[index] and self.request_generations[index] != KV_U64_MAX:
+                request_slot = index
+                break
+            index = index + 1
+        if request_slot < 0:
+            return Err(KvPageError.RequestTableFull)
+        self.request_active[request_slot] = true
+        self.request_namespaces[request_slot] = self.prefix_namespaces[prefix_slot]
+        self.request_pages[request_slot] = attached
+        self.request_cow_pages[request_slot] = []
+        for page in self.request_pages[request_slot]:
+            val page_slot = self._page_slot(page)
+            self.page_request_refs[page_slot] = self.page_request_refs[page_slot] + 1
+            self.telemetry_value.request_references = self.telemetry_value.request_references + 1
+        self.telemetry_value.active_requests = self.telemetry_value.active_requests + 1
+        self._touch_prefix(prefix_slot)
+        Ok(self._request_id(request_slot))
+
+    me attach_prefix_to_empty_request(request: KvRequestId,
+                                      prefix: KvPrefixId) -> Result<(), KvPageError>:
         val request_slot = self._request_slot(request)
-        self.request_pages[request_slot] = _kv_copy_pages(self.prefix_pages[prefix_slot])
+        val prefix_slot = self._prefix_slot(prefix)
+        if request_slot < 0:
+            return Err(KvPageError.InvalidRequest)
+        if prefix_slot < 0:
+            return Err(KvPageError.InvalidPrefix)
+        if (self.request_pages[request_slot].len() != 0 or
+            self.request_cow_pages[request_slot].len() != 0):
+            return Err(KvPageError.InvalidTransition)
+        if self.request_namespaces[request_slot] != self.prefix_namespaces[prefix_slot]:
+            return Err(KvPageError.InvalidNamespace)
+        if self.prefix_pages[prefix_slot].len() > self.request_block_capacity:
+            return Err(KvPageError.RequestBlockTableFull)
+        val attached = _kv_copy_pages(self.prefix_pages[prefix_slot])
+        for page in attached:
+            val page_slot = self._page_slot(page)
+            if page_slot < 0 or self.page_states[page_slot] != KvPageState.Sealed:
+                return Err(KvPageError.InvalidPage)
+        self.request_pages[request_slot] = attached
         for page in self.request_pages[request_slot]:
             val page_slot = self._page_slot(page)
             self.page_request_refs[page_slot] = self.page_request_refs[page_slot] + 1
             self.telemetry_value.request_references = self.telemetry_value.request_references + 1
         self._touch_prefix(prefix_slot)
-        Ok(request)
+        Ok(())
 
     me evict_prefix(prefix: KvPrefixId) -> Result<(), KvPageError>:
         val slot = self._prefix_slot(prefix)
         if slot < 0:
             return Err(KvPageError.InvalidPrefix)
         self._evict_prefix_slot(slot)
+        Ok(())
+
+    me evict_all_prefixes() -> Result<(), KvPageError>:
+        if self.telemetry_value.active_requests != 0 or
+           self.telemetry_value.active_reservations != 0:
+            return Err(KvPageError.Busy)
+        var index = 0
+        while index < self.prefix_capacity:
+            if self.prefix_active[index]:
+                self._evict_prefix_slot(index)
+            index = index + 1
         Ok(())
 
     me configure_limits(page_limit: i64, byte_limit: i64) -> Result<(), KvPageError>:
@@ -709,6 +666,8 @@ impl KvPageManager:
     me _reclaim_page(slot: i64):
         self.telemetry_value.allocated_pages = self.telemetry_value.allocated_pages - 1
         self.telemetry_value.allocated_bytes = self.telemetry_value.allocated_bytes - self.page_bytes
+        if self.page_provider_handles[slot] != 0u64:
+            self.reclaimed_provider_handles.push(self.page_provider_handles[slot])
         self.page_namespaces[slot] = ""
         self.page_provider_handles[slot] = 0u64
         self.page_occupied_rows[slot] = 0
@@ -721,10 +680,10 @@ impl KvPageManager:
             self.page_generations[slot] = self.page_generations[slot] + 1u64
             self.page_states[slot] = KvPageState.Free
 
-    fn _find_prefix_slot(namespace: text, key_hash: u64, exact_tokens: [i64]) -> i64:
+    fn _find_prefix_slot(scope_key: text, key_hash: u64, exact_tokens: [i64]) -> i64:
         var index = 0
         while index < self.prefix_capacity:
-            if (self.prefix_active[index] and self.prefix_namespaces[index] == namespace and
+            if (self.prefix_active[index] and self.prefix_namespaces[index] == scope_key and
                 self.prefix_hashes[index] == key_hash and
                 _kv_tokens_equal(self.prefix_tokens[index], exact_tokens)):
                 return index

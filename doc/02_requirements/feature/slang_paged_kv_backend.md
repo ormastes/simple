@@ -27,3 +27,6 @@ Date: 2026-09-08. Status: selected Astra-refined contract.
   adapter, KV-layout, attention-config, or position mismatches.
 - REQ-013: Do not call opaque serialized-state chunks pages.
 - REQ-014: Keep one serial execution owner until parallel advancement is proven.
+- REQ-015: Production physical requests allocate tokenizer/output identity and
+  bounded token storage without allocating a parallel legacy llama context;
+  negotiate this request mode separately and retain legacy requests unchanged.

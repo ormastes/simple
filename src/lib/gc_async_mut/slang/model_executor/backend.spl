@@ -53,6 +53,7 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.PhysicalPageOperationFailed: "physical paged KV provider operation failed"
 
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
+const SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS: i64 = 64
 const SLANG_PHYSICAL_PAGE_ABI_V1: i64 = 1
 
 enum PhysicalPageProviderStatus:
@@ -131,6 +132,8 @@ struct GgmlBackend:
     f_page_table_abort: i64
     f_page_allocated_bytes: i64
     f_page_bytes: i64
+    f_page_request_create: i64
+    physical_lightweight_requests: bool
 
 struct GgmlRequest:
     handle: i64
@@ -277,6 +280,13 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         physical_page_abi_version)
     if physical_page_status != PhysicalPageProviderStatus.Ready:
         physical_page_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var f_page_request_create = spl_dlsym(lib, "slang_ggml_page_request_create")
+    val physical_lightweight_requests = (
+        physical_page_status == PhysicalPageProviderStatus.Ready and
+        (reported_capabilities & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0 and
+        f_page_request_create != 0)
+    if not physical_lightweight_requests:
+        f_page_request_create = 0
     Ok(GgmlBackend(
         lib: lib,
         f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
@@ -319,7 +329,9 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_page_table_commit: physical_page_addrs[13],
         f_page_table_abort: physical_page_addrs[14],
         f_page_allocated_bytes: physical_page_addrs[15],
-        f_page_bytes: physical_page_addrs[16]
+        f_page_bytes: physical_page_addrs[16],
+        f_page_request_create: f_page_request_create,
+        physical_lightweight_requests: physical_lightweight_requests
     ))
 
 # Strings cross the int64-only ABI one byte at a time. That is the price of a
@@ -385,6 +397,49 @@ fn open_request(b: GgmlBackend, n_ctx: i64) -> Result<GgmlRequest, BackendError>
     if handle <= 0:
         return Err(BackendError.ContextCreateFailed)
     Ok(GgmlRequest(handle: handle))
+
+fn open_physical_request(b: GgmlBackend, pool: i64,
+                         n_ctx: i64) -> Result<GgmlRequest, BackendError>:
+    if not b.physical_lightweight_requests or pool <= 0 or n_ctx <= 0:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    val handle = _call2(b.f_page_request_create, pool, n_ctx)
+    if handle <= 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(GgmlRequest(handle: handle))
+
+fn prepare_request_tokens(b: GgmlBackend, request: GgmlRequest,
+                          prompt: text) -> Result<i64, BackendError>:
+    if not b.independent_requests or request.handle <= 0 or
+       _push_request_text(b, request, prompt) < 0:
+        return Err(BackendError.TokenizeFailed)
+    val count = _call2(b.f_request_tokenize, request.handle, 1)
+    if count <= 0:
+        return Err(BackendError.TokenizeFailed)
+    Ok(count)
+
+fn request_token_at(b: GgmlBackend, request: GgmlRequest,
+                    index: i64) -> Result<i64, BackendError>:
+    if index < 0:
+        return Err(BackendError.TokenizeFailed)
+    val token = _call2(b.f_request_token_at, request.handle, index)
+    if token < 0:
+        return Err(BackendError.TokenizeFailed)
+    Ok(token)
+
+fn request_sample(b: GgmlBackend, request: GgmlRequest) -> Result<i64, BackendError>:
+    val token = _call1(b.f_request_sample, request.handle)
+    if token < 0:
+        return Err(BackendError.DecodeFailed)
+    Ok(token)
+
+fn request_is_eog(b: GgmlBackend, token: i64) -> bool:
+    _call1(b.f_is_eog, token) == 1
+
+fn request_piece(b: GgmlBackend, request: GgmlRequest,
+                 token: i64) -> Result<text, BackendError>:
+    if _call2(b.f_request_piece, request.handle, token) < 0:
+        return Err(BackendError.DecodeFailed)
+    Ok(_read_request_out(b, request))
 
 fn close_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
     if not b.independent_requests or _call1(b.f_request_close, request.handle) < 0:
@@ -485,6 +540,9 @@ fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
 
 fn physical_page_provider_status(b: GgmlBackend) -> PhysicalPageProviderStatus:
     b.physical_page_status
+
+fn physical_lightweight_requests_ready(b: GgmlBackend) -> bool:
+    b.physical_lightweight_requests
 
 fn physical_page_execution_namespace(b: GgmlBackend) -> Result<i64, BackendError>:
     if b.physical_page_status != PhysicalPageProviderStatus.Ready:
@@ -673,12 +731,16 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
 export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
 export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_request, cancel_request
+export open_physical_request, prepare_request_tokens, request_token_at
+export request_sample, request_is_eog, request_piece
 export generate, configure_prefix_cache, prefix_cache_stats, close_backend
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status
+export physical_lightweight_requests_ready
 export physical_page_execution_namespace, physical_page_pool_create, physical_page_pool_destroy
 export physical_page_reserve, physical_page_release, physical_page_seal
 export physical_page_copy_tail, physical_page_table_begin, physical_page_table_push
 export physical_page_prefill, physical_page_decode, physical_page_boundary_logits
 export physical_page_table_commit, physical_page_table_abort
 export physical_page_allocated_bytes, physical_page_bytes
+export SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS

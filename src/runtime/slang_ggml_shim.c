@@ -57,6 +57,7 @@
 #define SLANG_REQUEST_MAX_GENERATION ((uint64_t)(INT64_MAX - SLANG_REQUEST_MAX_ENTRIES) / SLANG_REQUEST_MAX_ENTRIES)
 #define SLANG_PHYSICAL_PAGE_ABI_V1 1
 #define SLANG_CAP_PHYSICAL_PAGED_KV 32
+#define SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS 64
 
 /* Error codes. Negative so a caller can test `< 0` without a sentinel table. */
 #define SLANG_ERR_NO_MODEL     (-1)
@@ -99,6 +100,8 @@ struct slang_request {
     int active;
     int cancelled;
     int legacy_logits_valid;
+    int physical_only;
+    int64_t context_limit;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     float *paged_logits;
     int paged_logits_valid;
@@ -384,8 +387,9 @@ int64_t slang_ggml_request_configure(int64_t entries) {
     return entries;
 }
 
-int64_t slang_ggml_request_create(int64_t n_ctx) {
+static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
     if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+    if (n_ctx <= 0 || n_ctx > INT32_MAX) return SLANG_ERR_INVALID;
     if (g_request_count >= g_request_capacity) return SLANG_ERR_BUSY;
     int64_t slot = -1;
     for (int64_t i = 0; i < SLANG_REQUEST_MAX_ENTRIES; i++) {
@@ -396,34 +400,45 @@ int64_t slang_ggml_request_create(int64_t n_ctx) {
     if (old->generation >= SLANG_REQUEST_MAX_GENERATION)
         return SLANG_ERR_EXHAUSTED;
 
-    struct llama_context_params cp = llama_context_default_params();
-    cp.n_ctx   = (uint32_t)(n_ctx > 0 ? n_ctx : 4096);
-    cp.n_batch = cp.n_ctx;
-    struct llama_context *ctx = llama_init_from_model(g_model, cp);
-    if (ctx == NULL) return SLANG_ERR_NO_CTX;
-    struct llama_sampler_chain_params sp = llama_sampler_chain_default_params();
-    struct llama_sampler *smpl = llama_sampler_chain_init(sp);
-    struct llama_sampler *greedy = llama_sampler_init_greedy();
+    struct llama_context *ctx = NULL;
+    struct llama_sampler *smpl = NULL;
+    struct llama_sampler *greedy = NULL;
+    if (!physical_only) {
+        struct llama_context_params cp = llama_context_default_params();
+        cp.n_ctx = (uint32_t)n_ctx;
+        cp.n_batch = cp.n_ctx;
+        ctx = llama_init_from_model(g_model, cp);
+        if (ctx == NULL) return SLANG_ERR_NO_CTX;
+        struct llama_sampler_chain_params sp = llama_sampler_chain_default_params();
+        smpl = llama_sampler_chain_init(sp);
+        greedy = llama_sampler_init_greedy();
+    }
     char *str = (char *)malloc(SLANG_STR_CAP);
     char *out = (char *)malloc(SLANG_OUT_CAP);
     llama_token *tok = (llama_token *)malloc((size_t)SLANG_TOK_CAP * sizeof(llama_token));
-    if (smpl == NULL || greedy == NULL || str == NULL || out == NULL || tok == NULL) {
+    if ((!physical_only && (smpl == NULL || greedy == NULL)) || str == NULL || out == NULL || tok == NULL) {
         if (greedy) llama_sampler_free(greedy);
         if (smpl) llama_sampler_free(smpl);
         llama_free(ctx);
         free(str); free(out); free(tok);
         return SLANG_ERR_NO_CTX;
     }
-    llama_sampler_chain_add(smpl, greedy);
+    if (!physical_only) llama_sampler_chain_add(smpl, greedy);
     uint64_t generation = old->generation == 0 ? 1 : old->generation;
     memset(old, 0, sizeof(*old));
     old->ctx = ctx; old->smpl = smpl;
     old->str = str; old->out = out; old->tok = tok;
     old->eval_start = 0; old->selected_prefix = -1; old->lease_slot = -1;
+    old->physical_only = physical_only;
+    old->context_limit = n_ctx;
     old->generation = generation; old->model_generation = g_model_generation;
     old->active = 1;
     g_request_count++;
     return slang_request_handle(slot, generation);
+}
+
+int64_t slang_ggml_request_create(int64_t n_ctx) {
+    return slang_request_create_impl(n_ctx > 0 ? n_ctx : 4096, 0);
 }
 
 int64_t slang_ggml_ctx_create(int64_t n_ctx) {
@@ -443,7 +458,7 @@ int64_t slang_ggml_ctx_create(int64_t n_ctx) {
 int64_t slang_ggml_capabilities(void) {
     return 1 | 2 | 4 | 8 | 16 |
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
-        SLANG_CAP_PHYSICAL_PAGED_KV;
+        SLANG_CAP_PHYSICAL_PAGED_KV | SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS;
 #else
         0;
 #endif
@@ -572,7 +587,7 @@ int64_t slang_ggml_free(void) {
 
 int64_t slang_ggml_request_n_ctx(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
-    return request == NULL ? SLANG_ERR_INVALID : (int64_t)llama_n_ctx(request->ctx);
+    return request == NULL ? SLANG_ERR_INVALID : request->context_limit;
 }
 
 int64_t slang_ggml_n_ctx(void) {
@@ -651,6 +666,7 @@ int64_t slang_ggml_piece(int64_t token) {
 int64_t slang_ggml_request_kv_clear(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
     slang_request_release_lease(request);
     llama_memory_clear(llama_get_memory(request->ctx), true);
     request->eval_start = 0;
@@ -671,6 +687,7 @@ int64_t slang_ggml_kv_clear(void) {
 int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
     slang_request_release_lease(request);
     request->eval_start = 0;
@@ -798,6 +815,7 @@ static void slang_prefix_admit(struct slang_request *request) {
 int64_t slang_ggml_request_eval_prompt(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
@@ -834,6 +852,7 @@ int64_t slang_ggml_eval_prompt(void) {
 int64_t slang_ggml_request_eval(int64_t handle, int64_t token) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
@@ -1023,6 +1042,13 @@ int64_t slang_ggml_page_pool_destroy(int64_t pool_handle) {
     memset(pool, 0, sizeof(*pool));
     if (g_physical_pool_generation <= (uint64_t)INT64_MAX) ++g_physical_pool_generation;
     return 0;
+}
+
+int64_t slang_ggml_page_request_create(int64_t pool_handle, int64_t n_ctx) {
+    struct slang_physical_pool *pool = slang_physical_pool_get(pool_handle);
+    if (pool == NULL || n_ctx <= 0 || n_ctx > pool->page_tokens * pool->page_capacity)
+        return SLANG_ERR_INVALID;
+    return slang_request_create_impl(n_ctx, 1);
 }
 
 int64_t slang_ggml_page_reserve(int64_t pool_handle) {

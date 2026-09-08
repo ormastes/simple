@@ -1,3 +1,4 @@
+/* Requirements: REQ-001 REQ-004 REQ-005 REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 */
 #include "slang_paged_kv_provider.h"
 #include "llama.h"
 #include <assert.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 
 int64_t slang_ggml_backend_init(void);
+int64_t slang_ggml_capabilities(void);
 int64_t slang_ggml_str_reset(void);
 int64_t slang_ggml_str_push(int64_t byte);
 int64_t slang_ggml_model_load(int64_t n_gpu_layers);
@@ -19,6 +21,7 @@ int64_t slang_ggml_request_str_reset(int64_t request);
 int64_t slang_ggml_request_str_push(int64_t request, int64_t byte);
 int64_t slang_ggml_request_tokenize(int64_t request, int64_t add_bos);
 int64_t slang_ggml_request_token_at(int64_t request, int64_t index);
+int64_t slang_ggml_request_eval_prompt(int64_t request);
 int64_t slang_ggml_request_sample(int64_t request);
 int64_t slang_ggml_vocab_size(void);
 int64_t slang_ggml_request_logit_bits(int64_t request, int64_t index);
@@ -54,15 +57,21 @@ int main(int argc, char **argv) {
     assert(slang_ggml_backend_init() == 0);
     push_global(argv[1]);
     assert(slang_ggml_model_load(0) == 0);
+    assert((slang_ggml_capabilities() & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0);
     assert(slang_ggml_request_configure(2) == 2);
-    int64_t request_a = slang_ggml_request_create(32);
-    int64_t request_b = slang_ggml_request_create(32);
+    int64_t execution_namespace = slang_ggml_page_execution_namespace();
+    assert(execution_namespace > 0);
+    int64_t pool = slang_ggml_page_pool_create(execution_namespace, 4, 16, 64 * 1024 * 1024);
+    assert(pool > 0 && slang_ggml_page_bytes(pool) > 0);
+    int64_t request_a = slang_ggml_page_request_create(pool, 32);
+    int64_t request_b = slang_ggml_page_request_create(pool, 32);
     assert(request_a > 0 && request_b > 0);
     push_request(request_a, "Hello world, this is a multi page cache bridge test.");
     push_request(request_b, "Hello world, this is a multi page cache bridge test.");
     int64_t tokens_a = slang_ggml_request_tokenize(request_a, 1);
     int64_t tokens_b = slang_ggml_request_tokenize(request_b, 1);
     assert(tokens_a == tokens_b && tokens_a > 4 && tokens_a <= 24);
+    assert(slang_ggml_request_eval_prompt(request_a) < 0);
     int64_t vocabulary = slang_ggml_vocab_size();
     assert(vocabulary > 0);
     struct llama_model_params model_params = llama_model_default_params();
@@ -97,10 +106,6 @@ int main(int argc, char **argv) {
         memcpy(&reference[i], &reference_logits[i], sizeof(reference[i]));
     }
 
-    int64_t execution_namespace = slang_ggml_page_execution_namespace();
-    assert(execution_namespace > 0);
-    int64_t pool = slang_ggml_page_pool_create(execution_namespace, 4, 16, 64 * 1024 * 1024);
-    assert(pool > 0 && slang_ggml_page_bytes(pool) > 0);
     int64_t page_count = (tokens_a + 3) / 4;
     int64_t pages_a[8] = {0};
     assert(page_count >= 2 && page_count <= 8);
@@ -230,7 +235,7 @@ int main(int argc, char **argv) {
         assert(slang_ggml_page_release(pool, extra_full_page) == 0);
     assert(slang_ggml_page_release(pool, page_c) == 0);
     assert(slang_ggml_page_release(pool, page_c) < 0);
-    int64_t cancelled_request = slang_ggml_request_create(32);
+    int64_t cancelled_request = slang_ggml_page_request_create(pool, 32);
     int64_t cancelled_page = slang_ggml_page_reserve(pool);
     assert(cancelled_request > 0 && cancelled_page > 0);
     transaction = slang_ggml_page_table_begin(cancelled_request, pool, 0, 1);

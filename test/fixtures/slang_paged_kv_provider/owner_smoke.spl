@@ -1,0 +1,92 @@
+# Real-model smoke for the production Simple owner and exact-repeat path.
+# Requirements: REQ-001 REQ-004 REQ-005 REQ-009 REQ-010 REQ-011 REQ-014 REQ-015
+
+use std.gc_async_mut.slang.model_executor.backend.{backend_error_text, open_backend, load_model, physical_page_provider_status, physical_lightweight_requests_ready, physical_page_execution_namespace, close_backend}
+use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_activate, paged_executor_active, paged_executor_pool, paged_executor_generate, paged_executor_telemetry, paged_executor_shutdown}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() < 2:
+        print "ERROR -- usage: owner_smoke.spl LIB MODEL"
+        return 2
+    # Some bootstrap `run` modes preserve their `--` marker in application
+    # arguments. The two required paths are deliberately read from the tail.
+    val lib_path = args[args.len() - 2]
+    val model_path = args[args.len() - 1]
+    print "OWNER_STAGE open_backend"
+    val opened = open_backend(lib_path)
+    val backend = match opened:
+        Err(error):
+            print "FAIL -- backend open: " + backend_error_text(error)
+            return 1
+        Ok(value): value
+    print "OWNER_STAGE load_model"
+    match load_model(backend, model_path, 0):
+        Err(error):
+            print "FAIL -- model load: " + backend_error_text(error)
+            close_backend(backend)
+            return 1
+        Ok(_): ()
+    print "OWNER_STAGE provider_status"
+    physical_page_provider_status(backend)
+    print "OWNER_STAGE lightweight_status"
+    physical_lightweight_requests_ready(backend)
+    print "OWNER_STAGE execution_namespace"
+    match physical_page_execution_namespace(backend):
+        Err(_):
+            print "FAIL -- execution namespace unavailable"
+            return 1
+        Ok(_): print "OWNER_STAGE execution_namespace_ready"
+    print "OWNER_STAGE activate"
+    match paged_executor_activate(backend, 128, 4, 64, 1, 4, 2147483648):
+        Err(error):
+            print "FAIL -- activation: " + paged_executor_error_text(error)
+            close_backend(backend)
+            return 1
+        Ok(_): ()
+    print "OWNER_STAGE cold_generate"
+    val first = paged_executor_generate("The capital of France is", 4)
+    match first:
+        Err(error):
+            print "FAIL -- cold generation: " + paged_executor_error_text(error)
+            val failed_telemetry = paged_executor_telemetry()
+            if failed_telemetry != nil:
+                print "OWNER_TELEMETRY requests=" + failed_telemetry!.active_requests.to_string() +
+                    " pages=" + failed_telemetry!.allocated_pages.to_string() +
+                    " hits=" + failed_telemetry!.prefix_hits.to_string() +
+                    " misses=" + failed_telemetry!.prefix_misses.to_string()
+            return 1
+        Ok(_): ()
+    print "OWNER_STAGE repeat_generate"
+    val second = paged_executor_generate("The capital of France is", 4)
+    match second:
+        Err(error):
+            print "FAIL -- repeat generation: " + paged_executor_error_text(error)
+            return 1
+        Ok(second_text):
+            if first.unwrap() != second_text:
+                print "FAIL -- exact-repeat output differs from cold output"
+                return 1
+    val telemetry = paged_executor_telemetry()
+    if (telemetry == nil or telemetry!.prefix_hits < 1u64 or telemetry!.prefix_misses < 1u64 or
+        telemetry!.active_requests != 0 or telemetry!.active_reservations != 0):
+        print "FAIL -- exact-prefix hit/miss telemetry was not observed"
+        return 1
+    print "OWNER_STAGE shutdown"
+    match paged_executor_shutdown():
+        Err(error):
+            print "FAIL -- shutdown: " + paged_executor_error_text(error)
+            return 1
+        Ok(_): ()
+    if paged_executor_active() or paged_executor_pool() != 0 or paged_executor_telemetry() != nil:
+        print "FAIL -- shutdown retained physical owner state"
+        return 1
+    match close_backend(backend):
+        Err(error):
+            print "FAIL -- backend close: " + backend_error_text(error)
+            return 1
+        Ok(_): ()
+    print "PASS -- Simple owner cold and exact-repeat physical generation"
+    0

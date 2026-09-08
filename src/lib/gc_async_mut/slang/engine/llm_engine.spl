@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
+use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_activate, paged_executor_shutdown, paged_executor_generate}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
 use std.io_runtime.{file_exists}
@@ -29,6 +30,12 @@ var ENGINE_LIB_PATH = "build/sffi/libslang_ggml.so"
 var ENGINE_N_CTX = 4096
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
 var ENGINE_PREFIX_CACHE_BYTES = 2147483648
+var ENGINE_PHYSICAL_PAGES_ENABLED = false
+var ENGINE_PHYSICAL_PAGE_TOKENS = 256
+var ENGINE_PHYSICAL_PAGE_CAPACITY = 128
+var ENGINE_PHYSICAL_REQUEST_CAPACITY = 1
+var ENGINE_PHYSICAL_PREFIX_CAPACITY = 4
+var ENGINE_PHYSICAL_BYTE_LIMIT = 2147483648
 
 struct EngineKvReadiness:
     mode: KvExecutionMode
@@ -40,6 +47,22 @@ fn engine_set_lib_path(path: text):
 
 fn engine_set_n_ctx(n: i64):
     ENGINE_N_CTX = n
+
+fn engine_set_physical_pages(enabled: bool, page_tokens: i64 = 256,
+                             page_capacity: i64 = 128,
+                             prefix_capacity: i64 = 4,
+                             byte_limit: i64 = 2147483648) -> bool:
+    if ENGINE_BACKEND != nil:
+        return false
+    if enabled and (page_tokens <= 0 or page_capacity <= 0 or
+                    prefix_capacity <= 0 or byte_limit <= 0):
+        return false
+    ENGINE_PHYSICAL_PAGES_ENABLED = enabled
+    ENGINE_PHYSICAL_PAGE_TOKENS = page_tokens
+    ENGINE_PHYSICAL_PAGE_CAPACITY = page_capacity
+    ENGINE_PHYSICAL_PREFIX_CAPACITY = prefix_capacity
+    ENGINE_PHYSICAL_BYTE_LIMIT = byte_limit
+    true
 
 fn engine_set_prefix_cache_limits(entries: i64, bytes: i64) -> bool:
     if entries < 0 or entries > 8 or bytes < 0:
@@ -72,8 +95,11 @@ fn engine_prefix_cache_stats() -> PrefixCacheStats?:
 fn engine_physical_page_activation() -> PhysicalPageActivation:
     if ENGINE_BACKEND == nil:
         return PhysicalPageActivation.ProviderUnavailable
-    physical_page_activation(
-        physical_page_provider_status(ENGINE_BACKEND!),
+    if paged_executor_active():
+        return physical_page_activation(
+            physical_page_provider_status(ENGINE_BACKEND!),
+            PhysicalModelSupport.Supported, paged_executor_pool(), true)
+    physical_page_activation(physical_page_provider_status(ENGINE_BACKEND!),
         PhysicalModelSupport.Unknown, 0, false)
 
 fn engine_kv_readiness() -> EngineKvReadiness:
@@ -103,6 +129,10 @@ fn _runtime_overhead_bytes() -> i64:
 
 fn engine_unload() -> Result<(), text>:
     if ENGINE_BACKEND != nil:
+        if paged_executor_active():
+            match paged_executor_shutdown():
+                Err(error): return Err(paged_executor_error_text(error))
+                Ok(_): ()
         match close_backend(ENGINE_BACKEND!):
             Err(e): return Err(backend_error_text(e))
             Ok(_): ()
@@ -133,11 +163,23 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
         Err(e):
             return Err("backend unavailable at " + ENGINE_LIB_PATH + ": " + backend_error_text(e))
         Ok(b):
-            match load_model(b, model.entry_path, -1):
+            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED: 0 else: -1
+            match load_model(b, model.entry_path, gpu_layers):
                 Err(e):
                     close_backend(b)
                     return Err("load failed for '" + model.id + "': " + backend_error_text(e))
                 Ok(_):
+                    if ENGINE_PHYSICAL_PAGES_ENABLED:
+                        val activated = paged_executor_activate(
+                            b, ENGINE_N_CTX, ENGINE_PHYSICAL_PAGE_TOKENS,
+                            ENGINE_PHYSICAL_PAGE_CAPACITY,
+                            ENGINE_PHYSICAL_REQUEST_CAPACITY,
+                            ENGINE_PHYSICAL_PREFIX_CAPACITY,
+                            ENGINE_PHYSICAL_BYTE_LIMIT)
+                        if activated.is_ok():
+                            ENGINE_BACKEND = b
+                            ENGINE_LOADED_ID = model.id
+                            return Ok(())
                     match open_context(b, ENGINE_N_CTX):
                         Err(e):
                             close_backend(b)
@@ -154,6 +196,10 @@ fn engine_generate(prompt: text, max_tokens: i64) -> Result<text, text>:
     var budget = max_tokens
     if budget <= 0:
         budget = 256
+    if paged_executor_active():
+        match paged_executor_generate(prompt, budget):
+            Err(error): return Err(paged_executor_error_text(error))
+            Ok(txt): return Ok(txt)
     match generate(ENGINE_BACKEND!, prompt, budget):
         Err(e):
             Err(backend_error_text(e))
@@ -175,7 +221,7 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
         Ok(_):
             engine_generate(prompt, max_tokens)
 
-export engine_set_lib_path, engine_set_n_ctx, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_set_lib_path, engine_set_n_ctx, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export engine_physical_page_activation, engine_kv_execution_mode
 export engine_kv_execution_mode_text, engine_physical_page_reason
