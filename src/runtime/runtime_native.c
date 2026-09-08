@@ -1626,6 +1626,7 @@ int8_t rt_transient_array_scope_end(void) {
 
     rt_core_reclaim_transient_immortal(scope_id);
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    rt_core_reclaim_transient_raw();
     if (!rt_transient_raw_scope_end()) return 0;
 #else
     rt_core_reclaim_transient_raw();

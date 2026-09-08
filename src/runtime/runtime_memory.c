@@ -164,22 +164,38 @@ int32_t rt_transient_raw_scope_pause(void) {
 int64_t rt_transient_raw_words(
     int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr) {
     uintptr_t ptr = ((uintptr_t)value) & ~(uintptr_t)7;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    uint64_t bytes = 0;
+    if (!rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) return -1;
+    if (words) *words = (const uintptr_t*)ptr;
+    if (canonical_ptr) *canonical_ptr = ptr;
+    return (int64_t)(bytes / sizeof(uintptr_t));
+#else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr);
     if (!entry) return -1;
     if (words) *words = (const uintptr_t*)ptr;
     if (canonical_ptr) *canonical_ptr = ptr;
     return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
+#endif
 }
 
 int32_t rt_transient_raw_promote(uintptr_t ptr) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    ptr &= ~(uintptr_t)7;
+    uint64_t bytes = 0;
+    if (!rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) return 0;
+    return rt_transient_raw_owner_register_state((void*)ptr, bytes, 0) != 0;
+#else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr & ~(uintptr_t)7);
     if (!entry) return 0;
     entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
     return 1;
+#endif
 }
 
 int32_t rt_transient_raw_scope_end(void) {
     if (!rt_transient_raw_active) return 0;
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     for (size_t i = 0; i < rt_transient_raw_cap; i++) {
         RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
@@ -193,6 +209,7 @@ int32_t rt_transient_raw_scope_end(void) {
     }
     rt_transient_raw_len = 0;
     rt_transient_raw_tombs = 0;
+#endif
     rt_transient_raw_active = 0;
     rt_transient_raw_paused = 0;
     return 1;
