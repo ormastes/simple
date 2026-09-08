@@ -11,8 +11,10 @@
  * are positive, generation-safe integers; success statuses are exactly zero
  * and failures are negative. No pointer crosses SFFI.
  *
- * Stock slang_ggml_shim.c deliberately does not implement this interface.
- * Opaque snapshots and shared sequence cells are not physical KV pages.
+ * slang_ggml_shim.c exports this interface only when it is compiled against a
+ * compatible llama.cpp tree that provides llama-slang-paged.h. Stock upstream
+ * llama.cpp builds keep the capability absent. Opaque snapshots and shared
+ * sequence cells are not physical KV pages.
  */
 
 #define SLANG_CAP_PHYSICAL_PAGED_KV INT64_C(32)

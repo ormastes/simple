@@ -28,6 +28,12 @@ void llama_free(struct llama_context *c) { free(c); }
 void llama_model_free(struct llama_model *m) { free(m); }
 uint32_t llama_n_ctx(const struct llama_context *c) { return c->n_ctx; }
 const struct llama_vocab * llama_model_get_vocab(const struct llama_model *m) { (void)m; return &vocab; }
+int32_t llama_vocab_n_tokens(const struct llama_vocab *v) { (void)v; return 8; }
+float * llama_get_logits_ith(struct llama_context *ctx, int32_t i) {
+    static float logits[8];
+    (void)ctx; (void)i;
+    return logits;
+}
 int32_t llama_tokenize(const struct llama_vocab *v, const char *s, int32_t n, llama_token *out, int32_t cap, bool bos, bool special) { (void)v; (void)special; int32_t total = n + (bos ? 1 : 0); if (total > cap) return -total; int32_t j = 0; if (bos) out[j++] = 1; for (int32_t i = 0; i < n; i++) out[j++] = 10 + (unsigned char)s[i]; return total; }
 bool llama_vocab_is_eog(const struct llama_vocab *v, llama_token t) { (void)v; return t == 2; }
 int32_t llama_token_to_piece(const struct llama_vocab *v, llama_token t, char *out, int32_t cap, int32_t l, bool s) { (void)v; (void)l; (void)s; if (cap < 1) return -1; out[0] = (char)t; return 1; }
