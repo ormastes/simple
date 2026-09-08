@@ -40,6 +40,29 @@ fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
 }
 
 #[test]
+fn trait_typed_parameter_preserves_owner_for_virtual_dispatch() {
+    let mir = compile_to_mir(
+        "trait Gateway:\n    fn store() -> i64\n\nstruct Adapter:\n    value: i64\n\nimpl Gateway for Adapter:\n    fn store(self) -> i64: self.value\n\nfn consume(gateway: Gateway) -> i64:\n    gateway.store()\n",
+    )
+    .expect("trait-typed call must lower to MIR");
+    let consume = mir.functions.iter().find(|function| function.name == "consume").unwrap();
+    assert!(
+        consume
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction, MirInst::MethodCallVirtual { vtable_slot: 0, .. })),
+        "authored Gateway type must survive its Any runtime alias and select vtable slot zero"
+    );
+    assert!(
+        consume.blocks.iter().flat_map(|block| &block.instructions).all(
+            |instruction| !matches!(instruction, MirInst::MethodCallStatic { func_name, .. } if func_name == "store")
+        ),
+        "trait call must not degrade to an unresolvable bare static method"
+    );
+}
+
+#[test]
 fn value_bound_unsafe_capability_does_not_become_global_load() {
     let mir = compile_to_mir(
         "@unsafe(reason: \"raw provider\", capabilities: [ffi])\nextern fn rt_probe() -> i64\nfn owner() -> i64:\n    val value = unsafe(capabilities: [ffi]):\n        rt_probe()\n    value\n",
