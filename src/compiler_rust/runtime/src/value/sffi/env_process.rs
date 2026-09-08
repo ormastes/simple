@@ -2152,3 +2152,47 @@ pub extern "C" fn rt_process_acquire_pinned_executable(_handle: i64) -> i64 {
 pub extern "C" fn rt_process_pinned_executable_sha256_value(_handle: i64) -> RuntimeValue {
     RuntimeValue::NIL
 }
+
+/// Rust-lane counterpart for platforms where the canonical C OwnedProcess V3
+/// owner is unavailable. These functions are deliberately Rust-mangled: the C
+/// owner alone exports the public ABI, avoiding duplicate linker definitions.
+unsafe fn owned_process_v3_unsupported_words(count: u64, error_index: u64) -> RuntimeValue {
+    use crate::value::collections::{rt_array_new, rt_array_push};
+
+    const OPAQUE_V3_VERSION: i64 = 3;
+    let values = rt_array_new(count);
+    for index in 0..count {
+        let value = if index == 0 {
+            OPAQUE_V3_VERSION
+        } else if index == error_index {
+            libc::ENOTSUP as i64
+        } else {
+            0
+        };
+        if !rt_array_push(values, RuntimeValue::from_int(value)) {
+            return RuntimeValue::NIL;
+        }
+    }
+    values
+}
+
+pub unsafe fn rt_process_owned_v3_input_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(39, 6)
+}
+
+pub unsafe fn rt_process_owned_v3_cancel_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(4, 3)
+}
+
+pub unsafe fn rt_process_owned_v3_result_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(15, 14)
+}
+
+pub unsafe fn rt_process_owned_v3_collect_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(15, 14)
+}
+
+pub fn rt_process_owned_v3_release_value(_handle: i64) -> i32 {
+    // A platform without an OwnedProcess V3 table owns no lease to release.
+    0
+}
