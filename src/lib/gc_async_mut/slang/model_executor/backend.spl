@@ -37,6 +37,8 @@ enum BackendError:
     TokenizeFailed
     DecodeFailed
     NotOpen
+    PhysicalPagesUnavailable
+    PhysicalPageOperationFailed
 
 fn backend_error_text(e: BackendError) -> text:
     match e:
@@ -47,6 +49,18 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.TokenizeFailed: "prompt could not be tokenized"
         BackendError.DecodeFailed: "decode step failed"
         BackendError.NotOpen: "backend is not open"
+        BackendError.PhysicalPagesUnavailable: "physical paged KV provider is unavailable"
+        BackendError.PhysicalPageOperationFailed: "physical paged KV provider operation failed"
+
+const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
+const SLANG_PHYSICAL_PAGE_ABI_V1: i64 = 1
+
+enum PhysicalPageProviderStatus:
+    Unavailable
+    RejectedDependency
+    RejectedPartial
+    RejectedVersion
+    Ready
 
 # Resolved entry points. Held as addresses rather than re-resolved per call so
 # that a decode loop does not pay a symbol lookup per token.
@@ -99,6 +113,24 @@ struct GgmlBackend:
     f_request_piece: i64
     f_request_kv_clear: i64
     independent_requests: bool
+    physical_page_status: PhysicalPageProviderStatus
+    f_page_abi_version: i64
+    f_page_execution_namespace: i64
+    f_page_pool_create: i64
+    f_page_pool_destroy: i64
+    f_page_reserve: i64
+    f_page_release: i64
+    f_page_seal: i64
+    f_page_copy_tail: i64
+    f_page_table_begin: i64
+    f_page_table_push: i64
+    f_page_prefill: i64
+    f_page_decode: i64
+    f_page_boundary_logits: i64
+    f_page_table_commit: i64
+    f_page_table_abort: i64
+    f_page_allocated_bytes: i64
+    f_page_bytes: i64
 
 struct GgmlRequest:
     handle: i64
@@ -125,10 +157,43 @@ fn _call1(fptr: i64, a0: i64) -> i64:
 fn _call2(fptr: i64, a0: i64, a1: i64) -> i64:
     spl_wffi_call_i64(fptr, [a0, a1], 2)
 
+fn _call3(fptr: i64, a0: i64, a1: i64, a2: i64) -> i64:
+    spl_wffi_call_i64(fptr, [a0, a1, a2], 3)
+
+fn _call4(fptr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64:
+    spl_wffi_call_i64(fptr, [a0, a1, a2, a3], 4)
+
 fn _optional_call0(fptr: i64) -> i64:
     if fptr == 0:
         return -1
     _call0(fptr)
+
+fn physical_page_version_probe_is_authorized(reported_capabilities: i64,
+                                             independent_requests: bool,
+                                             addresses: [i64]) -> bool:
+    if (reported_capabilities & SLANG_CAP_PHYSICAL_PAGED_KV) == 0 or
+       not independent_requests or addresses.len() != 17:
+        return false
+    for address in addresses:
+        if address == 0:
+            return false
+    true
+
+fn physical_page_group_status_from_probe(reported_capabilities: i64,
+                                         independent_requests: bool,
+                                         addresses: [i64], abi_version: i64) -> PhysicalPageProviderStatus:
+    if (reported_capabilities & SLANG_CAP_PHYSICAL_PAGED_KV) == 0:
+        return PhysicalPageProviderStatus.Unavailable
+    if not independent_requests:
+        return PhysicalPageProviderStatus.RejectedDependency
+    if addresses.len() != 17:
+        return PhysicalPageProviderStatus.RejectedPartial
+    for address in addresses:
+        if address == 0:
+            return PhysicalPageProviderStatus.RejectedPartial
+    if abi_version != SLANG_PHYSICAL_PAGE_ABI_V1:
+        return PhysicalPageProviderStatus.RejectedVersion
+    PhysicalPageProviderStatus.Ready
 
 # Opens the shim and resolves every entry up front. Resolving eagerly means a
 # missing symbol is reported here, by name, instead of surfacing as a zero
@@ -175,8 +240,9 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_request_sample", "slang_ggml_request_piece",
         "slang_ggml_request_kv_clear"
     ]
+    val reported_capabilities = _call0(addrs[16])
     var request_addrs: [i64] = []
-    var request_group_ok = (_call0(addrs[16]) & 16) != 0
+    var request_group_ok = (reported_capabilities & 16) != 0
     for n in request_names:
         val address = spl_dlsym(lib, n)
         request_addrs.push(address)
@@ -184,6 +250,33 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
             request_group_ok = false
     if not request_group_ok:
         request_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    val physical_page_names = [
+        "slang_ggml_page_abi_version", "slang_ggml_page_execution_namespace",
+        "slang_ggml_page_pool_create", "slang_ggml_page_pool_destroy",
+        "slang_ggml_page_reserve", "slang_ggml_page_release",
+        "slang_ggml_page_seal", "slang_ggml_page_copy_tail",
+        "slang_ggml_page_table_begin", "slang_ggml_page_table_push",
+        "slang_ggml_page_prefill", "slang_ggml_page_decode",
+        "slang_ggml_page_boundary_logits", "slang_ggml_page_table_commit",
+        "slang_ggml_page_table_abort", "slang_ggml_page_allocated_bytes",
+        "slang_ggml_page_bytes"
+    ]
+    var physical_page_addrs: [i64] = []
+    var physical_group_complete = true
+    for n in physical_page_names:
+        val address = spl_dlsym(lib, n)
+        physical_page_addrs.push(address)
+        if address == 0:
+            physical_group_complete = false
+    var physical_page_abi_version = -1
+    if physical_group_complete and physical_page_version_probe_is_authorized(
+       reported_capabilities, request_group_ok, physical_page_addrs):
+        physical_page_abi_version = _call0(physical_page_addrs[0])
+    val physical_page_status = physical_page_group_status_from_probe(
+        reported_capabilities, request_group_ok, physical_page_addrs,
+        physical_page_abi_version)
+    if physical_page_status != PhysicalPageProviderStatus.Ready:
+        physical_page_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     Ok(GgmlBackend(
         lib: lib,
         f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
@@ -208,7 +301,25 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_request_prefix_prepare: request_addrs[11],
         f_request_eval_prompt: request_addrs[12], f_request_eval: request_addrs[13],
         f_request_sample: request_addrs[14], f_request_piece: request_addrs[15],
-        f_request_kv_clear: request_addrs[16], independent_requests: request_group_ok
+        f_request_kv_clear: request_addrs[16], independent_requests: request_group_ok,
+        physical_page_status: physical_page_status,
+        f_page_abi_version: physical_page_addrs[0],
+        f_page_execution_namespace: physical_page_addrs[1],
+        f_page_pool_create: physical_page_addrs[2],
+        f_page_pool_destroy: physical_page_addrs[3],
+        f_page_reserve: physical_page_addrs[4],
+        f_page_release: physical_page_addrs[5],
+        f_page_seal: physical_page_addrs[6],
+        f_page_copy_tail: physical_page_addrs[7],
+        f_page_table_begin: physical_page_addrs[8],
+        f_page_table_push: physical_page_addrs[9],
+        f_page_prefill: physical_page_addrs[10],
+        f_page_decode: physical_page_addrs[11],
+        f_page_boundary_logits: physical_page_addrs[12],
+        f_page_table_commit: physical_page_addrs[13],
+        f_page_table_abort: physical_page_addrs[14],
+        f_page_allocated_bytes: physical_page_addrs[15],
+        f_page_bytes: physical_page_addrs[16]
     ))
 
 # Strings cross the int64-only ABI one byte at a time. That is the price of a
@@ -350,6 +461,9 @@ fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
     var reported_capabilities = _call0(b.f_capabilities)
     if not b.independent_requests and (reported_capabilities & 16) != 0:
         reported_capabilities = reported_capabilities - 16
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready and
+       (reported_capabilities & SLANG_CAP_PHYSICAL_PAGED_KV) != 0:
+        reported_capabilities = reported_capabilities - SLANG_CAP_PHYSICAL_PAGED_KV
     PrefixCacheStats(
         capabilities: reported_capabilities,
         hits: _call0(b.f_prefix_hits),
@@ -369,6 +483,185 @@ fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
         return false
     _call2(b.f_prefix_configure, entries, bytes) >= 0
 
+fn physical_page_provider_status(b: GgmlBackend) -> PhysicalPageProviderStatus:
+    b.physical_page_status
+
+fn physical_page_execution_namespace(b: GgmlBackend) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    val handle = _call0(b.f_page_execution_namespace)
+    if handle <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(handle)
+
+fn physical_page_pool_create(b: GgmlBackend, execution_namespace: i64,
+                             page_tokens: i64, page_capacity: i64,
+                             byte_limit: i64) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if execution_namespace <= 0 or page_tokens <= 0 or page_capacity <= 0 or
+       byte_limit <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    val handle = _call4(b.f_page_pool_create, execution_namespace, page_tokens,
+                        page_capacity, byte_limit)
+    if handle <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(handle)
+
+fn physical_page_pool_destroy(b: GgmlBackend, pool: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0 or _call1(b.f_page_pool_destroy, pool) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_reserve(b: GgmlBackend, pool: i64) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    val page = _call1(b.f_page_reserve, pool)
+    if page <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(page)
+
+fn physical_page_release(b: GgmlBackend, pool: i64, page: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0 or page <= 0 or _call2(b.f_page_release, pool, page) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_seal(b: GgmlBackend, pool: i64, page: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0 or page <= 0 or _call2(b.f_page_seal, pool, page) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_copy_tail(b: GgmlBackend, pool: i64, source: i64,
+                           destination: i64, valid_rows: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0 or source <= 0 or destination <= 0 or source == destination or
+       valid_rows < 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if _call4(b.f_page_copy_tail, pool, source, destination, valid_rows) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_table_begin(b: GgmlBackend, request: GgmlRequest,
+                             pool: i64, table_base_position: i64,
+                             expected_pages: i64) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if request.handle <= 0 or pool <= 0 or table_base_position < 0 or
+       expected_pages <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    val transaction = _call4(b.f_page_table_begin, request.handle, pool,
+                             table_base_position, expected_pages)
+    if transaction <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(transaction)
+
+fn physical_page_table_push(b: GgmlBackend, transaction: i64, page: i64,
+                            valid_rows: i64,
+                            writable_capacity: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if page <= 0 or valid_rows < 0 or writable_capacity < 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if _call4(b.f_page_table_push, transaction, page, valid_rows,
+              writable_capacity) != 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_prefill(b: GgmlBackend, transaction: i64,
+                         start_position: i64, token_start: i64,
+                         token_count: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if start_position < 0 or token_start < 0 or token_count <= 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if _call4(b.f_page_prefill, transaction, start_position, token_start,
+              token_count) != 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_decode(b: GgmlBackend, transaction: i64,
+                        token: i64, position: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if position < 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if _call3(b.f_page_decode, transaction, token, position) != 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_boundary_logits(b: GgmlBackend, transaction: i64,
+                                 boundary_token_index: i64,
+                                 boundary_position: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if boundary_token_index < 0 or boundary_position < 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    if _call3(b.f_page_boundary_logits, transaction, boundary_token_index,
+              boundary_position) != 0:
+        _call1(b.f_page_table_abort, transaction)
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_table_commit(b: GgmlBackend,
+                              transaction: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0 or _call1(b.f_page_table_commit, transaction) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_table_abort(b: GgmlBackend,
+                             transaction: i64) -> Result<(), BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if transaction <= 0 or _call1(b.f_page_table_abort, transaction) != 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(())
+
+fn physical_page_allocated_bytes(b: GgmlBackend, pool: i64) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    val bytes = _call1(b.f_page_allocated_bytes, pool)
+    if bytes < 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(bytes)
+
+fn physical_page_bytes(b: GgmlBackend, pool: i64) -> Result<i64, BackendError>:
+    if b.physical_page_status != PhysicalPageProviderStatus.Ready:
+        return Err(BackendError.PhysicalPagesUnavailable)
+    if pool <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    val bytes = _call1(b.f_page_bytes, pool)
+    if bytes <= 0:
+        return Err(BackendError.PhysicalPageOperationFailed)
+    Ok(bytes)
+
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
 fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
@@ -378,5 +671,14 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
     Ok(())
 
 export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
+export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_request, cancel_request
 export generate, configure_prefix_cache, prefix_cache_stats, close_backend
+export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
+export physical_page_provider_status
+export physical_page_execution_namespace, physical_page_pool_create, physical_page_pool_destroy
+export physical_page_reserve, physical_page_release, physical_page_seal
+export physical_page_copy_tail, physical_page_table_begin, physical_page_table_push
+export physical_page_prefill, physical_page_decode, physical_page_boundary_logits
+export physical_page_table_commit, physical_page_table_abort
+export physical_page_allocated_bytes, physical_page_bytes

@@ -20,10 +20,11 @@ The owner releases storage only when the combined count reaches zero.
 
 ## Transaction boundary
 
-Admission reserves descriptors and physical bytes first. Decode writes only to
-unpublished pages or a private tail. On success the owner atomically publishes
-the new block table and cursor; on failure it releases reservations and marks a
-partially mutated private tail terminal unless the provider proves rollback.
+Admission reserves descriptors and physical bytes first. Execution writes only
+to transaction-exclusive staging pages that cannot alias a published table,
+cache record, or another transaction. A successful, logits-producing commit
+atomically publishes table, cursor, and request-owned logits. Failure consumes
+or aborts staging, preserves the old table/cursor, and invalidates sampling.
 
 ## Provider variants
 
