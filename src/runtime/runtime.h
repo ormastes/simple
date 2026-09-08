@@ -443,6 +443,23 @@ int64_t  rt_string_builder_finish(int64_t handle);
 int64_t  rt_string_builder_len(int64_t handle);
 void     rt_string_builder_free(int64_t handle);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
+
+/* Descriptor-pinned, beneath-root read-only file views. Text arguments use
+ * tagged runtime strings; optional byte arrays return NULL on failure. */
+int64_t  rt_file_view_open_beneath_no_follow_v1(int64_t root, int64_t path);
+int8_t   rt_file_view_mapping_supported_v1(int64_t handle);
+int64_t  rt_file_view_map_copy_v1(int64_t handle, uint64_t offset, uint64_t length);
+int64_t  rt_file_view_pread_exact_v1(int64_t handle, uint64_t offset, uint64_t length);
+int8_t   rt_file_view_prefetch_v1(int64_t handle, uint64_t offset, uint64_t length);
+int64_t  rt_file_view_device_v1(int64_t handle);
+int64_t  rt_file_view_inode_v1(int64_t handle);
+int64_t  rt_file_view_size_v1(int64_t handle);
+int8_t   rt_file_view_close_v1(int64_t handle);
+int64_t  rt_pinned_archive_open_beneath_v1(int64_t root, int64_t path);
+int64_t  rt_pinned_archive_device_v1(int64_t handle);
+int64_t  rt_pinned_archive_inode_v1(int64_t handle);
+int64_t  rt_pinned_archive_size_v1(int64_t handle);
+int8_t   rt_pinned_archive_close_v1(int64_t handle);
 int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_byte_at(int64_t string, int64_t index);
 int64_t  __simple_rt_string_byte_at(int64_t string, int64_t index);

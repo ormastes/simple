@@ -2626,6 +2626,18 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    for symbol in [
+        "rt_file_view_open_beneath_no_follow_v1",
+        "rt_file_view_pread_exact_v1",
+        "rt_file_view_close_v1",
+        "rt_pinned_archive_open_beneath_v1",
+        "rt_pinned_archive_close_v1",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must include file-view provider `{symbol}`"
+        );
+    }
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",
