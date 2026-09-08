@@ -2156,6 +2156,12 @@ pub extern "C" fn rt_process_pinned_executable_sha256_value(_handle: i64) -> Run
 /// Rust-lane counterpart for platforms where the canonical C OwnedProcess V3
 /// owner is unavailable. These functions are deliberately Rust-mangled: the C
 /// owner alone exports the public ABI, avoiding duplicate linker definitions.
+#[cfg(windows)]
+const OWNED_PROCESS_ENOTSUP: i64 = 129;
+
+#[cfg(not(windows))]
+const OWNED_PROCESS_ENOTSUP: i64 = libc::ENOTSUP as i64;
+
 unsafe fn owned_process_v3_unsupported_words(count: u64, error_index: u64) -> RuntimeValue {
     use crate::value::collections::{rt_array_new, rt_array_push};
 
@@ -2165,7 +2171,7 @@ unsafe fn owned_process_v3_unsupported_words(count: u64, error_index: u64) -> Ru
         let value = if index == 0 {
             OPAQUE_V3_VERSION
         } else if index == error_index {
-            libc::ENOTSUP as i64
+            OWNED_PROCESS_ENOTSUP
         } else {
             0
         };
