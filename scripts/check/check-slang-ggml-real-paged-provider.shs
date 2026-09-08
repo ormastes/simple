@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+LLAMA_ROOT=${LLAMA_ROOT:?set LLAMA_ROOT to the compatible llama.cpp checkout}
+LLAMA_BUILD_DIR=${LLAMA_BUILD_DIR:?set LLAMA_BUILD_DIR to its build directory}
+SLANG_TEST_MODEL=${SLANG_TEST_MODEL:?set SLANG_TEST_MODEL to a small GGUF model}
+OUT=$(mktemp -d)
+trap 'rm -rf "$OUT"' EXIT
+
+[ -f "$LLAMA_ROOT/include/llama-slang-paged.h" ] || {
+    echo "ERROR -- compatible llama-slang-paged.h is absent"; exit 2;
+}
+[ -f "$LLAMA_BUILD_DIR/bin/libllama.so" ] || {
+    echo "ERROR -- libllama.so is absent under LLAMA_BUILD_DIR"; exit 2;
+}
+[ -f "$SLANG_TEST_MODEL" ] || { echo "ERROR -- SLANG_TEST_MODEL is absent"; exit 2; }
+
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
+    "$ROOT/src/runtime/slang_ggml_shim.c" \
+    -L"$LLAMA_BUILD_DIR/bin" -lllama -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" \
+    -o "$OUT/libslang_ggml.so"
+
+cc -std=c11 -Wall -Wextra -Werror -I"$ROOT/src/runtime" \
+    -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
+    "$ROOT/test/fixtures/slang_paged_kv_provider/real_provider_smoke.c" \
+    -L"$OUT" -lslang_ggml -Wl,-rpath,"$OUT" \
+    -L"$LLAMA_BUILD_DIR/bin" -lllama -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" \
+    -o "$OUT/real-provider-smoke"
+
+"$OUT/real-provider-smoke" "$SLANG_TEST_MODEL"

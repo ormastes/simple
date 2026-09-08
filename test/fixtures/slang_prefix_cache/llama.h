@@ -29,6 +29,8 @@ void llama_free(struct llama_context *);
 void llama_model_free(struct llama_model *);
 uint32_t llama_n_ctx(const struct llama_context *);
 const struct llama_vocab * llama_model_get_vocab(const struct llama_model *);
+int32_t llama_vocab_n_tokens(const struct llama_vocab *);
+float * llama_get_logits_ith(struct llama_context *, int32_t);
 int32_t llama_tokenize(const struct llama_vocab *, const char *, int32_t,
                        llama_token *, int32_t, bool, bool);
 bool llama_vocab_is_eog(const struct llama_vocab *, llama_token);
