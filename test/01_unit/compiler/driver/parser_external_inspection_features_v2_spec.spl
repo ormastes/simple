@@ -1,0 +1,78 @@
+use std.spec.*
+use std.common.crypto.sha256.sha256_u8_hex
+use compiler.driver.parser_external_inspection_contract_v1.ParserInspectionInstructionV1
+use compiler.driver.parser_llvm_inspection_projection_join_v1.ParserLlvmInspectionDataV1
+use compiler.driver.parser_llvm_objdump_codec_v1.*
+use compiler.driver.parser_external_inspection_features_v2.*
+
+const DIGEST_PIF: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn objdump_pif(vector_bytes: [u8] = [0x62, 0xf3, 0x75, 0x08, 0x25, 0xd0, 0xff],
+    vector_opcode: text = "vpternlogd") -> ParserLlvmObjdumpProjectionV1:
+    ParserLlvmObjdumpProjectionV1(instructions: [
+        ParserLlvmObjdumpInstructionV1(section_index: 1, section_name: ".text",
+            section_offset: 0, bytes: [0x8d, 0x47, 0x01],
+            byte_digest: sha256_u8_hex([0x8d, 0x47, 0x01]),
+            opcode_identity: "leal", recognized: true),
+        ParserLlvmObjdumpInstructionV1(section_index: 1, section_name: ".text",
+            section_offset: 3, bytes: vector_bytes,
+            byte_digest: sha256_u8_hex(vector_bytes),
+            opcode_identity: vector_opcode, recognized: true)],
+        executable_section_count: 1, instruction_count: 2)
+
+fn data_pif(objdump: ParserLlvmObjdumpProjectionV1 = objdump_pif()
+) -> ParserLlvmInspectionDataV1:
+    var rows: [ParserInspectionInstructionV1] = []
+    for instruction in objdump.instructions:
+        rows.push(ParserInspectionInstructionV1(section_index: instruction.section_index,
+            section_offset: instruction.section_offset, byte_count: instruction.bytes.len(),
+            byte_digest: instruction.byte_digest, opcode_identity: instruction.opcode_identity,
+            required_feature: "", recognized: instruction.recognized))
+    ParserLlvmInspectionDataV1(known_section_indices: [0, 1], executable_sections: [],
+        executable_relocations: [], instructions: rows, group_digest: DIGEST_PIF,
+        projection_digest: DIGEST_PIF)
+
+describe "parser external inspection multi-feature layer V2":
+    it "derives a canonical AVX512F and AVX512VL conjunction":
+        val objdump = objdump_pif()
+        val result = parser_external_inspection_features_v2(data_pif(objdump), objdump,
+            ["avx512f", "avx512vl"], false).unwrap()
+        expect(result.observed_features).to_equal(["avx512f", "avx512vl"])
+        expect(result.instructions[0].required_features).to_equal([])
+        expect(result.instructions[1].required_features).to_equal(
+            ["avx512f", "avx512vl"])
+        expect(result.vector_instruction_count).to_equal(1)
+        expect(result.classifier_digest.len()).to_equal(64)
+        expect(result.projection_digest.len()).to_equal(64)
+
+    it "rejects unsupported VEX instructions and opcode substitution":
+        val unknown = objdump_pif(vector_bytes: [0xc5, 0xfd, 0x00, 0xc0],
+            vector_opcode: "vunknown")
+        expect(parser_external_inspection_features_v2(data_pif(unknown), unknown,
+            ["avx2"], false)).to_equal(
+                Err(ParserExternalInspectionFeaturesErrorV2.UnsupportedVectorInstruction))
+        val exact = objdump_pif()
+        var data = data_pif(exact)
+        var row = data.instructions[1]
+        row.opcode_identity = "vpxor"
+        data.instructions[1] = row
+        expect(parser_external_inspection_features_v2(data, exact,
+            ["avx512f"], false)).to_equal(
+                Err(ParserExternalInspectionFeaturesErrorV2.ProjectionMismatch))
+
+    it "rejects malformed requests and missing observed features":
+        val objdump = objdump_pif()
+        expect(parser_external_inspection_features_v2(data_pif(objdump), objdump,
+            ["avx512vl", "avx512f"], false)).to_equal(
+                Err(ParserExternalInspectionFeaturesErrorV2.InvalidRequest))
+        expect(parser_external_inspection_features_v2(data_pif(objdump), objdump,
+            ["avx2"], false)).to_equal(
+                Err(ParserExternalInspectionFeaturesErrorV2.MissingRequestedFeature))
+        expect(parser_external_inspection_features_v2(data_pif(objdump), objdump,
+            ["avx512f"], false)).to_equal(
+                Err(ParserExternalInspectionFeaturesErrorV2.UnexpectedObservedFeature))
+
+    it "rejects vector bytes in scalar-reference evidence":
+        val objdump = objdump_pif()
+        expect(parser_external_inspection_features_v2(data_pif(objdump), objdump,
+            [], true)).to_equal(Err(ParserExternalInspectionFeaturesErrorV2.ScalarContainsVector))

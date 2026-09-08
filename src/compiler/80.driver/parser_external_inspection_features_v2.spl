@@ -1,0 +1,134 @@
+# Additive multi-feature classification over a coherent LLVM inspection data
+# projection and its exact objdump bytes. This is data validation only.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.driver.parser_llvm_inspection_projection_join_v1.ParserLlvmInspectionDataV1
+use compiler.driver.parser_llvm_objdump_codec_v1.ParserLlvmObjdumpProjectionV1
+use compiler.driver.parser_x86_encoding_envelope_v1.*
+use compiler.driver.parser_x86_simd_opcode_classifier_v1.*
+
+pub enum ParserExternalInspectionFeaturesErrorV2:
+    InvalidRequest
+    ProjectionMismatch
+    UnsupportedVectorInstruction
+    MissingRequestedFeature
+    UnexpectedObservedFeature
+    ScalarContainsVector
+
+pub struct ParserInspectionInstructionFeaturesV2:
+    section_index: i64
+    section_offset: i64
+    byte_digest: text
+    opcode_identity: text
+    required_features: [text]
+
+pub struct ParserExternalInspectionFeaturesProjectionV2:
+    inspection_data_digest: text
+    classifier_digest: text
+    instructions: [ParserInspectionInstructionFeaturesV2]
+    requested_features: [text]
+    observed_features: [text]
+    vector_instruction_count: i64
+    scalar_reference: bool
+    projection_digest: text
+
+fn _canonical_features_pif(values: [text]) -> bool:
+    var prior = ""
+    for value in values:
+        if value == "" or (prior != "" and value <= prior): return false
+        prior = value
+    true
+
+fn _has_feature_pif(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+fn _digest_shape_pif(value: text) -> bool:
+    if value.len() != 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f')): return false
+    true
+
+fn _insert_feature_pif(values: [text], feature: text) -> [text]:
+    if _has_feature_pif(values, feature): return values
+    var result = values
+    result.push(feature)
+    var at = result.len() - 1
+    while at > 0 and result[at] < result[at - 1]:
+        val prior = result[at - 1]
+        result[at - 1] = result[at]
+        result[at] = prior
+        at = at - 1
+    result
+
+pub fn parser_external_inspection_features_v2(data: ParserLlvmInspectionDataV1,
+    objdump: ParserLlvmObjdumpProjectionV1, requested_features: [text],
+    scalar_reference: bool
+) -> Result<ParserExternalInspectionFeaturesProjectionV2,
+            ParserExternalInspectionFeaturesErrorV2>:
+    if not _canonical_features_pif(requested_features) or
+       not _digest_shape_pif(data.projection_digest):
+        return Err(ParserExternalInspectionFeaturesErrorV2.InvalidRequest)
+    if data.instructions.len() != objdump.instructions.len():
+        return Err(ParserExternalInspectionFeaturesErrorV2.ProjectionMismatch)
+    var rows: [ParserInspectionInstructionFeaturesV2] = []
+    var observed: [text] = []
+    var classifier_digest = ""
+    var vector_count = 0
+    for index in 0..data.instructions.len():
+        val normalized = data.instructions[index]
+        val exact = objdump.instructions[index]
+        if (normalized.section_index != exact.section_index or
+            normalized.section_offset != exact.section_offset or
+            normalized.byte_count != exact.bytes.len() or
+            normalized.byte_digest != exact.byte_digest or
+            exact.byte_digest != sha256_u8_hex(exact.bytes) or
+            normalized.opcode_identity.lower() != exact.opcode_identity.lower()):
+            return Err(ParserExternalInspectionFeaturesErrorV2.ProjectionMismatch)
+        val envelope_result = parser_x86_encoding_envelope_v1(exact.bytes)
+        if envelope_result.is_err():
+            return Err(ParserExternalInspectionFeaturesErrorV2.UnsupportedVectorInstruction)
+        var required: [text] = []
+        if envelope_result.unwrap().family != ParserX86EncodingFamilyV1.Legacy:
+            val classification = parser_x86_simd_opcode_classify_v1(exact.bytes)
+            if classification.is_err():
+                return Err(ParserExternalInspectionFeaturesErrorV2.UnsupportedVectorInstruction)
+            val classified = classification.unwrap()
+            if classified.instruction_identity.lower() != exact.opcode_identity.lower():
+                return Err(ParserExternalInspectionFeaturesErrorV2.ProjectionMismatch)
+            if classifier_digest != "" and classifier_digest != classified.classifier_digest:
+                return Err(ParserExternalInspectionFeaturesErrorV2.ProjectionMismatch)
+            classifier_digest = classified.classifier_digest
+            required = classified.required_features
+            for feature in required: observed = _insert_feature_pif(observed, feature)
+            vector_count = vector_count + 1
+        rows.push(ParserInspectionInstructionFeaturesV2(section_index: exact.section_index,
+            section_offset: exact.section_offset, byte_digest: exact.byte_digest,
+            opcode_identity: exact.opcode_identity, required_features: required))
+    if scalar_reference:
+        if requested_features.len() != 0 or vector_count != 0:
+            return Err(ParserExternalInspectionFeaturesErrorV2.ScalarContainsVector)
+    else:
+        if requested_features.len() == 0 or vector_count == 0:
+            return Err(ParserExternalInspectionFeaturesErrorV2.MissingRequestedFeature)
+        for requested in requested_features:
+            if not _has_feature_pif(observed, requested):
+                return Err(ParserExternalInspectionFeaturesErrorV2.MissingRequestedFeature)
+        for feature in observed:
+            if not _has_feature_pif(requested_features, feature):
+                return Err(ParserExternalInspectionFeaturesErrorV2.UnexpectedObservedFeature)
+    var digest_rows: [text] = [data.projection_digest, classifier_digest,
+        "scalar=" + scalar_reference.to_text(), "requested=" + requested_features.join(","),
+        "observed=" + observed.join(",")]
+    for row in rows:
+        digest_rows.push(row.section_index.to_text() + ":" + row.section_offset.to_text() +
+            ":" + row.byte_digest + ":" + row.opcode_identity + ":" +
+            row.required_features.join(","))
+    Ok(ParserExternalInspectionFeaturesProjectionV2(
+        inspection_data_digest: data.projection_digest,
+        classifier_digest: classifier_digest, instructions: rows,
+        requested_features: requested_features, observed_features: observed,
+        vector_instruction_count: vector_count, scalar_reference: scalar_reference,
+        projection_digest: sha256_text("simple/parser-external-inspection-features/v2\n" +
+            digest_rows.join("\n"))))

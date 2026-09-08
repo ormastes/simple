@@ -1,0 +1,111 @@
+# Terminal-receipt join for the normalized readobj/objdump data pipeline.
+# This validates caller-supplied process facts and exact captured outputs. A
+# future process owner must issue authority over this projection.
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.parser_external_inspection_contract_v1.ParserInspectionToolTerminalV1
+use compiler.driver.parser_llvm_inspection_projection_join_v1.ParserLlvmInspectionDataV1
+use compiler.driver.parser_external_inspection_features_v2.ParserExternalInspectionFeaturesProjectionV2
+
+pub enum ParserExternalInspectionTerminalJoinErrorV2:
+    InvalidIdentity
+    IncompleteProcess
+    ResourceLimit
+    OutputMismatch
+    InputMismatch
+    ProjectionMismatch
+
+pub const PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_INPUT_V2: i64 = 67108864
+pub const PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2: i64 = 67108864
+
+pub struct ParserExternalInspectionTerminalProjectionV2:
+    input_digest: text
+    input_byte_count: i64
+    readobj_tool_digest: text
+    readobj_generation: u64
+    objdump_tool_digest: text
+    objdump_generation: u64
+    inspection_data_digest: text
+    feature_projection_digest: text
+    terminal_pair_digest: text
+    projection_digest: text
+
+fn _digest_shape_pit(value: text) -> bool:
+    if value.len() != 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f')): return false
+    true
+
+fn _terminal_valid_pit(terminal: ParserInspectionToolTerminalV1,
+    stdout_text: text, stderr_text: text) -> ParserExternalInspectionTerminalJoinErrorV2?:
+    if (not _digest_shape_pit(terminal.tool_bundle_digest) or terminal.tool_generation == 0u64 or
+        not _digest_shape_pit(terminal.argv_digest) or
+        not _digest_shape_pit(terminal.environment_digest) or
+        not _digest_shape_pit(terminal.input_digest) or terminal.input_byte_count <= 0 or
+        not _digest_shape_pit(terminal.stdout_digest) or
+        not _digest_shape_pit(terminal.stderr_digest)):
+        return ParserExternalInspectionTerminalJoinErrorV2.InvalidIdentity
+    if (not terminal.input_fully_written_and_closed or terminal.exit_code != 0 or
+        terminal.timed_out or terminal.cancelled or terminal.output_overflow or
+        not terminal.process_identity_revalidated or not terminal.reaped or
+        not terminal.collected or terminal.stdout_seen_bytes != terminal.stdout_kept_bytes or
+        terminal.stderr_seen_bytes != terminal.stderr_kept_bytes):
+        return ParserExternalInspectionTerminalJoinErrorV2.IncompleteProcess
+    if (terminal.input_byte_count > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_INPUT_V2 or
+        terminal.stdout_seen_bytes < 0 or terminal.stderr_seen_bytes < 0 or
+        terminal.stdout_seen_bytes > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2 or
+        terminal.stderr_seen_bytes > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2):
+        return ParserExternalInspectionTerminalJoinErrorV2.ResourceLimit
+    if (terminal.stdout_seen_bytes != stdout_text.len() or
+        terminal.stderr_seen_bytes != stderr_text.len() or
+        terminal.stdout_digest != sha256_text(stdout_text) or
+        terminal.stderr_digest != sha256_text(stderr_text)):
+        return ParserExternalInspectionTerminalJoinErrorV2.OutputMismatch
+    nil
+
+pub fn parser_external_inspection_terminal_join_v2(
+    readobj_terminal: ParserInspectionToolTerminalV1,
+    objdump_terminal: ParserInspectionToolTerminalV1,
+    readobj_stdout: text, readobj_stderr: text,
+    objdump_stdout: text, objdump_stderr: text,
+    data: ParserLlvmInspectionDataV1,
+    features: ParserExternalInspectionFeaturesProjectionV2
+) -> Result<ParserExternalInspectionTerminalProjectionV2,
+            ParserExternalInspectionTerminalJoinErrorV2>:
+    val readobj_error = _terminal_valid_pit(readobj_terminal, readobj_stdout, readobj_stderr)
+    if readobj_error.is_some(): return Err(readobj_error.unwrap())
+    val objdump_error = _terminal_valid_pit(objdump_terminal, objdump_stdout, objdump_stderr)
+    if objdump_error.is_some(): return Err(objdump_error.unwrap())
+    if (readobj_terminal.input_digest != objdump_terminal.input_digest or
+        readobj_terminal.input_byte_count != objdump_terminal.input_byte_count):
+        return Err(ParserExternalInspectionTerminalJoinErrorV2.InputMismatch)
+    if readobj_terminal.argv_digest == objdump_terminal.argv_digest:
+        return Err(ParserExternalInspectionTerminalJoinErrorV2.InvalidIdentity)
+    if (features.inspection_data_digest != data.projection_digest or
+        not _digest_shape_pit(data.projection_digest) or
+        not _digest_shape_pit(features.projection_digest) or
+        not _digest_shape_pit(features.classifier_digest)):
+        return Err(ParserExternalInspectionTerminalJoinErrorV2.ProjectionMismatch)
+    val terminal_rows = [readobj_terminal.tool_bundle_digest,
+        readobj_terminal.tool_generation.to_text(), readobj_terminal.argv_digest,
+        readobj_terminal.environment_digest, readobj_terminal.stdout_digest,
+        readobj_terminal.stderr_digest, objdump_terminal.tool_bundle_digest,
+        objdump_terminal.tool_generation.to_text(), objdump_terminal.argv_digest,
+        objdump_terminal.environment_digest, objdump_terminal.stdout_digest,
+        objdump_terminal.stderr_digest]
+    val terminal_digest = sha256_text("simple/parser-inspection-terminal-pair/v2\n" +
+        terminal_rows.join("\n"))
+    val projection_digest = sha256_text("simple/parser-external-inspection/v2\n" +
+        readobj_terminal.input_digest + "\n" + readobj_terminal.input_byte_count.to_text() +
+        "\n" + terminal_digest + "\n" + data.projection_digest + "\n" +
+        features.projection_digest)
+    Ok(ParserExternalInspectionTerminalProjectionV2(
+        input_digest: readobj_terminal.input_digest,
+        input_byte_count: readobj_terminal.input_byte_count,
+        readobj_tool_digest: readobj_terminal.tool_bundle_digest,
+        readobj_generation: readobj_terminal.tool_generation,
+        objdump_tool_digest: objdump_terminal.tool_bundle_digest,
+        objdump_generation: objdump_terminal.tool_generation,
+        inspection_data_digest: data.projection_digest,
+        feature_projection_digest: features.projection_digest,
+        terminal_pair_digest: terminal_digest, projection_digest: projection_digest))

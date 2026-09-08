@@ -11,6 +11,272 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+
+# Owned-process V3 opaque bridge declarations.  The runtime owns the adapter
+# table and the underlying RtOwnedProcessTokenV2; the only authority visible
+# here is a nonzero opaque handle.  Numeric projections are versioned arrays so
+# this module never needs an out-parameter or a raw pointer/token ABI.
+@unsafe(reason: "native-owned opaque process lease start; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_start_value(command: text, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> [i64]
+@unsafe(reason: "native-owned opaque process poll; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_poll_value(handle: i64, wait_ms: i64, stdout_capacity: i64, stderr_capacity: i64) -> ([u8], [u8], [i64])
+@unsafe(reason: "native-owned opaque process input receipt; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_input_value(handle: i64) -> [i64]
+@unsafe(reason: "native-owned opaque process cancellation; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_cancel_value(handle: i64) -> [i64]
+@unsafe(reason: "native-owned opaque process result; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_result_value(handle: i64) -> [i64]
+@unsafe(reason: "native-owned opaque process collection; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_collect_value(handle: i64) -> [i64]
+@unsafe(reason: "native-owned opaque process release; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_release_value(handle: i64) -> bool
+@unsafe(reason: "length-safe native executable pin; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_pin_executable_owned_value(path: text) -> i64
+@unsafe(reason: "native executable pin close; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_close_pinned_executable_owned_value(handle: i64) -> i32
+@unsafe(reason: "native executable image digest; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_pinned_executable_sha256_value(handle: i64) -> [u8]
+@unsafe(reason: "native-owned opaque pinned process start; interpreter rejects this provider", capabilities: [ffi])
+extern fn rt_process_owned_v3_start_pinned_value(handle: i64, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> [i64]
+
+pub const OWNED_PROCESS_V3_START_WORDS: i64 = 4
+pub const OWNED_PROCESS_V3_POLL_WORDS: i64 = 17
+pub const OWNED_PROCESS_V3_INPUT_WORDS: i64 = 39
+pub const OWNED_PROCESS_V3_CANCEL_WORDS: i64 = 4
+pub const OWNED_PROCESS_V3_RESULT_WORDS: i64 = 15
+pub const OWNED_EXECUTABLE_SHA256_BYTES: i64 = 32
+
+pub struct OwnedProcessReceipt:
+    lease: OwnedProcessLease
+    version: i64
+    accepted: bool
+    runtime_error: i64
+
+impl OwnedProcessReceipt:
+    # Returning the already-owned class reference preserves one lease owner;
+    # callers never receive a constructor or raw integer conversion.
+    pub fn lease() -> OwnedProcessLease:
+        self.lease
+
+pub class OwnedExecutablePin:
+    # The native handle is private; callers can only obtain this owner from
+    # the length-safe pin operation and can never pass an arbitrary integer.
+    handle: i64
+    var closed: bool
+
+    pub static fn pin(path: text) -> Result<OwnedExecutablePin, text>:
+        val handle = unsafe(capabilities: [ffi]):
+            rt_process_pin_executable_owned_value(host_path_native(path))
+        if handle <= 0:
+            return Err("owned executable pin was rejected")
+        Ok(OwnedExecutablePin(handle: handle, closed: false))
+
+    pub fn digest(self) -> Result<[u8], text>:
+        if self.closed:
+            return Err("owned executable pin is closed")
+        val digest = unsafe(capabilities: [ffi]):
+            rt_process_pinned_executable_sha256_value(self.handle)
+        if digest.len() != OWNED_EXECUTABLE_SHA256_BYTES:
+            return Err("owned executable pin returned an invalid SHA-256 digest")
+        Ok(digest)
+
+    pub fn start(self, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
+        if self.closed:
+            return Err("owned executable pin is closed")
+        process_owned_start_pinned_v3(self, args, input, timeout_ms, term_grace_ms, max_output_bytes)
+
+    me fn close() -> Result<bool, text>:
+        if self.closed:
+            return Ok(true)
+        val closed = unsafe(capabilities: [ffi]):
+            rt_process_close_pinned_executable_owned_value(self.handle)
+        if closed != 1:
+            return Err("owned executable pin close was rejected")
+        self.closed = true
+        Ok(true)
+
+pub struct OwnedProcessPoll:
+    stdout: [u8]
+    stderr: [u8]
+    version: i64
+    live: bool
+    terminal: bool
+    cancel_requested: bool
+    timed_out: bool
+    term_sent: bool
+    kill_sent: bool
+    reaped: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+    stdout_seen: i64
+    stderr_seen: i64
+    stdout_kept: i64
+    stderr_kept: i64
+    stdout_delivered: i64
+    stderr_delivered: i64
+    runtime_error: i64
+
+pub struct OwnedProcessInputReceipt:
+    version: i64
+    accepted: i64
+    written: i64
+    stdin_closed: bool
+    terminal: bool
+    reaped: bool
+    runtime_error: i64
+    digest: [u8]
+
+pub struct OwnedProcessCancelReceipt:
+    version: i64
+    accepted: bool
+    term_sent: bool
+    runtime_error: i64
+
+pub struct OwnedProcessResult:
+    version: i64
+    exit_code: i64
+    timed_out: bool
+    cancel_requested: bool
+    term_sent: bool
+    kill_sent: bool
+    identity_revalidated: bool
+    reaped: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+    stdout_seen: i64
+    stderr_seen: i64
+    stdout_kept: i64
+    stderr_kept: i64
+    runtime_error: i64
+
+fn _owned_v3_words(raw: [i64], expected: i64, operation: text) -> Result<[i64], text>:
+    if raw.len() != expected:
+        return Err("owned process {operation}: invalid {expected}-word receipt")
+    if operation != "start" and raw[0] != 1:
+        return Err("owned process {operation}: unsupported receipt version")
+    Ok(raw)
+
+fn _owned_v3_bool(value: i64) -> bool:
+    value != 0
+
+fn _owned_v3_live_handle(lease: OwnedProcessLease) -> Result<i64, text>:
+    if lease.released or lease.handle <= 0:
+        return Err("owned process lease is released or invalid")
+    Ok(lease.handle)
+
+pub class OwnedProcessLease:
+    # `handle` is private by construction: callers can only obtain one from a
+    # validated native start receipt, never from an arbitrary integer.
+    handle: i64
+    var released: bool
+    var collected: bool
+
+    pub static fn start(command: text, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
+        process_owned_start_v3(command, args, input, timeout_ms, term_grace_ms, max_output_bytes)
+
+    pub fn poll(self, wait_ms: i64, stdout_capacity: i64, stderr_capacity: i64) -> Result<OwnedProcessPoll, text>:
+        val handle = _owned_v3_live_handle(self)?
+        val (stdout, stderr, raw) = unsafe(capabilities: [ffi]):
+            rt_process_owned_v3_poll_value(handle, wait_ms, stdout_capacity, stderr_capacity)
+        val words = _owned_v3_words(raw, OWNED_PROCESS_V3_POLL_WORDS, "poll")?
+        Ok(OwnedProcessPoll(
+            stdout: stdout, stderr: stderr, version: words[0], live: _owned_v3_bool(words[1]),
+            terminal: _owned_v3_bool(words[2]), cancel_requested: _owned_v3_bool(words[3]),
+            timed_out: _owned_v3_bool(words[4]), term_sent: _owned_v3_bool(words[5]),
+            kill_sent: _owned_v3_bool(words[6]), reaped: _owned_v3_bool(words[7]),
+            stdout_truncated: _owned_v3_bool(words[8]), stderr_truncated: _owned_v3_bool(words[9]),
+            stdout_seen: words[10], stderr_seen: words[11], stdout_kept: words[12],
+            stderr_kept: words[13], stdout_delivered: words[14], stderr_delivered: words[15],
+            runtime_error: words[16]))
+
+    pub fn input_receipt(self) -> Result<OwnedProcessInputReceipt, text>:
+        val handle = _owned_v3_live_handle(self)?
+        val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_input_value(handle)
+        val words = _owned_v3_words(raw, OWNED_PROCESS_V3_INPUT_WORDS, "input")?
+        var digest: [u8] = []
+        var i = 0
+        while i < 32:
+            digest.push(words[7 + i] as u8)
+            i = i + 1
+        Ok(OwnedProcessInputReceipt(
+            version: words[0], accepted: words[1], written: words[2],
+            stdin_closed: _owned_v3_bool(words[3]), terminal: _owned_v3_bool(words[4]),
+            reaped: _owned_v3_bool(words[5]), runtime_error: words[6], digest: digest))
+
+    pub fn cancel(self) -> Result<OwnedProcessCancelReceipt, text>:
+        val handle = _owned_v3_live_handle(self)?
+        val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_cancel_value(handle)
+        val words = _owned_v3_words(raw, OWNED_PROCESS_V3_CANCEL_WORDS, "cancel")?
+        Ok(OwnedProcessCancelReceipt(
+            version: words[0], accepted: _owned_v3_bool(words[1]),
+            term_sent: _owned_v3_bool(words[2]), runtime_error: words[3]))
+
+    pub fn result(self) -> Result<OwnedProcessResult, text>:
+        val handle = _owned_v3_live_handle(self)?
+        val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_result_value(handle)
+        val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "result")?
+        Ok(_owned_v3_result_from_words(words))
+
+    me fn collect() -> Result<OwnedProcessResult, text>:
+        val handle = _owned_v3_live_handle(self)?
+        val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_collect_value(handle)
+        val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "collect")?
+        val result = _owned_v3_result_from_words(words)
+        if result.reaped and result.runtime_error != 11 and result.runtime_error != 16:
+            self.collected = true
+            self.released = true
+        Ok(result)
+
+    me fn release() -> Result<bool, text>:
+        if self.released:
+            return Ok(true)
+        val handle = _owned_v3_live_handle(self)?
+        val released = unsafe(capabilities: [ffi]): rt_process_owned_v3_release_value(handle)
+        if not released:
+            return Err("owned process lease release was rejected")
+        self.released = true
+        Ok(true)
+
+fn _owned_v3_result_from_words(words: [i64]) -> OwnedProcessResult:
+    OwnedProcessResult(
+        version: words[0], exit_code: words[1], timed_out: _owned_v3_bool(words[2]),
+        cancel_requested: _owned_v3_bool(words[3]), term_sent: _owned_v3_bool(words[4]),
+        kill_sent: _owned_v3_bool(words[5]), identity_revalidated: _owned_v3_bool(words[6]),
+        reaped: _owned_v3_bool(words[7]), stdout_truncated: _owned_v3_bool(words[8]),
+        stderr_truncated: _owned_v3_bool(words[9]), stdout_seen: words[10], stderr_seen: words[11],
+        stdout_kept: words[12], stderr_kept: words[13], runtime_error: words[14])
+
+pub fn process_owned_start_v3(command: text, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_start_value(command, args, input, timeout_ms, term_grace_ms, max_output_bytes)
+    val words = _owned_v3_words(raw, OWNED_PROCESS_V3_START_WORDS, "start")?
+    if words[1] != 1:
+        return Err("owned process start: unsupported receipt version")
+    val accepted = _owned_v3_bool(words[2])
+    if accepted and words[0] <= 0:
+        return Err("owned process start accepted an invalid opaque handle")
+    if not accepted:
+        return Err("owned process start rejected: runtime error {words[3]}")
+    Ok(OwnedProcessReceipt(
+        lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
+        version: words[1], accepted: accepted, runtime_error: words[3]))
+
+pub fn process_owned_start_pinned_v3(pin: OwnedExecutablePin, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
+    if pin.closed:
+        return Err("owned executable pin is closed")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_start_pinned_value(pin.handle, args, input, timeout_ms, term_grace_ms, max_output_bytes)
+    val words = _owned_v3_words(raw, OWNED_PROCESS_V3_START_WORDS, "start_pinned")?
+    if words[1] != 1:
+        return Err("owned pinned process start: unsupported receipt version")
+    val accepted = _owned_v3_bool(words[2])
+    if accepted and words[0] <= 0:
+        return Err("owned pinned process start accepted an invalid opaque handle")
+    if not accepted:
+        return Err("owned pinned process start rejected: runtime error {words[3]}")
+    Ok(OwnedProcessReceipt(
+        lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
+        version: words[1], accepted: accepted, runtime_error: words[3]))
 use std.io_runtime.{env_get}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool

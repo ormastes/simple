@@ -1,0 +1,80 @@
+use std.spec.*
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.parser_external_inspection_contract_v1.*
+
+fn pet() -> ParserInspectionToolTerminalV1:
+    val d = sha256_text
+    ParserInspectionToolTerminalV1(tool_bundle_digest: d("tool"), tool_generation: 1u64,
+        argv_digest: d("argv"), environment_digest: d("env"), input_digest: d("input"),
+        input_byte_count: 300, input_fully_written_and_closed: true, exit_code: 0,
+        timed_out: false, cancelled: false, stdout_digest: d("stdout"),
+        stdout_seen_bytes: 100, stdout_kept_bytes: 100, stderr_digest: d("stderr"),
+        stderr_seen_bytes: 0, stderr_kept_bytes: 0, output_overflow: false,
+        process_identity_revalidated: true, process_group_terminated: false,
+        reaped: true, collected: true)
+
+fn pei() -> ParserExternalInspectionInputV1:
+    val d = sha256_text
+    ParserExternalInspectionInputV1(terminal: pet(), object_format: "elf64-le-relocatable",
+        architecture: "x86_64", known_section_indices: [0, 1, 2],
+        sections: [ParserInspectionSectionV1(section_index: 1, name: ".text",
+            file_offset: 280, byte_count: 3, byte_digest: d("text"))],
+        relocations: [],
+        instructions: [ParserInspectionInstructionV1(section_index: 1, section_offset: 0,
+            byte_count: 3, byte_digest: d("vzeroupper"), opcode_identity: "VZEROUPPER",
+            required_feature: "avx", recognized: true)],
+        requested_simd_features: ["avx"], observed_simd_features: ["avx"],
+        scalar_reference: false)
+
+describe "normalized external parser inspection contract V1":
+    it "accepts terminal exact complete SIMD evidence as data only":
+        val result = parser_external_inspection_normalize_v1(pei()).unwrap()
+        expect(result.executable_section_count).to_equal(1)
+        expect(result.executable_byte_count).to_equal(3)
+        expect(result.instruction_count).to_equal(1)
+        expect(result.observed_vector_instruction_count).to_equal(1)
+        expect(result.normalized_digest.len()).to_equal(64)
+        var changed = pei(); var changed_terminal = changed.terminal
+        changed_terminal.stdout_digest = sha256_text("different stdout")
+        changed.terminal = changed_terminal
+        expect(parser_external_inspection_normalize_v1(changed).unwrap().normalized_digest ==
+            result.normalized_digest).to_equal(false)
+
+    it "rejects incomplete or overflowing tool execution":
+        var incomplete = pei(); var incomplete_terminal = incomplete.terminal
+        incomplete_terminal.reaped = false; incomplete.terminal = incomplete_terminal
+        expect(parser_external_inspection_normalize_v1(incomplete)).to_equal(
+            Err(ParserExternalInspectionErrorV1.ToolExecutionIncomplete))
+        var overflow = pei(); var overflow_terminal = overflow.terminal
+        overflow_terminal.output_overflow = true; overflow.terminal = overflow_terminal
+        expect(parser_external_inspection_normalize_v1(overflow)).to_equal(
+            Err(ParserExternalInspectionErrorV1.ToolExecutionIncomplete))
+        var bad_digest = pei(); var bad_terminal = bad_digest.terminal
+        bad_terminal.tool_bundle_digest = "G" + bad_terminal.tool_bundle_digest[1..]
+        bad_digest.terminal = bad_terminal
+        expect(parser_external_inspection_normalize_v1(bad_digest)).to_equal(
+            Err(ParserExternalInspectionErrorV1.InvalidIdentity))
+
+    it "rejects instruction gaps and unsupported SIMD claims":
+        var gap = pei(); var gap_rows = gap.instructions; var gap_row = gap_rows[0]
+        gap_row.section_offset = 1; gap_rows[0] = gap_row; gap.instructions = gap_rows
+        expect(parser_external_inspection_normalize_v1(gap)).to_equal(
+            Err(ParserExternalInspectionErrorV1.IncompleteInstructionCoverage))
+        var absent = pei(); var absent_rows = absent.instructions; var absent_row = absent_rows[0]
+        absent_row.required_feature = ""; absent_rows[0] = absent_row; absent.instructions = absent_rows
+        absent.observed_simd_features = []
+        expect(parser_external_inspection_normalize_v1(absent)).to_equal(
+            Err(ParserExternalInspectionErrorV1.UnsupportedInstruction))
+
+    it "rejects relocation targets outside the executable closure":
+        var data_target = pei()
+        data_target.relocations = [ParserInspectionRelocationV1(section_index: 1,
+            section_offset: 1, relocation_type: "R_X86_64_PC32",
+            symbol_identity: "constant", target_section_index: 2)]
+        expect(parser_external_inspection_normalize_v1(data_target).is_ok()).to_equal(true)
+        var invalid = pei()
+        invalid.relocations = [ParserInspectionRelocationV1(section_index: 1,
+            section_offset: 1, relocation_type: "R_X86_64_PC32",
+            symbol_identity: "callee", target_section_index: 9)]
+        expect(parser_external_inspection_normalize_v1(invalid)).to_equal(
+            Err(ParserExternalInspectionErrorV1.InvalidRelocation))

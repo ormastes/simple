@@ -135,6 +135,13 @@ typedef struct RtOwnedSlot {
     int err_fd;
     int out_open;
     int err_open;
+    int in_fd;
+    int in_open;
+    uint8_t* input;
+    uint64_t input_len;
+    uint64_t input_written;
+    uint8_t input_sha256[32];
+    int input_contract_v3;
     int64_t started_ms;
     int64_t timeout_ms;
     int64_t term_grace_ms;
@@ -167,6 +174,34 @@ typedef struct RtOwnedSlot {
     int collecting;
     pthread_mutex_t* state_lock;
 } RtOwnedSlot;
+
+static uint32_t owned_sha256_rotr(uint32_t v, unsigned s) { return (v >> s) | (v << (32 - s)); }
+static void owned_sha256_block(uint32_t st[8], const uint8_t b[64]) {
+    static const uint32_t k[64] = {
+        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u };
+    uint32_t w[64];
+    for (int i=0;i<16;i++) w[i]=((uint32_t)b[i*4]<<24)|((uint32_t)b[i*4+1]<<16)|((uint32_t)b[i*4+2]<<8)|b[i*4+3];
+    for (int i=16;i<64;i++) { uint32_t a=owned_sha256_rotr(w[i-15],7)^owned_sha256_rotr(w[i-15],18)^(w[i-15]>>3); uint32_t z=owned_sha256_rotr(w[i-2],17)^owned_sha256_rotr(w[i-2],19)^(w[i-2]>>10); w[i]=w[i-16]+a+w[i-7]+z; }
+    uint32_t a=st[0],bb=st[1],c=st[2],d=st[3],e=st[4],f=st[5],g=st[6],h=st[7];
+    for (int i=0;i<64;i++) { uint32_t s1=owned_sha256_rotr(e,6)^owned_sha256_rotr(e,11)^owned_sha256_rotr(e,25); uint32_t t1=h+s1+((e&f)^((~e)&g))+k[i]+w[i]; uint32_t s0=owned_sha256_rotr(a,2)^owned_sha256_rotr(a,13)^owned_sha256_rotr(a,22); uint32_t t2=s0+((a&bb)^(a&c)^(bb&c)); h=g;g=f;f=e;e=d+t1;d=c;c=bb;bb=a;a=t1+t2; }
+    st[0]+=a;st[1]+=bb;st[2]+=c;st[3]+=d;st[4]+=e;st[5]+=f;st[6]+=g;st[7]+=h;
+}
+static void owned_sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
+    uint32_t st[8]={0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u}; size_t i=0;
+    for (;i+64<=len;i+=64) owned_sha256_block(st,msg+i);
+    uint8_t tail[128]={0}; size_t rem=len-i; if(rem) memcpy(tail,msg+i,rem); tail[rem]=0x80; size_t total=rem+9<=64?64:128; uint64_t bits=(uint64_t)len*8u;
+    for(int j=0;j<8;j++) tail[total-1-j]=(uint8_t)(bits>>(8*j));
+    owned_sha256_block(st,tail);
+    if(total==128) owned_sha256_block(st,tail+64);
+    for(int j=0;j<8;j++){out[j*4]=(uint8_t)(st[j]>>24);out[j*4+1]=(uint8_t)(st[j]>>16);out[j*4+2]=(uint8_t)(st[j]>>8);out[j*4+3]=(uint8_t)st[j];}
+}
 
 typedef struct RtOwnedCleanup {
     uint32_t slot;
@@ -260,6 +295,48 @@ static int owned_pidfd_open(pid_t pid) {
     (void)pid;
     errno = ENOTSUP;
     return -1;
+#endif
+}
+
+static int owned_pipe_cloexec(int fds[2]) {
+#if defined(__linux__) && defined(SYS_pipe2)
+    if (syscall(SYS_pipe2, fds, O_CLOEXEC) != 0) return -1;
+#else
+    if (pipe(fds) != 0) return -1;
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(fds[0]); close(fds[1]);
+        fds[0] = -1; fds[1] = -1;
+        errno = saved;
+        return -1;
+    }
+#endif
+    for (int i = 0; i < 2; i++) {
+        if (fds[i] <= STDERR_FILENO) {
+            int moved = fcntl(fds[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+            if (moved < 0) {
+                int saved = errno;
+                close(fds[0]); close(fds[1]);
+                fds[0] = -1; fds[1] = -1; errno = saved; return -1;
+            }
+            close(fds[i]); fds[i] = moved;
+        }
+    }
+    return 0;
+}
+
+static int owned_child_close_inherited_except(int keep_fd) {
+#if defined(__linux__) && defined(SYS_close_range)
+    if (keep_fd > STDERR_FILENO + 1 &&
+        syscall(SYS_close_range, (unsigned int)(STDERR_FILENO + 1),
+                (unsigned int)keep_fd - 1U, 0U) != 0) return 0;
+    if (syscall(SYS_close_range, (unsigned int)keep_fd + 1U, ~0U, 0U) != 0)
+        return 0;
+    return 1;
+#else
+    (void)keep_fd;
+    return 0;
 #endif
 }
 
@@ -523,6 +600,47 @@ static void owned_async_close_pipes(RtOwnedSlot* slot) {
     if (slot->err_open) { close(slot->err_fd); slot->err_open = 0; slot->err_fd = -1; }
 }
 
+static void owned_async_close_input(RtOwnedSlot* slot) {
+    if (slot->in_open) { close(slot->in_fd); slot->in_open = 0; slot->in_fd = -1; }
+    RT_OWNED_HOST_FREE(slot->input); slot->input = NULL;
+}
+
+static ssize_t owned_write_no_sigpipe(int fd, const uint8_t* data, size_t len) {
+    sigset_t block, prior;
+    sigemptyset(&block); sigaddset(&block, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &block, &prior) != 0) { errno = EIO; return -1; }
+    ssize_t result = write(fd, data, len);
+    int saved = errno;
+    if (result < 0 && saved == EPIPE && !sigismember(&prior, SIGPIPE)) {
+        struct timespec zero = {0, 0};
+        while (sigtimedwait(&block, NULL, &zero) < 0 && errno == EINTR) {}
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
+    errno = saved;
+    return result;
+}
+
+static void owned_async_write_input(RtOwnedSlot* slot) {
+    if (!slot->in_open) return;
+    uint64_t budget = RT_OWNED_DRAIN_QUANTUM;
+    while (slot->input_written < slot->input_len && budget > 0) {
+        size_t remaining = (size_t)(slot->input_len - slot->input_written);
+        if (remaining > budget) remaining = (size_t)budget;
+        ssize_t n = owned_write_no_sigpipe(
+            slot->in_fd, slot->input + slot->input_written, remaining);
+        if (n > 0) {
+            slot->input_written += (uint64_t)n;
+            budget -= (uint64_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (slot->runtime_error == 0) slot->runtime_error = errno ? errno : EIO;
+        owned_async_close_input(slot); return;
+    }
+    if (slot->input_written == slot->input_len) owned_async_close_input(slot);
+}
+
 /* A post-reap deadline exists only for descendants that retained an inherited
  * pipe forever.  Closing such a pipe is a deliberate bounded-loss policy, so
  * the receipt must say so; a terminal non-truncated receipt always drained
@@ -581,10 +699,10 @@ static void owned_async_capture_one(RtOwnedSlot* slot, int fd, int stream,
 /* A zero-size caller buffer is an observation-only poll: it must not consume
  * any retained bytes.  The scan cursor therefore advances only while a byte
  * is copied into an actual caller buffer. */
-static void owned_async_deliver(RtOwnedSlot* slot, int stream, char* dst,
-                                uint64_t cap) {
+static uint64_t owned_async_deliver(RtOwnedSlot* slot, int stream, char* dst,
+                                    uint64_t cap) {
     if (cap) dst[0] = '\0';
-    if (!dst || cap <= 1) return;
+    if (!dst || cap <= 1) return 0;
     uint64_t* scan = stream ? &slot->stderr_scan : &slot->stdout_scan;
     uint64_t* delivered = stream ? &slot->stderr_delivered : &slot->stdout_delivered;
     uint64_t copied = 0;
@@ -596,10 +714,13 @@ static void owned_async_deliver(RtOwnedSlot* slot, int stream, char* dst,
         *delivered = owned_add_sat(*delivered, 1);
     }
     dst[copied] = '\0';
+    return copied;
 }
 
 static void owned_async_fill_poll(const RtOwnedSlot* slot,
-                                  RtOwnedProcessPollReceiptV2* receipt) {
+                                  RtOwnedProcessPollReceiptV2* receipt,
+                                  uint64_t stdout_delivered,
+                                  uint64_t stderr_delivered) {
     memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
     receipt->live = slot->state == 1;
@@ -615,6 +736,8 @@ static void owned_async_fill_poll(const RtOwnedSlot* slot,
     receipt->stderr_bytes_seen = slot->stderr_seen;
     receipt->stdout_bytes_kept = slot->stdout_kept;
     receipt->stderr_bytes_kept = slot->stderr_kept;
+    receipt->stdout_bytes_delivered = stdout_delivered;
+    receipt->stderr_bytes_delivered = stderr_delivered;
     receipt->runtime_error = slot->runtime_error;
 }
 
@@ -679,48 +802,74 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     return OWNED_SIGNAL_ERROR;
 }
 
-bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
+static bool owned_process_start(const char* cmd, const char* const* argv,
+                               const uint8_t* input, uint64_t input_len, int pipe_stdin,
+                               int pinned_executable_fd,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes,
                                RtOwnedProcessTokenV2* token,
                                RtOwnedProcessStartReceiptV2* receipt) {
-    if (!token || !receipt) return false;
+    if (!token || !receipt) { if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
 #ifndef __linux__
     (void)cmd; (void)argv; (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
+    if (pinned_executable_fd >= 0) close(pinned_executable_fd);
     receipt->runtime_error = ENOTSUP; return false;
 #else
     if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
         timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS || term_grace_ms < 0 ||
         term_grace_ms > 30000 || max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
-        receipt->runtime_error = EINVAL; return false;
+        receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
     }
+    uint8_t* input_copy = NULL; uint8_t input_sha256[32] = {0};
+    if (pipe_stdin && input_len) {
+        if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || !input) { receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
+        input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
+        if (!input_copy) { receipt->runtime_error = ENOMEM; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
+        memcpy(input_copy, input, (size_t)input_len);
+    }
+    if (pipe_stdin) owned_sha256(input_copy, (size_t)input_len, input_sha256);
     uint32_t index = 0; uint64_t generation = 0;
     if (!owned_reserve(&index, &generation)) {
-        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; return false;
+        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
     }
     RtOwnedProcessTokenV2 minted = {0, 0};
     if (!owned_token_mint_install_reserved(index, generation, &minted)) {
-        receipt->runtime_error = errno; owned_release(index, generation); return false;
+        receipt->runtime_error = errno; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
     }
-    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
-    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1};
+    if (owned_pipe_cloexec(out_pipe) != 0 || owned_pipe_cloexec(err_pipe) != 0 ||
+        (pipe_stdin && owned_pipe_cloexec(in_pipe) != 0)) {
         int saved = errno;
         if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
         if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
-        receipt->runtime_error = saved; owned_release(index, generation); return false;
+        if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
+        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
     }
     pid_t pid = fork();
     if (pid == 0) {
         (void)setpgid(0, 0); close(out_pipe[0]); close(err_pipe[0]);
-        if (dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
-        close(out_pipe[1]); close(err_pipe[1]); execvp(cmd, (char* const*)argv); _exit(127);
+        if (pipe_stdin) close(in_pipe[1]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(err_pipe[1], STDERR_FILENO) < 0 ||
+            (pipe_stdin && dup2(in_pipe[0], STDIN_FILENO) < 0)) _exit(126);
+        if (pipe_stdin && in_pipe[0] > STDERR_FILENO) close(in_pipe[0]);
+        if (out_pipe[1] > STDERR_FILENO) close(out_pipe[1]);
+        if (err_pipe[1] > STDERR_FILENO) close(err_pipe[1]);
+        if (pinned_executable_fd >= 0) {
+            char* pinned_environment[] = {(char*)"LANG=C", (char*)"LC_ALL=C", (char*)"TZ=UTC", (char*)"PATH=/nonexistent", NULL};
+            if (chdir("/") != 0) _exit(127);
+            if (!owned_child_close_inherited_except(pinned_executable_fd)) _exit(127);
+            fexecve(pinned_executable_fd, (char* const*)argv, pinned_environment);
+        } else execvp(cmd, (char* const*)argv);
+        _exit(127);
     }
     close(out_pipe[1]); close(err_pipe[1]);
+    if (pipe_stdin) close(in_pipe[0]);
+    if (pinned_executable_fd >= 0) { close(pinned_executable_fd); pinned_executable_fd = -1; }
     if (pid < 0) {
-        int saved = errno; close(out_pipe[0]); close(err_pipe[0]);
-        receipt->runtime_error = saved; owned_release(index, generation); return false;
+        int saved = errno; close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]);
+        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); return false;
     }
     int pidfd = -1; uint64_t identity = 0; int error = 0;
     RtOwnedCapturedByte* retained = NULL;
@@ -733,7 +882,8 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     if (!error && getpgid(pid) != pid) error = EPERM;
     if (!error && (pidfd = owned_pidfd_open(pid)) < 0) error = errno ? errno : ENOTSUP;
     if (!error && (identity = owned_start_identity(pid)) == 0) error = ESRCH;
-    if (!error && (!owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]))) error = errno ? errno : EIO;
+    if (!error && (!owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]) ||
+                   (pipe_stdin && !owned_set_nonblocking(in_pipe[1])))) error = errno ? errno : EIO;
     int64_t started = !error ? owned_now_ms() : -1;
     if (!error && started < 0) error = errno ? errno : EIO;
     if (error) {
@@ -741,8 +891,8 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
         else (void)kill(-pid, SIGKILL);
         int status; pid_t reaped; do reaped = waitpid(pid, &status, 0); while (reaped < 0 && errno == EINTR);
         (void)reaped;
-        close(out_pipe[0]); close(err_pipe[0]); if (pidfd >= 0) close(pidfd);
-        RT_OWNED_HOST_FREE(retained);
+        close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]); if (pidfd >= 0) close(pidfd);
+        RT_OWNED_HOST_FREE(retained); RT_OWNED_HOST_FREE(input_copy);
         receipt->runtime_error = error; owned_release(index, generation); return false;
     }
     pthread_mutex_lock(&rt_owned_lock);
@@ -751,19 +901,68 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
         pthread_mutex_unlock(&rt_owned_lock);
         (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
         int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-        close(out_pipe[0]); close(err_pipe[0]); close(pidfd);
-        RT_OWNED_HOST_FREE(retained);
+        close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]); close(pidfd);
+        RT_OWNED_HOST_FREE(retained); RT_OWNED_HOST_FREE(input_copy);
         receipt->runtime_error = ESTALE; owned_release(index, generation); return false;
     }
     slot->pid = pid; slot->pgid = pid; slot->pidfd = pidfd; slot->start_identity = identity;
     slot->token_high = minted.high; slot->token_low = minted.low; slot->state = 1;
     slot->out_fd = out_pipe[0]; slot->err_fd = err_pipe[0]; slot->out_open = 1; slot->err_open = 1;
+    slot->in_fd = pipe_stdin ? in_pipe[1] : -1; slot->in_open = pipe_stdin;
+    slot->input = input_copy; slot->input_len = input_len; slot->input_written = 0;
+    memcpy(slot->input_sha256, input_sha256, sizeof(slot->input_sha256));
+    slot->input_contract_v3 = pipe_stdin;
+    if (pipe_stdin && input_len == 0) { close(slot->in_fd); slot->in_fd = -1; slot->in_open = 0; }
     slot->started_ms = started; slot->timeout_ms = timeout_ms; slot->term_grace_ms = term_grace_ms;
     slot->term_at_ms = -1; slot->drain_deadline_ms = -1; slot->output_limit = max_output_bytes;
     slot->retained = retained;
     pthread_mutex_unlock(&rt_owned_lock);
     *token = minted; receipt->accepted = 1; return true;
 #endif
+}
+
+bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
+                               int64_t timeout_ms, int64_t term_grace_ms,
+                               uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
+                               RtOwnedProcessStartReceiptV2* receipt) {
+    return owned_process_start(cmd, argv, NULL, 0, 0, -1, timeout_ms, term_grace_ms,
+                               max_output_bytes, token, receipt);
+}
+
+bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
+                               const uint8_t* input, uint64_t input_len,
+                               int64_t timeout_ms, int64_t term_grace_ms,
+                               uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
+                               RtOwnedProcessStartReceiptV2* receipt) {
+    if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || (input_len && !input)) {
+        if (token) memset(token, 0, sizeof(*token));
+        if (receipt) { memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = EINVAL; }
+        return false;
+    }
+    bool ok = owned_process_start(cmd, argv, input, input_len, 1, -1, timeout_ms,
+                                  term_grace_ms, max_output_bytes, token, receipt);
+    if (receipt) receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
+    return ok;
+}
+
+bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
+                                      const char* const* argv,
+                                      const uint8_t* input, uint64_t input_len,
+                                      int64_t timeout_ms, int64_t term_grace_ms,
+                                      uint64_t max_output_bytes,
+                                      RtOwnedProcessTokenV2* token,
+                                      RtOwnedProcessStartReceiptV2* receipt) {
+    int private_fd = (int)rt_process_acquire_pinned_executable(executable_handle);
+    if (private_fd < 0) {
+        if (token) memset(token, 0, sizeof(*token));
+        if (receipt) { memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ESTALE; }
+        return false;
+    }
+    bool ok = owned_process_start("simple-pinned-executable", argv, input, input_len, 1,
+                                  private_fd, timeout_ms, term_grace_ms, max_output_bytes,
+                                  token, receipt);
+    if (receipt) receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
+    return ok;
 }
 
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
@@ -780,9 +979,9 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
     if (!slot) { receipt->runtime_error = ESTALE; return false; }
     pthread_mutex_lock(slot->state_lock);
     if (slot->state == 2) {
-        owned_async_deliver(slot, 0, out, out_cap);
-        owned_async_deliver(slot, 1, err, err_cap);
-        owned_async_fill_poll(slot, receipt);
+        uint64_t out_delivered = owned_async_deliver(slot, 0, out, out_cap);
+        uint64_t err_delivered = owned_async_deliver(slot, 1, err, err_cap);
+        owned_async_fill_poll(slot, receipt, out_delivered, err_delivered);
         pthread_mutex_unlock(slot->state_lock);
         owned_token_release(slot);
         return true;
@@ -800,9 +999,10 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         earliest = slot->drain_deadline_ms;
     int64_t deadline_wait = earliest > before_poll ? earliest - before_poll : 0;
     if (wait_ms > deadline_wait) wait_ms = deadline_wait;
-    struct pollfd pfds[2]; nfds_t count = 0; int oi = -1, ei = -1;
+    struct pollfd pfds[3]; nfds_t count = 0; int oi = -1, ei = -1, ii = -1;
     if (slot->out_open) { oi = (int)count; pfds[count++] = (struct pollfd){slot->out_fd, POLLIN|POLLHUP|POLLERR, 0}; }
     if (slot->err_open) { ei = (int)count; pfds[count++] = (struct pollfd){slot->err_fd, POLLIN|POLLHUP|POLLERR, 0}; }
+    if (slot->in_open) { ii = (int)count; pfds[count++] = (struct pollfd){slot->in_fd, POLLOUT|POLLHUP|POLLERR, 0}; }
     int rc; do rc = poll(pfds, count, (int)wait_ms); while (rc < 0 && errno == EINTR);
     if (rc < 0) slot->runtime_error = errno;
     uint64_t drain_budget = RT_OWNED_DRAIN_QUANTUM;
@@ -810,12 +1010,19 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         owned_async_capture_one(slot, slot->out_fd, 0, &slot->out_open, &drain_budget);
     if (ei >= 0 && (pfds[ei].revents & (POLLIN|POLLHUP|POLLERR)))
         owned_async_capture_one(slot, slot->err_fd, 1, &slot->err_open, &drain_budget);
+    if (ii >= 0 && (pfds[ii].revents & (POLLOUT|POLLHUP|POLLERR))) owned_async_write_input(slot);
     if (!slot->out_open) slot->out_fd = -1;
     if (!slot->err_open) slot->err_fd = -1;
     siginfo_t info; memset(&info, 0, sizeof(info));
-    int wr; do wr = waitid(P_PID, (id_t)slot->pid, &info, WEXITED|WNOHANG|WNOWAIT); while (wr < 0 && errno == EINTR);
+    int wr = 0;
+    if (!slot->reaped) {
+        do wr = waitid(P_PID, (id_t)slot->pid, &info,
+            WEXITED|WNOHANG|WNOWAIT); while (wr < 0 && errno == EINTR);
+    }
     int64_t now = owned_now_ms();
     if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
+        /* waitid observed the same pidfd-pinned leader before exact reap. */
+        slot->identity_revalidated = 1;
         (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
         memset(&slot->child_usage, 0, sizeof(slot->child_usage));
         pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage); while (waited < 0 && errno == EINTR);
@@ -826,7 +1033,7 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
             if (slot->runtime_error == ESTALE) slot->runtime_error = 0;
         }
         else slot->runtime_error = errno ? errno : ECHILD;
-    } else if (wr < 0) slot->runtime_error = errno;
+    } else if (!slot->reaped && wr < 0) slot->runtime_error = errno;
     if (!slot->reaped && (slot->cancel_requested || now - slot->started_ms >= slot->timeout_ms) && !slot->term_sent) {
         slot->timed_out = !slot->cancel_requested;
         enum OwnedSignalOutcome outcome = owned_async_signal_or_reap(slot, SIGTERM, now);
@@ -843,14 +1050,41 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
     }
     if (slot->reaped && slot->drain_deadline_ms >= 0 && now >= slot->drain_deadline_ms)
         owned_async_close_pipes_truncated(slot);
+    if (slot->reaped && slot->in_open) {
+        if (slot->input_written != slot->input_len && slot->runtime_error == 0)
+            slot->runtime_error = EPIPE;
+        owned_async_close_input(slot);
+    }
     if (slot->reaped && !slot->out_open && !slot->err_open) slot->state = 2;
-    owned_async_deliver(slot, 0, out, out_cap);
-    owned_async_deliver(slot, 1, err, err_cap);
-    owned_async_fill_poll(slot, receipt);
+    uint64_t out_delivered = owned_async_deliver(slot, 0, out, out_cap);
+    uint64_t err_delivered = owned_async_deliver(slot, 1, err, err_cap);
+    owned_async_fill_poll(slot, receipt, out_delivered, err_delivered);
     pthread_mutex_unlock(slot->state_lock);
     owned_token_release(slot);
     return receipt->runtime_error == 0;
 #endif
+}
+
+bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                       RtOwnedProcessInputReceiptV3* receipt) {
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
+    RtOwnedSlot* slot = owned_token_acquire(token, NULL);
+    if (!slot) { receipt->runtime_error = ESTALE; return false; }
+    pthread_mutex_lock(slot->state_lock);
+    if (!slot->input_contract_v3) {
+        pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
+        receipt->runtime_error = EPROTO; return false;
+    }
+    receipt->input_bytes_accepted = slot->input_len;
+    receipt->input_bytes_written = slot->input_written;
+    memcpy(receipt->input_sha256, slot->input_sha256, sizeof(receipt->input_sha256));
+    receipt->stdin_closed = !slot->in_open;
+    receipt->terminal = slot->state == 2;
+    receipt->reaped = slot->reaped;
+    receipt->runtime_error = slot->runtime_error;
+    pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
+    return receipt->runtime_error == 0;
 }
 
 bool rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
@@ -1008,6 +1242,455 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
     (void)index;
     return result->runtime_error == 0;
 #endif
+}
+
+/* The language ABI never receives the V2 token.  This small registry maps a
+ * separately minted random positive handle to that token and serializes the
+ * one operation that can consume a core lease.  `closing` prevents a release
+ * from racing a newly admitted projection, while `refs` lets in-flight polls
+ * finish against their stable token snapshot. */
+#define RT_OWNED_ADAPTER_SLOTS RT_OWNED_PROCESS_SLOTS
+#define RT_OWNED_ADAPTER_MAX_ARGS 4096
+#define RT_OWNED_ADAPTER_MAX_ARG_BYTES (1024U * 1024U)
+#define RT_OWNED_ADAPTER_MAX_POLL_BYTES (64U * 1024U)
+typedef struct RtOwnedAdapterSlot {
+    RtOwnedProcessTokenV2 token;
+    uint64_t handle;
+    uint32_t refs;
+    int active;
+    int closing;
+} RtOwnedAdapterSlot;
+
+static RtOwnedAdapterSlot rt_owned_adapter_slots[RT_OWNED_ADAPTER_SLOTS];
+static pthread_mutex_t rt_owned_adapter_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static SplArray* owned_adapter_values(const int64_t* values, int64_t count) {
+    SplArray* result = rt_array_new(count);
+    if (!result) return NULL;
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_array_push(result, rt_value_int(values[i]))) {
+            rt_array_free(result);
+            return NULL;
+        }
+    }
+    return result;
+}
+
+static int owned_adapter_fill_reserved_values(SplArray* result,
+                                              const int64_t* values,
+                                              int64_t count) {
+    if (!result || rt_array_len(result) != 0) return 0;
+    for (int64_t i = 0; i < count; i++)
+        if (!rt_array_push(result, rt_value_int(values[i]))) return 0;
+    return 1;
+}
+
+static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
+    if (count > INT64_MAX) return NULL;
+    SplArray* result = rt_array_new((int64_t)count);
+    if (!result) return NULL;
+    for (uint64_t i = 0; i < count; i++) {
+        if (!rt_array_push(result, rt_value_int((unsigned char)bytes[i]))) {
+            rt_array_free(result);
+            return NULL;
+        }
+    }
+    return result;
+}
+
+static SplArray* owned_adapter_poll_error(int error) {
+    const int64_t fields[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, error };
+    SplArray* out = owned_adapter_bytes("", 0);
+    SplArray* err = owned_adapter_bytes("", 0);
+    SplArray* receipt = owned_adapter_values(fields, 17);
+    SplArray* tuple = NULL;
+    if (out && err && receipt && (tuple = rt_array_new(3)) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)out) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)err) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return tuple;
+    if (tuple) rt_array_free(tuple);
+    if (out) rt_array_free(out);
+    if (err) rt_array_free(err);
+    if (receipt) rt_array_free(receipt);
+    return NULL;
+}
+
+static int owned_adapter_handle_live_locked(uint64_t handle) {
+    for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++)
+        if (rt_owned_adapter_slots[i].active && rt_owned_adapter_slots[i].handle == handle)
+            return 1;
+    return 0;
+}
+
+static int owned_adapter_reserve(uint32_t* index, uint64_t* handle) {
+    if (pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
+    uint32_t free_index = RT_OWNED_ADAPTER_SLOTS;
+    for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++) {
+        if (!rt_owned_adapter_slots[i].active) { free_index = i; break; }
+    }
+    if (free_index == RT_OWNED_ADAPTER_SLOTS) {
+        pthread_mutex_unlock(&rt_owned_adapter_lock); errno = EAGAIN; return 0;
+    }
+    for (int attempt = 0; attempt < 16; attempt++) {
+        RtOwnedProcessTokenV2 entropy = {0, 0};
+        if (!owned_token_random(&entropy)) break;
+        /* Keep handles in Simple's immediate positive integer range, avoiding
+         * heap-box allocation or truncating OOM fallback during publication. */
+        uint64_t candidate = entropy.low & UINT64_C(0x0fffffffffffffff);
+        if (candidate && !owned_adapter_handle_live_locked(candidate)) {
+            RtOwnedAdapterSlot* slot = &rt_owned_adapter_slots[free_index];
+            memset(slot, 0, sizeof(*slot));
+            slot->handle = candidate;
+            slot->active = 1; /* reserved, not yet externally visible */
+            *index = free_index; *handle = candidate;
+            pthread_mutex_unlock(&rt_owned_adapter_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+    if (!errno) errno = EAGAIN;
+    return 0;
+}
+
+static void owned_adapter_drop(uint32_t index) {
+    if (pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return;
+    if (index < RT_OWNED_ADAPTER_SLOTS) memset(&rt_owned_adapter_slots[index], 0,
+                                                sizeof(rt_owned_adapter_slots[index]));
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+}
+
+static int owned_adapter_publish(uint32_t index, RtOwnedProcessTokenV2 token) {
+    if (pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
+    int ok = index < RT_OWNED_ADAPTER_SLOTS && rt_owned_adapter_slots[index].active &&
+             !rt_owned_adapter_slots[index].closing;
+    if (ok) rt_owned_adapter_slots[index].token = token;
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+    return ok;
+}
+
+static int owned_adapter_acquire(int64_t raw_handle, RtOwnedProcessTokenV2* token,
+                                 uint32_t* index) {
+    uint64_t handle = (uint64_t)raw_handle;
+    if (raw_handle <= 0 || pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
+    for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++) {
+        RtOwnedAdapterSlot* slot = &rt_owned_adapter_slots[i];
+        if (slot->active && !slot->closing && slot->handle == handle &&
+            (slot->token.high || slot->token.low)) {
+            slot->refs++; *token = slot->token; *index = i;
+            pthread_mutex_unlock(&rt_owned_adapter_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+    return 0;
+}
+
+static void owned_adapter_release_ref(uint32_t index) {
+    if (pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return;
+    if (index < RT_OWNED_ADAPTER_SLOTS && rt_owned_adapter_slots[index].refs)
+        rt_owned_adapter_slots[index].refs--;
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+}
+
+static int owned_adapter_begin_consume(int64_t raw_handle, RtOwnedProcessTokenV2* token,
+                                       uint32_t* index) {
+    uint64_t handle = (uint64_t)raw_handle;
+    if (raw_handle <= 0 || pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
+    for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++) {
+        RtOwnedAdapterSlot* slot = &rt_owned_adapter_slots[i];
+        if (slot->active && !slot->closing && slot->refs == 0 && slot->handle == handle &&
+            (slot->token.high || slot->token.low)) {
+            slot->closing = 1; *token = slot->token; *index = i;
+            pthread_mutex_unlock(&rt_owned_adapter_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+    return 0;
+}
+
+static void owned_adapter_end_consume(uint32_t index, int consumed) {
+    if (pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return;
+    if (index < RT_OWNED_ADAPTER_SLOTS) {
+        if (consumed) memset(&rt_owned_adapter_slots[index], 0,
+                             sizeof(rt_owned_adapter_slots[index]));
+        else rt_owned_adapter_slots[index].closing = 0;
+    }
+    pthread_mutex_unlock(&rt_owned_adapter_lock);
+}
+
+static void owned_adapter_free_argv(char** argv, int64_t argc) {
+    if (!argv) return;
+    for (int64_t i = 0; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
+    RT_OWNED_HOST_FREE(argv);
+}
+
+static char** owned_adapter_copy_argv(const char* command_data, uint64_t command_len,
+                                      SplArray* args, int64_t* argc_out, int* error_out) {
+    *argc_out = -1; *error_out = EINVAL;
+    if (!command_data || !args || command_len == 0 || command_len > RT_OWNED_ADAPTER_MAX_ARG_BYTES ||
+        command_len > SIZE_MAX - 1 || memchr(command_data, '\0', (size_t)command_len)) return NULL;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || argc > RT_OWNED_ADAPTER_MAX_ARGS || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return NULL;
+    char** argv = (char**)RT_OWNED_HOST_CALLOC((size_t)argc + 2, sizeof(char*));
+    if (!argv) { *error_out = ENOMEM; return NULL; }
+    argv[0] = (char*)RT_OWNED_HOST_MALLOC((size_t)command_len + 1);
+    if (!argv[0]) { owned_adapter_free_argv(argv, argc); *error_out = ENOMEM; return NULL; }
+    memcpy(argv[0], command_data, (size_t)command_len); argv[0][command_len] = '\0';
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t value = rt_array_get(args, i);
+        int64_t length = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (length < 0 || !data || (uint64_t)length > RT_OWNED_ADAPTER_MAX_ARG_BYTES ||
+            (uint64_t)length > SIZE_MAX - 1 || memchr(data, '\0', (size_t)length)) {
+            owned_adapter_free_argv(argv, argc); return NULL;
+        }
+        argv[i + 1] = (char*)RT_OWNED_HOST_MALLOC((size_t)length + 1);
+        if (!argv[i + 1]) { owned_adapter_free_argv(argv, argc); *error_out = ENOMEM; return NULL; }
+        memcpy(argv[i + 1], data, (size_t)length); argv[i + 1][length] = '\0';
+    }
+    *argc_out = argc; *error_out = 0;
+    return argv;
+}
+
+static SplArray* owned_adapter_result_values(const RtOwnedProcessResultV2* result) {
+    const int64_t values[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, result->exit_code,
+        result->timed_out, result->cancel_requested, result->term_sent, result->kill_sent,
+        result->identity_revalidated, result->reaped, result->stdout_truncated,
+        result->stderr_truncated, (int64_t)result->stdout_bytes_seen,
+        (int64_t)result->stderr_bytes_seen, (int64_t)result->stdout_bytes_kept,
+        (int64_t)result->stderr_bytes_kept, result->runtime_error };
+    return owned_adapter_values(values, (int64_t)(sizeof(values) / sizeof(values[0])));
+}
+
+/* Start publishes no authority until the adapter token map is installed.  A
+ * mutex-provider failure at that exact point must still consume the private
+ * core lease rather than orphaning a child or its captured output. */
+static void owned_adapter_discard_unpublished(RtOwnedProcessTokenV2 token) {
+    RtOwnedProcessCancelReceipt cancel;
+    (void)rt_process_owned_cancel_v2(token, &cancel);
+    char out[8192], err[8192];
+    RtOwnedProcessPollReceiptV2 poll;
+    for (int i = 0; i < 4096; i++) {
+        (void)rt_process_owned_poll_v2(token, 0, out, sizeof(out), err, sizeof(err), &poll);
+        if (poll.terminal && poll.stdout_bytes_delivered == 0 && poll.stderr_bytes_delivered == 0) break;
+    }
+    RtOwnedProcessResultV2 result;
+    (void)rt_process_owned_collect_v2(token, &result);
+}
+
+SplArray* rt_process_owned_v3_start_value(const char* command_data, uint64_t command_len,
+                                          SplArray* args, SplArray* input,
+                                          int64_t timeout_ms, int64_t term_grace_ms,
+                                          int64_t max_output_bytes) {
+    int64_t values[4] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, EINVAL};
+    SplArray* projected = rt_array_new(4);
+    if (!projected) return NULL;
+    int64_t argc = -1, input_len = -1; int copy_error = EINVAL;
+    char** argv = owned_adapter_copy_argv(command_data, command_len, args, &argc, &copy_error);
+    uint8_t* input_copy = NULL;
+    uint32_t adapter_index = 0; uint64_t handle = 0;
+    RtOwnedProcessTokenV2 token = {0, 0}; RtOwnedProcessStartReceiptV2 receipt;
+    if (!argv) {
+        values[3] = copy_error;
+        (void)owned_adapter_fill_reserved_values(projected, values, 4);
+        return projected;
+    }
+    input_len = input ? rt_array_len(input) : -1;
+    if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
+        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) goto done;
+    if (rt_array_bytes_validate((int64_t)(uintptr_t)input) != input_len) goto done;
+    if (input_len) {
+        input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
+        if (!input_copy) { values[3] = ENOMEM; goto done; }
+        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, input_copy, input_len) != input_len) {
+            values[3] = EINVAL; goto done;
+        }
+    }
+    if (!owned_adapter_reserve(&adapter_index, &handle)) { values[3] = errno ? errno : EAGAIN; goto done; }
+    if (!rt_process_owned_start_v3(argv[0], (const char* const*)argv, input_copy,
+                                   (uint64_t)input_len, timeout_ms, term_grace_ms,
+                                   (uint64_t)max_output_bytes, &token, &receipt)) {
+        values[3] = receipt.runtime_error ? receipt.runtime_error : EIO;
+        owned_adapter_drop(adapter_index); goto done;
+    }
+    if (!owned_adapter_publish(adapter_index, token)) {
+        owned_adapter_discard_unpublished(token);
+        owned_adapter_drop(adapter_index); values[3] = ESTALE; goto done;
+    }
+    values[0] = (int64_t)handle; values[2] = 1; values[3] = 0;
+done:
+    RT_OWNED_HOST_FREE(input_copy);
+    owned_adapter_free_argv(argv, argc);
+    if (!owned_adapter_fill_reserved_values(projected, values, 4)) {
+        /* The fixed-size projection was fully allocated before any authority
+         * existed, so replacement cannot require allocation. */
+        rt_array_free(projected);
+        return NULL;
+    }
+    return projected;
+}
+
+SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
+                                                  SplArray* args, SplArray* input,
+                                                  int64_t timeout_ms,
+                                                  int64_t term_grace_ms,
+                                                  int64_t max_output_bytes) {
+    static const char argv0[] = "simple-pinned-executable";
+    int64_t values[4] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, EINVAL};
+    SplArray* projected = rt_array_new(4);
+    int64_t argc = -1, input_len = -1; int copy_error = EINVAL;
+    uint8_t* input_copy = NULL; char** argv = NULL;
+    uint32_t adapter_index = 0; uint64_t handle = 0;
+    RtOwnedProcessTokenV2 token = {0, 0}; RtOwnedProcessStartReceiptV2 receipt;
+    if (!projected) return NULL;
+    argv = owned_adapter_copy_argv(argv0, sizeof(argv0) - 1, args, &argc, &copy_error);
+    if (!argv) { values[3] = copy_error; goto done; }
+    input_len = input ? rt_array_len(input) : -1;
+    if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
+        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        rt_array_bytes_validate((int64_t)(uintptr_t)input) != input_len) goto done;
+    if (input_len) {
+        input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
+        if (!input_copy) { values[3] = ENOMEM; goto done; }
+        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, input_copy, input_len) != input_len) goto done;
+    }
+    if (!owned_adapter_reserve(&adapter_index, &handle)) { values[3] = errno ? errno : EAGAIN; goto done; }
+    if (!rt_process_owned_start_pinned_v3(executable_handle, (const char* const*)argv,
+                                          input_copy, (uint64_t)input_len, timeout_ms,
+                                          term_grace_ms, (uint64_t)max_output_bytes, &token, &receipt)) {
+        values[3] = receipt.runtime_error ? receipt.runtime_error : EIO;
+        owned_adapter_drop(adapter_index); goto done;
+    }
+    if (!owned_adapter_publish(adapter_index, token)) {
+        owned_adapter_discard_unpublished(token); owned_adapter_drop(adapter_index);
+        values[3] = ESTALE; goto done;
+    }
+    values[0] = (int64_t)handle; values[2] = 1; values[3] = 0;
+done:
+    RT_OWNED_HOST_FREE(input_copy); owned_adapter_free_argv(argv, argc);
+    if (!owned_adapter_fill_reserved_values(projected, values, 4)) { rt_array_free(projected); return NULL; }
+    return projected;
+}
+
+SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
+                                         int64_t stdout_capacity, int64_t stderr_capacity) {
+    RtOwnedProcessTokenV2 token; uint32_t index;
+    if (wait_ms < 0 || wait_ms > 1000) return owned_adapter_poll_error(EINVAL);
+    if (!owned_adapter_acquire(handle, &token, &index)) return owned_adapter_poll_error(ESTALE);
+    if (stdout_capacity < 0 || stderr_capacity < 0 || stdout_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES ||
+        stderr_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES) {
+        owned_adapter_release_ref(index); return owned_adapter_poll_error(EINVAL);
+    }
+    char* out = NULL; char* err = NULL;
+    if (stdout_capacity) { out = (char*)RT_OWNED_HOST_MALLOC((size_t)stdout_capacity + 1); if (!out) goto oom; }
+    if (stderr_capacity) { err = (char*)RT_OWNED_HOST_MALLOC((size_t)stderr_capacity + 1); if (!err) goto oom; }
+    SplArray* out_value = rt_array_new(stdout_capacity);
+    SplArray* err_value = rt_array_new(stderr_capacity);
+    SplArray* field_value = rt_array_new(17);
+    SplArray* tuple = rt_array_new(3);
+    if (!out_value || !err_value || !field_value || !tuple ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)out_value) ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)err_value) ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)field_value)) {
+        rt_array_free(tuple); rt_array_free(out_value); rt_array_free(err_value);
+        rt_array_free(field_value); goto oom;
+    }
+    RtOwnedProcessPollReceiptV2 receipt;
+    memset(&receipt, 0, sizeof(receipt));
+    receipt.version = RT_OWNED_PROCESS_ASYNC_VERSION;
+    if (!rt_process_owned_poll_v2(token, wait_ms, out,
+            (uint64_t)stdout_capacity + (stdout_capacity ? 1 : 0), err,
+            (uint64_t)stderr_capacity + (stderr_capacity ? 1 : 0), &receipt) &&
+        receipt.runtime_error == 0)
+        receipt.runtime_error = EIO;
+    uint64_t out_count = receipt.stdout_bytes_delivered;
+    uint64_t err_count = receipt.stderr_bytes_delivered;
+    int64_t fields[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, receipt.live, receipt.terminal,
+        receipt.cancel_requested, receipt.timed_out, receipt.term_sent, receipt.kill_sent, receipt.reaped,
+        receipt.stdout_truncated, receipt.stderr_truncated, (int64_t)receipt.stdout_bytes_seen,
+        (int64_t)receipt.stderr_bytes_seen, (int64_t)receipt.stdout_bytes_kept,
+        (int64_t)receipt.stderr_bytes_kept, (int64_t)receipt.stdout_bytes_delivered,
+        (int64_t)receipt.stderr_bytes_delivered, receipt.runtime_error };
+    int projection_ok = 1;
+    for (uint64_t i = 0; i < out_count; i++)
+        projection_ok = projection_ok && rt_array_push(out_value,
+            rt_value_int((unsigned char)out[i]));
+    for (uint64_t i = 0; i < err_count; i++)
+        projection_ok = projection_ok && rt_array_push(err_value,
+            rt_value_int((unsigned char)err[i]));
+    for (int i = 0; i < 17; i++)
+        projection_ok = projection_ok && rt_array_push(field_value, rt_value_int(fields[i]));
+    if (projection_ok) {
+        RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return tuple;
+    }
+    rt_array_free(tuple); rt_array_free(out_value); rt_array_free(err_value); rt_array_free(field_value);
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return NULL;
+oom:
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index);
+    return owned_adapter_poll_error(ENOMEM);
+}
+
+SplArray* rt_process_owned_v3_input_value(int64_t handle) {
+    RtOwnedProcessInputReceiptV3 receipt; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_adapter_acquire(handle, &token, &index)) {
+        int64_t values[39] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, 0, 0, 0, ESTALE };
+        return owned_adapter_values(values, 39);
+    }
+    (void)rt_process_owned_input_receipt_v3(token, &receipt); owned_adapter_release_ref(index);
+    int64_t values[39] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, (int64_t)receipt.input_bytes_accepted,
+        (int64_t)receipt.input_bytes_written, receipt.stdin_closed, receipt.terminal, receipt.reaped,
+        receipt.runtime_error };
+    for (int i = 0; i < 32; i++) values[7 + i] = receipt.input_sha256[i];
+    return owned_adapter_values(values, 39);
+}
+
+SplArray* rt_process_owned_v3_cancel_value(int64_t handle) {
+    RtOwnedProcessCancelReceipt receipt; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_adapter_acquire(handle, &token, &index)) {
+        const int64_t values[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, ESTALE };
+        return owned_adapter_values(values, 4);
+    }
+    (void)rt_process_owned_cancel_v2(token, &receipt); owned_adapter_release_ref(index);
+    const int64_t values[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, receipt.accepted,
+        receipt.term_sent, receipt.runtime_error };
+    return owned_adapter_values(values, 4);
+}
+
+SplArray* rt_process_owned_v3_result_value(int64_t handle) {
+    RtOwnedProcessResultV2 result; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_adapter_acquire(handle, &token, &index)) {
+        memset(&result, 0, sizeof(result)); result.exit_code = -1; result.runtime_error = ESTALE;
+        return owned_adapter_result_values(&result);
+    }
+    (void)rt_process_owned_result_v2(token, &result); owned_adapter_release_ref(index);
+    return owned_adapter_result_values(&result);
+}
+
+SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
+    RtOwnedProcessResultV2 result; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_adapter_begin_consume(handle, &token, &index)) {
+        memset(&result, 0, sizeof(result)); result.exit_code = -1; result.runtime_error = ESTALE;
+        return owned_adapter_result_values(&result);
+    }
+    int consumed = rt_process_owned_collect_v2(token, &result) ? 1 : 0;
+    /* A terminal provider error still consumes the core lease: its copied
+     * result carries the error but a retry must never resurrect authority. */
+    if (!consumed && result.reaped && result.runtime_error != EAGAIN && result.runtime_error != EBUSY)
+        consumed = 1;
+    owned_adapter_end_consume(index, consumed);
+    return owned_adapter_result_values(&result);
+}
+
+int rt_process_owned_v3_release_value(int64_t handle) {
+    RtOwnedProcessTokenV2 token; uint32_t index; RtOwnedProcessResultV2 result;
+    if (!owned_adapter_begin_consume(handle, &token, &index)) return 0;
+    int consumed = rt_process_owned_collect_v2(token, &result) ? 1 : 0;
+    if (!consumed && result.reaped && result.runtime_error != EAGAIN && result.runtime_error != EBUSY)
+        consumed = 1;
+    owned_adapter_end_consume(index, consumed);
+    return consumed;
 }
 
 static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
@@ -1375,6 +2058,44 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     return false;
 }
 
+bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
+                               const uint8_t* input, uint64_t input_len,
+                               int64_t timeout_ms, int64_t term_grace_ms,
+                               uint64_t max_output_bytes,
+                               RtOwnedProcessTokenV2* token,
+                               RtOwnedProcessStartReceiptV2* receipt) {
+    (void)cmd; (void)argv; (void)input; (void)input_len; (void)timeout_ms;
+    (void)term_grace_ms; (void)max_output_bytes;
+    if (!token || !receipt) return false;
+    memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
+    receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ENOTSUP;
+    return false;
+}
+
+bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
+                                      const char* const* argv,
+                                      const uint8_t* input, uint64_t input_len,
+                                      int64_t timeout_ms, int64_t term_grace_ms,
+                                      uint64_t max_output_bytes,
+                                      RtOwnedProcessTokenV2* token,
+                                      RtOwnedProcessStartReceiptV2* receipt) {
+    (void)executable_handle; (void)argv; (void)input; (void)input_len;
+    (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
+    if (!token || !receipt) return false;
+    memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
+    receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ENOTSUP;
+    return false;
+}
+
+bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                       RtOwnedProcessInputReceiptV3* receipt) {
+    (void)token;
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
+    receipt->runtime_error = ENOTSUP;
+    return false;
+}
+
 bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
                                            int64_t timeout_ms, uint64_t max_output_bytes,
                                            char* out, uint64_t out_cap, char* err,
@@ -1530,6 +2251,75 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t c
     }
     tuple[2] = (int64_t)(uintptr_t)fields;
     return tuple;
+}
+
+static SplArray* owned_v3_unsupported_words(int64_t count, int64_t error_index) {
+    SplArray* values = rt_array_new(count);
+    if (!values) return NULL;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = i == 0 ? RT_OWNED_PROCESS_OPAQUE_V3_VERSION : 0;
+        if (i == error_index) value = ENOTSUP;
+        if (!rt_array_push(values, rt_value_int(value))) {
+            rt_array_free(values); return NULL;
+        }
+    }
+    return values;
+}
+
+SplArray* rt_process_owned_v3_start_value(const char* command_data,
+        uint64_t command_len, SplArray* args, SplArray* input,
+        int64_t timeout_ms, int64_t term_grace_ms, int64_t max_output_bytes) {
+    (void)command_data; (void)command_len; (void)args; (void)input;
+    (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
+    SplArray* values = owned_v3_unsupported_words(4, 3);
+    if (values) {
+        (void)rt_array_set(values, 0, rt_value_int(0));
+        (void)rt_array_set(values, 1,
+            rt_value_int(RT_OWNED_PROCESS_OPAQUE_V3_VERSION));
+    }
+    return values;
+}
+
+SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
+        SplArray* args, SplArray* input, int64_t timeout_ms,
+        int64_t term_grace_ms, int64_t max_output_bytes) {
+    (void)executable_handle; (void)args; (void)input; (void)timeout_ms;
+    (void)term_grace_ms; (void)max_output_bytes;
+    SplArray* values = rt_array_new(4);
+    if (!values) return NULL;
+    const int64_t fields[] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, ENOTSUP};
+    for (int i = 0; i < 4; i++) if (!rt_array_push(values, rt_value_int(fields[i]))) { rt_array_free(values); return NULL; }
+    return values;
+}
+
+SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
+        int64_t stdout_capacity, int64_t stderr_capacity) {
+    (void)handle; (void)wait_ms; (void)stdout_capacity; (void)stderr_capacity;
+    SplArray* out = rt_array_new(0); SplArray* err = rt_array_new(0);
+    SplArray* receipt = owned_v3_unsupported_words(17, 16);
+    SplArray* tuple = rt_array_new(3);
+    if (out && err && receipt && tuple &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)out) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)err) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return tuple;
+    rt_array_free(tuple); rt_array_free(out); rt_array_free(err);
+    rt_array_free(receipt); return NULL;
+}
+
+SplArray* rt_process_owned_v3_input_value(int64_t handle) {
+    (void)handle; return owned_v3_unsupported_words(39, 6);
+}
+SplArray* rt_process_owned_v3_cancel_value(int64_t handle) {
+    (void)handle; return owned_v3_unsupported_words(4, 3);
+}
+SplArray* rt_process_owned_v3_result_value(int64_t handle) {
+    (void)handle; return owned_v3_unsupported_words(15, 14);
+}
+SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
+    (void)handle; return owned_v3_unsupported_words(15, 14);
+}
+int rt_process_owned_v3_release_value(int64_t handle) {
+    (void)handle; return 0;
 }
 #endif
 

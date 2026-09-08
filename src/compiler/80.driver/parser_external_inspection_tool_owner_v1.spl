@@ -1,0 +1,325 @@
+# codex-impl
+# Compiler-side tool admission owner for parser external inspection.
+#
+# This module owns policy records and generation/lease lifetime, but it does
+# not authenticate caller-supplied executable metadata.  The runtime pinned
+# process ABI is not available yet, so start and join are deliberately blocked.
+# In particular, terminal/capture values never become inspection authority.
+
+pub const PARSER_EXTERNAL_INSPECTION_TOOL_OWNER_MAX_V1: i64 = 8
+pub const PARSER_EXTERNAL_INSPECTION_TOOL_OWNER_MAX_LEASES_V1: i64 = 32
+
+pub enum ParserExternalInspectionToolKindV1:
+    Readobj
+    Objdump
+
+pub enum ParserExternalInspectionToolOwnerErrorV1:
+    InvalidOwner
+    InvalidTool
+    InvalidCanonicalPath
+    InvalidDigest
+    InvalidVersion
+    InvalidPolicy
+    CapacityExceeded
+    CounterOverflow
+    DuplicateTool
+    UnknownTool
+    UnknownLease
+    LeaseStillLive
+    ProcessPortUnavailable
+    InspectionAuthorityBlocked
+
+# This is a policy candidate until an OS/loader owner supplies authenticated
+# release evidence.  Its fields are retained exactly for later runtime join.
+pub struct ParserExternalInspectionToolPolicyV1:
+    kind: ParserExternalInspectionToolKindV1
+    canonical_path: text
+    image_digest: text
+    dependency_closure_digest: text
+    version_identity: text
+    argv_digest: text
+    environment_digest: text
+    generation: u64
+    argv_policy_closed: bool
+    environment_policy_closed: bool
+    no_path_lookup: bool
+    no_shell: bool
+    no_plugins: bool
+    no_response_files: bool
+
+pub struct ParserExternalInspectionToolRegistrationV1:
+    registration_id: u64
+    owner_identity: u64
+
+pub struct ParserExternalInspectionToolLeaseV1:
+    lease_id: u64
+    owner_identity: u64
+    registration_id: u64
+    generation: u64
+
+# The runtime adapter will eventually construct this from an opaque pinned
+# process token plus its normalized terminal/capture receipt.  This value is
+# intentionally only accepted by the blocked join below; it cannot authorize
+# inspection while the admitted-process ABI is absent.
+pub struct ParserExternalInspectionPinnedCaptureReceiptV1:
+    owner_identity: u64
+    lease_id: u64
+    generation: u64
+    input_digest: text
+    input_byte_count: u64
+    terminal_digest: text
+    capture_digest: text
+    complete: bool
+    output_overflow: bool
+    process_identity_revalidated: bool
+    process_group_terminated: bool
+    reaped: bool
+    collected: bool
+
+pub struct ParserExternalInspectionToolProjectionV1:
+    policy: ParserExternalInspectionToolPolicyV1
+    active_leases: i64
+    live: bool
+
+pub struct ParserExternalInspectionTokenV1:
+    token_id: u64
+    owner_identity: u64
+    readobj_generation: u64
+    objdump_generation: u64
+    input_digest: text
+    capture_digest: text
+
+struct _ToolRecordV1:
+    registration: ParserExternalInspectionToolRegistrationV1
+    policy: ParserExternalInspectionToolPolicyV1
+    live: bool
+    active_leases: i64
+
+struct _LeaseRecordV1:
+    lease: ParserExternalInspectionToolLeaseV1
+    live: bool
+
+var _next_tool_owner_identity_peito_v1: u64 = 1u64
+
+pub class ParserExternalInspectionToolOwnerV1:
+    var owner_identity: u64
+    var next_registration_id: u64
+    var next_lease_id: u64
+    var next_token_id: u64
+    var records: [_ToolRecordV1]
+    var leases: [_LeaseRecordV1]
+
+    pub static fn create() -> ParserExternalInspectionToolOwnerV1:
+        val candidate = _next_tool_owner_identity_peito_v1
+        val identity = if candidate == 0u64 or
+            candidate == 0xffffffffffffffffu64: 0u64 else candidate
+        if identity != 0u64:
+            _next_tool_owner_identity_peito_v1 = identity + 1u64
+        ParserExternalInspectionToolOwnerV1(owner_identity: identity,
+            next_registration_id: 1u64, next_lease_id: 1u64, next_token_id: 1u64,
+            records: [], leases: [])
+
+fn _digest_shape_peito_v1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _path_valid_peito_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 4096 or value.char_at(0) != '/': return false
+    if value.contains("\0") or value.contains("//") or value.contains("/../") or
+       value.ends_with("/..") or value.contains("/./") or value.ends_with("/."):
+        return false
+    true
+
+fn _version_valid_peito_v1(value: text) -> bool:
+    value.len() > 0 and value.len() <= 128 and not value.contains("\0")
+
+fn _kind_valid_peito_v1(kind: ParserExternalInspectionToolKindV1) -> bool:
+    match kind:
+        case ParserExternalInspectionToolKindV1.Readobj: true
+        case ParserExternalInspectionToolKindV1.Objdump: true
+
+fn _policy_valid_peito_v1(policy: ParserExternalInspectionToolPolicyV1
+) -> ParserExternalInspectionToolOwnerErrorV1?:
+    if not _kind_valid_peito_v1(policy.kind):
+        return Some(ParserExternalInspectionToolOwnerErrorV1.InvalidTool)
+    if not _path_valid_peito_v1(policy.canonical_path):
+        return Some(ParserExternalInspectionToolOwnerErrorV1.InvalidCanonicalPath)
+    if not _digest_shape_peito_v1(policy.image_digest) or
+       not _digest_shape_peito_v1(policy.dependency_closure_digest) or
+       not _digest_shape_peito_v1(policy.argv_digest) or
+       not _digest_shape_peito_v1(policy.environment_digest):
+        return Some(ParserExternalInspectionToolOwnerErrorV1.InvalidDigest)
+    if not _version_valid_peito_v1(policy.version_identity) or policy.generation == 0u64:
+        return Some(ParserExternalInspectionToolOwnerErrorV1.InvalidVersion)
+    if not policy.argv_policy_closed or not policy.environment_policy_closed or
+       not policy.no_path_lookup or not policy.no_shell or not policy.no_plugins or
+       not policy.no_response_files:
+        return Some(ParserExternalInspectionToolOwnerErrorV1.InvalidPolicy)
+    nil
+
+fn _compact_dead_leases_peito_v1(owner: ParserExternalInspectionToolOwnerV1):
+    var kept: [_LeaseRecordV1] = []
+    for entry in owner.leases:
+        if entry.live: kept.push(entry)
+    owner.leases = kept
+
+pub fn parser_external_inspection_tool_owner_register_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    policy: ParserExternalInspectionToolPolicyV1
+) -> Result<ParserExternalInspectionToolRegistrationV1,
+            ParserExternalInspectionToolOwnerErrorV1>:
+    if owner.owner_identity == 0u64: return Err(ParserExternalInspectionToolOwnerErrorV1.InvalidOwner)
+    val invalid = _policy_valid_peito_v1(policy)
+    if invalid.? : return Err(invalid.unwrap())
+    if owner.records.len() >= PARSER_EXTERNAL_INSPECTION_TOOL_OWNER_MAX_V1:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.CapacityExceeded)
+    if owner.next_registration_id == 0u64 or
+       owner.next_registration_id == 0xffffffffffffffffu64:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.CounterOverflow)
+    for record in owner.records:
+        if record.live and record.policy.kind == policy.kind:
+            return Err(ParserExternalInspectionToolOwnerErrorV1.DuplicateTool)
+    val registration = ParserExternalInspectionToolRegistrationV1(
+        registration_id: owner.next_registration_id, owner_identity: owner.owner_identity)
+    owner.records.push(_ToolRecordV1(registration: registration, policy: policy,
+        live: true, active_leases: 0))
+    owner.next_registration_id = owner.next_registration_id + 1u64
+    Ok(registration)
+
+pub fn parser_external_inspection_tool_owner_project_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    registration: ParserExternalInspectionToolRegistrationV1
+) -> Result<ParserExternalInspectionToolProjectionV1,
+            ParserExternalInspectionToolOwnerErrorV1>:
+    if registration.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+    for record in owner.records:
+        if record.registration == registration and record.live:
+            return Ok(ParserExternalInspectionToolProjectionV1(policy: record.policy,
+                active_leases: record.active_leases, live: record.live))
+    Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+
+pub fn parser_external_inspection_tool_owner_lease_acquire_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    registration: ParserExternalInspectionToolRegistrationV1
+) -> Result<ParserExternalInspectionToolLeaseV1,
+            ParserExternalInspectionToolOwnerErrorV1>:
+    if registration.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+    _compact_dead_leases_peito_v1(owner)
+    if owner.leases.len() >= PARSER_EXTERNAL_INSPECTION_TOOL_OWNER_MAX_LEASES_V1:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.CapacityExceeded)
+    var index = 0
+    while index < owner.records.len():
+        val record = owner.records[index]
+        if record.registration == registration and record.live:
+            if owner.next_lease_id == 0u64 or
+               owner.next_lease_id == 0xffffffffffffffffu64:
+                return Err(ParserExternalInspectionToolOwnerErrorV1.CounterOverflow)
+            val lease = ParserExternalInspectionToolLeaseV1(
+                lease_id: owner.next_lease_id, owner_identity: owner.owner_identity,
+                registration_id: registration.registration_id,
+                generation: record.policy.generation)
+            owner.leases.push(_LeaseRecordV1(lease: lease, live: true))
+            var updated = record; updated.active_leases = record.active_leases + 1
+            owner.records[index] = updated
+            owner.next_lease_id = owner.next_lease_id + 1u64
+            return Ok(lease)
+        index = index + 1
+    Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+
+pub fn parser_external_inspection_tool_owner_start_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    lease: ParserExternalInspectionToolLeaseV1,
+    input: [u8], timeout_ms: i64, max_output_bytes: i64
+) -> Result<ParserExternalInspectionPinnedCaptureReceiptV1,
+            ParserExternalInspectionToolOwnerErrorV1>:
+    # This validates ownership only; no process is started.  The existing
+    # runtime V3 uses execvp and cannot satisfy this owner’s pin/env contract.
+    if owner.owner_identity == 0u64 or lease.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+    if input.len() <= 0 or timeout_ms <= 0 or max_output_bytes <= 0:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.InvalidPolicy)
+    for record in owner.leases:
+        if record.lease == lease and record.live:
+            return Err(ParserExternalInspectionToolOwnerErrorV1.ProcessPortUnavailable)
+    Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+
+pub fn parser_external_inspection_tool_owner_join_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    readobj: ParserExternalInspectionToolLeaseV1,
+    objdump: ParserExternalInspectionToolLeaseV1,
+    readobj_capture: ParserExternalInspectionPinnedCaptureReceiptV1,
+    objdump_capture: ParserExternalInspectionPinnedCaptureReceiptV1
+) -> Result<ParserExternalInspectionTokenV1,
+            ParserExternalInspectionToolOwnerErrorV1>:
+    # Keep this explicit even after receipt-shape checks are added: until the
+    # runtime emits opaque pinned receipts, no caller-provided capture can
+    # create an inspection token.
+    if owner.owner_identity == 0u64 or readobj.owner_identity != owner.owner_identity or
+       objdump.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+    if readobj_capture.owner_identity != owner.owner_identity or
+       objdump_capture.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.InspectionAuthorityBlocked)
+    Err(ParserExternalInspectionToolOwnerErrorV1.InspectionAuthorityBlocked)
+
+pub fn parser_external_inspection_tool_owner_lease_release_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    lease: ParserExternalInspectionToolLeaseV1
+) -> Result<(), ParserExternalInspectionToolOwnerErrorV1>:
+    if lease.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+    var lease_found = false
+    for entry in owner.leases:
+        if entry.lease == lease:
+            if not entry.live: return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+            lease_found = true
+    if not lease_found: return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+    var record_found = false
+    for record in owner.records:
+        if record.registration.registration_id == lease.registration_id and record.live:
+            if record.active_leases <= 0:
+                return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+            record_found = true
+    if not record_found: return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownLease)
+    var updated_leases: [_LeaseRecordV1] = []
+    for entry in owner.leases:
+        if entry.lease == lease:
+            updated_leases.push(_LeaseRecordV1(lease: entry.lease, live: false))
+        else: updated_leases.push(entry)
+    owner.leases = updated_leases
+    var updated_records: [_ToolRecordV1] = []
+    for record in owner.records:
+        if record.registration.registration_id == lease.registration_id and record.live:
+            var updated = record
+            updated.active_leases = updated.active_leases - 1
+            updated_records.push(updated)
+        else: updated_records.push(record)
+    owner.records = updated_records
+    Ok(())
+
+pub fn parser_external_inspection_tool_owner_revoke_v1(
+    owner: ParserExternalInspectionToolOwnerV1,
+    registration: ParserExternalInspectionToolRegistrationV1
+) -> Result<(), ParserExternalInspectionToolOwnerErrorV1>:
+    if registration.owner_identity != owner.owner_identity:
+        return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+    var found = false
+    for record in owner.records:
+        if record.registration == registration and record.live:
+            found = true
+            if record.active_leases != 0:
+                return Err(ParserExternalInspectionToolOwnerErrorV1.LeaseStillLive)
+    if not found: return Err(ParserExternalInspectionToolOwnerErrorV1.UnknownTool)
+    var kept: [_ToolRecordV1] = []
+    for record in owner.records:
+        if record.registration != registration: kept.push(record)
+    owner.records = kept
+    Ok(())
