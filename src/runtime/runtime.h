@@ -897,6 +897,9 @@ typedef struct RtOwnedProcessCancelReceipt {
 /* Async identity-owned process lease.  The random token is authority; the
  * diagnostic PID fields returned after start/termination are not. */
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
+#define RT_OWNED_PROCESS_INPUT_VERSION 3
+#define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
+#define RT_OWNED_PROCESS_MAX_INPUT_BYTES (16U * 1024U * 1024U)
 typedef struct RtOwnedProcessTokenV2 {
     uint64_t high;
     uint64_t low;
@@ -907,6 +910,20 @@ typedef struct RtOwnedProcessStartReceiptV2 {
     int32_t accepted;
     int32_t runtime_error;
 } RtOwnedProcessStartReceiptV2;
+
+/* V3 atomically copies one bounded immutable byte sequence into the process
+ * lease.  The runtime owns delivery and closes child stdin exactly once; no
+ * PID is returned as authority. */
+typedef struct RtOwnedProcessInputReceiptV3 {
+    uint64_t version;
+    uint8_t input_sha256[32];
+    uint64_t input_bytes_accepted;
+    uint64_t input_bytes_written;
+    int32_t stdin_closed;
+    int32_t terminal;
+    int32_t reaped;
+    int32_t runtime_error;
+} RtOwnedProcessInputReceiptV3;
 
 typedef struct RtOwnedProcessPollReceiptV2 {
     uint64_t version;
@@ -923,6 +940,10 @@ typedef struct RtOwnedProcessPollReceiptV2 {
     uint64_t stderr_bytes_seen;
     uint64_t stdout_bytes_kept;
     uint64_t stderr_bytes_kept;
+    /* Bytes copied into the caller buffers by this poll.  These are distinct
+     * from retained bytes: an observer with a zero-sized buffer consumes none. */
+    uint64_t stdout_bytes_delivered;
+    uint64_t stderr_bytes_delivered;
     int32_t runtime_error;
 } RtOwnedProcessPollReceiptV2;
 
@@ -1025,6 +1046,23 @@ bool     rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                    uint64_t max_output_bytes,
                                    RtOwnedProcessTokenV2* token,
                                    RtOwnedProcessStartReceiptV2* receipt);
+bool     rt_process_owned_start_v3(const char* cmd, const char* const* argv,
+                                   const uint8_t* input, uint64_t input_len,
+                                   int64_t timeout_ms, int64_t term_grace_ms,
+                                   uint64_t max_output_bytes,
+                                   RtOwnedProcessTokenV2* token,
+                                   RtOwnedProcessStartReceiptV2* receipt);
+/* Executes only a duplicated, sealed static ELF admitted by
+ * rt_process_pin_executable; it never resolves a path or consults PATH. */
+bool     rt_process_owned_start_pinned_v3(int64_t executable_handle,
+                                          const char* const* argv,
+                                          const uint8_t* input, uint64_t input_len,
+                                          int64_t timeout_ms, int64_t term_grace_ms,
+                                          uint64_t max_output_bytes,
+                                          RtOwnedProcessTokenV2* token,
+                                          RtOwnedProcessStartReceiptV2* receipt);
+bool     rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                           RtOwnedProcessInputReceiptV3* receipt);
 bool     rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                                   char* out, uint64_t out_cap, char* err,
                                   uint64_t err_cap,
@@ -1038,10 +1076,47 @@ bool     rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
 bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                      RtOwnedProcessResultV2* result);
 
+/* Runtime-owned Simple ABI facade for V3.  The handle is a positive random
+ * capability mapped privately to a token; no PID, token word, or start
+ * identity crosses this boundary.  All numeric receipts are SplArray values.
+ * poll returns [stdout_bytes, stderr_bytes, receipt], where both byte arrays
+ * retain all bytes (including NUL) and receipt contains delivered counts. */
+SplArray* rt_process_owned_v3_start_value(const char* command_data,
+                                          uint64_t command_len,
+                                          SplArray* args, SplArray* input,
+                                          int64_t timeout_ms,
+                                          int64_t term_grace_ms,
+                                          int64_t max_output_bytes);
+SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
+                                                  SplArray* args, SplArray* input,
+                                                  int64_t timeout_ms,
+                                                  int64_t term_grace_ms,
+                                                  int64_t max_output_bytes);
+SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
+                                         int64_t stdout_capacity,
+                                         int64_t stderr_capacity);
+SplArray* rt_process_owned_v3_input_value(int64_t handle);
+SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
+SplArray* rt_process_owned_v3_result_value(int64_t handle);
+SplArray* rt_process_owned_v3_collect_value(int64_t handle);
+int       rt_process_owned_v3_release_value(int64_t handle);
+
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
 int64_t     rt_process_pin_executable(const char* canonical_path);
+/* Separately named opaque owner for consumers that cannot safely retain a raw
+ * descriptor.  It is acquired only through rt_process_acquire_pinned_executable. */
+int64_t     rt_process_pin_executable_owned(const char* canonical_path);
+bool        rt_process_close_pinned_executable_owned(int64_t handle);
+/* Length-safe language values: the path is copied, bounded, absolute, and
+ * rejects embedded NUL.  Digest bytes describe the final sealed owner image. */
+int64_t     rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len);
+int         rt_process_close_pinned_executable_owned_value(int64_t handle);
+SplArray*   rt_process_pinned_executable_sha256_value(int64_t handle);
+/* Runtime-private borrow of an opaque owned pin.  Returns a CLOEXEC duplicate held
+ * independently of the caller's handle, or -1; it is not a language ABI. */
+int64_t     rt_process_acquire_pinned_executable(int64_t handle);
 bool        rt_process_close_pinned_executable(int64_t handle);
 int64_t     rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args);
 int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);

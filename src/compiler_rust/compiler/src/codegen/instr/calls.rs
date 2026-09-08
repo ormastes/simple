@@ -189,6 +189,23 @@ mod tests {
     }
 
     #[test]
+    fn owned_process_v3_start_expands_only_command_text() {
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
+            Some((&[0][..], &[1][..]))
+        );
+    }
+
+    #[test]
+    fn owned_pinned_process_path_expands_to_ptr_len() {
+        assert_eq!(text_arg_indices("rt_process_pin_executable_owned_value"), Some(&[0][..]));
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_v3_start_pinned_value"),
+            None
+        );
+    }
+
+    #[test]
     fn conversion_aliases_resolve_to_runtime_symbols() {
         assert_eq!(sffi_alias_target("to_int"), Some("rt_string_to_int"));
         assert_eq!(sffi_alias_target("to_i64"), Some("rt_string_to_int"));
@@ -2588,7 +2605,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
-        "rt_process_run_with_limits" => Some(&[0]),
+        // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
+        // embedded NUL in the native provider without requiring C-string text.
+        "rt_process_run_with_limits"
+        | "rt_process_pin_executable_owned_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
         // from every text-arg table, so JIT/native passed the RuntimeString
@@ -2749,7 +2769,8 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
-        | "rt_process_run_bounded" => Some((&[0], &[1])),
+        | "rt_process_run_bounded"
+        | "rt_process_owned_v3_start_value" => Some((&[0], &[1])),
         _ => None,
     }
 }

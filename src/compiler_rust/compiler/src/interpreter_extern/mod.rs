@@ -1821,6 +1821,53 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_run_owned_observed_bounded_value",
         system::rt_process_run_owned_observed_bounded_value
     );
+    // The native V3 adapter keeps RtOwnedProcessTokenV2 private.  Register
+    // every name for deterministic interpreter resolution, but fail closed
+    // instead of fabricating an opaque lease or receipt projection.
+    insert_simple!(
+        "rt_process_owned_v3_start_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_poll_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_input_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_cancel_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_result_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_collect_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_release_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pin_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_close_pinned_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pinned_executable_sha256_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_start_pinned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real
@@ -2184,6 +2231,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
+    insert_simple!("rt_cpu_affinity_avx2_acquire", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_generation", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_thread_id", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_cpu", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
+    insert_simple!("rt_cpu_affinity_avx2_validate", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_release", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_call_enter", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_call_exit", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_parser_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
+    insert_simple!("rt_parser_lexical_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
     insert_simple!("spl_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("spl_thread_yield", concurrency::rt_thread_yield);
     insert_simple!("spl_mutex_create", concurrency::spl_mutex_create);

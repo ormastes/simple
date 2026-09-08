@@ -1,0 +1,78 @@
+use std.spec.*
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.parser_external_inspection_tool_owner_v1.*
+
+fn d(value: text) -> text:
+    sha256_text(value)
+
+fn policy(kind: ParserExternalInspectionToolKindV1, path: text,
+    generation: u64 = 1u64) -> ParserExternalInspectionToolPolicyV1:
+    ParserExternalInspectionToolPolicyV1(kind: kind, canonical_path: path,
+        image_digest: d(path + ":image"), dependency_closure_digest: d(path + ":deps"),
+        version_identity: "llvm-19.1.0", argv_digest: d(path + ":argv"),
+        environment_digest: d(path + ":env"), generation: generation,
+        argv_policy_closed: true, environment_policy_closed: true,
+        no_path_lookup: true, no_shell: true, no_plugins: true,
+        no_response_files: true)
+
+fn capture(owner_identity: u64, lease_id: u64, generation: u64
+) -> ParserExternalInspectionPinnedCaptureReceiptV1:
+    ParserExternalInspectionPinnedCaptureReceiptV1(owner_identity: owner_identity,
+        lease_id: lease_id, generation: generation, input_digest: d("input"),
+        input_byte_count: 4u64, terminal_digest: d("terminal"),
+        capture_digest: d("capture"), complete: true, output_overflow: false,
+        process_identity_revalidated: true, process_group_terminated: true,
+        reaped: true, collected: true)
+
+describe "parser external inspection tool owner V1" :
+    it "retains exact policy identities and rejects open execution policy" :
+        val owner = ParserExternalInspectionToolOwnerV1.create()
+        val registered = parser_external_inspection_tool_owner_register_v1(
+            owner, policy(ParserExternalInspectionToolKindV1.Readobj,
+                "/usr/libexec/llvm-readobj" )).unwrap()
+        val projected = parser_external_inspection_tool_owner_project_v1(owner, registered).unwrap()
+        expect(projected.policy.canonical_path).to_equal("/usr/libexec/llvm-readobj")
+        expect(projected.policy.image_digest).to_equal(d("/usr/libexec/llvm-readobj:image"))
+        expect(projected.policy.dependency_closure_digest).to_equal(
+            d("/usr/libexec/llvm-readobj:deps"))
+        expect(projected.policy.argv_policy_closed).to_equal(true)
+        var unsafe_policy = policy(ParserExternalInspectionToolKindV1.Objdump,
+            "/usr/bin/llvm-objdump")
+        unsafe_policy.no_path_lookup = false
+        expect(parser_external_inspection_tool_owner_register_v1(owner,
+            unsafe_policy)).to_equal(
+            Err(ParserExternalInspectionToolOwnerErrorV1.InvalidPolicy))
+
+    it "retains a generation while leased and drains it before revoke" :
+        val owner = ParserExternalInspectionToolOwnerV1.create()
+        val registered = parser_external_inspection_tool_owner_register_v1(
+            owner, policy(ParserExternalInspectionToolKindV1.Readobj,
+                "/usr/libexec/llvm-readobj", 7u64)).unwrap()
+        val lease = parser_external_inspection_tool_owner_lease_acquire_v1(owner, registered).unwrap()
+        expect(parser_external_inspection_tool_owner_revoke_v1(owner, registered)).to_equal(
+            Err(ParserExternalInspectionToolOwnerErrorV1.LeaseStillLive))
+        expect(parser_external_inspection_tool_owner_lease_release_v1(owner, lease)).to_equal(Ok(()))
+        expect(parser_external_inspection_tool_owner_revoke_v1(owner, registered)).to_equal(Ok(()))
+
+    it "fails closed because runtime pinned-process authority is unavailable" :
+        val owner = ParserExternalInspectionToolOwnerV1.create()
+        val readobj_registration = parser_external_inspection_tool_owner_register_v1(
+            owner, policy(ParserExternalInspectionToolKindV1.Readobj,
+                "/usr/libexec/llvm-readobj")).unwrap()
+        val objdump_registration = parser_external_inspection_tool_owner_register_v1(
+            owner, policy(ParserExternalInspectionToolKindV1.Objdump,
+                "/usr/libexec/llvm-objdump")).unwrap()
+        val readobj = parser_external_inspection_tool_owner_lease_acquire_v1(
+            owner, readobj_registration).unwrap()
+        val objdump = parser_external_inspection_tool_owner_lease_acquire_v1(
+            owner, objdump_registration).unwrap()
+        expect(parser_external_inspection_tool_owner_start_v1(
+            owner, readobj, [1u8, 2u8], 1000, 65536)).to_equal(
+            Err(ParserExternalInspectionToolOwnerErrorV1.ProcessPortUnavailable))
+        val readobj_capture = capture(readobj.owner_identity,
+            readobj.lease_id, readobj.generation)
+        val objdump_capture = capture(objdump.owner_identity,
+            objdump.lease_id, objdump.generation)
+        expect(parser_external_inspection_tool_owner_join_v1(owner, readobj, objdump,
+            readobj_capture, objdump_capture)).to_equal(
+            Err(ParserExternalInspectionToolOwnerErrorV1.InspectionAuthorityBlocked))

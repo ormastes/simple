@@ -946,6 +946,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_thread_join", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_thread_detach", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_thread_current_id", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_acquire", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_generation", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_thread_id", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_cpu", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_validate", &[I64, I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_release", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_call_enter", &[I64, I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_cpu_affinity_avx2_call_exit", &[I64, I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_parser_mask_call_u8x32", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_parser_lexical_mask_call_u8x32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_thread_sleep", &[I64], &[]),
     RuntimeFuncSpec::new("spl_thread_yield", &[], &[]),
     RuntimeFuncSpec::new("spl_mutex_create", &[], &[I64]),
@@ -1541,6 +1551,31 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Lost together with that C file in the tree-wipe restore ae55a746719; without
     // this spec resolve_runtime_func drops whole modules to the interpreter.
     RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
+    // Owned-process V3 opaque adapter.  `text` command expands to (ptr, len),
+    // so the Simple six-argument start declaration has a seven-word native
+    // call signature.  All projections return runtime-owned i64/byte arrays;
+    // no token halves, PID, or start identity cross this boundary.
+    RuntimeFuncSpec::new(
+        "rt_process_owned_v3_start_value",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_process_owned_v3_poll_value", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_input_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_cancel_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_result_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_collect_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I32]),
+    // Length-safe owned executable pinning. The path text expands to
+    // (ptr,len); the digest is a runtime-owned byte-array handle.
+    RuntimeFuncSpec::new("rt_process_pin_executable_owned_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_close_pinned_executable_owned_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_pinned_executable_sha256_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_owned_v3_start_pinned_value",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -2500,6 +2535,43 @@ mod tests {
         let spec = spec_for("rt_process_run_owned_bounded_value").expect("owned process runtime spec");
         assert_eq!(spec.params, [I64, I64, I64, I64, I64]);
         assert_eq!(spec.returns, [I64]);
+    }
+
+    #[test]
+    fn owned_process_v3_opaque_adapter_abi_is_registered_without_authority_fields() {
+        let start = spec_for("rt_process_owned_v3_start_value").expect("owned V3 start runtime spec");
+        assert_eq!(start.params, [I64, I64, I64, I64, I64, I64, I64]);
+        assert_eq!(start.returns, [I64]);
+        for name in [
+            "rt_process_owned_v3_poll_value",
+            "rt_process_owned_v3_input_value",
+            "rt_process_owned_v3_cancel_value",
+            "rt_process_owned_v3_result_value",
+            "rt_process_owned_v3_collect_value",
+        ] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing owned V3 adapter spec: {name}"));
+            assert!(!spec.params.is_empty());
+            assert_eq!(spec.returns, [I64]);
+        }
+        let release = spec_for("rt_process_owned_v3_release_value").expect("owned V3 release runtime spec");
+        assert_eq!(release.params, [I64]);
+        assert_eq!(release.returns, [I8]);
+    }
+
+    #[test]
+    fn owned_pinned_process_abi_is_length_safe_and_opaque() {
+        let pin = spec_for("rt_process_pin_executable_owned_value").unwrap();
+        assert_eq!(pin.params, [I64, I64]);
+        assert_eq!(pin.returns, [I64]);
+        let close = spec_for("rt_process_close_pinned_executable_owned_value").unwrap();
+        assert_eq!(close.params, [I64]);
+        assert_eq!(close.returns, [I32]);
+        let digest = spec_for("rt_process_pinned_executable_sha256_value").unwrap();
+        assert_eq!(digest.params, [I64]);
+        assert_eq!(digest.returns, [I64]);
+        let start = spec_for("rt_process_owned_v3_start_pinned_value").unwrap();
+        assert_eq!(start.params, [I64, I64, I64, I64, I64, I64]);
+        assert_eq!(start.returns, [I64]);
     }
 
     #[test]
