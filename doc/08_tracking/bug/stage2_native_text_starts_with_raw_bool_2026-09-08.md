@@ -22,7 +22,7 @@ The first containment attempt exposed a second facet: ordinary `text == text`
 lowered to `rt_native_eq`, which returned false for byte-identical values when
 one was a slice and the other a literal. GDB showed both values had length 19
 and contained `--bootstrap-reason=`, yet `rt_native_eq` returned zero. The
-an attempted planner containment compared a bounded argument slice with an
+attempted planner containment compared a bounded argument slice with an
 equivalent prefix slice so both operands used the same runtime representation;
 the stale compiler still rejected the canonical reason.
 
@@ -42,5 +42,5 @@ planner source remains authoritative until the compiler/runtime ABI is fixed.
 
 Align native method-call lowering and the core-C boolean return convention,
 then add a native executable test that asserts both matching and non-matching
-`text.starts_with`/`text.ends_with` results. Remove this planner containment
-after that test passes with the admitted bootstrap compiler.
+`text.starts_with`/`text.ends_with` results. Retire any temporary planner
+containment only after that test passes with the admitted bootstrap compiler.
