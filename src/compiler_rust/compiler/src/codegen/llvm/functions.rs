@@ -3205,12 +3205,23 @@ impl LlvmBackend {
                     } else {
                         i64_type.fn_type(&fallback_param_types, false)
                     };
+                    // Project mangling runs before per-unit LLVM emission and may
+                    // already replace a cross-unit call target with its final
+                    // `module__path__function` symbol. Such a target is neither a
+                    // builtin receiver qualifier nor a name that use/import maps
+                    // are required to retain. Preserve it verbatim as an extern;
+                    // otherwise the builtin fail-closed branch below rejects every
+                    // already-mangled free-function call in Stage 2.
+                    let already_mangled_project_symbol =
+                        func_name.contains("__") && !func_name.contains('.') && !func_name.contains("_dot_");
                     let func = if let Some(spec) = runtime_spec {
                         module
                             .get_function(spec.name)
                             .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
                     } else if let Some(f) = called_func {
                         f
+                    } else if already_mangled_project_symbol {
+                        module.add_function(func_name, fallback_fn_type, None)
                     } else if qualified_owner_is_user_type {
                         // Owner is a genuine (non-builtin) user type -- e.g.
                         // `DbValue.to_text`. `fallback_name` is load-bearing
@@ -4692,5 +4703,41 @@ mod tests {
             result.is_err(),
             "must fail closed instead of silently declaring a phantom extern for an unresolvable builtin-receiver method"
         );
+    }
+
+    #[test]
+    fn already_mangled_project_method_call_is_declared_verbatim() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("already_mangled_project_method").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "compiler__frontend__core__types__str_len".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&caller).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @compiler__frontend__core__types__str_len(i64"),
+            "canonical project symbol was not preserved:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@rt_len("),
+            "canonical free function was hijacked by the len builtin:\n{ir}"
+        );
+        backend.verify().unwrap();
     }
 }
