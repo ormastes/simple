@@ -59,11 +59,12 @@ Product binary + integration tests live in a separate GitHub repo (`ormastes/sla
 
 ### Current cache capability
 
-The ggml compatibility backend now implements an S2 serial, bounded multi-entry
-exact-prefix snapshot/restore path with isolation, deterministic LRU, byte/count
-limits, and counters. This is a precursor, not completion of A4: paged KV
-ownership, concurrent contexts, spill tiers, and distributed transport remain
-absent. See `doc/04_architecture/ml/slang_bounded_multi_prefix_cache.md`.
+The ggml compatibility backend now implements S3 bounded independent request
+ownership and serial multi-entry exact-prefix snapshots. This is not A4: opaque
+sequence blobs are not physical KV pages. The selected S4 contract requires a
+provider whose attention kernels consume Slang-owned page tables; stock llama
+shared sequences may be explored only as separately reported precursor work.
+See `doc/04_architecture/ml/slang_paged_kv_backend.md`.
 
 Details for each phase (including per-phase fs-request triggers) are in the approved plan file.
 
@@ -108,6 +109,10 @@ See the "Risks & Mitigations" section of the approved plan; summarized here:
 
 ## Change log
 
+- **2026-09-08 (S4 contract):** Astra review established that opaque llama
+  snapshots cannot implement physical paging. Selected a backend page-pool,
+  immutable-page, private-tail COW, transactional publication, and numerical/
+  physical-memory evidence contract while retaining S3 fallback.
 - **2026-09-08 (S3 implementation):** Added bounded independent request-owned
   contexts/samplers/buffers, generation-checked opaque handles, immutable-prefix
   leases, atomic shrink/admission behavior, cooperative cancellation, atomic
