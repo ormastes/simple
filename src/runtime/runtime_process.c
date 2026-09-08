@@ -20,6 +20,10 @@
  * Build: cc -c -fPIC -O2 -std=gnu11 -I src/runtime src/runtime/runtime_process.c
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #ifdef _WIN32
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
 #undef _WIN32_WINNT
@@ -1056,6 +1060,10 @@ static int64_t rt_process_spawn_piped_argv(
 #include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
+
+static int64_t rt_process_spawn_piped_argv(
+        const char* cmd, char** argv, bool sandboxed_renderer,
+        int pinned_executable_fd);
 #include <pthread.h>
 #include <poll.h>
 #ifdef __APPLE__
