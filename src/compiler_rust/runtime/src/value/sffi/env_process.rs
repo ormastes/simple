@@ -2129,10 +2129,7 @@ pub unsafe extern "C" fn rt_process_pin_executable_owned(_path: *const libc::c_c
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_pin_executable_owned_value(
-    _path: *const u8,
-    _path_len: u64,
-) -> i64 {
+pub unsafe extern "C" fn rt_process_pin_executable_owned_value(_path: *const u8, _path_len: u64) -> i64 {
     -1
 }
 
@@ -2154,29 +2151,4 @@ pub extern "C" fn rt_process_acquire_pinned_executable(_handle: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_process_pinned_executable_sha256_value(_handle: i64) -> RuntimeValue {
     RuntimeValue::NIL
-}
-
-#[no_mangle]
-pub extern "C" fn rt_process_owned_v3_input_value(_handle: i64) -> RuntimeValue {
-    RuntimeValue::NIL
-}
-
-#[no_mangle]
-pub extern "C" fn rt_process_owned_v3_cancel_value(_handle: i64) -> RuntimeValue {
-    RuntimeValue::NIL
-}
-
-#[no_mangle]
-pub extern "C" fn rt_process_owned_v3_result_value(_handle: i64) -> RuntimeValue {
-    RuntimeValue::NIL
-}
-
-#[no_mangle]
-pub extern "C" fn rt_process_owned_v3_collect_value(_handle: i64) -> RuntimeValue {
-    RuntimeValue::NIL
-}
-
-#[no_mangle]
-pub extern "C" fn rt_process_owned_v3_release_value(_handle: i64) -> i32 {
-    0
 }

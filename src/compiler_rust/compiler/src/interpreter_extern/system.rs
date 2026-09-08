@@ -8,6 +8,14 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Owned-process V3 exposes opaque native leases that the interpreter cannot
+/// safely manufacture or project. Keep every registered entry fail-closed.
+pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::Runtime(
+        "OwnedProcessV3 requires the native runtime".to_string(),
+    ))
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
