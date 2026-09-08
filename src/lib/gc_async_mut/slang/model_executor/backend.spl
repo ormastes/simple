@@ -81,6 +81,27 @@ struct GgmlBackend:
     f_prefix_resident_bytes: i64
     f_prefix_rejected_bytes: i64
     f_prefix_restore_failures: i64
+    f_request_configure: i64
+    f_request_create: i64
+    f_request_close: i64
+    f_request_cancel: i64
+    f_request_str_reset: i64
+    f_request_str_push: i64
+    f_request_out_len: i64
+    f_request_out_byte: i64
+    f_request_n_ctx: i64
+    f_request_tokenize: i64
+    f_request_token_at: i64
+    f_request_prefix_prepare: i64
+    f_request_eval_prompt: i64
+    f_request_eval: i64
+    f_request_sample: i64
+    f_request_piece: i64
+    f_request_kv_clear: i64
+    independent_requests: bool
+
+struct GgmlRequest:
+    handle: i64
 
 struct PrefixCacheStats:
     capabilities: i64
@@ -143,6 +164,26 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
     var optional: [i64] = []
     for n in optional_names:
         optional.push(spl_dlsym(lib, n))
+    val request_names = [
+        "slang_ggml_request_configure", "slang_ggml_request_create",
+        "slang_ggml_request_close", "slang_ggml_request_cancel",
+        "slang_ggml_request_str_reset", "slang_ggml_request_str_push",
+        "slang_ggml_request_out_len", "slang_ggml_request_out_byte",
+        "slang_ggml_request_n_ctx", "slang_ggml_request_tokenize",
+        "slang_ggml_request_token_at", "slang_ggml_request_prefix_prepare",
+        "slang_ggml_request_eval_prompt", "slang_ggml_request_eval",
+        "slang_ggml_request_sample", "slang_ggml_request_piece",
+        "slang_ggml_request_kv_clear"
+    ]
+    var request_addrs: [i64] = []
+    var request_group_ok = (_call0(addrs[16]) & 16) != 0
+    for n in request_names:
+        val address = spl_dlsym(lib, n)
+        request_addrs.push(address)
+        if address == 0:
+            request_group_ok = false
+    if not request_group_ok:
+        request_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     Ok(GgmlBackend(
         lib: lib,
         f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
@@ -157,7 +198,17 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_prefix_configure: optional[0], f_prefix_admissions: optional[1],
         f_prefix_evictions: optional[2], f_prefix_resident_entries: optional[3],
         f_prefix_resident_bytes: optional[4], f_prefix_rejected_bytes: optional[5],
-        f_prefix_restore_failures: optional[6]
+        f_prefix_restore_failures: optional[6],
+        f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
+        f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
+        f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
+        f_request_out_len: request_addrs[6], f_request_out_byte: request_addrs[7],
+        f_request_n_ctx: request_addrs[8], f_request_tokenize: request_addrs[9],
+        f_request_token_at: request_addrs[10],
+        f_request_prefix_prepare: request_addrs[11],
+        f_request_eval_prompt: request_addrs[12], f_request_eval: request_addrs[13],
+        f_request_sample: request_addrs[14], f_request_piece: request_addrs[15],
+        f_request_kv_clear: request_addrs[16], independent_requests: request_group_ok
     ))
 
 # Strings cross the int64-only ABI one byte at a time. That is the price of a
@@ -183,6 +234,26 @@ fn _read_out(b: GgmlBackend) -> text:
         i = i + 1
     bytes_to_text(bytes)
 
+fn _push_request_text(b: GgmlBackend, request: GgmlRequest, s: text) -> i64:
+    _call1(b.f_request_str_reset, request.handle)
+    var pushed = 0
+    for byte in text_to_utf8_bytes(s):
+        if _call2(b.f_request_str_push, request.handle, byte.to_i64()) < 0:
+            return -1
+        pushed = pushed + 1
+    pushed
+
+fn _read_request_out(b: GgmlBackend, request: GgmlRequest) -> text:
+    val n = _call1(b.f_request_out_len, request.handle)
+    if n <= 0:
+        return ""
+    var bytes: [u8] = []
+    var i = 0
+    while i < n:
+        bytes.push(_call2(b.f_request_out_byte, request.handle, i).to_u8())
+        i = i + 1
+    bytes_to_text(bytes)
+
 fn load_model(b: GgmlBackend, model_path: text, n_gpu_layers: i64) -> Result<(), BackendError>:
     _call0(b.f_backend_init)
     if _push_text(b, model_path) < 0:
@@ -196,9 +267,60 @@ fn open_context(b: GgmlBackend, n_ctx: i64) -> Result<i64, BackendError>:
         return Err(BackendError.ContextCreateFailed)
     Ok(_call0(b.f_n_ctx))
 
+fn open_request(b: GgmlBackend, n_ctx: i64) -> Result<GgmlRequest, BackendError>:
+    if not b.independent_requests:
+        return Err(BackendError.ContextCreateFailed)
+    val handle = _call1(b.f_request_create, n_ctx)
+    if handle <= 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(GgmlRequest(handle: handle))
+
+fn close_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
+    if not b.independent_requests or _call1(b.f_request_close, request.handle) < 0:
+        return Err(BackendError.NotOpen)
+    Ok(())
+
+fn cancel_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
+    if not b.independent_requests or _call1(b.f_request_cancel, request.handle) < 0:
+        return Err(BackendError.NotOpen)
+    Ok(())
+
+fn _generate_request(b: GgmlBackend, request: GgmlRequest, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+    if _push_request_text(b, request, prompt) < 0:
+        return Err(BackendError.TokenizeFailed)
+    if _call2(b.f_request_tokenize, request.handle, 1) < 0:
+        return Err(BackendError.TokenizeFailed)
+    if _call1(b.f_request_prefix_prepare, request.handle) < 0:
+        return Err(BackendError.DecodeFailed)
+    if _call1(b.f_request_eval_prompt, request.handle) < 0:
+        return Err(BackendError.DecodeFailed)
+    var out = ""
+    var produced = 0
+    while produced < max_tokens:
+        val tok = _call1(b.f_request_sample, request.handle)
+        if _call1(b.f_is_eog, tok) == 1:
+            break
+        if _call2(b.f_request_piece, request.handle, tok) < 0:
+            return Err(BackendError.DecodeFailed)
+        out = out + _read_request_out(b, request)
+        if _call2(b.f_request_eval, request.handle, tok) < 0:
+            return Err(BackendError.DecodeFailed)
+        produced = produced + 1
+    Ok(out)
+
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
 fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+    if b.independent_requests:
+        val opened = open_request(b, _call0(b.f_n_ctx))
+        match opened:
+            Ok(request):
+                val result = _generate_request(b, request, prompt, max_tokens)
+                val closed = close_request(b, request)
+                match closed:
+                    Err(_): return Err(BackendError.DecodeFailed)
+                    Ok(_): return result
+            Err(error): return Err(error)
     # Start from an empty KV cache. The model stays resident across requests;
     # the conversation state must not, or the second request answers while still
     # attending to the first and eventually overruns n_ctx.
@@ -225,8 +347,11 @@ fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, Backe
     Ok(out)
 
 fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
+    var reported_capabilities = _call0(b.f_capabilities)
+    if not b.independent_requests and (reported_capabilities & 16) != 0:
+        reported_capabilities = reported_capabilities - 16
     PrefixCacheStats(
-        capabilities: _call0(b.f_capabilities),
+        capabilities: reported_capabilities,
         hits: _call0(b.f_prefix_hits),
         misses: _call0(b.f_prefix_misses),
         tokens_reused: _call0(b.f_prefix_tokens_reused),
@@ -247,9 +372,11 @@ fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
 fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
-    _call0(b.f_free)
+    if _call0(b.f_free) < 0:
+        return Err(BackendError.NotOpen)
     spl_dlclose(b.lib)
     Ok(())
 
 export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
-export open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, close_backend
+export GgmlRequest, open_backend, load_model, open_context, open_request, close_request, cancel_request
+export generate, configure_prefix_cache, prefix_cache_stats, close_backend
