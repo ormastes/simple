@@ -285,6 +285,7 @@ fn compile_c_runtime_sources() {
         "runtime_rocm.c",
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
+        "runtime_file_view.c",
         "runtime_font.c",
         "runtime_memtrack.c",
         "runtime_simd_dispatch.c",
