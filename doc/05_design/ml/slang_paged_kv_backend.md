@@ -37,3 +37,10 @@ Exact-token comparison follows hash lookup. Execution namespace includes model
 weights, tokenizer, adapter, KV dtype/layout, attention/position configuration,
 tensor sharding, and provider ABI. Boundary logits are recomputed or restored only
 through a provider contract covered by numerical parity tests.
+
+The activation classifier has six explicit physical states: provider
+unavailable, model support unknown, model unsupported, pool inactive, owner
+disconnected, and active. Execution mode additionally depends on a resident
+context and is one of `unavailable`, `snapshot`, or `physical_pages`. Only the
+active state with a resident context maps to `physical_pages`; this readiness
+integration does not itself provide tensor kernels or parity evidence.
