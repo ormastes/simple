@@ -4,9 +4,10 @@
 #
 # Master plan slot A5. What is present: model residency (load once, serve many),
 # admission control against the host memory budget, and request-level
-# generation and bounded serial prefix snapshots. What is deliberately absent:
-# continuous batching, chunked prefill, paged KV ownership, and concurrent
-# request contexts. Requests are therefore served one at a time.
+# generation, independently owned request contexts, and bounded serial prefix
+# snapshots. What is deliberately absent: continuous batching, chunked
+# prefill, paged KV ownership, and parallel execution. Requests are still
+# advanced by one serial owner at a time.
 #
 # RESIDENCY IS THE WHOLE POINT. These models are 46-78 GB; loading per request
 # would take minutes and, on a machine whose memory is unified with the GPU,
@@ -66,11 +67,14 @@ fn engine_prefix_cache_stats() -> PrefixCacheStats?:
 fn _runtime_overhead_bytes() -> i64:
     6 * 1024 * 1024 * 1024
 
-fn engine_unload():
+fn engine_unload() -> Result<(), text>:
     if ENGINE_BACKEND != nil:
-        close_backend(ENGINE_BACKEND!)
+        match close_backend(ENGINE_BACKEND!):
+            Err(e): return Err(backend_error_text(e))
+            Ok(_): ()
         ENGINE_BACKEND = nil
     ENGINE_LOADED_ID = ""
+    Ok(())
 
 # Makes `model` the resident model, unloading whatever was resident first.
 # Err carries a caller-facing reason; every failure path leaves the engine with
@@ -85,7 +89,9 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     # Unload BEFORE the fit check: the memory the outgoing model holds is
     # memory the incoming one can have, and checking first would refuse a swap
     # that actually fits.
-    engine_unload()
+    match engine_unload():
+        Err(reason): return Err("resident model is busy: " + reason)
+        Ok(_): ()
     val fit = check_fit(model.bytes, _runtime_overhead_bytes(), default_headroom_bytes())
     if not fit.fits:
         return Err("refusing to load '" + model.id + "': " + fit.reason)

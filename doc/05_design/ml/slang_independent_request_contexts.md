@@ -1,6 +1,7 @@
 # Slang independent request-context detail design
 
-Date: 2026-09-08. Status: Astra-refined design for implementation.
+Date: 2026-09-08. Status: implemented; focused native verification complete,
+pure-Simple verification pending an admitted self-hosted runtime.
 
 The native table has a fixed maximum and configurable admitted count. Slot
 creation allocates every buffer and llama owner off-table, then publishes one
