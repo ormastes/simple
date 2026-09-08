@@ -68,6 +68,19 @@ struct GgmlBackend:
     f_eval: i64
     f_sample: i64
     f_kv_clear: i64
+    f_capabilities: i64
+    f_prefix_prepare: i64
+    f_prefix_hits: i64
+    f_prefix_misses: i64
+    f_prefix_tokens_reused: i64
+    f_prefix_tokens_prefilled: i64
+
+struct PrefixCacheStats:
+    capabilities: i64
+    hits: i64
+    misses: i64
+    tokens_reused: i64
+    tokens_prefilled: i64
 
 fn _call0(fptr: i64) -> i64:
     spl_wffi_call_i64(fptr, [], 0)
@@ -88,7 +101,10 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_ctx_create", "slang_ggml_free", "slang_ggml_n_ctx",
         "slang_ggml_tokenize", "slang_ggml_is_eog", "slang_ggml_piece",
         "slang_ggml_eval_prompt", "slang_ggml_eval", "slang_ggml_sample",
-        "slang_ggml_kv_clear"
+        "slang_ggml_kv_clear", "slang_ggml_capabilities",
+        "slang_ggml_prefix_prepare", "slang_ggml_prefix_hits",
+        "slang_ggml_prefix_misses", "slang_ggml_prefix_tokens_reused",
+        "slang_ggml_prefix_tokens_prefilled"
     ]
     var addrs: [i64] = []
     for n in names:
@@ -104,7 +120,10 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_ctx_create: addrs[6], f_free: addrs[7], f_n_ctx: addrs[8],
         f_tokenize: addrs[9], f_is_eog: addrs[10], f_piece: addrs[11],
         f_eval_prompt: addrs[12], f_eval: addrs[13], f_sample: addrs[14],
-        f_kv_clear: addrs[15]
+        f_kv_clear: addrs[15], f_capabilities: addrs[16],
+        f_prefix_prepare: addrs[17], f_prefix_hits: addrs[18],
+        f_prefix_misses: addrs[19], f_prefix_tokens_reused: addrs[20],
+        f_prefix_tokens_prefilled: addrs[21]
     ))
 
 # Strings cross the int64-only ABI one byte at a time. That is the price of a
@@ -149,11 +168,12 @@ fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, Backe
     # Start from an empty KV cache. The model stays resident across requests;
     # the conversation state must not, or the second request answers while still
     # attending to the first and eventually overruns n_ctx.
-    _call0(b.f_kv_clear)
     if _push_text(b, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
     if _call1(b.f_tokenize, 1) < 0:
         return Err(BackendError.TokenizeFailed)
+    if _call0(b.f_prefix_prepare) < 0:
+        return Err(BackendError.DecodeFailed)
     if _call0(b.f_eval_prompt) < 0:
         return Err(BackendError.DecodeFailed)
     var out = ""
@@ -170,6 +190,15 @@ fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, Backe
         produced = produced + 1
     Ok(out)
 
+fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
+    PrefixCacheStats(
+        capabilities: _call0(b.f_capabilities),
+        hits: _call0(b.f_prefix_hits),
+        misses: _call0(b.f_prefix_misses),
+        tokens_reused: _call0(b.f_prefix_tokens_reused),
+        tokens_prefilled: _call0(b.f_prefix_tokens_prefilled)
+    )
+
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
 fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
@@ -177,5 +206,5 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
     spl_dlclose(b.lib)
     Ok(())
 
-export BackendError, backend_error_text, GgmlBackend
-export open_backend, load_model, open_context, generate, close_backend
+export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
+export open_backend, load_model, open_context, generate, prefix_cache_stats, close_backend
