@@ -12,6 +12,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* native_all needs a Rust-visible ABI owner as well as the standalone C
+ * owner. In that build only, compile these bodies under private names; the
+ * Rust module exports the public rt_* names as zero-policy aliases. */
+#if defined(SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER)
+#define rt_file_view_open_beneath_no_follow_v1 spl_c_file_view_open_beneath_no_follow_v1
+#define rt_file_view_mapping_supported_v1 spl_c_file_view_mapping_supported_v1
+#define rt_file_view_map_copy_v1 spl_c_file_view_map_copy_v1
+#define rt_file_view_pread_exact_v1 spl_c_file_view_pread_exact_v1
+#define rt_file_view_prefetch_v1 spl_c_file_view_prefetch_v1
+#define rt_file_view_device_v1 spl_c_file_view_device_v1
+#define rt_file_view_inode_v1 spl_c_file_view_inode_v1
+#define rt_file_view_size_v1 spl_c_file_view_size_v1
+#define rt_file_view_close_v1 spl_c_file_view_close_v1
+#define rt_pinned_archive_open_beneath_v1 spl_c_pinned_archive_open_beneath_v1
+#define rt_pinned_archive_device_v1 spl_c_pinned_archive_device_v1
+#define rt_pinned_archive_inode_v1 spl_c_pinned_archive_inode_v1
+#define rt_pinned_archive_size_v1 spl_c_pinned_archive_size_v1
+#define rt_pinned_archive_close_v1 spl_c_pinned_archive_close_v1
+#endif
+
 #ifdef _WIN32
 
 int64_t rt_file_view_open_beneath_no_follow_v1(int64_t root, int64_t path) { (void)root; (void)path; return -1; }

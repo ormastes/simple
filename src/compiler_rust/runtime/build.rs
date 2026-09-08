@@ -391,6 +391,7 @@ fn compile_c_runtime_sources() {
     // See the runtime_process.c comment above: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
+    build.define("SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER", None);
     let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os_for_heap_counters == "windows" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks

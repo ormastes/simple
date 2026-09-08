@@ -133,6 +133,7 @@ pub mod security_runtime;
 /// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
 pub mod text_slice_audit;
 pub mod value;
+mod file_view;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
