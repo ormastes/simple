@@ -108,6 +108,9 @@ See the "Risks & Mitigations" section of the approved plan; summarized here:
 
 ## Change log
 
+- **2026-09-08 (S3 contract):** Froze the bounded independent-request ownership,
+  generation-handle, immutable-prefix-lease, cooperative-cancel, and busy-unload
+  design. Implementation remains open; execution is serial until proven otherwise.
 - **2026-09-08 (S2):** Added bounded serial multi-entry snapshots, longest exact
   prefix selection, deterministic LRU, configurable byte/count limits, and
   optional S2 ABI gauges. Paged/concurrent A4 remains open.
