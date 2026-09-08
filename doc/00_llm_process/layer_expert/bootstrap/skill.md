@@ -628,6 +628,14 @@ admission compares a `bootstrap_stage3_source_snapshot` taken before and after
 the stage; any drift invalidates the private copy, which is deliberate — it
 prevents a stop-after-stage2 false admission.
 
+## macOS current-source Stage2 handoff (2026-09-08)
+
+The current Apple Silicon lane reduced LLVM failed files from 374 to one.
+`cache_gateway_v1.spl` still loses the slot for generic/imported
+`CacheGatewayV1.virtual_source_store`; no Stage4 candidate exists and the July
+deployment must remain untouched. The exact resume condition and capped-cycle
+history are in `doc/03_plan/compiler/bootstrap/stage4_macos_deploy_2026-07-25.md`.
+
 **Use a private worktree pinned to a commit.** `scripts/bootstrap/bootstrap-in-snapshot.shs`
 exists exactly for this: it materialises COMMITTED content into
 `git worktree add --detach` and runs the bootstrap there. Its header records

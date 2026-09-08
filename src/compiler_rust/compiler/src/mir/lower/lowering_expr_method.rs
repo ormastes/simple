@@ -2011,7 +2011,18 @@ impl<'a> MirLowerer<'a> {
             None
         };
 
-        let func_name = if let Some(class_ty) = erased_class_receiver_ty
+        let declared_trait_owner = match &receiver.kind {
+            crate::hir::HirExprKind::Local(index) => self
+                .local_type_name_hints
+                .get(index)
+                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                .cloned(),
+            _ => None,
+        };
+
+        let func_name = if let Some(trait_name) = declared_trait_owner {
+            format!("{}.{}", trait_name, method)
+        } else if let Some(class_ty) = erased_class_receiver_ty
             .filter(|_| !wrapper_enum_builtin_collision)
             .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
             .map(|(_, n)| n)
@@ -2083,7 +2094,6 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
-        let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).

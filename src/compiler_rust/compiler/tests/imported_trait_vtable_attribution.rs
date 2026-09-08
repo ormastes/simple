@@ -52,3 +52,36 @@ fn flattened_import_retains_struct_trait_impl_for_mir_vtable_attribution() {
         "HIR impl disappeared before MIR vtable attribution"
     );
 }
+
+#[test]
+fn imported_trait_parameter_retains_owner_for_virtual_call() {
+    let dir = tempfile::tempdir().expect("temp fixture directory");
+    let trait_module = dir.path().join("gateway.spl");
+    let impl_module = dir.path().join("adapter.spl");
+    let entry = dir.path().join("main.spl");
+    std::fs::write(&trait_module, "trait Gateway:\n    fn store() -> i64\n").unwrap();
+    std::fs::write(
+        &impl_module,
+        "use gateway.{Gateway}\nstruct Adapter:\n    value: i64\nimpl Gateway for Adapter:\n    fn store(self) -> i64: self.value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &entry,
+        "use gateway.{Gateway}\nuse adapter.{Adapter}\nfn consume(gateway: Gateway) -> i64:\n    gateway.store()\n",
+    )
+    .unwrap();
+
+    let ast = load_module_with_imports(&entry, &mut HashSet::new()).expect("flattened imports");
+    let hir = hir::lower(&ast).expect("HIR lowering");
+    let consume_hir = hir.functions.iter().find(|function| function.name == "consume").unwrap();
+    assert_eq!(consume_hir.params[0].type_name_hint.as_deref(), Some("Gateway"));
+    let trait_impls = std::collections::HashMap::from([("Gateway".to_string(), vec!["Adapter".to_string()])]);
+    let mir = mir::lower_to_mir_with_global_trait_impls(&hir, &trait_impls).expect("MIR lowering");
+    let consume = mir.functions.iter().find(|function| function.name == "consume").unwrap();
+    assert!(consume.blocks.iter().flat_map(|block| &block.instructions).any(
+        |instruction| matches!(instruction, mir::MirInst::MethodCallVirtual { vtable_slot: 0, .. })
+    ));
+    assert!(consume.blocks.iter().flat_map(|block| &block.instructions).all(
+        |instruction| !matches!(instruction, mir::MirInst::MethodCallStatic { func_name, .. } if func_name == "store")
+    ));
+}

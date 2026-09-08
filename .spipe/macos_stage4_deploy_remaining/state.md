@@ -38,3 +38,11 @@ blocked-after-capped-verification
   `virtual_source_store` call and two genuine `str.split_whitespace` calls.
 - The mandatory three-cycle cap stopped further edits. No Stage4 candidate was
   produced, so deployment was correctly left unchanged.
+- Continuation 2026-09-08: `split_whitespace` imports cleared both original
+  sites; canonical in-place `Array.remove` cleared the newly exposed
+  `Array.remove_at` failure. The imported-trait regression test passed (1/1).
+- Continuation cycles reduced Stage2 from 3 files to 2 and then 1. A generic
+  defining-module facade still lowers `virtual_source_store` as a bare static
+  call because per-file native HIR lacks imported/generic constraint trait-slot
+  metadata. The third-cycle cap stopped further retries. No candidate exists;
+  deployment and essential-tool gates remain pending.
