@@ -40,3 +40,12 @@ or aborts staging, preserves the old table/cursor, and invalidates sampling.
 
 No simultaneous execution, continuous batching, GPU residency, spill, remote
 transport, or speedup is claimed by the architecture alone.
+
+## Activation boundary
+
+ABI compatibility is discovery, not runtime readiness. The engine selects
+`physical_pages` only when a resident context exists, the loaded model/config is
+supported, a physical pool has been created, and the owner dispatch is
+connected. Every incomplete state falls back to `snapshot`; an unloaded engine
+reports `unavailable`. The engine owns this observation so dashboard/status
+consumers do not infer readiness from capability bits.

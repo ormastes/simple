@@ -15,7 +15,8 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, close_backend}
+use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
 use std.io_runtime.{file_exists}
@@ -28,6 +29,11 @@ var ENGINE_LIB_PATH = "build/sffi/libslang_ggml.so"
 var ENGINE_N_CTX = 4096
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
 var ENGINE_PREFIX_CACHE_BYTES = 2147483648
+
+struct EngineKvReadiness:
+    mode: KvExecutionMode
+    cache_ready: bool
+    physical_activation: PhysicalPageActivation
 
 fn engine_set_lib_path(path: text):
     ENGINE_LIB_PATH = path
@@ -59,6 +65,34 @@ fn engine_prefix_cache_stats() -> PrefixCacheStats?:
     if ENGINE_BACKEND == nil:
         return nil
     prefix_cache_stats(ENGINE_BACKEND!)
+
+# Physical-page ABI discovery is not activation. Until a model-specific tensor
+# provider creates a pool and connects the owner dispatch, generation must stay
+# on the proven snapshot path.
+fn engine_physical_page_activation() -> PhysicalPageActivation:
+    if ENGINE_BACKEND == nil:
+        return PhysicalPageActivation.ProviderUnavailable
+    physical_page_activation(
+        physical_page_provider_status(ENGINE_BACKEND!),
+        PhysicalModelSupport.Unknown, 0, false)
+
+fn engine_kv_readiness() -> EngineKvReadiness:
+    val context_ready = ENGINE_BACKEND != nil and ENGINE_LOADED_ID != ""
+    val activation = engine_physical_page_activation()
+    val mode = kv_execution_mode(context_ready, activation)
+    EngineKvReadiness(
+        mode: mode,
+        cache_ready: mode != KvExecutionMode.Unavailable,
+        physical_activation: activation)
+
+fn engine_kv_execution_mode() -> KvExecutionMode:
+    engine_kv_readiness().mode
+
+fn engine_kv_execution_mode_text() -> text:
+    kv_execution_mode_text(engine_kv_execution_mode())
+
+fn engine_physical_page_reason() -> text:
+    physical_page_activation_text(engine_physical_page_activation())
 
 # KV cache and activations for a context of this size. A per-token-per-layer
 # estimate would need the model's own hyperparameters, which are not read until
@@ -143,3 +177,6 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
 
 export engine_set_lib_path, engine_set_n_ctx, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
+export engine_physical_page_activation, engine_kv_execution_mode
+export engine_kv_execution_mode_text, engine_physical_page_reason
+export EngineKvReadiness, engine_kv_readiness
