@@ -1,7 +1,7 @@
 # Stage-2 core-C bootstrap is missing runtime symbols
 
 **Date:** 2026-09-09  
-**Status:** Open; blocks admitted-runtime verification for the physical paged-KV lane
+**Status:** Resolved on `slang-physical-provider-activation`; Stage-2 now links
 
 ## Reproducer
 
@@ -9,8 +9,8 @@
 sh scripts/bootstrap/run-phase1-local.shs
 ```
 
-The Rust seed and runtime prerequisites complete. The Stage-2 pure-Simple
-`native-build` compiles 861 modules, then the final link fails.
+The original failure occurred after the Stage-2 pure-Simple `native-build`
+compiled 861 modules and reached the final link.
 
 ## Observed linker gap
 
@@ -37,3 +37,16 @@ Evidence is retained at:
   admitted pure-Simple runtime.
 
 Fake compatibility stubs and Rust-seed verification do not satisfy this gate.
+
+## Resolution evidence
+
+- `runtime_file_view.c` supplies real descriptor-pinned, beneath-root file
+  views and archive capabilities, with an executable traversal/symlink/range
+  self-check.
+- `runtime_secure_staging.c` supplies the four narrow native-all bootstrap ABI
+  gaps without importing collision-heavy `runtime.c`.
+- The two `Result[Unit, ...]` call sites now use canonical `Result[(), ...]`.
+- `libsimple_native_all.a` contains each formerly missing symbol exactly once.
+- The 2026-09-09 Stage-2 build compiled 861/861 modules and linked successfully,
+  then advanced to compiler sanity. Its later sanity failure is tracked in
+  `stage2_rust_transient_promotion_positional_hello_2026-09-09.md`.
