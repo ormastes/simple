@@ -2124,7 +2124,7 @@ mod tests {
 // runtime.  Keep the Rust runtime lane explicit and fail closed until it owns
 // an equivalent sealed-image table and digest implementation.
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_pin_executable_owned(_path: *const libc::c_char) -> i64 {
+pub unsafe extern "C" fn rt_process_pin_executable_owned(_path: *const std::ffi::c_char) -> i64 {
     -1
 }
 

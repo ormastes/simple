@@ -549,6 +549,56 @@ pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
     true
 }
 
+/// Validate either runtime representation of `[u8]` and return its length.
+/// This is the Rust-owned provider used by the C owned-process adapter when
+/// runtime_native.c is deliberately absent from the Rust seed composition.
+#[no_mangle]
+pub extern "C" fn rt_array_bytes_validate(raw: i64) -> i64 {
+    let value = RuntimeValue(raw as u64);
+    let Some(array) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return -22;
+    };
+    let array = unsafe { &*array };
+    if array.len > array.capacity
+        || array.len > i64::MAX as u64
+        || array.is_u64_packed()
+        || (array.len > 0 && array.data.is_null())
+    {
+        return -22;
+    }
+    if !array.is_byte_packed() {
+        for item in unsafe { array.as_slice() } {
+            if !item.is_int() {
+                return -22;
+            }
+            let byte = item.as_int();
+            if !(0..=255).contains(&byte) {
+                return -22;
+            }
+        }
+    }
+    array.len as i64
+}
+
+/// Copy a validated `[u8]` into caller-owned storage without truncation.
+#[no_mangle]
+pub unsafe extern "C" fn rt_array_bytes_copy_checked(raw: i64, out: *mut u8, capacity: i64) -> i64 {
+    let length = rt_array_bytes_validate(raw);
+    if length < 0 || capacity < length || (length > 0 && out.is_null()) {
+        return -22;
+    }
+    let value = RuntimeValue(raw as u64);
+    let array = &*get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array).expect("validated array");
+    if array.is_byte_packed() {
+        std::ptr::copy_nonoverlapping(array.data.cast::<u8>(), out, length as usize);
+    } else {
+        for (index, item) in array.as_slice().iter().enumerate() {
+            *out.add(index) = item.as_int() as u8;
+        }
+    }
+    length
+}
+
 /// Layout used for the element storage of a `RuntimeArray` with the given
 /// capacity. Capacity 0 is treated as 1 to satisfy the allocator's min-size
 /// requirement.
@@ -6004,7 +6054,8 @@ mod tests;
 #[cfg(test)]
 mod string_free_contract_tests {
     use super::{
-        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
+        rt_array_push, rt_byte_array_new_len, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
         rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
         rt_transient_heap_promote,
     };
@@ -6029,6 +6080,48 @@ mod string_free_contract_tests {
         assert_eq!(rt_heap_registry_count(), before + 1, "new string registers");
         assert_eq!(rt_string_free(s), 1, "ordinary string is freed");
         assert_eq!(rt_heap_registry_count(), before, "registry returns to baseline");
+    }
+
+    #[test]
+    fn owned_process_byte_array_provider_validates_both_representations() {
+        let _g = GUARD.lock().unwrap();
+        let boxed = rt_array_new(3);
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(0)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(127)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(255)));
+        let mut boxed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(boxed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), boxed_out.len() as i64) },
+            3
+        );
+        assert_eq!(boxed_out, [0, 127, 255]);
+
+        let packed = rt_byte_array_new_len(3);
+        assert!(byte_array_write(packed, &[1, 2, 3]));
+        let mut packed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(packed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(packed.0 as i64, packed_out.as_mut_ptr(), packed_out.len() as i64) },
+            3
+        );
+        assert_eq!(packed_out, [1, 2, 3]);
+
+        let invalid = rt_array_new(1);
+        assert!(rt_array_push(invalid, crate::value::RuntimeValue::from_int(256)));
+        assert_eq!(rt_array_bytes_validate(invalid.0 as i64), -22);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, std::ptr::null_mut(), 3) },
+            -22
+        );
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), 2) },
+            -22
+        );
+
+        rt_array_free(boxed);
+        rt_array_free(packed);
+        rt_array_free(invalid);
     }
 
     #[test]

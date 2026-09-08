@@ -37,6 +37,9 @@ Exact-token comparison follows hash lookup. Execution namespace includes model
 weights, tokenizer, adapter, KV dtype/layout, attention/position configuration,
 tensor sharding, and provider ABI. Boundary logits are recomputed or restored only
 through a provider contract covered by numerical parity tests.
+For the pinned CPU provider profile, every finite logit must satisfy
+`abs(actual - expected) <= 1e-4 * max(1, abs(expected))`, matching the
+underlying llama.cpp backend-sampler tolerance; sampled token IDs remain exact.
 
 The activation classifier has six explicit physical states: provider
 unavailable, model support unknown, model unsupported, pool inactive, owner
