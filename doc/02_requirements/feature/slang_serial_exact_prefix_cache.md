@@ -9,5 +9,6 @@ SPipe + Slang research contract.
 - REQ-004: Keep weights resident and cache ownership inside the backend context.
 - REQ-005: Expose honest capability and cumulative hit/miss/token counters.
 - REQ-006: Free snapshot storage and reset counters during backend teardown.
-- REQ-007: Keep the cache serial and single-entry until paged immutable storage
-  and concurrent context ownership are implemented.
+- REQ-007: S1 remains the single-entry compatibility floor. A later explicitly
+  versioned precursor may retain several immutable serialized snapshots while
+  execution remains serial; it must not claim paged or concurrent ownership.

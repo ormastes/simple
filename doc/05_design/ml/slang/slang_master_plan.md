@@ -59,11 +59,11 @@ Product binary + integration tests live in a separate GitHub repo (`ormastes/sla
 
 ### Current cache capability
 
-The ggml compatibility backend now implements an S1 serial, single-entry exact
-prefix snapshot/restore path with isolation and counters. This is a precursor,
-not completion of A4: paged KV ownership, concurrent contexts, eviction tiers,
-and distributed transport remain absent. See
-`doc/04_architecture/ml/slang_serial_exact_prefix_cache.md`.
+The ggml compatibility backend now implements an S2 serial, bounded multi-entry
+exact-prefix snapshot/restore path with isolation, deterministic LRU, byte/count
+limits, and counters. This is a precursor, not completion of A4: paged KV
+ownership, concurrent contexts, spill tiers, and distributed transport remain
+absent. See `doc/04_architecture/ml/slang_bounded_multi_prefix_cache.md`.
 
 Details for each phase (including per-phase fs-request triggers) are in the approved plan file.
 
@@ -108,6 +108,9 @@ See the "Risks & Mitigations" section of the approved plan; summarized here:
 
 ## Change log
 
+- **2026-09-08 (S2):** Added bounded serial multi-entry snapshots, longest exact
+  prefix selection, deterministic LRU, configurable byte/count limits, and
+  optional S2 ABI gauges. Paged/concurrent A4 remains open.
 - **2026-09-08 (S1):** Added serial exact-token prefix restore behind explicit
   backend capabilities, request-isolation fallback, and observable counters.
 - **2026-04-18 (v0):** Initial doc. Pivoted from "fs_requests reactive only" to "upfront nvfs requirements in parallel track." Module layout confirmed as vLLM-mirrored. Repo split: library in main simple repo, product in `ormastes/slang` submodule.

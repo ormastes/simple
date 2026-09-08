@@ -39,6 +39,9 @@
 #define SLANG_STR_CAP  (1 << 20)   /* 1 MiB of prompt is far past any real use */
 #define SLANG_OUT_CAP  4096
 #define SLANG_TOK_CAP  (1 << 18)
+#define SLANG_PREFIX_CACHE_MAX_ENTRIES 8
+#define SLANG_PREFIX_CACHE_DEFAULT_ENTRIES 4
+#define SLANG_PREFIX_CACHE_DEFAULT_BYTES ((size_t)2 * 1024 * 1024 * 1024)
 
 /* Error codes. Negative so a caller can test `< 0` without a sentinel table. */
 #define SLANG_ERR_NO_MODEL     (-1)
@@ -57,15 +60,32 @@ static int64_t g_out_len = 0;
 
 static llama_token g_tok[SLANG_TOK_CAP];
 static int64_t     g_tok_len = 0;
-static llama_token g_prefix_tok[SLANG_TOK_CAP];
-static int64_t     g_prefix_tok_len = 0;
-static uint8_t    *g_prefix_state = NULL;
-static size_t      g_prefix_state_size = 0;
+
+struct slang_prefix_entry {
+    llama_token *tokens;
+    int64_t token_count;
+    uint8_t *state;
+    size_t state_size;
+    size_t retained_bytes;
+    uint64_t last_used;
+};
+
+static struct slang_prefix_entry g_prefix[SLANG_PREFIX_CACHE_MAX_ENTRIES];
+static int64_t     g_prefix_capacity = SLANG_PREFIX_CACHE_DEFAULT_ENTRIES;
+static size_t      g_prefix_byte_limit = SLANG_PREFIX_CACHE_DEFAULT_BYTES;
+static size_t      g_prefix_resident_bytes = 0;
+static int64_t     g_prefix_resident_entries = 0;
+static uint64_t    g_prefix_clock = 0;
 static int64_t     g_eval_start = 0;
 static int64_t     g_prefix_hits = 0;
 static int64_t     g_prefix_misses = 0;
 static int64_t     g_prefix_tokens_reused = 0;
 static int64_t     g_prefix_tokens_prefilled = 0;
+static int64_t     g_prefix_admissions = 0;
+static int64_t     g_prefix_evictions = 0;
+static int64_t     g_prefix_rejected_bytes = 0;
+static int64_t     g_prefix_restore_failures = 0;
+static int64_t     g_selected_prefix = -1;
 
 static struct llama_model   *g_model = NULL;
 static struct llama_context *g_ctx   = NULL;
@@ -124,8 +144,53 @@ int64_t slang_ggml_ctx_create(int64_t n_ctx) {
 }
 
 /* Capability bits are stable at the ABI boundary. Bit 0 is resident weights,
- * bit 1 is request isolation, and bit 2 is serial exact-prefix restore. */
-int64_t slang_ggml_capabilities(void) { return 1 | 2 | 4; }
+ * bit 1 is request isolation, bit 2 is serial exact-prefix restore, and bit 3
+ * is bounded serial multi-entry prefix retention. */
+int64_t slang_ggml_capabilities(void) { return 1 | 2 | 4 | 8; }
+
+static void slang_prefix_drop(int64_t slot, int count_eviction) {
+    struct slang_prefix_entry *entry = &g_prefix[slot];
+    if (entry->tokens == NULL && entry->state == NULL) return;
+    if (g_prefix_resident_bytes >= entry->retained_bytes)
+        g_prefix_resident_bytes -= entry->retained_bytes;
+    else
+        g_prefix_resident_bytes = 0;
+    free(entry->tokens);
+    free(entry->state);
+    memset(entry, 0, sizeof(*entry));
+    if (g_prefix_resident_entries > 0) g_prefix_resident_entries--;
+    if (count_eviction) g_prefix_evictions++;
+}
+
+static int64_t slang_prefix_lru_slot(void) {
+    int64_t selected = -1;
+    for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
+        if (g_prefix[i].state == NULL) continue;
+        if (selected < 0 || g_prefix[i].last_used < g_prefix[selected].last_used)
+            selected = i;
+    }
+    return selected;
+}
+
+static void slang_prefix_clear_all(int count_eviction) {
+    for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++)
+        slang_prefix_drop(i, count_eviction);
+}
+
+int64_t slang_ggml_prefix_cache_configure(int64_t entries, int64_t bytes) {
+    if (entries < 0 || entries > SLANG_PREFIX_CACHE_MAX_ENTRIES || bytes < 0)
+        return SLANG_ERR_OVERFLOW;
+    if ((uint64_t)bytes > (uint64_t)SIZE_MAX) return SLANG_ERR_OVERFLOW;
+    g_prefix_capacity = entries;
+    g_prefix_byte_limit = (size_t)bytes;
+    while (g_prefix_resident_entries > g_prefix_capacity ||
+           g_prefix_resident_bytes > g_prefix_byte_limit) {
+        int64_t slot = slang_prefix_lru_slot();
+        if (slot < 0) break;
+        slang_prefix_drop(slot, 1);
+    }
+    return g_prefix_capacity;
+}
 
 /* Frees in reverse construction order and resets every handle, so a caller
  * that stops and restarts a model in one process leaks nothing. */
@@ -133,10 +198,14 @@ int64_t slang_ggml_free(void) {
     if (g_smpl)  { llama_sampler_free(g_smpl); g_smpl = NULL; }
     if (g_ctx)   { llama_free(g_ctx);          g_ctx = NULL; }
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
-    free(g_prefix_state); g_prefix_state = NULL; g_prefix_state_size = 0;
-    g_prefix_tok_len = 0; g_eval_start = 0;
+    slang_prefix_clear_all(0);
+    g_prefix_capacity = SLANG_PREFIX_CACHE_DEFAULT_ENTRIES;
+    g_prefix_byte_limit = SLANG_PREFIX_CACHE_DEFAULT_BYTES;
+    g_prefix_clock = 0; g_eval_start = 0; g_selected_prefix = -1;
     g_prefix_hits = 0; g_prefix_misses = 0;
     g_prefix_tokens_reused = 0; g_prefix_tokens_prefilled = 0;
+    g_prefix_admissions = 0; g_prefix_evictions = 0;
+    g_prefix_rejected_bytes = 0; g_prefix_restore_failures = 0;
     g_tok_len = 0; g_out_len = 0; g_str_len = 0;
     return 0;
 }
@@ -201,22 +270,36 @@ int64_t slang_ggml_kv_clear(void) {
 int64_t slang_ggml_prefix_prepare(void) {
     if (g_ctx == NULL) return SLANG_ERR_NO_CTX;
     g_eval_start = 0;
-    if (g_prefix_state != NULL && g_prefix_tok_len > 1 &&
-        g_tok_len >= g_prefix_tok_len &&
-        memcmp(g_tok, g_prefix_tok,
-               (size_t)g_prefix_tok_len * sizeof(llama_token)) == 0) {
+    g_selected_prefix = -1;
+    for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
+        struct slang_prefix_entry *entry = &g_prefix[i];
+        if (entry->state == NULL || entry->token_count <= 1 ||
+            g_tok_len < entry->token_count) continue;
+        if (memcmp(g_tok, entry->tokens,
+                   (size_t)entry->token_count * sizeof(llama_token)) != 0)
+            continue;
+        if (g_selected_prefix < 0 ||
+            entry->token_count > g_prefix[g_selected_prefix].token_count)
+            g_selected_prefix = i;
+    }
+    if (g_selected_prefix >= 0) {
+        struct slang_prefix_entry *entry = &g_prefix[g_selected_prefix];
         llama_memory_clear(llama_get_memory(g_ctx), true);
-        if (llama_state_seq_set_data(g_ctx, g_prefix_state,
-                                     g_prefix_state_size, 0) ==
-            g_prefix_state_size) {
-            g_eval_start = g_prefix_tok_len - 1;
+        if (llama_state_seq_set_data(g_ctx, entry->state,
+                                     entry->state_size, 0) ==
+            entry->state_size) {
+            g_eval_start = entry->token_count - 1;
             if (llama_memory_seq_rm(llama_get_memory(g_ctx), 0,
                                     (llama_pos)g_eval_start, -1)) {
+                entry->last_used = ++g_prefix_clock;
                 g_prefix_hits++;
                 g_prefix_tokens_reused += g_eval_start;
                 return g_eval_start;
             }
         }
+        g_prefix_restore_failures++;
+        slang_prefix_drop(g_selected_prefix, 0);
+        g_selected_prefix = -1;
     }
     llama_memory_clear(llama_get_memory(g_ctx), true);
     g_prefix_misses++;
@@ -227,6 +310,76 @@ int64_t slang_ggml_prefix_hits(void) { return g_prefix_hits; }
 int64_t slang_ggml_prefix_misses(void) { return g_prefix_misses; }
 int64_t slang_ggml_prefix_tokens_reused(void) { return g_prefix_tokens_reused; }
 int64_t slang_ggml_prefix_tokens_prefilled(void) { return g_prefix_tokens_prefilled; }
+int64_t slang_ggml_prefix_admissions(void) { return g_prefix_admissions; }
+int64_t slang_ggml_prefix_evictions(void) { return g_prefix_evictions; }
+int64_t slang_ggml_prefix_resident_entries(void) { return g_prefix_resident_entries; }
+int64_t slang_ggml_prefix_resident_bytes(void) { return (int64_t)g_prefix_resident_bytes; }
+int64_t slang_ggml_prefix_rejected_bytes(void) { return g_prefix_rejected_bytes; }
+int64_t slang_ggml_prefix_restore_failures(void) { return g_prefix_restore_failures; }
+
+static int64_t slang_prefix_exact_slot(void) {
+    for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
+        struct slang_prefix_entry *entry = &g_prefix[i];
+        if (entry->state != NULL && entry->token_count == g_tok_len &&
+            memcmp(entry->tokens, g_tok,
+                   (size_t)g_tok_len * sizeof(llama_token)) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void slang_prefix_admit(void) {
+    if (g_prefix_capacity == 0 || g_prefix_byte_limit == 0) return;
+    int64_t exact = slang_prefix_exact_slot();
+    if (exact >= 0) {
+        g_prefix[exact].last_used = ++g_prefix_clock;
+        return;
+    }
+    size_t state_size = llama_state_seq_get_size(g_ctx, 0);
+    if (state_size == 0 || g_tok_len <= 0) return;
+    size_t token_bytes = (size_t)g_tok_len * sizeof(llama_token);
+    if (state_size > SIZE_MAX - token_bytes) {
+        g_prefix_rejected_bytes = INT64_MAX;
+        return;
+    }
+    size_t candidate_bytes = state_size + token_bytes;
+    if (candidate_bytes > g_prefix_byte_limit) {
+        if (candidate_bytes > (size_t)(INT64_MAX - g_prefix_rejected_bytes))
+            g_prefix_rejected_bytes = INT64_MAX;
+        else
+            g_prefix_rejected_bytes += (int64_t)candidate_bytes;
+        return;
+    }
+    while (g_prefix_resident_entries >= g_prefix_capacity ||
+           g_prefix_resident_bytes > g_prefix_byte_limit - candidate_bytes) {
+        int64_t victim = slang_prefix_lru_slot();
+        if (victim < 0) break;
+        slang_prefix_drop(victim, 1);
+    }
+    int64_t slot = -1;
+    for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
+        if (g_prefix[i].state == NULL) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    uint8_t *state = (uint8_t *)malloc(state_size);
+    llama_token *tokens = (llama_token *)malloc(token_bytes);
+    if (state == NULL || tokens == NULL ||
+        llama_state_seq_get_data(g_ctx, state, state_size, 0) != state_size) {
+        free(state);
+        free(tokens);
+        return;
+    }
+    memcpy(tokens, g_tok, token_bytes);
+    g_prefix[slot].tokens = tokens;
+    g_prefix[slot].token_count = g_tok_len;
+    g_prefix[slot].state = state;
+    g_prefix[slot].state_size = state_size;
+    g_prefix[slot].retained_bytes = candidate_bytes;
+    g_prefix[slot].last_used = ++g_prefix_clock;
+    g_prefix_resident_bytes += candidate_bytes;
+    g_prefix_resident_entries++;
+    g_prefix_admissions++;
+}
 
 /* Prefill: submits the whole tokenized prompt as one batch. This is the only
  * place ggml sees more than a single token, and it is a batching detail, not a
@@ -242,23 +395,7 @@ int64_t slang_ggml_eval_prompt(void) {
         if (llama_decode(g_ctx, batch) != 0) return SLANG_ERR_DECODE;
         g_prefix_tokens_prefilled += suffix_len;
     }
-    size_t state_size = llama_state_seq_get_size(g_ctx, 0);
-    if (state_size > 0) {
-        uint8_t *state = (uint8_t *)realloc(g_prefix_state, state_size);
-        if (state != NULL) {
-            g_prefix_state = state;
-            if (llama_state_seq_get_data(g_ctx, state, state_size, 0) ==
-                state_size) {
-                g_prefix_state_size = state_size;
-                memcpy(g_prefix_tok, g_tok,
-                       (size_t)g_tok_len * sizeof(llama_token));
-                g_prefix_tok_len = g_tok_len;
-            } else {
-                g_prefix_state_size = 0;
-                g_prefix_tok_len = 0;
-            }
-        }
-    }
+    slang_prefix_admit();
     g_eval_start = g_tok_len;
     return g_tok_len;
 }
