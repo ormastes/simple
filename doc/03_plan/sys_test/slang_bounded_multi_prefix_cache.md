@@ -7,6 +7,8 @@
 - REQ-008: capability, cumulative counters, and resident gauges are exact.
 - REQ-009: teardown resets ownership, counters, and bytes.
 - REQ-010: architecture and capability naming remain explicitly serial.
+- Failure controls inject snapshot serialization, restore, truncation, and
+  decode errors; each must preserve isolation and publish no partial entry.
 
 Executable evidence remains
 `test/02_integration/lib/slang_prefix_cache_shim_contract_test.shs` using a
