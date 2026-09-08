@@ -1,7 +1,8 @@
 # Stage-2 Rust transient promotion rejects positional hello world
 
 **Date:** 2026-09-09
-**Status:** Open; blocks Stage-2 admission for physical paged-KV verification
+**Status:** Repair implemented; focused Rust and native-all-provider regression
+tests pass. Fresh Stage-2 admission remains required.
 
 ## Observed boundary
 
@@ -41,3 +42,20 @@ runtime path, not a missing symbol or package-index initialization failure.
 
 The session reached the mandatory three-cycle bootstrap cap after producing
 this evidence. Further repair and verification must start in a fresh session.
+
+## Repair
+
+`runtime_memory.c` now lets the transient graph walker recognize a root only
+when it is present in either the transient raw-owner table or the existing
+live native-struct allocation registry. A persistent native-struct root is
+already outside the transient reclaim set, so its promotion is a validated
+no-op, while its exact registered allocation size bounds traversal of fields
+that can lead to transient children. Arbitrary and stale pointers remain
+rejected.
+
+The Rust runtime regression
+`persistent_native_struct_root_promotes_transient_children` constructs the
+same ownership shape: a native struct allocated before the scope, containing
+a string allocated inside the scope. It passes both the ordinary runtime and
+the production `native-all-provider` composition and proves that the child
+survives scope end.

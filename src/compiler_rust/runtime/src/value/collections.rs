@@ -6173,6 +6173,33 @@ mod string_free_contract_tests {
     }
 
     #[test]
+    fn persistent_native_struct_root_promotes_transient_children() {
+        unsafe extern "C" {
+            fn rt_struct_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        let root_ptr = unsafe { rt_struct_alloc(16) };
+        assert!(!root_ptr.is_null(), "persistent native owner allocated");
+        let root = crate::value::RuntimeValue((root_ptr as u64) | crate::value::tags::TAG_HEAP);
+
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("transient child reached through persistent native owner");
+        unsafe {
+            (root_ptr as *mut u64).write(child.0);
+            (root_ptr as *mut u64).add(1).write(0);
+        }
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), 55, "reachable transient child survives");
+
+        assert_eq!(rt_string_free(child), 1);
+        unsafe { rt_free(root_ptr) };
+    }
+
+    #[test]
     fn repeated_transient_string_scopes_return_to_fixed_registry_bound() {
         let _g = GUARD.lock().unwrap();
         let before = rt_heap_registry_count();

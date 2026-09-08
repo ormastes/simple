@@ -53,6 +53,7 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 #define RT_TRANSIENT_RAW_SIZE_MASK (~RT_TRANSIENT_RAW_OWNED_BIT)
 
 void rt_free(uint8_t* ptr);
+static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -166,31 +167,50 @@ int64_t rt_transient_raw_words(
     uintptr_t ptr = ((uintptr_t)value) & ~(uintptr_t)7;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     uint64_t bytes = 0;
-    if (!rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) return -1;
-    if (words) *words = (const uintptr_t*)ptr;
-    if (canonical_ptr) *canonical_ptr = ptr;
-    return (int64_t)(bytes / sizeof(uintptr_t));
+    if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
+        if (words) *words = (const uintptr_t*)ptr;
+        if (canonical_ptr) *canonical_ptr = ptr;
+        return (int64_t)(bytes / sizeof(uintptr_t));
+    }
 #else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr);
-    if (!entry) return -1;
+    if (entry) {
+        if (words) *words = (const uintptr_t*)ptr;
+        if (canonical_ptr) *canonical_ptr = ptr;
+        return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
+    }
+#endif
+    /* A lowering owner is allocated before its per-module transient scope.
+     * It is therefore absent from the transient allocation table, but its
+     * fields are the roots through which scope-owned arrays and strings must
+     * be discovered.  The struct registry is the existing fail-closed proof
+     * that this is a live native object and supplies its exact scan bound. */
+    size_t struct_bytes = 0;
+    if (!rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes)) return -1;
     if (words) *words = (const uintptr_t*)ptr;
     if (canonical_ptr) *canonical_ptr = ptr;
-    return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
-#endif
+    return (int64_t)(struct_bytes / sizeof(uintptr_t));
 }
 
 int32_t rt_transient_raw_promote(uintptr_t ptr) {
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     ptr &= ~(uintptr_t)7;
     uint64_t bytes = 0;
-    if (!rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) return 0;
-    return rt_transient_raw_owner_register_state((void*)ptr, bytes, 0) != 0;
+    if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
+        return rt_transient_raw_owner_register_state((void*)ptr, bytes, 0) != 0;
+    }
 #else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr & ~(uintptr_t)7);
-    if (!entry) return 0;
-    entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
-    return 1;
+    if (entry) {
+        entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
+        return 1;
+    }
+    ptr &= ~(uintptr_t)7;
 #endif
+    /* Persistent struct roots are already outside the transient owner's
+     * reclaim set.  Promotion is intentionally a validated no-op for them. */
+    size_t struct_bytes = 0;
+    return rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes) ? 1 : 0;
 }
 
 int32_t rt_transient_raw_scope_end(void) {
