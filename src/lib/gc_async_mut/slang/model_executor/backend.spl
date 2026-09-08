@@ -74,6 +74,13 @@ struct GgmlBackend:
     f_prefix_misses: i64
     f_prefix_tokens_reused: i64
     f_prefix_tokens_prefilled: i64
+    f_prefix_configure: i64
+    f_prefix_admissions: i64
+    f_prefix_evictions: i64
+    f_prefix_resident_entries: i64
+    f_prefix_resident_bytes: i64
+    f_prefix_rejected_bytes: i64
+    f_prefix_restore_failures: i64
 
 struct PrefixCacheStats:
     capabilities: i64
@@ -81,12 +88,26 @@ struct PrefixCacheStats:
     misses: i64
     tokens_reused: i64
     tokens_prefilled: i64
+    admissions: i64
+    evictions: i64
+    resident_entries: i64
+    resident_bytes: i64
+    rejected_bytes: i64
+    restore_failures: i64
 
 fn _call0(fptr: i64) -> i64:
     spl_wffi_call_i64(fptr, [], 0)
 
 fn _call1(fptr: i64, a0: i64) -> i64:
     spl_wffi_call_i64(fptr, [a0], 1)
+
+fn _call2(fptr: i64, a0: i64, a1: i64) -> i64:
+    spl_wffi_call_i64(fptr, [a0, a1], 2)
+
+fn _optional_call0(fptr: i64) -> i64:
+    if fptr == 0:
+        return -1
+    _call0(fptr)
 
 # Opens the shim and resolves every entry up front. Resolving eagerly means a
 # missing symbol is reported here, by name, instead of surfacing as a zero
@@ -113,6 +134,15 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
             spl_dlclose(lib)
             return Err(BackendError.SymbolMissing)
         addrs.push(a)
+    val optional_names = [
+        "slang_ggml_prefix_cache_configure", "slang_ggml_prefix_admissions",
+        "slang_ggml_prefix_evictions", "slang_ggml_prefix_resident_entries",
+        "slang_ggml_prefix_resident_bytes", "slang_ggml_prefix_rejected_bytes",
+        "slang_ggml_prefix_restore_failures"
+    ]
+    var optional: [i64] = []
+    for n in optional_names:
+        optional.push(spl_dlsym(lib, n))
     Ok(GgmlBackend(
         lib: lib,
         f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
@@ -123,7 +153,11 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_kv_clear: addrs[15], f_capabilities: addrs[16],
         f_prefix_prepare: addrs[17], f_prefix_hits: addrs[18],
         f_prefix_misses: addrs[19], f_prefix_tokens_reused: addrs[20],
-        f_prefix_tokens_prefilled: addrs[21]
+        f_prefix_tokens_prefilled: addrs[21],
+        f_prefix_configure: optional[0], f_prefix_admissions: optional[1],
+        f_prefix_evictions: optional[2], f_prefix_resident_entries: optional[3],
+        f_prefix_resident_bytes: optional[4], f_prefix_rejected_bytes: optional[5],
+        f_prefix_restore_failures: optional[6]
     ))
 
 # Strings cross the int64-only ABI one byte at a time. That is the price of a
@@ -196,8 +230,19 @@ fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
         hits: _call0(b.f_prefix_hits),
         misses: _call0(b.f_prefix_misses),
         tokens_reused: _call0(b.f_prefix_tokens_reused),
-        tokens_prefilled: _call0(b.f_prefix_tokens_prefilled)
+        tokens_prefilled: _call0(b.f_prefix_tokens_prefilled),
+        admissions: _optional_call0(b.f_prefix_admissions),
+        evictions: _optional_call0(b.f_prefix_evictions),
+        resident_entries: _optional_call0(b.f_prefix_resident_entries),
+        resident_bytes: _optional_call0(b.f_prefix_resident_bytes),
+        rejected_bytes: _optional_call0(b.f_prefix_rejected_bytes),
+        restore_failures: _optional_call0(b.f_prefix_restore_failures)
     )
+
+fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
+    if b.f_prefix_configure == 0:
+        return false
+    _call2(b.f_prefix_configure, entries, bytes) >= 0
 
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
@@ -207,4 +252,4 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
     Ok(())
 
 export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
-export open_backend, load_model, open_context, generate, prefix_cache_stats, close_backend
+export open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, close_backend
