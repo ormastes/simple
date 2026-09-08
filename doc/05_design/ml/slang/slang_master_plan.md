@@ -1,7 +1,7 @@
 # slang Master Plan
 
 - **Status:** v0 — derived from user-supplied research doc (2026-04-17) and the approved plan at `~/.claude/plans/to-make-good-file-virtual-stardust.md`
-- **Last-updated:** 2026-04-18
+- **Last-updated:** 2026-09-08
 - **Related docs:**
   - `../nvfs/slang_requirements.md` — upfront fs requirements for the parallel nvfs track
   - `./fs_requests/README.md` — reactive fs feature-request capture
@@ -57,6 +57,14 @@ Product binary + integration tests live in a separate GitHub repo (`ormastes/sla
 | A7 | Sleep/wake | `engine/llm_engine.sleep(level)` / `wake_up()` | R3 atomic manifest swap |
 | A8 | LoRA adapter hot-load | `lora/` tree, per-request adapter routing | R1 `adapter` class, R8 async listing |
 
+### Current cache capability
+
+The ggml compatibility backend now implements an S1 serial, single-entry exact
+prefix snapshot/restore path with isolation and counters. This is a precursor,
+not completion of A4: paged KV ownership, concurrent contexts, eviction tiers,
+and distributed transport remain absent. See
+`doc/04_architecture/ml/slang_serial_exact_prefix_cache.md`.
+
 Details for each phase (including per-phase fs-request triggers) are in the approved plan file.
 
 ## Key design invariants
@@ -100,4 +108,6 @@ See the "Risks & Mitigations" section of the approved plan; summarized here:
 
 ## Change log
 
+- **2026-09-08 (S1):** Added serial exact-token prefix restore behind explicit
+  backend capabilities, request-isolation fallback, and observable counters.
 - **2026-04-18 (v0):** Initial doc. Pivoted from "fs_requests reactive only" to "upfront nvfs requirements in parallel track." Module layout confirmed as vLLM-mirrored. Repo split: library in main simple repo, product in `ormastes/slang` submodule.

@@ -57,6 +57,15 @@ static int64_t g_out_len = 0;
 
 static llama_token g_tok[SLANG_TOK_CAP];
 static int64_t     g_tok_len = 0;
+static llama_token g_prefix_tok[SLANG_TOK_CAP];
+static int64_t     g_prefix_tok_len = 0;
+static uint8_t    *g_prefix_state = NULL;
+static size_t      g_prefix_state_size = 0;
+static int64_t     g_eval_start = 0;
+static int64_t     g_prefix_hits = 0;
+static int64_t     g_prefix_misses = 0;
+static int64_t     g_prefix_tokens_reused = 0;
+static int64_t     g_prefix_tokens_prefilled = 0;
 
 static struct llama_model   *g_model = NULL;
 static struct llama_context *g_ctx   = NULL;
@@ -114,12 +123,20 @@ int64_t slang_ggml_ctx_create(int64_t n_ctx) {
     return 0;
 }
 
+/* Capability bits are stable at the ABI boundary. Bit 0 is resident weights,
+ * bit 1 is request isolation, and bit 2 is serial exact-prefix restore. */
+int64_t slang_ggml_capabilities(void) { return 1 | 2 | 4; }
+
 /* Frees in reverse construction order and resets every handle, so a caller
  * that stops and restarts a model in one process leaks nothing. */
 int64_t slang_ggml_free(void) {
     if (g_smpl)  { llama_sampler_free(g_smpl); g_smpl = NULL; }
     if (g_ctx)   { llama_free(g_ctx);          g_ctx = NULL; }
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
+    free(g_prefix_state); g_prefix_state = NULL; g_prefix_state_size = 0;
+    g_prefix_tok_len = 0; g_eval_start = 0;
+    g_prefix_hits = 0; g_prefix_misses = 0;
+    g_prefix_tokens_reused = 0; g_prefix_tokens_prefilled = 0;
     g_tok_len = 0; g_out_len = 0; g_str_len = 0;
     return 0;
 }
@@ -178,14 +195,71 @@ int64_t slang_ggml_kv_clear(void) {
     return 0;
 }
 
+/* Selects the longest cacheable prefix owned by this serial context. The
+ * snapshot is restored only after exact token comparison. One trailing token
+ * is recomputed so the backend produces fresh boundary logits. */
+int64_t slang_ggml_prefix_prepare(void) {
+    if (g_ctx == NULL) return SLANG_ERR_NO_CTX;
+    g_eval_start = 0;
+    if (g_prefix_state != NULL && g_prefix_tok_len > 1 &&
+        g_tok_len >= g_prefix_tok_len &&
+        memcmp(g_tok, g_prefix_tok,
+               (size_t)g_prefix_tok_len * sizeof(llama_token)) == 0) {
+        llama_memory_clear(llama_get_memory(g_ctx), true);
+        if (llama_state_seq_set_data(g_ctx, g_prefix_state,
+                                     g_prefix_state_size, 0) ==
+            g_prefix_state_size) {
+            g_eval_start = g_prefix_tok_len - 1;
+            if (llama_memory_seq_rm(llama_get_memory(g_ctx), 0,
+                                    (llama_pos)g_eval_start, -1)) {
+                g_prefix_hits++;
+                g_prefix_tokens_reused += g_eval_start;
+                return g_eval_start;
+            }
+        }
+    }
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+    g_prefix_misses++;
+    return 0;
+}
+
+int64_t slang_ggml_prefix_hits(void) { return g_prefix_hits; }
+int64_t slang_ggml_prefix_misses(void) { return g_prefix_misses; }
+int64_t slang_ggml_prefix_tokens_reused(void) { return g_prefix_tokens_reused; }
+int64_t slang_ggml_prefix_tokens_prefilled(void) { return g_prefix_tokens_prefilled; }
+
 /* Prefill: submits the whole tokenized prompt as one batch. This is the only
  * place ggml sees more than a single token, and it is a batching detail, not a
  * scheduling decision — slang still chose what to prefill and when. */
 int64_t slang_ggml_eval_prompt(void) {
     if (g_ctx == NULL) return SLANG_ERR_NO_CTX;
     if (g_tok_len == 0) return SLANG_ERR_TOKENIZE;
-    struct llama_batch batch = llama_batch_get_one(g_tok, (int32_t)g_tok_len);
-    if (llama_decode(g_ctx, batch) != 0) return SLANG_ERR_DECODE;
+    if (g_eval_start < 0 || g_eval_start > g_tok_len) return SLANG_ERR_DECODE;
+    int64_t suffix_len = g_tok_len - g_eval_start;
+    if (suffix_len > 0) {
+        struct llama_batch batch = llama_batch_get_one(
+            g_tok + g_eval_start, (int32_t)suffix_len);
+        if (llama_decode(g_ctx, batch) != 0) return SLANG_ERR_DECODE;
+        g_prefix_tokens_prefilled += suffix_len;
+    }
+    size_t state_size = llama_state_seq_get_size(g_ctx, 0);
+    if (state_size > 0) {
+        uint8_t *state = (uint8_t *)realloc(g_prefix_state, state_size);
+        if (state != NULL) {
+            g_prefix_state = state;
+            if (llama_state_seq_get_data(g_ctx, state, state_size, 0) ==
+                state_size) {
+                g_prefix_state_size = state_size;
+                memcpy(g_prefix_tok, g_tok,
+                       (size_t)g_tok_len * sizeof(llama_token));
+                g_prefix_tok_len = g_tok_len;
+            } else {
+                g_prefix_state_size = 0;
+                g_prefix_tok_len = 0;
+            }
+        }
+    }
+    g_eval_start = g_tok_len;
     return g_tok_len;
 }
 
