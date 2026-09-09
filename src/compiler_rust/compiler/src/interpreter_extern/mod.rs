@@ -1324,6 +1324,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
+    insert_simple!("rt_env_vars", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);
     insert_simple!("rt_env_define_var", env_sffi::rt_env_define);
     insert_simple!("rt_env_exists", system::rt_env_exists);
@@ -3318,6 +3319,35 @@ pub(crate) fn call_extern_function_with_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_snapshot_aliases_have_identical_typed_results_and_arity() {
+        let all = EXTERN_DISPATCH.get("rt_env_all").expect("registered rt_env_all");
+        let vars = EXTERN_DISPATCH.get("rt_env_vars").expect("registered rt_env_vars");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let all_value = all(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .expect("rt_env_all snapshot");
+        let vars_value = vars(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .expect("rt_env_vars snapshot");
+        assert_eq!(format!("{all_value:?}"), format!("{vars_value:?}"));
+
+        for handler in [all, vars] {
+            assert!(handler(
+                &[Value::Int(1)],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn loader_memory_extern_family_includes_page_size_alignment_query() {

@@ -1326,6 +1326,7 @@ impl Lowerer {
             Node::Extern(e) => {
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
                 Ok(vec![])
             }

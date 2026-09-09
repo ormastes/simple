@@ -832,7 +832,17 @@ impl Lowerer {
 
     /// Resolve a function alias to its original function name
     pub fn resolve_function_alias(&self, name: &str) -> Option<&str> {
-        self.function_aliases.get(name).map(|s| s.as_str())
+        let mut current = self.function_aliases.get(name)?.as_str();
+        // Re-export facades can introduce multiple alias hops. Follow the
+        // complete chain while bounding malformed cycles fail-closed.
+        for _ in 0..=self.function_aliases.len() {
+            match self.function_aliases.get(current) {
+                Some(next) if next != current => current = next.as_str(),
+                Some(_) => return None,
+                None => return Some(current),
+            }
+        }
+        None
     }
 
     /// Find non-deprecated alternatives for a deprecated type

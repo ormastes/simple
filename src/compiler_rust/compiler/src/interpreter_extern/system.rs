@@ -481,7 +481,10 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// # Returns
 /// * Array of (key, value) tuples
-pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_env_all(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_env_all/rt_env_vars require no arguments"));
+    }
     unsafe {
         let result = sffi_env_all();
         Ok(runtime_to_value(result))
