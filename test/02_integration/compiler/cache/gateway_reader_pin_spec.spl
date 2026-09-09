@@ -4,8 +4,10 @@
 
 use std.spec.{describe, it, expect}
 use std.spec.step
-use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write,
+    thread_sleep, time_now_monotonic_ms}
 use compiler.common.cache_contract.cache_gateway_v1.*
+use compiler.common.cache_contract.errors_v1.{CacheErrorCodeV1}
 use compiler.common.cache_contract.canonical_cache_codec_v1.{
     canonical_cache_encode_envelope_v1, canonical_cache_kind_source_blob_v1
 }
@@ -49,7 +51,7 @@ describe "descriptor-pinned cache gateway":
             object_kind: "source_blob", object_digest: object,
             manifest_digest: manifest), 6).unwrap()
         var subject = gateway(root, catalog, manifest)
-        val pin = subject.begin_direct_read(10).unwrap()
+        val pin = subject.begin_direct_read(10000).unwrap()
         val hit = subject.lookup_verified_action(digest("a"), pin).unwrap()
         expect(hit.present).to_equal(true)
         expect(hit.canonical_bytes).to_equal(envelope)
@@ -70,7 +72,7 @@ describe "descriptor-pinned cache gateway":
             object_kind: "source_blob", object_digest: object,
             manifest_digest: manifest), 6).unwrap()
         var subject = gateway(root, catalog, manifest)
-        val pin = subject.begin_direct_read(10).unwrap()
+        val pin = subject.begin_direct_read(10000).unwrap()
         val forged = DirectReadPinV1(pin_id: "1", process_instance_nonce: pin.process_instance_nonce,
             boot_identity_digest: pin.boot_identity_digest,
             reader_admission_epoch: pin.reader_admission_epoch,
@@ -81,22 +83,45 @@ describe "descriptor-pinned cache gateway":
             namespace_entry_digest: pin.namespace_entry_digest)
         expect(subject.get_verified("source_blob", object,
             CacheLimitsV1(max_bytes: 1024, max_entries: 1), forged).is_err()).to_equal(true)
-        subject.monotonic_now = 110
-        expect(subject.get_verified("source_blob", object,
-            CacheLimitsV1(max_bytes: 1024, max_entries: 1), pin).is_err()).to_equal(true)
-        subject.monotonic_now = 105
+        val short_pin = subject.begin_direct_read(5).unwrap()
+        var observed_now = time_now_monotonic_ms()
+        var wait_polls = 0
+        while observed_now < short_pin.expires_monotonic and wait_polls < 2000:
+            thread_sleep(1)
+            observed_now = time_now_monotonic_ms()
+            wait_polls = wait_polls + 1
+        expect(observed_now >= short_pin.expires_monotonic).to_equal(true)
+        val expired = subject.get_verified("source_blob", object,
+            CacheLimitsV1(max_bytes: 1024, max_entries: 1), short_pin)
+        expect(expired.is_err()).to_equal(true)
+        expect(expired.unwrap_err().code).to_equal(CacheErrorCodeV1.CachePinExpired)
+
+        val generation_pin = subject.begin_direct_read(10000).unwrap()
         subject.journal_generation = 7
-        expect(subject.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)
+        val stale_generation = subject.lookup_verified_action(digest("a"), generation_pin)
+        expect(stale_generation.is_err()).to_equal(true)
+        expect(stale_generation.unwrap_err().code).to_equal(CacheErrorCodeV1.CachePinExpired)
         subject.journal_generation = 6
+        val ordinary = subject.begin_direct_read(10000).unwrap()
+        expect(subject.release_direct_read_pin(ordinary).is_ok()).to_equal(true)
+        val regression_subject = gateway(root, catalog, manifest)
+        regression_subject.monotonic_now = time_now_monotonic_ms() + 1000000
+        val regression = regression_subject.begin_direct_read(10000)
+        expect(regression.is_err()).to_equal(true)
+        expect(regression.unwrap_err().code).to_equal(CacheErrorCodeV1.CacheUnavailable)
         val host_root = cache_host_open_root_v1(root)
         expect(cache_host_reader_gc_begin_v1(host_root, 8)).to_equal(9)
-        expect(subject.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)
+        val gc_refused = subject.lookup_verified_action(digest("a"), generation_pin)
+        expect(gc_refused.is_err()).to_equal(true)
+        expect(gc_refused.unwrap_err().code).to_equal(CacheErrorCodeV1.CachePinExpired)
         expect(cache_host_reader_gc_end_v1(host_root, 9, 7)).to_equal(10)
         _ = cache_host_close_root_v1(host_root)
+        # RED gap: no public fault-injection surface can make the trusted
+        # monotonic provider return a negative value without a fake selector.
         expect(file_write(verified_cas_object_path_v1(root, "source_blob", object).unwrap(), "00")).to_equal(true)
         subject.reader_admission_epoch = 10
         subject.journal_generation = 7
-        val fresh = subject.begin_direct_read(10).unwrap()
+        val fresh = subject.begin_direct_read(10000).unwrap()
         expect(subject.get_verified("source_blob", object,
             CacheLimitsV1(max_bytes: 1024, max_entries: 1), fresh).is_err()).to_equal(true)
         dir_remove_all(root)
