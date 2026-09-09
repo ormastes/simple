@@ -1,0 +1,51 @@
+#!/bin/sh
+# Native Windows Cargo launch/status ownership. Other host commands retain the
+# existing run_logged route; this adapter is bootstrap host tooling only.
+bootstrap_logged_windows_cargo() (
+    [ "$#" -ge 5 ] || return 126
+    blwc_root=$1
+    blwc_log=$2
+    shift 2
+    [ "$1" = env ] && [ "$2" = -i ] || return 126
+    blwc_python=$(command -v python3 || command -v python) || return 126
+    blwc_helper=$blwc_root/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    blwc_helper_sha=$(sha256sum "$blwc_helper" | awk '{print $1}') || return 126
+    blwc_parent=$(CDPATH= cd -- "${blwc_log%/*}" && pwd -P) || return 126
+    # MSYS process IDs can recur across independent sessions. A fresh capture
+    # directory retains previous receipts without making a retry collide.
+    blwc_parent=$(mktemp -d "$blwc_parent/${blwc_log##*/}.process.XXXXXX") || return 126
+    blwc_leaf=command
+    blwc_status=0
+    "$blwc_python" "$blwc_helper" --command-environment=clean-prefix \
+        --helper-sha256="$blwc_helper_sha" --output-parent="$blwc_parent" \
+        --log-leaf="$blwc_leaf.log" --receipt-leaf="$blwc_leaf.env" \
+        --max-bytes=67108864 --timeout-seconds=7200 --term-grace-seconds=0 \
+        -- "$@" || blwc_status=$?
+    # Retain both the capture and the original human-readable build log.
+    [ ! -f "$blwc_parent/$blwc_leaf.log" ] || cat "$blwc_parent/$blwc_leaf.log" >>"$blwc_log"
+    printf 'process_receipt=%s\n' "$blwc_parent/$blwc_leaf.env" >>"$blwc_log"
+    if [ ! -f "$blwc_parent/$blwc_leaf.env" ]; then
+        echo 'bootstrap-native-cargo-error: missing native process receipt' >&2
+        return 126
+    fi
+    blwc_recorded_status=$(sed -n 's/^raw_status=//p' "$blwc_parent/$blwc_leaf.env")
+    blwc_native_status=$(sed -n 's/^native_exit_status=//p' "$blwc_parent/$blwc_leaf.env")
+    blwc_recorded_sha=$(sed -n 's/^helper_sha256=//p' "$blwc_parent/$blwc_leaf.env")
+    [ "$blwc_recorded_status" = "$blwc_status" ] &&
+        [ "$blwc_recorded_sha" = "$blwc_helper_sha" ] &&
+        [ "$(sed -n 's/^schema=//p' "$blwc_parent/$blwc_leaf.env")" = simple-bounded-process-log-v1 ] &&
+        [ "$(sed -n 's/^status=//p' "$blwc_parent/$blwc_leaf.env")" = complete ] &&
+        [ "$(sed -n 's/^process_group=//p' "$blwc_parent/$blwc_leaf.env")" = windows-job ] &&
+        [ "$(sed -n 's/^command_environment=//p' "$blwc_parent/$blwc_leaf.env")" = clean-prefix ] &&
+        [ "$(sed -n 's/^log_sha256=//p' "$blwc_parent/$blwc_leaf.env")" = \
+            "$(sha256sum "$blwc_parent/$blwc_leaf.log" | awk '{print $1}')" ] || {
+        echo 'bootstrap-native-cargo-error: native process receipt mismatch' >&2
+        return 126
+    }
+    if [ "$blwc_status" -eq 0 ]; then
+        [ "$blwc_native_status" = 0 ] &&
+            [ "$(sed -n 's/^reason=//p' "$blwc_parent/$blwc_leaf.env")" = child-exit ] || return 126
+    fi
+    printf 'native_process_status=%s shell_status=%s\n' "$blwc_native_status" "$blwc_status" >>"$blwc_log"
+    return "$blwc_status"
+)

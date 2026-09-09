@@ -682,13 +682,8 @@ bootstrap_stage_sanity() (
   frontend0_receipt="$evidence.frontend-bootstrap-0.status.env"
   frontend1_log="$evidence.frontend-bootstrap-1.log"
   frontend1_receipt="$evidence.frontend-bootstrap-1.status.env"
-  frontend_owner_pid=$(perl -e 'print getppid') || return 1
-  exec 6<"${frontend0_log%/*}" 7<"$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
-      8<"$(command -v perl)" || return 1
-  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
-  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
-  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
-  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  candidate_frontend_capture_setup "${frontend0_log%/*}" || return 1
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   rm -f "$frontend_log" "$frontend0_log" "$frontend0_receipt" \
     "$frontend1_log" "$frontend1_receipt"
@@ -704,9 +699,9 @@ bootstrap_stage_sanity() (
   frontend_status=0
   CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend0_log" \
-    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend0_receipt##*/}" \
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_receipt##*/}" \
     candidate_frontend_smoke "$candidate_sanity" >"$frontend_log_authority" 2>&1 || frontend_status=$?
   frontend_bootstrap_status=0
   frontend_bootstrap_ran=false
@@ -714,9 +709,9 @@ bootstrap_stage_sanity() (
     frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend1_log" \
-      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend1_receipt##*/}" \
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_receipt##*/}" \
       candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log_authority" 2>&1 || \
       frontend_bootstrap_status=$?
     frontend_status=$frontend_bootstrap_status

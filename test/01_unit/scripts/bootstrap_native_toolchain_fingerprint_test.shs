@@ -1,0 +1,79 @@
+#!/bin/sh
+# Exercise the production native fingerprint block without compiler-tree hashing.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-fingerprint.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+case "$fixture" in /*/simple-native-fingerprint.*) ;; *) exit 1 ;; esac
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/bin"
+awk '/^        bootstrap_stage3_seed_trace resolve-native-toolchain$/ { active=1 }
+     active { print }
+     /^        bootstrap_stage3_seed_trace finalize-records$/ { exit }' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >"$fixture/native-block.sh"
+[ -s "$fixture/native-block.sh" ]
+cat >"$fixture/bin/gcc" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = --version ] || exit 91
+if [ -e "${0%/*}/cc-fail" ]; then
+    printf 'fixture compiler version unsupported\n' >&2
+    exit 51
+fi
+printf 'fixture GCC version\n'
+EOF
+cat >"$fixture/bin/llvm-config" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 1 ] || exit 92
+printf '%s\n' "$1" >>"${0%/*}/llvm.calls"
+if [ -e "${0%/*}/llvm-fail" ] && [ "$(cat "${0%/*}/llvm-fail")" = "$1" ]; then
+    printf 'invalid metadata\n'
+    printf 'fixture LLVM metadata fault\n' >&2
+    exit 52
+fi
+case "$1" in
+    --version) printf '23.1.0\n' ;;
+    --prefix) printf '/fixture/llvm\n' ;;
+    *) exit 93 ;;
+esac
+EOF
+chmod +x "$fixture/bin/gcc" "$fixture/bin/llvm-config"
+run_block() (
+    PATH="$fixture/bin:$PATH"
+    CC_x86_64_pc_windows_gnu="$fixture/bin/gcc"
+    export PATH CC_x86_64_pc_windows_gnu
+    bootstrap_stage3_seed_target=x86_64-pc-windows-gnu
+    bootstrap_stage3_seed_tmp="$fixture/$1"
+    mkdir -p "$bootstrap_stage3_seed_tmp"
+    bootstrap_stage3_seed_records="$bootstrap_stage3_seed_tmp/records"
+    : >"$bootstrap_stage3_seed_records"
+    bootstrap_stage3_seed_trace() { printf 'fingerprint-step=%s\n' "$1" >&2; }
+    . "$fixture/native-block.sh"
+)
+run_block success >"$fixture/success.stdout" 2>"$fixture/success.stderr"
+grep -Fx 'cc-version-status=0' "$fixture/success/records" >/dev/null
+grep -Fx 'llvm-config-version=23.1.0' "$fixture/success/records" >/dev/null
+grep -Fx 'llvm-config-prefix=/fixture/llvm' "$fixture/success/records" >/dev/null
+grep -Fx 'fingerprint-step=finalize-records' "$fixture/success.stderr" >/dev/null
+touch "$fixture/bin/cc-fail"
+run_block cc-failure >"$fixture/cc-failure.stdout" 2>"$fixture/cc-failure.stderr"
+grep -Fx 'cc-version-status=51' "$fixture/cc-failure/records" >/dev/null
+grep -Fx 'fixture compiler version unsupported' "$fixture/cc-failure/records" >/dev/null
+grep -Fx 'fingerprint-step=native-cc-version-status=51' "$fixture/cc-failure.stderr" >/dev/null
+rm -f "$fixture/bin/cc-fail"
+for query in version prefix; do
+    printf '%s\n' "--$query" >"$fixture/bin/llvm-fail"
+    : >"$fixture/bin/llvm.calls"
+    if run_block "llvm-$query-failure" >"$fixture/$query.stdout" 2>"$fixture/$query.stderr"; then
+        echo "FAIL: LLVM $query failure admitted" >&2
+        exit 1
+    fi
+    [ "$(grep -c -- "^--$query$" "$fixture/bin/llvm.calls")" -eq 2 ]
+    [ ! -s "$fixture/$query.stdout" ]
+    grep -Fx "bootstrap-native-metadata-probe=llvm-config-$query attempt=1 shell-status=52" "$fixture/$query.stderr" >/dev/null
+    grep -Fx "bootstrap-native-metadata-probe=llvm-config-$query attempt=2 shell-status=52" "$fixture/$query.stderr" >/dev/null
+    [ "$(grep -c '^fixture LLVM metadata fault$' "$fixture/$query.stderr")" -eq 2 ]
+    if grep -q '^fingerprint-step=finalize-records$' "$fixture/$query.stderr"; then exit 1; fi
+    if grep -q 'invalid metadata' "$fixture/llvm-$query-failure/records"; then exit 1; fi
+done
+printf 'PASS: native fingerprint preserves C version status and rejects LLVM version/prefix faults with bounded exact-command evidence\n'

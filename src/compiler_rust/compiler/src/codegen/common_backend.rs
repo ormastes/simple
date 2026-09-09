@@ -15,7 +15,7 @@ use cranelift_module::{Linkage, Module};
 use target_lexicon::Triple;
 use thiserror::Error;
 
-use simple_common::target::{Target, TargetArch, TargetCpu};
+use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
@@ -1772,7 +1772,7 @@ impl<M: Module> CodegenBackend<M> {
             let is_local = is_jit_module || local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:
-            // - Local globals: Preemptible + initialized data (if available)
+            // - Local globals: target-appropriate owner linkage + initialized data
             // - Imported globals: Import linkage, resolve symbol via use_map/import_map
             if !is_local {
                 if trace_global {
@@ -1820,7 +1820,17 @@ impl<M: Module> CodegenBackend<M> {
                     self.global_ids.insert(resolved_name, data_id);
                 }
             } else {
-                // Local global: define with Preemptible linkage.
+                // COFF data definitions need an ordinary external symbol. The
+                // object backend's weak definitions do not acquire PE base
+                // relocations for their .refptr slots under GNU ld, leaving
+                // preferred-image addresses behind when Windows applies ASLR.
+                // Imported globals still use Import above, so the defining
+                // module remains the single owner of each mangled data slot.
+                let linkage = if self.target.os == TargetOS::Windows {
+                    cranelift_module::Linkage::Export
+                } else {
+                    cranelift_module::Linkage::Preemptible
+                };
                 let local_symbol = self.mangle_name(name);
                 let needs_runtime_init = runtime_init_globals.contains(name);
                 let writable = *is_mutable || needs_runtime_init;
@@ -1832,7 +1842,7 @@ impl<M: Module> CodegenBackend<M> {
                 }
                 let data_id = self
                     .module
-                    .declare_data(&local_symbol, cranelift_module::Linkage::Preemptible, writable, false)
+                    .declare_data(&local_symbol, linkage, writable, false)
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();

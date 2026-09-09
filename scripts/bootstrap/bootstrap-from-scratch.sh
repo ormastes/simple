@@ -231,7 +231,7 @@ Options:
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
   --jobs=<n|full|half|min|auto>
-                     Native build workers (default: half CPUs locally, 2 on GitHub Actions)
+                     Native build workers (default: all detected available CPUs)
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
@@ -1252,73 +1252,17 @@ k1_composition_sha256_before=$(shasum -a 256 "${k1_composition_file}" | awk '{pr
 SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}
 export SIMPLE_K1_COMPOSITION_SHA256_BEFORE
 
-host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)
-case "${host_cpus}" in
-  ''|*[!0-9]*) host_cpus=2 ;;
-esac
-case "${jobs}" in
-  ""|auto)
-    jobs=""
-    ;;
-  full)
-    jobs="${host_cpus}"
-    ;;
-  half)
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-    ;;
-  min|minimal|minimum)
-    jobs=1
-    ;;
-esac
-if [ -z "${jobs}" ]; then
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    jobs=2
-  elif [ "${execution_profile}" = "clean-release" ]; then
-    # A release proof is intentionally full-resource: it must not inherit the
-    # conservative incremental scheduler used for developer iteration.
-    jobs="${host_cpus}"
-  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
-    jobs="${host_cpus}"
-  else
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-  fi
-fi
-case "${jobs}" in
-  ''|*[!0-9]*|0)
-    echo "error: --jobs must be a positive integer" >&2
-    exit 1
-    ;;
-esac
-. "${repo_root}/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
-jobs_cpu_derived="${jobs}"
-jobs=$(bootstrap_build_jobs_memory_clamp "${jobs}")
-if [ "${jobs}" != "${jobs_cpu_derived}" ]; then
-  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}; clamped from ${jobs_cpu_derived} by available memory)"
-else
-  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
-fi
-selfhost_jobs="${jobs}"
-if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
-  selfhost_jobs=2
-fi
-# Opt-in override of the self-host thread count (stage 2/3/4 recompiles);
-# unset keeps the profile-derived value above.  `full` = host CPUs.
-case "${SIMPLE_NATIVE_BUILD_THREADS:-}" in
-  '') ;;
-  full) selfhost_jobs="${host_cpus}" ;;
-  *[!0-9]*|0)
-    echo "error: SIMPLE_NATIVE_BUILD_THREADS must be a positive integer or 'full'" >&2
-    exit 1
-    ;;
-  *) selfhost_jobs="${SIMPLE_NATIVE_BUILD_THREADS}" ;;
-esac
+. "${bootstrap_entry_dir}/bootstrap-jobs.shs"
+bootstrap_select_jobs "${jobs}" "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source})"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
+{
+  echo schema=simple-bootstrap-selected-jobs-v1
+  echo host_cpus="${host_cpus}"
+  echo jobs="${jobs}"
+  echo selfhost_jobs="${selfhost_jobs}"
+  echo source="${job_source}"
+} >"${output_dir}/selected-build-jobs.env"
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
@@ -1527,6 +1471,8 @@ bootstrap_stage2_single_timeout_cache_retry_eligible() {
   ' "${bsscre_log}"
 }
 
+. "${repo_root}/scripts/bootstrap/bootstrap-logged-process.shs"
+
 run_logged() {
   label=$1
   shift
@@ -1539,7 +1485,12 @@ run_logged() {
   } >"${log_file}"
 
   set +e
-  "$@" >>"${log_file}" 2>&1
+  case "${os:-}:${label}" in
+    windows:rust-seed-build|windows:rust-native-all-build|windows:rust-runtime-nolto-build|windows:rust-compiler-backfill-build)
+      bootstrap_logged_windows_cargo "${repo_root}" "${log_file}" "$@" >>"${log_file}" 2>&1
+      ;;
+    *) "$@" >>"${log_file}" 2>&1 ;;
+  esac
   status=$?
   set -e
 
@@ -1560,7 +1511,7 @@ COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
-NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
+NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-0}   # Explicit opt-in; default uses selected parallel workers.
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1721,20 +1672,14 @@ bootstrap_stage_sanity() (
   unsupported_status=$?
   set -e
   frontend_status=0
-  frontend_owner_pid=$(perl -e 'print getppid') || return 1
-  exec 6<"${frontend_bootstrap0_log%/*}" \
-    7<"${sanity_repo_root}/scripts/bootstrap/run-process-group-bounded-log.pl" \
-    8<"$(command -v perl)" || return 1
-  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
-  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
-  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
-  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   CANDIDATE_FRONTEND_BACKEND="${backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
-    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_status_path##*/}" \
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_status_path##*/}" \
     candidate_frontend_smoke "${candidate}" >"${frontend_log_authority}" 2>&1 ||
     frontend_status=$?
   # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
@@ -1749,9 +1694,9 @@ bootstrap_stage_sanity() (
     frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="${backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
-      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_status_path##*/}" \
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_status_path##*/}" \
       candidate_frontend_smoke "${candidate}" >>"${frontend_log_authority}" 2>&1 ||
       frontend_bootstrap_status=$?
     frontend_status=${frontend_bootstrap_status}
@@ -1975,6 +1920,9 @@ fi
 # churn. Any doubt (missing stamp, hash failure → empty mismatch) rebuilds: a
 # stale seed would silently miscompile, which is worse than a slow build.
 seed_stamp="${seed_bin}.inputs.sha256"
+seed_fingerprint_details="${seed_stamp}.details.env"
+seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 seed_fingerprint_tmp="${output_dir}/rust-authority-fingerprint-tmp"
 seed_fingerprint_error_manifest=\
 "${output_dir}/rust-authority-fingerprint-error.manifest"
@@ -1982,6 +1930,10 @@ seed_fingerprint_error=\
 "${output_dir}/rust-authority-fingerprint-error.log"
 seed_inputs_hash() {
   seed_fingerprint_phase=$1
+  # Never overwrite the sidecar bound to the published stamp while deciding
+  # whether that stamp is stale.  Current observations remain separate until
+  # a rebuilt tuple is committed as a new immutable generation.
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="${seed_fingerprint_observation_details}" \
   bootstrap_authority_seed_inputs_fingerprint \
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
@@ -2218,7 +2170,7 @@ run_rust_authority_cargo() {
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" LC_ALL=C LANG=C \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2236,7 +2188,7 @@ run_rust_authority_cargo() {
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" LC_ALL=C LANG=C \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2255,7 +2207,7 @@ run_rust_authority_cargo() {
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2269,7 +2221,7 @@ run_rust_authority_cargo() {
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2355,6 +2307,8 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     exit 1
   fi
   seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE="${seed_fingerprint_observation_details}"
+  export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
   rust_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "${rust_generation_nonce}" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -2398,6 +2352,9 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
   compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
   seed_stamp="${seed_bin}.inputs.sha256"
+  seed_fingerprint_details="${seed_stamp}.details.env"
+  seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
