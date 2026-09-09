@@ -28,6 +28,28 @@ producer streams, and runtime or toolchain receipts. This prevents stale,
 copied, linked, mutated, or mutable pointer input from becoming performance
 evidence.
 
+The manifest is provenance-bound as well as artifact-bound. It records
+`source_policy=current-git-tree-v1`, the exact Git commit and committed tree,
+tracked dirty state plus the exact tracked-diff digest, a calendar-valid UTC
+start time, a per-reservation producer nonce, and SHA-256 values for
+this wrapper plus both sourced helper files. It also records the complete
+workload/configuration inputs, line-safe explicit command argc/argv entries and their digest,
+and a self-digest over all preceding manifest lines. Aggregation recomputes
+those values against the current repository and rejects missing, malformed,
+stale, or tampered provenance before row admission. A deliberately declared
+cross-revision candidate is accepted only as analysis metadata and is emitted
+as `compare_status=skipped` with an explicit provenance reason; it cannot become
+a current-tree performance pass by omission.
+
+Aggregation takes the comparison budget from the immutable manifest rather
+than the caller environment. It rechecks exact Git state before a live verdict,
+so a checkout or tracked-source change during a run is downgraded instead of
+being published as current evidence. The numbered argc/argv representation can
+be extended with a `chrome_command_*` leg without parsing or evaluating a shell
+command string. Aggregate mode snapshots the manifest and verdict-bearing rows
+into a private directory before parsing so concurrent mutation cannot change
+the bytes after validation.
+
 Each live run retains C and Simple stdout/stderr, runtime receipts, the C
 toolchain receipt, and both framebuffer paths, including explicit empty raw
 streams for a leg skipped before launch. Receipt rows bind source,
@@ -43,3 +65,7 @@ runs, collision refusal, stale/latest rejection, and direct-run aggregation:
 vulkan_2d_c_evidence_contract=pass
 vulkan_2d_c_immutable_runs_contract=pass
 ```
+
+The immutable-run contract additionally exercises required provenance fields,
+no-eval/no-backtick command construction, cross-revision downgrade semantics,
+and fail-closed manifest tamper detection.

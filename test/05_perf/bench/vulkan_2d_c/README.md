@@ -72,6 +72,24 @@ The ratio is Simple p95 divided by C p95 with the selected 2.0x ceiling. Both
 rows must already be `admitted`; raw measured output is intentionally reported
 as `measured-unadmitted` until the common receipt validator accepts it. The live
 path refuses Rust bootstrap-seed binaries.
+
+The run manifest is also provenance-bound. It records the exact Git commit and
+committed tree, tracked dirty state and exact tracked-diff digest, a validated
+UTC start timestamp, unique reservation nonce, the
+wrapper and both sourced helper SHA-256 digests, the complete workload/config
+hash inputs, and line-safe argc plus one-argument-per-line argv and an argv
+digest. The
+manifest has a self-digest; aggregation verifies every bound file and recomputes
+the current-tree policy before accepting rows. A candidate from another source
+revision is retained for analysis but returns
+`compare_status=skipped` with
+`compare_reason=provenance-cross-revision:source-revision-mismatch` (or the
+declared-revision equivalent), never a silent performance pass. Commands are
+executed through explicit argv arrays; no eval or backtick expansion is part
+of the evidence path.
+Aggregate mode uses the recorded budget rather than a caller override. Future
+Simple-web/Chrome legs use the same numbered `*_command_argc`,
+`*_command_argv_N`, and digest convention; no shell command string is decoded.
 The aggregate verdict logic is executable-tested by
 `test/03_system/check/engine2d_vulkan_2d_perf_contract_spec.spl`.
 

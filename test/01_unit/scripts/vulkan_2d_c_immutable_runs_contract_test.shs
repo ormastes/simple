@@ -21,6 +21,7 @@ done
 # The private stage doubles as the atomic run-id reservation and is mode 0700.
 perf_immutable_prepare_run "$TMP_ROOT/helper" reserved
 helper_stage=$PERF_IMMUTABLE_STAGE_DIR
+first_nonce=$PERF_IMMUTABLE_RUN_NONCE
 if stat -f '%Lp' "$helper_stage" >/dev/null 2>&1; then
     helper_mode=$(stat -f '%Lp' "$helper_stage")
 else
@@ -35,6 +36,13 @@ else
 fi
 perf_immutable_remove_stage "$helper_stage"
 [ ! -e "$helper_stage" ] && [ ! -L "$helper_stage" ] || exit 1
+perf_immutable_prepare_run "$TMP_ROOT/helper" distinct-nonce
+second_nonce=$PERF_IMMUTABLE_RUN_NONCE
+[ "$first_nonce" != "$second_nonce" ] || {
+    echo "sequential immutable preparations reused a producer nonce" >&2
+    exit 1
+}
+perf_immutable_remove_stage "$PERF_IMMUTABLE_STAGE_DIR"
 
 # Simulate a final path appearing after reservation: publication must neither
 # overwrite it nor move the private stage beneath it.
@@ -102,6 +110,94 @@ run_skip second
 [ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/runs/second/evidence.env")" = second ] || exit 1
 [ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/latest")" = second ] || exit 1
 [ "$(sed -n 's/^authoritative=//p' "$TMP_ROOT/out/latest")" = false ] || exit 1
+
+manifest="$TMP_ROOT/out/runs/first/run.manifest.env"
+for required_manifest_field in \
+    source_policy git_commit git_tree git_dirty git_tracked_diff_sha256 \
+    run_started_utc run_started_epoch run_nonce \
+    wrapper_path wrapper_sha256 immutable_run_helper_path immutable_run_helper_sha256 \
+    admission_helper_path admission_helper_sha256 config_sha256 fixture_sha256 \
+    shader_source_sha256 c_command_argc c_command_argv_0 c_command_argv_sha256 \
+    simple_command_argc simple_command_argv_0 simple_command_argv_sha256 manifest_digest_sha256; do
+    grep -F "${required_manifest_field}=" "$manifest" >/dev/null || {
+        echo "required provenance field missing: $required_manifest_field" >&2
+        exit 1
+    }
+done
+[ "$(sed -n 's/^c_command_argc=//p' "$manifest")" = 7 ] || exit 1
+[ "$(sed -n 's/^simple_command_argc=//p' "$manifest")" = 3 ] || exit 1
+if grep -Eq '(^|[[:space:]])eval([[:space:]]|$)|`' "$WRAPPER"; then
+    echo "wrapper command contract contains eval or backticks" >&2
+    exit 1
+fi
+
+# A declared cross-revision candidate remains usable for forensic comparison,
+# but aggregation must expose it as analysis-only rather than accepting it as
+# current-tree performance evidence.  Recompute the manifest digest so this
+# is a source-policy mismatch, not a malformed/tampered manifest.
+run_skip cross-revision
+cross_manifest="$TMP_ROOT/out/runs/cross-revision/run.manifest.env"
+cross_tmp="$TMP_ROOT/cross.manifest.tmp"
+sed 's/^git_commit=.*/git_commit=0000000000000000000000000000000000000000/' "$cross_manifest" |
+    sed '/^manifest_digest_sha256=/d' >"$cross_tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+    cross_digest=$(sha256sum "$cross_tmp" | awk '{print $1}')
+else
+    cross_digest=$(shasum -a 256 "$cross_tmp" | awk '{print $1}')
+fi
+printf 'manifest_digest_sha256=%s\n' "$cross_digest" >>"$cross_tmp"
+mv "$cross_tmp" "$cross_manifest"
+sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/cross-revision" >"$TMP_ROOT/cross.stdout"
+grep -F 'compare_status=skipped' "$TMP_ROOT/cross.stdout" >/dev/null || exit 1
+grep -F 'compare_reason=provenance-cross-revision:source-revision-mismatch' "$TMP_ROOT/cross.stdout" >/dev/null || exit 1
+
+# Aggregation uses the immutable run's budget, never a caller override.
+VK2D_BUDGET_X1000=999999 sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/first" >"$TMP_ROOT/budget.stdout"
+grep -F 'compare_budget_x1000=2000' "$TMP_ROOT/budget.stdout" >/dev/null || exit 1
+
+# Manifest scalar/argv fields are line-safe; a caller cannot inject records
+# through a newline-bearing executable path.
+newline_simple_bin=$(printf 'bad\npath')
+if SIMPLE_BIN="$newline_simple_bin" VK2D_OUT_DIR="$TMP_ROOT/out" VK2D_RUN_ID=newline-argv \
+    VK_ICD_FILENAMES="$TMP_ROOT/no-such-vulkan-icd.json" \
+    sh "$WRAPPER" >"$TMP_ROOT/newline.stdout" 2>"$TMP_ROOT/newline.stderr"; then
+    echo "newline-bearing command argv was accepted" >&2
+    exit 1
+fi
+grep -F 'manifest path contains a newline' "$TMP_ROOT/newline.stderr" >/dev/null || exit 1
+[ ! -e "$TMP_ROOT/out/runs/newline-argv" ] || exit 1
+
+# A calendar-invalid value is not accepted merely because its shape resembles
+# an RFC 3339 UTC timestamp, even with a recomputed manifest digest.
+run_skip invalid-date
+invalid_date_manifest="$TMP_ROOT/out/runs/invalid-date/run.manifest.env"
+invalid_date_tmp="$TMP_ROOT/invalid-date.manifest.tmp"
+sed 's/^run_started_utc=.*/run_started_utc=2026-99-99T99:99:99Z/' "$invalid_date_manifest" |
+    sed '/^manifest_digest_sha256=/d' >"$invalid_date_tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+    invalid_date_digest=$(sha256sum "$invalid_date_tmp" | awk '{print $1}')
+else
+    invalid_date_digest=$(shasum -a 256 "$invalid_date_tmp" | awk '{print $1}')
+fi
+printf 'manifest_digest_sha256=%s\n' "$invalid_date_digest" >>"$invalid_date_tmp"
+mv "$invalid_date_tmp" "$invalid_date_manifest"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/invalid-date" >"$TMP_ROOT/invalid-date.stdout" 2>"$TMP_ROOT/invalid-date.stderr"; then
+    echo "calendar-invalid provenance timestamp was accepted" >&2
+    exit 1
+fi
+grep -F 'invalid immutable run provenance' "$TMP_ROOT/invalid-date.stderr" >/dev/null || exit 1
+
+# A provenance edit without a matching manifest digest is tampering, not a
+# candidate revision, and must fail closed before aggregate admission.
+run_skip provenance-tamper
+tampered_manifest="$TMP_ROOT/out/runs/provenance-tamper/run.manifest.env"
+sed -i.bak 's/^git_tree=.*/git_tree=0000000000000000000000000000000000000000/' "$tampered_manifest"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/provenance-tamper" >"$TMP_ROOT/provenance-tamper.stdout" 2>"$TMP_ROOT/provenance-tamper.stderr"; then
+    echo "tampered provenance manifest was accepted" >&2
+    exit 1
+fi
+grep -F 'invalid immutable run provenance' "$TMP_ROOT/provenance-tamper.stderr" >/dev/null || exit 1
+rm -f "$tampered_manifest.bak"
 
 if VK2D_OUT_DIR="$TMP_ROOT/out" VK2D_RUN_ID=first \
     VK_ICD_FILENAMES="$TMP_ROOT/no-such-vulkan-icd.json" \
