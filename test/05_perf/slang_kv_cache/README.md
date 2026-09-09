@@ -18,6 +18,9 @@ Optional inputs are `SIMPLE_BIN`, `SLANG_KV_LIB`, `SLANG_KV_TOKENS`,
 `SLANG_KV_THREADS` (default 1), `SLANG_KV_N_CTX` (default 4096), and
 `SLANG_KV_EVIDENCE_DIR`. The output directory retains a TSV manifest, raw GNU
 `time -v`/stdout/stderr receipts, a TSV summary, and a Markdown summary.
+`SLANG_KV_N_CTX` must be divisible by 64; the physical pool uses exactly
+`n_ctx / 64` pages so its provider context does not silently expand beyond the
+matched snapshot context.
 
 The harness fails closed. Physical samples only pass when the runtime reports
 `physical_pages`; a fallback to snapshot is not benchmark evidence. A summary
