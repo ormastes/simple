@@ -30,9 +30,20 @@ candidate_frontend_executable_path() {
     esac
 }
 
-candidate_frontend_hash_file() {
-    sha256sum -- "$1" | awk '{ print $1 }'
-}
+candidate_frontend_hash_file() (
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        candidate_hash_output=$(sha256sum -- "$1") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        candidate_hash_output=$(shasum -a 256 -- "$1") || return 1
+    else
+        return 126
+    fi
+    candidate_hash_digest=${candidate_hash_output%% *}
+    [ "${#candidate_hash_digest}" -eq 64 ] || return 126
+    case "$candidate_hash_digest" in *[!0-9a-f]*) return 126 ;; esac
+    printf '%s\n' "$candidate_hash_digest"
+)
 candidate_frontend_procfd() {
     expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null
 }
@@ -54,7 +65,17 @@ candidate_frontend_capture_setup() {
             [ ! -L "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" ] || return 126
         BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR") || return 126
         ;;
-      *)
+      Darwin)
+        # Darwin exposes inherited files through /dev/fd, but cannot resolve
+        # directory children there. Keep display/status paths physical; the
+        # collector duplicates fd 6 and publishes relative to that held dir.
+        CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-fd
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+        BOOTSTRAP_STAGE3_DARWIN_PERL=$(command -v perl) || return 126
+        exec 6<"$CANDIDATE_FRONTEND_CAPTURE_PARENT" \
+            7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" || return 126
+        ;;
+      Linux)
         CANDIDATE_FRONTEND_CAPTURE_KIND=procfd
         frontend_owner_pid=$(perl -e 'print getppid') || return 126
         exec 6<"$1" 7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" \
@@ -64,11 +85,13 @@ candidate_frontend_capture_setup() {
         CANDIDATE_FRONTEND_CAPTURE_PARENT=/proc/$frontend_owner_pid/fd/6
         export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
         ;;
+      *) return 126 ;;
     esac
 }
 
 candidate_frontend_capture_leaf() {
-    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ] ||
+        [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-fd ]; then
         [ "${1%/*}" = "$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 1
         case "${1##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
     else
@@ -80,6 +103,17 @@ candidate_frontend_collect() {
     if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
         "$BOOTSTRAP_STAGE3_WINDOWS_PYTHON" "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" \
             --helper-sha256="$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" "$@"
+    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-fd ]; then
+        [ "$1" = "--output-parent=$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 126
+        shift
+        # /dev/fd duplicates the open description (including its offset).
+        # Rewind the held helper before each probe; otherwise probe two would
+        # execute an empty script and could mistake an old receipt for success.
+        "$BOOTSTRAP_STAGE3_DARWIN_PERL" -e '
+            open my $helper, "<&", 7 or exit 126;
+            seek($helper, 0, 0) or exit 126;
+            exec $^X, "/dev/fd/7", @ARGV or exit 126;
+        ' -- --output-parent=/dev/fd/6 "$@"
     else
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
