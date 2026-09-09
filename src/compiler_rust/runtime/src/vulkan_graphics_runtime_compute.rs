@@ -681,7 +681,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
             return 0;
         }
     };
-    let fence = match Fence::new(device.clone(), false) {
+    let fence = match device.acquire_fence() {
         Ok(fence) => fence,
         Err(e) => {
             device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
@@ -760,7 +760,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
             return 0;
         }
     };
-    let fence = match Fence::new(device.clone(), false) {
+    let fence = match device.acquire_fence() {
         Ok(fence) => fence,
         Err(e) => {
             device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
