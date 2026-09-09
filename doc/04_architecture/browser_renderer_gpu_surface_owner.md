@@ -202,6 +202,28 @@ submission observation. This source review admits a WARN development change
 only: the current general Simple CLI/check worker and real device execution
 remain unavailable, and no runtime or performance PASS is inferred.
 
+### Damage retained across a delayed present
+
+The host asks `DirtyRegion` for one owner-issued prefix value containing its
+epoch and rectangle count before provider entry. Appending a later
+pointer/resource/timer invalidation does not change that epoch. After validating
+the exact provider/presenter and external frame receipts, the host retires only
+the captured prefix, preserving later
+rectangles even if they overlap the older damage. Clear and successful prefix
+retirement advance the epoch; clear-and-readd with identical rectangles and
+duplicate acknowledgement cannot consume the replacement damage. A count not
+issued for the active epoch is rejected rather than retiring an arbitrary
+shorter prefix. Epoch exhaustion rejects capture instead of wrapping. The
+checkpoint is held by the
+host owner and grants no device authority.
+
+This replaces the earlier rectangle-count identity check and whole-set clear
+in the typed present path. It is a production-connected prerequisite for
+REQ-SURFACE-005/006, not an async provider implementation. The software
+HostCompositor-path regression supplies presenter observations as test data;
+live provider release and Vulkan async admission remain pending. See the
+[damage checkpoint report](../09_report/host_present_damage_checkpoint_2026-09-10.md).
+
 ## Provider port required before production connection
 
 Astra's scheduler escalation removed the unused host scheduler candidate after

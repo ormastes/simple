@@ -39,6 +39,23 @@ Device-free provider fixtures test owner control flow only. They must be labeled
 as injected test data and cannot enter `gpu_present_receipt_admitted` production
 evidence or timing collection.
 
+The production host's owner-issued epoch/count damage-prefix prerequisite now
+has focused source specs:
+`test/01_unit/os/compositor/dirty_rect_checkpoint_spec.spl` covers later
+overlapping damage, replay, clear/readd, malformed checkpoints, and epoch
+exhaustion;
+`test/01_unit/os/compositor/host_compositor_pending_damage_spec.spl` enters the
+real software Engine2D render/evidence/acknowledge path. The latter injects only
+presenter sequence observations and cannot establish physical presentation.
+Both remain `TEST_BLOCKED` until an admitted general Pure Simple test runner is
+available. They do not satisfy the bounded async GPU ring or live release gates.
+
+SPipe owner checks must preserve semantic damage identity: rectangle count,
+bounding-box equality, and spatial subtraction cannot prove which input
+revision a present consumed. Hold an older frame, add identical or overlapping
+new damage, then acknowledge the old frame and inspect the pending successor.
+Also clear and re-add at the same count to test stale-checkpoint rejection.
+
 ## Production call-path coverage
 
 Extend `test/02_integration/rendering/hosted_browser_compositor_revision_cache_spec.spl`
