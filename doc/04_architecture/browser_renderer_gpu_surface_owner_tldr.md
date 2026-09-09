@@ -22,3 +22,9 @@ Next: `browser_renderer_gpu_surface_owner.md`,
 `../02_requirements/feature/browser_renderer_gpu_surface_owner.md`,
 `../02_requirements/feature/vulkan_async_compute_submission_ring.md`,
 `../03_plan/sys_test/browser_renderer_gpu_surface_owner.md`.
+
+Current blocker: V2 candidate removed after two Sol cycles and Astra review;
+no real provider/consumer existed, and its capability accepted local identity.
+Repair the managed-buffer SFFI export gap, then the real existing-session and
+presenter boundary. Exact handoff:
+`../09_report/gpu_async_device_port_v2_astra_review_2026-09-09.md`.

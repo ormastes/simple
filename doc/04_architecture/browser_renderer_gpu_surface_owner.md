@@ -335,3 +335,20 @@ The source review/removal does not satisfy these cases. Keep the production
 async and performance gates pending until an admitted Pure Simple runtime and
 actual provider execute them. Do not reopen the same five-file facade task;
 start at this missing port and include its production consumers.
+
+### V2 implementation escalation: concrete missing boundary
+
+The four-file V2 candidate also failed after two Sol cycles. Astra removed it:
+it had no provider implementation or production consumer, its session
+capability accepted caller-supplied identity, and its recording packet carried
+metadata without actual DrawIR commands. The current committed managed-buffer
+facade additionally imports a missing canonical SFFI operation. These are
+implementation defects, not unavailable-runtime evidence gates.
+
+The [Astra V2 review](../09_report/gpu_async_device_port_v2_astra_review_2026-09-09.md)
+defines the minimum real context admission, scoped recording, compute and
+presenter operations, with source paths and an ordered implementation handoff.
+Start with the canonical export gap and actual VulkanSession/provider boundary;
+do not recreate the removed trait/owner/value-test package. Scheduling, DrawIR
+policy and event publication remain Pure Simple. O1 + B/N2 is still selected,
+and none of its pending production or hardware gates is waived.
