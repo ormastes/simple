@@ -72,14 +72,23 @@ inserted `BoxInt` immediately before the raw-i64 `_decode_one` call.
 
 The binder now patches its local slot and match joins ignore arms that
 definitely return. Focused HIR regressions cover both cases. After rebuilding
-the driver, the third real-model run reached `OWNER_STAGE cold_generate` but
-terminated before emitting PASS or a structured owner failure. Per the
-three-cycle cap, no fourth owner run was started; the path remains unqualified.
+the driver, GDB proves transaction `3` now reaches llama with cursor `6`,
+position `6`, and end `7`; all visible admission predicates pass.
+
+Generation completes transactions `2` through `6` with the correct resolved
+commit/decode/abort entry points. The subsequent request cleanup crosses
+`_call1` with `37` in the function-pointer position. `37` is the first
+generation-safe native request handle (`SLANG_REQUEST_MAX_ENTRIES + 1`), proving
+the function-pointer position is overwritten with the second source argument
+before `spl_wffi_call_i64`; the observed shape is consistent with transposition.
+The provider pointer stored in `GgmlBackend` remains intact. The wrappers now
+separate the capability branch and snapshot both scalar arguments before the
+helper call. This source repair awaits a fresh owner-smoke cycle.
 
 ## Required next diagnosis
 
-- In a fresh verification session, capture transaction `3` once more and prove
-  cursor/end/position are `6/7/6`; if they are, diagnose the subsequent
-  termination without changing provider admission rules.
+- In a fresh verification session, prove close/cancel receive the resolved
+  function pointer first and the request handle second, then complete cold,
+  exact-repeat, and prefix-extension generation.
 - Produce the
   five-pair snapshot/physical benchmark evidence.

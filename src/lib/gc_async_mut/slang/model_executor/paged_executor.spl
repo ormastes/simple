@@ -310,11 +310,19 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
         index = index + 1
-    if (physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle,
-                                 retained, 1).is_err() or
-        physical_page_boundary_logits(PAGED_BACKEND!, transaction,
-                                      tokens.len() - 1, tokens.len() - 1).is_err() or
-        physical_page_table_commit(PAGED_BACKEND!, transaction).is_err()):
+    if physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle,
+                                retained, 1).is_err():
+        PAGED_MANAGER.abort_cow(reservation)
+        PAGED_MANAGER.close_request(logical_request)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_boundary_logits(PAGED_BACKEND!, transaction,
+                                     tokens.len() - 1, tokens.len() - 1).is_err():
+        PAGED_MANAGER.abort_cow(reservation)
+        PAGED_MANAGER.close_request(logical_request)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
         PAGED_MANAGER.abort_cow(reservation)
         PAGED_MANAGER.close_request(logical_request)
         _drain_reclaimed_pages()
@@ -427,9 +435,15 @@ fn _decode_one(native_request: GgmlRequest, token: i64,
                 _drain_reclaimed_pages()
                 return Err(PagedExecutorError.ProviderOperationFailed)
             index = index + 1
-        if (physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle, occupied, 1).is_err() or
-            physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err() or
-            physical_page_table_commit(PAGED_BACKEND!, transaction).is_err()):
+        if physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle, occupied, 1).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
             PAGED_MANAGER.abort_cow(reservation)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
@@ -464,9 +478,15 @@ fn _decode_one(native_request: GgmlRequest, token: i64,
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
         index = index + 1
-    if (physical_page_table_push(PAGED_BACKEND!, transaction, new_handle, 0, 1).is_err() or
-        physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err() or
-        physical_page_table_commit(PAGED_BACKEND!, transaction).is_err()):
+    if physical_page_table_push(PAGED_BACKEND!, transaction, new_handle, 0, 1).is_err():
+        PAGED_MANAGER.abort_page(new_page)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err():
+        PAGED_MANAGER.abort_page(new_page)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
         PAGED_MANAGER.abort_page(new_page)
         _drain_reclaimed_pages()
         return Err(PagedExecutorError.ProviderOperationFailed)
