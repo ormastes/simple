@@ -318,7 +318,9 @@ int main(int argc, char** argv) {
     // independently in each language is exactly how the two sides silently
     // diverged (i64 sign-masking vs u64 wraparound), so the table is committed
     // literal data, not a re-derivation.
-    const char* scene_path = getenv("VK2D_SCENES");
+    const char* required_scene_path = getenv("VK2D_SCENES");
+    const char* scene_path = required_scene_path;
+    const char* scene_source = "generated";
     if (!scene_path) scene_path = "scenes.txt";
     FILE* sf = fopen(scene_path, "r");
     if (sf) {
@@ -335,8 +337,16 @@ int main(int argc, char** argv) {
             }
         }
         fclose(sf);
-        if (k > 0) num_rects = k;
+        if (k != num_rects) {
+            fprintf(stderr, "scenes: expected %d rect(s), loaded %d from %s\n",
+                num_rects, k, scene_path);
+            return 1;
+        }
+        scene_source = "table";
         fprintf(stderr, "scenes: loaded %d rect(s) from %s\n", k, scene_path);
+    } else if (required_scene_path) {
+        fprintf(stderr, "scenes: required table unreadable: %s\n", scene_path);
+        return 1;
     }
 
     if (getenv("VK2D_DUMP_RECTS")) {
@@ -362,7 +372,7 @@ int main(int argc, char** argv) {
     }
 
     u64* latency_ns = calloc((size_t)num_frames, sizeof(u64));
-    u64 submit_ns[3] = { 0, 0, 0 };
+    u64 sample_start_ns[3] = { 0, 0, 0 };
     i32 slot_sample[3] = { -1, -1, -1 };
     u64 completion_poll_count = 0;
     u64 t0 = now_ns();
@@ -373,12 +383,12 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "timed fence poll failed\n");
                 return 1;
             }
-            latency_ns[slot_sample[slot]] = now_ns() - submit_ns[slot];
+            latency_ns[slot_sample[slot]] = now_ns() - sample_start_ns[slot];
             vkResetFences(device, 1, &fences[slot]);
         }
+        sample_start_ns[slot] = now_ns();
         record_frame(cmd_buffers[slot], fb_buffer, fb_size, pipeline,
             pipeline_layout, descriptor_set, rects, num_rects, clear_color);
-        submit_ns[slot] = now_ns();
         slot_sample[slot] = frame;
         vkQueueSubmit(queue, 1, &(VkSubmitInfo){
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
@@ -391,7 +401,7 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "final fence poll failed\n");
                 return 1;
             }
-            latency_ns[slot_sample[slot]] = now_ns() - submit_ns[slot];
+            latency_ns[slot_sample[slot]] = now_ns() - sample_start_ns[slot];
         }
     }
     u64 t1 = now_ns();
@@ -461,12 +471,12 @@ int main(int argc, char** argv) {
     vkDestroyDescriptorPool(device, descriptor_pool, NULL);
     vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
     vkDestroyShaderModule(device, shader_module, NULL);
-    vkFreeMemory(device, memory, NULL);
     vkDestroyBuffer(device, fb_buffer, NULL);
+    vkFreeMemory(device, memory, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
-    printf("c-vulkan-2d w=%d h=%d rects=%d warmups=%d samples=%d ring=%d max_frames_in_flight=3 unconditional_submit_wait=false timed_buffer_allocation_count=0 retained_buffer_bytes=%llu teardown_released_bytes=%llu timed_full_frame_upload_count=0 upload_bytes=%llu timed_readback_bytes=0 capture_count=%d capture_readback_bytes=%llu fence_completions=%d completion_polls=%llu cpu_completion_wait_count=0 event_generations=%d damage_area_pixels=%llu device_vendor=%04x device_id=%04x p50_ns=%llu p95_ns=%llu ms=%.1f fps=%.1f checksum=%llu\n",
-        fb_w, fb_h, num_rects, warmup_count, num_frames, ring_size,
+    printf("c-vulkan-2d w=%d h=%d rects=%d warmups=%d samples=%d scene_source=%s ring=%d max_frames_in_flight=3 unconditional_submit_wait=false timed_buffer_allocation_count=0 retained_buffer_bytes=%llu teardown_released_bytes=%llu timed_full_frame_upload_count=0 upload_bytes=%llu timed_readback_bytes=0 capture_count=%d capture_readback_bytes=%llu fence_completions=%d completion_polls=%llu cpu_completion_wait_count=0 event_generations=%d damage_area_pixels=%llu device_vendor=%04x device_id=%04x p50_ns=%llu p95_ns=%llu ms=%.1f fps=%.1f checksum=%llu\n",
+        fb_w, fb_h, num_rects, warmup_count, num_frames, scene_source, ring_size,
         (unsigned long long)mem_reqs.size, (unsigned long long)mem_reqs.size,
         (unsigned long long)num_frames * (unsigned long long)num_rects * sizeof(RectPush),
         do_readback ? 1 : 0, (unsigned long long)(do_readback ? fb_size : 0),

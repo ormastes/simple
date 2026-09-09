@@ -91,6 +91,10 @@ line_value() {
     }'
 }
 
+unsigned_integer() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 simple_binary_is_seed() {
     case "$1" in *compiler_rust*|*bootstrap*|*rust-seed*|*/seed/*|*seed-simple*) return 0 ;; esac
     if command -v strings >/dev/null 2>&1 &&
@@ -205,8 +209,11 @@ fi
 mkdir -p "$OUT_DIR"
 
 c_status=skipped; c_reason=not-attempted; c_p95=0; c_bin="$OUT_DIR/vk2d_bench"
-c_device=; c_checksum=; c_bin_sha=; c_timing_scope=submit-to-fence-p95
+c_device=; c_checksum=; c_bin_sha=; c_timing_scope=draw-plus-submit-to-fence-p95
 c_artifact="$OUT_DIR/c-framebuffer.rgba"; c_artifact_sha=
+c_stdout_raw="$OUT_DIR/c.stdout.raw"; c_stderr_raw="$OUT_DIR/c.stderr.raw"
+c_metrics="$OUT_DIR/c.runtime.env"; c_toolchain="$OUT_DIR/c.toolchain.env"
+c_max_rss_bytes=unavailable
 ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
@@ -217,35 +224,106 @@ elif [ ! -f /opt/homebrew/include/vulkan/vulkan.h ]; then
 elif [ ! -f "$ICD" ]; then
     c_reason=no-vulkan-icd
 else
-    (cd "$OUT_DIR" && glslangValidator -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
-    clang -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
+    c_compiler=$(command -v clang)
+    shader_compiler=$(command -v glslangValidator)
+    c_compiler_sha=$(hash_file "$c_compiler")
+    shader_compiler_sha=$(hash_file "$shader_compiler")
+    perf_admission_valid_sha256 "$c_compiler_sha" || fail "cannot bind C compiler identity"
+    perf_admission_valid_sha256 "$shader_compiler_sha" || fail "cannot bind shader compiler identity"
+    {
+        echo "schema=vulkan-2d-c-toolchain-v1"
+        echo "c_compiler_path=$c_compiler"
+        echo "c_compiler_sha256=$c_compiler_sha"
+        echo "c_compiler_version=$("$c_compiler" --version | sed -n '1p')"
+        echo "c_compiler_flags=-std=c99 -O2 -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan"
+        echo "shader_compiler_path=$shader_compiler"
+        echo "shader_compiler_sha256=$shader_compiler_sha"
+        echo "shader_compiler_version=$("$shader_compiler" --version | sed -n '1p')"
+        echo "shader_compiler_flags=-V"
+    } >"$c_toolchain"
+    (cd "$OUT_DIR" && "$shader_compiler" -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
+    "$c_compiler" -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
         -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o "$c_bin" ||
         fail "C reference build failed (toolchain present but compile broke)"
-    rm -f "$c_artifact"
-    c_all_out=$(cd "$OUT_DIR" && VK_ICD_FILENAMES="$ICD" VK2D_DUMP_FB="$c_artifact" ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS")
-    c_out=$(printf '%s\n' "$c_all_out" | tail -1)
-    c_device=$(printf '%s\n' "$c_all_out" | sed -n 's/^device: //p' | tail -1)
+    rm -f "$c_artifact" "$c_stdout_raw" "$c_stderr_raw"
+    if [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/time ]; then
+        (cd "$OUT_DIR" && /usr/bin/time -l env \
+            VK_ICD_FILENAMES="$ICD" VK2D_SCENES="$BENCH_DIR/scenes.txt" \
+            VK2D_DUMP_FB="$c_artifact" \
+            ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS" \
+            >"$c_stdout_raw" 2>"$c_stderr_raw") || fail "C reference run failed"
+        c_max_rss_bytes=$(LC_ALL=C awk '/maximum resident set size/ { print $1; exit }' "$c_stderr_raw")
+        case "$c_max_rss_bytes" in
+            ''|*[!0-9]*|0) c_max_rss_bytes=unavailable ;;
+        esac
+    else
+        (cd "$OUT_DIR" && env \
+            VK_ICD_FILENAMES="$ICD" VK2D_SCENES="$BENCH_DIR/scenes.txt" \
+            VK2D_DUMP_FB="$c_artifact" \
+            ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS" \
+            >"$c_stdout_raw" 2>"$c_stderr_raw") || fail "C reference run failed"
+    fi
+    c_out=$(tail -1 "$c_stdout_raw")
+    c_device=$(sed -n 's/^device: //p' "$c_stdout_raw" | tail -1)
     case $c_out in
         c-vulkan-2d*p95_ns=*)
+            c_p50_candidate=$(line_value "$c_out" p50_ns)
+            c_p95_candidate=$(line_value "$c_out" p95_ns)
+            c_checksum_candidate=$(line_value "$c_out" checksum)
+            c_polls=$(line_value "$c_out" completion_polls)
+            c_retained=$(line_value "$c_out" retained_buffer_bytes)
+            c_released=$(line_value "$c_out" teardown_released_bytes)
+            c_capture_bytes=$(line_value "$c_out" capture_readback_bytes)
+            c_upload_bytes=$(line_value "$c_out" upload_bytes)
+            c_vendor=$(line_value "$c_out" device_vendor)
+            c_device_id=$(line_value "$c_out" device_id)
+            c_device_lc=$(printf '%s\n' "$c_device" | tr '[:upper:]' '[:lower:]')
+            expected_capture_bytes=$((W * H * 4))
+            expected_upload_bytes=$((FRAMES * RECTS * 28))
+            expected_damage_pixels=$((W * H * FRAMES))
             if [ -z "$c_device" ] || [ -z "$ICD_SHA256" ] ||
+               ! perf_admission_positive_integer "$c_p50_candidate" ||
+               ! perf_admission_positive_integer "$c_p95_candidate" ||
+               [ "$c_p50_candidate" -gt "$c_p95_candidate" ] ||
+               ! unsigned_integer "$c_checksum_candidate" ||
+               ! perf_admission_positive_integer "$c_polls" ||
+               [ "$c_polls" -lt "$FRAMES" ] ||
+               ! perf_admission_positive_integer "$c_retained" ||
+               [ "$c_retained" != "$c_released" ] ||
+               [ "$c_capture_bytes" != "$expected_capture_bytes" ] ||
+               [ "$c_upload_bytes" != "$expected_upload_bytes" ] ||
+               ! perf_admission_positive_integer "$c_max_rss_bytes" ||
+               [ -z "$c_vendor" ] || [ -z "$c_device_id" ] ||
                [ "$(line_value "$c_out" w)" != "$W" ] ||
                [ "$(line_value "$c_out" h)" != "$H" ] ||
                [ "$(line_value "$c_out" rects)" != "$RECTS" ] ||
                [ "$(line_value "$c_out" warmups)" != "$WARMUPS" ] ||
                [ "$(line_value "$c_out" samples)" != "$FRAMES" ] ||
+               [ "$(line_value "$c_out" scene_source)" != table ] ||
                [ "$(line_value "$c_out" ring)" != 3 ] ||
                [ "$(line_value "$c_out" max_frames_in_flight)" != 3 ] ||
                [ "$(line_value "$c_out" unconditional_submit_wait)" != false ] ||
+               [ "$(line_value "$c_out" timed_buffer_allocation_count)" != 0 ] ||
+               [ "$(line_value "$c_out" timed_full_frame_upload_count)" != 0 ] ||
                [ "$(line_value "$c_out" timed_readback_bytes)" != 0 ] ||
                [ "$(line_value "$c_out" capture_count)" != 1 ] ||
-               [ "$(line_value "$c_out" cpu_completion_wait_count)" != 0 ]; then
+               [ "$(line_value "$c_out" fence_completions)" != "$FRAMES" ] ||
+               [ "$(line_value "$c_out" cpu_completion_wait_count)" != 0 ] ||
+               [ "$(line_value "$c_out" event_generations)" != "$FRAMES" ] ||
+               [ "$(line_value "$c_out" damage_area_pixels)" != "$expected_damage_pixels" ]; then
                 c_status=fail; c_reason=invalid-live-contract
+            elif case "$c_vendor:$c_device_id" in *[!0-9A-Fa-f:]*) true ;; *) false ;; esac; then
+                c_status=fail; c_reason=invalid-device-identity
+            elif case "$c_device_lc" in *software*|*swiftshader*|*lavapipe*|*llvmpipe*|*fallback*|*cpu*) true ;; *) false ;; esac; then
+                c_status=fail; c_reason=software-fallback-device
             elif [ ! -s "$c_artifact" ]; then
                 c_status=fail; c_reason=missing-post-timing-capture
+            elif [ "$(wc -c <"$c_artifact" | tr -d '[:space:]')" != "$expected_capture_bytes" ]; then
+                c_status=fail; c_reason=invalid-post-timing-capture-size
             else
                 c_status=measured-unadmitted; c_reason=receipt-needs-common-admission
-                c_p95=$(line_value "$c_out" p95_ns)
-                c_checksum=$(line_value "$c_out" checksum)
+                c_p95=$c_p95_candidate
+                c_checksum=$c_checksum_candidate
                 c_bin_sha=$(hash_file "$c_bin")
                 c_artifact_sha=$(hash_file "$c_artifact")
                 echo "c_line=$c_out"
@@ -363,6 +441,14 @@ fi
     echo "c_checksum=$c_checksum"
     echo "simple_checksum=$simple_checksum"
 } | tee "$OUT_DIR/c.env.raw" >/dev/null
+{
+    echo "schema=vulkan-2d-c-runtime-metrics-v1"
+    echo "c_max_rss_bytes=$c_max_rss_bytes"
+    echo "c_stdout_path=$c_stdout_raw"
+    echo "c_stdout_sha256=$(hash_file "$c_stdout_raw")"
+    echo "c_stderr_path=$c_stderr_raw"
+    echo "c_stderr_sha256=$(hash_file "$c_stderr_raw")"
+} >"$c_metrics"
 # Split rows for the --aggregate contract path.
 sed -n 's/^c_/c_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
 sed -n 's/^simple_/simple_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"

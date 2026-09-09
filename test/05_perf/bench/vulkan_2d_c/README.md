@@ -15,8 +15,9 @@ once after the timed samples and is excluded from p50/p95.
   memory strategy (one HOST_VISIBLE|HOST_COHERENT allocation, first compute
   queue), plus a retained three-command-buffer/fence ring, five untimed
   warmups, nonblocking `vkGetFenceStatus` completion polling, per-frame
-  device-completion latency, deterministic teardown, and optional post-timing
-  capture. Its receipt reports retained/released bytes, timed allocations,
+  draw/record-through-device-completion latency, deterministic teardown, and
+  optional post-timing capture. Its receipt reports retained/released bytes,
+  timed allocations,
   push-constant upload bytes, full-frame uploads, readbacks, completion polls,
   driver waits, event/frame generations, and damage area. Adds the
   `VK_KHR_portability_enumeration` flag MoltenVK requires.
@@ -50,6 +51,12 @@ SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
 `sh scripts/check/check-vulkan-2d-c-compare.shs` builds/runs both legs and
 writes `build/vulkan-2d-c-compare/evidence.env` (ratio vs budget, explicit
 `skipped` rows when a toolchain leg is missing — never a fake pass).
+It also retains the C producer streams as `c.stdout.raw` and `c.stderr.raw`;
+on macOS the latter includes `/usr/bin/time -l` process statistics. The
+canonical wrapper passes the committed `scenes.txt` as a required table and
+rejects a C receipt unless it reports `scene_source=table`.
+`c.runtime.env` binds those streams and maximum RSS, while `c.toolchain.env`
+binds the C/shader compiler paths, hashes, versions, and exact flags.
 The ratio is Simple p95 divided by C p95 with the selected 2.0x ceiling. Both
 rows must already be `admitted`; raw measured output is intentionally reported
 as `measured-unadmitted` until the common receipt validator accepts it. The live
