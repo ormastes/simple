@@ -7,8 +7,10 @@ the C/reference side of the canonical `vulkan_2d_c` showcase only. The first
 authorized measurement was recorded, but a later accidental invocation
 overwrote the shared ignored output paths. That historical row remains
 unverified for performance admission. A subsequent no-clobber run is retained
-below as a fresh candidate, but it is not admitted and is not a C/Simple/Chrome
-comparison.
+below as a fresh candidate. A later finalized-provenance invocation mistakenly
+reused that producer ID after quarantining the prior directory; its distinct
+durable evidence ID and collision audit are also retained below. Neither row
+is admitted or constitutes a C/Simple/Chrome comparison.
 No Simple bootstrap, Simple renderer run, Chrome builder, or cross-renderer
 ratio was run in the authorized task. Its comparator result was
 `compare_status=skipped` with
@@ -182,7 +184,7 @@ This section records the one authorized live invocation performed after the
 immutable-run protocol was installed. The preflight checked that the run ID
 did not exist, inspected the supported `VK2D_RUN_ID` interface without
 invoking workload help, and validated the script with `sh -n`. No second live
-invocation was made.
+invocation was made in that original authorized step.
 
 Exact command:
 
@@ -190,11 +192,15 @@ Exact command:
 VK2D_RUN_ID=c-m4-moltenvk-20260910-01 sh scripts/check/check-vulkan-2d-c-compare.shs
 ```
 
-The producer receipt is the published directory below. The directory was
-created with mode `0700`; its regular files are mode `0644` except for the
-captured native benchmark (`0755`). Every file has link count one and no entry
-is a symlink. The producer's `latest` file is a convenience pointer with
-`authoritative=false` and is not used as evidence input.
+The producer receipt was originally published at the manifest path below. It
+was created with mode `0700`; its regular files were mode `0644` except for the
+captured native benchmark (`0755`). Every file had link count one and no entry
+was a symlink. Before the later finalized-provenance invocation, this complete
+directory was moved to
+`build/vulkan-2d-c-compare/runs/.quarantine-c-m4-moltenvk-20260910-01-pre-finalized/`.
+The later run now occupies the original producer path, so that path must not be
+used to resolve this older row. The producer's `latest` file is a convenience
+pointer with `authoritative=false` and is not used as evidence input.
 
 That ignored build directory is not durable PR evidence: it is omitted from
 Git, remains owner-writable, and may disappear during cleanup. Exact text
@@ -207,7 +213,7 @@ receipt.
 
 | Item | Value |
 |---|---|
-| run manifest | `build/vulkan-2d-c-compare/runs/c-m4-moltenvk-20260910-01/run.manifest.env` |
+| retained run manifest | `build/vulkan-2d-c-compare/runs/.quarantine-c-m4-moltenvk-20260910-01-pre-finalized/run.manifest.env` |
 | manifest schema | `immutable-vulkan-2d-c-run-v1` |
 | config SHA-256 | `0cbc4bd07a7ce7c067a714adf0f393f2261d867405eef617b5925eeeec4f99b2` |
 | fixture SHA-256 | `26b4c4d9fe24aafba15f31b4547b2a6fabe2242421184358dd32c55d64ff4b51` |
@@ -294,3 +300,115 @@ scene/toolchain/binary/shader/ICD bindings, RSS, fallback, capture checksum,
 retained/released bytes, and skipped aggregate are internally consistent, but
 producer time/revision are not manifest-bound and the timed path performs
 synchronous poll/sleep completion gating.
+
+## Finalized-provenance receipt — `c-m4-moltenvk-provenance-20260910-01`
+
+This is the durable evidence ID for one later current-protocol C invocation.
+The producer was asked to use that ID but instead requested the already-used
+producer ID `c-m4-moltenvk-20260910-01`. The earlier published directory was
+manually quarantined and moved intact to
+`build/vulkan-2d-c-compare/runs/.quarantine-c-m4-moltenvk-20260910-01-pre-finalized/`
+before the new invocation. The current helper then reserved a private stage
+and published the replacement atomically without overwriting that quarantine.
+This preserved the old bytes, but moving the prior reservation defeated global
+run-ID uniqueness. Therefore the producer ID disposition is `manual-quarantine`
+and the colliding producer ID is not used as the durable tracked identity.
+
+The quarantined copies of all ten corresponding text receipts match the
+already-tracked `doc/09_report/assets/c-m4-moltenvk-20260910-01/` files
+byte-for-byte. Its 1,920,000-byte framebuffer also reproduces the prior
+tracked framebuffer hash. Those old tracked assets were not changed. The new
+receipts are copied byte-for-byte under the distinct durable ID
+`doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/`.
+
+The exact producer command was:
+
+```text
+VK2D_RUN_ID=c-m4-moltenvk-20260910-01 sh scripts/check/check-vulkan-2d-c-compare.shs
+```
+
+The retained stdout has exactly one workload result line, the retained stderr
+has exactly one framebuffer-dump line and one `/usr/bin/time -l` block, and
+the result line declares five warmups and 300 samples. This proves that this
+receipt set contains one benchmark-process execution. It cannot prove that no
+unrelated invocation occurred outside this receipt set.
+
+### Measured C row (unadmitted)
+
+| Metric | Value |
+|---|---|
+| viewport / rectangles | `800×600 / 64` |
+| warmups / samples | `5 / 300` |
+| p50 / p95 | `446000 / 1047000 ns` |
+| max RSS | `30605312 bytes` |
+| completion polls / fence completions | `921 / 300` |
+| timed blocking `vkWaitForFences` calls | `0` |
+| synchronous fence-status polls | `921` |
+| timed full-frame upload / readback | `0 / 0 bytes` |
+| push-constant upload bytes | `537600` |
+| retained / released bytes | `1920000 / 1920000` |
+| capture bytes | `1920000` |
+| capture checksum | `10460147` (`sampled-u32-xor-stride-4096`) |
+| event generations / damage pixels | `300 / 144000000` |
+| GPU / fallback | `Apple M4` through bound MoltenVK ICD / `none` |
+| C status | `measured-unadmitted` (`receipt-needs-common-admission`) |
+
+### Durable finalized-provenance bindings
+
+| Artifact | Tracked candidate path | SHA-256 |
+|---|---|---|
+| run manifest | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/run.manifest.env` | `a850cb0fdc43958669246e69f36c7e6abbe317d7e3732cbb4ca06c747572ddef` |
+| raw C stdout | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.stdout.raw` | `f31fc0be19df98222cdcc6feded38fad5cfaf50e392c607481fe5b1c203dcd62` |
+| raw C stderr | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.stderr.raw` | `d03b1f08a1382f9e028307bd32bb55da3b16642a288f71a46fb7709c2aaba616` |
+| C runtime receipt | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.runtime.env` | `c9b5a009ec00f26453bff72ef2869db18e7629938eae3bd1f161d42880ab2ed7` |
+| C toolchain receipt | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.toolchain.env` | `df0ad35d0d5ac72724be83c1555e0dc488546fc1a858f788212129304e959619` |
+| C row | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.env` | `49eefc288e621be96a93c606ed27a58fe441e139b4498deb5ba86c06881ccd2f` |
+| combined raw row | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c.env.raw` | `de0a00b5c625640e64ddbcd9dfa29163a7e8c72e7660081706f1b3ad136230e5` |
+| skipped Simple row | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/simple.env` | `9efd5dffcd4bb8ffbf90c7b560fdf2975c2cd7605482f8a49fd91129684f56e0` |
+| skipped Simple runtime receipt | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/simple.runtime.env` | `30b727e147526d10a5762f2177be947f865becd37cd59df2753fcc83cdf9237c` |
+| aggregate evidence | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/evidence.env` | `4a5f04d67e520eb78af3a534eb911804a8a45b00f8d3da06606d56789ba178af` |
+| framebuffer hash receipt | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/c-framebuffer.rgba.sha256` | `ee25bc8fded5ec2ab95072d3ec862ca993071a2b8a2d9ccd40963f9e82cb04a1` |
+| quarantine/collision audit | `doc/09_report/assets/c-m4-moltenvk-provenance-20260910-01/quarantine.audit.env` | `72b248d086595212ec94c47796129890977b1d5b7a44bc0b4c0820269de3824c` |
+
+The ignored producer directory remains
+`build/vulkan-2d-c-compare/runs/c-m4-moltenvk-20260910-01/`, as recorded by
+the immutable manifest. The tracked directory name does not rewrite the
+producer manifest or its self-digest.
+
+### Provenance and semantics audit
+
+The manifest self-digest is
+`a38d4562201fc594780716cd10084e079f9e32dd202f71c90c2c28af7fe7ee17`.
+It binds clean commit `102af6a114abc7cc768a61b78bf5f7d5976839e7`, tree
+`38876d339e6b497ea42400228e1327b2ff5fe347`, the empty tracked-diff hash,
+start `2026-09-09T22:39:01Z`, and nonce
+`1788993541-1631-64541-RyA16S`. The UTC timestamp exactly matches epoch
+`1788993541`. Hash recomputation passed for the wrapper, immutable-run helper,
+admission helper, C and Simple sources, scene, shader source and binary, C
+binary, MoltenVK ICD, raw streams, runtime/toolchain receipts, projected rows,
+and aggregate. The configuration hash and both newline-delimited argv hashes
+also recompute exactly.
+
+The live directory is mode `0700`, contains no symlinks, and every regular
+file has link count one. Its benchmark is mode `0755`; the remaining files are
+mode `0644`. The framebuffer is exactly 1,920,000 bytes with SHA-256
+`f7485b8db5e755a936810d7cfd2ce2c4fa8ce71cfc133e404a872340e1ded9f3`;
+folding little-endian `u32` values at stride 4096 reproduces checksum
+`10460147`.
+
+The timed path has no blocking `vkWaitForFences` call and no timed framebuffer
+readback, but it synchronously performs 921 `vkGetFenceStatus` polls with
+`nanosleep` when reusing and draining ring slots. The 921 poll/sleep operations
+therefore do not prove
+CPU-independent asynchronous progress or zero CPU waiting. The Simple row is
+`skipped` with `bootstrap-seed-forbidden`; its streams are empty and its
+binary/artifact hashes are intentionally empty. The aggregate correctly says
+`compare_status=skipped`, `compare_ratio_x1000=0`, and
+`compare_reason=c-leg-measured-unadmitted:receipt-needs-common-admission`.
+
+Audit status is `WARN`, not `PASS`: all retained provenance, raw receipt,
+metric, checksum, mode, and skip bindings are internally consistent, but the
+producer ID collided with an earlier receipt, the C row lacks common binary
+admission, the timed path has synchronous poll/sleep completion gating, and no
+Simple or Chrome comparison was executed. Thus Simple and Chrome are both
+explicitly skipped for this candidate.
