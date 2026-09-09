@@ -1,11 +1,13 @@
 """Pure-Simple owner facade for the runtime-owned Vulkan B/N2 submission ring.
 
-The facade owns only session and slot tokens. Command buffers, fences, and
-descriptor/buffer owners remain runtime-owned until `retire` returns 1.
+The facade owns the session handle and forwards opaque provider tokens.
+Command buffers, slot-generation authority, fences, and descriptor/buffer
+owners remain runtime-owned until `retire` returns 1.
 """
 
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_async_session_acquire,
+    vulkan_sffi_async_session_bind_buffer,
     vulkan_sffi_async_session_command,
     vulkan_sffi_async_session_submit,
     vulkan_sffi_async_session_poll,
@@ -23,6 +25,11 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_async_session_snapshot,
     vulkan_sffi_async_session_snapshot_word
 }
+use std.common.gpu.render_surface_contract.{
+    GPU_ASYNC_ACCESS_READ, GPU_ASYNC_ACCESS_WRITE,
+    GPU_ASYNC_ACCESS_READ_WRITE, gpu_async_frame_ring_capacity_v2_valid,
+    gpu_async_wait_timeout_v2_valid
+}
 
 pub val VULKAN_ASYNC_RETIRED: i64 = 1
 pub val VULKAN_ASYNC_PENDING: i64 = 0
@@ -31,6 +38,7 @@ pub val VULKAN_ASYNC_UNKNOWN: i64 = -2
 pub val VULKAN_ASYNC_WOULD_BLOCK: i64 = -3
 pub val VULKAN_ASYNC_CLOSED: i64 = -4
 pub val VULKAN_ASYNC_QUARANTINED: i64 = 2
+pub val VULKAN_ASYNC_BIND_INVALID: i64 = -1
 
 pub class VulkanAsyncSubmissionSession:
     handle: i64
@@ -42,7 +50,9 @@ pub class VulkanAsyncSubmissionSession:
 
     static fn open_with_wait(capacity: i64, timeout_ns: i64) -> VulkanAsyncSubmissionSession:
         var handle = 0
-        if vulkan_sffi_async_session_supported() == 1:
+        if gpu_async_frame_ring_capacity_v2_valid(capacity) and
+           gpu_async_wait_timeout_v2_valid(timeout_ns) and
+           vulkan_sffi_async_session_supported() == 1:
             handle = vulkan_sffi_async_session_create_with_wait(capacity, timeout_ns)
         VulkanAsyncSubmissionSession(
             handle: handle,
@@ -60,6 +70,25 @@ pub class VulkanAsyncSubmissionSession:
         if self.handle <= 0:
             return VULKAN_ASYNC_INVALID
         vulkan_sffi_async_session_acquire(self.handle)
+
+    # Bind a range through the runtime owner while this exact opaque token is
+    # recording. The provider/runtime is authoritative for slot-generation,
+    # range-conflict, and resource-retention decisions; this facade only
+    # validates scalar shape and never waits for a prior frame or reads back.
+    fn bind_buffer(token: i64, descriptor_set: i64, binding: i64,
+                   buffer: i64, offset: i64, range: i64, access: i64) -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        if token <= 0 or descriptor_set <= 0 or binding < 0 or
+           binding > 4294967295 or buffer <= 0 or
+           offset < 0 or range <= 0 or
+           offset > 9223372036854775807 - range or
+           (access != GPU_ASYNC_ACCESS_READ and
+            access != GPU_ASYNC_ACCESS_WRITE and
+            access != GPU_ASYNC_ACCESS_READ_WRITE):
+            return VULKAN_ASYNC_BIND_INVALID
+        vulkan_sffi_async_session_bind_buffer(self.handle, token,
+            descriptor_set, binding, buffer, offset, range, access)
 
     fn command(token: i64) -> i64:
         if self.handle <= 0:
