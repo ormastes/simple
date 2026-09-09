@@ -11,7 +11,7 @@ and performance claims are historical input, not newly verified measurements.
 
 | ID | User-selected outcome |
 |---|---|
-| REQ-001 | A user-owned `.spipe` repository contains a `.spipe` common submodule, `organization/`, and `projects/`. |
+| REQ-001 | Preserve the original `.spipe/.spipe` user layout; September 9 refines new global installs to `~/spipe` common and `~/.spipe` private workspace with `common` link. |
 | REQ-002 | Interactive setup supports first installation and use after cloning a project. |
 | REQ-003 | Common, company, organization, project, user, and host content retains independent ownership. |
 | REQ-004 | Shared configuration contains logical identities and revision pins; local configuration owns machine paths. |
@@ -23,6 +23,9 @@ and performance claims are historical input, not newly verified measurements.
 | REQ-010 | `raw`, `wiki`, `doc`, `skills`, and non-canonical `runtime` retain distinct semantics. |
 
 ## Ownership and physical layout
+
+The following September 8 layout remains a supported compatibility contract.
+The September 9 preferred layout below supersedes it for new global installs.
 
 ```text
 <user-root>/.spipe/                 user repository; ~/.spipe is a default
@@ -40,6 +43,29 @@ disk. Their containment is deliberate: `<user-root>/.spipe/.spipe`. A project
 mount selects its own common revision; it must not silently replace that pin
 with the user's common checkout. Registered existing organization/project
 checkouts remain in place; registration does not copy their contents.
+
+Preferred global layout:
+
+```text
+~/spipe/                                  independent common checkout
+~/.spipe/                                 private workspace
+├── common -> ~/spipe
+├── companies/<company>/organizations/<organization>/
+├── projects/<project>/                    registrations only
+├── users/<user>/hosts/<host>/mounts.json   private account-specific mounts
+├── hosts/defaults.json
+├── hosts/profiles/<profile>/
+├── hosts/machines/<host>/
+└── runtime/<user>/<host>/{cache,state,run,tmp}/
+```
+
+Company itself owns company-wide content; departments are separate organization
+scopes. User-host bindings hold account paths, while host defaults/profiles
+describe desired setup. Trusted runtime probes establish observed capabilities.
+A direct SPipe checkout may supply both common and workspace identities to the
+resolver; explicit scaffold installation into an existing source checkout still
+requires its own supported mode. Neither direct use nor mirroring authorizes
+tracking private scope content in common.
 
 ## Components and boundaries
 
@@ -72,16 +98,21 @@ common/wiki -> company/wiki -> organization(s)/wiki -> project(s)/wiki
 Explicit workspace order resolves multiple organizations/projects, with stable
 scope identity as a tie-breaker. Composition does not mean last-writer-wins:
 authorization and restrictions accumulate, and conflicting claims retain source,
-revision, applicability, and owner. Each knowledge-owning scope has `index.md`,
-`raw/index.md`, `wiki/index.md`, `doc/index.md`, and `skills/index.md`.
+revision, applicability, and owner. Each knowledge-owning scope has `index.md`;
+`raw`, `wiki`, `doc`, and `skills` surfaces are created lazily, with `index.md`
+in each existing traversable surface.
 
 `runtime/<user>/<host>/` contains derived research/execution state only. It is
-never an evidence authority. Reuse validates policy, source revisions, task and
-profile compatibility, and expiry. Removing runtime cannot change correctness.
+never an evidence authority. `cache` is reconstructible; `state` retains runs,
+history and receipts; `run` holds live coordination; `tmp` has bounded lifetime.
+Reuse validates policy, source revisions, task and profile compatibility, and
+expiry. Cache eviction preserves retained state and active process files.
 
 The shared APIs `locate_common`, `resolve_workspace`, `resolve_active_scopes`,
 `compile_research_context`, and `explain_resolution` are proposed integration
-contracts, not claims of existing exports.
+contracts, not claims of existing exports. Knowledge composition, schema-typed
+preference merging, and trusted mandatory policy evaluation are separate
+operations. Unconfigured scaffold authority cannot permit protected actions.
 
 ## Repository compatibility
 
@@ -94,7 +125,18 @@ An occupied project `.spipe` directory is a migration case, not an empty target.
 The installer must diagnose the legacy nested submodule and preserve it. Moving
 it requires a separately reviewed migration that accounts for state, registry
 files, Git metadata, and dirty content. Newly created installations use the
-requested direct `.spipe` submodule layout immediately.
+requested direct `.spipe` submodule layout when that mode is explicitly chosen.
+New global installations use the September 9 preferred layout.
+
+The latest user refinement routes Simple `.spipe/common` to canonical `~/spipe`.
+The locator resolves explicit `SPIPE_HOME`, project `.spipe/common`,
+`~/spipe`, `~/.spipe/common`, direct current SPipe package, then verified legacy
+`.spipe/spipe`, `.spipe/spipe_project`, direct `.spipe` gitlink, or `~/.spipe`
+package. Legacy mounts are migration fallbacks rather than preferred locations.
+Explicit invalid selections fail; an existing project revision requirement
+must match the selected common or produce an incompatibility diagnostic until
+a reviewed migration changes it. No physical submodule relocation is part of
+this documentation change.
 
 ## Knowledge maintenance and later work
 

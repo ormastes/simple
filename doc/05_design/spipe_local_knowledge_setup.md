@@ -81,9 +81,11 @@ physical moves and cross-scope publication do not follow from popularity.
 
 Within a knowledge-owning scope, `raw/` stores evidence, `wiki/` stores
 synthesized LLM knowledge, `doc/` stores normative lifecycle artifacts, and
-`skills/` stores procedures. The scope root and each category expose
-`index.md`. `runtime/<user>/<host>/` is derived, ignored state; writeback never
-promotes runtime entries into canonical knowledge implicitly.
+`skills/` stores procedures. The scope root exposes `index.md`; categories are
+created lazily and each present traversable category exposes `index.md`.
+`runtime/<user>/<host>/` separates reconstructible `cache/`, retained `state/`,
+live `run/`, and bounded `tmp/`. Writeback never promotes runtime entries into
+canonical knowledge implicitly; cache cleanup must preserve state and live runs.
 
 Resolution returns ordered authorized descriptors for common, company,
 organizations, projects, user, and host. Missing scopes are skipped explicitly;
@@ -91,6 +93,46 @@ denied scopes are reported without leaking their contents. `compile_research_con
 returns deterministic segments, provenance and coverage plus runtime eligibility.
 `explain_resolution` records selected, skipped, missing, and denied decisions.
 These are proposed shared contracts until their implementation is admitted.
+
+## September 9 workspace integration refinement
+
+New global installation selects `~/spipe` as common and `~/.spipe` as the
+private workspace, with `common` linking to that checkout. The original
+interactive `.spipe/.spipe` path remains a compatibility mode. The latest user
+refinement routes Simple `.spipe/common` to `~/spipe`; existing `.spipe/spipe` remains a
+migration fallback, with its recorded pin preserved until reviewed cutover.
+
+The shared locator order is explicit `SPIPE_HOME`, project `.spipe/common`,
+`~/spipe`, `~/.spipe/common`, direct current SPipe package, then verified
+legacy `.spipe/spipe`, `.spipe/spipe_project`, direct `.spipe` gitlink, or
+`~/.spipe` package. Validate selected package identity and declared project
+revision requirements before accepting a root. Invalid explicit roots and pin
+mismatches fail; optional candidates may be absent. Resolve workspace
+separately from common. Changing the route does not authorize removing the
+recorded submodule or accepting an incompatible global version.
+
+Schema-2 workspace/scope/mount records in the supplied reference package are
+integration inputs. `companies/<company>/organizations/<org>/` identifies
+company and department owners; `projects/<id>/` holds references to independent
+repositories; `users/<user>/hosts/<host>/mounts.json` holds private paths.
+`hosts/defaults.json`, `hosts/profiles/`, and `hosts/machines/<host>/` describe
+desired setup; capability observations remain timestamped runtime records.
+
+Freeze one schema owner and one authoritative registry writer. Read legacy
+`scopes.sdn` through a strict adapter; do not rename its pipe-delimited contents
+to JSON or dual-write two registries. Typed preference conflicts and mandatory
+policy decisions are separate from ordered knowledge composition. Scaffolds
+carry unconfigured authority and cannot authenticate their stated user/host.
+
+The Node bootstrap and shell/PowerShell wrappers are a supplied reference, with
+integration and native-platform tests pending. Plan-only setup must avoid writes
+and network access; apply creates only reviewed missing scaffolds, preserves
+pins/authored fields, and reports partial progress. Inventory classifies legacy
+filenames; production migration additionally needs owner decisions, hashes,
+journaling and recovery through the canonical RefactorService. Mirror
+publication, global fast-forward updates, and pinned project initialization
+remain distinct operations. Never execute mirror deletion semantics during an
+ordinary install.
 
 ## Errors and recovery
 

@@ -35,7 +35,8 @@ Primary manual step text:
 
 | Test | Requirements | Observable assertion |
 |---|---|---|
-| First-user install | REQ-001, REQ-002 | Outer `.spipe` is a Git root; inner `.spipe` has mode-160000 gitlink and expected commit; organization/projects routes exist. |
+| Legacy first-user install | REQ-001, REQ-002 | Explicit compatibility mode retains outer `.spipe` and inner pinned `.spipe` gitlink with existing routes. |
+| Preferred global install | REQ-001, REQ-002 | Approved common checkout is `~/spipe`; private workspace common link and Simple `.spipe/common` resolve to it. |
 | Project clone | REQ-002, REQ-004 | Recorded common gitlink is initialized at its existing commit; local registration resolves the exact project. |
 | Repeat install | REQ-007 | Existing owned file bytes and common commit remain identical; no duplicate registration. |
 | Personal project | REQ-003, REQ-008 | Common plus project setup succeeds with no organization and no LLM executable. |
@@ -43,10 +44,10 @@ Primary manual step text:
 | Two equal project names | REQ-003, REQ-004 | Explicit identities resolve separate roots; ambiguous alias is rejected. |
 | Local path privacy | REQ-004 | Tracked manifests contain logical IDs/pins; absolute machine paths stay in ignored local records. |
 | Navigation and instructions | REQ-005, REQ-006 | Traversable nodes contain `index.md`; links resolve; native skill/agent filenames are preserved. |
-| Scope scaffold | REQ-003, REQ-009, REQ-010 | Every knowledge-owning scope has root, raw, wiki, doc, and skills indexes. |
+| Scope scaffold | REQ-003, REQ-009, REQ-010 | Scope root and present traversable raw/wiki/doc/skills surfaces have indexes; absent empty surfaces are accepted. |
 | Ordered composition | REQ-009 | Authorized scopes resolve common, company, explicit organizations/projects, user, and host deterministically. |
 | Missing or denied mount | REQ-003, REQ-009 | Missing is explicit; denied scope contributes no content or metadata. |
-| Runtime disposal | REQ-010 | Removing `runtime/<user>/<host>` changes performance only, never authoritative results. |
+| Runtime retention | REQ-010 | Rebuilding cache preserves authoritative results; cache cleanup preserves state/history/receipts and live run files. |
 | Runtime invalidation | REQ-010 | Policy, source revision, task/profile, or expiry mismatch rejects derived state. |
 | Owner writeback | REQ-003, REQ-006 | Proposed wiki updates target the narrowest authorized owner; runtime is never promoted implicitly. |
 | Occupied target | REQ-007 | Setup fails with a specific conflict and all existing bytes remain unchanged. |
@@ -56,6 +57,19 @@ Primary manual step text:
 | Path handling | REQ-007 | Spaces work; option-like values, containment violations, and escaped targets are rejected or safely literal. |
 | Knowledge update flow | REQ-005, REQ-006 | Guide/skill direct edits to the owner’s canonical artifact and require evidence-linked dependent refresh. |
 | Rebalance/publication scope | REQ-003, REQ-006 | Default guidance is proposal-only; private content cannot be promoted without owner review. |
+| Locator compatibility | REQ-001, REQ-007 | Explicit root/project `.spipe/common` and canonical global installation precede verified legacy mounts; invalid explicit selections or incompatible pins are diagnosed. |
+| Company versus department | REQ-003, REQ-009 | Company policy and selected authorized departments compose; HR metadata is not probed for an unrelated software task. |
+| User-host binding | REQ-004, REQ-010 | Two users retain separate private mounts/state; host desired setup cannot substitute for a trusted capability observation. |
+| Plan and registration | REQ-002, REQ-007 | Reference-compatible plan performs no writes/network; project registration leaves source bytes unchanged and rejects rebinding. |
+| Migration reader parity | REQ-004, REQ-007 | Explicit legacy conversion preserves identities; conflicting registries fail and only one canonical writer is active. |
+| Distribution modes | REQ-001, REQ-007 | Internet/mirror installation and legacy pinned mode resolve equivalent approved common content; ordinary install performs no mirror publication/deletion. |
+| Host configuration/linker | REQ-004, REQ-007 | Host config stays outside common and nested links resolve using target-parent-relative payloads. |
+
+The supplied standalone package reports 25 Linux fixture passes; these are
+external research claims until its scripts/results are available and executed
+for the integrated revision. Native Windows/macOS, enterprise authorization,
+migration recovery, and schema-2 CLI/MCP behavior need their own evidence. This
+table is an acceptance plan, not a passing generated test report.
 
 ## Verification and stopping rules
 
