@@ -140,6 +140,80 @@ inventory doubles as the burn-down list for making phases 1-5 honest.
 
 ## Verification commands
 
+### UI performance evidence rules
+
+For Engine2D/web optimization, separately report: retained GPU allocation
+bytes/count, upload bytes, readback bytes, submits, fence polls/waits, frames in
+flight, damage area, and fallback reason. A backend name or completed host queue
+packet is not device execution. Require a device identity plus a backend fence
+or timeline receipt. Keep steady device-present measurements readback-free and
+run exact pixel capture as a separate correctness sample.
+
+Chrome comparison is admitted only when both Chrome and Simple artifacts are
+measured and share interval/sample/viewport/device metadata. Cold Chrome
+process-plus-PNG time cannot be divided by warm in-process Simple paint time.
+The current `perf_chrome_runner.spl` synthetic ratio is never publishable.
+
+### Renderer comparison admission traps (2026-09-08)
+
+- The selected Vulkan budget is latency-directional:
+  `Simple p95 / C p95 <= 2.0`. A threshold expressed as Simple FPS being at
+  least 10% of C is a different requirement and must not be used.
+- `measured` is not `admitted`. A ratio requires identical fixture/event hashes,
+  viewport, RGBA format, timing boundary, warmups/samples, and physical device;
+  source/binary identity; real fence completion; a 2–3-slot ring; no fallback;
+  and the full allocation/residency/upload/readback/damage receipt. Unknown
+  counters are `-1` and reject the row; never coerce them to zero.
+- Timed display admits zero framebuffer readback, zero buffer allocation, zero
+  full-frame host upload, and no unconditional submit-and-wait. Correctness may
+  perform one exact RGBA8 capture after timing. Its byte count is exactly
+  `width * height * 4`.
+- A blocking `vkWaitForFences` after each timed submit is not asynchronous even
+  when three command buffers exist. Observe completion with nonblocking fence
+  or timeline polling and report poll and blocking-wait counts separately.
+- Never run renderer performance through a Rust seed. `bin/simple` resolving
+  under `src/compiler_rust` is an explicit unavailable reason, not permission
+  to use a Vulkan-feature seed.
+
+### Chromium oracle SFFI rules (2026-09-08)
+
+The owned reference bridge has exactly five C symbols and remains test-only.
+Hash the explicit library before and after load, resolve every symbol once,
+validate ABI identity before create, bound request/response storage, and destroy
+then close exactly once. Ordinary Simple `[u8]` literals may be boxed and have
+no stable native data pointer in the interpreter. Use the canonical one-call
+`spl_wffi_call_i64_with_bytes` pin for immutable input and
+`rt_byte_array_new_len` for mutable output/length slots. A passing fixture with
+`oracle_identity=fixture-not-chromium` proves transport only—never Chrome or GPU.
+
+### Residency and event-driven scheduling checklist
+
+For every claimed GPU-resident renderer path, identify the owner and lifetime
+of the device-local target, persistent mapped staging ring, and any readback
+buffer. A mapped staging allocation is not a resident render target. The
+steady path must not allocate, map/unmap, upload a full framebuffer, or copy a
+frame to the CPU. Record allocation count, retained/staging bytes, upload
+bytes, and teardown bytes; unknown values are `-1` and fail admission.
+
+When transfer and graphics queues differ, the receipt must identify both queue
+owners and the release/acquire barrier (or an explicit single-queue policy),
+plus the fence/timeline value that makes the handoff visible. A host queue
+packet, backend name, or `submit` return is not a device receipt.
+
+The event path is host-owned: normalize and coalesce events, clip bounded
+damage, tag the scene generation, freeze it into one frame slot, and schedule
+the next available ring slot. Completion is a nonblocking fence/timeline poll;
+only the matching monotonic token retires the slot. Do not drain or wait from
+each event, and do not let stale input mutate an in-flight frame.
+
+Parity has two independent lanes. C Vulkan and Simple Vulkan need identical
+fixture/event hashes, viewport, format, queue/device identity, warmups, samples,
+timing boundary, ring depth, and capture policy. Simple Web and Chrome need an
+identical semantic primitive/event trace plus a device-origin receipt. Missing
+canonical Chrome library or runner is an explicit **non-admission**; a fixture,
+Electron DOM/paint result, or bootstrap diagnostic dylib cannot become a Chrome
+GPU ratio.
+
 - Re-run the scanner (above) after any refactor in the two scanned dirs; the
   diff of blocked-name count and per-root verdicts is the ratchet.
 - Inventory-mode-first policy: warnings, not errors, until the list is burned
