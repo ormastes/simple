@@ -1,7 +1,8 @@
 # Slang JIT physical prefill reports no memory slot, then SIGBUS
 
 Date: 2026-09-09
-Status: SIGBUS cleanup cause isolated; provider rejection still under diagnosis
+Status: decode-position type corruption fixed in source; physical owner remains
+unqualified after the capped third verification cycle
 
 ## Reproducer boundary
 
@@ -58,12 +59,27 @@ transaction end `6`; every visible admission predicate passes.
 Continuing from that breakpoint reaches `init_batch` a second time through
 `slang_ggml_page_decode`, now with transaction `3`. Thus cold prefill succeeds;
 the generic "batch of size 1" diagnostic belongs to the first generated-token
-decode transaction. The remaining investigation is its cursor/end/table
-invariant, not prompt tokenization or prefill capacity.
+decode transaction. That call exposed cursor `8`, submitted position `48`, and
+transaction end `9`; the expected values were `6`, `6`, and `7`. The submitted
+position is a tagged-small-integer artifact (`48 == 6 << 3`).
+
+Two generic compiler defects caused this transport corruption. Scalar
+enum-pattern bindings carried a concrete `HirStmt::Let` type but left the
+authoritative local slot as `Any`, allowing MIR to re-box extracted values. A
+return-only error arm also contributed its return-expression type to a match
+value join, degrading the successful scalar arm to `Any`; arithmetic then
+inserted `BoxInt` immediately before the raw-i64 `_decode_one` call.
+
+The binder now patches its local slot and match joins ignore arms that
+definitely return. Focused HIR regressions cover both cases. After rebuilding
+the driver, the third real-model run reached `OWNER_STAGE cold_generate` but
+terminated before emitting PASS or a structured owner failure. Per the
+three-cycle cap, no fourth owner run was started; the path remains unqualified.
 
 ## Required next diagnosis
 
-- Capture transaction `3` at the second `init_batch` call and identify its
-  exact failed cursor/end/table predicate before changing provider behavior.
+- In a fresh verification session, capture transaction `3` once more and prove
+  cursor/end/position are `6/7/6`; if they are, diagnose the subsequent
+  termination without changing provider admission rules.
 - Produce the
   five-pair snapshot/physical benchmark evidence.

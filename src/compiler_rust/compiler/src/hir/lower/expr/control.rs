@@ -11,6 +11,22 @@ use crate::hir::lower::error::LowerResult;
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
+fn hir_expr_definitely_returns(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Return(_)) => true,
+            Some(HirStmt::Expr(inner)) => hir_expr_definitely_returns(inner),
+            _ => false,
+        },
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => hir_expr_definitely_returns(then_branch) && hir_expr_definitely_returns(else_branch),
+        _ => false,
+    }
+}
+
 impl Lowerer {
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
@@ -444,6 +460,12 @@ impl Lowerer {
 
         // Recursively build the else branch from remaining arms
         let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+        // A return-only arm does not contribute a value to the match join.
+        // Using its return expression type as the whole match type degraded
+        // `Err(_): return Err(...); Ok(value): value` to ANY.  Arithmetic then
+        // re-boxed the otherwise raw i64 before a direct i64 call (6 -> 48).
+        let then_diverges = hir_expr_definitely_returns(&then_branch);
+        let result_ty = if then_diverges { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -451,7 +473,7 @@ impl Lowerer {
                 then_branch: Box::new(then_branch),
                 else_branch: Some(Box::new(else_branch)),
             },
-            ty: then_ty,
+            ty: result_ty,
         })
     }
 

@@ -283,6 +283,45 @@ fn test_optional_struct_pattern_binding_preserves_inner_type() {
 }
 
 #[test]
+fn test_result_scalar_pattern_binding_patches_local_slot_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> i64:\n    val result = load()\n    match result:\n        Ok(value):\n            return value\n        Err(_):\n            return 0\n",
+    )
+    .unwrap();
+
+    let read = module
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "Result<i64> payload local must be raw i64, not an ANY tagged slot"
+    );
+}
+
+#[test]
+fn test_returning_error_arm_does_not_degrade_match_value_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> Result<i64, text>:\n    val result = load()\n    val value = match result:\n        Err(error): return Err(error)\n        Ok(found): found\n    Ok(value)\n",
+    )
+    .unwrap();
+    let read = module
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "diverging Err arm must not force an ANY match join"
+    );
+}
+
+#[test]
 fn test_untyped_empty_array_specializes_on_first_append() {
     let module = parse_and_lower(
         "class Boxed:\n    value: i64\n\nfn run_one() -> i64:\n    var items = []\n    items.append(Boxed(value: 7))\n    for item in items:\n        return item.value\n    return 0\n",
