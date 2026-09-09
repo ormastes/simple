@@ -1,0 +1,152 @@
+# codex-impl
+
+use app.llm_caret.multimodal_types.*
+use app.llm_caret.image_profile.{configured_image_profile_v1}
+use app.llm_caret.image_completion.{complete_configured_image_v1}
+use app.llm_caret.config.{config_image_read_detail}
+use app.io.mod.{current_time_ms}
+use app.image_to_markdown.input.{admit_local_image_with_limits_v1}
+use app.image_to_markdown.service.{run_three_stage_extraction_v1}
+use app.image_to_markdown.prompts.{IMAGE_TO_MARKDOWN_PROMPT_VERSION_V1,
+    IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1}
+use app.image_to_markdown.markdown.{IMAGE_TO_MARKDOWN_RENDERER_VERSION_V1,
+    render_extraction_markdown_v1}
+use app.image_to_markdown.extraction_json.{decode_extraction_document_v1}
+use app.image_to_markdown.artifacts.{EXTRACTION_RECEIPT_SCHEMA_VERSION_V1,
+    publish_extraction_artifacts_v1,
+    publish_extraction_failure_receipt_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.image_to_markdown.cache.{model_profile_fingerprint_v1,
+    image_extraction_cache_key_v1, load_image_extraction_cache_v1,
+    store_image_extraction_cache_v1}
+
+fn _request_count_for_error_v1(code: text) -> i64:
+    if code == "invalid_request" or code == "invalid_profile" or
+            code == "missing_secret" or code == "unsupported_provider" or
+            code == "image_not_materialized": return 0
+    1
+
+fn _validation_failure_count_v1(code: text) -> i64:
+    if code == "output_limit" or code == "invalid_pipeline" or
+            code == "invalid_inventory" or code == "invalid_extraction" or
+            code == "invalid_audit" or code == "source_mismatch" or
+            code == "inventory_mismatch": return 1
+    0
+
+fn _failed_extraction_artifacts_v1(output_dir: text, base_name: text,
+        profile: ModelProfileV1, image: ContentPartV1, code: text,
+        request_count: i64, cache_hit: bool,
+        validation_check_count: i64, provenance_item_count: i64,
+        validation_failure_count: i64, load_ms: i64, cache_ms: i64,
+        transport_ms: i64, validation_ms: i64, render_ms: i64) -> ExtractionArtifactsV1:
+    val receipt = ExtractionReceiptV1(schema_version: EXTRACTION_RECEIPT_SCHEMA_VERSION_V1,
+        extraction_schema_version: IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        renderer_version: IMAGE_TO_MARKDOWN_RENDERER_VERSION_V1,
+        status: "failed", error_code: code, source_artifact_id: image.artifact_id,
+        source_sha256: image.sha256, source_width: image.width, source_height: image.height,
+        markdown_path: "", markdown_sha256: "", structured_path: "", structured_sha256: "",
+        result_sha256: "", profile_fingerprint: model_profile_fingerprint_v1(profile),
+        provider: profile.provider, model_id: profile.model_id, model_revision: profile.model_revision,
+        prompt_version: IMAGE_TO_MARKDOWN_PROMPT_VERSION_V1, preprocessing_version: "none/1",
+        load_ms: load_ms, preprocess_ms: 0, transport_ms: transport_ms, inference_ms: 0,
+        validation_ms: validation_ms, render_ms: render_ms, cache_ms: cache_ms, retry_count: 0,
+        request_count: request_count, cache_hit: cache_hit,
+        provenance_item_count: provenance_item_count,
+        validation_check_count: validation_check_count,
+        validation_failure_count: validation_failure_count,
+        warnings: ["failure diagnostic withheld; see safe error_code"])
+    publish_extraction_failure_receipt_v1(output_dir, base_name, receipt,
+        code + ": extraction failed; inspect the receipt error_code")
+
+fn run_configured_image_file_v1(path: text, allowed_root: text, output_dir: text, base_name: text) -> ExtractionArtifactsV1:
+    val profile = configured_image_profile_v1()
+    val profile_error = validate_model_profile_v1(profile)
+    if profile_error != "":
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: profile_error)
+    val detail = config_image_read_detail()
+    if not (detail == "auto" or detail == "low" or detail == "high"):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "",
+            error: "image detail must be auto, low, or high")
+    val load_started = current_time_ms()
+    val admitted = admit_local_image_with_limits_v1(path, allowed_root,
+        profile.max_request_bytes, profile.max_pixels, detail)
+    val load_ms = current_time_ms() - load_started
+    if admitted.error_code != "":
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: admitted.error_code + ": " + admitted.error_message)
+    val cache_key = image_extraction_cache_key_v1(admitted.part.sha256, profile,
+        admitted.part.detail, IMAGE_TO_MARKDOWN_PROMPT_VERSION_V1,
+        IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        "none/1")
+    val cache_root = output_dir + "/.image-read-cache"
+    val cache_started = current_time_ms()
+    val cached = load_image_extraction_cache_v1(cache_root, cache_key, profile.max_output_tokens * 16)
+    val cache_ms = current_time_ms() - cache_started
+    var audited_json = cached.content
+    var retry_count = 0
+    var transport_ms = 0
+    if not cached.hit:
+        val transport_started = current_time_ms()
+        val run = run_three_stage_extraction_v1(profile, admitted.part, complete_configured_image_v1)
+        transport_ms = current_time_ms() - transport_started
+        if run.status != "completed":
+            return _failed_extraction_artifacts_v1(output_dir, base_name, profile,
+                admitted.part, run.error_code,
+                _request_count_for_error_v1(run.error_code),
+                false, 0, 0,
+                _validation_failure_count_v1(run.error_code),
+                load_ms, cache_ms, transport_ms, 0, 0)
+        audited_json = run.audited_json
+        retry_count = run.retry_count
+    val validation_started = current_time_ms()
+    val decoded = decode_extraction_document_v1(audited_json)
+    val validation_ms = current_time_ms() - validation_started
+    if decoded.error != "":
+        return _failed_extraction_artifacts_v1(output_dir, base_name, profile,
+            admitted.part, "invalid_audit",
+            if cached.hit: 0 else: 1, cached.hit, 1, 0, 1,
+            load_ms, cache_ms, transport_ms, validation_ms, 0)
+    if decoded.document.source_artifact_id != admitted.part.artifact_id or
+            decoded.document.source_sha256 != admitted.part.sha256 or
+            decoded.document.width != admitted.part.width or
+            decoded.document.height != admitted.part.height:
+        return _failed_extraction_artifacts_v1(output_dir, base_name, profile,
+            admitted.part, "invalid_audit",
+            if cached.hit: 0 else: 1, cached.hit, 2,
+            decoded.document.regions.len() + decoded.document.tables.len() + decoded.document.charts.len(),
+            1, load_ms, cache_ms, transport_ms, validation_ms, 0)
+    val render_started = current_time_ms()
+    val markdown = render_extraction_markdown_v1(decoded.document)
+    val render_ms = current_time_ms() - render_started
+    if not cached.hit:
+        val cache_error = store_image_extraction_cache_v1(cache_root, cache_key, audited_json)
+        if cache_error != "":
+            return _failed_extraction_artifacts_v1(output_dir, base_name, profile,
+                admitted.part, "cache_write_failed", 1, false, 2,
+                decoded.document.regions.len() + decoded.document.tables.len() + decoded.document.charts.len(),
+                0, load_ms, cache_ms, transport_ms, validation_ms, render_ms)
+    val profile_fingerprint = model_profile_fingerprint_v1(profile)
+    val receipt = ExtractionReceiptV1(schema_version: EXTRACTION_RECEIPT_SCHEMA_VERSION_V1,
+        extraction_schema_version: IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        renderer_version: IMAGE_TO_MARKDOWN_RENDERER_VERSION_V1,
+        status: "completed", error_code: "", source_artifact_id: admitted.part.artifact_id,
+        source_sha256: admitted.part.sha256, source_width: admitted.part.width,
+        source_height: admitted.part.height, markdown_path: "", markdown_sha256: "",
+        structured_path: "", structured_sha256: "",
+        result_sha256: sha256_text(audited_json), profile_fingerprint: profile_fingerprint,
+        provider: profile.provider, model_id: profile.model_id,
+        model_revision: profile.model_revision,
+        prompt_version: IMAGE_TO_MARKDOWN_PROMPT_VERSION_V1,
+        preprocessing_version: "none/1", load_ms: load_ms,
+        preprocess_ms: 0, transport_ms: transport_ms, inference_ms: 0,
+        validation_ms: validation_ms, render_ms: render_ms, cache_ms: cache_ms,
+        retry_count: retry_count,
+        request_count: if cached.hit: 0 else: 1,
+        cache_hit: cached.hit,
+        provenance_item_count: decoded.document.regions.len() + decoded.document.tables.len() + decoded.document.charts.len(),
+        validation_check_count: 2,
+        validation_failure_count: 0,
+        warnings: if cached.hit: ["cache hit"] else: ["transport_ms is an orchestration upper bound including response validation; server inference timing unavailable"])
+    publish_extraction_artifacts_v1(output_dir, base_name, markdown, audited_json, receipt)

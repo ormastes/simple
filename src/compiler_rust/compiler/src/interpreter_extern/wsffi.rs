@@ -221,8 +221,12 @@ pub fn spl_backend_plugin_run_v1(args: &[Value]) -> Result<Value, CompileError> 
         if status == 0 {
             status = finalize(session, &mut object);
         }
-        if status == 0 {
-            status = diagnostics(session, &mut diagnostic);
+        // Match the native bridge: diagnostics are meaningful on failure too.
+        // Retain the primary compile/finalize status when collection succeeds
+        // or has its own secondary failure.
+        let diagnostic_status = diagnostics(session, &mut diagnostic);
+        if status == 0 && diagnostic_status != 0 {
+            status = diagnostic_status;
         }
         let payload_bytes = if status == 0 {
             copy_backend_buffer(object.payload).unwrap_or_default()

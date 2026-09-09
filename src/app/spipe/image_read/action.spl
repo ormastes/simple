@@ -1,0 +1,49 @@
+# codex-impl
+# SPipe invokes image reading only through this explicit configured action.
+
+use app.llm_caret.multimodal_types.*
+use app.image_to_markdown.service.{ExtractionRunV1, run_three_stage_extraction_v1}
+use std.common.spec.evidence.format.evidence_sidecar.{emit_evidence}
+
+struct SpipeImageReadResultV1:
+    status: text
+    reason: text
+    run: ExtractionRunV1
+
+fn _empty_failed_run_v1(code: text, message: text) -> ExtractionRunV1:
+    ExtractionRunV1(status: "failed", inventory_json: "", extraction_json: "",
+        audited_json: "", error_code: code, error_message: message, retry_count: 0)
+
+fn run_spipe_image_read_v1(
+    image_read_profile: text,
+    profile: ModelProfileV1,
+    image: ContentPartV1,
+    complete: fn(MultimodalRequestV1) -> ModelCompletionV1
+) -> SpipeImageReadResultV1:
+    if image_read_profile == "":
+        return SpipeImageReadResultV1(status: "skipped", reason: "image_read_profile not configured",
+            run: _empty_failed_run_v1("not_configured", "image_read_profile not configured"))
+    if image_read_profile != profile.profile_id:
+        return SpipeImageReadResultV1(status: "failed", reason: "configured profile ID mismatch",
+            run: _empty_failed_run_v1("profile_mismatch", "configured profile ID mismatch"))
+    val run = run_three_stage_extraction_v1(profile, image, complete)
+    SpipeImageReadResultV1(status: run.status, reason: run.error_message, run: run)
+
+fn publish_spipe_image_read_evidence_v1(
+    spec_path: text,
+    markdown_path: text,
+    structured_path: text,
+    receipt_path: text,
+    source_sha256: text,
+    result_sha256: text
+) -> bool:
+    if spec_path == "" or markdown_path == "" or structured_path == "" or receipt_path == "":
+        return false
+    emit_evidence(spec_path, "Image-to-Markdown artifacts", [
+        "| Artifact | Path | SHA-256 |",
+        "|---|---|---|",
+        "| Source image | retained input | `" + source_sha256 + "` |",
+        "| Markdown | `" + markdown_path + "` | bound by receipt |",
+        "| Structured extraction | `" + structured_path + "` | `" + result_sha256 + "` |",
+        "| Receipt | `" + receipt_path + "` | self-described |"
+    ])

@@ -1,0 +1,67 @@
+# codex-impl
+# Standalone SPipe image-read action entrypoint while the slice-1 SPipe main
+# remains owned by its registry/admission lane.
+
+use std.cli.cli_util.{get_cli_args}
+use app.llm_caret.config.{load_config, config_image_read_profile_id}
+use app.image_to_markdown.app_service.{run_configured_image_file_v1}
+use app.spipe.image_read.action.{publish_spipe_image_read_evidence_v1}
+use app.io.mod.{file_read}
+use std.json.{json_parse, json_object_get, json_to_string, json_get_type}
+
+fn _option(args: [text], name: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == name and i + 1 < args.len(): return args[i + 1]
+        if args[i].starts_with(name + "="): return args[i].substring(name.len() + 1)
+        i = i + 1
+    ""
+
+fn _help():
+    print "Usage: spipe-image-read --config FILE --image FILE --root DIR --output DIR --name NAME --profile ID [--spec FILE]"
+
+fn run_spipe_image_read_cli_v1(args: [text]) -> i64:
+    if args.len() == 0 or _option(args, "--config") == "":
+        _help()
+        return 2
+    val config_error = load_config(_option(args, "--config"))
+    if config_error != "":
+        print "image-read configuration error: " + config_error
+        return 2
+    val selected_profile = _option(args, "--profile")
+    if selected_profile == "":
+        print "image-read skipped: image_read_profile not configured"
+        return 3
+    if selected_profile != config_image_read_profile_id():
+        print "image-read profile mismatch"
+        return 2
+    val image_path = _option(args, "--image")
+    val allowed_root = _option(args, "--root")
+    val output_dir = _option(args, "--output")
+    val base_name = _option(args, "--name")
+    if image_path == "" or allowed_root == "" or output_dir == "" or base_name == "":
+        _help()
+        return 2
+    val artifacts = run_configured_image_file_v1(image_path, allowed_root, output_dir, base_name)
+    if artifacts.error != "":
+        print "image-read failed: " + artifacts.error
+        return 1
+    val spec_path = _option(args, "--spec")
+    if spec_path != "":
+        val receipt = json_parse(file_read(artifacts.receipt_path))
+        if receipt == nil or json_get_type(receipt) != "object":
+            print "image-read receipt is not valid JSON"
+            return 1
+        val source_sha256 = json_to_string(json_object_get(receipt, "source_sha256")) ?? ""
+        if source_sha256 == "" or not publish_spipe_image_read_evidence_v1(
+                spec_path, artifacts.markdown_path, artifacts.structured_path,
+                artifacts.receipt_path, source_sha256, artifacts.structured_sha256):
+            print "image-read evidence publication failed"
+            return 1
+    print "Markdown: " + artifacts.markdown_path
+    print "Structured: " + artifacts.structured_path
+    print "Receipt: " + artifacts.receipt_path
+    0
+
+fn main() -> i64:
+    run_spipe_image_read_cli_v1(get_cli_args())

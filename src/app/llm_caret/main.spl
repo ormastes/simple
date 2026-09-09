@@ -54,8 +54,12 @@ use app.llm_caret.config.{load_config, config_loaded,
     config_compat_base_url, config_compat_model, config_compat_api_key,
     config_kimi_base_url, config_kimi_model, config_kimi_api_key,
     config_glm_base_url, config_glm_model, config_glm_api_key,
-    config_slang_base_url, config_slang_model, config_slang_api_key, config_slang_model_root}
-use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers}
+    config_slang_base_url, config_slang_model, config_slang_api_key, config_slang_model_root,
+    config_image_read_api_key}
+use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers, new_llm_error}
+use app.llm_caret.image_profile.{configured_image_profile_v1}
+use app.llm_caret.multimodal_types.{validate_model_profile_v1}
+use app.llm_caret.multimodal_provider.{complete_multimodal_wire_v1}
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
 use app.llm_caret.types.{Message}
@@ -69,8 +73,14 @@ use app.llm_caret.chat_tui.{
 use app.llm_caret.json_helpers.{build_message_json, ja, extract_json_bool}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
+    build_models_response_with_image_v1,
     build_chat_completion_stream_response, build_anthropic_stream_response,
-    parse_chat_request_content, parse_chat_request_model}
+    parse_chat_request_content, parse_chat_request_model,
+    parse_chat_request_messages_json, multimodal_messages_have_image_v1,
+    validate_proxy_image_messages_v1, validate_proxy_image_messages_with_limits_v1,
+    openai_messages_to_anthropic_v1,
+    anthropic_messages_to_openai_v1, anthropic_system_text_v1,
+    parse_chat_request_system_text}
 use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
 use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
@@ -478,13 +488,103 @@ fn proxy_handle_stream(path: text, body: text,
             resp.stop_reason, resp.input_tokens, resp.output_tokens))
     (200, "text/event-stream", build_chat_completion_stream_response(resp.content, resp.model, resp.stop_reason))
 
+# Production multimodal siblings preserve the incoming ordered message array.
+# The legacy two-argument handler above remains for text-only API/test
+# compatibility; the HTTP server uses these lossless variants.
+fn proxy_handle_multimodal(method: text, path: text, body: text,
+                           dispatch: fn(text, text, text) -> LLMResponse) -> (i64, text):
+    if method == "GET" and path == "/v1/models":
+        val profile = configured_image_profile_v1()
+        if validate_model_profile_v1(profile) == "":
+            return (200, build_models_response_with_image_v1(profile.profile_id,
+                profile.model_id, profile.provider))
+    if method == "POST" and (path == "/v1/chat/completions" or path == "/v1/messages"):
+        val messages_json = parse_chat_request_messages_json(body)
+        if messages_json == "" or messages_json == "[]":
+            return (400, build_error_response("messages required", 400))
+        val content = parse_chat_request_content(body)
+        val model = parse_chat_request_model(body)
+        var dispatch_messages = messages_json
+        val top_system = parse_chat_request_system_text(body)
+        if path == "/v1/messages" and top_system != "":
+            dispatch_messages = "[" + build_message_json("system", top_system) +
+                "," + messages_json.substring(1)
+        val resp = dispatch(content, model, dispatch_messages)
+        if resp.is_error: return (502, build_error_response(resp.error, 502))
+        if path == "/v1/messages":
+            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    val body_text = handle_route(method, path, body)
+    (status_for_path(path), body_text)
+
+fn proxy_handle_stream_multimodal(path: text, body: text,
+                                  dispatch: fn(text, text, text) -> LLMResponse) -> (i64, text, text):
+    val messages_json = parse_chat_request_messages_json(body)
+    if messages_json == "" or messages_json == "[]":
+        return (400, "application/json; charset=utf-8", build_error_response("messages required", 400))
+    var dispatch_messages = messages_json
+    val top_system = parse_chat_request_system_text(body)
+    if path == "/v1/messages" and top_system != "":
+        dispatch_messages = "[" + build_message_json("system", top_system) +
+            "," + messages_json.substring(1)
+    val resp = dispatch(parse_chat_request_content(body), parse_chat_request_model(body), dispatch_messages)
+    if resp.is_error:
+        return (502, "application/json; charset=utf-8", build_error_response(resp.error, 502))
+    if path == "/v1/messages":
+        return (200, "text/event-stream", build_anthropic_stream_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    (200, "text/event-stream", build_chat_completion_stream_response(resp.content, resp.model, resp.stop_reason))
+
 fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
     var use_model = model
     if use_model == "":
         use_model = RT_MODEL
     val messages_json = ja([build_message_json("user", content)])
     dispatch_send(RT_PROVIDER, content, use_model, RT_API_KEY, RT_BASE_URL,
-                   RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
+        RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
+
+fn validate_proxy_image_model_selection_v1(requested_model: text,
+        profile: ModelProfileV1) -> text:
+    if requested_model != "" and requested_model != profile.model_id and
+            requested_model != profile.profile_id:
+        return "requested image model does not match the configured image-read profile"
+    ""
+
+fn _proxy_dispatch_multimodal(content: text, model: text, messages_json: text) -> LLMResponse:
+    var use_model = model
+    if use_model == "": use_model = RT_MODEL
+    val has_image = multimodal_messages_have_image_v1(messages_json)
+    if has_image:
+        val profile = configured_image_profile_v1()
+        val profile_error = validate_model_profile_v1(profile)
+        if profile_error != "": return new_llm_error(RT_PROVIDER, profile_error)
+        val model_error = validate_proxy_image_model_selection_v1(model, profile)
+        if model_error != "": return new_llm_error(profile.provider, model_error)
+        val image_error = validate_proxy_image_messages_with_limits_v1(messages_json,
+            profile.max_request_bytes, profile.max_images, profile.max_pixels)
+        if image_error != "": return new_llm_error(RT_PROVIDER, image_error)
+    if has_image:
+        # Dispatch the exact profile admitted above. Never validate one
+        # endpoint and then send image bytes with the text-runtime endpoint.
+        val profile = configured_image_profile_v1()
+        val provider_messages = if profile.provider == "claude_api":
+            openai_messages_to_anthropic_v1(messages_json)
+        else:
+            anthropic_messages_to_openai_v1(messages_json)
+        var image_system = RT_SYSTEM_PROMPT
+        if profile.provider == "claude_api":
+            val incoming_system = anthropic_system_text_v1(messages_json)
+            if image_system == "": image_system = incoming_system
+            elif incoming_system != "": image_system = image_system + "\n\n" + incoming_system
+        val completion = complete_multimodal_wire_v1(profile,
+            config_image_read_api_key(), provider_messages, image_system)
+        return LLMResponse(content: completion.content, model: completion.model_id,
+            provider: completion.provider, session_id: "",
+            stop_reason: if completion.error_code == "truncated_output": "max_tokens" else: "end_turn",
+            input_tokens: completion.input_tokens, output_tokens: completion.output_tokens,
+            error: completion.error_message, is_error: completion.error_code != "",
+            raw: completion.raw)
+    dispatch_send(RT_PROVIDER, content, use_model, RT_API_KEY, RT_BASE_URL,
+        RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
 
 fn _to_http_status(code: i64) -> HttpStatus:
     if code == 200: return HttpStatus.Ok
@@ -505,7 +605,10 @@ fn _to_http_status(code: i64) -> HttpStatus:
 # is simpler and correctness-safe).
 # ============================================================================
 
-val MAX_BODY_BYTES: i64 = 1000000
+# A configured image may contain up to 20 MiB of decoded bytes. Base64 adds
+# roughly one third plus the JSON envelope; decoded-byte enforcement happens
+# after structural parsing in validate_proxy_image_messages_v1.
+val MAX_BODY_BYTES: i64 = 30000000
 val RATE_LIMIT_PER_MIN: i64 = 60
 val RATE_WINDOW_MS: i64 = 60000
 
@@ -590,12 +693,12 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
             (req.path == "/v1/chat/completions" or req.path == "/v1/messages") and
             extract_json_bool(req.body, "stream"))
         if wants_stream:
-            val result = proxy_handle_stream(req.path, req.body, _proxy_dispatch)
+            val result = proxy_handle_stream_multimodal(req.path, req.body, _proxy_dispatch_multimodal)
             code = result.0
             content_type = result.1
             body = result.2
         else:
-            val result = proxy_handle(method, req.path, req.body, _proxy_dispatch)
+            val result = proxy_handle_multimodal(method, req.path, req.body, _proxy_dispatch_multimodal)
             code = result.0
             body = result.1
     # Access log: level-gated via SIMPLE_LOG (default off - std.log's

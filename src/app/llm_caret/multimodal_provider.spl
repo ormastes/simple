@@ -1,0 +1,159 @@
+# codex-impl
+# Lossless provider serialization for already-admitted bounded image data.
+
+use app.llm_caret.multimodal_types.*
+use app.llm_caret.json_helpers.{jp, js, jo2, ja}
+use app.llm_caret.openai_api.{build_openai_headers, build_openai_body,
+    complete_openai_exchange}
+use app.llm_caret.claude_api.{build_claude_api_headers, build_claude_api_body,
+    complete_claude_api_exchange}
+use app.llm_caret.openai_compat.{build_compat_request, complete_compat_exchange}
+use std.nogc_sync_mut.io.http_sffi.{http_request_v2_raw}
+use std.common.string_core.{bytes_to_text}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms}
+
+fn _openai_content_part_json_v1(part: ContentPartV1) -> text:
+    if part.kind == "text":
+        return jo2(jp("type", js("text")), jp("text", js(part.text_content)))
+    val image_url = "{" + jp("url", js(part.image_data_url)) + "," + jp("detail", js(part.detail)) + "}"
+    jo2(jp("type", js("image_url")), jp("image_url", image_url))
+
+fn _anthropic_content_part_json_v1(part: ContentPartV1) -> text:
+    if part.kind == "text":
+        return jo2(jp("type", js("text")), jp("text", js(part.text_content)))
+    val marker = ";base64,"
+    val marker_index = part.image_data_url.find(marker)
+    if marker_index < 0: return "{}"
+    val source = "{" + jp("type", js("base64")) + "," +
+        jp("media_type", js(part.mime_type)) + "," +
+        jp("data", js(part.image_data_url[marker_index + marker.len():])) + "}"
+    jo2(jp("type", js("image")), jp("source", source))
+
+fn multimodal_messages_json_v1(messages: [MultimodalMessageV1], provider: text) -> text:
+    var encoded_messages: [text] = []
+    for message in messages:
+        if provider == "claude_api" and (message.role == "system" or message.role == "developer"):
+            continue
+        var encoded_parts: [text] = []
+        for part in message.parts:
+            val encoded = if provider == "claude_api": _anthropic_content_part_json_v1(part) else: _openai_content_part_json_v1(part)
+            encoded_parts = encoded_parts + [encoded]
+        encoded_messages = encoded_messages + [jo2(jp("role", js(message.role)), jp("content", ja(encoded_parts)))]
+    ja(encoded_messages)
+
+fn _anthropic_system_prompt_v1(messages: [MultimodalMessageV1], configured: text) -> text:
+    var parts: [text] = []
+    if configured != "": parts = parts + [configured]
+    for message in messages:
+        if message.role == "system" or message.role == "developer":
+            for part in message.parts:
+                if part.kind == "text": parts = parts + [part.text_content]
+    parts.join("\n\n")
+
+fn _timeout_exchange_v1(method: text, url: text, headers: text, body: text,
+        timeout_ms: i64) -> (text, text):
+    if url.starts_with("https://"):
+        val parsed = match Url.parse(url):
+            Some(value): value
+            nil: return ("", "invalid HTTPS provider URL")
+        # A single-hop request prevents an authorization header from crossing
+        # origins through a provider-controlled redirect. The browser H1/TLS
+        # stack performs certificate verification and applies the same absolute
+        # deadline to DNS, connect, TLS, write, and response reads.
+        val engine = FetchEngine.new(Logger.new("llm-caret-image", BrowserLogLevel.Error))
+        val request = FetchRequest(method: method, url: parsed, headers: headers,
+            body: body.bytes(), mode: RequestMode.NoCors, credentials: "omit")
+        val fetched = engine.fetch_single_hop(request, browser_monotonic_ms() + timeout_ms)
+        return match fetched:
+            Ok(response):
+                if response.status < 200 or response.status >= 300:
+                    ("", "provider HTTP status " + response.status.to_text())
+                elif response.body.len() > 8388608:
+                    ("", "provider response exceeds 8 MiB limit")
+                else:
+                    (response.body_text(), "")
+            Err(error): ("", error.message)
+    val header_lines = if headers == "": [] else: headers.split("\n")
+    val result = http_request_v2_raw(method, url, header_lines, body.bytes(), timeout_ms)
+    if result.0 < 0:
+        return (bytes_to_text(result.3), if result.4 == "": "HTTP transport failed" else: result.4)
+    if result.3.len() > 8388608: return ("", "provider response exceeds 8 MiB limit")
+    if result.0 < 200 or result.0 >= 300:
+        return ("", "provider HTTP status " + result.0.to_text())
+    (bytes_to_text(result.3), "")
+
+fn _base_endpoint_v1(endpoint: text) -> text:
+    if endpoint.ends_with("/"): endpoint.substring(0, endpoint.len() - 1) else: endpoint
+
+fn _complete_provider_v1(provider: text, endpoint: text, api_key: text,
+        model: text, messages_json: text, system_prompt: text,
+        max_tokens: i64, timeout_ms: i64) -> ModelCompletionV1:
+    if provider == "claude_api":
+        if api_key == "": return model_completion_error_v1("missing_secret", "Anthropic API key is not configured")
+        val exchange = _timeout_exchange_v1("POST", _base_endpoint_v1(endpoint) + "/v1/messages",
+            build_claude_api_headers(api_key),
+            build_claude_api_body(model, messages_json, system_prompt, max_tokens), timeout_ms)
+        val response = complete_claude_api_exchange(exchange.0, exchange.1)
+        return ModelCompletionV1(content: response.content, provider: provider,
+            model_id: response.model, raw: response.raw, input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            error_code: if response.is_error: if response.error.lower().contains("deadline exceeded") or response.error.lower().contains("timed out") or response.error.lower().contains("timeout"): "timeout" else: "provider_error" else: if response.stop_reason == "max_tokens": "truncated_output" else: "",
+            error_message: response.error)
+    if provider == "openai":
+        if api_key == "": return model_completion_error_v1("missing_secret", "OpenAI API key is not configured")
+        val exchange = _timeout_exchange_v1("POST", _base_endpoint_v1(endpoint) + "/v1/chat/completions",
+            build_openai_headers(api_key), build_openai_body(model, messages_json,
+                max_tokens, 0.0), timeout_ms)
+        val response = complete_openai_exchange(exchange.0, exchange.1)
+        return ModelCompletionV1(content: response.content, provider: provider,
+            model_id: response.model, raw: response.raw, input_tokens: response.prompt_tokens,
+            output_tokens: response.completion_tokens,
+            error_code: if response.is_error: if response.error.lower().contains("deadline exceeded") or response.error.lower().contains("timed out") or response.error.lower().contains("timeout"): "timeout" else: "provider_error" else: if response.finish_reason == "length": "truncated_output" else: "",
+            error_message: response.error)
+    val request = build_compat_request(_base_endpoint_v1(endpoint), api_key, model, messages_json,
+        max_tokens, 0.0)
+    val exchange = _timeout_exchange_v1(request.method, request.url,
+        request.headers, request.body, timeout_ms)
+    val response = complete_compat_exchange(exchange.0, exchange.1)
+    ModelCompletionV1(content: response.content, provider: provider,
+        model_id: response.model, raw: response.raw, input_tokens: response.prompt_tokens,
+        output_tokens: response.completion_tokens,
+        error_code: if response.is_error: if response.error.lower().contains("deadline exceeded") or response.error.lower().contains("timed out") or response.error.lower().contains("timeout"): "timeout" else: "provider_error" else: if response.finish_reason == "length": "truncated_output" else: "",
+        error_message: response.error)
+
+fn complete_multimodal_wire_v1(profile: ModelProfileV1, api_key: text,
+        messages_json: text, system_prompt: text) -> ModelCompletionV1:
+    val profile_error = validate_model_profile_v1(profile)
+    if profile_error != "": return model_completion_error_v1("invalid_profile", profile_error)
+    if not (profile.provider == "openai" or profile.provider == "openai_compat" or
+            profile.provider == "slang" or profile.provider == "claude_api"):
+        return model_completion_error_v1("unsupported_provider",
+            "provider does not implement typed vision content: " + profile.provider)
+    _complete_provider_v1(profile.provider, profile.endpoint, api_key,
+        profile.model_id, messages_json, system_prompt,
+        profile.max_output_tokens, profile.timeout_ms)
+
+fn complete_multimodal_v1(
+    request: MultimodalRequestV1,
+    api_key: text,
+    cli_path: text,
+    system_prompt: text
+) -> ModelCompletionV1:
+    val validation_error = validate_multimodal_request_v1(request)
+    if validation_error != "": return model_completion_error_v1("invalid_request", validation_error)
+    for message in request.messages:
+        for part in message.parts:
+            if part.kind == "image" and part.image_data_url == "":
+                return model_completion_error_v1("image_not_materialized", "image bytes must be admitted and materialized before provider dispatch")
+    val provider = request.profile.provider
+    if not (provider == "openai" or provider == "openai_compat" or provider == "slang" or provider == "claude_api"):
+        return model_completion_error_v1("unsupported_provider", "provider does not implement typed vision content: " + provider)
+    val messages_json = multimodal_messages_json_v1(request.messages, provider)
+    val provider_system = if provider == "claude_api": _anthropic_system_prompt_v1(request.messages, system_prompt) else: system_prompt
+    _complete_provider_v1(provider, request.profile.endpoint, api_key,
+        request.profile.model_id, messages_json, provider_system,
+        request.profile.max_output_tokens, request.profile.timeout_ms)

@@ -1,0 +1,379 @@
+# codex-impl
+# Strict conversion from the audited wire document into the typed renderer model.
+
+use app.llm_caret.multimodal_types.*
+use std.json.{json_parse, json_object_get, json_object_has, json_get_type,
+    json_array_length, json_array_get, json_to_string, json_to_number,
+    json_to_boolean}
+
+struct DecodedExtractionV1:
+    document: ExtractionDocumentV1
+    error: text
+
+fn _empty_document_v1() -> ExtractionDocumentV1:
+    ExtractionDocumentV1(schema_version: "", source_artifact_id: "",
+        source_sha256: "", width: 0, height: 0, categories: [], regions: [],
+        text_spans: [], tables: [], charts: [], unresolved: [], warnings: [])
+
+fn _jt_v1(object: any, key: text) -> text:
+    val value = json_to_string(json_object_get(object, key))
+    if value == nil: "" else: value
+
+fn _ji_v1(object: any, key: text) -> i64:
+    val value = json_to_number(json_object_get(object, key))
+    if value == nil: 0 else: value as i64
+
+fn _jf_v1(object: any, key: text) -> f64:
+    val value = json_to_number(json_object_get(object, key))
+    if value == nil: 0.0 else: value
+
+fn _jb_v1(object: any, key: text) -> bool:
+    val value = json_to_boolean(json_object_get(object, key))
+    if value == nil: false else: value
+
+fn _text_array_v1(value: any) -> [text]:
+    var result: [text] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_to_string(json_array_get(value, index))
+        if item != nil: result = result + [item]
+        index = index + 1
+    result
+
+fn _text_array_valid_v1(value: any) -> bool:
+    if json_get_type(value) != "array": return false
+    var index = 0
+    while index < json_array_length(value):
+        if json_get_type(json_array_get(value, index)) != "string": return false
+        index = index + 1
+    true
+
+fn _fields_are_type_v1(object: any, fields: [text], expected: text) -> bool:
+    if json_get_type(object) != "object": return false
+    for field in fields:
+        if json_get_type(json_object_get(object, field)) != expected: return false
+    true
+
+fn _integer_field_v1(object: any, field: text) -> bool:
+    if json_get_type(json_object_get(object, field)) != "number": return false
+    val value = json_to_number(json_object_get(object, field))
+    if value == nil: return false
+    val number: f64 = value
+    number.floor() == number
+
+fn _bounds_wire_valid_v1(value: any) -> bool:
+    for field in ["page_index", "x", "y", "width", "height"]:
+        if not _integer_field_v1(value, field): return false
+    true
+
+fn _validate_non_chart_wire_v1(root: any) -> text:
+    if not _fields_are_type_v1(root,
+            ["schema_version", "source_artifact_id", "source_sha256"], "string"):
+        return "document identity fields must be text"
+    for field in ["width", "height"]:
+        if not _integer_field_v1(root, field): return "document " + field + " must be an integer"
+    val regions = json_object_get(root, "regions")
+    var index = 0
+    while index < json_array_length(regions):
+        val item = json_array_get(regions, index)
+        if not _fields_are_type_v1(item, ["region_id", "category", "markdown"], "string"):
+            return "region text fields are invalid"
+        if not _integer_field_v1(item, "reading_order") or not _integer_field_v1(item, "confidence_milli"):
+            return "region integer fields are invalid"
+        if not _bounds_wire_valid_v1(json_object_get(item, "source_box")): return "region source_box is invalid"
+        index = index + 1
+    val spans = json_object_get(root, "text_spans")
+    index = 0
+    while index < json_array_length(spans):
+        val item = json_array_get(spans, index)
+        if not _fields_are_type_v1(item, ["text_content", "language", "script"], "string"):
+            return "text span text fields are invalid"
+        if not _integer_field_v1(item, "confidence_milli"): return "text span confidence must be an integer"
+        if not _fields_are_type_v1(item, ["highlighted", "handwritten"], "boolean"):
+            return "text span annotation flags must be boolean"
+        if not _bounds_wire_valid_v1(json_object_get(item, "source_box")): return "text span source_box is invalid"
+        index = index + 1
+    val tables = json_object_get(root, "tables")
+    index = 0
+    while index < json_array_length(tables):
+        val table = json_array_get(tables, index)
+        if not _fields_are_type_v1(table, ["table_id", "title"], "string"):
+            return "table identity fields are invalid"
+        if not _integer_field_v1(table, "row_count") or not _integer_field_v1(table, "column_count"):
+            return "table dimensions must be integers"
+        if json_get_type(json_object_get(table, "cells")) != "array": return "table cells must be an array"
+        if not _bounds_wire_valid_v1(json_object_get(table, "source_box")): return "table source_box is invalid"
+        val cells = json_object_get(table, "cells")
+        var cell_index = 0
+        while cell_index < json_array_length(cells):
+            val cell = json_array_get(cells, cell_index)
+            for field in ["row", "column", "row_span", "column_span", "confidence_milli"]:
+                if not _integer_field_v1(cell, field): return "table cell integer fields are invalid"
+            if not _fields_are_type_v1(cell, ["content", "status"], "string"):
+                return "table cell text fields are invalid"
+            if not _fields_are_type_v1(cell, ["highlighted", "handwritten"], "boolean"):
+                return "table cell annotation flags must be boolean"
+            if not _bounds_wire_valid_v1(json_object_get(cell, "source_box")): return "table cell source_box is invalid"
+            cell_index = cell_index + 1
+        index = index + 1
+    ""
+
+fn _bounds_v1(object: any) -> SourceBoundsV1:
+    SourceBoundsV1(page_index: _ji_v1(object, "page_index"),
+        x: _ji_v1(object, "x"), y: _ji_v1(object, "y"),
+        width: _ji_v1(object, "width"), height: _ji_v1(object, "height"))
+
+fn _status_v1(value: text) -> ImageValueStatusV1:
+    if value == "observed": return ImageValueStatusV1.observed
+    if value == "calibrated": return ImageValueStatusV1.calibrated
+    if value == "missing": return ImageValueStatusV1.missing
+    ImageValueStatusV1.ambiguous
+
+fn _validate_point_wire_v1(item: any) -> text:
+    if json_get_type(item) != "object": return "chart point must be an object"
+    for field in ["x_present", "y_present"]:
+        if json_get_type(json_object_get(item, field)) != "boolean":
+            return "chart point " + field + " must be boolean"
+    for field in ["x_value", "y_value", "uncertainty_low", "uncertainty_high"]:
+        if json_get_type(json_object_get(item, field)) != "number":
+            return "chart point " + field + " must be numeric"
+    if not _integer_field_v1(item, "uncertainty_milli"):
+        return "chart point uncertainty_milli must be an integer"
+    for field in ["x_lexeme", "y_lexeme", "status", "calibration_method"]:
+        if json_get_type(json_object_get(item, field)) != "string":
+            return "chart point " + field + " must be text"
+    val status = _jt_v1(item, "status")
+    if not (status == "observed" or status == "calibrated" or status == "missing" or status == "ambiguous"):
+        return "unsupported chart point status"
+    if not _bounds_wire_valid_v1(json_object_get(item, "source_box")):
+        return "chart point source_box is invalid"
+    ""
+
+fn _validate_chart_wire_v1(charts: any) -> text:
+    var chart_index = 0
+    while chart_index < json_array_length(charts):
+        val chart = json_array_get(charts, chart_index)
+        if not _fields_are_type_v1(chart,
+                ["panel_id", "chart_type", "title", "x_axis", "y_axis",
+                    "x_scale", "y_scale", "shared_legend_id"], "string"):
+            return "chart text fields are invalid"
+        for field in ["x_min", "x_max", "y_min", "y_max"]:
+            if json_get_type(json_object_get(chart, field)) != "number": return "chart ranges must be numeric"
+        if not _fields_are_type_v1(chart, ["x_range_present", "y_range_present"], "boolean"):
+            return "chart range presence flags must be boolean"
+        for field in ["x_ticks", "y_ticks", "legend_entries", "annotations"]:
+            if json_get_type(json_object_get(chart, field)) != "array": return "chart " + field + " must be an array"
+        for tick_axis in ["x_ticks", "y_ticks"]:
+            val ticks = json_object_get(chart, tick_axis)
+            var tick_index = 0
+            while tick_index < json_array_length(ticks):
+                val tick = json_array_get(ticks, tick_index)
+                if not _fields_are_type_v1(tick, ["lexeme"], "string") or
+                        json_get_type(json_object_get(tick, "value")) != "number" or
+                        not _fields_are_type_v1(tick, ["value_present"], "boolean") or
+                        not _bounds_wire_valid_v1(json_object_get(tick, "source_box")):
+                    return "chart tick fields are invalid"
+                tick_index = tick_index + 1
+        val legends = json_object_get(chart, "legend_entries")
+        var legend_index = 0
+        while legend_index < json_array_length(legends):
+            val legend = json_array_get(legends, legend_index)
+            if not _fields_are_type_v1(legend, ["label", "series_name", "marker"], "string") or
+                    not _bounds_wire_valid_v1(json_object_get(legend, "source_box")):
+                return "chart legend fields are invalid"
+            legend_index = legend_index + 1
+        val annotations = json_object_get(chart, "annotations")
+        var annotation_index = 0
+        while annotation_index < json_array_length(annotations):
+            val annotation = json_array_get(annotations, annotation_index)
+            if not _fields_are_type_v1(annotation,
+                    ["annotation_id", "text_content", "target_series", "relation"], "string") or
+                    not _integer_field_v1(annotation, "target_point_index") or
+                    not _bounds_wire_valid_v1(json_object_get(annotation, "source_box")):
+                return "chart annotation fields are invalid"
+            annotation_index = annotation_index + 1
+        if not _bounds_wire_valid_v1(json_object_get(chart, "source_box")):
+            return "chart source_box is invalid"
+        val series = json_object_get(chart, "series")
+        if json_get_type(series) != "array": return "chart series must be an array"
+        var series_index = 0
+        while series_index < json_array_length(series):
+            val series_item = json_array_get(series, series_index)
+            if not _fields_are_type_v1(series_item, ["name", "unit"], "string"):
+                return "chart series text fields are invalid"
+            val points = json_object_get(series_item, "points")
+            if json_get_type(points) != "array": return "chart points must be an array"
+            var point_index = 0
+            while point_index < json_array_length(points):
+                val error = _validate_point_wire_v1(json_array_get(points, point_index))
+                if error != "": return error
+                point_index = point_index + 1
+            series_index = series_index + 1
+        chart_index = chart_index + 1
+    ""
+
+fn _decode_ticks_v1(value: any) -> [ChartTickV1]:
+    var result: [ChartTickV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartTickV1(lexeme: _jt_v1(item, "lexeme"),
+            value: _jf_v1(item, "value"), value_present: _jb_v1(item, "value_present"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_legends_v1(value: any) -> [ChartLegendEntryV1]:
+    var result: [ChartLegendEntryV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartLegendEntryV1(label: _jt_v1(item, "label"),
+            series_name: _jt_v1(item, "series_name"), marker: _jt_v1(item, "marker"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_annotations_v1(value: any) -> [ChartAnnotationV1]:
+    var result: [ChartAnnotationV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartAnnotationV1(annotation_id: _jt_v1(item, "annotation_id"),
+            text_content: _jt_v1(item, "text_content"), target_series: _jt_v1(item, "target_series"),
+            target_point_index: _ji_v1(item, "target_point_index"), relation: _jt_v1(item, "relation"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_regions_v1(value: any) -> [ExtractionRegionV1]:
+    var result: [ExtractionRegionV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ExtractionRegionV1(region_id: _jt_v1(item, "region_id"),
+            category: _jt_v1(item, "category"), reading_order: _ji_v1(item, "reading_order"),
+            markdown: _jt_v1(item, "markdown"), source_box: _bounds_v1(json_object_get(item, "source_box")),
+            confidence_milli: _ji_v1(item, "confidence_milli"))]
+        index = index + 1
+    result
+
+fn _decode_spans_v1(value: any) -> [TextSpanV1]:
+    var result: [TextSpanV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [TextSpanV1(text_content: _jt_v1(item, "text_content"),
+            language: _jt_v1(item, "language"), script: _jt_v1(item, "script"),
+            confidence_milli: _ji_v1(item, "confidence_milli"),
+            highlighted: _jb_v1(item, "highlighted"), handwritten: _jb_v1(item, "handwritten"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_cells_v1(value: any) -> [TableCellV1]:
+    var result: [TableCellV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [TableCellV1(row: _ji_v1(item, "row"), column: _ji_v1(item, "column"),
+            row_span: _ji_v1(item, "row_span"), column_span: _ji_v1(item, "column_span"),
+            content: _jt_v1(item, "content"), status: _jt_v1(item, "status"),
+            confidence_milli: _ji_v1(item, "confidence_milli"),
+            highlighted: _jb_v1(item, "highlighted"), handwritten: _jb_v1(item, "handwritten"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_tables_v1(value: any) -> [TableV1]:
+    var result: [TableV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [TableV1(table_id: _jt_v1(item, "table_id"), title: _jt_v1(item, "title"),
+            row_count: _ji_v1(item, "row_count"), column_count: _ji_v1(item, "column_count"),
+            cells: _decode_cells_v1(json_object_get(item, "cells")),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_points_v1(value: any) -> [ChartPointV1]:
+    var result: [ChartPointV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartPointV1(x_lexeme: _jt_v1(item, "x_lexeme"),
+            y_lexeme: _jt_v1(item, "y_lexeme"), x_value: _jf_v1(item, "x_value"),
+            y_value: _jf_v1(item, "y_value"), x_present: _jb_v1(item, "x_present"),
+            y_present: _jb_v1(item, "y_present"), status: _status_v1(_jt_v1(item, "status")),
+            uncertainty_milli: _ji_v1(item, "uncertainty_milli"),
+            uncertainty_low: _jf_v1(item, "uncertainty_low"),
+            uncertainty_high: _jf_v1(item, "uncertainty_high"),
+            calibration_method: _jt_v1(item, "calibration_method"),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn _decode_series_v1(value: any) -> [ChartSeriesV1]:
+    var result: [ChartSeriesV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartSeriesV1(name: _jt_v1(item, "name"), unit: _jt_v1(item, "unit"),
+            points: _decode_points_v1(json_object_get(item, "points")))]
+        index = index + 1
+    result
+
+fn _decode_charts_v1(value: any) -> [ChartPanelV1]:
+    var result: [ChartPanelV1] = []
+    var index = 0
+    while index < json_array_length(value):
+        val item = json_array_get(value, index)
+        result = result + [ChartPanelV1(panel_id: _jt_v1(item, "panel_id"),
+            chart_type: _jt_v1(item, "chart_type"), title: _jt_v1(item, "title"),
+            x_axis: _jt_v1(item, "x_axis"), y_axis: _jt_v1(item, "y_axis"),
+            x_scale: _jt_v1(item, "x_scale"), y_scale: _jt_v1(item, "y_scale"),
+            x_min: _jf_v1(item, "x_min"), x_max: _jf_v1(item, "x_max"),
+            x_range_present: _jb_v1(item, "x_range_present"),
+            y_min: _jf_v1(item, "y_min"), y_max: _jf_v1(item, "y_max"),
+            y_range_present: _jb_v1(item, "y_range_present"),
+            x_ticks: _decode_ticks_v1(json_object_get(item, "x_ticks")),
+            y_ticks: _decode_ticks_v1(json_object_get(item, "y_ticks")),
+            shared_legend_id: _jt_v1(item, "shared_legend_id"),
+            legend_entries: _decode_legends_v1(json_object_get(item, "legend_entries")),
+            annotations: _decode_annotations_v1(json_object_get(item, "annotations")),
+            series: _decode_series_v1(json_object_get(item, "series")),
+            source_box: _bounds_v1(json_object_get(item, "source_box")))]
+        index = index + 1
+    result
+
+fn validate_extraction_document_wire_v1(content: text) -> text:
+    val root = json_parse(content.trim())
+    if root == nil or json_get_type(root) != "object":
+        return "invalid extraction JSON object"
+    for field in ["categories", "regions", "text_spans", "tables", "charts", "unresolved", "warnings"]:
+        if json_get_type(json_object_get(root, field)) != "array":
+            return field + " must be an array"
+    for field in ["categories", "unresolved", "warnings"]:
+        if not _text_array_valid_v1(json_object_get(root, field)):
+            return field + " must contain only text"
+    val non_chart_wire_error = _validate_non_chart_wire_v1(root)
+    if non_chart_wire_error != "": return non_chart_wire_error
+    _validate_chart_wire_v1(json_object_get(root, "charts"))
+
+fn decode_extraction_document_v1(content: text) -> DecodedExtractionV1:
+    val root = json_parse(content.trim())
+    val wire_error = validate_extraction_document_wire_v1(content)
+    if wire_error != "":
+        return DecodedExtractionV1(document: _empty_document_v1(), error: wire_error)
+    val document = ExtractionDocumentV1(schema_version: _jt_v1(root, "schema_version"),
+        source_artifact_id: _jt_v1(root, "source_artifact_id"),
+        source_sha256: _jt_v1(root, "source_sha256"), width: _ji_v1(root, "width"),
+        height: _ji_v1(root, "height"), categories: _text_array_v1(json_object_get(root, "categories")),
+        regions: _decode_regions_v1(json_object_get(root, "regions")),
+        text_spans: _decode_spans_v1(json_object_get(root, "text_spans")),
+        tables: _decode_tables_v1(json_object_get(root, "tables")),
+        charts: _decode_charts_v1(json_object_get(root, "charts")),
+        unresolved: _text_array_v1(json_object_get(root, "unresolved")),
+        warnings: _text_array_v1(json_object_get(root, "warnings")))
+    DecodedExtractionV1(document: document, error: validate_extraction_document_v1(document))

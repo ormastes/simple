@@ -1,0 +1,116 @@
+# codex-impl
+
+use app.io.mod.{dir_create_all, file_atomic_write, file_delete, file_exists, file_read}
+use std.common.crypto.sha256.{sha256_text}
+use std.text.{escape_json}
+use app.llm_caret.multimodal_types.{ExtractionReceiptV1, ExtractionArtifactsV1}
+
+val EXTRACTION_RECEIPT_SCHEMA_VERSION_V1: text = "simple.image-extraction.receipt.v3"
+
+fn _json_text_array_v1(values: [text]) -> text:
+    var out = "["
+    var i = 0
+    for value in values:
+        if i > 0: out = out + ","
+        out = out + "\"" + escape_json(value) + "\""
+        i = i + 1
+    out + "]"
+
+fn render_extraction_receipt_json_v1(receipt: ExtractionReceiptV1) -> text:
+    "{" +
+    "\"schema_version\":\"" + escape_json(receipt.schema_version) + "\"," +
+    "\"extraction_schema_version\":\"" + escape_json(receipt.extraction_schema_version) + "\"," +
+    "\"renderer_version\":\"" + escape_json(receipt.renderer_version) + "\"," +
+    "\"status\":\"" + escape_json(receipt.status) + "\"," +
+    "\"error_code\":\"" + escape_json(receipt.error_code) + "\"," +
+    "\"source_artifact_id\":\"" + escape_json(receipt.source_artifact_id) + "\"," +
+    "\"source_sha256\":\"" + receipt.source_sha256 + "\"," +
+    "\"source_width\":" + receipt.source_width.to_text() + "," +
+    "\"source_height\":" + receipt.source_height.to_text() + "," +
+    "\"markdown_path\":\"" + escape_json(receipt.markdown_path) + "\"," +
+    "\"markdown_sha256\":\"" + receipt.markdown_sha256 + "\"," +
+    "\"structured_path\":\"" + escape_json(receipt.structured_path) + "\"," +
+    "\"structured_sha256\":\"" + receipt.structured_sha256 + "\"," +
+    "\"result_sha256\":\"" + receipt.result_sha256 + "\"," +
+    "\"profile_fingerprint\":\"" + receipt.profile_fingerprint + "\"," +
+    "\"provider\":\"" + escape_json(receipt.provider) + "\"," +
+    "\"model_id\":\"" + escape_json(receipt.model_id) + "\"," +
+    "\"model_revision\":\"" + escape_json(receipt.model_revision) + "\"," +
+    "\"prompt_version\":\"" + escape_json(receipt.prompt_version) + "\"," +
+    "\"preprocessing_version\":\"" + escape_json(receipt.preprocessing_version) + "\"," +
+    "\"timings_ms\":{\"load\":" + receipt.load_ms.to_text() + ",\"preprocess\":" + receipt.preprocess_ms.to_text() + ",\"transport\":" + receipt.transport_ms.to_text() + ",\"inference\":" + receipt.inference_ms.to_text() + ",\"validation\":" + receipt.validation_ms.to_text() + ",\"render\":" + receipt.render_ms.to_text() + ",\"cache\":" + receipt.cache_ms.to_text() + "}," +
+    "\"retry_count\":" + receipt.retry_count.to_text() + "," +
+    "\"request_count\":" + receipt.request_count.to_text() + "," +
+    "\"cache_hit\":" + receipt.cache_hit.to_text() + "," +
+    "\"provenance_item_count\":" + receipt.provenance_item_count.to_text() + "," +
+    "\"validation_check_count\":" + receipt.validation_check_count.to_text() + "," +
+    "\"validation_failure_count\":" + receipt.validation_failure_count.to_text() + "," +
+    "\"warnings\":" + _json_text_array_v1(receipt.warnings) + "}\n"
+
+fn _restore_artifact_v1(path: text, existed: bool, content: text):
+    if existed:
+        val _ = file_atomic_write(path, content)
+    else:
+        val _ = file_delete(path)
+
+fn publish_extraction_artifacts_v1(
+    output_dir: text,
+    base_name: text,
+    markdown: text,
+    structured_json: text,
+    receipt: ExtractionReceiptV1
+) -> ExtractionArtifactsV1:
+    if output_dir == "" or base_name == "" or base_name.contains("/") or base_name.contains(".."):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: "invalid output path")
+    if not dir_create_all(output_dir):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: "cannot create output directory")
+    val markdown_path = output_dir + "/" + base_name + ".md"
+    val structured_path = output_dir + "/" + base_name + ".json"
+    val receipt_path = output_dir + "/" + base_name + ".receipt.json"
+    val markdown_existed = file_exists(markdown_path)
+    val structured_existed = file_exists(structured_path)
+    val receipt_existed = file_exists(receipt_path)
+    val old_markdown = if markdown_existed: file_read(markdown_path) else: ""
+    val old_structured = if structured_existed: file_read(structured_path) else: ""
+    val old_receipt = if receipt_existed: file_read(receipt_path) else: ""
+    var bound_receipt = receipt
+    bound_receipt.markdown_path = markdown_path
+    bound_receipt.markdown_sha256 = sha256_text(markdown)
+    bound_receipt.structured_path = structured_path
+    bound_receipt.structured_sha256 = sha256_text(structured_json)
+    val receipt_json = render_extraction_receipt_json_v1(bound_receipt)
+    if not file_atomic_write(markdown_path, markdown):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: "cannot write Markdown artifact")
+    if not file_atomic_write(structured_path, structured_json):
+        _restore_artifact_v1(markdown_path, markdown_existed, old_markdown)
+        return ExtractionArtifactsV1(markdown_path: markdown_path, structured_path: "", receipt_path: "",
+            markdown_sha256: sha256_text(markdown), structured_sha256: "", receipt_sha256: "", error: "cannot write structured artifact")
+    if not file_atomic_write(receipt_path, receipt_json):
+        _restore_artifact_v1(markdown_path, markdown_existed, old_markdown)
+        _restore_artifact_v1(structured_path, structured_existed, old_structured)
+        _restore_artifact_v1(receipt_path, receipt_existed, old_receipt)
+        return ExtractionArtifactsV1(markdown_path: markdown_path, structured_path: structured_path, receipt_path: "",
+            markdown_sha256: sha256_text(markdown), structured_sha256: sha256_text(structured_json), receipt_sha256: "", error: "cannot write receipt artifact")
+    ExtractionArtifactsV1(markdown_path: markdown_path, structured_path: structured_path,
+        receipt_path: receipt_path, markdown_sha256: sha256_text(markdown),
+        structured_sha256: sha256_text(structured_json), receipt_sha256: sha256_text(receipt_json), error: "")
+
+fn publish_extraction_failure_receipt_v1(output_dir: text, base_name: text,
+        receipt: ExtractionReceiptV1, failure: text) -> ExtractionArtifactsV1:
+    if output_dir == "" or base_name == "" or base_name.contains("/") or base_name.contains(".."):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: failure)
+    if not dir_create_all(output_dir):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: failure)
+    val receipt_path = output_dir + "/" + base_name + ".failure.receipt.json"
+    val receipt_json = render_extraction_receipt_json_v1(receipt)
+    if not file_atomic_write(receipt_path, receipt_json):
+        return ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: "",
+            markdown_sha256: "", structured_sha256: "", receipt_sha256: "", error: failure)
+    ExtractionArtifactsV1(markdown_path: "", structured_path: "", receipt_path: receipt_path,
+        markdown_sha256: "", structured_sha256: "", receipt_sha256: sha256_text(receipt_json),
+        error: failure)

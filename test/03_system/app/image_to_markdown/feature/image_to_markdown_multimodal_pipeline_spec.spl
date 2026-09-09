@@ -1,0 +1,273 @@
+# codex-system-test
+# @tag:system
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015
+# @evidence-display: links
+
+"""
+# Image-to-Markdown multimodal pipeline
+
+Exercises the deterministic reference provider and independent fixture
+expectations. Live model output is evidence, never its own oracle.
+"""
+
+use std.spec.*
+use app.llm_caret.multimodal_types.*
+use app.llm_caret.multimodal_provider.{multimodal_messages_json_v1}
+use app.image_to_markdown.prompts.*
+use app.image_to_markdown.service.*
+use app.image_to_markdown.markdown.*
+use app.image_to_markdown.extraction_json.{decode_extraction_document_v1}
+use app.image_to_markdown.input.{admit_local_png_v1}
+use app.spipe.image_read.action.*
+use app.spipe.main.{run_spipe_cli_v1}
+use app.image_to_markdown.artifacts.{EXTRACTION_RECEIPT_SCHEMA_VERSION_V1,
+    publish_extraction_artifacts_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_read}
+
+var IMAGE_MODEL_CALLS = 0
+
+fn fixture_box() -> SourceBoundsV1:
+    SourceBoundsV1(page_index: 0, x: 1, y: 2, width: 20, height: 10)
+
+fn given_private_fixture_workspace() -> text:
+    "build/test-artifacts/image_to_markdown"
+
+fn given_local_image_read_profile() -> ModelProfileV1:
+    ModelProfileV1(profile_id: "fixture-local", provider: "slang",
+        endpoint: "http://localhost:8721", model_id: "fixture-vision",
+        model_revision: "fixture-r1", secret_ref: "", vision: true,
+        structured_output: true, remote_egress: false, fallback_provider: "",
+        max_images: 5, max_pixels: 40000000, max_request_bytes: 20971520,
+        max_output_tokens: 16384, timeout_ms: 30000, max_concurrency: 1,
+        trust_scope: "private-fixture")
+
+fn given_deterministic_vision_fixture_provider(request: MultimodalRequestV1) -> ModelCompletionV1:
+    IMAGE_MODEL_CALLS = IMAGE_MODEL_CALLS + 1
+    val prompt = request.messages[0].parts[0].text_content
+    val box = "{\"page_index\":0,\"x\":1,\"y\":2,\"width\":20,\"height\":10}"
+    val point = "{\"x_lexeme\":\"0\",\"y_lexeme\":\"1.00\",\"x_value\":0,\"y_value\":1,\"x_present\":true,\"y_present\":true,\"status\":\"observed\",\"uncertainty_milli\":0,\"uncertainty_low\":1,\"uncertainty_high\":1,\"calibration_method\":\"\",\"source_box\":" + box + "}"
+    val series = "[{\"name\":\"높이\",\"unit\":\"mm\",\"points\":[" + point + "]}]"
+    val tick = "{\"lexeme\":\"0\",\"value\":0,\"value_present\":true,\"source_box\":" + box + "}"
+    val legend = "{\"label\":\"측정값\",\"series_name\":\"높이\",\"marker\":\"blue\",\"source_box\":" + box + "}"
+    val annotation = "{\"annotation_id\":\"a1\",\"text_content\":\"주의\",\"target_series\":\"높이\",\"target_point_index\":0,\"relation\":\"points_to\",\"source_box\":" + box + "}"
+    val chart1 = "{\"panel_id\":\"panel-1\",\"chart_type\":\"line\",\"title\":\"A\",\"x_axis\":\"x\",\"y_axis\":\"height\",\"x_scale\":\"linear\",\"y_scale\":\"linear\",\"x_min\":0,\"x_max\":1,\"x_range_present\":true,\"y_min\":1,\"y_max\":1,\"y_range_present\":true,\"x_ticks\":[" + tick + "],\"y_ticks\":[],\"shared_legend_id\":\"shared\",\"legend_entries\":[" + legend + "],\"annotations\":[" + annotation + "],\"series\":" + series + ",\"source_box\":" + box + "}"
+    val chart2 = chart1.replace("panel-1", "panel-2").replace("\"line\"", "\"cell_distribution\"")
+    val envelope = "{\"schema_version\":\"simple.image-extraction.v2\",\"source_artifact_id\":\"fixture.png\",\"source_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"width\":100,\"height\":80,\"categories\":[\"table\",\"highlight\",\"handwriting\",\"multiple_charts\",\"cell_distribution\"],\"regions\":[],\"text_spans\":[{\"text_content\":\"주의\",\"language\":\"ko\",\"script\":\"Hangul\",\"confidence_milli\":950,\"highlighted\":true,\"handwritten\":true,\"source_box\":" + box + "}],\"tables\":[{\"table_id\":\"table-1\",\"title\":\"재고\",\"row_count\":1,\"column_count\":1,\"cells\":[{\"row\":0,\"column\":0,\"row_span\":1,\"column_span\":1,\"content\":\"수량\",\"status\":\"observed\",\"confidence_milli\":900,\"highlighted\":true,\"handwritten\":false,\"source_box\":" + box + "}],\"source_box\":" + box + "}],\"charts\":[" + chart1 + "," + chart2 + "],\"unresolved\":[],\"warnings\":[]}"
+    val inventory_chart1 = chart1.replace("\"series\":" + series, "\"series\":[]")
+    val inventory_chart2 = chart2.replace("\"series\":" + series, "\"series\":[]")
+    val inventory_envelope = "{\"schema_version\":\"simple.image-extraction.v2\",\"source_artifact_id\":\"fixture.png\",\"source_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"width\":100,\"height\":80,\"categories\":[\"table\",\"highlight\",\"handwriting\",\"multiple_charts\",\"cell_distribution\"],\"regions\":[],\"text_spans\":[],\"tables\":[{\"table_id\":\"table-1\",\"title\":\"재고\",\"row_count\":1,\"column_count\":1,\"cells\":[],\"source_box\":" + box + "}],\"charts\":[" + inventory_chart1 + "," + inventory_chart2 + "],\"unresolved\":[],\"warnings\":[]}"
+    var content = envelope
+    if prompt.starts_with(IMAGE_PIPELINE_PROMPT_ID_V1):
+        content = "{\"pipeline_version\":\"image-three-stage-pipeline.v1\",\"inventory\":" +
+            inventory_envelope + ",\"extraction\":" + envelope + ",\"audit\":" + envelope + "}"
+    ModelCompletionV1(content: content, provider: "fixture", model_id: "fixture-vision",
+        raw: "", input_tokens: 0, output_tokens: 0, error_code: "", error_message: "")
+
+fn given_clean_image_artifact_root() -> text:
+    "build/test-artifacts/image_to_markdown/clean"
+
+fn fixture_image() -> ContentPartV1:
+    image_data_part_v1("fixture.png", "image/png", 100, 80,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "high", "data:image/png;base64,AA==")
+
+fn when_image_to_markdown_runs(fixture_name: text) -> ExtractionRunV1:
+    IMAGE_MODEL_CALLS = 0
+    run_three_stage_extraction_v1(given_local_image_read_profile(), fixture_image(),
+        given_deterministic_vision_fixture_provider)
+
+fn check_ordered_multimodal_parts_preserved():
+    val messages = [
+        MultimodalMessageV1(role: "system", parts: [text_part_v1("faithful")]),
+        MultimodalMessageV1(role: "user", parts: [text_part_v1("read"), fixture_image()])
+    ]
+    val encoded = multimodal_messages_json_v1(messages, "openai")
+    expect(encoded.index_of("system").unwrap()).to_be_less_than(encoded.index_of("user").unwrap())
+    expect(encoded.index_of("\"type\":\"text\"").unwrap()).to_be_less_than(encoded.index_of("\"type\":\"image_url\"").unwrap())
+
+fn reference_document() -> ExtractionDocumentV1:
+    val bounds = fixture_box()
+    val cells = [
+        TableCellV1(row: 0, column: 0, row_span: 1, column_span: 1, content: "항목", status: "observed", confidence_milli: 950, highlighted: true, handwritten: false, source_box: bounds),
+        TableCellV1(row: 0, column: 1, row_span: 1, column_span: 1, content: "수량", status: "observed", confidence_milli: 900, highlighted: false, handwritten: true, source_box: bounds)
+    ]
+    val samples = [
+        ChartPointV1(x_lexeme: "0", y_lexeme: "1.00", x_value: 0.0, y_value: 1.0, x_present: true, y_present: true, status: ImageValueStatusV1.observed, uncertainty_milli: 0, uncertainty_low: 1.0, uncertainty_high: 1.0, calibration_method: "", source_box: bounds),
+        ChartPointV1(x_lexeme: "1", y_lexeme: "2.5", x_value: 1.0, y_value: 2.5, x_present: true, y_present: true, status: ImageValueStatusV1.calibrated, uncertainty_milli: 25, uncertainty_low: 2.4, uncertainty_high: 2.6, calibration_method: "linear-axis-pixels", source_box: bounds),
+        ChartPointV1(x_lexeme: "2", y_lexeme: "?", x_value: 2.0, y_value: 0.0, x_present: true, y_present: false, status: ImageValueStatusV1.ambiguous, uncertainty_milli: 100, uncertainty_low: 0.0, uncertainty_high: 0.0, calibration_method: "", source_box: bounds)
+    ]
+    val series = [ChartSeriesV1(name: "높이", unit: "mm", points: samples)]
+    val ticks = [ChartTickV1(lexeme: "0", value: 0.0, value_present: true, source_box: bounds),
+        ChartTickV1(lexeme: "1", value: 1.0, value_present: true, source_box: bounds)]
+    val legends = [ChartLegendEntryV1(label: "측정값", series_name: "높이",
+        marker: "blue", source_box: bounds)]
+    val annotations = [ChartAnnotationV1(annotation_id: "a1", text_content: "주의",
+        target_series: "높이", target_point_index: 1, relation: "points_to", source_box: bounds)]
+    ExtractionDocumentV1(schema_version: IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        source_artifact_id: "fixture.png", source_sha256: fixture_image().sha256,
+        width: 100, height: 80,
+        categories: ["table", "highlight", "handwriting", "multiple_charts"],
+        regions: [],
+        text_spans: [TextSpanV1(text_content: "주의", language: "ko", script: "Hangul", confidence_milli: 950, highlighted: true, handwritten: true, source_box: bounds)],
+        tables: [TableV1(table_id: "table-1", title: "재고", row_count: 1, column_count: 2, cells: cells, source_box: bounds)],
+        charts: [
+            ChartPanelV1(panel_id: "panel-1", chart_type: "line", title: "A", x_axis: "x", y_axis: "height", x_scale: "linear", y_scale: "linear", x_min: 0.0, x_max: 2.0, x_range_present: true, y_min: 1.0, y_max: 2.6, y_range_present: true, x_ticks: ticks, y_ticks: ticks, shared_legend_id: "legend-shared", legend_entries: legends, annotations: annotations, series: series, source_box: bounds),
+            ChartPanelV1(panel_id: "panel-2", chart_type: "bar", title: "B", x_axis: "x", y_axis: "height", x_scale: "category", y_scale: "log", x_min: 0.0, x_max: 2.0, x_range_present: true, y_min: 1.0, y_max: 2.6, y_range_present: true, x_ticks: ticks, y_ticks: [], shared_legend_id: "legend-shared", legend_entries: legends, annotations: annotations, series: series, source_box: bounds)
+        ], unresolved: ["panel-1 sample 2 ambiguous"], warnings: [])
+
+fn check_markdown_matches_reference(fixture_name: text):
+    val markdown = render_extraction_markdown_v1(reference_document())
+    expect(markdown).to_contain("# Image dataset")
+    expect(markdown).to_contain("panel-1 sample 2 ambiguous")
+
+fn check_table_topology_and_annotations():
+    val document = reference_document()
+    expect(document.tables[0].row_count).to_equal(1)
+    expect(document.tables[0].column_count).to_equal(2)
+    expect(document.tables[0].cells[0].highlighted).to_be(true)
+
+fn check_original_scripts_preserved():
+    val markdown = render_extraction_markdown_v1(reference_document())
+    expect(markdown).to_contain("주의")
+    expect(markdown).to_contain("수량")
+    expect(markdown).to_contain("Hangul")
+
+fn check_graph_samples_and_uncertainty():
+    val chart = reference_document().charts[0]
+    expect(chart.series[0].points.len()).to_equal(3)
+    expect(chart.series[0].points[1].uncertainty_milli).to_equal(25)
+    expect(image_value_status_name_v1(chart.series[0].points[1].status)).to_equal("calibrated")
+    expect(chart.x_ticks.len()).to_equal(2)
+    expect(chart.legend_entries[0].series_name).to_equal("높이")
+    expect(chart.annotations[0].target_point_index).to_equal(1)
+
+fn check_multi_panel_identity():
+    val charts = reference_document().charts
+    expect(charts.len()).to_equal(2)
+    expect(charts[0].panel_id).to_equal("panel-1")
+    expect(charts[1].panel_id).to_equal("panel-2")
+    expect(charts[0].shared_legend_id).to_equal(charts[1].shared_legend_id)
+
+fn check_receipt_artifact_hashes():
+    val document = reference_document()
+    val markdown = render_extraction_markdown_v1(document)
+    val structured = "{\"schema_version\":\"simple.image-extraction.v2\"}"
+    val receipt = ExtractionReceiptV1(schema_version: EXTRACTION_RECEIPT_SCHEMA_VERSION_V1,
+        extraction_schema_version: IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        renderer_version: IMAGE_TO_MARKDOWN_RENDERER_VERSION_V1,
+        status: "completed", error_code: "", source_artifact_id: document.source_artifact_id,
+        source_sha256: document.source_sha256, source_width: document.width,
+        source_height: document.height, markdown_path: "", markdown_sha256: "",
+        structured_path: "", structured_sha256: "",
+        result_sha256: sha256_text(structured), profile_fingerprint: "fixture-profile",
+        provider: "fixture", model_id: "fixture-vision", model_revision: "r1",
+        prompt_version: IMAGE_TO_MARKDOWN_PROMPT_VERSION_V1, preprocessing_version: "none/1",
+        load_ms: 1, preprocess_ms: 1, transport_ms: 1, inference_ms: 0,
+        validation_ms: 1, render_ms: 1, cache_ms: 0, retry_count: 0,
+        request_count: 1, cache_hit: false, provenance_item_count: 4,
+        validation_check_count: 2, validation_failure_count: 0, warnings: [])
+    val artifacts = publish_extraction_artifacts_v1(given_private_fixture_workspace(),
+        "published-fixture", markdown, structured, receipt)
+    expect(artifacts.error).to_equal("")
+    expect(sha256_text(file_read(artifacts.markdown_path))).to_equal(artifacts.markdown_sha256)
+    expect(sha256_text(file_read(artifacts.structured_path))).to_equal(artifacts.structured_sha256)
+    expect(sha256_text(file_read(artifacts.receipt_path))).to_equal(artifacts.receipt_sha256)
+    val receipt_json = file_read(artifacts.receipt_path)
+    expect(receipt_json).to_contain("\"schema_version\":\"simple.image-extraction.receipt.v3\"")
+    expect(receipt_json).to_contain("\"error_code\":\"\"")
+    expect(receipt_json).to_contain("\"request_count\":1")
+    expect(receipt_json).to_contain("\"cache_hit\":false")
+    expect(receipt_json).to_contain("\"provenance_item_count\":4")
+    expect(receipt_json).to_contain("\"validation_failure_count\":0")
+    expect(receipt_json).to_contain("\"transport\":1")
+    expect(receipt_json).to_contain("\"inference\":0")
+    expect(receipt_json).to_contain("\"extraction_schema_version\":\"simple.image-extraction.v2\"")
+    expect(receipt_json).to_contain("\"renderer_version\":\"image-to-markdown-markdown/3\"")
+
+fn check_no_model_call_occurred():
+    IMAGE_MODEL_CALLS = 0
+    val result = run_spipe_image_read_v1("", given_local_image_read_profile(), fixture_image(), given_deterministic_vision_fixture_provider)
+    expect(result.status).to_equal("skipped")
+    expect(IMAGE_MODEL_CALLS).to_equal(0)
+
+fn check_canonical_spipe_image_read_command_registered():
+    # Missing action arguments route to image-read usage (2), not the
+    # canonical SPipe unknown-command result (1).
+    expect(run_spipe_cli_v1(["image-read"])).to_equal(2)
+
+fn check_safe_typed_failure(code: text):
+    var profile = given_local_image_read_profile()
+    profile.vision = false
+    val result = run_spipe_image_read_v1(profile.profile_id, profile, fixture_image(), given_deterministic_vision_fixture_provider)
+    expect(result.run.error_code).to_equal(code)
+
+describe "Image-to-Markdown primary manual flow":
+    it "extracts structured multilingual tables and graph arrays through an explicit profile":
+        step("Configure an explicit local vision profile")
+        expect(validate_model_profile_v1(given_local_image_read_profile())).to_equal("")
+        check_ordered_multimodal_parts_preserved()
+        check_canonical_spipe_image_read_command_registered()
+
+        step("Extract a highlighted multilingual table image")
+        val admitted_fixture = admit_local_png_v1("test/fixture/io/tiny_1x1.png",
+            "test/fixture/io", 20971520, "high")
+        expect(admitted_fixture.error_code).to_equal("")
+        expect(admitted_fixture.part.width).to_equal(1)
+        expect(admitted_fixture.part.sha256.len()).to_equal(64)
+        val mixed_fixture = admit_local_png_v1(
+            "test/fixture/image_to_markdown/korean_table_multi_chart.png",
+            "test/fixture/image_to_markdown", 20971520, "high")
+        expect(mixed_fixture.error_code).to_equal("")
+        expect(mixed_fixture.part.width).to_equal(1024)
+        expect(mixed_fixture.part.height).to_equal(1536)
+        expect(mixed_fixture.part.sha256).to_equal(
+            "a362cc2651d506f44f386ecaf483df670de10cb3f37f697e1dd670679a6dd162")
+        val rotated_fixture = admit_local_png_v1(
+            "test/fixture/image_to_markdown/rotated_cjk_log_chart.png",
+            "test/fixture/image_to_markdown", 20971520, "high")
+        expect(rotated_fixture.error_code).to_equal("")
+        expect(rotated_fixture.part.sha256).to_equal(
+            "7e0c7aeef222d8f9658e85d3c7c95b86589eec9972d09d759e9b196ed070d351")
+        val run = when_image_to_markdown_runs("highlighted-korean-table")
+        expect(IMAGE_MODEL_CALLS).to_equal(1)
+        expect(run.status).to_equal("completed")
+        val decoded_run = decode_extraction_document_v1(run.audited_json)
+        expect(decoded_run.error).to_equal("")
+        expect(decoded_run.document.text_spans[0].text_content).to_equal("주의")
+        expect(decoded_run.document.tables[0].cells[0].content).to_equal("수량")
+        expect(decoded_run.document.charts.len()).to_equal(2)
+        expect(decoded_run.document.charts[0].x_ticks[0].lexeme).to_equal("0")
+        expect(decoded_run.document.charts[0].legend_entries[0].series_name).to_equal("높이")
+        expect(decoded_run.document.charts[0].annotations[0].target_point_index).to_equal(0)
+        expect(render_extraction_markdown_v1(decoded_run.document)).to_contain("cell_distribution")
+        check_table_topology_and_annotations()
+        check_original_scripts_preserved()
+
+        step("Extract a single-chart image into numeric arrays")
+        check_graph_samples_and_uncertainty()
+
+        step("Extract a multi-panel chart without losing panel identity")
+        check_multi_panel_identity()
+
+        step("Publish Markdown, structured data, and a synchronized receipt")
+        check_markdown_matches_reference("mixed-page")
+        check_receipt_artifact_hashes()
+
+        step("Reject unsafe, unsupported, or unconfigured image requests")
+        check_no_model_call_occurred()
+        check_safe_typed_failure("invalid_request")
+
+    it "fails closed when release acceptance has no vision-capable profile":
+        step("Attempt extraction without an admitted vision capability")
+        IMAGE_MODEL_CALLS = 0
+        check_safe_typed_failure("invalid_request")
+        expect(IMAGE_MODEL_CALLS).to_equal(0)
+
+        step("Keep incomplete acceptance out of published artifacts")
+        val skipped = run_spipe_image_read_v1("", given_local_image_read_profile(),
+            fixture_image(), given_deterministic_vision_fixture_provider)
+        expect(skipped.status).to_equal("skipped")
+        expect(skipped.markdown).to_equal("")
+        expect(skipped.structured_json).to_equal("")
+        expect(IMAGE_MODEL_CALLS).to_equal(0)

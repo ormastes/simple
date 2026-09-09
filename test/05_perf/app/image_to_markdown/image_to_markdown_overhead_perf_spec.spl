@@ -1,0 +1,60 @@
+# codex-system-test
+# @req NFR-004 NFR-012
+# Valid release evidence requires an admitted Stage 4 runtime.
+
+use std.spec.*
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use app.llm_caret.multimodal_types.*
+use app.llm_caret.multimodal_provider.{multimodal_messages_json_v1}
+use app.image_to_markdown.extraction_json.{decode_extraction_document_v1}
+use app.image_to_markdown.markdown.{render_extraction_markdown_v1}
+use app.io.mod.{file_read_bytes}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+
+fn _image_perf_json_v1() -> text:
+    val box = "{\"page_index\":0,\"x\":1,\"y\":1,\"width\":100,\"height\":100}"
+    "{\"schema_version\":\"simple.image-extraction.v2\",\"source_artifact_id\":\"perf.png\",\"source_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"width\":1024,\"height\":1536,\"categories\":[\"table\",\"handwriting\",\"multiple_charts\"],\"regions\":[{\"region_id\":\"r1\",\"category\":\"table\",\"reading_order\":0,\"markdown\":\"\",\"confidence_milli\":900,\"source_box\":" + box + "}],\"text_spans\":[{\"text_content\":\"수량 확인\",\"language\":\"ko\",\"script\":\"Hangul\",\"confidence_milli\":900,\"highlighted\":true,\"handwritten\":true,\"source_box\":" + box + "}],\"tables\":[{\"table_id\":\"t1\",\"title\":\"재고\",\"row_count\":1,\"column_count\":1,\"cells\":[{\"row\":0,\"column\":0,\"row_span\":1,\"column_span\":1,\"content\":\"08\",\"status\":\"observed\",\"confidence_milli\":900,\"highlighted\":true,\"handwritten\":false,\"source_box\":" + box + "}],\"source_box\":" + box + "}],\"charts\":[{\"panel_id\":\"p1\",\"chart_type\":\"cell_distribution\",\"title\":\"높이\",\"x_axis\":\"bin\",\"y_axis\":\"count\",\"x_scale\":\"linear\",\"y_scale\":\"linear\",\"x_min\":0,\"x_max\":20,\"x_range_present\":true,\"y_min\":0,\"y_max\":2,\"y_range_present\":true,\"x_ticks\":[],\"y_ticks\":[],\"shared_legend_id\":\"legend\",\"legend_entries\":[],\"annotations\":[],\"series\":[{\"name\":\"측정값\",\"unit\":\"mm\",\"points\":[{\"x_lexeme\":\"10\",\"y_lexeme\":\"2\",\"x_value\":10,\"y_value\":2,\"x_present\":true,\"y_present\":true,\"status\":\"observed\",\"uncertainty_milli\":0,\"uncertainty_low\":2,\"uncertainty_high\":2,\"calibration_method\":\"\",\"source_box\":" + box + "}]}],\"source_box\":" + box + "}],\"unresolved\":[],\"warnings\":[]}"
+
+fn _image_perf_sorted_v1(values: [i64]) -> [i64]:
+    var sorted = values
+    var index = 1
+    while index < sorted.len():
+        val value = sorted[index]
+        var previous = index - 1
+        while previous >= 0 and sorted[previous] > value:
+            sorted[previous + 1] = sorted[previous]
+            previous = previous - 1
+        sorted[previous + 1] = value
+        index = index + 1
+    sorted
+
+fn _image_perf_p95_v1(values: [i64]) -> i64:
+    val sorted = _image_perf_sorted_v1(values)
+    var index = sorted.len() * 95 / 100
+    if index >= sorted.len(): index = sorted.len() - 1
+    sorted[index]
+
+describe "NFR-004 image extraction host overhead":
+    it "keeps warm serialization validation and Markdown rendering below 100 ms p95":
+        val fixture_bytes = file_read_bytes(
+            "test/fixture/image_to_markdown/korean_table_multi_chart.png") ?? []
+        expect(fixture_bytes.len()).to_be_greater_than(0)
+        val fixture_data_url = "data:image/png;base64," + base64_encode_bytes(fixture_bytes)
+        val image = image_data_part_v1("perf.png", "image/png", 1024, 1536,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "high", fixture_data_url)
+        val messages = [MultimodalMessageV1(role: "user", parts: [
+            text_part_v1("extract"), image])]
+        val warm = decode_extraction_document_v1(_image_perf_json_v1())
+        expect(warm.error).to_equal("")
+        val _ = render_extraction_markdown_v1(warm.document)
+        var samples: [i64] = []
+        for _ in 0..100:
+            val started = time_now_nanos()
+            val encoded = multimodal_messages_json_v1(messages, "openai")
+            val decoded = decode_extraction_document_v1(_image_perf_json_v1())
+            val markdown = render_extraction_markdown_v1(decoded.document)
+            samples.push(time_now_nanos() - started)
+            expect(encoded).to_contain("image_url")
+            expect(markdown).to_contain("# Image dataset")
+        expect(_image_perf_p95_v1(samples)).to_be_less_than(100000001)

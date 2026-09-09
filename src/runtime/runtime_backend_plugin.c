@@ -69,7 +69,12 @@ int64_t spl_backend_plugin_run_v1(int64_t path_value, int64_t request_value,
     simple_backend_owned_buffer_v1 diagnostic={0};
     status=v->compile_module(session,(simple_backend_slice_v1){mir,(uint64_t)mir_len},&module);
     if (!status) status=v->finalize_object(session,&object);
-    if (!status) status=v->diagnostics(session,&diagnostic);
+    /* Diagnostics describe both successful and failed provider operations.
+     * Calling this only on success erased the real compile/finalize failure
+     * and reduced the caller's evidence to an opaque scalar status. Preserve
+     * the primary failure while still collecting its provider-owned message. */
+    int32_t diagnostic_status=v->diagnostics(session,&diagnostic);
+    if (!status && diagnostic_status) status=diagnostic_status;
     int64_t result=bridge_envelope(status,object.result_kind,
         status?NULL:object.payload.data,status?0:object.payload.size,
         diagnostic.data,diagnostic.size);
