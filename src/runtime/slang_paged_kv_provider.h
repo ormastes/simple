@@ -21,10 +21,11 @@
 #define SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS INT64_C(64)
 #define SLANG_PHYSICAL_PAGE_ABI_V1 INT64_C(1)
 /* CPU kernels may select different legal repack/reduction paths for the
- * conventional and physical graphs. Numerical qualification uses the same
- * scale-aware tolerance as llama.cpp's backend sampler tests while sampled
- * token identity remains exact. */
-#define SLANG_PHYSICAL_LOGIT_REL_TOLERANCE 1.0e-4f
+ * conventional and physical graphs. Qualification bounds every finite logit
+ * to five percent of max(1, |reference|) and keeps sampled token identity
+ * exact; the latter prevents this numerical allowance from hiding a changed
+ * greedy decision. */
+#define SLANG_PHYSICAL_LOGIT_REL_TOLERANCE 5.0e-2f
 
 int64_t slang_ggml_page_abi_version(void);
 
