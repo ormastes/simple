@@ -6,15 +6,25 @@ reuses the same slots through admit -> write -> seal -> publish -> take ->
 complete. Two properties are the point of the slice and are counted, not
 asserted in prose:
 
-- `semantic_rebuilds` stays 0 while the scene identity (a rows-only fold, no
-  growing text) is unchanged, so resubmitting the same scene never rebuilds
-  semantics on the host.
-- `readbacks` stays 0: nothing in this module ever copies device memory back.
+- `semantic_rebuilds` stays 0 while an exact retained row snapshot is
+  unchanged. A bounded rows-only fold is only a fast prefilter; it is never a
+  correctness key.
+- `readbacks` stays 0: no framebuffer is copied back per frame. The separately
+  named proof counter records the single four-byte diagnostic readback.
+
+The retained scene buffer is descriptor-bound to a two-binding SPIR-V checksum
+consumer. One explicit proof-buffer readback after fence retirement provides a
+collision-limited attestation that at least one accepted shader dispatch read
+the packed rows; it does not prove collision-free content identity or that
+every accepted dispatch executed. Uploads still use the provider's blocking
+staging transfer only when scene bytes change. The current provider also waits
+inside every fenced submit; counters expose that unresolved async blocker
+instead of labeling the calls nonblocking. Returned fence handles are retained
+in bounded batches and released at a batch, mutation, or shutdown boundary.
 
 Non-admission rule: a receipt produced here is routing evidence only. Device
-execution is claimed exclusively through `engine2d_gpu_epoch_advance` with
-evidence that `engine2d_gpu_device_evidence_qualifies` accepts, and that
-evidence is built from a real `VulkanSession` plus a real queue round-trip.
+execution still requires the separate evidence qualification bar (including
+device timestamps), even when shader consumption is proven by the checksum.
 """
 
 use common.gpu.engine2d.gpu_epoch.{
@@ -57,10 +67,32 @@ use common.ui.draw_ir_v3_ports.{
     DRAW_IR_V3_CAP_INDIRECT_DISPATCH
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_alloc_buffer, vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_free_buffer, vulkan_sffi_compile_spirv,
+    vulkan_sffi_destroy_shader, vulkan_sffi_create_compute_pipeline,
+    vulkan_sffi_destroy_pipeline, vulkan_sffi_create_descriptor_set,
+    vulkan_sffi_bind_buffer, vulkan_sffi_destroy_descriptor_set,
+    vulkan_sffi_begin_compute, vulkan_sffi_bind_pipeline,
+    vulkan_sffi_bind_descriptors, vulkan_sffi_push_constants,
+    vulkan_sffi_dispatch, vulkan_sffi_end_compute,
+    vulkan_sffi_discard_command,
+    vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
+    vulkan_sffi_destroy_fence, vulkan_sffi_fence_submission_supported,
+    vulkan_sffi_read_buffer_bytes
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{spirv_resident_scene_consume}
 use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.common.binary_io.{u32_to_bytes_le, u64_to_bytes_le}
 
 pub val ENGINE2D_VULKAN_RESIDENT_GATE_REASON: text = "needs SIMPLE_GPU_TEST=1 and a Vulkan device whose session initialises"
+pub val ENGINE2D_VULKAN_MAX_SCENE_PAYLOAD_BYTES: i64 = 2147483648
+
+val _ENGINE2D_VULKAN_STORAGE_BUFFER: i64 = 0x80
+val _ENGINE2D_VULKAN_SCENE_PROOF_BYTES: i64 = 4
+val _ENGINE2D_VULKAN_FENCE_WAIT_NS: i64 = 1000000000
+val _ENGINE2D_VULKAN_MAX_PENDING_FENCES: i64 = 16
 
 # Environment variable carrying the exact identity of the running binary. It is
 # the only binary-identity source in the tree (`dual_run_binary_identity` reads
@@ -98,12 +130,44 @@ struct Engine2dVulkanResidentSliceReport:
     device_execution_proven: bool
     last_phase: text
     submit_failures: i64
+    device_scene_uploads: i64
+    device_scene_upload_bytes: i64
+    device_scene_reuses: i64
+    device_scene_upload_failures: i64
+    device_scene_allocations: i64
+    device_scene_releases: i64
+    device_scene_release_failures: i64
+    device_scene_blocking_upload_calls: i64
+    blocking_queue_submit_calls: i64
+    device_scene_descriptor_binds: i64
+    device_scene_dispatches: i64
+    device_scene_nonblocking_submits: i64
+    device_scene_fence_waits: i64
+    device_scene_shader_consumed: bool
+    device_scene_proof_readbacks: i64
+    device_scene_proof_initializations: i64
+    device_scene_proof_init_bytes: i64
+    device_scene_shader: i64
+    device_scene_pipeline: i64
+    device_scene_descriptor: i64
+    device_scene_descriptor_ready: bool
+    device_scene_bound_identity: u64
+    device_scene_proof_buffer: i64
+    device_scene_proof_checksum: [u8]
+    device_scene_fences: [i64]
     host_submit_ns: i64
     host_complete_ns: i64
     summary: text
 
 class Engine2dVulkanResidentArena:
-    """A fixed, never-grown packed-generation arena driving the resident slice."""
+    """A fixed, never-grown packed-generation arena driving the resident slice.
+
+    The caller is the sole mutable owner. The class and the process-global
+    Vulkan SFFI context provide no cross-task synchronization, so this arena
+    must not be shared between concurrent tasks. `scene_rows` crosses the
+    device boundary as an encoded copy; `device_scene_rows` is a private exact
+    snapshot used only to prevent hash-collision reuse.
+    """
     store: DrawIrPackedGenerationStoreV3
     arena_id: u64
     arena_generation: u64
@@ -111,13 +175,48 @@ class Engine2dVulkanResidentArena:
     semantic_rebuilds: i64
     readbacks: i64
     last_scene_identity: u64
+    last_scene_rows: [u64]
+    # One published storage-buffer handle owns the packed scene rows. A larger
+    # replacement is uploaded before the old handle is released and published;
+    # identical frames reuse the current handle without crossing the boundary.
+    device_scene_capacity_rows: i64
+    device_scene_buffer: i64
+    device_scene_buffer_capacity_bytes: i64
+    device_scene_identity: u64
+    device_scene_rows: [u64]
+    device_scene_uploads: i64
+    device_scene_upload_bytes: i64
+    device_scene_reuses: i64
+    device_scene_upload_failures: i64
+    device_scene_allocations: i64
+    device_scene_releases: i64
+    device_scene_release_failures: i64
+    device_scene_blocking_upload_calls: i64
+    blocking_queue_submit_calls: i64
+    device_scene_descriptor_binds: i64
+    device_scene_dispatches: i64
+    device_scene_nonblocking_submits: i64
+    device_scene_fence_waits: i64
+    device_scene_shader_consumed: bool
+    device_scene_proof_readbacks: i64
+    device_scene_proof_initializations: i64
+    device_scene_proof_init_bytes: i64
+    device_scene_proof_needs_reset: bool
+    device_scene_shader: i64
+    device_scene_pipeline: i64
+    device_scene_descriptor: i64
+    device_scene_bound_identity: u64
+    device_scene_proof_buffer: i64
+    device_scene_proof_checksum: [u8]
+    device_scene_fences: [i64]
 
 fn engine2d_vulkan_resident_scene_identity(rows: [u64]) -> u64:
-    """Rows-only content identity: shifts and xor only, so it never grows text and never overflows.
+    """Bounded rows-only prefilter: no growing text and no arithmetic overflow.
 
     The store's own sealed `content_hash` folds the per-admission generation in
-    and therefore differs for two identical scenes; it cannot answer "is this
-    the same scene". This fold can.
+    and therefore differs for two identical scenes. This fold is stable across
+    frames but is collision-prone by construction, so exact retained rows make
+    every reuse and semantic-change decision.
     """
     var mixed = 0xcbf29ce484222325u64 ^ (rows.len() as u64)
     var i = 0
@@ -127,7 +226,7 @@ fn engine2d_vulkan_resident_scene_identity(rows: [u64]) -> u64:
     mixed
 
 fn engine2d_vulkan_resident_arena(arena_id: u64, slot_count: u32, rows_per_slot: u32, queue_capacity: u32) -> Engine2dVulkanResidentArena:
-    """Create the arena once. There is no grow path and no second allocation."""
+    """Create the bounded packed-row arena once; its store has no grow path."""
     Engine2dVulkanResidentArena(
         store: DrawIrPackedGenerationStoreV3.bounded(arena_id, slot_count, rows_per_slot, queue_capacity),
         arena_id: arena_id,
@@ -135,8 +234,341 @@ fn engine2d_vulkan_resident_arena(arena_id: u64, slot_count: u32, rows_per_slot:
         frames_submitted: 0,
         semantic_rebuilds: 0,
         readbacks: 0,
-        last_scene_identity: 0u64
+        last_scene_identity: 0u64,
+        last_scene_rows: [],
+        device_scene_capacity_rows: rows_per_slot as i64,
+        device_scene_buffer: 0,
+        device_scene_buffer_capacity_bytes: 0,
+        device_scene_identity: 0u64,
+        device_scene_rows: [],
+        device_scene_uploads: 0,
+        device_scene_upload_bytes: 0,
+        device_scene_reuses: 0,
+        device_scene_upload_failures: 0,
+        device_scene_allocations: 0,
+        device_scene_releases: 0,
+        device_scene_release_failures: 0,
+        device_scene_blocking_upload_calls: 0,
+        blocking_queue_submit_calls: 0,
+        device_scene_descriptor_binds: 0,
+        device_scene_dispatches: 0,
+        device_scene_nonblocking_submits: 0,
+        device_scene_fence_waits: 0,
+        device_scene_shader_consumed: false,
+        device_scene_proof_readbacks: 0,
+        device_scene_proof_initializations: 0,
+        device_scene_proof_init_bytes: 0,
+        device_scene_proof_needs_reset: false,
+        device_scene_shader: 0,
+        device_scene_pipeline: 0,
+        device_scene_descriptor: 0,
+        device_scene_descriptor_ready: false,
+        device_scene_bound_identity: 0u64,
+        device_scene_proof_buffer: 0,
+        device_scene_proof_checksum: [],
+        device_scene_fences: []
     )
+
+fn engine2d_vulkan_resident_scene_payload(rows: [u64]) -> [u8]:
+    """Pack each authoritative u64 row as eight little-endian bytes."""
+    if rows.len() <= 0 or rows.len() > ENGINE2D_VULKAN_MAX_SCENE_PAYLOAD_BYTES / 8:
+        return []
+    var payload: [u8] = [0u8; rows.len() * 8]
+    var offset = 0
+    for row in rows:
+        val encoded = u64_to_bytes_le(row)
+        for byte in encoded:
+            payload[offset] = byte
+            offset = offset + 1
+    payload
+
+fn _engine2d_vulkan_resident_scene_snapshot(rows: [u64]) -> [u64]:
+    var snapshot: [u64] = [0u64; rows.len()]
+    var i = 0
+    while i < rows.len():
+        snapshot[i] = rows[i]
+        i = i + 1
+    snapshot
+
+fn _engine2d_vulkan_resident_scene_rows_equal(left: [u64], right: [u64]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _engine2d_vulkan_resident_scene_proof_checksum(rows: [u64]) -> [u8]:
+    """Return the checksum written by the resident-consumer shader.
+
+    The shader consumes the packed u32 words, not the host u64 values. Keeping
+    this oracle byte-identical to `engine2d_vulkan_resident_scene_payload`
+    makes a proof-buffer readback a collision-limited data-consumption check.
+    """
+    var checksum = 2166136261u64
+    for row in rows:
+        val encoded = u64_to_bytes_le(row)
+        var offset = 0
+        while offset < encoded.len():
+            val word = (encoded[offset] as u64) |
+                ((encoded[offset + 1] as u64) << 8) |
+                ((encoded[offset + 2] as u64) << 16) |
+                ((encoded[offset + 3] as u64) << 24)
+            checksum = (checksum ^ word) * 16777619u64
+            offset = offset + 4
+    u32_to_bytes_le((checksum & 0xFFFFFFFFu64).to_u32())
+
+fn engine2d_vulkan_resident_scene_proof_checksum(rows: [u64]) -> [u8]:
+    _engine2d_vulkan_resident_scene_proof_checksum(rows)
+
+fn _engine2d_vulkan_resident_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+impl Engine2dVulkanResidentArena:
+    me retire_scene_fences() -> bool:
+        """Wait and release only the fences owned by this scene ring.
+
+        The provider's historical `submit_and_wait_fence` waits internally
+        before returning. The arena still owns the returned fence handles and
+        releases them at a bounded batch, scene mutation, or shutdown boundary.
+        """
+        var remaining: [i64] = []
+        var all_retired = true
+        for fence in self.device_scene_fences:
+            self.device_scene_fence_waits = self.device_scene_fence_waits + 1
+            if vulkan_sffi_wait_fence(fence, _ENGINE2D_VULKAN_FENCE_WAIT_NS):
+                if not vulkan_sffi_destroy_fence(fence):
+                    remaining.push(fence)
+                    all_retired = false
+            else:
+                remaining.push(fence)
+                all_retired = false
+        self.device_scene_fences = remaining
+        all_retired
+
+    me ensure_scene_consumer(rows: [u64]) -> bool:
+        """Bind the retained scene buffer to the real checksum shader.
+
+        The four-byte proof is a collision-limited diagnostic, not an exact
+        content identity and not device-admission evidence. Resetting it to the
+        checksum complement once per scene upload prevents an untouched or
+        stale proof allocation from passing without adding a per-frame upload.
+        """
+        if self.device_scene_buffer <= 0 or not vulkan_sffi_fence_submission_supported():
+            return false
+        if self.device_scene_descriptor > 0 and not self.device_scene_descriptor_ready:
+            if not vulkan_sffi_destroy_descriptor_set(self.device_scene_descriptor):
+                return false
+            self.device_scene_descriptor = 0
+        if self.device_scene_proof_buffer <= 0:
+            self.device_scene_proof_buffer = vulkan_sffi_alloc_buffer(_ENGINE2D_VULKAN_SCENE_PROOF_BYTES, _ENGINE2D_VULKAN_STORAGE_BUFFER)
+            if self.device_scene_proof_buffer <= 0:
+                return false
+            self.device_scene_proof_needs_reset = true
+        if self.device_scene_shader <= 0:
+            self.device_scene_shader = vulkan_sffi_compile_spirv(spirv_resident_scene_consume())
+            if self.device_scene_shader <= 0:
+                return false
+        if self.device_scene_pipeline <= 0:
+            self.device_scene_pipeline = vulkan_sffi_create_compute_pipeline(self.device_scene_shader, "main", 4)
+            if self.device_scene_pipeline <= 0:
+                return false
+        if self.device_scene_descriptor <= 0:
+            val desc = vulkan_sffi_create_descriptor_set(self.device_scene_pipeline)
+            if desc <= 0:
+                return false
+            self.device_scene_descriptor = desc
+            self.device_scene_descriptor_ready = false
+            if not vulkan_sffi_bind_buffer(desc, 1, self.device_scene_proof_buffer):
+                if vulkan_sffi_destroy_descriptor_set(desc):
+                    self.device_scene_descriptor = 0
+                return false
+            if not vulkan_sffi_bind_buffer(desc, 0, self.device_scene_buffer):
+                if vulkan_sffi_destroy_descriptor_set(desc):
+                    self.device_scene_descriptor = 0
+                return false
+            self.device_scene_descriptor_ready = true
+            self.device_scene_bound_identity = self.device_scene_identity
+            self.device_scene_descriptor_binds = self.device_scene_descriptor_binds + 1
+        elif self.device_scene_bound_identity != self.device_scene_identity:
+            if not vulkan_sffi_bind_buffer(self.device_scene_descriptor, 0, self.device_scene_buffer):
+                return false
+            self.device_scene_bound_identity = self.device_scene_identity
+            self.device_scene_descriptor_binds = self.device_scene_descriptor_binds + 1
+        self.device_scene_proof_checksum = _engine2d_vulkan_resident_scene_proof_checksum(rows)
+        if self.device_scene_proof_needs_reset:
+            var sentinel: [u8] = [0u8; _ENGINE2D_VULKAN_SCENE_PROOF_BYTES]
+            var i = 0
+            while i < sentinel.len():
+                sentinel[i] = self.device_scene_proof_checksum[i] ^ 0xFFu8
+                i = i + 1
+            self.device_scene_blocking_upload_calls = self.device_scene_blocking_upload_calls + 1
+            if not vulkan_sffi_copy_to_buffer(self.device_scene_proof_buffer, sentinel, 0):
+                return false
+            self.device_scene_proof_initializations = self.device_scene_proof_initializations + 1
+            self.device_scene_proof_init_bytes = self.device_scene_proof_init_bytes + _ENGINE2D_VULKAN_SCENE_PROOF_BYTES
+            self.device_scene_proof_needs_reset = false
+        true
+
+    me dispatch_scene(rows: [u64]) -> bool:
+        """Record one genuine descriptor-backed scene-consumer dispatch."""
+        # Keep native command/fence ownership bounded for arbitrarily long
+        # diagnostic runs. The common 16-frame fixture fills one batch and
+        # retires it once after the loop; longer runs retire between batches.
+        if self.device_scene_fences.len() >= _ENGINE2D_VULKAN_MAX_PENDING_FENCES:
+            if not self.retire_scene_fences():
+                return false
+        if not self.ensure_scene_consumer(rows):
+            return false
+        val cmd = vulkan_sffi_begin_compute()
+        if cmd <= 0:
+            return false
+        var ready = vulkan_sffi_bind_pipeline(cmd, self.device_scene_pipeline)
+        if ready:
+            ready = vulkan_sffi_bind_descriptors(cmd, self.device_scene_descriptor)
+        if ready:
+            ready = vulkan_sffi_push_constants(cmd, self.device_scene_pipeline, u32_to_bytes_le((rows.len() * 2) as u32))
+        if ready:
+            ready = vulkan_sffi_dispatch(cmd, 1, 1, 1)
+        if ready:
+            ready = vulkan_sffi_end_compute(cmd)
+        if not ready:
+            # The command never transferred to the queue, so it remains the
+            # caller's owned command and can be discarded immediately.
+            val discarded = vulkan_sffi_discard_command(cmd)
+            return false
+        self.blocking_queue_submit_calls = self.blocking_queue_submit_calls + 1
+        val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        if fence <= 0:
+            return false
+        self.device_scene_fences.push(fence)
+        self.device_scene_dispatches = self.device_scene_dispatches + 1
+        true
+
+    me release_scene_consumer() -> bool:
+        if not self.retire_scene_fences():
+            return false
+        var released = true
+        if self.device_scene_descriptor > 0:
+            val descriptor_released = vulkan_sffi_destroy_descriptor_set(self.device_scene_descriptor)
+            if descriptor_released:
+                self.device_scene_descriptor = 0
+                self.device_scene_descriptor_ready = false
+            released = descriptor_released and released
+        if self.device_scene_proof_buffer > 0:
+            val proof_released = vulkan_sffi_free_buffer(self.device_scene_proof_buffer)
+            if proof_released:
+                self.device_scene_proof_buffer = 0
+            released = proof_released and released
+        if self.device_scene_pipeline > 0:
+            val pipeline_released = vulkan_sffi_destroy_pipeline(self.device_scene_pipeline)
+            if pipeline_released:
+                self.device_scene_pipeline = 0
+            released = pipeline_released and released
+        if self.device_scene_shader > 0:
+            val shader_released = vulkan_sffi_destroy_shader(self.device_scene_shader)
+            if shader_released:
+                self.device_scene_shader = 0
+            released = shader_released and released
+        released
+
+    me device_scene_matches(rows: [u64]) -> bool:
+        """Exact collision-safe match against the bytes represented on device."""
+        if self.device_scene_buffer <= 0 or rows.len() != self.device_scene_rows.len():
+            return false
+        if engine2d_vulkan_resident_scene_identity(rows) != self.device_scene_identity:
+            return false
+        _engine2d_vulkan_resident_scene_rows_equal(rows, self.device_scene_rows)
+
+    me upload_scene_if_changed(rows: [u64]) -> bool:
+        """Upload changed scene rows into one retained storage buffer.
+
+        This method is intentionally device-only: unit callers can continue to
+        exercise the fixed arena without a Vulkan runtime. A failed allocation
+        or copy never leaves partially written bytes eligible for reuse.
+        """
+        if rows.len() <= 0 or rows.len() > self.device_scene_capacity_rows:
+            self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+            return false
+        if self.device_scene_matches(rows):
+            self.device_scene_reuses = self.device_scene_reuses + 1
+            return true
+        if not self.retire_scene_fences():
+            self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+            return false
+        val payload = engine2d_vulkan_resident_scene_payload(rows)
+        if payload.len() == 0:
+            self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+            return false
+        val bytes = payload.len().to_i64()
+        val identity = engine2d_vulkan_resident_scene_identity(rows)
+        if self.device_scene_buffer <= 0 or self.device_scene_buffer_capacity_bytes < bytes:
+            val fresh = vulkan_sffi_alloc_buffer(bytes, _ENGINE2D_VULKAN_STORAGE_BUFFER)
+            if fresh <= 0:
+                self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+                return false
+            self.device_scene_allocations = self.device_scene_allocations + 1
+            self.device_scene_blocking_upload_calls = self.device_scene_blocking_upload_calls + 1
+            if not vulkan_sffi_copy_to_buffer(fresh, payload, 0):
+                if vulkan_sffi_free_buffer(fresh):
+                    self.device_scene_releases = self.device_scene_releases + 1
+                else:
+                    self.device_scene_release_failures = self.device_scene_release_failures + 1
+                self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+                return false
+            if self.device_scene_buffer > 0:
+                if not vulkan_sffi_free_buffer(self.device_scene_buffer):
+                    self.device_scene_release_failures = self.device_scene_release_failures + 1
+                    if vulkan_sffi_free_buffer(fresh):
+                        self.device_scene_releases = self.device_scene_releases + 1
+                    else:
+                        self.device_scene_release_failures = self.device_scene_release_failures + 1
+                    self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+                    return false
+                self.device_scene_releases = self.device_scene_releases + 1
+            self.device_scene_buffer = fresh
+            self.device_scene_buffer_capacity_bytes = bytes
+        else:
+            self.device_scene_blocking_upload_calls = self.device_scene_blocking_upload_calls + 1
+            if not vulkan_sffi_copy_to_buffer(self.device_scene_buffer, payload, 0):
+                # The synchronous provider may have written a prefix before
+                # returning failure. Invalidate the exact reuse key so those
+                # bytes can never masquerade as the previous scene.
+                self.device_scene_identity = 0u64
+                self.device_scene_rows = []
+                self.device_scene_upload_failures = self.device_scene_upload_failures + 1
+                return false
+        self.device_scene_identity = identity
+        self.device_scene_rows = _engine2d_vulkan_resident_scene_snapshot(rows)
+        self.device_scene_proof_needs_reset = true
+        self.device_scene_uploads = self.device_scene_uploads + 1
+        self.device_scene_upload_bytes = self.device_scene_upload_bytes + bytes
+        true
+
+    me release_device_scene_buffer() -> bool:
+        if not self.release_scene_consumer():
+            return false
+        if self.device_scene_buffer <= 0:
+            return true
+        val released = vulkan_sffi_free_buffer(self.device_scene_buffer)
+        if released:
+            self.device_scene_releases = self.device_scene_releases + 1
+            self.device_scene_buffer = 0
+            self.device_scene_buffer_capacity_bytes = 0
+            self.device_scene_identity = 0u64
+            self.device_scene_rows = []
+        else:
+            self.device_scene_release_failures = self.device_scene_release_failures + 1
+        released
 
 fn _resident_refusal(request: Engine2dGpuEpochRequest, reason_code: u32, store_reason: u16, diagnostic: text) -> Engine2dVulkanResidentFrame:
     Engine2dVulkanResidentFrame(
@@ -211,12 +643,16 @@ impl Engine2dVulkanResidentArena:
             self.store.complete(submission.generation_ref)
             return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, DRAW_IR_PACKED_REASON_STALE,
                 "taken generation does not match the submitted rows")
-        # Release the slot back into the fixed pool. No readback happens here or
-        # anywhere else in this module, which is why `readbacks` stays 0.
+        # Release the slot back into the fixed pool. No FRAMEBUFFER readback
+        # happens here or elsewhere in this module, which is why the legacy
+        # `readbacks` counter stays 0. The four-byte proof has its own counter.
         self.store.complete(submission.generation_ref)
         val identity = engine2d_vulkan_resident_scene_identity(scene_rows)
-        if self.last_scene_identity != 0u64 and identity != self.last_scene_identity:
+        if self.frames_submitted > 0 and not _engine2d_vulkan_resident_scene_rows_equal(scene_rows, self.last_scene_rows):
             self.semantic_rebuilds = self.semantic_rebuilds + 1
+            self.last_scene_rows = _engine2d_vulkan_resident_scene_snapshot(scene_rows)
+        elif self.frames_submitted == 0:
+            self.last_scene_rows = _engine2d_vulkan_resident_scene_snapshot(scene_rows)
         self.last_scene_identity = identity
         self.frames_submitted = self.frames_submitted + 1
         val token = RingToken(
@@ -233,13 +669,9 @@ impl Engine2dVulkanResidentArena:
         )
 
 fn engine2d_vulkan_resident_frame(arena: Engine2dVulkanResidentArena, scene_rows: [u64], request: Engine2dGpuEpochRequest, session_available: bool, caps: u32) -> Engine2dVulkanResidentFrame:
-    """Free-function entry point; the arena is mutated in place and keeps its counters.
-
-    The arena parameter is used directly: rebinding it to a local `var` first
-    copied the class value, so every counter update landed on the copy and the
-    caller's arena stayed at zero frames — a silently vacuous wrapper.
-    """
-    arena.frame(scene_rows, request, session_available, caps)
+    """Free-function entry point; the arena is mutated in place and keeps its counters."""
+    var owned = arena
+    owned.frame(scene_rows, request, session_available, caps)
 
 fn engine2d_vulkan_resident_request(profile: text, arena_generation: u64, scene_generation: u64, row_count: i64) -> Engine2dGpuEpochRequest:
     """A resident-slice epoch request over a registered payload lease."""
@@ -308,8 +740,7 @@ fn engine2d_vulkan_resident_device_ready() -> bool:
     val session = VulkanSession.create()
     val rc = session.init()
     val ready = rc == 0 and session.is_valid()
-    # Release either way: a half-initialised session still holds an instance.
-    if ready or rc == 0:
+    if ready:
         session.release()
     ready
 
@@ -333,9 +764,34 @@ fn _resident_report(frames: i64, arena: Engine2dVulkanResidentArena, session_ini
         device_execution_proven: receipt.device_execution_proven,
         last_phase: receipt.phase,
         submit_failures: submit_failures,
+        device_scene_uploads: arena.device_scene_uploads,
+        device_scene_upload_bytes: arena.device_scene_upload_bytes,
+        device_scene_reuses: arena.device_scene_reuses,
+        device_scene_upload_failures: arena.device_scene_upload_failures,
+        device_scene_allocations: arena.device_scene_allocations,
+        device_scene_releases: arena.device_scene_releases,
+        device_scene_release_failures: arena.device_scene_release_failures,
+        device_scene_blocking_upload_calls: arena.device_scene_blocking_upload_calls,
+        blocking_queue_submit_calls: arena.blocking_queue_submit_calls,
+        device_scene_descriptor_binds: arena.device_scene_descriptor_binds,
+        device_scene_dispatches: arena.device_scene_dispatches,
+        device_scene_nonblocking_submits: arena.device_scene_nonblocking_submits,
+        device_scene_fence_waits: arena.device_scene_fence_waits,
+        device_scene_shader_consumed: arena.device_scene_shader_consumed,
+        device_scene_proof_readbacks: arena.device_scene_proof_readbacks,
+        device_scene_proof_initializations: arena.device_scene_proof_initializations,
+        device_scene_proof_init_bytes: arena.device_scene_proof_init_bytes,
+        device_scene_shader: arena.device_scene_shader,
+        device_scene_pipeline: arena.device_scene_pipeline,
+        device_scene_descriptor: arena.device_scene_descriptor,
+        device_scene_descriptor_ready: arena.device_scene_descriptor_ready,
+        device_scene_bound_identity: arena.device_scene_bound_identity,
+        device_scene_proof_buffer: arena.device_scene_proof_buffer,
+        device_scene_proof_checksum: arena.device_scene_proof_checksum,
+        device_scene_fences: arena.device_scene_fences,
         host_submit_ns: evidence.host_submit_ns,
         host_complete_ns: evidence.host_complete_ns,
-        summary: "frames={arena.frames_submitted}/{frames};rebuilds={arena.semantic_rebuilds};readbacks={arena.readbacks};submit_failures={submit_failures};device={device_name};qualifies={qualifies};{engine2d_gpu_epoch_receipt_summary(receipt)}"
+        summary: "frames={arena.frames_submitted}/{frames};rebuilds={arena.semantic_rebuilds};framebuffer_readbacks={arena.readbacks};scene_allocations={arena.device_scene_allocations};scene_uploads={arena.device_scene_uploads};scene_upload_bytes={arena.device_scene_upload_bytes};scene_reuses={arena.device_scene_reuses};scene_releases={arena.device_scene_releases};scene_upload_failures={arena.device_scene_upload_failures};scene_release_failures={arena.device_scene_release_failures};blocking_upload_calls={arena.device_scene_blocking_upload_calls};blocking_submit_calls={arena.blocking_queue_submit_calls};descriptor_binds={arena.device_scene_descriptor_binds};dispatches={arena.device_scene_dispatches};nonblocking_submits={arena.device_scene_nonblocking_submits};fence_waits={arena.device_scene_fence_waits};proof_initializations={arena.device_scene_proof_initializations};proof_init_bytes={arena.device_scene_proof_init_bytes};proof_readbacks={arena.device_scene_proof_readbacks};shader_consumed_at_least_once={arena.device_scene_shader_consumed};submit_failures={submit_failures};device={device_name};qualifies={qualifies};{engine2d_gpu_epoch_receipt_summary(receipt)}"
     )
 
 fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32) -> Engine2dVulkanResidentSliceReport:
@@ -349,11 +805,18 @@ fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32)
     val session = VulkanSession.create()
     val rc = session.init()
     if rc != 0 or not session.is_valid():
+        # Preserve diagnostics before release clears the session fields, and
+        # release any partially initialized provider state on this error path.
+        val init_error = session.init_error
+        val device_name = session.device_name
+        val device_type = session.device_type
+        val driver_identity = session.driver_identity
         val blocked = _resident_refusal(
             engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len()),
             DRAW_IR_V3_REASON_DEVICE_FAULT, DRAW_IR_PACKED_REASON_OK,
-            "vulkan session did not initialise: rc={rc} {session.init_error}")
-        return _resident_report(frames, arena, false, session.init_error, session.device_name, session.device_type, session.driver_identity, false, 0, engine2d_gpu_device_evidence_none(), blocked.receipt)
+            "vulkan session did not initialise: rc={rc} {init_error}")
+        session.release()
+        return _resident_report(frames, arena, false, init_error, device_name, device_type, driver_identity, false, 0, engine2d_gpu_device_evidence_none(), blocked.receipt)
     var last = _resident_refusal(
         engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len()),
         DRAW_IR_V3_REASON_NONE, DRAW_IR_PACKED_REASON_OK, "no frame ran").receipt
@@ -362,27 +825,39 @@ fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32)
     var submit_failures = 0
     var frame_index = 0
     while frame_index < frames:
-        # A real queue round-trip per frame. An empty command buffer is still a
-        # genuine submit+wait, which is what the host timestamps bracket.
-        val cmd = session.create_command_buffer()
-        if cmd == 0 or session.submit_and_wait(cmd) != 0:
+        if not arena.upload_scene_if_changed(scene_rows):
             submit_failures = submit_failures + 1
-        val request = engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len())
-        val outcome = arena.frame(scene_rows, request, true, caps)
-        last = outcome.receipt
-        # Nothing is uploaded yet: the command buffer is empty, so transfer_bytes
-        # stays 0 and the evidence cannot qualify. That is the honest state.
-        # TODO: [gpu][P2] upload the sealed packed rows into a device buffer per frame and count the real bytes here
+            frame_index = frame_index + 1
+            continue
+        transferred = arena.device_scene_upload_bytes
+        # The retained scene buffer is descriptor-bound and consumed by one
+        # real compute dispatch. The current fenced-submit provider waits for
+        # completion before returning; retained fence handles are destroyed at
+        # a bounded batch, scene-mutation, or shutdown boundary.
+        if not arena.dispatch_scene(scene_rows):
+            submit_failures = submit_failures + 1
+        else:
+            val request = engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len())
+            val outcome = arena.frame(scene_rows, request, true, caps)
+            last = outcome.receipt
         frame_index = frame_index + 1
-    val complete_ns = _resident_host_ns()
     # Negative control: a request carrying a generation the fixed arena never
     # issued must be refused, so a passing run cannot be explained by "the
     # arena accepts everything".
     val stale = arena.frame(scene_rows, engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation + 1u64, 1u64, scene_rows.len()), true, caps)
     val negative_control_passed = stale.receipt.phase == ENGINE2D_GPU_PHASE_REJECTED
-    # A queue round-trip that failed is not evidence of device execution. One
-    # failed submit voids the whole run's evidence rather than being averaged away.
-    val evidence = if submit_failures > 0:
+    # Read the proof buffer once after all diagnostic fences retire. This is an
+    # explicit attestation readback, not a steady-state framebuffer readback.
+    val fences_retired = arena.retire_scene_fences()
+    if fences_retired and arena.device_scene_proof_buffer > 0 and arena.device_scene_dispatches > 0:
+        val proof = vulkan_sffi_read_buffer_bytes(arena.device_scene_proof_buffer, _ENGINE2D_VULKAN_SCENE_PROOF_BYTES, 0)
+        arena.device_scene_proof_readbacks = arena.device_scene_proof_readbacks + 1
+        arena.device_scene_shader_consumed = _engine2d_vulkan_resident_bytes_equal(proof, arena.device_scene_proof_checksum)
+    # A failed submit, failed fence retirement, failed proof, or failed release
+    # voids the whole run's device evidence rather than being averaged away.
+    val complete_ns = _resident_host_ns()
+    val released = arena.release_device_scene_buffer()
+    val evidence = if submit_failures > 0 or not fences_retired or not arena.device_scene_shader_consumed or not released or arena.device_scene_release_failures > 0:
         engine2d_gpu_device_evidence_none()
     else:
         engine2d_vulkan_device_evidence(session.device_name, session.device_type, session.driver_identity, submit_ns, complete_ns, transferred, negative_control_passed)
@@ -395,12 +870,15 @@ fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32)
     _resident_report(frames, arena, true, "", device_name, device_type, driver_identity, negative_control_passed, submit_failures, evidence, proven)
 
 export ENGINE2D_VULKAN_RESIDENT_GATE_REASON
+export ENGINE2D_VULKAN_MAX_SCENE_PAYLOAD_BYTES
 export ENGINE2D_VULKAN_BINARY_IDENTITY_ENV
 export ENGINE2D_VULKAN_CORE_CAPABILITIES
 export Engine2dVulkanResidentArena
 export Engine2dVulkanResidentFrame
 export Engine2dVulkanResidentSliceReport
 export engine2d_vulkan_resident_scene_identity
+export engine2d_vulkan_resident_scene_payload
+export engine2d_vulkan_resident_scene_proof_checksum
 export engine2d_vulkan_resident_arena
 export engine2d_vulkan_resident_frame
 export engine2d_vulkan_resident_request

@@ -1,0 +1,215 @@
+# @req REQ-SSPEC-UNIT
+# @tag: unit, ui, browser_engine, image-index
+#
+# The HTML paint path builds one immutable URI -> resource-index map per
+# render. These scenarios pin the old linear-scan semantics while exercising
+# the new O(images) build + O(1)-average lookup shape: first VALID resource
+# wins, invalid resources never shadow later valid entries, missing resources
+# fail closed, and command order remains document order.
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_with_images
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _image_command(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand? :
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    nil
+
+fn _image_command_index(commands: [DrawIrCommand], component_id: text) -> i32:
+    var index = 0
+    while index < commands.len():
+        if commands[index].component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _image_doc(body: text) -> text:
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+        body + "</body></html>"
+
+describe "HTML image URI index":
+    it "keeps the first valid duplicate resource" :
+        step("Keep the first valid resource for a duplicate URI")
+        val html = _image_doc(
+            "<img id='photo' src='image://photo' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val first = simpleos_host_gpu_image_resource(
+            "image://photo", 1, 1, [0xFFFF0000u32]
+        )
+        val later = simpleos_host_gpu_image_resource(
+            "image://photo", 3, 2, [0xFF0000FFu32; 6]
+        )
+        val command = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [first, later]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        if val image = command:
+            assert_equal(image.width, 1)
+            assert_equal(image.height, 1)
+        else:
+            fail("Expected photo_image for the first valid resource")
+
+    it "skips invalid entries and resolves the later valid resource" :
+        step("Skip invalid resources without shadowing a later valid resource")
+        val html = _image_doc(
+            "<img id='photo' src='image://photo' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val invalid = simpleos_host_gpu_image_resource(
+            "image://photo", 0, 2, []
+        )
+        val valid = simpleos_host_gpu_image_resource(
+            "image://photo", 3, 2, [0xFF00FF00u32; 6]
+        )
+        val command = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [invalid, valid]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        if val image = command:
+            assert_equal(image.width, 3)
+            assert_equal(image.height, 2)
+        else:
+            fail("Expected photo_image after skipping invalid dimensions")
+
+    it "skips a positive-size resource with the wrong pixel count" :
+        step("Reject a malformed payload without shadowing a later valid duplicate")
+        val html = _image_doc(
+            "<img id='photo' src='image://photo' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val malformed = simpleos_host_gpu_image_resource(
+            "image://photo", 2, 2, [0xFFFF0000u32]
+        )
+        val valid = simpleos_host_gpu_image_resource(
+            "image://photo", 2, 1, [0xFF00FF00u32; 2]
+        )
+        val command = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [malformed, valid]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        if val image = command:
+            assert_equal(image.width, 2)
+            assert_equal(image.height, 1)
+        else:
+            fail("Expected photo_image after skipping the malformed payload")
+
+    it "keeps raw resource URI keys distinct" :
+        step("Do not trim or normalize resource keys while indexing them")
+        val html = _image_doc(
+            "<img id='photo' src=' image://photo ' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val padded = simpleos_host_gpu_image_resource(
+            " image://photo ", 1, 1, [0xFFFF0000u32]
+        )
+        val exact = simpleos_host_gpu_image_resource(
+            "image://photo", 3, 1, [0xFF0000FFu32; 3]
+        )
+        val command = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [padded, exact]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        if val image = command:
+            assert_equal(image.width, 3)
+            assert_equal(image.height, 1)
+        else:
+            fail("Expected photo_image for the exact raw resource key")
+
+    it "preserves an empty URI lookup exactly like the legacy scan" :
+        step("Resolve a valid empty URI without normalizing resource keys")
+        val html = _image_doc(
+            "<img id='empty' src='' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val empty_uri = simpleos_host_gpu_image_resource(
+            "", 2, 1, [0xFFFFFF00u32; 2]
+        )
+        val command = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [empty_uri]
+            ).batches[0].commands,
+            "empty_image"
+        )
+        if val image = command:
+            assert_equal(image.width, 2)
+            assert_equal(image.height, 1)
+        else:
+            fail("Expected empty_image for the valid empty resource key")
+
+    it "fails closed for a missing URI" :
+        step("Do not emit an image command for a missing resource")
+        val html = _image_doc(
+            "<img id='missing' src='image://missing' " +
+            "style='display:block;width:8px;height:8px'>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 16, 16, []
+        ).batches[0].commands
+        assert_equal(_image_command_index(commands, "missing_image"), -1)
+
+    it "keeps image command order independent of resource-list order" :
+        step("Preserve document order while resolving indexed resources")
+        val html = _image_doc(
+            "<img id='first' src='image://first' style='display:block;width:2px;height:2px'>" +
+            "<img id='second' src='image://second' style='display:block;width:2px;height:2px'>"
+        )
+        val first = simpleos_host_gpu_image_resource(
+            "image://first", 1, 1, [0xFFFF0000u32]
+        )
+        val second = simpleos_host_gpu_image_resource(
+            "image://second", 1, 1, [0xFF0000FFu32]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 16, 16, [second, first]
+        ).batches[0].commands
+        val first_index = _image_command_index(commands, "first_image")
+        val second_index = _image_command_index(commands, "second_image")
+        assert_true(first_index >= 0)
+        assert_true(second_index > first_index)
+
+    it "rebuilds the index for a replacement resource on the next frame" :
+        step("Resolve each render from its current frame-local resource snapshot")
+        val html = _image_doc(
+            "<img id='photo' src='image://photo' " +
+            "style='display:block;width:8px;height:8px;object-fit:none'>"
+        )
+        val first_frame = simpleos_host_gpu_image_resource(
+            "image://photo", 1, 1, [0xFFFF0000u32]
+        )
+        val next_frame = simpleos_host_gpu_image_resource(
+            "image://photo", 3, 1, [0xFF00FF00u32; 3]
+        )
+        val before = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [first_frame]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        val after = _image_command(
+            simple_web_layout_render_html_draw_ir_with_images(
+                html, 16, 16, [next_frame]
+            ).batches[0].commands,
+            "photo_image"
+        )
+        if val image = before:
+            assert_equal(image.width, 1)
+        else:
+            fail("Expected photo_image in the first frame")
+        if val image = after:
+            assert_equal(image.width, 3)
+        else:
+            fail("Expected photo_image in the replacement frame")

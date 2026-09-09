@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -87,7 +87,7 @@ pub(super) struct ComputeCommandOwners {
 #[cfg(feature = "vulkan")]
 pub(super) struct QuarantinedComputeSubmission {
     pub device: Arc<VulkanDevice>,
-    pub fence: Fence,
+    pub fence: Arc<Fence>,
     pub command_buffer: vk::CommandBuffer,
     pub owners: ComputeCommandOwners,
     /// Caller-visible fence handle for a submission whose command buffer is
@@ -141,7 +141,11 @@ pub(super) struct QuarantinedGraphicsSubmission {
 }
 
 pub(super) fn alloc_handle() -> i64 {
-    NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
+    NEXT_HANDLE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            (next > 0).then(|| next.checked_add(1)).flatten()
+        })
+        .unwrap_or(0)
 }
 
 // ── Global Vulkan state ──────────────────────────────────────────────────────
@@ -165,6 +169,17 @@ pub(super) struct VulkanState {
     /// a permanent "release pending" state it can never clear.
     pub retired_fence_handles: Vec<i64>,
     pub accepted_compute_submit_count: i64,
+    /// Exactly one runtime-owned async compute session may hold this lease for
+    /// a device generation.  The session module owns the lifecycle; the
+    /// legacy global begin path only observes the admission bit.
+    pub async_compute_session_active: bool,
+    /// A failed recovery detached this generation into process-lifetime
+    /// quarantine. Do not initialize a replacement while other GPU entrypoints
+    /// may still carry generation-local leases outside STATE.
+    pub device_generation_quarantined: bool,
+    /// Fence handles retained by an async session cannot be revoked through
+    /// the legacy destroy-fence API while the GPU may still reference them.
+    pub async_compute_session_fences: HashSet<i64>,
     pub graphics_commands: HashMap<i64, GraphicsCommandOwners>,
     pub quarantined_graphics: Vec<QuarantinedGraphicsSubmission>,
     pub strings: HashMap<String, CString>,
@@ -205,6 +220,9 @@ impl VulkanState {
             quarantined_compute: Vec::new(),
             retired_fence_handles: Vec::new(),
             accepted_compute_submit_count: 0,
+            async_compute_session_active: false,
+            device_generation_quarantined: false,
+            async_compute_session_fences: HashSet::new(),
             graphics_commands: HashMap::new(),
             quarantined_graphics: Vec::new(),
             strings: HashMap::new(),
@@ -237,6 +255,9 @@ impl VulkanState {
     }
 
     pub fn require_device(&self) -> Result<Arc<VulkanDevice>, String> {
+        if self.device_generation_quarantined {
+            return Err("Vulkan device generation quarantined; restart process".to_string());
+        }
         self.device
             .as_ref()
             .cloned()
@@ -244,7 +265,9 @@ impl VulkanState {
     }
 
     pub fn has_device_resources(&self) -> bool {
-        !self.buffers.is_empty()
+        self.device_generation_quarantined
+            || self.async_compute_session_active
+            || !self.buffers.is_empty()
             || !self.compute_pipelines.is_empty()
             || !self.shader_modules.is_empty()
             || !self.fences.is_empty()
@@ -293,7 +316,7 @@ impl VulkanState {
         self.quarantined_compute
             .iter()
             .find(|submission| submission.wait_handle == handle)
-            .map(|submission| &submission.fence)
+            .map(|submission| submission.fence.as_ref())
     }
 
     /// Drop a caller-visible handle for a quarantined submission. The `Fence`
@@ -302,6 +325,9 @@ impl VulkanState {
     /// the caller's ability to name it. Returns true if a handle was revoked.
     pub fn release_quarantined_wait_handle(&mut self, handle: i64) -> bool {
         if handle == 0 {
+            return false;
+        }
+        if self.async_compute_session_fences.contains(&handle) {
             return false;
         }
         for submission in self.quarantined_compute.iter_mut() {
@@ -336,6 +362,7 @@ impl VulkanState {
             // reports success rather than "not found" — see
             // `release_quarantined_wait_handle`.
             if wait_handle != 0 {
+                self.async_compute_session_fences.remove(&wait_handle);
                 self.retired_fence_handles.push(wait_handle);
             }
             device.free_compute_command(command_buffer);
@@ -391,6 +418,10 @@ pub(super) fn cchar_to_str<'a>(ptr: *const c_char) -> &'a str {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_init() -> i64 {
     let mut state = STATE.lock();
+    if state.device_generation_quarantined {
+        state.set_error("init: quarantined device generation requires process restart".to_string());
+        return 0;
+    }
     if state.device.is_some() {
         return 1;
     }
@@ -436,6 +467,14 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     let mut state = STATE.lock();
+    if state.device_generation_quarantined {
+        state.set_error("shutdown: device owners remain quarantined until process exit".to_string());
+        return 0;
+    }
+    if state.async_compute_session_active {
+        state.set_error("shutdown: async compute session is still active".to_string());
+        return 0;
+    }
     if let Some(device) = state.device.clone() {
         if let Err(e) = device.wait_idle() {
             state.set_error(format!("shutdown wait_idle: {e}"));
@@ -494,6 +533,14 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+// TODO: [gpu][P2] `rt_vulkan_is_available` can answer TRUE with the `vulkan`
+// cargo feature OFF. `vulkan` is not in Cargo.toml's default set
+// (`default = ["cpu-simd"]`, Cargo.toml:19), yet this `cfg(not(feature =
+// "vulkan"))` arm dlopens the loader anyway and reports availability, so a
+// build compiled without Vulkan support still tells callers Vulkan is there.
+// Evidence to close: gate availability on the feature (or make the dlopen
+// path report a distinct "loader present but unsupported build" status) plus
+// a spec that pins both answers for a feature-on and a feature-off build.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
