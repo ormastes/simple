@@ -201,3 +201,137 @@ The owner uses a distinct submitted state, so a completion cannot bypass
 submission observation. This source review admits a WARN development change
 only: the current general Simple CLI/check worker and real device execution
 remain unavailable, and no runtime or performance PASS is inferred.
+
+## Provider port required before production connection
+
+Astra's scheduler escalation removed the unused host scheduler candidate after
+two Sol cycles. See
+[the exact review and recovery record](../09_report/host_compositor_gpu_scheduler_package_2026-09-09.md).
+This section freezes the next implementation boundary. The names below are
+reserved design names; no implementation, native symbol, or hardware support
+is claimed by declaring them here.
+
+The long-lived Pure Simple device owner must acquire its admission from the
+**same live VulkanSession that owns the Engine2D pipeline and output resources**.
+The existing `VulkanAsyncSubmissionSession.open_with_wait(capacity, timeout)`
+cannot supply that contract: it has no expected-device/session/swapchain
+arguments, and its returned opaque handle identifies a separately created
+global provider owner. A completed `VulkanFrameReceipt` can observe a previous
+frame; it cannot grant the new owner's authority. Do not construct a second
+session and then compare local counters or positive handle fields.
+
+Keep scheduling, surface tables, resource versions, pending damage, and event
+publication in `.spl`. The backend port supplies opaque device operations and
+their actual results. The Rust provider may serve as background/reference
+evidence, but moving policy into Rust does not implement the selected Pure
+Simple compositor. A provider advertised as usable must implement the whole
+binding, recording, presenter, and terminal contract, not just export the
+existing optional B/N2 symbols.
+
+The private port is `GpuAsyncDevicePortV2`, held only by the device owner.
+Shared copied vocabulary belongs beside the existing contracts in
+`src/lib/common/gpu/render_surface_contract.spl` (or its versioned child), not
+in a parallel scheduler type system. Preserve the existing V1 layouts.
+
+| Reserved value/operation | Required authority and result |
+|---|---|
+| `GpuDeviceBindingV2`; `bind_existing_session` | Provider validates the exact existing device/session and output target, rejects live legacy recording and a competing admission owner atomically, and returns an opaque owner binding with device generation, session generation, and binding generation. Failure leaves the old owner usable. Raw pointer equality and locally incremented generations are insufficient. |
+| `GpuRecordingLeaseV2`; `borrow_surface` / `acquire` | Provider binds a non-owning surface lease to that owner and the actual framebuffer/image allocation. Every recording token resolves to the exact device/session/binding, surface epoch, slot generation, and output revision. The host supplies producer/event revision data; these fields never confer native authority. Children receive no cancel-session, recover, abandon, or close-device operation. |
+| `bind_resources` / `record` | Exact token plus checked descriptor, pipeline, buffer range/access, image revision, and dependency inputs. Provider validates membership and lifetimes before mutation. The returned command is used to record actual DrawIR primitives/images/fonts; retrieving a command alone is not recording. Unknown range/access information overlaps. |
+| `submit` / `poll_compute` / `retire_compute` | Returns rejected-before-submit, accepted/pending, exact compute completion, or completion-unknown. A receipt carries the same immutable binding and opaque token. Retiring command scratch does not release an output image that present/capture/another composition still reads. |
+| `enqueue_present` / `poll_present_release` | Binds the exact output image revision, compute dependency, display target generation, and provider-issued present token. Acceptance, completion, and source-image release are distinct. A copy-completion fence may prove release of its source buffer if that is the provider's defined boundary; it cannot claim swapchain/scanout release. |
+| `GpuFrameProgressV2` | Carries typed rejected/pending/unknown/complete states and the separately validated submit, compute, and image-release facts. The Pure Simple owner adds its accepted/submitted/acknowledged output sequence and per-producer revision mapping only after receipt validation. No caller-set proof booleans. |
+| `release_surface` / `recover` / `abandon` | Provider authorizes exact surface cleanup or device terminal ownership. Surface cleanup cannot close the session or drain another surface. Device recovery belongs solely to the central owner; quarantined abandonment is retained ownership, not completion. |
+
+Opaque records are looked up and validated by their issuing owner on every
+operation. Copying a lease does not clone its authority or grant teardown.
+Revocation must invalidate all copies; generations cannot wrap. A capability
+probe and later use must still validate the binding on the actual operation,
+so device replacement between those calls cannot authorize stale work.
+No production adapter may turn an injected test port into a device proof.
+
+### Actual owner and event call chain to migrate together
+
+1. `src/os/hosted/hosted_entry.spl` offers its pending semantic snapshot to
+   `HostCompositor.gpu_surface_offer` and polls `gpu_surface_poll` on later
+   event turns. These are the already-reserved public operations. Pending
+   does not enter compatibility rendering or stop evidence mode.
+2. `HostCompositor` freezes that offer's producer revisions, damage and
+   resources. Its single device owner holds the provider binding and all
+   child surface leases. `Engine2D.create_shared_vulkan_offscreen` borrows
+   through that owner; it cannot call `enable_frame_batching` to create a
+   legacy command behind an active session. The same rule covers font,
+   image, primitive, direct-compute, and retained-window routes.
+3. `Engine2dCompositorBackend` records the composition through the exact lease
+   into per-slot immutable descriptor/parameter storage and a versioned output
+   image. `backend_vulkan_helpers._flush_pending_compute_impl` must gain the
+   real token-based path and preserve explicit write/read dependencies; the
+   synchronous `submit_and_wait_fence` path cannot be relabeled as async.
+4. The central owner submits once and polls exact compute progress on later
+   turns. When the provider dependency is satisfied, it enqueues the exact
+   present and retains the image until the defined release receipt. Device
+   completion, command retirement, present acceptance, and image release stay
+   separate even if a provider reports some together.
+5. Only the contiguous released output prefix commits presentation. At that
+   commit, acknowledge the frozen producer revisions through
+   `_mark_external_web_frames_consumed`, consume only the damage belonging to
+   that prefix, and emit the corresponding input presentation receipt.
+   New damage received after submission remains pending; blindly calling
+   `dirty.clear()` would discard it. In `hosted_entry.spl`, advance
+   `presented_event_id` and `presented_mutation_revision` from that receipt,
+   never from the boolean return or the newest current input receipt.
+
+The old boolean `render_frame_engine2d` contract means synchronously complete
+or rejected. It cannot encode an accepted pending frame. Preserve that meaning
+for compatibility callers while migrating the production hosted loop to the
+typed operations in one reviewable change. Likewise, the idle retained-window
+path must poll/present through the same owner rather than silently using its
+old synchronous present beside in-flight work.
+
+N2 admission calls the provider acquire operation at most once per offered
+frame, including when the local table appears full. That operation owns its
+single configured bounded pressure observation. A local early capacity return
+must not silently change N2 into a no-wait policy, and a failed acquire must
+not be retried internally. Recycle records in bounded tables; retaining every
+retired lease or closed surface forever defeats the memory bound.
+
+Use the shared 3–16 capacity and timeout validators already present in the
+common contract. Capacity covers all child surfaces together. Slot images
+must carry their actual predecessor content revisions before damaged replay;
+reusing a different ring image requires an ordered GPU seed/copy or an honest
+full redraw. Retain font atlas and parameter revisions until their last reader
+retires, including the background-rectangle-to-glyph dependency.
+
+### Acceptance of this port and production connection
+
+Extend the existing production test plan with its reserved
+`open_browser_surface_pair`, `assert_surface_owner_receipts`, and manual step
+names. Tests must enter the real hosted offer/poll path and observe operations
+at the actual port; a zero-caller facade or an empty-command session cannot
+pass. An injected port proves control flow only and is labeled accordingly.
+
+- Two surfaces share exactly one provider binding and aggregate capacity at
+  3, 8, and 16. Recording real DrawIR B while A is submitted succeeds only for
+  legal resource access. A's resize/close does not wait for or invalidate B.
+- Wrong session/binding/device/surface/slot generations fail before mutation;
+  handle reuse, copied stale leases, provider replacement, duplicate receipts,
+  and a forged positive scalar record cannot advance owner state.
+- Three distinct output revisions remain alive concurrently. A rectangle,
+  glyph, and image composition have correct barriers and immutable parameters;
+  controlled post-timing captures match synchronous output exactly.
+- Out-of-order compute completion does not acknowledge events. Hold a present
+  release, inject a newer pointer/resource/timer event, and verify both the
+  old image lease and the new pending damage remain. Release the contiguous
+  prefix and verify only its exact revisions are consumed and acknowledged.
+- Full capacity performs at most one N2 pressure wait per offer; later event
+  turns reclaim exact released slots. Repeated recycling leaves bounded
+  record count, retained bytes, descriptors and allocations. Normal operation
+  has no device-idle call, full-frame readback, or hidden retry loop.
+- Pre-submit rejection, ambiguous submit, loss between compute and present,
+  failed recovery, abandonment, and repeated close preserve the exact owner
+  and cannot manufacture image release or event acknowledgement.
+
+The source review/removal does not satisfy these cases. Keep the production
+async and performance gates pending until an admitted Pure Simple runtime and
+actual provider execute them. Do not reopen the same five-file facade task;
+start at this missing port and include its production consumers.
