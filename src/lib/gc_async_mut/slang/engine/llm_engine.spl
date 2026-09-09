@@ -15,7 +15,7 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown, paged_executor_generate}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
@@ -28,6 +28,7 @@ var ENGINE_LOADED_ID = ""
 var ENGINE_BACKEND: GgmlBackend? = nil
 var ENGINE_LIB_PATH = "build/sffi/libslang_ggml.so"
 var ENGINE_N_CTX = 4096
+var ENGINE_MATCHED_CPU_THREADS = -1
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
 var ENGINE_PREFIX_CACHE_BYTES = 2147483648
 var ENGINE_PHYSICAL_PAGES_ENABLED = false
@@ -47,6 +48,12 @@ fn engine_set_lib_path(path: text):
 
 fn engine_set_n_ctx(n: i64):
     ENGINE_N_CTX = n
+
+fn engine_set_matched_cpu_threads(threads: i64) -> bool:
+    if ENGINE_BACKEND != nil or threads <= 0:
+        return false
+    ENGINE_MATCHED_CPU_THREADS = threads
+    true
 
 fn engine_set_physical_pages(enabled: bool, page_tokens: i64 = 256,
                              page_capacity: i64 = 128,
@@ -105,6 +112,20 @@ fn engine_prefix_cache_stats() -> PrefixCacheStats?:
             rejected_bytes: physical!.busy_rejects.to_i64(),
             restore_failures: physical!.generation_failures.to_i64())
     prefix_cache_stats(ENGINE_BACKEND!)
+
+fn engine_physical_page_allocated_bytes() -> Result<i64, text>:
+    if ENGINE_BACKEND == nil or not paged_executor_active():
+        return Err("physical page executor is inactive")
+    match physical_page_allocated_bytes(ENGINE_BACKEND!, paged_executor_pool()):
+        Err(e): Err(backend_error_text(e))
+        Ok(bytes): Ok(bytes)
+
+fn engine_physical_page_bytes() -> Result<i64, text>:
+    if ENGINE_BACKEND == nil or not paged_executor_active():
+        return Err("physical page executor is inactive")
+    match physical_page_bytes(ENGINE_BACKEND!, paged_executor_pool()):
+        Err(e): Err(backend_error_text(e))
+        Ok(bytes): Ok(bytes)
 
 # Physical-page ABI discovery is not activation. Until a model-specific tensor
 # provider creates a pool and connects the owner dispatch, generation must stay
@@ -186,6 +207,12 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
                     close_backend(b)
                     return Err("load failed for '" + model.id + "': " + backend_error_text(e))
                 Ok(_):
+                    if ENGINE_MATCHED_CPU_THREADS > 0:
+                        match configure_matched_cpu_context(b, ENGINE_MATCHED_CPU_THREADS):
+                            Err(e):
+                                close_backend(b)
+                                return Err("matched CPU context failed for '" + model.id + "': " + backend_error_text(e))
+                            Ok(_): ()
                     if ENGINE_PHYSICAL_PAGES_ENABLED:
                         val activated = paged_executor_activate(
                             b, ENGINE_N_CTX, ENGINE_PHYSICAL_PAGE_TOKENS,
@@ -238,8 +265,9 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
         Ok(_):
             engine_generate(prompt, max_tokens)
 
-export engine_set_lib_path, engine_set_n_ctx, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_set_lib_path, engine_set_n_ctx, engine_set_matched_cpu_threads, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
+export engine_physical_page_allocated_bytes, engine_physical_page_bytes
 export engine_physical_page_activation, engine_kv_execution_mode
 export engine_kv_execution_mode_text, engine_physical_page_reason
 export EngineKvReadiness, engine_kv_readiness

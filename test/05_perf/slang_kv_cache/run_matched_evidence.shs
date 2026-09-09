@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || fail "run inside the Simple repository"
+cd "$ROOT"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+MODEL_PATH=${SLANG_KV_MODEL_PATH:-}
+MODEL_ID=${SLANG_KV_MODEL_ID:-}
+SLANG_LIB=${SLANG_KV_LIB:-build/sffi/libslang_ggml.so}
+TOKENS=${SLANG_KV_TOKENS:-8}
+THREADS=${SLANG_KV_THREADS:-1}
+N_CTX=${SLANG_KV_N_CTX:-4096}
+OUT=${SLANG_KV_EVIDENCE_DIR:-build/perf/slang-kv-cache}
+DRIVER=test/05_perf/slang_kv_cache/slang_kv_workload.spl
+
+[[ -x "$SIMPLE_BIN" ]] || fail "SIMPLE_BIN is not executable: $SIMPLE_BIN"
+[[ -n "$MODEL_PATH" && -f "$MODEL_PATH" ]] || fail "set SLANG_KV_MODEL_PATH to a GGUF model file"
+[[ -n "$MODEL_ID" ]] || fail "set SLANG_KV_MODEL_ID"
+[[ -f "$SLANG_LIB" ]] || fail "Slang ggml library not found: $SLANG_LIB"
+[[ "$TOKENS" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_TOKENS must be a positive integer"
+[[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_THREADS must be a positive integer"
+[[ "$N_CTX" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_N_CTX must be a positive integer"
+[[ -x /usr/bin/time ]] || fail "/usr/bin/time is required for raw maximum-RSS receipts"
+
+mkdir -p "$OUT/raw"
+RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+MANIFEST="$OUT/manifest-$RUN_ID.tsv"
+SUMMARY_TSV="$OUT/summary-$RUN_ID.tsv"
+SUMMARY_MD="$OUT/summary-$RUN_ID.md"
+printf 'run_id\tpair\torder\tworkload\tlane\tstatus\texit_code\twhole_process_elapsed_ns\tresident_elapsed_ms\tmax_rss_kib\toutput_digest\tstdout_sha256\ttime_receipt\tstdout_receipt\tstderr_receipt\n' > "$MANIFEST"
+
+workloads=(cold exact_repeat prefix_extension alternating_prefix eviction_pressure)
+lanes_for_pair() {
+    if (( $1 % 2 == 1 )); then printf '%s\n' snapshot physical_pages
+    else printf '%s\n' physical_pages snapshot
+    fi
+}
+
+for workload in "${workloads[@]}"; do
+    for pair in 1 2 3 4 5; do
+        order=0
+        while IFS= read -r lane; do
+            order=$((order + 1))
+            stem="$RUN_ID-$workload-pair$pair-order$order-$lane"
+            stdout="$OUT/raw/$stem.stdout"
+            stderr="$OUT/raw/$stem.stderr"
+            timing="$OUT/raw/$stem.time-v"
+            start_ns=$(date +%s%N)
+            set +e
+            /usr/bin/time -v -o "$timing" env SIMPLE_LIB=src "$SIMPLE_BIN" run "$DRIVER" \
+                --model-path="$MODEL_PATH" --model-id="$MODEL_ID" --lib="$SLANG_LIB" \
+                --lane="$lane" --workload="$workload" --tokens="$TOKENS" \
+                --threads="$THREADS" --n-ctx="$N_CTX" \
+                >"$stdout" 2>"$stderr"
+            code=$?
+            set -e
+            end_ns=$(date +%s%N)
+            elapsed_ns=$((end_ns - start_ns))
+            max_rss=$(awk -F: '/Maximum resident set size \(kbytes\)/ {gsub(/^[[:space:]]+/, "", $2); print $2}' "$timing")
+            [[ "$max_rss" =~ ^[0-9]+$ ]] || max_rss=0
+            status=FAIL
+            if (( code == 0 )) && grep -q '^SLANG_KV_RESULT status=PASS ' "$stdout"; then status=PASS; fi
+            result=$(grep '^SLANG_KV_RESULT status=PASS ' "$stdout" | tail -1 || true)
+            resident_ms=$(printf '%s\n' "$result" | sed -n 's/.* resident_elapsed_ms=\([0-9][0-9]*\).*/\1/p')
+            output_digest=$(printf '%s\n' "$result" | sed -n 's/.* output_digest=\([0-9][0-9]*\).*/\1/p')
+            [[ "$resident_ms" =~ ^[0-9]+$ ]] || resident_ms=0
+            [[ "$output_digest" =~ ^[0-9]+$ ]] || output_digest=missing
+            digest=$(sha256sum "$stdout" | awk '{print $1}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$RUN_ID" "$pair" "$order" "$workload" "$lane" "$status" "$code" \
+                "$elapsed_ns" "$resident_ms" "$max_rss" "$output_digest" "$digest" "$timing" "$stdout" "$stderr" >> "$MANIFEST"
+        done < <(lanes_for_pair "$pair")
+    done
+done
+
+PARITY="$OUT/parity-$RUN_ID.tsv"
+awk -F '\t' 'BEGIN {OFS="\t"; print "workload","pair","snapshot_digest","physical_digest","status"}
+NR>1 {d[$4 SUBSEP $2 SUBSEP $5]=$11}
+END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(p=1;p<=5;p++){s=d[names[w] SUBSEP p SUBSEP "snapshot"];q=d[names[w] SUBSEP p SUBSEP "physical_pages"];print names[w],p,s,q,(s!=""&&s!="missing"&&s==q?"PASS":"FAIL")}}}' "$MANIFEST" > "$PARITY"
+
+awk -F '\t' 'BEGIN {OFS="\t"; print "workload","lane","samples","passed","min_resident_ms","median_resident_ms","p95_resident_ms","max_resident_ms","max_rss_kib"}
+NR > 1 {key=$4 SUBSEP $5; n[key]++; if ($6=="PASS") pass[key]++; t[key,n[key]]=$9+0; if (($10+0)>rss[key]) rss[key]=$10+0}
+END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(l=1;l<=2;l++){lanes[1]="snapshot";lanes[2]="physical_pages";key=names[w] SUBSEP lanes[l];for(i=1;i<=n[key];i++)a[i]=t[key,i];for(i=1;i<=n[key];i++)for(j=i+1;j<=n[key];j++)if(a[i]>a[j]){x=a[i];a[i]=a[j];a[j]=x}print names[w],lanes[l],n[key]+0,pass[key]+0,a[1]+0,a[3]+0,a[5]+0,a[5]+0,rss[key]+0;delete a}}}' "$MANIFEST" > "$SUMMARY_TSV"
+
+{
+    printf '# Slang KV-cache matched benchmark — %s\n\n' "$RUN_ID"
+    printf 'Immutable evidence manifest: `%s`\n\n' "$MANIFEST"
+    printf '| Workload | Lane | Passed | Min ms | Median ms | p95 ms | Max ms | Max RSS KiB |\n|---|---|---:|---:|---:|---:|---:|---:|\n'
+    awk -F '\t' 'NR>1 {printf "| %s | %s | %s/%s | %s | %s | %s | %s | %s |\n",$1,$2,$4,$3,$5,$6,$7,$8,$9}' "$SUMMARY_TSV"
+    printf '\nTiming is monotonic resident-request time; model load and disjoint warmup are excluded. p95 with five samples is the nearest-rank fifth sample. Whole-process GNU `time -v`, stdout, and stderr remain raw per-sample receipts. CPU threads=%s and n_ctx=%s are identical across lanes. Output digest parity is required within every pair (`%s`). TTFT is truthfully unavailable because the backend API exposes only completed generation.\n' "$THREADS" "$N_CTX" "$PARITY"
+} > "$SUMMARY_MD"
+
+if awk -F '\t' 'NR>1 && $4 != 5 {bad=1} END {exit bad}' "$SUMMARY_TSV" && \
+   awk -F '\t' 'NR>1 && $5 != "PASS" {bad=1} END {exit bad}' "$PARITY"; then
+    printf 'STATUS: PASS slang-kv-cache-matched-evidence\nsummary: %s\n' "$SUMMARY_MD"
+else
+    printf 'STATUS: BLOCKED slang-kv-cache-matched-evidence (inspect %s)\n' "$MANIFEST" >&2
+    exit 1
+fi
