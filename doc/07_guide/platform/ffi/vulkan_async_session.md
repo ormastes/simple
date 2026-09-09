@@ -79,12 +79,22 @@ exhaustion, bounded receipt publication and bounded telemetry. The C fixture
 `test/01_unit/runtime/vulkan_async_provider_compatibility.c` includes the actual
 loader and verifies legacy-v1/partial/full-extension behavior.
 
+On macOS, run it with dead stripping so unrelated hosted-runtime adapters do
+not become link dependencies:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+  -I src/runtime test/01_unit/runtime/vulkan_async_provider_compatibility.c \
+  -ldl -Wl,-dead_strip -o /tmp/vulkan-provider-compat
+/tmp/vulkan-provider-compat
+```
+
 The injected test `src/compiler_rust/runtime/tests/vulkan_async_session_injected.rs`
 compiles the actual runtime owner files against a deterministic device/fence
 boundary. It exercises pending waits, concurrent polling/snapshots, unknown
 completion, failed recovery, resource retention, rejected submission, cancellation,
-and recycling. It is registered as Cargo test `vulkan_async_session_injected`
-(requires `vulkan`) and also has a low-disk standalone command:
+and recycling. It is intentionally a standalone low-disk harness (its injected
+crate aliases are not a normal `simple-runtime` Cargo target), run with:
 
 ```sh
 rustc --edition=2021 --cfg 'feature="vulkan"' --test src/compiler_rust/runtime/tests/vulkan_async_session_injected.rs -o /tmp/simple-vulkan-async-injected-test
