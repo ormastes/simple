@@ -67,6 +67,10 @@ static void assert_logit_close(int64_t index, uint32_t actual_bits, uint32_t exp
 }
 
 int main(int argc, char **argv) {
+    const uint32_t page_tokens = 4;
+    const uint32_t page_capacity = 16;
+    const uint32_t provider_context_tokens = page_tokens * page_capacity;
+
     assert(argc == 2);
     assert(slang_ggml_backend_init() == 0);
     push_global(argv[1]);
@@ -75,7 +79,8 @@ int main(int argc, char **argv) {
     assert(slang_ggml_request_configure(2) == 2);
     int64_t execution_namespace = slang_ggml_page_execution_namespace();
     assert(execution_namespace > 0);
-    int64_t pool = slang_ggml_page_pool_create(execution_namespace, 4, 16, 64 * 1024 * 1024);
+    int64_t pool = slang_ggml_page_pool_create(
+        execution_namespace, page_tokens, page_capacity, 64 * 1024 * 1024);
     assert(pool > 0 && slang_ggml_page_bytes(pool) > 0);
     int64_t request_a = slang_ggml_page_request_create(pool, 32);
     int64_t request_b = slang_ggml_page_request_create(pool, 32);
@@ -93,9 +98,10 @@ int main(int argc, char **argv) {
     struct llama_model *reference_model = llama_model_load_from_file(argv[1], model_params);
     assert(reference_model != NULL);
     struct llama_context_params context_params = llama_context_default_params();
-    context_params.n_ctx = 32;
-    context_params.n_batch = 32;
-    context_params.n_ubatch = 32;
+    /* Logit parity requires the same execution profile as the physical pool. */
+    context_params.n_ctx = provider_context_tokens;
+    context_params.n_batch = provider_context_tokens;
+    context_params.n_ubatch = provider_context_tokens;
     context_params.n_seq_max = 1;
     context_params.type_k = GGML_TYPE_F32;
     context_params.type_v = GGML_TYPE_F32;
