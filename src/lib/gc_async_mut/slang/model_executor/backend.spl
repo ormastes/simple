@@ -139,6 +139,21 @@ struct GgmlBackend:
 struct GgmlRequest:
     handle: i64
 
+struct BackendGeneration:
+    generated_tokens: text
+    output: text
+
+struct BackendGenerationRequest:
+    max_tokens: text
+    prompt: text
+    backend: GgmlBackend
+
+struct BackendActiveGenerationRequest:
+    max_tokens: text
+    prompt: text
+    backend: GgmlBackend
+    request: GgmlRequest
+
 struct PrefixCacheStats:
     capabilities: i64
     hits: i64
@@ -468,7 +483,11 @@ fn cancel_backend_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), Ba
         return Err(BackendError.NotOpen)
     Ok(())
 
-fn _generate_request(b: GgmlBackend, request: GgmlRequest, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val request = input.request
+    val prompt = input.prompt
+    val max_tokens = input.max_tokens.parse_i64() ?? 0
     if _push_request_text(b, request, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
     if _call2(b.f_request_tokenize, request.handle, 1) < 0:
@@ -489,16 +508,21 @@ fn _generate_request(b: GgmlBackend, request: GgmlRequest, prompt: text, max_tok
         if _call2(b.f_request_eval, request.handle, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(out)
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
 
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
-fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val prompt = input.prompt
+    val max_tokens = input.max_tokens.parse_i64() ?? 0
     if b.independent_requests:
         val opened = open_request(b, _call0(b.f_n_ctx))
         match opened:
             Ok(request):
-                val result = _generate_request(b, request, prompt, max_tokens)
+                val result = _generate_request_observed(BackendActiveGenerationRequest(
+                    max_tokens: input.max_tokens, prompt: prompt, backend: b,
+                    request: request))
                 val closed = close_backend_request(b, request)
                 match closed:
                     Err(_): return Err(BackendError.DecodeFailed)
@@ -527,7 +551,17 @@ fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, Backe
         if _call1(b.f_eval, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(out)
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
+
+fn generate_observed(b: GgmlBackend, prompt: text,
+                     max_tokens: i64) -> Result<BackendGeneration, BackendError>:
+    generate_observed_request(BackendGenerationRequest(
+        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b))
+
+fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+    match generate_observed(b, prompt, max_tokens):
+        Err(error): Err(error)
+        Ok(observed): Ok(observed.output)
 
 fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
     var reported_capabilities = _call0(b.f_capabilities)
@@ -748,12 +782,12 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
     spl_dlclose(b.lib)
     Ok(())
 
-export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
+export BackendError, backend_error_text, GgmlBackend, BackendGeneration, BackendGenerationRequest, PrefixCacheStats
 export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
 export GgmlRequest, open_backend, load_model, open_context, open_request, close_backend_request, cancel_backend_request
 export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
-export generate, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
+export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status
 export physical_lightweight_requests_ready

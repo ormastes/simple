@@ -1,0 +1,41 @@
+"""
+The observation DTOs preserve the decode loops' produced counter without
+changing the established text-only generation API. Native/provider fixtures
+own loop execution; these focused tests pin the two boundary values callers
+must be able to distinguish.
+"""
+
+use std.spec.step
+use std.gc_async_mut.slang.model_executor.backend.{BackendGeneration}
+use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGeneration, PagedGenerationRequest}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationObservation, EngineGenerationRequest}
+
+describe "Slang generation observation values":
+    it "retains the authoritative max-token produced count":
+        step("represent a decode loop which consumed its complete four-token budget")
+        val backend = BackendGeneration(output: "x", generated_tokens: "4")
+        val paged = PagedGeneration(output: backend.output,
+            generated_tokens: backend.generated_tokens)
+        val engine = EngineGenerationObservation(output: paged.output,
+            generated_tokens: paged.generated_tokens)
+        expect(engine.output).to_equal("x")
+        expect(engine.generated_tokens).to_equal("4")
+
+    it "represents EOG before the first generated token as zero":
+        step("preserve empty output separately from a consumed generation token")
+        val backend = BackendGeneration(output: "nonempty", generated_tokens: "0")
+        val paged = PagedGeneration(output: backend.output,
+            generated_tokens: backend.generated_tokens)
+        val engine = EngineGenerationObservation(output: paged.output,
+            generated_tokens: paged.generated_tokens)
+        expect(engine.output).to_equal("nonempty")
+        expect(engine.generated_tokens).to_equal("0")
+
+    it "keeps token budgets textual across mixed composite request boundaries":
+        step("use unequal prompt length and token budget sentinels")
+        val engine = EngineGenerationRequest(prompt: "sixteen-letters!!",
+            max_tokens: "2")
+        val paged = PagedGenerationRequest(prompt: engine.prompt,
+            max_tokens: engine.max_tokens)
+        expect(paged.prompt).to_equal("sixteen-letters!!")
+        expect(paged.max_tokens).to_equal("2")

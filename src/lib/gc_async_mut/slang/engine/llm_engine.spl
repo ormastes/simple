@@ -15,9 +15,9 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
-use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown, paged_executor_generate}
+use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
 use std.io_runtime.{file_exists}
@@ -42,6 +42,14 @@ struct EngineKvReadiness:
     mode: KvExecutionMode
     cache_ready: bool
     physical_activation: PhysicalPageActivation
+
+struct EngineGenerationObservation:
+    generated_tokens: text
+    output: text
+
+struct EngineGenerationRequest:
+    prompt: text
+    max_tokens: text
 
 fn engine_set_lib_path(path: text):
     ENGINE_LIB_PATH = path
@@ -201,7 +209,7 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
         Err(e):
             return Err("backend unavailable at " + ENGINE_LIB_PATH + ": " + backend_error_text(e))
         Ok(b):
-            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED: 0 else: -1
+            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED or ENGINE_MATCHED_CPU_THREADS > 0: 0 else: -1
             match load_model(b, model.entry_path, gpu_layers):
                 Err(e):
                     close_backend(b)
@@ -234,21 +242,37 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
                             ENGINE_LOADED_ID = model.id
                             Ok(())
 
-fn engine_generate(prompt: text, max_tokens: i64) -> Result<text, text>:
+fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<EngineGenerationObservation, text>:
+    val prompt = input.prompt
+    val max_tokens = input.max_tokens.parse_i64() ?? 0
     if ENGINE_BACKEND == nil:
         return Err("no model is resident")
     var budget = max_tokens
     if budget <= 0:
         budget = 256
     if paged_executor_active():
-        match paged_executor_generate(prompt, budget):
+        match paged_executor_generate_observed_request(PagedGenerationRequest(
+              max_tokens: budget.to_text(), prompt: prompt)):
             Err(error): return Err(paged_executor_error_text(error))
-            Ok(txt): return Ok(txt)
-    match generate(ENGINE_BACKEND!, prompt, budget):
+            Ok(observed): return Ok(EngineGenerationObservation(
+                output: observed.output, generated_tokens: observed.generated_tokens))
+    match generate_observed_request(BackendGenerationRequest(
+          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!)):
         Err(e):
             Err(backend_error_text(e))
-        Ok(txt):
-            Ok(txt)
+        Ok(observed):
+            Ok(EngineGenerationObservation(
+                output: observed.output, generated_tokens: observed.generated_tokens))
+
+fn engine_generate(prompt: text, max_tokens: i64) -> Result<text, text>:
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: prompt, max_tokens: max_tokens.to_text())):
+        Err(reason): Err(reason)
+        Ok(observed): Ok(observed.output)
+
+fn engine_generate_observed(prompt: text, max_tokens: i64) -> Result<EngineGenerationObservation, text>:
+    engine_generate_observed_request(EngineGenerationRequest(
+        prompt: prompt, max_tokens: max_tokens.to_text()))
 
 # Load-and-generate in one step, which is what an HTTP handler wants: it has a
 # model name and a prompt and no business knowing whether a load is needed.
@@ -267,6 +291,7 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
 
 export engine_set_lib_path, engine_set_n_ctx, engine_set_matched_cpu_threads, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
+export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
 export engine_physical_page_allocated_bytes, engine_physical_page_bytes
 export engine_physical_page_activation, engine_kv_execution_mode
 export engine_kv_execution_mode_text, engine_physical_page_reason

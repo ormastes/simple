@@ -29,6 +29,14 @@ enum PagedExecutorError:
     DecodeFailed
     CleanupFailed
 
+struct PagedGeneration:
+    generated_tokens: text
+    output: text
+
+struct PagedGenerationRequest:
+    max_tokens: text
+    prompt: text
+
 fn paged_executor_error_text(error: PagedExecutorError) -> text:
     match error:
         PagedExecutorError.AlreadyActive: "physical paged executor is already active"
@@ -533,8 +541,9 @@ fn _cancel_generation(native_request: GgmlRequest,
 # Executes one request entirely through the external physical-page provider.
 # Once prefill starts, failures are returned from this mode; callers must not
 # replay the request through another context and risk duplicate output.
-fn _paged_executor_generate_impl(prompt: text,
-                                 max_tokens: i64) -> Result<text, PagedExecutorError>:
+fn _paged_executor_generate_impl(input: PagedGenerationRequest) -> Result<PagedGeneration, PagedExecutorError>:
+    val prompt = input.prompt
+    val max_tokens = input.max_tokens.parse_i64() ?? -1
     if not paged_executor_active():
         return Err(PagedExecutorError.ProviderUnavailable)
     if _current_request_active():
@@ -613,17 +622,27 @@ fn _paged_executor_generate_impl(prompt: text,
         produced = produced + 1
     match _close_generation(native_request, true):
         Err(error): Err(error)
-        Ok(_): Ok(output)
+        Ok(_): Ok(PagedGeneration(output: output, generated_tokens: produced.to_text()))
 
-fn paged_executor_generate(prompt: text,
-                           max_tokens: i64) -> Result<text, PagedExecutorError>:
-    val result = _paged_executor_generate_impl(prompt, max_tokens)
+fn paged_executor_generate_observed(prompt: text,
+                                    max_tokens: i64) -> Result<PagedGeneration, PagedExecutorError>:
+    paged_executor_generate_observed_request(PagedGenerationRequest(
+        max_tokens: max_tokens.to_text(), prompt: prompt))
+
+fn paged_executor_generate_observed_request(input: PagedGenerationRequest) -> Result<PagedGeneration, PagedExecutorError>:
+    val result = _paged_executor_generate_impl(input)
     match result:
         Err(error):
             if PAGED_MANAGER_ACTIVE:
                 PAGED_MANAGER.record_generation_failure()
             Err(error)
-        Ok(output): Ok(output)
+        Ok(observed): Ok(observed)
+
+fn paged_executor_generate(prompt: text,
+                           max_tokens: i64) -> Result<text, PagedExecutorError>:
+    match paged_executor_generate_observed(prompt, max_tokens):
+        Err(error): Err(error)
+        Ok(observed): Ok(observed.output)
 
 fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
                            page_tokens: i64, page_capacity: i64,
@@ -694,8 +713,8 @@ fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
     PAGED_CONTEXT_TOKENS = 0
     Ok(())
 
-export PagedExecutorError
+export PagedExecutorError, PagedGeneration, PagedGenerationRequest
 export paged_executor_error_text
 export paged_executor_active, paged_executor_pool, paged_executor_namespace
 export paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown
-export paged_executor_generate
+export paged_executor_generate, paged_executor_generate_observed, paged_executor_generate_observed_request

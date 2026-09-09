@@ -1,8 +1,9 @@
 # @gc -- one fresh-process real-model Slang KV benchmark sample.
-use std.gc_async_mut.slang.engine.llm_engine.{engine_set_lib_path, engine_set_n_ctx, engine_set_matched_cpu_threads, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate, engine_kv_execution_mode_text, engine_prefix_cache_stats, engine_physical_page_allocated_bytes, engine_physical_page_bytes, engine_unload}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_lib_path, engine_set_n_ctx, engine_set_matched_cpu_threads, engine_set_physical_pages, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate_observed_request, engine_kv_execution_mode_text, engine_prefix_cache_stats, engine_physical_page_allocated_bytes, engine_physical_page_bytes, engine_unload}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
 use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_active, paged_executor_telemetry}
 use std.cli.cli_util.{get_cli_args}
+use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{time_now_monotonic_ms}
 
 fn argument(args: [text], name: text, fallback: text) -> text:
@@ -15,51 +16,80 @@ fn argument(args: [text], name: text, fallback: text) -> text:
 fn blocked(reason: text):
     print "SLANG_KV_RESULT status=BLOCKED reason={reason} ttft_status=unavailable ttft_reason=backend-api-has-no-first-token-timestamp"
 
-fn append_request(receipt: text, prompt: text, tokens: i64) -> Result<text, text>:
-    match engine_generate(prompt, tokens):
-        Err(reason): Err(reason)
-        Ok(output): Ok(receipt + output.len().to_text() + ":" + output + "|")
+struct WorkloadObservation:
+    receipt: text
+    generated_token_vector: text
+    generated_tokens_total: text
+    requested_tokens: text
 
-fn run_workload(workload: text, tokens: i64) -> Result<text, text>:
-    var out = ""
+fn append_request(prompt: text,
+                  observation: WorkloadObservation) -> Result<WorkloadObservation, text>:
+    val tokens = observation.requested_tokens.parse_i64() ?? 0
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: prompt, max_tokens: observation.requested_tokens)):
+        Err(reason): Err(reason)
+        Ok(generated):
+            val generated_count = generated.generated_tokens.parse_i64() ?? -1
+            if generated_count < 0:
+                return Err("invalid-generated-token-count-" + generated.generated_tokens)
+            if generated_count > tokens:
+                return Err("generation-budget-exceeded-requested-" +
+                    tokens.to_text() + "-observed-" +
+                    generated.generated_tokens)
+            var vector = observation.generated_token_vector
+            if vector != "":
+                vector = vector + ","
+            vector = vector + generated.generated_tokens
+            val prior_total = observation.generated_tokens_total.parse_i64() ?? 0
+            Ok(WorkloadObservation(
+                receipt: observation.receipt + generated.output.len().to_text() +
+                    ":" + generated.output + "|",
+                generated_token_vector: vector,
+                generated_tokens_total: (prior_total + generated_count).to_text(),
+                requested_tokens: observation.requested_tokens))
+
+fn run_workload(workload: text, requested_tokens: text) -> Result<WorkloadObservation, text>:
+    var out = WorkloadObservation(receipt: "", generated_token_vector: "",
+        generated_tokens_total: "0", requested_tokens: requested_tokens)
     if workload == "cold":
-        return append_request(out, "Summarize the ownership rule for a KV page.", tokens)
+        return append_request("Summarize the ownership rule for a KV page.", out)
     if workload == "exact_repeat":
-        match append_request(out, "Explain why immutable cache keys matter in one paragraph.", tokens):
+        match append_request(
+              "Explain why immutable cache keys matter in one paragraph.", out):
             Err(e): return Err(e)
             Ok(v): out = v
-        return append_request(out, "Explain why immutable cache keys matter in one paragraph.", tokens)
+        return append_request(
+            "Explain why immutable cache keys matter in one paragraph.", out)
     if workload == "prefix_extension":
-        match append_request(out, "Explain why immutable cache keys matter", tokens):
+        match append_request("Explain why immutable cache keys matter", out):
             Err(e): return Err(e)
             Ok(v): out = v
-        return append_request(out, "Explain why immutable cache keys matter. Include a concrete example.", tokens)
+        return append_request(
+            "Explain why immutable cache keys matter. Include a concrete example.", out)
     if workload == "alternating_prefix":
-        match append_request(out, "Cache family alpha has this shared prefix", tokens):
+        match append_request("Cache family alpha has this shared prefix", out):
             Err(e): return Err(e)
             Ok(v): out = v
-        match append_request(out, "Cache family beta has this shared prefix", tokens):
+        match append_request("Cache family beta has this shared prefix", out):
             Err(e): return Err(e)
             Ok(v): out = v
-        match append_request(out, "Cache family alpha has this shared prefix and a correctness suffix.", tokens):
+        match append_request(
+              "Cache family alpha has this shared prefix and a correctness suffix.", out):
             Err(e): return Err(e)
             Ok(v): out = v
-        return append_request(out, "Cache family beta has this shared prefix and a performance suffix.", tokens)
+        return append_request(
+            "Cache family beta has this shared prefix and a performance suffix.", out)
     if workload == "eviction_pressure":
         var index: i64 = 0
         while index < 6:
-            match append_request(out, "KV eviction probe " + index.to_text() + ": give one cache invariant.", tokens):
+            match append_request(
+                  "KV eviction probe " + index.to_text() + ": give one cache invariant.", out):
                 Err(e): return Err(e)
                 Ok(v): out = v
             index = index + 1
-        return append_request(out, "KV eviction probe 0: give one cache invariant.", tokens)
+        return append_request(
+            "KV eviction probe 0: give one cache invariant.", out)
     Err("unknown-workload")
-
-fn output_digest(value: text) -> u64:
-    var hash: u64 = 14695981039346656037u64
-    for byte in text_to_utf8_bytes(value):
-        hash = (hash ^ byte.to_u64()) * 1099511628211u64
-    hash
 
 fn main():
     val args = get_cli_args()
@@ -88,10 +118,14 @@ fn main():
     engine_set_prefix_cache_limits(4, 2147483648)
     val page_tokens: i64 = 64
     val page_capacity = n_ctx / page_tokens
-    if not engine_set_physical_pages(lane == "physical_pages", page_tokens,
-                                     page_capacity, 4, 2147483648):
-        blocked("physical-configuration-rejected")
-        return
+    # Leave the default disabled state untouched for snapshot mode. Passing a
+    # false Boolean through the current cross-module multi-argument interpreter
+    # path can be mis-bound; physical admission is therefore an explicit call.
+    if lane == "physical_pages":
+        if not engine_set_physical_pages(true, page_tokens, page_capacity,
+                                         4, 2147483648):
+            blocked("physical-configuration-rejected")
+            return
 
     # Load and a disjoint one-token warmup are outside resident-request timing.
     val model = NativeModel(id: model_id, root: model_path, format: "gguf",
@@ -102,7 +136,8 @@ fn main():
             blocked("load:" + reason)
             return
         Ok(_): ()
-    match engine_generate("Slang KV benchmark residency warmup.", 1):
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: "Slang KV benchmark residency warmup.", max_tokens: "1")):
         Err(reason):
             blocked("load-warmup:" + reason)
             return
@@ -113,7 +148,7 @@ fn main():
         blocked("mode-mismatch-requested-" + lane + "-actual-" + actual_mode)
         return
     val started_ms = time_now_monotonic_ms()
-    val generated = run_workload(workload, tokens)
+    val generated = run_workload(workload, tokens.to_text())
     val elapsed_ms = time_now_monotonic_ms() - started_ms
     if elapsed_ms <= 0:
         engine_unload()
@@ -124,7 +159,8 @@ fn main():
             engine_unload()
             blocked("request:" + reason)
             return
-        Ok(receipt):
+        Ok(observed):
+            val receipt = observed.receipt
             val stats = engine_prefix_cache_stats()
             if stats == nil:
                 engine_unload()
@@ -150,6 +186,6 @@ fn main():
                     if paged_executor_active() or paged_executor_telemetry() != nil:
                         blocked("cleanup-state-retained")
                         return
-                    print "SLANG_KV_RESULT status=PASS lane={actual_mode} workload={workload} threads={threads} n_ctx={n_ctx} page_tokens={page_tokens} page_capacity={page_capacity} resident_elapsed_ms={elapsed_ms} output_digest={output_digest(receipt)} output_bytes={receipt.len()} hits={stats!.hits} misses={stats!.misses} reused_tokens={stats!.tokens_reused} prefilled_tokens={stats!.tokens_prefilled} admissions={stats!.admissions} evictions={stats!.evictions} resident_entries={stats!.resident_entries} resident_bytes={stats!.resident_bytes} rejected_bytes={stats!.rejected_bytes} restore_failures={stats!.restore_failures} {physical} cleanup_active=false cleanup_telemetry=nil ttft_status=unavailable ttft_reason=backend-api-has-no-first-token-timestamp"
+                    print "SLANG_KV_RESULT status=PASS lane={actual_mode} workload={workload} requested_tokens={tokens} threads={threads} n_ctx={n_ctx} page_tokens={page_tokens} page_capacity={page_capacity} resident_elapsed_ms={elapsed_ms} output_digest={sha256_text(receipt)} output_bytes={receipt.len()} generated_token_vector={observed.generated_token_vector} generated_tokens_total={observed.generated_tokens_total} hits={stats!.hits} misses={stats!.misses} reused_tokens={stats!.tokens_reused} prefilled_tokens={stats!.tokens_prefilled} admissions={stats!.admissions} evictions={stats!.evictions} resident_entries={stats!.resident_entries} resident_bytes={stats!.resident_bytes} rejected_bytes={stats!.rejected_bytes} restore_failures={stats!.restore_failures} {physical} cleanup_active=false cleanup_telemetry=nil ttft_status=unavailable ttft_reason=backend-api-has-no-first-token-timestamp"
 
 main()
