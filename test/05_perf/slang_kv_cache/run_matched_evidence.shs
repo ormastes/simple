@@ -40,6 +40,9 @@ LIB_REAL=$(realpath "$SLANG_LIB")
 LLAMA_LIB=$(ldd "$LIB_REAL" | awk '/libllama\.so/{print $3; exit}')
 [[ -n "$LLAMA_LIB" && -f "$LLAMA_LIB" ]] || fail "unable to resolve the measured libllama provider"
 WORKLOAD_SHA=$(printf '%s\n' 'cold|exact_repeat|prefix_extension|alternating_prefix|eviction_pressure' | sha256sum | awk '{print $1}')
+CPU_MODELS=$(LC_ALL=C lscpu | awk -F: '/^Model name:/{gsub(/^[[:space:]]+/,"",$2);print $2}' | sort -u | paste -sd, -)
+[[ -n "$CPU_MODELS" ]] || fail "unable to identify CPU model through lscpu"
+CPU_IDENTITY_SHA=$(LC_ALL=C lscpu | sha256sum | awk '{print $1}')
 {
     printf 'field\tvalue\n'
     printf 'source_head\t%s\n' "$SOURCE_HEAD"
@@ -59,10 +62,11 @@ WORKLOAD_SHA=$(printf '%s\n' 'cold|exact_repeat|prefix_extension|alternating_pre
     printf 'snapshot_entries\t4\nsnapshot_byte_limit\t2147483648\n'
     printf 'physical_page_tokens\t64\nphysical_page_capacity\t%s\nphysical_prefix_capacity\t4\nphysical_byte_limit\t2147483648\n' "$((N_CTX / 64))"
     printf 'repetitions\t5\npair_order\talternating\nclock\tSimple monotonic milliseconds\n'
-    printf 'architecture\t%s\nkernel\t%s\ncpu_model\t%s\n' "$(uname -m)" "$(uname -sr)" "$(awk -F: '/model name|Model/{gsub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo)"
+    printf 'architecture\t%s\nkernel\t%s\ncpu_models\t%s\ncpu_identity_sha256\t%s\n' \
+        "$(uname -m)" "$(uname -sr)" "$CPU_MODELS" "$CPU_IDENTITY_SHA"
     printf 'observer\t%s\nrun_id\t%s\n' "$(/usr/bin/time --version 2>&1 | head -1)" "$RUN_ID"
 } > "$IDENTITY"
-printf 'run_id\tpair\torder\tworkload\tlane\tstatus\texit_code\trealtime_observer_elapsed_ns\tresident_elapsed_ms\tmax_rss_kib\toutput_digest\tgenerated_token_vector\tgenerated_tokens_total\tstdout_sha256\tstderr_sha256\ttime_sha256\targv_sha256\ttime_receipt\tstdout_receipt\tstderr_receipt\n' > "$MANIFEST"
+printf 'run_id\tpair\torder\tworkload\tlane\tstatus\texit_code\trealtime_observer_elapsed_ns\tresident_elapsed_ms\tmax_rss_kib\toutput_digest\tgenerated_token_vector\tgenerated_tokens_total\tstdout_sha256\tstderr_sha256\ttime_sha256\targv_sha256\teffective_n_ctx\teffective_n_batch\teffective_n_ubatch\ttime_receipt\tstdout_receipt\tstderr_receipt\n' > "$MANIFEST"
 
 workloads=(cold exact_repeat prefix_extension alternating_prefix eviction_pressure)
 lanes_for_pair() {
@@ -140,7 +144,13 @@ for workload in "${workloads[@]}"; do
             [[ "$output_digest" =~ ^[0-9a-f]{64}$ ]] || output_digest=missing
             [[ "$generated_vector" =~ ^[0-9]+(,[0-9]+)*$ ]] || generated_vector=missing
             [[ "$generated_total" =~ ^[0-9]+$ ]] || generated_total=missing
+            effective_n_ctx=$(awk -F'= ' '/llama_context: n_ctx                 =/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_n_batch=$(awk -F'= ' '/llama_context: n_batch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_n_ubatch=$(awk -F'= ' '/llama_context: n_ubatch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
             if (( code == 0 )) && [[ -n "$result" ]] && \
+               [[ "$effective_n_ctx" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_n_batch" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_n_ubatch" =~ ^[1-9][0-9]*$ ]] && \
                validate_sample "$workload" "$lane" "$result" "$generated_vector" \
                    "$generated_total" "$resident_ms" "$output_digest"; then
                 status=PASS
@@ -149,10 +159,11 @@ for workload in "${workloads[@]}"; do
             stderr_digest=$(sha256sum "$stderr" | awk '{print $1}')
             time_digest=$(sha256sum "$timing" | awk '{print $1}')
             argv_digest=$(printf '%s\0' "$SIMPLE_REAL" run "$DRIVER" "$MODEL_REAL" "$MODEL_ID" "$LIB_REAL" "$lane" "$workload" "$TOKENS" "$THREADS" "$N_CTX" | sha256sum | awk '{print $1}')
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$RUN_ID" "$pair" "$order" "$workload" "$lane" "$status" "$code" \
                 "$elapsed_ns" "$resident_ms" "$max_rss" "$output_digest" "$generated_vector" "$generated_total" "$digest" \
-                "$stderr_digest" "$time_digest" "$argv_digest" "$timing" "$stdout" "$stderr" >> "$MANIFEST"
+                "$stderr_digest" "$time_digest" "$argv_digest" "$effective_n_ctx" "$effective_n_batch" "$effective_n_ubatch" \
+                "$timing" "$stdout" "$stderr" >> "$MANIFEST"
         done < <(lanes_for_pair "$pair")
     done
 done
