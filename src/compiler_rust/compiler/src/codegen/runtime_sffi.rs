@@ -2062,6 +2062,22 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),               // text -> i64 (CRC32 checksum)
     RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),                 // path -> bool (alias for fsync)
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
+    // Descriptor-pinned file views use tagged text values for root/path; they
+    // are deliberately not part of the legacy ptr/len text-argument map.
+    RuntimeFuncSpec::new("rt_file_view_open_beneath_no_follow_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_view_mapping_supported_v1", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_file_view_map_copy_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_view_prefetch_v1", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_file_view_close_v1", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_file_view_pread_exact_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_view_device_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_view_inode_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_view_size_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pinned_archive_open_beneath_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pinned_archive_device_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pinned_archive_inode_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pinned_archive_size_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pinned_archive_close_v1", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_file_copy_create_excl_no_follow", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool (O_EXCL|O_NOFOLLOW)
     RuntimeFuncSpec::new("rt_file_link_create_excl_no_follow", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool (link, O_NOFOLLOW)
     RuntimeFuncSpec::new("rt_mem_snapshot_open", &[I64, I64], &[I64]),        // path -> owned fd

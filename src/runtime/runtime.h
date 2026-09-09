@@ -1330,6 +1330,28 @@ int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
+/* Descriptor-pinned read-only view ABI. The root/path parameters are tagged
+ * runtime text values; byte-returning operations return a tagged [u8] array
+ * or the runtime nil sentinel on failure. */
+int64_t     rt_file_view_open_beneath_no_follow_v1(int64_t root_value,
+                                                    int64_t path_value);
+int8_t      rt_file_view_mapping_supported_v1(int64_t descriptor);
+int64_t     rt_file_view_map_copy_v1(int64_t descriptor, uint64_t offset,
+                                     uint64_t length);
+int8_t      rt_file_view_prefetch_v1(int64_t descriptor, uint64_t offset,
+                                     uint64_t length);
+int8_t      rt_file_view_close_v1(int64_t descriptor);
+int64_t     rt_file_view_pread_exact_v1(int64_t descriptor, uint64_t offset,
+                                        uint64_t length);
+int64_t     rt_file_view_device_v1(int64_t descriptor);
+int64_t     rt_file_view_inode_v1(int64_t descriptor);
+int64_t     rt_file_view_size_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_open_beneath_v1(int64_t root_value,
+                                               int64_t path_value);
+int64_t     rt_pinned_archive_device_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_inode_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_size_v1(int64_t descriptor);
+int8_t      rt_pinned_archive_close_v1(int64_t descriptor);
 int         rt_file_copy_create_excl_no_follow(
                     const char* source, int64_t source_len,
                     const char* destination, int64_t destination_len);

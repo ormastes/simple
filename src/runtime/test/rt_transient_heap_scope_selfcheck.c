@@ -172,6 +172,18 @@ int main(void) {
           "promoted raw CONTROL block survives reclamation of its sibling");
     rt_free(raw_control);
 
+    /* OWNER-MODE REGRESSION: runtime_memory owns the bytes while
+     * runtime_native owns the canonical raw registry. Scope end must reclaim
+     * and clear that registry so an unpromoted raw allocation cannot poison
+     * the next scope's begin check. */
+    check(rt_transient_array_scope_begin() == 1,
+          "follow-up raw scope begins after owner-mode reclamation");
+    int64_t* raw_follow_up = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+    check(raw_follow_up != NULL, "follow-up scope raw allocation succeeds");
+    if (raw_follow_up != NULL) raw_follow_up[0] = 0x51C0;
+    check(rt_transient_array_scope_end() == 1,
+          "follow-up raw scope ends and reclaims its allocation");
+
     int64_t string_base = rt_heap_registry_count();
     check(rt_transient_array_scope_begin() == 1, "direct-string scope begins");
     int64_t direct_string = rt_string_new(

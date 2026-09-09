@@ -44,11 +44,105 @@ candidate_frontend_hash_file() (
     case "$candidate_hash_digest" in *[!0-9a-f]*) return 126 ;; esac
     printf '%s\n' "$candidate_hash_digest"
 )
+candidate_frontend_descriptor_root() {
+    case "$(uname -s)" in
+      Darwin) printf '/dev/fd\n' ;;
+      *) printf '/proc/%s/fd\n' "$1" ;;
+    esac
+}
+candidate_frontend_perl_executable() {
+    case "$(uname -s)" in
+      Darwin) printf '/usr/bin/perl\n' ;;
+      *) command -v perl ;;
+    esac
+}
 candidate_frontend_procfd() {
-    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null
+    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || {
+        [ "$(uname -s)" = Darwin ] &&
+        expr "$1" : '/dev/fd/[1-9][0-9]*$' >/dev/null
+    }
+}
+candidate_frontend_pinned_cwd() {
+    [ "${CANDIDATE_FRONTEND_PINNED_CWD:-0}" = 1 ] &&
+    [ "$(uname -s)" = Darwin ] || return 1
+    /usr/bin/perl -e '
+        open(my $dir, "<&6") or exit 1;
+        my @held = stat($dir); my @cwd = stat(".");
+        exit !(@held && @cwd && -d $dir && $held[0] == $cwd[0] && $held[1] == $cwd[1]);
+    '
 }
 candidate_frontend_procfd_leaf() {
-    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*$' >/dev/null
+    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*$' >/dev/null || {
+        case "$1" in ./[A-Za-z0-9_.-]*) ;; *) return 1 ;; esac
+        candidate_leaf=${1#./}
+        case "$candidate_leaf" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+        candidate_frontend_pinned_cwd
+    }
+}
+
+# Darwin fdescfs supports reading an inherited file descriptor, but neither
+# directory-fd suffixes nor executing an executable through /dev/fd. Enter the
+# held output directory with fchdir before starting the smoke shell; its log
+# and receipt leaves then stay attached to that directory even if renamed.
+# The interpreter is macOS system Perl, and its held identity is checked before
+# use. The admission script itself is read through the inherited descriptor.
+candidate_frontend_pinned_smoke() (
+    pinned_candidate=$1 pinned_driver_log=$2
+    if [ "$(uname -s)" != Darwin ]; then
+        candidate_frontend_smoke "$pinned_candidate" >>"$pinned_driver_log" 2>&1
+        exit $?
+    fi
+    for pinned_path in "$pinned_driver_log" "$CANDIDATE_FRONTEND_LOG_PATH" "$CANDIDATE_FRONTEND_STATUS_PATH"; do
+        case "$pinned_path" in /dev/fd/6/*) ;; *) exit 126 ;; esac
+        pinned_leaf=${pinned_path#/dev/fd/6/}
+        case "$pinned_leaf" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 126 ;; esac
+    done
+    CANDIDATE_FRONTEND_LOG_PATH=./${CANDIDATE_FRONTEND_LOG_PATH##*/}
+    CANDIDATE_FRONTEND_STATUS_PATH=./${CANDIDATE_FRONTEND_STATUS_PATH##*/}
+    CANDIDATE_FRONTEND_PINNED_CWD=1
+    CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-pinned
+    CANDIDATE_FRONTEND_CAPTURE_PARENT=/dev/fd/6
+    export CANDIDATE_FRONTEND_LOG_PATH CANDIDATE_FRONTEND_STATUS_PATH
+    export CANDIDATE_FRONTEND_PINNED_CWD CANDIDATE_FRONTEND_LOG_DISPLAY_PATH
+    export CANDIDATE_FRONTEND_CAPTURE_KIND CANDIDATE_FRONTEND_CAPTURE_PARENT
+    export CANDIDATE_FRONTEND_ROOT CANDIDATE_FRONTEND_BACKEND CANDIDATE_FRONTEND_BOOTSTRAP
+    export CANDIDATE_FRONTEND_MAX_LOG_BYTES COMPILER_BUILD_TIMEOUT_SECONDS
+    export COMPILER_EXEC_TIMEOUT_SECONDS COMPILER_CHECK_KILL_GRACE_SECONDS
+    exec 9<"$CANDIDATE_FRONTEND_ROOT/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs" || exit 126
+    /usr/bin/perl -MFcntl=O_WRONLY,O_APPEND,O_CREAT,O_NOFOLLOW,O_NONBLOCK -e '
+        open(my $interpreter, "<&8") or die "frontend-launch-error: interpreter descriptor: $!\n";
+        my @held = stat($interpreter); my @system = stat("/usr/bin/perl");
+        @held && @system && $held[0] == $system[0] && $held[1] == $system[1]
+            or die "frontend-launch-error: interpreter is not system Perl\n";
+        open(my $dir, "<&6") or die "frontend-launch-error: output descriptor: $!\n";
+        -d $dir && chdir($dir) or die "frontend-launch-error: output fchdir: $!\n";
+        my ($leaf, $candidate) = @ARGV;
+        sysopen(my $log, $leaf, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600)
+            or die "frontend-launch-error: driver log: $!\n";
+        -f $log or die "frontend-launch-error: driver log is not regular\n";
+        open(STDOUT, ">&", $log) && open(STDERR, ">&", $log)
+            or die "frontend-launch-error: log redirect: $!\n";
+        exec "/bin/sh", "-c", q{. /dev/fd/9; candidate_frontend_smoke "$1"}, "sh", $candidate;
+        die "frontend-launch-error: smoke exec: $!\n";
+    ' "${pinned_driver_log##*/}" "$pinned_candidate"
+)
+
+candidate_frontend_run_collector() {
+    if [ "$(uname -s)" = Darwin ]; then
+        # fdescfs duplicates the held script's open description, including its
+        # offset. Rewind it before every probe instead of admitting an empty
+        # second script execution after the first has consumed the descriptor.
+        /usr/bin/perl -e '
+            my $script = shift @ARGV;
+            $script =~ m{\A/dev/fd/([1-9][0-9]*)\z} or exit 126;
+            open(my $held, "<&$1") or die "frontend-launch-error: open collector descriptor: $!\n";
+            seek($held, 0, 0) or die "frontend-launch-error: rewind collector descriptor: $!\n";
+            do $script;
+            die "frontend-launch-error: collector did not exit: $@ $!\n";
+        ' "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    else
+        "$BOOTSTRAP_STAGE3_PERL_DESCRIPTOR" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    fi
 }
 
 # One host capture authority for both fresh bootstrap and admitted resume.
@@ -66,14 +160,15 @@ candidate_frontend_capture_setup() {
         BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR") || return 126
         ;;
       Darwin)
-        # Darwin exposes inherited files through /dev/fd, but cannot resolve
-        # directory children there. Keep display/status paths physical; the
-        # collector duplicates fd 6 and publishes relative to that held dir.
-        CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-fd
-        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
-        BOOTSTRAP_STAGE3_DARWIN_PERL=$(command -v perl) || return 126
-        exec 6<"$CANDIDATE_FRONTEND_CAPTURE_PARENT" \
-            7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" || return 126
+        CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-pinned
+        frontend_descriptor_root=$(candidate_frontend_descriptor_root 0) || return 126
+        exec 6<"$1" \
+            7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" \
+            8<"$(candidate_frontend_perl_executable)" || return 126
+        BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=$frontend_descriptor_root/8
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$frontend_descriptor_root/7
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$frontend_descriptor_root/6
+        export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
         ;;
       Linux)
         CANDIDATE_FRONTEND_CAPTURE_KIND=procfd
@@ -90,8 +185,7 @@ candidate_frontend_capture_setup() {
 }
 
 candidate_frontend_capture_leaf() {
-    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ] ||
-        [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-fd ]; then
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
         [ "${1%/*}" = "$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 1
         case "${1##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
     else
@@ -103,17 +197,8 @@ candidate_frontend_collect() {
     if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
         "$BOOTSTRAP_STAGE3_WINDOWS_PYTHON" "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" \
             --helper-sha256="$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" "$@"
-    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-fd ]; then
-        [ "$1" = "--output-parent=$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 126
-        shift
-        # /dev/fd duplicates the open description (including its offset).
-        # Rewind the held helper before each probe; otherwise probe two would
-        # execute an empty script and could mistake an old receipt for success.
-        "$BOOTSTRAP_STAGE3_DARWIN_PERL" -e '
-            open my $helper, "<&", 7 or exit 126;
-            seek($helper, 0, 0) or exit 126;
-            exec $^X, "/dev/fd/7", @ARGV or exit 126;
-        ' -- --output-parent=/dev/fd/6 "$@"
+    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-pinned ]; then
+        candidate_frontend_run_collector "$@"
     else
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
@@ -126,7 +211,17 @@ candidate_frontend_bounded_build() {
     bounded_parent=${build_log%/*}
     bounded_base=${build_log##*/}
     [ "$bounded_parent/$bounded_base" = "$build_log" ] || return 126
-    candidate_frontend_capture_leaf "$build_log" || return 126
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-pinned ]; then
+        [ "$bounded_parent" = . ] || return 126
+        candidate_frontend_pinned_cwd || return 126
+        bounded_output_parent=/dev/fd/6
+        # Output publication stays in the held directory, while source paths
+        # retain the repository working directory expected by native-build.
+        set -- /bin/sh -c 'cd "$1" || exit 126; shift; exec "$@"' sh "$CANDIDATE_FRONTEND_ROOT" "$@"
+    else
+        candidate_frontend_capture_leaf "$build_log" || return 126
+        bounded_output_parent=$bounded_parent
+    fi
     case "$bounded_probe" in
       p2_add) bounded_leaf=$bounded_base ;;
       stage2_mir_retention) bounded_leaf=$bounded_base.stage2-mir-retention ;;
@@ -137,7 +232,7 @@ candidate_frontend_bounded_build() {
     bounded_log=$bounded_parent/$bounded_leaf
     bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
     if candidate_frontend_collect \
-        --output-parent="$bounded_parent" --log-leaf="$bounded_leaf" \
+        --output-parent="$bounded_output_parent" --log-leaf="$bounded_leaf" \
         --receipt-leaf="$bounded_leaf.bounded.env" \
         --max-bytes="$CANDIDATE_FRONTEND_MAX_LOG_BYTES" \
         --timeout-seconds="$COMPILER_BUILD_TIMEOUT_SECONDS" \
@@ -194,6 +289,12 @@ candidate_frontend_smoke() (
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
     trap 'rm -rf "$probe_dir"' 0
     trap 'exit 1' HUP INT TERM
+    # These source-fixture builds have fresh private caches, not an admitted
+    # persistent SCV/package-index generation. Select the driver's explicit
+    # cold-initialization contract only inside this smoke subshell; normal
+    # candidate invocations must still reject missing package-index authority.
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+    export SIMPLE_PACKAGE_INDEX_COLD_INIT
     build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
     build_log_display=${CANDIDATE_FRONTEND_LOG_DISPLAY_PATH:-$build_log}
     status_path=${CANDIDATE_FRONTEND_STATUS_PATH:-}

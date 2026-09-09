@@ -1651,6 +1651,10 @@ int8_t rt_transient_array_scope_end(void) {
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     rt_core_reclaim_transient_raw();
     if (!rt_transient_raw_scope_end()) return 0;
+    /* runtime_memory.c owns the bytes, but all owner-mode registrations live
+     * in this canonical table. Its scope-end only closes the allocator-side
+     * lifecycle; reclaim and clear this table here so a later scope can begin. */
+    rt_core_reclaim_transient_raw();
 #else
     rt_core_reclaim_transient_raw();
 #endif
@@ -1858,6 +1862,12 @@ static void rt_core_reclaim_transient_raw(void) {
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
         if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
             void* raw = (void*)entry->ptr;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+            /* The composed allocator may add hardening headers, quarantine,
+             * or guarded mappings. Reclaim through its canonical ABI; rt_free
+             * also unregisters this entry safely while the table is scanned. */
+            rt_free(raw);
+#else
             rt_struct_alloc_unregister(raw);
             /* Now that sampled guard slots are registered here too, reclaim
              * must not hand one to free(): a slot is a page-aligned mmap
@@ -1869,6 +1879,7 @@ static void rt_core_reclaim_transient_raw(void) {
             } else {
                 free(raw);
             }
+#endif
         }
     }
     rt_core_transient_raw_clear();

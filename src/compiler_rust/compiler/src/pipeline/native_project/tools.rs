@@ -374,6 +374,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
+        "runtime_file_view.c",
         // Groups F/G/I-rest/J of stage2_windows_unresolved_inventory_2026-08-31:
         // the 12 io/system externs (rt_stdin_read{,_all}, rt_term_{write,flush},
         // rt_file_modified{,_time}, rt_list_dir_recursive, rt_path_normalize,
@@ -1962,6 +1963,10 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)
