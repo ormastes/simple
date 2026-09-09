@@ -3,8 +3,9 @@
 Date: 2026-09-09
 Scope: canonical Chrome primitive prerequisite, Simple 2D/WebRenderer GPU
 residency and offload, async/event correctness, fair Vulkan/web comparisons,
-Astra/Sol planning, and SPipe UI-optimization knowledge. This is a read-only
-evidence audit; no build, benchmark, or runtime test was rerun.
+Astra/Sol planning, and SPipe UI-optimization knowledge. One bounded canonical
+Chrome-oracle builder admission attempt was run; no benchmark or runtime test
+was rerun.
 
 ## Verdict
 
@@ -22,6 +23,40 @@ latest isolated candidate failed frontend sanity at the K1 composition policy.
 The K1 content-order repair is present in the isolated source but has not been
 retried canonically. The C Vulkan row is `measured-unadmitted`; the Simple row
 is `skipped:bootstrap-seed-forbidden`; therefore no ratio is valid.
+
+## Canonical Chrome builder attempt (2026-09-09)
+
+The single permitted initial build/admission attempt was:
+
+```text
+sh scripts/check/build-chromium-primitive-oracle.shs
+```
+
+It failed closed before invoking a compiler (`exit_code=1`):
+
+```text
+chromium-oracle-builder: REJECTED — bootstrap-output-not-canonical
+```
+
+The clean PR worktree has no physical `build/bootstrap` directory and no
+`stage2-admitted` compiler/parent receipts. No output dylib or receipt was
+created. The existing builder remains the authoritative path and correctly
+rejects substitution with `bin/simple`, a Rust seed, or a fabricated receipt
+graph. This lane must not rerun the builder until an independently produced,
+source-matched admitted Stage-2 compiler and all authority receipts physically
+exist; creating that authority is a separate scoped compiler task, not this
+lane.
+
+Chrome comparison admission remains incomplete unless all of the following are
+present: pinned Electron `42.5.0` and Chrome `148.0.7778.271` identities with
+broker and npm-lock hashes; the same versioned fixture/workload, viewport,
+timing scope, warmups, and sample counts on both sides; a proven hardware GPU
+backend/renderer identity with SwiftShader, software, fallback, and unknown
+states rejected; CPU `capturePage` pixels explicitly retained as
+`device_origin_readback=false`; frame-bound artifact/readback/checksum hashes;
+raw samples producing p50/p95 frame times and max RSS; and all four canonical
+fixtures. Otherwise the result is WARN/INCOMPLETE, never PASS. A dylib build
+alone cannot satisfy GPU or performance-comparison admission.
 
 ## Requirement evidence
 
