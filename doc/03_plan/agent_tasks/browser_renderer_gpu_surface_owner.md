@@ -32,3 +32,22 @@ explicit pending/presenter-release receipts, and central recovery/teardown.
 All shared offscreen children must borrow the one device scheduler; enabling
 frame batching cannot open a competing session. A source-presence test or
 empty-command ring test cannot admit the connection.
+
+## Astra scheduler escalation
+
+The later five-file host scheduler candidate was also removed after its second
+Sol review: it had no production recording/presenter callers and opened a new
+session from an unrelated completed receipt. The exact removal and recovery
+record is
+[Host scheduler review](../../09_report/host_compositor_gpu_scheduler_package_2026-09-09.md).
+The selected architecture now freezes `GpuAsyncDevicePortV2`, the shared
+session/recording identities, and the actual hosted offer/poll/acknowledgement
+chain. Read **Provider port required before production connection** before
+assigning another implementation lane. A new wrapper around
+`VulkanAsyncSubmissionSession.open_with_wait` is not the next package.
+
+The Pure Simple owner/DrawIR/event path remains the production lane; Rust is
+background provider/reference work. Sol implements the missing port consumers
+only with actual provider authority, then Astra reviews the full chain.
+Preserve the reserved SPipe helpers in the linked test plan. Do not publish
+async support or performance claims from source-only/injected-port checks.
