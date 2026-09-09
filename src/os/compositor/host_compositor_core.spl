@@ -46,7 +46,7 @@ use os.compositor.host_frame_ack.{
     host_frame_ack_exact, host_frame_ack_with_external_release,
     host_frame_ack_complete_host_present, host_frame_ack_can_advance_input
 }
-use os.compositor.dirty_rect.{DirtyRegion}
+use os.compositor.dirty_rect.{DirtyRegion, DirtyRegionCheckpoint}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
@@ -725,7 +725,7 @@ class HostCompositor:
     # receipt. It is captured before provider entry and consumed atomically
     # only after the matching synchronous provider/presenter evidence.
     frame_ack_pending: bool
-    frame_ack_dirty_rect_count: i64
+    frame_ack_dirty_checkpoint: DirtyRegionCheckpoint
     frame_ack_external_window_ids: [i64]
     frame_ack_external_content_revisions: [i64]
     # O1 compositor-owned visible GPU surface.  Browser producers offer
@@ -784,7 +784,8 @@ class HostCompositor:
             dirty: DirtyRegion.new(),
             skipped_frame_count: 0,
             frame_ack_pending: false,
-            frame_ack_dirty_rect_count: 0,
+            frame_ack_dirty_checkpoint: DirtyRegionCheckpoint(
+                epoch: 0, count: 0),
             frame_ack_external_window_ids: [],
             frame_ack_external_content_revisions: [],
             gpu_surface_owner: CompositorGpuSurfaceOwner.create(
@@ -1934,7 +1935,8 @@ class HostCompositor:
     me _capture_external_web_frame_ack(frames: [WmContentFrame]) -> bool:
         """Capture the exact owned external revisions read by this attempt."""
         self.frame_ack_pending = false
-        self.frame_ack_dirty_rect_count = 0
+        self.frame_ack_dirty_checkpoint = DirtyRegionCheckpoint(
+            epoch: 0, count: 0)
         self.frame_ack_external_window_ids = []
         self.frame_ack_external_content_revisions = []
         var slot = 0
@@ -1960,13 +1962,19 @@ class HostCompositor:
                     self.frame_ack_external_window_ids.push(window_id)
                     self.frame_ack_external_content_revisions.push(revision)
             slot += 1
+        val damage_checkpoint = self.dirty.checkpoint()
+        if damage_checkpoint.epoch == 0:
+            self.frame_ack_external_window_ids = []
+            self.frame_ack_external_content_revisions = []
+            return false
         self.frame_ack_pending = true
-        self.frame_ack_dirty_rect_count = self.dirty.rects.len().to_i64()
+        self.frame_ack_dirty_checkpoint = damage_checkpoint
         true
 
     me _discard_frame_ack_capture():
         self.frame_ack_pending = false
-        self.frame_ack_dirty_rect_count = 0
+        self.frame_ack_dirty_checkpoint = DirtyRegionCheckpoint(
+            epoch: 0, count: 0)
         self.frame_ack_external_window_ids = []
         self.frame_ack_external_content_revisions = []
 
@@ -2005,8 +2013,8 @@ class HostCompositor:
             evidence.target_width != self.width or
             evidence.target_height != self.height or
             evidence.scene_revision != self.render_revision or
-            self.dirty.rects.len().to_i64() !=
-                self.frame_ack_dirty_rect_count or
+            not self.dirty.can_retire_prefix(
+                self.frame_ack_dirty_checkpoint) or
             evidence.external_window_ids.len() !=
                 self.frame_ack_external_window_ids.len() or
             evidence.external_content_revisions.len() !=
@@ -2057,7 +2065,15 @@ class HostCompositor:
             evidence.external_content_revisions):
             self._discard_frame_ack_capture()
             return host_frame_ack_unknown("external-frame-revision-mismatch")
-        self.dirty.clear()
+        # Receipt validation and producer commit above run on this same
+        # compositor owner and cannot mutate damage. Retire that exact prefix
+        # only; input arriving while the presenter was pending belongs to the
+        # next frame, including new damage overlapping the old rectangles.
+        val damage_retired = self.dirty.retire_prefix(
+            self.frame_ack_dirty_checkpoint)
+        if not damage_retired:
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("stale-damage-checkpoint")
         self._discard_frame_ack_capture()
         host_frame_ack_with_external_release(evidence)
 
