@@ -1,0 +1,68 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "Vulkan Engine2D image upload scratch contract":
+    it "retains a bounded per-surface staging scratch and counters":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        expect(backend).to_contain("image_upload_scratch: [u8]")
+        expect(backend).to_contain("image_upload_scratch_reuse_count: i64")
+        expect(backend).to_contain("image_upload_scratch_resize_count: i64")
+        expect(backend).to_contain("image_upload_scratch_fallback_count: i64")
+        expect(helpers).to_contain(
+            "val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864")
+        expect(helpers).to_contain(
+            "me _prepare_image_upload(pixels: [u32], count: i64) -> bool")
+
+    it "uploads only initialized scratch bytes on native ABI lanes":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val sffi = file_read(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
+        expect(backend).to_contain(
+            "vulkan_sffi_copy_to_buffer_prefix(")
+        expect(backend).to_contain(
+            "vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0)")
+        expect(sffi).to_contain(
+            "fn vulkan_sffi_copy_to_buffer_prefix(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool")
+        expect(sffi).to_contain(
+            "rt_vulkan_copy_to_buffer_array(handle, data, byte_count, offset)")
+        expect(sffi).to_contain(
+            "extern fn rt_vulkan_copy_to_buffer_array(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool")
+        expect(sffi).to_contain("offset < 0")
+        expect(sffi).to_contain(
+            "offset > 9223372036854775807 - byte_count")
+
+    it "fails closed to exact-size upload on interpreter ABI lanes":
+        val sffi = file_read(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
+        expect(sffi).to_contain(
+            "if byte_count != data.len().to_i64():")
+        expect(sffi).to_contain(
+            "return rt_vulkan_copy_to_buffer(handle, data, offset)")
+        expect(sffi).to_contain(
+            "byte_count > data.len().to_i64()")
+
+    it "keeps staging reuse independent from fenced GPU-source ownership":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        expect(backend).to_contain("self._acquire_image_source(src_size)")
+        expect(backend).to_contain("self._prepare_image_upload(pixels, pixel_count)")
+        expect(helpers).to_contain(
+            "self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1")
+        expect(backend).to_contain(
+            "if upload_ok and scratch_reused:")
+        expect(helpers).to_contain(
+            "the pooled device source remains fenced independently")
+
+    it "releases the retained host scratch with the backend lifetime":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(backend).to_contain("self.image_upload_scratch = []")
+        expect(backend).to_contain("self.image_upload_scratch_resize_count = 0")
+        expect(backend).to_contain(
+            "Host-only upload staging is never a GPU dependency")

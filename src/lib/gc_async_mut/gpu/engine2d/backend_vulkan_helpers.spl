@@ -37,6 +37,9 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
 val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
+# Bound retained host staging so a pathological web image cannot pin
+# unbounded CPU memory on the long-lived compositor surface.
+val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864
 
 # ============================================================================
 # Submission-order probe (level-gated, default OFF)
@@ -158,6 +161,36 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
     VK_DISPATCH_COMPLETED_INELIGIBLE
 
 impl VulkanBackend:
+
+    me _prepare_image_upload(pixels: [u32], count: i64) -> bool:
+        """Pack an image into reusable host staging without changing pixels.
+
+        `vulkan_sffi_copy_to_buffer_prefix` snapshots the initialized prefix
+        immediately into the destination Vulkan buffer. The pooled device
+        source remains fenced independently, so this CPU scratch is safe to
+        reuse by the next sequential draw.
+        """
+        if count <= 0 or pixels.len().to_i64() != count:
+            return false
+        if count > 9223372036854775807 / 4:
+            return false
+        val byte_count = count * 4
+        if byte_count > VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES:
+            self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
+            return false
+        if self.image_upload_scratch.len().to_i64() < byte_count:
+            self.image_upload_scratch = [0u8; byte_count]
+            self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
+        var i: i64 = 0
+        while i < count:
+            val pixel = pixels[i]
+            val offset = i * 4
+            self.image_upload_scratch[offset] = _u32_to_u8(pixel & 0xFF)
+            self.image_upload_scratch[offset + 1] = _u32_to_u8((pixel >> 8) & 0xFF)
+            self.image_upload_scratch[offset + 2] = _u32_to_u8((pixel >> 16) & 0xFF)
+            self.image_upload_scratch[offset + 3] = _u32_to_u8((pixel >> 24) & 0xFF)
+            i = i + 1
+        true
 
     me _image_source_is_pending(source: i64) -> bool:
         if source <= 0:
