@@ -51,3 +51,27 @@ background provider/reference work. Sol implements the missing port consumers
 only with actual provider authority, then Astra reviews the full chain.
 Preserve the reserved SPipe helpers in the linked test plan. Do not publish
 async support or performance claims from source-only/injected-port checks.
+
+## V2 escalation implementation sequence
+
+Astra removed the subsequent four-file V2 model after two Sol cycles. The
+[V2 review](../../09_report/gpu_async_device_port_v2_astra_review_2026-09-09.md)
+is the next handoff, with actual code paths, native authority requirements and
+the recoverable candidate location. It also records the newly found
+[canonical buffer-binding export gap](../../08_tracking/bug/vulkan_async_bind_buffer_export_gap_2026-09-09.md).
+
+1. Sol: repair that export gap with explicit unsupported behavior unless the
+   checked operation is actually implemented. No legacy-binder substitution.
+2. Sol: implement the actual context-admission adapter at VulkanSession/SFFI
+   and a real Engine2D initialization consumer together.
+3. Sol: migrate primitive/font/image DrawIR into exact recording leases and
+   bounded slot resources under that same owner.
+4. Sol: implement presenter release, then connect hosted offer/poll, retained
+   presentation, damage and input acknowledgements as one production chain.
+5. Astra: review provider-derived authority, two-surface lifetime isolation and
+   real production-path evidence before Root commits/pushes that package.
+
+No new sidecar owns a parallel scheduler or foreign-policy implementation.
+Rust remains background/reference work. Keep each new implementation file
+below 800 lines. The shared helpers in the existing system test plan remain
+reserved; no value-fixture test substitutes for their real provider path.
