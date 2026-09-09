@@ -24,7 +24,7 @@
 #                      status=skipped with an explicit reason — never a fake
 #                      pass.
 #   --aggregate DIR    read the direct immutable DIR/c.env + DIR/simple.env
-#                      and emit the aggregate to stdout only. A `latest`
+#                      and emit the aggregate to stdout only. A latest
 #                      pointer is deliberately not accepted as DIR.
 #
 # Exit: 0 when aggregate is pass or skipped, 1 when both legs ran and the
@@ -44,6 +44,8 @@ H=${VK2D_H:-600}
 RECTS=${VK2D_RECTS:-64}
 FRAMES=${VK2D_FRAMES:-300}
 WARMUPS=5
+SIMPLE_BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
+ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 
 fail() { echo "check-vulkan-2d-c-compare: $*" >&2; exit 1; }
 
@@ -83,6 +85,84 @@ hash_stdin() {
     fi
 }
 
+WRAPPER_PATH="$ROOT/scripts/check/check-vulkan-2d-c-compare.shs"
+IMMUTABLE_RUN_HELPER_PATH="$ROOT/scripts/check/lib/immutable-perf-run.shs"
+ADMISSION_HELPER_PATH="$ROOT/scripts/check/lib/perf-comparison-admission.shs"
+
+valid_git_object() {
+    case "${#1}" in 40|64) ;; *) return 1 ;; esac
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+valid_utc_timestamp() {
+    printf '%s\n' "$1" | awk '
+        function leap(y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+        length($0) == 20 &&
+        $0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/ {
+            y = substr($0, 1, 4) + 0; m = substr($0, 6, 2) + 0; d = substr($0, 9, 2) + 0
+            h = substr($0, 12, 2) + 0; minute = substr($0, 15, 2) + 0; s = substr($0, 18, 2) + 0
+            days[1]=31; days[2]=28 + leap(y); days[3]=31; days[4]=30; days[5]=31; days[6]=30
+            days[7]=31; days[8]=31; days[9]=30; days[10]=31; days[11]=30; days[12]=31
+            if (y >= 1 && m >= 1 && m <= 12 && d >= 1 && d <= days[m] && h <= 23 && minute <= 59 && s <= 59) ok=1
+        }
+        END { exit !ok }
+    '
+}
+
+valid_run_nonce() {
+    printf '%s\n' "$1" | awk '
+        /^[0-9]+-[0-9]+-[0-9]+-[A-Za-z0-9]+$/ { ok=1 }
+        END { exit !ok }
+    '
+}
+
+valid_manifest_scalar() {
+    manifest_cr=$(printf '\r')
+    case "$1" in
+        *"$manifest_cr"*) return 1 ;;
+    esac
+    manifest_without_newlines=$(printf '%s' "$1" | tr -d '\n')
+    [ "$manifest_without_newlines" = "$1" ]
+}
+
+git_tracked_dirty() {
+    if git -C "$ROOT" diff --quiet --ignore-submodules HEAD -- 2>/dev/null &&
+       git -C "$ROOT" diff --cached --quiet --ignore-submodules 2>/dev/null; then
+        printf 'false\n'
+    else
+        printf 'true\n'
+    fi
+}
+
+git_tracked_diff_sha256() {
+    provenance_diff_tmp=$(mktemp "${TMPDIR:-/tmp}/vk2d-git-diff.XXXXXX") || return 1
+    if ! LC_ALL=C git -C "$ROOT" diff --binary --full-index --no-ext-diff --no-textconv --no-renames --ignore-submodules HEAD -- >"$provenance_diff_tmp"; then
+        rm -f "$provenance_diff_tmp"
+        return 1
+    fi
+    provenance_diff_hash=$(hash_file "$provenance_diff_tmp")
+    rm -f "$provenance_diff_tmp"
+    perf_admission_valid_sha256 "$provenance_diff_hash" || return 1
+    printf '%s\n' "$provenance_diff_hash"
+}
+
+git_commit=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+git_tree=$(git -C "$ROOT" rev-parse --verify HEAD^{tree} 2>/dev/null || true)
+git_dirty=$(git_tracked_dirty)
+git_diff_sha256=$(git_tracked_diff_sha256) || fail "cannot bind tracked Git diff provenance"
+valid_git_object "$git_commit" || fail "cannot bind git commit provenance"
+valid_git_object "$git_tree" || fail "cannot bind git tree provenance"
+case "$git_dirty" in true|false) ;; *) fail "cannot bind git dirty provenance" ;; esac
+WRAPPER_SHA256=$(hash_file "$WRAPPER_PATH")
+IMMUTABLE_RUN_HELPER_SHA256=$(hash_file "$IMMUTABLE_RUN_HELPER_PATH")
+ADMISSION_HELPER_SHA256=$(hash_file "$ADMISSION_HELPER_PATH")
+for provenance_hash in "$WRAPPER_SHA256" "$IMMUTABLE_RUN_HELPER_SHA256" "$ADMISSION_HELPER_SHA256"; do
+    perf_admission_valid_sha256 "$provenance_hash" || fail "cannot bind helper provenance"
+done
+for provenance_scalar in "$ROOT" "$BENCH_DIR" "$WRAPPER_PATH" "$IMMUTABLE_RUN_HELPER_PATH" "$ADMISSION_HELPER_PATH" "$SIMPLE_BIN" "$ICD"; do
+    valid_manifest_scalar "$provenance_scalar" || fail "manifest path contains a newline"
+done
+
 SOURCE_REVISION=$( {
     hash_file "$BENCH_DIR/vk2d_bench.c"
     hash_file "$BENCH_DIR/vk2d_bench.spl"
@@ -98,7 +178,7 @@ CONFIG_REVISION=$(printf '%s\n' \
     "warmups=$WARMUPS" "budget_x1000=$BUDGET_X1000" \
     "readback=post-timing-full-frame" "capture=single-post-timing-capture" \
     | hash_stdin)
-ICD_SHA256=$(hash_file "${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}")
+ICD_SHA256=$(hash_file "$ICD")
 
 line_value() {
     printf '%s\n' "$1" | awk -v wanted="$2" '{
@@ -219,6 +299,155 @@ manifest_value_exact() {
     ' "$1"
 }
 
+manifest_hash_matches_file() {
+    provenance_manifest=$1
+    provenance_path_key=$2
+    provenance_hash_key=$3
+    provenance_expected_path=$4
+    provenance_path=$(manifest_value_exact "$provenance_manifest" "$provenance_path_key") || return 1
+    provenance_hash=$(manifest_value_exact "$provenance_manifest" "$provenance_hash_key") || return 1
+    [ "$provenance_path" = "$provenance_expected_path" ] || return 1
+    perf_admission_valid_sha256 "$provenance_hash" || return 1
+    [ "$PERF_PROVENANCE_STATUS" = cross-revision ] && return 0
+    [ ! -L "$provenance_path" ] && [ -f "$provenance_path" ] || return 1
+    [ "$(hash_file "$provenance_path")" = "$provenance_hash" ]
+}
+
+manifest_digest_matches() {
+    provenance_manifest=$1
+    provenance_declared_digest=$(manifest_value_exact "$provenance_manifest" manifest_digest_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_declared_digest" || return 1
+    provenance_actual_digest=$(awk '!/^manifest_digest_sha256=/' "$provenance_manifest" | hash_stdin) || return 1
+    [ "$provenance_actual_digest" = "$provenance_declared_digest" ]
+}
+
+validate_manifest_provenance() {
+    provenance_manifest=$1
+    provenance_dir=$2
+    PERF_PROVENANCE_STATUS=current
+    PERF_PROVENANCE_REASON=admitted
+    manifest_digest_matches "$provenance_manifest" || return 1
+
+    provenance_policy=$(manifest_value_exact "$provenance_manifest" source_policy) || return 1
+    [ "$provenance_policy" = current-git-tree-v1 ] ||
+        [ "$provenance_policy" = declared-revision-v1 ] || return 1
+    provenance_commit=$(manifest_value_exact "$provenance_manifest" git_commit) || return 1
+    provenance_tree=$(manifest_value_exact "$provenance_manifest" git_tree) || return 1
+    provenance_dirty=$(manifest_value_exact "$provenance_manifest" git_dirty) || return 1
+    provenance_diff_hash=$(manifest_value_exact "$provenance_manifest" git_tracked_diff_sha256) || return 1
+    provenance_started=$(manifest_value_exact "$provenance_manifest" run_started_utc) || return 1
+    provenance_started_epoch=$(manifest_value_exact "$provenance_manifest" run_started_epoch) || return 1
+    provenance_nonce=$(manifest_value_exact "$provenance_manifest" run_nonce) || return 1
+    valid_git_object "$provenance_commit" || return 1
+    valid_git_object "$provenance_tree" || return 1
+    case "$provenance_dirty" in true|false) ;; *) return 1 ;; esac
+    perf_admission_valid_sha256 "$provenance_diff_hash" || return 1
+    valid_utc_timestamp "$provenance_started" || return 1
+    perf_admission_positive_integer "$provenance_started_epoch" || return 1
+    valid_run_nonce "$provenance_nonce" || return 1
+    [ "${provenance_nonce%%-*}" = "$provenance_started_epoch" ] || return 1
+
+    if [ "$provenance_policy" = declared-revision-v1 ]; then
+        PERF_PROVENANCE_STATUS=cross-revision
+        PERF_PROVENANCE_REASON=declared-revision-analysis-only
+    else
+        current_commit=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+        current_tree=$(git -C "$ROOT" rev-parse --verify HEAD^{tree} 2>/dev/null || true)
+        current_dirty=$(git_tracked_dirty)
+        current_diff_hash=$(git_tracked_diff_sha256) || return 1
+        if [ "$provenance_commit" != "$current_commit" ] ||
+           [ "$provenance_tree" != "$current_tree" ] ||
+           [ "$provenance_dirty" != "$current_dirty" ] ||
+           [ "$provenance_diff_hash" != "$current_diff_hash" ]; then
+            PERF_PROVENANCE_STATUS=cross-revision
+            PERF_PROVENANCE_REASON=source-revision-mismatch
+        fi
+    fi
+
+    manifest_hash_matches_file "$provenance_manifest" wrapper_path wrapper_sha256 "$WRAPPER_PATH" || return 1
+    manifest_hash_matches_file "$provenance_manifest" immutable_run_helper_path immutable_run_helper_sha256 "$IMMUTABLE_RUN_HELPER_PATH" || return 1
+    manifest_hash_matches_file "$provenance_manifest" admission_helper_path admission_helper_sha256 "$ADMISSION_HELPER_PATH" || return 1
+
+    provenance_fixture_path=$(manifest_value_exact "$provenance_manifest" fixture_path) || return 1
+    provenance_fixture_hash=$(manifest_value_exact "$provenance_manifest" fixture_sha256) || return 1
+    [ "$provenance_fixture_path" = "$BENCH_DIR/scenes.txt" ] || return 1
+    perf_admission_valid_sha256 "$provenance_fixture_hash" || return 1
+    if [ "$PERF_PROVENANCE_STATUS" = current ]; then
+        [ ! -L "$provenance_fixture_path" ] && [ -f "$provenance_fixture_path" ] || return 1
+        [ "$(hash_file "$provenance_fixture_path")" = "$provenance_fixture_hash" ] || return 1
+    fi
+    provenance_shader_path="$BENCH_DIR/rect.comp.glsl"
+    provenance_shader_hash=$(manifest_value_exact "$provenance_manifest" shader_source_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_shader_hash" || return 1
+    provenance_c_source_hash=$(manifest_value_exact "$provenance_manifest" c_source_sha256) || return 1
+    provenance_simple_source_hash=$(manifest_value_exact "$provenance_manifest" simple_source_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_c_source_hash" || return 1
+    perf_admission_valid_sha256 "$provenance_simple_source_hash" || return 1
+    if [ "$PERF_PROVENANCE_STATUS" = current ]; then
+        [ "$(hash_file "$provenance_shader_path")" = "$provenance_shader_hash" ] || return 1
+        [ "$(hash_file "$BENCH_DIR/vk2d_bench.c")" = "$provenance_c_source_hash" ] || return 1
+        [ "$(hash_file "$BENCH_DIR/vk2d_bench.spl")" = "$provenance_simple_source_hash" ] || return 1
+    fi
+
+    provenance_width=$(manifest_value_exact "$provenance_manifest" viewport_width) || return 1
+    provenance_height=$(manifest_value_exact "$provenance_manifest" viewport_height) || return 1
+    provenance_rects=$(manifest_value_exact "$provenance_manifest" rect_count) || return 1
+    provenance_frames=$(manifest_value_exact "$provenance_manifest" sample_count) || return 1
+    provenance_warmups=$(manifest_value_exact "$provenance_manifest" warmup_count) || return 1
+    provenance_budget=$(manifest_value_exact "$provenance_manifest" budget_x1000) || return 1
+    for provenance_number in "$provenance_width" "$provenance_height" "$provenance_rects" "$provenance_frames" "$provenance_warmups" "$provenance_budget"; do
+        perf_admission_positive_integer "$provenance_number" || return 1
+    done
+    [ "$provenance_width" -le 16384 ] && [ "$provenance_height" -le 16384 ] || return 1
+    [ "$provenance_rects" -le 1000000 ] && [ "$provenance_frames" -le 1000000 ] || return 1
+    [ "$provenance_budget" -le 1000000 ] || return 1
+    provenance_config_hash=$(manifest_value_exact "$provenance_manifest" config_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_config_hash" || return 1
+    provenance_expected_config=$(printf '%s\n' \
+        "width=$provenance_width" "height=$provenance_height" "rects=$provenance_rects" \
+        "frames=$provenance_frames" "warmups=$provenance_warmups" \
+        "budget_x1000=$provenance_budget" "readback=post-timing-full-frame" \
+        "capture=single-post-timing-capture" | hash_stdin)
+    [ "$provenance_expected_config" = "$provenance_config_hash" ] || return 1
+
+    provenance_c_argv_0=$(manifest_value_exact "$provenance_manifest" c_command_argv_0) || return 1
+    provenance_c_argc=$(manifest_value_exact "$provenance_manifest" c_command_argc) || return 1
+    provenance_c_argv_1=$(manifest_value_exact "$provenance_manifest" c_command_argv_1) || return 1
+    provenance_c_argv_2=$(manifest_value_exact "$provenance_manifest" c_command_argv_2) || return 1
+    provenance_c_argv_3=$(manifest_value_exact "$provenance_manifest" c_command_argv_3) || return 1
+    provenance_c_argv_4=$(manifest_value_exact "$provenance_manifest" c_command_argv_4) || return 1
+    provenance_c_argv_5=$(manifest_value_exact "$provenance_manifest" c_command_argv_5) || return 1
+    provenance_c_argv_6=$(manifest_value_exact "$provenance_manifest" c_command_argv_6) || return 1
+    [ "$provenance_c_argc" = 7 ] || return 1
+    [ "$provenance_c_argv_0" = ./vk2d_bench ] || return 1
+    [ "$provenance_c_argv_1" = "$provenance_width" ] || return 1
+    [ "$provenance_c_argv_2" = "$provenance_height" ] || return 1
+    [ "$provenance_c_argv_3" = "$provenance_rects" ] || return 1
+    [ "$provenance_c_argv_4" = "$provenance_frames" ] || return 1
+    [ "$provenance_c_argv_5" = 1 ] || return 1
+    [ "$provenance_c_argv_6" = "$provenance_warmups" ] || return 1
+    provenance_c_argv_hash=$(manifest_value_exact "$provenance_manifest" c_command_argv_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_c_argv_hash" || return 1
+    [ "$(printf '%s\n' "$provenance_c_argv_0" "$provenance_c_argv_1" "$provenance_c_argv_2" "$provenance_c_argv_3" "$provenance_c_argv_4" "$provenance_c_argv_5" "$provenance_c_argv_6" | hash_stdin)" = "$provenance_c_argv_hash" ] || return 1
+
+    provenance_simple_path=$(manifest_value_exact "$provenance_manifest" simple_binary_path) || return 1
+    provenance_simple_argc=$(manifest_value_exact "$provenance_manifest" simple_command_argc) || return 1
+    provenance_simple_argv_0=$(manifest_value_exact "$provenance_manifest" simple_command_argv_0) || return 1
+    provenance_simple_argv_1=$(manifest_value_exact "$provenance_manifest" simple_command_argv_1) || return 1
+    provenance_simple_argv_2=$(manifest_value_exact "$provenance_manifest" simple_command_argv_2) || return 1
+    [ "$provenance_simple_argc" = 3 ] || return 1
+    valid_manifest_scalar "$provenance_simple_path" || return 1
+    valid_manifest_scalar "$provenance_simple_argv_0" || return 1
+    [ "$provenance_simple_argv_0" = "$provenance_simple_path" ] || return 1
+    [ "$provenance_simple_argv_1" = run ] || return 1
+    [ "$provenance_simple_argv_2" = test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl ] || return 1
+    provenance_simple_argv_hash=$(manifest_value_exact "$provenance_manifest" simple_command_argv_sha256) || return 1
+    perf_admission_valid_sha256 "$provenance_simple_argv_hash" || return 1
+    [ "$(printf '%s\n' "$provenance_simple_argv_0" "$provenance_simple_argv_1" "$provenance_simple_argv_2" | hash_stdin)" = "$provenance_simple_argv_hash" ] || return 1
+
+    return 0
+}
+
 validate_manifest_file_binding() {
     immutable_manifest=$1
     immutable_dir=$2
@@ -253,11 +482,17 @@ if [ "${1:-}" = "--aggregate" ]; then
     dir=$(CDPATH= cd -- "$dir" && pwd -P) || fail "invalid row directory"
     run_id=${dir##*/}
     perf_immutable_valid_run_id "$run_id" || fail "invalid row directory"
-    manifest="$dir/run.manifest.env"
-    [ ! -L "$manifest" ] && [ -f "$manifest" ] || fail "invalid immutable run manifest"
+    manifest_source="$dir/run.manifest.env"
+    [ ! -L "$manifest_source" ] && [ -f "$manifest_source" ] || fail "invalid immutable run manifest"
+    projection_dir=$(mktemp -d "${TMPDIR:-/tmp}/vk2d-admission.XXXXXX") || fail "cannot create projection directory"
+    trap 'rm -rf "$projection_dir"' EXIT HUP INT TERM
+    cp "$manifest_source" "$projection_dir/run.manifest.env" || fail "cannot snapshot immutable run manifest"
+    manifest="$projection_dir/run.manifest.env"
     [ "$(manifest_value_exact "$manifest" schema)" = immutable-vulkan-2d-c-run-v1 ] || fail "invalid immutable run schema"
     [ "$(manifest_value_exact "$manifest" run_id)" = "$run_id" ] || fail "invalid immutable run id"
     [ "$(manifest_value_exact "$manifest" run_dir)" = "$dir" ] || fail "stale immutable run path"
+    validate_manifest_provenance "$manifest" "$dir" || fail "invalid immutable run provenance"
+    BUDGET_X1000=$provenance_budget
     for immutable_binding in \
         'c_row:c_row_sha256:c.env' \
         'combined_raw_row:combined_raw_row_sha256:c.env.raw' \
@@ -279,10 +514,21 @@ if [ "${1:-}" = "--aggregate" ]; then
     done
     [ ! -L "$dir/c.env" ] && [ -f "$dir/c.env" ] || fail "invalid $dir/c.env"
     [ ! -L "$dir/simple.env" ] && [ -f "$dir/simple.env" ] || fail "invalid $dir/simple.env"
-    projection_dir=$(mktemp -d "${TMPDIR:-/tmp}/vk2d-admission.XXXXXX") || fail "cannot create projection directory"
-    trap 'rm -rf "$projection_dir"' EXIT HUP INT TERM
-    project_row "$dir/c.env" c_ "$projection_dir/c.env" || fail "malformed or inexact C row"
-    project_row "$dir/simple.env" simple_ "$projection_dir/simple.env" || fail "malformed or inexact Simple row"
+    cp "$dir/c.env" "$projection_dir/c.env.snapshot" || fail "cannot snapshot immutable C row"
+    cp "$dir/simple.env" "$projection_dir/simple.env.snapshot" || fail "cannot snapshot immutable Simple row"
+    [ "$(hash_file "$projection_dir/c.env.snapshot")" = "$(manifest_value_exact "$manifest" c_row_sha256)" ] ||
+        fail "racing immutable C row"
+    [ "$(hash_file "$projection_dir/simple.env.snapshot")" = "$(manifest_value_exact "$manifest" simple_row_sha256)" ] ||
+        fail "racing immutable Simple row"
+    project_row "$projection_dir/c.env.snapshot" c_ "$projection_dir/c.env" || fail "malformed or inexact C row"
+    project_row "$projection_dir/simple.env.snapshot" simple_ "$projection_dir/simple.env" || fail "malformed or inexact Simple row"
+    if [ "$PERF_PROVENANCE_STATUS" = cross-revision ]; then
+        echo "compare_budget_x1000=$BUDGET_X1000"
+        echo "compare_status=skipped"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=provenance-cross-revision:$PERF_PROVENANCE_REASON"
+        exit 0
+    fi
     aggregate \
         "$(value_of "$dir/c.env" c_p95_ns)" \
         "$(value_of "$dir/simple.env" simple_p95_ns)" \
@@ -332,9 +578,16 @@ c_stderr_raw_public="$FINAL_RUN_DIR/c.stderr.raw"
 c_metrics_public="$FINAL_RUN_DIR/c.runtime.env"
 c_toolchain_public="$FINAL_RUN_DIR/c.toolchain.env"
 c_max_rss_bytes=unavailable
+C_COMMAND_ARGV_0=./vk2d_bench
+C_COMMAND_ARGV_1=$W
+C_COMMAND_ARGV_2=$H
+C_COMMAND_ARGV_3=$RECTS
+C_COMMAND_ARGV_4=$FRAMES
+C_COMMAND_ARGV_5=1
+C_COMMAND_ARGV_6=$WARMUPS
+C_COMMAND_ARGV_SHA256=$(printf '%s\n' "$C_COMMAND_ARGV_0" "$C_COMMAND_ARGV_1" "$C_COMMAND_ARGV_2" "$C_COMMAND_ARGV_3" "$C_COMMAND_ARGV_4" "$C_COMMAND_ARGV_5" "$C_COMMAND_ARGV_6" | hash_stdin)
 : >"$c_stdout_raw"
 : >"$c_stderr_raw"
-ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
 elif ! command -v glslangValidator >/dev/null 2>&1; then
@@ -475,7 +728,10 @@ simple_metrics_public="$FINAL_RUN_DIR/simple.runtime.env"
 simple_exit=0
 : >"$simple_stdout_raw"
 : >"$simple_stderr_raw"
-SIMPLE_BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
+SIMPLE_COMMAND_ARGV_0=$SIMPLE_BIN
+SIMPLE_COMMAND_ARGV_1=run
+SIMPLE_COMMAND_ARGV_2=test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
+SIMPLE_COMMAND_ARGV_SHA256=$(printf '%s\n' "$SIMPLE_COMMAND_ARGV_0" "$SIMPLE_COMMAND_ARGV_1" "$SIMPLE_COMMAND_ARGV_2" | hash_stdin)
 if [ "$c_status" = skipped ]; then
     simple_reason=c-leg-skipped
 elif [ ! -x "$SIMPLE_BIN" ]; then
@@ -613,12 +869,27 @@ fi
 sed -n 's/^c_/c_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
 sed -n 's/^simple_/simple_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
 
-set +e
-aggregate "$c_p95" "$s_p95" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
-    "$OUT_DIR/c.env" "$OUT_DIR/simple.env" \
-    >"$OUT_DIR/evidence.env"
-aggregate_rc=$?
-set -e
+live_commit=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+live_tree=$(git -C "$ROOT" rev-parse --verify HEAD^{tree} 2>/dev/null || true)
+live_dirty=$(git_tracked_dirty)
+live_diff_sha256=$(git_tracked_diff_sha256) || fail "cannot revalidate tracked Git diff provenance"
+if [ "$live_commit" != "$git_commit" ] || [ "$live_tree" != "$git_tree" ] ||
+   [ "$live_dirty" != "$git_dirty" ] || [ "$live_diff_sha256" != "$git_diff_sha256" ]; then
+    {
+        echo "compare_budget_x1000=$BUDGET_X1000"
+        echo "compare_status=skipped"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=provenance-cross-revision:source-changed-during-run"
+    } >"$OUT_DIR/evidence.env"
+    aggregate_rc=0
+else
+    set +e
+    aggregate "$c_p95" "$s_p95" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
+        "$OUT_DIR/c.env" "$OUT_DIR/simple.env" \
+        >"$OUT_DIR/evidence.env"
+    aggregate_rc=$?
+    set -e
+fi
 {
     cat "$OUT_DIR/evidence.env"
     echo "run_id=$RUN_ID"
@@ -631,7 +902,27 @@ mv "$OUT_DIR/evidence.env.complete" "$OUT_DIR/evidence.env"
     echo "schema=immutable-vulkan-2d-c-run-v1"
     echo "run_id=$RUN_ID"
     echo "run_dir=$FINAL_RUN_DIR"
+    echo "source_policy=current-git-tree-v1"
+    echo "git_commit=$git_commit"
+    echo "git_tree=$git_tree"
+    echo "git_dirty=$git_dirty"
+    echo "git_tracked_diff_sha256=$git_diff_sha256"
+    echo "run_started_utc=$PERF_IMMUTABLE_STARTED_UTC"
+    echo "run_started_epoch=$PERF_IMMUTABLE_STARTED_EPOCH"
+    echo "run_nonce=$PERF_IMMUTABLE_RUN_NONCE"
+    echo "wrapper_path=$WRAPPER_PATH"
+    echo "wrapper_sha256=$WRAPPER_SHA256"
+    echo "immutable_run_helper_path=$IMMUTABLE_RUN_HELPER_PATH"
+    echo "immutable_run_helper_sha256=$IMMUTABLE_RUN_HELPER_SHA256"
+    echo "admission_helper_path=$ADMISSION_HELPER_PATH"
+    echo "admission_helper_sha256=$ADMISSION_HELPER_SHA256"
     echo "config_sha256=$CONFIG_REVISION"
+    echo "viewport_width=$W"
+    echo "viewport_height=$H"
+    echo "rect_count=$RECTS"
+    echo "sample_count=$FRAMES"
+    echo "warmup_count=$WARMUPS"
+    echo "budget_x1000=$BUDGET_X1000"
     echo "fixture_path=$BENCH_DIR/scenes.txt"
     echo "fixture_sha256=$FIXTURE_REVISION"
     echo "c_source_sha256=$C_SOURCE_REVISION"
@@ -641,6 +932,8 @@ mv "$OUT_DIR/evidence.env.complete" "$OUT_DIR/evidence.env"
     echo "shader_binary_sha256=$(hash_file "$OUT_DIR/rect.spv")"
     echo "icd_path=$ICD"
     echo "icd_sha256=$ICD_SHA256"
+    echo "c_binary_path=$c_bin_public"
+    echo "simple_binary_path=$SIMPLE_BIN"
     echo "c_binary_sha256=$c_bin_sha"
     echo "simple_binary_sha256=$simple_bin_sha"
     echo "c_raw_stdout=$c_stdout_raw_public"
@@ -668,7 +961,23 @@ mv "$OUT_DIR/evidence.env.complete" "$OUT_DIR/evidence.env"
     echo "c_framebuffer=$c_artifact_public"
     echo "simple_framebuffer=$simple_artifact_public"
     echo "evidence_env=$FINAL_RUN_DIR/evidence.env"
-} >"$OUT_DIR/run.manifest.env"
+    echo "c_command_argc=7"
+    echo "c_command_argv_0=$C_COMMAND_ARGV_0"
+    echo "c_command_argv_1=$C_COMMAND_ARGV_1"
+    echo "c_command_argv_2=$C_COMMAND_ARGV_2"
+    echo "c_command_argv_3=$C_COMMAND_ARGV_3"
+    echo "c_command_argv_4=$C_COMMAND_ARGV_4"
+    echo "c_command_argv_5=$C_COMMAND_ARGV_5"
+    echo "c_command_argv_6=$C_COMMAND_ARGV_6"
+    echo "c_command_argv_sha256=$C_COMMAND_ARGV_SHA256"
+    echo "simple_command_argc=3"
+    echo "simple_command_argv_0=$SIMPLE_COMMAND_ARGV_0"
+    echo "simple_command_argv_1=$SIMPLE_COMMAND_ARGV_1"
+    echo "simple_command_argv_2=$SIMPLE_COMMAND_ARGV_2"
+    echo "simple_command_argv_sha256=$SIMPLE_COMMAND_ARGV_SHA256"
+} >"$OUT_DIR/run.manifest.env.provisional"
+printf 'manifest_digest_sha256=%s\n' "$(hash_file "$OUT_DIR/run.manifest.env.provisional")" >>"$OUT_DIR/run.manifest.env.provisional"
+mv "$OUT_DIR/run.manifest.env.provisional" "$OUT_DIR/run.manifest.env"
 perf_immutable_publish_run "$RUN_DIR" "$FINAL_RUN_DIR" || fail "immutable run publication failed"
 trap - EXIT HUP INT TERM
 if ! perf_immutable_publish_latest_pointer "$OUT_ROOT" "$FINAL_RUN_DIR"; then
