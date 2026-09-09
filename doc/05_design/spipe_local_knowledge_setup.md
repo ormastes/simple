@@ -71,11 +71,26 @@ identity, references, applicability, and confidentiality; apply an owner-approve
 change; refresh only dependent navigation/summaries. Research results and
 durable wiki changes have separate review states.
 
-Company content belongs in organization scope; project architecture, tests, and
-incidents stay with their project. A common contribution is reviewed and
+Company and organization content have separate owner scopes; project
+architecture, tests, and incidents stay with their project. Authored user and
+host knowledge is canonical in its owner scope, while preferences remain local
+configuration. A common contribution is reviewed and
 sanitized, receives a new identity when crossing scopes, and does not expose
 private paths or internal provenance. Rebalancing starts with a proposal;
 physical moves and cross-scope publication do not follow from popularity.
+
+Within a knowledge-owning scope, `raw/` stores evidence, `wiki/` stores
+synthesized LLM knowledge, `doc/` stores normative lifecycle artifacts, and
+`skills/` stores procedures. The scope root and each category expose
+`index.md`. `runtime/<user>/<host>/` is derived, ignored state; writeback never
+promotes runtime entries into canonical knowledge implicitly.
+
+Resolution returns ordered authorized descriptors for common, company,
+organizations, projects, user, and host. Missing scopes are skipped explicitly;
+denied scopes are reported without leaking their contents. `compile_research_context`
+returns deterministic segments, provenance and coverage plus runtime eligibility.
+`explain_resolution` records selected, skipped, missing, and denied decisions.
+These are proposed shared contracts until their implementation is admitted.
 
 ## Errors and recovery
 

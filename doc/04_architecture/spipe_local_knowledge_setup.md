@@ -13,12 +13,14 @@ and performance claims are historical input, not newly verified measurements.
 |---|---|
 | REQ-001 | A user-owned `.spipe` repository contains a `.spipe` common submodule, `organization/`, and `projects/`. |
 | REQ-002 | Interactive setup supports first installation and use after cloning a project. |
-| REQ-003 | Common, organization, and project content retains independent ownership. |
+| REQ-003 | Common, company, organization, project, user, and host content retains independent ownership. |
 | REQ-004 | Shared configuration contains logical identities and revision pins; local configuration owns machine paths. |
 | REQ-005 | Traversable wiki nodes use `index.md`; lifecycle documents remain canonical. |
 | REQ-006 | Guides and skills explain reading, updating, rebalancing, and proposing reusable knowledge. |
 | REQ-007 | Setup preserves existing repositories, provider instructions, local edits, and unrelated staged work. |
 | REQ-008 | Hosted-only operation remains possible; installation has no Slang/model dependency. |
+| REQ-009 | Research context resolves `common -> company -> organization(s) -> project(s) -> user -> host` without weakening authorization or provenance. |
+| REQ-010 | `raw`, `wiki`, `doc`, `skills`, and non-canonical `runtime` retain distinct semantics. |
 
 ## Ownership and physical layout
 
@@ -53,10 +55,33 @@ Composition uses narrow adapters and shared records. Cross-cutting policy and
 provenance belong in shared contracts, while Git and filesystem details remain
 inside setup adapters. No compiler or kernel restructuring is necessary.
 
-Common is the reusable distribution. Organization restrictions remain effective
-when composing project skills; registration alone grants no membership or export
-authority. Local preferences do not create a fourth canonical knowledge scope.
+Common is the reusable distribution. Company and organization are separate
+owners. Organization restrictions remain effective when composing project
+skills; registration alone grants no membership or export authority. Authored
+user and host knowledge may be canonical, while personal preferences remain
+local configuration rather than knowledge.
 Provider agent/skill files are integration surfaces with their native filenames.
+
+Research context is composed in deterministic order:
+
+```text
+common/wiki -> company/wiki -> organization(s)/wiki -> project(s)/wiki
+            -> user/wiki -> host/wiki
+```
+
+Explicit workspace order resolves multiple organizations/projects, with stable
+scope identity as a tie-breaker. Composition does not mean last-writer-wins:
+authorization and restrictions accumulate, and conflicting claims retain source,
+revision, applicability, and owner. Each knowledge-owning scope has `index.md`,
+`raw/index.md`, `wiki/index.md`, `doc/index.md`, and `skills/index.md`.
+
+`runtime/<user>/<host>/` contains derived research/execution state only. It is
+never an evidence authority. Reuse validates policy, source revisions, task and
+profile compatibility, and expiry. Removing runtime cannot change correctness.
+
+The shared APIs `locate_common`, `resolve_workspace`, `resolve_active_scopes`,
+`compile_research_context`, and `explain_resolution` are proposed integration
+contracts, not claims of existing exports.
 
 ## Repository compatibility
 

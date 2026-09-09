@@ -1,8 +1,8 @@
 # SPipe local knowledge setup
 
-SPipe keeps reusable common knowledge separate from organization and project
-content. The project records the common revision; machine-specific checkout
-paths remain in a private local registry.
+SPipe keeps reusable common knowledge separate from company, organization,
+project, user, and host knowledge. The project records the common revision;
+machine-specific checkout paths remain in a private local registry.
 
 ## First user setup
 
@@ -32,10 +32,23 @@ with `.spipe/spipe` are supported without moving or overwriting their state.
 ## Ownership and updates
 
 - Common: generally reusable procedures and public knowledge.
-- Organization: company policy, private infrastructure, and organization-wide
-  decisions.
+- Company: company-owned policy and infrastructure knowledge.
+- Organization: organization-owned rules and decisions inside or across a company.
 - Project: architecture, requirements, tests, incidents, and project evidence.
+- User: authored personal knowledge; preferences remain local configuration.
+- Host: machine-specific authored knowledge that is safe to retain canonically.
 - Local registry: absolute paths and personal machine configuration.
+
+Research composes authorized `wiki/` scopes in this order:
+
+```text
+common -> company -> organization(s) -> project(s) -> user -> host
+```
+
+Each knowledge-owning scope uses `raw/` for evidence, `wiki/` for synthesized
+knowledge, `doc/` for normative lifecycle artifacts, and `skills/` for agent
+procedures. Each directory has `index.md`. `runtime/<user>/<host>/` is disposable
+cache/state, never canonical knowledge; clearing it must remain safe.
 
 Start at a scope's `index.md`. Update the smallest owner-controlled canonical
 lifecycle document, validate its evidence and links, and refresh only dependent

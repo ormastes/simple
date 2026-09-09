@@ -43,6 +43,12 @@ Primary manual step text:
 | Two equal project names | REQ-003, REQ-004 | Explicit identities resolve separate roots; ambiguous alias is rejected. |
 | Local path privacy | REQ-004 | Tracked manifests contain logical IDs/pins; absolute machine paths stay in ignored local records. |
 | Navigation and instructions | REQ-005, REQ-006 | Traversable nodes contain `index.md`; links resolve; native skill/agent filenames are preserved. |
+| Scope scaffold | REQ-003, REQ-009, REQ-010 | Every knowledge-owning scope has root, raw, wiki, doc, and skills indexes. |
+| Ordered composition | REQ-009 | Authorized scopes resolve common, company, explicit organizations/projects, user, and host deterministically. |
+| Missing or denied mount | REQ-003, REQ-009 | Missing is explicit; denied scope contributes no content or metadata. |
+| Runtime disposal | REQ-010 | Removing `runtime/<user>/<host>` changes performance only, never authoritative results. |
+| Runtime invalidation | REQ-010 | Policy, source revision, task/profile, or expiry mismatch rejects derived state. |
+| Owner writeback | REQ-003, REQ-006 | Proposed wiki updates target the narrowest authorized owner; runtime is never promoted implicitly. |
 | Occupied target | REQ-007 | Setup fails with a specific conflict and all existing bytes remain unchanged. |
 | Legacy `.spipe/spipe` | REQ-007 | Dirty checkout, local state, and gitlink are preserved; migration diagnostic names the real conflict. |
 | Cancellation/EOF | REQ-002, REQ-007 | Pre-apply cancellation creates no files and exits promptly. |

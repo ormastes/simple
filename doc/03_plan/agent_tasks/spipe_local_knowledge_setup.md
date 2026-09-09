@@ -9,8 +9,8 @@ Date: 2026-09-08. Status: scoped implementation handoff, refined by Astra.
    with current SPipe setup/resolver surfaces.
 2. Implement first-user and project-clone interactive setup with the exact
    `.spipe/.spipe` user layout and project `.spipe` submodule layout.
-3. Update common/organization/project wiki navigation and owner-focused
-   company/project guides and skills.
+3. Update common/company/organization/project/user/host wiki navigation and
+   owner-focused guides and skills; keep runtime non-canonical.
 4. Verify installation, repeatability, preservation, and scope/privacy fixtures.
 5. Commit and push only owned changes using the user-authorized workflow.
 6. Continue the hosted research/context-manifest and Slang cache waves after the
@@ -23,6 +23,7 @@ Date: 2026-09-08. Status: scoped implementation handoff, refined by Astra.
 | Astra design | Refine ownership, setup, maintenance, and acceptance contracts | This plan; architecture/detail-design/system-test-plan companions. |
 | Setup implementer | Inspect existing installer, implement guarded initialization and compatible resolver storage | `SetupRequest`, `SetupInspection`, `SetupPlan`, `SetupReceipt`; actual owning setup module selected by integration. |
 | Knowledge documentation | Common/organization/project indexes, LLM wiki, authoring guide/skill | Canonical documentation and provider integration surfaces only. |
+| Scope resolver follow-up | Centralize location, workspace, authorization, context compilation, and explanation | Proposed shared APIs; no provider-specific duplicate resolver logic. |
 | Verification | Local Git fixture execution, transcript evidence, preservation review | Shared SSpec/checker contracts in the test plan. |
 | Integration | Resolve shared names, review patches, stage owned files, publish | Root agent; final review uses the best available model. |
 
@@ -53,6 +54,7 @@ No worker grants itself permission to publish private organization content.
 | Wave | Work | Admission condition |
 |---|---|---|
 | Hosted research | Immutable source/coverage manifests, bounded DFS, structured results and adapters | Full workflow succeeds with no Slang installation. |
+| Scope-aware wiki | Deterministic six-level composition, complete scope scaffolds, owner writeback | Missing/denied scopes are explicit; deleting runtime preserves correctness. |
 | Cache observations | Stable prompt rendering, usage normalization, content-based invalidation | Cached/missing/unknown observations remain truthful. |
 | Learned ordering | Independent-task co-use, deterministic grouping, strictly >10% hysteresis | Held-out quality and observation/amortization gates. |
 | Slang baseline | Capability/readiness audit, timing/memory, request isolation | Evidence of isolated cold/resident execution. |
