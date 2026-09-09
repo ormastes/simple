@@ -47,8 +47,8 @@ This executable contract proves the backend-neutral lifecycle required before Si
 | Design | doc/05_design/simple_2d_web_renderer_gpu_optimization.md |
 | Research | doc/01_research/local/simple_2d_web_renderer_gpu_optimization.md |
 | Source | `test/03_system/app/ui.browser/feature/simple_2d_web_renderer_gpu_optimization_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-09-10 |
+| Generator | `simple spipe-docgen` (Simple); manual mirror refreshed while the admitted worker is unavailable |
 
 ## Overview
 
@@ -97,6 +97,18 @@ requirement. Assertions inspect frame state, token admission, damage bounds,
 upload bytes, memory release, and readback bytes. Passing this spec proves the
 portable lifecycle contract; it is not a substitute for physical-device traces
 or the C Vulkan and Chrome differential receipts.
+
+The companion [comparison-admission manual](../../../check/perf_comparison_admission_contract_spec.md)
+owns equal fixture, viewport, timing, readback/capture, GPU identity, warmup,
+sample, and checksum metadata for C Vulkan/Simple and Chrome/Simple rows. It
+fails closed for software, unknown, synthetic, unverified, and fallback
+identities. The typed host-frame acknowledgement and Vulkan context-admission
+unit contracts separately specify that pending/unknown event work cannot advance
+input, dirty regions and external-frame revisions remain owned until exact
+acknowledgement, and `async_claim=false` remains in force until provider
+authority exists. Retained GPU buffers and leases stay bound to their
+surface/device generation; a positive local or recycled handle is not
+submission authority.
 
 ## Scenario catalogue
 
@@ -148,8 +160,11 @@ Simple Web, and Chrome.
 
 Normal presentation must never perform checksum, fingerprint, screenshot, or
 full-frame readback work. Those operations belong to an explicit diagnostic or
-capture request and must report their transferred byte count. A benchmark that
-includes capture on one side but not the other is inadmissible.
+capture request and must report their transferred byte count. A capture also
+needs an exact token/generation, device-origin source, dimensions, stride,
+byte count, and checksum. A CPU cache or synthetic present is not device
+evidence. A benchmark that includes capture on one side but not the other is
+inadmissible.
 
 ## Limitations and troubleshooting
 
@@ -162,6 +177,10 @@ If this contract passes but a backend stalls, inspect the backend adapter's
 real submission token and completion callback. If presentation performs a
 readback, route it through the explicit capture path instead of weakening the
 zero-readback presentation assertion.
+
+No runtime result is claimed by this manual update: the clean PR worktree has
+no admitted pure-Simple worker, so docgen and compiled execution remain
+pending. The source/manual pair is intentionally evidence-first.
 
 **Requirements:** doc/02_requirements/feature/simple_2d_web_renderer_gpu_optimization.md
 
@@ -427,12 +446,13 @@ expect(unchanged.slots[slot].state).to_equal(GPU_FRAME_SUBMITTED)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Accumulate two event damage rectangles")
-val initial = gpu_pending_event_damage(8u64)
+val surface = gpu_render_surface_create(41, 100, 100, 2, 40000, 4096)
+val initial = gpu_pending_event_damage_for_surface(surface.surface, 8u64)
 val (one, _) = gpu_event_damage_accumulate(initial,
     system_batch(8u64), 1, [-10, 10, 30, 20], 100, 100)
 val (two, reason) = gpu_event_damage_accumulate(one,
@@ -448,17 +468,19 @@ expect(two.right).to_equal(100)
 
 - Accumulate damage from the previous scene generation
    - Expected: reason equals `stale-scene-generation`
+   - Expected: unchanged.has_damage is `false`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Accumulate damage from the previous scene generation")
-val pending = gpu_pending_event_damage(8u64)
+val surface = gpu_render_surface_create(41, 100, 100, 2, 40000, 4096)
+val pending = gpu_pending_event_damage_for_surface(surface.surface, 8u64)
 val (unchanged, reason) = gpu_event_damage_accumulate(pending,
     system_batch(7u64), 1, [0, 0, 10, 10], 100, 100)
 expect(reason).to_equal("stale-scene-generation")
@@ -485,7 +507,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Freeze one event generation into a frame slot")
 val surface = gpu_render_surface_create(41, 100, 100, 2, 40000, 4096)
 val (pending, _) = gpu_event_damage_accumulate(
-    gpu_pending_event_damage(8u64), system_batch(8u64), 5,
+    gpu_pending_event_damage_for_surface(surface.surface, 8u64), system_batch(8u64), 5,
     [10, 10, 20, 30], 100, 100)
 val (recording, next, slot, reason) = gpu_event_damage_freeze(
     surface, pending, 4)

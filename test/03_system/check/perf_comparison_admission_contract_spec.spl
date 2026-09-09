@@ -2,12 +2,13 @@
 # It never launches Vulkan, Chrome, or the Simple renderer.
 # @req REQ-GPUUI-007
 # @req NFR-GPUUI-002
+# @req NFR-GPUUI-003
 
 use std.spec.step
 use std.spec.*
 use std.io_runtime.{process_run}
 
-val COMMON = "workload_id=scene-v1\\nviewport_width=800\\nviewport_height=600\\nwarmup_count=5\\nsample_count=300\\ntiming_scope=submit-to-fence-p95\\nreadback_mode=post-timing-full-frame\\ncapture_mode=single-post-timing-capture\\ngpu_identity=Apple-M4-MoltenVK\\nfallback_state=none\\nchecksum_semantics=sampled-u32-xor-stride-4096\\nchecksum=123\\n"
+val COMMON = "workload_id=scene-v1\\nviewport_width=800\\nviewport_height=600\\nwarmup_count=5\\nsample_count=300\\ntiming_scope=submit-to-fence-p95\\nreadback_mode=post-timing-full-frame\\ncapture_mode=single-post-timing-capture\\ngpu_identity=contract-test-gpu\\nfallback_state=none\\nchecksum_semantics=sampled-u32-xor-stride-4096\\nchecksum=123\\n"
 
 fn fixture_setup(dir: text) -> text:
     "rm -rf " + dir + " && mkdir -p " + dir +
@@ -36,14 +37,14 @@ fn run_gate(dir: text, mutate: text) -> (text, text, i32):
 
 describe "shared performance comparison admission":
 
-    it "admits distinct implementations when each source revision is currently pinned":
-        step("Create independently source-bound native rows")
+    it "should admit distinct implementations when each source revision is currently pinned":
+        step("Create independently source-bound admission-fixture rows")
         val (stdout, _stderr, code) = run_gate("build/test-perf-admission-identical", ":")
         expect(code).to_equal(0)
         expect(stdout).to_contain("status=admitted")
         expect(stdout).to_contain("reason=admitted")
 
-    it "rejects duplicate keys instead of using the last value":
+    it "should reject duplicate keys instead of using the last value":
         step("Append a forged second workload identity")
         val (stdout, _stderr, code) = run_gate(
             "build/test-perf-admission-duplicate",
@@ -52,7 +53,7 @@ describe "shared performance comparison admission":
         expect(stdout).to_contain("status=skipped")
         expect(stdout).to_contain("duplicate-key-workload_id")
 
-    it "rejects unknown injected rows":
+    it "should reject unknown injected rows":
         step("Append a newline-shaped injected field")
         val (stdout, _stderr, code) = run_gate(
             "build/test-perf-admission-injection",
@@ -60,15 +61,47 @@ describe "shared performance comparison admission":
         expect(code).to_equal(0)
         expect(stdout).to_contain("unexpected-key-compare_status")
 
-    it "skips a GPU identity mismatch before ratio calculation":
-        step("Change only the right physical-device identity")
+    it "should skip a GPU identity mismatch before ratio calculation":
+        step("Change only the right contract-test device identity")
         val (stdout, _stderr, code) = run_gate(
             "build/test-perf-admission-gpu",
-            "sed 's/simple_gpu_identity=Apple-M4-MoltenVK/simple_gpu_identity=Other-GPU/' build/test-perf-admission-gpu/right.env > build/test-perf-admission-gpu/right.tmp && mv build/test-perf-admission-gpu/right.tmp build/test-perf-admission-gpu/right.env")
+            "sed 's/simple_gpu_identity=contract-test-gpu/simple_gpu_identity=other-contract-test-gpu/' build/test-perf-admission-gpu/right.env > build/test-perf-admission-gpu/right.tmp && mv build/test-perf-admission-gpu/right.tmp build/test-perf-admission-gpu/right.env")
         expect(code).to_equal(0)
         expect(stdout).to_contain("reason=mismatch-gpu_identity")
 
-    it "rejects stale artifact replay":
+    it "should reject software fallback even when both rows agree":
+        step("Mark both sides as software fallback")
+        val (stdout, _stderr, code) = run_gate(
+            "build/test-perf-admission-software",
+            "sed -e 's/^c_fallback_state=none/c_fallback_state=software/' -e 's/^simple_fallback_state=none/simple_fallback_state=software/' build/test-perf-admission-software/left.env > build/test-perf-admission-software/left.tmp && mv build/test-perf-admission-software/left.tmp build/test-perf-admission-software/left.env && sed -e 's/^c_fallback_state=none/c_fallback_state=software/' -e 's/^simple_fallback_state=none/simple_fallback_state=software/' build/test-perf-admission-software/right.env > build/test-perf-admission-software/right.tmp && mv build/test-perf-admission-software/right.tmp build/test-perf-admission-software/right.env")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("reason=fallback-software")
+
+    it "should reject unknown GPU identity even when fallback state is none":
+        step("Replace both contract-test device identities with unknown")
+        val (stdout, _stderr, code) = run_gate(
+            "build/test-perf-admission-unknown-gpu",
+            "sed -e 's/^c_gpu_identity=contract-test-gpu/c_gpu_identity=unknown/' -e 's/^simple_gpu_identity=contract-test-gpu/simple_gpu_identity=unknown/' build/test-perf-admission-unknown-gpu/left.env > build/test-perf-admission-unknown-gpu/left.tmp && mv build/test-perf-admission-unknown-gpu/left.tmp build/test-perf-admission-unknown-gpu/left.env && sed -e 's/^c_gpu_identity=contract-test-gpu/c_gpu_identity=unknown/' -e 's/^simple_gpu_identity=contract-test-gpu/simple_gpu_identity=unknown/' build/test-perf-admission-unknown-gpu/right.env > build/test-perf-admission-unknown-gpu/right.tmp && mv build/test-perf-admission-unknown-gpu/right.tmp build/test-perf-admission-unknown-gpu/right.env")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("reason=invalid-gpu-identity")
+
+    it "should reject a viewport mismatch before calculating a ratio":
+        step("Change only the right viewport width")
+        val (stdout, _stderr, code) = run_gate(
+            "build/test-perf-admission-viewport",
+            "sed 's/^simple_viewport_width=800/simple_viewport_width=801/' build/test-perf-admission-viewport/right.env > build/test-perf-admission-viewport/right.tmp && mv build/test-perf-admission-viewport/right.tmp build/test-perf-admission-viewport/right.env")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("reason=mismatch-viewport_width")
+
+    it "should reject a non-comparable checksum before calculating a ratio":
+        step("Inject punctuation outside the checksum schema")
+        val (stdout, _stderr, code) = run_gate(
+            "build/test-perf-admission-checksum",
+            "sed -e 's/^c_checksum=123/c_checksum=123%forged/' -e 's/^simple_checksum=123/simple_checksum=123%forged/' build/test-perf-admission-checksum/left.env > build/test-perf-admission-checksum/left.tmp && mv build/test-perf-admission-checksum/left.tmp build/test-perf-admission-checksum/left.env && sed -e 's/^c_checksum=123/c_checksum=123%forged/' -e 's/^simple_checksum=123/simple_checksum=123%forged/' build/test-perf-admission-checksum/right.env > build/test-perf-admission-checksum/right.tmp && mv build/test-perf-admission-checksum/right.tmp build/test-perf-admission-checksum/right.env")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("reason=invalid-checksum")
+
+    it "should reject stale artifact replay":
         step("Mutate the measured artifact after its row was sealed")
         val (stdout, _stderr, code) = run_gate(
             "build/test-perf-admission-stale",
@@ -76,7 +109,7 @@ describe "shared performance comparison admission":
         expect(code).to_equal(0)
         expect(stdout).to_contain("reason=stale-left-artifact")
 
-    it "rejects a seed path even when its hash and receipt are internally consistent":
+    it "should reject a seed path even when its hash and receipt are internally consistent":
         step("Rebind the left row to a copied executable under a forbidden seed path")
         val dir = "build/test-perf-admission-seed"
         val mutate = "cp /bin/sh " + dir + "/compiler_rust-seed && chmod +x " + dir + "/compiler_rust-seed" +
@@ -88,7 +121,7 @@ describe "shared performance comparison admission":
         expect(code).to_equal(0)
         expect(stdout).to_contain("reason=seed-left-binary-forbidden")
 
-    it "reports missing canonical Simple artifacts without a ratio":
+    it "should report missing canonical Simple artifacts without a ratio":
         step("Provide no complete canonical comparison bundle")
         val command = "rm -rf build/test-chrome-simple-admission && mkdir -p build/test-chrome-simple-admission && " +
             "printf '{\"source\":\"measured\",\"comparison_admitted\":true}\\n' > build/test-chrome-simple-admission/chrome_static_page.json && " +
