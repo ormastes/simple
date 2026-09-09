@@ -1,7 +1,8 @@
 # JIT/interpreter bridge truncates generic `Result` values
 
 Date: 2026-09-09  
-Status: open; blocks hybrid-JIT qualification. `--no-jit` bypasses this defect
+Status: root cause corrected locally; focused regression passes and the owner
+smoke advances through execution-namespace lookup. `--no-jit` bypasses this defect
 and exposes the independent global aggregate persistence failure recorded in
 `interpreter_global_page_manager_state_lost_2026-09-09.md`.
 
@@ -21,11 +22,13 @@ not prevent the hybrid bridge used by this `run` path.
 
 ## Cause
 
-`src/compiler_rust/compiler/src/compilability.rs` function
-`return_type_keeps_boxed` preserves tuples, arrays, text, optionals, and
-capabilities. It has no arm for generic `Result<T,E>`. The interpreter marshals
-the result as a heap-boxed tagged value, while generated caller code attempts
-to coerce it to raw `i64`.
+The failure occurs inside `physical_page_execution_namespace`, when its
+unresolvable `spl_wffi_call_i64` bridge returns a full-width signed execution
+namespace. `RuntimeValue::from_int` correctly stores values outside the inline
+61-bit range as `HeapInt`, but `rt_value_raw_i64` decoded only `HeapUInt` before
+rejecting other heap values. The generic `Result` carrier was not the value
+being truncated; the original diagnosis confused the enclosing Simple return
+type with the nested raw SFFI result.
 
 This is the generic-result counterpart of
 `jit_rt_tls13_sha256_returns_empty_2026-08-05.md`; it is not a Slang provider
@@ -33,8 +36,16 @@ failure. The native external-provider parity smoke remains green.
 
 ## Required fix and acceptance
 
-- Preserve interpreter-call results whose return type is generic `Result`.
-- Add a focused compiler regression test covering both `Ok(i64)` and an enum
-  `Err` across the JIT/interpreter boundary.
+- Preserve full-width signed i64 results returned by an interpreter-routed
+  SFFI call.
+- Add a focused runtime regression across both sides of the inline-int bound.
 - Rebuild an admitted self-hosted runtime and rerun the Slang owner smoke.
 - Reject any fix that merely allowlists the Slang function name.
+
+## Qualification progression
+
+The corrected diagnostic driver reaches `execution_namespace_ready`, proving
+that the full-width result now crosses the bridge intact. It then reaches
+`cold_generate` and terminates with a separate bus error. The session's
+three-cycle cap prevents another owner-smoke retry here; cold-generation
+diagnosis and full benchmark qualification remain separate follow-up work.
