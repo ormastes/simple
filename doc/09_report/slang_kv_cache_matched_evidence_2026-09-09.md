@@ -1,7 +1,7 @@
 # Slang KV-cache matched evidence
 
 Date: 2026-09-09
-Measured source: `5bbdd24b224060586891772a4fba6d297b6bbe6d`
+Measured source: `dd68490f33208bc84e99af8a5e57a64d82082991`
 Result: **PASS**
 
 The matched real-model run completed 50 fresh-process samples: five workloads,
@@ -11,11 +11,11 @@ had identical output digests and generated-token vectors.
 
 | Workload | Snapshot median ms | Physical median ms | Snapshot max RSS KiB | Physical max RSS KiB |
 |---|---:|---:|---:|---:|
-| cold | 27 | 29 | 312896 | 287556 |
-| exact repeat | 39 | 43 | 313016 | 288984 |
-| prefix extension | 42 | 61 | 312964 | 294056 |
-| alternating prefix | 74 | 102 | 313060 | 298472 |
-| eviction pressure | 181 | 226 | 313600 | 296848 |
+| cold | 28 | 29 | 313052 | 287316 |
+| exact repeat | 39 | 42 | 313072 | 288916 |
+| prefix extension | 41 | 61 | 312816 | 294100 |
+| alternating prefix | 74 | 103 | 313100 | 299332 |
+| eviction pressure | 184 | 226 | 313720 | 296800 |
 
 These observations establish correctness and matched execution evidence; they
 do not establish a universal physical-page speedup. The executor was the
@@ -34,6 +34,10 @@ and differential evidence, not self-hosted Simple release-performance evidence.
 - Architecture/kernel: `aarch64`, Linux `6.17.0-1032-nvidia`.
 - Threads: 1; greedy sampler; GPU layers: 0; KV: F32; flash attention and KQV
   offload disabled.
+- Generated-token budget: 2 per request; repetitions: 5 paired runs per
+  workload with alternating lane order.
+- Snapshot limits: 4 entries and 2,147,483,648 bytes. Physical limits: 64
+  tokens/page, 16 pages, 4 prefixes, and 2,147,483,648 bytes.
 - Requested context: 1024; all 50 stderr receipts yielded exactly
   `n_ctx=1024,n_batch=1024,n_ubatch=1024`.
 - Executor: Rust bootstrap seed at
@@ -46,16 +50,22 @@ and differential evidence, not self-hosted Simple release-performance evidence.
 
 ## Evidence receipts
 
-The raw local evidence remains under `build/perf/slang-kv-cache/` and is bound
-by these digests:
+The reviewable evidence is published under
+`doc/09_report/evidence/slang_kv_cache/20260909T130630Z/`. Raw per-process
+stdout/stderr and GNU-time logs remain local because they contain verbose
+provider diagnostics; their admitted status, timing, RSS, output/token
+digests, configuration, and cleanup telemetry are preserved row-by-row in the
+published manifest.
 
-- manifest: `51e6883ae2f31aa62f9f5f005a02210bb0bba84df1e2a8e051b4102e49da0d68`;
-- identity: `f3c396d24d52c85914259edb5b348907db8ba3c1a7273bc473d219ce0f8e65e2`;
+Published artifact digests:
+
+- manifest: `75415f6b9d0cc7c0a539d893b1783bb401b06abe32c2389f20a2a147495bc230`;
+- identity: `e7bb3f9ce0fa7798ca8fa74fe3c782b70f1a1df1674cce1ea8654bc45bb1fa77`;
 - parity: `91ae3dce1f5703a2baa17cca8ad6290449a4204cf979ff1c3c72ac3c29020af7`;
 - Markdown summary:
-  `ffd1132507931152fbef3050deda0c5aa31bb34ba7f138ad91c0ce809a61f758`;
+  `495ea6abf2becd2657e625482b9aa45ba18b575686bc5ee69846f2a9abfedc97`;
 - TSV summary:
-  `a40f68b2892c9e2e9f940d4a87521605e5dfef12a623afaccc998a62ab7b18fd`.
+  `4c60db066a25afbc73fb87cd05e37c3b7bfa84dddecaec0217484fa0c19ad6d5`.
 
 The identity receipt records the ARM CPU models directly and binds the full
 CPU identity receipt without altering the completed benchmark artifacts.
