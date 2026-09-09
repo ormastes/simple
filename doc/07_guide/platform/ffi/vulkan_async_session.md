@@ -49,6 +49,28 @@ admission contract. The scoped `vulkan_sffi_async_session_bind_buffer` name is
 retained for API compatibility, but its Pure Simple owner also returns invalid
 or unsupported and performs no native call while the capability query is false.
 
+## Engine2D context admission
+
+`std.gc_async_mut.gpu.engine2d.vulkan_context_admission` is the Pure Simple
+production gate for DrawIR async promotion. It accepts the live
+`VulkanBackend` owned by `Engine2D` and inspects that retained context, but raw
+session/device/framebuffer handles are never published as admitted identities.
+A caller cannot pass a positive handle or session generation as proof.
+
+Unavailable production paths return before DrawIR serialization, so the
+synchronous frame loop does not gain a second composition pass. The separate
+`vulkan_context_draw_ir_packet` helper exercises the actual bounded canonical
+codec without granting submission authority; malformed candidates fail closed.
+
+With the committed Pure Simple buffer-binding capability disabled, the gate
+currently returns `managed-buffer-binding-unavailable` for an otherwise live
+context. If that prerequisite becomes available while exact context binding
+is still absent, it returns `provider-context-binding-unavailable`. The
+`Engine2D` window-present consumer records the exact status, reason, zero
+packet checksum, and `async_claim=false`, then keeps the existing synchronous
+path. Buffer-binding support alone is not context admission, and the
+synchronous positive present result is not an async receipt.
+
 ## Telemetry version 1
 
 `telemetry()` copies 64 signed scalar words from one frozen snapshot. An empty

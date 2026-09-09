@@ -131,6 +131,13 @@ struct Engine2dDrawIrAdvResult:
     # fence counters. Device readback is a separate attestation below.
     device_submit_count: i64 = 0
     device_fence_count: i64 = 0
+    # Production window-present evidence records the separate async admission
+    # gate. A packet checksum proves canonical encoding only; async_claim is
+    # false until the provider binds this exact session/surface authoritatively.
+    async_admission_status: text = ""
+    async_admission_reason: text = ""
+    async_packet_checksum: i64 = 0
+    async_claim: bool = false
 
 # A strict Vulkan submission receipt deliberately carries no framebuffer
 # pixels.  The retained Engine2D and composition let an evidence caller make
@@ -2810,8 +2817,18 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
     No framebuffer readback or host-cache refresh is requested. An unavailable
     or failed window presentation is reported as an explicit fallback reason.
     """
+    val async_admission = engine.vulkan_async_admission(3)
+    # Query the same live Engine2D context used by the window-present route.
+    # The current provider cannot prove session/device/surface membership, so
+    # this deliberately falls through to the existing synchronous owner.  A
+    # future admitted branch must submit the packet and return separate compute
+    # and presenter receipts; it may not reinterpret this sync path as async.
     var result = _engine2d_draw_ir_adv_composition_with_images(
         engine, composition, true, images, false, false, false)
+    result.async_admission_status = async_admission.status
+    result.async_admission_reason = async_admission.reason
+    result.async_packet_checksum = async_admission.packet.checksum
+    result.async_claim = async_admission.async_claim
     if result.fallback_required or result.skipped_command_count != 0:
         return result
     if not engine.present_window_device():
