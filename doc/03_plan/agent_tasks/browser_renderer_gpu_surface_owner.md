@@ -19,3 +19,16 @@ Shared interface names and manual/setup/checker helpers are fixed in
 `doc/03_plan/sys_test/browser_renderer_gpu_surface_owner.md` before sidecars
 start. The selected O1 owner and B/N2 session are the only implementation
 target; O2, A/N1, and blocking-only alternatives are not implementation lanes.
+
+## B/N2 connection order after provider review
+
+The attempted backend-local connection was removed after two Sol reviews and
+Astra's provider review. Follow the ordered packages and concrete acceptance
+cases in
+[B/N2 to O1 provider bridge review](../../09_report/b_n2_o1_provider_bridge_astra_review_2026-09-09.md).
+Start with the actual descriptor/buffer admission entrypoints and the central
+compositor scheduler contract. Then implement slot-local resource lifetimes,
+explicit pending/presenter-release receipts, and central recovery/teardown.
+All shared offscreen children must borrow the one device scheduler; enabling
+frame batching cannot open a competing session. A source-presence test or
+empty-command ring test cannot admit the connection.
