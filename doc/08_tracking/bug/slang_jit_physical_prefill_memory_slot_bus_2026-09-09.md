@@ -1,8 +1,8 @@
 # Slang JIT physical prefill reports no memory slot, then SIGBUS
 
 Date: 2026-09-09
-Status: decode-position and cleanup-dispatch corruption fixed in source;
-physical generation passes, shutdown telemetry reset remains unqualified
+Status: decode-position, cleanup dispatch, and shutdown telemetry fixed in
+source; physical owner smoke passes, benchmark qualification remains
 
 ## Reproducer boundary
 
@@ -120,3 +120,9 @@ exact-repeat reuse, prefix extension, and provider shutdown all complete
 without SIGBUS. The remaining owner-smoke failure is narrower: post-shutdown
 state reports `active=false` and `pool=0`, while the optional telemetry query is
 still observed as non-nil. This must be resolved before benchmark admission.
+
+The telemetry query now derives availability from the canonical
+`paged_executor_active()` predicate instead of separately reading the manager
+flag. The real-model owner smoke subsequently passed cold generation,
+exact-repeat reuse, prefix extension, cleanup, telemetry checks, and shutdown
+with exit code zero. Performance qualification remains separate.
