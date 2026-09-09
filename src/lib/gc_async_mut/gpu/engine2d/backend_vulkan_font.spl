@@ -68,14 +68,9 @@ fn vulkan_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas
                                       atlas_x: i32, atlas_y: i32, quad_width: i32, quad_height: i32,
                                       dst_width: i32, dst_height: i32, dst_count: i64,
                                       dst_x: i32, dst_y: i32, color: u32) -> [u8]:
-    val atlas_product = atlas_width.to_i64() * atlas_height.to_i64()
-    val quad_product = quad_width.to_i64() * quad_height.to_i64()
-    val dst_product = dst_width.to_i64() * dst_height.to_i64()
-    if (atlas_width <= 0 or atlas_height <= 0 or quad_width <= 0 or quad_height <= 0 or
-        dst_width <= 0 or dst_height <= 0 or atlas_count != atlas_product or dst_count != dst_product or
-        atlas_count > 2147483647 or dst_count > 2147483647 or quad_product <= 0 or quad_product > 2147483647 or
-        atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height or
-        quad_width > atlas_width - atlas_x or quad_height > atlas_height - atlas_y):
+    if not _vulkan_font_atlas_composite_params_valid(
+        atlas_width, atlas_height, atlas_count, atlas_x, atlas_y, quad_width,
+        quad_height, dst_width, dst_height, dst_count):
         return []
     var p: [u8] = [0u8; VULKAN_FONT_PARAMS_BYTES]
     var off = 0
@@ -84,6 +79,20 @@ fn vulkan_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas
     for value in values:
         off = _vulkan_font_pack_i32_le(p, off, value)
     p
+
+fn _vulkan_font_atlas_composite_params_valid(atlas_width: i32, atlas_height: i32,
+                                              atlas_count: i64, atlas_x: i32,
+                                              atlas_y: i32, quad_width: i32,
+                                              quad_height: i32, dst_width: i32,
+                                              dst_height: i32, dst_count: i64) -> bool:
+    val atlas_product = atlas_width.to_i64() * atlas_height.to_i64()
+    val quad_product = quad_width.to_i64() * quad_height.to_i64()
+    val dst_product = dst_width.to_i64() * dst_height.to_i64()
+    not (atlas_width <= 0 or atlas_height <= 0 or quad_width <= 0 or quad_height <= 0 or
+        dst_width <= 0 or dst_height <= 0 or atlas_count != atlas_product or dst_count != dst_product or
+        atlas_count > 2147483647 or dst_count > 2147483647 or quad_product <= 0 or quad_product > 2147483647 or
+        atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height or
+        quad_width > atlas_width - atlas_x or quad_height > atlas_height - atlas_y)
 
 fn vulkan_font_dispatch_groups(pixel_count: i64) -> i64:
     if pixel_count <= 0 or pixel_count > 2147483647:
@@ -756,9 +765,9 @@ impl VulkanBackend:
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
             if vulkan_font_dispatch_groups(total) == 0 or dst_x == nil or dst_y == nil:
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-quad", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
-                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)
-            if packed.len() != VULKAN_FONT_PARAMS_BYTES:
+            if not _vulkan_font_atlas_composite_params_valid(
+                batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
+                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count):
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-params", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             checked = checked + 1
 
