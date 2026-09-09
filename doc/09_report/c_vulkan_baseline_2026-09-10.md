@@ -2,11 +2,13 @@
 
 ## Verdict
 
-`historical-measured-unadmitted; live-artifact-set-stale`. This is the
-C/reference side of the canonical `vulkan_2d_c` showcase only. The first
+`fresh-candidate-measured-unadmitted; comparison-skipped; audit-warn`. This is
+the C/reference side of the canonical `vulkan_2d_c` showcase only. The first
 authorized measurement was recorded, but a later accidental invocation
-overwrote the shared ignored output paths. The historical row below is not a
-current-filesystem receipt and remains unverified for performance admission.
+overwrote the shared ignored output paths. That historical row remains
+unverified for performance admission. A subsequent no-clobber run is retained
+below as a fresh candidate, but it is not admitted and is not a C/Simple/Chrome
+comparison.
 No Simple bootstrap, Simple renderer run, Chrome builder, or cross-renderer
 ratio was run in the authorized task. Its comparator result was
 `compare_status=skipped` with
@@ -173,3 +175,122 @@ first rerun:
 Even after those checks, the C row remains `measured-unadmitted` and the
 comparison remains `skipped` until authorized binary-admission receipts and a
 matched admitted Simple row exist.
+
+## Fresh immutable run — `c-m4-moltenvk-20260910-01`
+
+This section records the one authorized live invocation performed after the
+immutable-run protocol was installed. The preflight checked that the run ID
+did not exist, inspected the supported `VK2D_RUN_ID` interface without
+invoking workload help, and validated the script with `sh -n`. No second live
+invocation was made.
+
+Exact command:
+
+```text
+VK2D_RUN_ID=c-m4-moltenvk-20260910-01 sh scripts/check/check-vulkan-2d-c-compare.shs
+```
+
+The producer receipt is the published directory below. The directory was
+created with mode `0700`; its regular files are mode `0644` except for the
+captured native benchmark (`0755`). Every file has link count one and no entry
+is a symlink. The producer's `latest` file is a convenience pointer with
+`authoritative=false` and is not used as evidence input.
+
+That ignored build directory is not durable PR evidence: it is omitted from
+Git, remains owner-writable, and may disappear during cleanup. Exact text
+receipts were therefore copied byte-for-byte to the tracked asset directory
+`doc/09_report/assets/c-m4-moltenvk-20260910-01/`. The 1,920,000-byte
+framebuffer, 37,832-byte native binary, and 2,336-byte SPIR-V binary were not
+duplicated; the tracked manifest and framebuffer hash receipt preserve their
+observed SHA-256 identities. These are candidate receipts, not an admission
+receipt.
+
+| Item | Value |
+|---|---|
+| run manifest | `build/vulkan-2d-c-compare/runs/c-m4-moltenvk-20260910-01/run.manifest.env` |
+| manifest schema | `immutable-vulkan-2d-c-run-v1` |
+| config SHA-256 | `0cbc4bd07a7ce7c067a714adf0f393f2261d867405eef617b5925eeeec4f99b2` |
+| fixture SHA-256 | `26b4c4d9fe24aafba15f31b4547b2a6fabe2242421184358dd32c55d64ff4b51` |
+| C source SHA-256 | `c988d2d9072d61faeef8facffc64755ae02a64ddc3f3e063e6ea4775fa221f9c` |
+| shader source SHA-256 | `5b5703ff722beef203a9c40c24ef3a26be937e0fb0780050054c505b33247b28` |
+| shader binary SHA-256 | `785f4dc27b460b1a18dfe655a27890f4eb36fb75d12c59b721932c0eb240c2b7` |
+| C binary SHA-256 | `b881ab3569fd8ecb97a5a2864ba1e84c56d9a0361153c0b88a6dfa4a0596cfc3` |
+| ICD SHA-256 | `b514f51690582fb783383154b7a33c7816cc47e98ee1a1f652dccd3e996f0bf1` |
+
+### Measured C row (unadmitted)
+
+The C workload used 800×600, five warmups, 300 timed samples, 64 table
+rectangles, a three-slot ring, and one post-timing full-frame capture. Timing
+scope is draw-plus-submit-to-fence. The GPU identity was Apple M4 (vendor
+`106b`, device `1a040209`) through the MoltenVK ICD. No software fallback was
+detected.
+
+| Metric | Value |
+|---|---|
+| p50 / p95 | `438000 / 1023000 ns` |
+| max RSS | `30801920 bytes` |
+| completion polls / fence completions | `920 / 300` |
+| timed blocking `vkWaitForFences` calls | `0` |
+| synchronous fence-status polls | `920` |
+| timed full-frame upload / readback | `0 / 0 bytes` |
+| upload bytes | `537600` |
+| retained / released bytes | `1920000 / 1920000` |
+| capture bytes | `1920000` |
+| capture checksum | `10460147` (`sampled-u32-xor-stride-4096`) |
+| event generations / damage pixels | `300 / 144000000` |
+| C status | `measured-unadmitted` (`receipt-needs-common-admission`) |
+
+### Durable candidate artifact bindings
+
+All paths are relative to the clean PR worktree
+`/tmp/simple-2d-web-renderer-gpu-pr-20260909`.
+
+| Artifact | Tracked candidate path | SHA-256 |
+|---|---|---|
+| run manifest | `doc/09_report/assets/c-m4-moltenvk-20260910-01/run.manifest.env` | `513a99c079ad5b826f978d18e98055b3920e36953cdc0c4a5ea26c3372893bed` |
+| raw C stdout | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.stdout.raw` | `0fd46e39bea7093857f48b3267b7b52a78b11c9dedadc66f616b87cb2f2925ea` |
+| raw C stderr | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.stderr.raw` | `032b4fbd699149eba53141ddace305d4e8f8a5281eef46c279125e7f52c0173a` |
+| C runtime receipt | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.runtime.env` | `ff49d3c64665a014480e8ef4c512b97aacba44d8da81b095934d353e2f86642c` |
+| C toolchain receipt | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.toolchain.env` | `df0ad35d0d5ac72724be83c1555e0dc488546fc1a858f788212129304e959619` |
+| C row | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.env` | `390917cca45cd4848b249a0bca691df218196fefd5913b87fc40a8130a11de44` |
+| combined raw row | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c.env.raw` | `6bdeecd21ad7454477652a92a3d7c1c8db9cbfae4ba3af460516e55b9fa8af75` |
+| skipped Simple row | `doc/09_report/assets/c-m4-moltenvk-20260910-01/simple.env` | `9efd5dffcd4bb8ffbf90c7b560fdf2975c2cd7605482f8a49fd91129684f56e0` |
+| skipped Simple runtime receipt | `doc/09_report/assets/c-m4-moltenvk-20260910-01/simple.runtime.env` | `30b727e147526d10a5762f2177be947f865becd37cd59df2753fcc83cdf9237c` |
+| aggregate evidence | `doc/09_report/assets/c-m4-moltenvk-20260910-01/evidence.env` | `4a5f04d67e520eb78af3a534eb911804a8a45b00f8d3da06606d56789ba178af` |
+| framebuffer hash receipt | `doc/09_report/assets/c-m4-moltenvk-20260910-01/c-framebuffer.rgba.sha256` | `ee25bc8fded5ec2ab95072d3ec862ca993071a2b8a2d9ccd40963f9e82cb04a1` |
+
+The framebuffer was independently checked as exactly 1,920,000 bytes. Folding
+little-endian `u32` values at stride 4096 reproduced checksum `10460147`; its
+full SHA-256 reproduced
+`f7485b8db5e755a936810d7cfd2ce2c4fa8ce71cfc133e404a872340e1ded9f3`.
+
+### Audit limitations
+
+Filesystem birth/modification times place production and publication between
+`2026-09-10T06:34:45+09:00` and `06:34:46+09:00`. They are observation-only:
+the manifest does not carry producer start/end timestamps, a repository commit,
+or the wrapper's own hash. The current source, scene, shader, and wrapper match
+HEAD `2fb1deeb75b4c77855afd973a656565aa2fadc95`, while the corrected C
+source/evidence contract entered in
+`d543a6c0e4bcfa8a1f7393cb616b0c7d656fd9d4` and the no-clobber protocol in
+`2fb1deeb75b4c77855afd973a656565aa2fadc95`. This commit association is an
+auditor observation, not a manifest-bound claim.
+
+The raw value `cpu_completion_wait_count=0` proves only that the timed region
+did not call blocking `vkWaitForFences`. `poll_fence_complete` synchronously
+loops over `vkGetFenceStatus` and `nanosleep` until each reused/final ring slot
+completes; the run reports 920 such polls. Therefore this candidate proves no
+timed framebuffer readback and no unconditional Vulkan wait, but it does not
+prove CPU-independent asynchronous progress or literally zero CPU waiting.
+
+The Simple row is `skipped` with reason `bootstrap-seed-forbidden`; its raw
+stdout/stderr are empty and its binary/artifact hashes are intentionally
+empty. Consequently `compare_status=skipped`,
+`compare_ratio_x1000=0`, and
+`compare_reason=c-leg-measured-unadmitted:receipt-needs-common-admission`.
+This fresh receipt is measured evidence only; it does not admit the C row or
+claim C/Simple/Chrome parity. Audit status is `WARN`: values, hashes, modes,
+scene/toolchain/binary/shader/ICD bindings, RSS, fallback, capture checksum,
+retained/released bytes, and skipped aggregate are internally consistent, but
+producer time/revision are not manifest-bound and the timed path performs
+synchronous poll/sleep completion gating.
