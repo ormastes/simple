@@ -399,6 +399,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_aop_invoke_around",
     "rt_aop_proceed",
     "rt_heap_registry_count",
+    "rt_heap_alloc_count",
+    "rt_heap_free_count",
+    "rt_heap_live_bytes",
+    "rt_heap_peak_bytes",
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
@@ -492,6 +496,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_slice",
     "rt_contains",
     "rt_len",
+    "rt_to_int_dynamic",
     // ANY+ANY dynamic add (tag-dispatched string-concat vs. integer add).
     // Emitted by MIR lowering (lowering_expr_ops.rs) whenever both operands are
     // ANY-typed (untyped params / erased receivers, e.g. inside the Simple Web
@@ -1063,6 +1068,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_fsync",
     "rt_file_fsync_cached",
     "rt_file_copy",
+    "rt_file_copy_create_excl_no_follow",
+    "rt_file_link_create_excl_no_follow",
     "rt_file_remove",
     "rt_file_size",
     "rt_file_hash_sha256",

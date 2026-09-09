@@ -39,6 +39,11 @@ enum BackendError:
     NotOpen
     PhysicalPagesUnavailable
     PhysicalPageOperationFailed
+    PhysicalPageNoContext
+    PhysicalPageOverflow
+    PhysicalPageInvalid
+    PhysicalPageBusy
+    InvalidTokenBudget
 
 fn backend_error_text(e: BackendError) -> text:
     match e:
@@ -51,10 +56,30 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.NotOpen: "backend is not open"
         BackendError.PhysicalPagesUnavailable: "physical paged KV provider is unavailable"
         BackendError.PhysicalPageOperationFailed: "physical paged KV provider operation failed"
+        BackendError.PhysicalPageNoContext: "physical paged KV provider could not create a context"
+        BackendError.PhysicalPageOverflow: "physical paged KV provider capacity overflowed"
+        BackendError.PhysicalPageInvalid: "physical paged KV provider rejected its configuration"
+        BackendError.PhysicalPageBusy: "physical paged KV provider is busy"
+        BackendError.InvalidTokenBudget: "max_tokens must be a nonnegative signed 64-bit integer"
 
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
 const SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS: i64 = 64
 const SLANG_PHYSICAL_PAGE_ABI_V1: i64 = 1
+const INVALID_NONNEGATIVE_I64_TEXT: i64 = -1
+
+fn parse_nonnegative_i64_text_exact(raw: text) -> i64:
+    var value = raw.trim()
+    if value == "":
+        return INVALID_NONNEGATIVE_I64_TEXT
+    var result: i64 = 0
+    for ch in value:
+        if ch < "0" or ch > "9":
+            return INVALID_NONNEGATIVE_I64_TEXT
+        val digit = ch.to_i64() - "0".to_i64()
+        if result > (9223372036854775807 - digit) / 10:
+            return INVALID_NONNEGATIVE_I64_TEXT
+        result = result * 10 + digit
+    result
 
 enum PhysicalPageProviderStatus:
     Unavailable
@@ -138,6 +163,28 @@ struct GgmlBackend:
 
 struct GgmlRequest:
     handle: i64
+
+struct BackendGeneration:
+    generated_tokens: text
+    output: text
+
+struct BackendGenerationRequest:
+    max_tokens: text
+    prompt: text
+    backend: GgmlBackend
+
+struct BackendActiveGenerationRequest:
+    max_tokens: text
+    prompt: text
+    backend: GgmlBackend
+    request: GgmlRequest
+
+struct PhysicalPagePoolCreateRequest:
+    execution_namespace: text
+    page_tokens: text
+    page_capacity: text
+    byte_limit: text
+    backend: GgmlBackend
 
 struct PrefixCacheStats:
     capabilities: i64
@@ -451,17 +498,30 @@ fn request_piece(b: GgmlBackend, request: GgmlRequest,
         return Err(BackendError.DecodeFailed)
     Ok(_read_request_out(b, request))
 
-fn close_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
-    if not b.independent_requests or _call1(b.f_request_close, request.handle) < 0:
+fn close_backend_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
+    if not b.independent_requests:
+        return Err(BackendError.NotOpen)
+    # Keep the cleanup WFFI boundary lexical. The interpreter has been observed
+    # to transpose the two scalar parameters of the shared _call1 helper after
+    # physical decode, turning request handle 37 into the function pointer.
+    if spl_wffi_call_i64(b.f_request_close, [request.handle], 1) < 0:
         return Err(BackendError.NotOpen)
     Ok(())
 
-fn cancel_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
-    if not b.independent_requests or _call1(b.f_request_cancel, request.handle) < 0:
+fn cancel_backend_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), BackendError>:
+    if not b.independent_requests:
+        return Err(BackendError.NotOpen)
+    if spl_wffi_call_i64(b.f_request_cancel, [request.handle], 1) < 0:
         return Err(BackendError.NotOpen)
     Ok(())
 
-fn _generate_request(b: GgmlBackend, request: GgmlRequest, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val request = input.request
+    val prompt = input.prompt
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err(BackendError.InvalidTokenBudget)
     if _push_request_text(b, request, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
     if _call2(b.f_request_tokenize, request.handle, 1) < 0:
@@ -482,17 +542,24 @@ fn _generate_request(b: GgmlBackend, request: GgmlRequest, prompt: text, max_tok
         if _call2(b.f_request_eval, request.handle, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(out)
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
 
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
-fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val b = input.backend
+    val prompt = input.prompt
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err(BackendError.InvalidTokenBudget)
     if b.independent_requests:
         val opened = open_request(b, _call0(b.f_n_ctx))
         match opened:
             Ok(request):
-                val result = _generate_request(b, request, prompt, max_tokens)
-                val closed = close_request(b, request)
+                val result = _generate_request_observed(BackendActiveGenerationRequest(
+                    max_tokens: input.max_tokens, prompt: prompt, backend: b,
+                    request: request))
+                val closed = close_backend_request(b, request)
                 match closed:
                     Err(_): return Err(BackendError.DecodeFailed)
                     Ok(_): return result
@@ -520,7 +587,17 @@ fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, Backe
         if _call1(b.f_eval, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(out)
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text()))
+
+fn generate_observed(b: GgmlBackend, prompt: text,
+                     max_tokens: i64) -> Result<BackendGeneration, BackendError>:
+    generate_observed_request(BackendGenerationRequest(
+        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b))
+
+fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+    match generate_observed(b, prompt, max_tokens):
+        Err(error): Err(error)
+        Ok(observed): Ok(observed.output)
 
 fn prefix_cache_stats(b: GgmlBackend) -> PrefixCacheStats:
     var reported_capabilities = _call0(b.f_capabilities)
@@ -562,16 +639,30 @@ fn physical_page_execution_namespace(b: GgmlBackend) -> Result<i64, BackendError
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(handle)
 
-fn physical_page_pool_create(b: GgmlBackend, execution_namespace: i64,
-                             page_tokens: i64, page_capacity: i64,
-                             byte_limit: i64) -> Result<i64, BackendError>:
+fn physical_page_pool_create_request(input: PhysicalPagePoolCreateRequest) -> Result<i64, BackendError>:
+    val execution_namespace = parse_nonnegative_i64_text_exact(input.execution_namespace)
+    val page_tokens = parse_nonnegative_i64_text_exact(input.page_tokens)
+    val page_capacity = parse_nonnegative_i64_text_exact(input.page_capacity)
+    val byte_limit = parse_nonnegative_i64_text_exact(input.byte_limit)
+    val b = input.backend
     if b.physical_page_status != PhysicalPageProviderStatus.Ready:
         return Err(BackendError.PhysicalPagesUnavailable)
     if execution_namespace <= 0 or page_tokens <= 0 or page_capacity <= 0 or
        byte_limit <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
-    val handle = _call4(b.f_page_pool_create, execution_namespace, page_tokens,
-                        page_capacity, byte_limit)
+    # Keep the exact provider argument vector at this owner boundary. Routing
+    # these values through another five-parameter Simple helper can reproduce
+    # the interpreter's cross-module positional-binding defect.
+    val handle = spl_wffi_call_i64(b.f_page_pool_create,
+        [execution_namespace, page_tokens, page_capacity, byte_limit], 4)
+    if handle == -2:
+        return Err(BackendError.PhysicalPageNoContext)
+    if handle == -4:
+        return Err(BackendError.PhysicalPageOverflow)
+    if handle == -8:
+        return Err(BackendError.PhysicalPageInvalid)
+    if handle == -9:
+        return Err(BackendError.PhysicalPageBusy)
     if handle <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(handle)
@@ -639,12 +730,15 @@ fn physical_page_table_push(b: GgmlBackend, transaction: i64, page: i64,
         return Err(BackendError.PhysicalPagesUnavailable)
     if transaction <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
+    val abort_fptr = b.f_page_table_abort
     if page <= 0 or valid_rows < 0 or writable_capacity < 0:
-        _call1(b.f_page_table_abort, transaction)
+        _call1(abort_fptr, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     if _call4(b.f_page_table_push, transaction, page, valid_rows,
               writable_capacity) != 0:
-        _call1(b.f_page_table_abort, transaction)
+        # The request owner cancels on provider failure. Cancellation owns
+        # transaction abort/detach and does not require another WFFI dispatch
+        # through a value live across the failed foreign call.
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(())
 
@@ -655,12 +749,12 @@ fn physical_page_prefill(b: GgmlBackend, transaction: i64,
         return Err(BackendError.PhysicalPagesUnavailable)
     if transaction <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
+    val abort_fptr = b.f_page_table_abort
     if start_position < 0 or token_start < 0 or token_count <= 0:
-        _call1(b.f_page_table_abort, transaction)
+        _call1(abort_fptr, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     if _call4(b.f_page_prefill, transaction, start_position, token_start,
               token_count) != 0:
-        _call1(b.f_page_table_abort, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(())
 
@@ -670,11 +764,11 @@ fn physical_page_decode(b: GgmlBackend, transaction: i64,
         return Err(BackendError.PhysicalPagesUnavailable)
     if transaction <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
+    val abort_fptr = b.f_page_table_abort
     if position < 0:
-        _call1(b.f_page_table_abort, transaction)
+        _call1(abort_fptr, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     if _call3(b.f_page_decode, transaction, token, position) != 0:
-        _call1(b.f_page_table_abort, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(())
 
@@ -685,12 +779,12 @@ fn physical_page_boundary_logits(b: GgmlBackend, transaction: i64,
         return Err(BackendError.PhysicalPagesUnavailable)
     if transaction <= 0:
         return Err(BackendError.PhysicalPageOperationFailed)
+    val abort_fptr = b.f_page_table_abort
     if boundary_token_index < 0 or boundary_position < 0:
-        _call1(b.f_page_table_abort, transaction)
+        _call1(abort_fptr, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     if _call3(b.f_page_boundary_logits, transaction, boundary_token_index,
               boundary_position) != 0:
-        _call1(b.f_page_table_abort, transaction)
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(())
 
@@ -738,16 +832,18 @@ fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
     spl_dlclose(b.lib)
     Ok(())
 
-export BackendError, backend_error_text, GgmlBackend, PrefixCacheStats
+export BackendError, backend_error_text, GgmlBackend, BackendGeneration, BackendGenerationRequest, PhysicalPagePoolCreateRequest, PrefixCacheStats
 export PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV, SLANG_PHYSICAL_PAGE_ABI_V1
-export GgmlRequest, open_backend, load_model, open_context, open_request, close_request, cancel_request
+export GgmlRequest, open_backend, load_model, open_context, open_request, close_backend_request, cancel_backend_request
 export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
-export generate, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
+export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status
+export INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact
+export physical_page_pool_create_request
 export physical_lightweight_requests_ready
-export physical_page_execution_namespace, physical_page_pool_create, physical_page_pool_destroy
+export physical_page_execution_namespace, physical_page_pool_destroy
 export physical_page_reserve, physical_page_release, physical_page_seal
 export physical_page_copy_tail, physical_page_table_begin, physical_page_table_push
 export physical_page_prefill, physical_page_decode, physical_page_boundary_logits
