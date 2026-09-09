@@ -35,7 +35,17 @@ use common.ui.widget.{UIEvent, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use os.compositor.compositor_gpu_surface_owner.{CompositorGpuSurfaceOwner}
+use os.compositor.compositor_gpu_surface_owner.{
+    CompositorGpuSurfaceOwner, COMPOSITOR_GPU_SURFACE_SUBMITTED,
+    COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE
+}
+use os.compositor.host_frame_ack.{
+    HostFrameAckEvidence, HostFrameAckState, HostFrameReceiptKind,
+    host_frame_ack_rejected,
+    host_frame_ack_unknown, host_frame_ack_skipped,
+    host_frame_ack_exact, host_frame_ack_with_external_release,
+    host_frame_ack_complete_host_present, host_frame_ack_can_advance_input
+}
 use os.compositor.dirty_rect.{DirtyRegion}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
@@ -711,6 +721,13 @@ class HostCompositor:
     # recomposition is deferred until profiling demands it (see render_frame).
     dirty: DirtyRegion
     skipped_frame_count: i64
+    # Exact owned external-frame snapshot used by the typed presentation
+    # receipt. It is captured before provider entry and consumed atomically
+    # only after the matching synchronous provider/presenter evidence.
+    frame_ack_pending: bool
+    frame_ack_dirty_rect_count: i64
+    frame_ack_external_window_ids: [i64]
+    frame_ack_external_content_revisions: [i64]
     # O1 compositor-owned visible GPU surface.  Browser producers offer
     # immutable resource snapshots here; the owner releases them only after
     # the exact synchronous Vulkan present receipt is validated.
@@ -766,6 +783,10 @@ class HostCompositor:
             render_revision: 0,
             dirty: DirtyRegion.new(),
             skipped_frame_count: 0,
+            frame_ack_pending: false,
+            frame_ack_dirty_rect_count: 0,
+            frame_ack_external_window_ids: [],
+            frame_ack_external_content_revisions: [],
             gpu_surface_owner: CompositorGpuSurfaceOwner.create(
                 1, size.width as i32, size.height as i32)
         )
@@ -1645,7 +1666,7 @@ class HostCompositor:
         false
 
     me resize(width: i32, height: i32):
-        if self.gpu_surface_owner.has_pending_frame():
+        if self.frame_ack_pending or self.gpu_surface_owner.has_pending_frame():
             return
         if width <= 0 or height <= 0:
             return
@@ -1901,35 +1922,347 @@ class HostCompositor:
     # pending provider attempt stays retained; Engine2D/runtime teardown owns
     # recovery and this method never fabricates a release receipt.
     me close_gpu_surface() -> bool:
+        if self.frame_ack_pending:
+            return false
         self.gpu_surface_owner.close()
 
     me prepare_gpu_surface_replacement() -> bool:
+        if self.frame_ack_pending:
+            return false
         self.gpu_surface_owner.prepare_provider_replacement()
 
-    me _mark_external_web_frames_consumed(frames: [WmContentFrame]):
-        """Receipt that the submitted compositor frame no longer reads pixels.
+    me _capture_external_web_frame_ack(frames: [WmContentFrame]) -> bool:
+        """Capture the exact owned external revisions read by this attempt."""
+        self.frame_ack_pending = false
+        self.frame_ack_dirty_rect_count = 0
+        self.frame_ack_external_window_ids = []
+        self.frame_ack_external_content_revisions = []
+        var slot = 0
+        while slot < self.external_web_window_ids.len():
+            if self.external_web_frame_owned[slot]:
+                val window_id = self.external_web_window_ids[slot]
+                val revision = self.external_web_frames[slot].content_revision
+                var matches = 0
+                var fi = 0
+                while fi < frames.len():
+                    if ui_native_i64_text(window_id) == frames[fi].window_id:
+                        if frames[fi].content_revision != revision:
+                            self.frame_ack_external_window_ids = []
+                            self.frame_ack_external_content_revisions = []
+                            return false
+                        matches += 1
+                    fi += 1
+                if matches > 1:
+                    self.frame_ack_external_window_ids = []
+                    self.frame_ack_external_content_revisions = []
+                    return false
+                if matches == 1:
+                    self.frame_ack_external_window_ids.push(window_id)
+                    self.frame_ack_external_content_revisions.push(revision)
+            slot += 1
+        self.frame_ack_pending = true
+        self.frame_ack_dirty_rect_count = self.dirty.rects.len().to_i64()
+        true
 
-        This runs only after the selected CPU or Vulkan route has completed
-        its synchronous present work.  It keys the receipt by both window ID
-        and content revision so a replacement admitted during another owner
-        turn cannot be mistaken for the submitted base.
-        """
-        var fi = 0
-        while fi < frames.len():
-            val frame = frames[fi]
-            var slot = 0
-            while slot < self.external_web_window_ids.len():
-                if (self.external_web_frame_owned[slot] and
-                    ui_native_i64_text(self.external_web_window_ids[slot]) ==
-                        frame.window_id and
-                    self.external_web_frames[slot].content_revision ==
-                        frame.content_revision):
-                    self.external_web_frame_consumed_revision[slot] =
-                        frame.content_revision
-                slot += 1
-            fi += 1
+    me _discard_frame_ack_capture():
+        self.frame_ack_pending = false
+        self.frame_ack_dirty_rect_count = 0
+        self.frame_ack_external_window_ids = []
+        self.frame_ack_external_content_revisions = []
+
+    me _commit_external_web_frame_ack(
+        window_ids: [i64], revisions: [i64]
+    ) -> bool:
+        """Validate every revision before mutating any consumed marker."""
+        if window_ids.len() != revisions.len():
+            return false
+        var i = 0
+        while i < window_ids.len():
+            var j = 0
+            while j < i:
+                if window_ids[j] == window_ids[i]:
+                    return false
+                j += 1
+            val slot = self._external_web_frame_index(window_ids[i])
+            if (slot < 0 or not self.external_web_frame_owned[slot] or
+                self.external_web_frames[slot].content_revision != revisions[i] or
+                revisions[i] <= 0):
+                return false
+            i += 1
+        i = 0
+        while i < window_ids.len():
+            val slot = self._external_web_frame_index(window_ids[i])
+            self.external_web_frame_consumed_revision[slot] = revisions[i]
+            i += 1
+        true
+
+    fn _frame_ack_identity_matches(evidence: HostFrameAckEvidence) -> bool:
+        if (not self.frame_ack_pending or
+            evidence.surface_id != self.gpu_surface_owner.surface_id or
+            evidence.surface_epoch != self.gpu_surface_owner.surface_epoch or
+            evidence.device_generation != self.gpu_surface_owner.device_generation or
+            evidence.provider_generation != self.gpu_surface_owner.provider_generation or
+            evidence.target_width != self.width or
+            evidence.target_height != self.height or
+            evidence.scene_revision != self.render_revision or
+            self.dirty.rects.len().to_i64() !=
+                self.frame_ack_dirty_rect_count or
+            evidence.external_window_ids.len() !=
+                self.frame_ack_external_window_ids.len() or
+            evidence.external_content_revisions.len() !=
+                self.frame_ack_external_content_revisions.len()):
+            return false
+        var i = 0
+        while i < evidence.external_window_ids.len():
+            if (evidence.external_window_ids[i] !=
+                    self.frame_ack_external_window_ids[i] or
+                evidence.external_content_revisions[i] !=
+                    self.frame_ack_external_content_revisions[i]):
+                return false
+            i += 1
+        true
+
+    me _commit_host_frame_ack(
+        evidence: HostFrameAckEvidence
+    ) -> HostFrameAckEvidence:
+        if (not self._frame_ack_identity_matches(evidence) or
+            evidence.state != HostFrameAckState.Presented or
+            not evidence.compute_complete or not evidence.present_complete):
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("stale-frame-ack-identity")
+        if evidence.receipt_kind == HostFrameReceiptKind.SynchronousPresent:
+            if (evidence.frame_generation !=
+                    self.gpu_surface_owner.current_frame_generation() or
+                evidence.framebuffer_identity !=
+                    self.gpu_surface_owner.bound_framebuffer_identity or
+                evidence.device_identity !=
+                    self.gpu_surface_owner.bound_device_identity or
+                evidence.swapchain_identity !=
+                    self.gpu_surface_owner.bound_swapchain_identity or
+                self.gpu_surface_owner.release_boundary() !=
+                    "synchronous-present-receipt"):
+                self._discard_frame_ack_capture()
+                return host_frame_ack_unknown("stale-vulkan-present-receipt")
+        elif evidence.receipt_kind == HostFrameReceiptKind.HostBufferPresent:
+            if not evidence.presenter_released or evidence.host_present_generation <= 0:
+                self._discard_frame_ack_capture()
+                return host_frame_ack_unknown("missing-host-present-receipt")
+        else:
+            # Future async completion needs its own poll/retire implementation;
+            # this synchronous commit path must never infer that release.
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("unsupported-frame-release-receipt")
+        if not self._commit_external_web_frame_ack(
+            evidence.external_window_ids,
+            evidence.external_content_revisions):
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("external-frame-revision-mismatch")
+        self.dirty.clear()
+        self._discard_frame_ack_capture()
+        host_frame_ack_with_external_release(evidence)
+
+    # Typed receipt boundary for the hosted input loop. The legacy bool method
+    # remains available to existing compositor callers, but event ownership
+    # is advanced only from this evidence object.
+    me render_frame_engine2d_evidence(
+        executor: Engine2dCompositorBackend
+    ) -> HostFrameAckEvidence:
+        # Never enter the producer again while a future asynchronous receipt
+        # owns the captured snapshot. Re-entry could overwrite the external
+        # revisions and attach a newer scene to the older provider token.
+        if (self.gpu_surface_owner.state ==
+                COMPOSITOR_GPU_SURFACE_SUBMITTED or
+            self.gpu_surface_owner.state ==
+                COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE):
+            if not self.frame_ack_pending:
+                return host_frame_ack_unknown(
+                    "pending-gpu-owner-without-frame-snapshot")
+            return host_frame_ack_exact(
+                HostFrameAckState.Pending,
+                HostFrameReceiptKind.AsyncSubmission,
+                self.gpu_surface_owner.retained_frame_generation,
+                self.render_revision,
+                false, false, false, false,
+                self.gpu_surface_owner.surface_id,
+                self.gpu_surface_owner.surface_epoch,
+                self.gpu_surface_owner.device_generation,
+                self.gpu_surface_owner.provider_generation,
+                self.width, self.height,
+                self.gpu_surface_owner.bound_framebuffer_identity,
+                self.gpu_surface_owner.bound_device_identity,
+                self.gpu_surface_owner.bound_swapchain_identity,
+                0,
+                self.frame_ack_external_window_ids,
+                self.frame_ack_external_content_revisions,
+                self.gpu_surface_owner.blocker_reason()
+            )
+        # The CPU buffer is also a two-phase attempt. A second render request
+        # before the winit present receipt returns the same captured snapshot;
+        # it must not repaint or silently replace the outstanding evidence.
+        if self.frame_ack_pending:
+            return host_frame_ack_exact(
+                HostFrameAckState.Pending,
+                HostFrameReceiptKind.HostBufferPresent,
+                0, self.render_revision,
+                true, false, false, false,
+                self.gpu_surface_owner.surface_id,
+                self.gpu_surface_owner.surface_epoch,
+                self.gpu_surface_owner.device_generation,
+                self.gpu_surface_owner.provider_generation,
+                self.width, self.height,
+                0, 0, 0,
+                self.pixel_backend.present_count,
+                self.frame_ack_external_window_ids,
+                self.frame_ack_external_content_revisions,
+                "host-present-receipt-pending"
+            )
+        self._discard_frame_ack_capture()
+        val prior_frame_generation = self.gpu_surface_owner.current_frame_generation()
+        val prior_present_count = self.pixel_backend.present_count
+        val had_damage = not self.dirty.is_empty()
+        val accepted = self._render_frame_engine2d_attempt(executor)
+        if not accepted:
+            if (self.gpu_surface_owner.state ==
+                    COMPOSITOR_GPU_SURFACE_SUBMITTED or
+                self.gpu_surface_owner.state ==
+                    COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE):
+                return host_frame_ack_exact(
+                    HostFrameAckState.Pending,
+                    HostFrameReceiptKind.AsyncSubmission,
+                    self.gpu_surface_owner.retained_frame_generation,
+                    self.render_revision,
+                    false, false, false, false,
+                    self.gpu_surface_owner.surface_id,
+                    self.gpu_surface_owner.surface_epoch,
+                    self.gpu_surface_owner.device_generation,
+                    self.gpu_surface_owner.provider_generation,
+                    self.width, self.height,
+                    self.gpu_surface_owner.bound_framebuffer_identity,
+                    self.gpu_surface_owner.bound_device_identity,
+                    self.gpu_surface_owner.bound_swapchain_identity,
+                    0,
+                    self.frame_ack_external_window_ids,
+                    self.frame_ack_external_content_revisions,
+                    self.gpu_surface_owner.blocker_reason()
+                )
+            self._discard_frame_ack_capture()
+            return host_frame_ack_rejected(
+                "engine2d-frame-rejected-{self.gpu_surface_owner.last_reason}"
+            )
+        if not had_damage:
+            return host_frame_ack_skipped(self.render_revision)
+        if executor.window_present_enabled():
+            val generation = self.gpu_surface_owner.current_frame_generation()
+            if (generation > prior_frame_generation and
+                self.gpu_surface_owner.release_boundary() ==
+                    "synchronous-present-receipt"):
+                val evidence = host_frame_ack_exact(
+                    HostFrameAckState.Presented,
+                    HostFrameReceiptKind.SynchronousPresent,
+                    generation,
+                    self.render_revision,
+                    true, true, false, false,
+                    self.gpu_surface_owner.surface_id,
+                    self.gpu_surface_owner.surface_epoch,
+                    self.gpu_surface_owner.device_generation,
+                    self.gpu_surface_owner.provider_generation,
+                    self.width, self.height,
+                    self.gpu_surface_owner.bound_framebuffer_identity,
+                    self.gpu_surface_owner.bound_device_identity,
+                    self.gpu_surface_owner.bound_swapchain_identity,
+                    0,
+                    self.frame_ack_external_window_ids,
+                    self.frame_ack_external_content_revisions,
+                    "exact-vulkan-present-receipt"
+                )
+                return self._commit_host_frame_ack(evidence)
+            if (self.gpu_surface_owner.state ==
+                    COMPOSITOR_GPU_SURFACE_SUBMITTED or
+                self.gpu_surface_owner.state ==
+                    COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE):
+                return host_frame_ack_exact(
+                    HostFrameAckState.Pending,
+                    HostFrameReceiptKind.AsyncSubmission,
+                    self.gpu_surface_owner.retained_frame_generation,
+                    self.render_revision,
+                    false, false, false, false,
+                    self.gpu_surface_owner.surface_id,
+                    self.gpu_surface_owner.surface_epoch,
+                    self.gpu_surface_owner.device_generation,
+                    self.gpu_surface_owner.provider_generation,
+                    self.width, self.height,
+                    self.gpu_surface_owner.bound_framebuffer_identity,
+                    self.gpu_surface_owner.bound_device_identity,
+                    self.gpu_surface_owner.bound_swapchain_identity,
+                    0,
+                    self.frame_ack_external_window_ids,
+                    self.frame_ack_external_content_revisions,
+                    self.gpu_surface_owner.blocker_reason()
+                )
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("missing-synchronous-present-receipt")
+        if self.pixel_backend.present_count > prior_present_count:
+            return host_frame_ack_exact(
+                HostFrameAckState.Pending,
+                HostFrameReceiptKind.HostBufferPresent,
+                0,
+                self.render_revision,
+                true, false, false, false,
+                self.gpu_surface_owner.surface_id,
+                self.gpu_surface_owner.surface_epoch,
+                self.gpu_surface_owner.device_generation,
+                self.gpu_surface_owner.provider_generation,
+                self.width, self.height,
+                0, 0, 0,
+                self.pixel_backend.present_count,
+                self.frame_ack_external_window_ids,
+                self.frame_ack_external_content_revisions,
+                "host-buffer-ready-for-present"
+            )
+        self._discard_frame_ack_capture()
+        host_frame_ack_unknown("missing-host-present-receipt")
+
+    me acknowledge_host_buffer_present(
+        evidence: HostFrameAckEvidence,
+        presenter_identity: i64,
+        presenter_width: i32,
+        presenter_height: i32,
+        prior_present_generation: i64,
+        present_generation: i64
+    ) -> HostFrameAckEvidence:
+        if (not self._frame_ack_identity_matches(evidence) or
+            evidence.host_present_generation != self.pixel_backend.present_count):
+            self._discard_frame_ack_capture()
+            return host_frame_ack_unknown("stale-host-present-identity")
+        val completed = host_frame_ack_complete_host_present(
+            evidence, presenter_identity, presenter_width, presenter_height,
+            prior_present_generation, present_generation)
+        self._commit_host_frame_ack(completed)
+
+    # A compatibility renderer may have painted pixels after the Engine2D
+    # provider was rejected, but it has no typed provider receipt. Keep the
+    # pending damage visible so the next admitted attempt can retry and do not
+    # let an unproven fallback consume an external frame.
+    me retain_unacknowledged_frame_state():
+        self.dirty.add_full_screen(self.width, self.height)
 
     me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
+        if self.frame_ack_pending:
+            return false
+        val prior_present_count = self.pixel_backend.present_count
+        var evidence = self.render_frame_engine2d_evidence(executor)
+        if (evidence.state == HostFrameAckState.Pending and
+            evidence.receipt_kind == HostFrameReceiptKind.HostBufferPresent):
+            evidence = self.acknowledge_host_buffer_present(
+                evidence, self.gpu_surface_owner.surface_id,
+                self.width, self.height,
+                prior_present_count, self.pixel_backend.present_count)
+        host_frame_ack_can_advance_input(evidence) or
+            evidence.state == HostFrameAckState.Skipped
+
+    me _render_frame_engine2d_attempt(
+        executor: Engine2dCompositorBackend
+    ) -> bool:
         # Resolve dimensions through the layout-owning module. Direct
         # cross-module field reads can shift by the object-header slot.
         val executor_width = executor.width()
@@ -1997,6 +2330,8 @@ class HostCompositor:
             images.push(engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), frame.width, frame.height, frame.pixels))
             top_frames.push(frame)
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
+        if not self._capture_external_web_frame_ack(frames):
+            return self._reject_engine2d_frame()
         # One canonical damage input feeds both the native-window GPU path and
         # the retained CPU mirror path below. It contains the compositor's
         # conservative old/new invalidation rectangles, not inferred command
@@ -2032,8 +2367,6 @@ class HostCompositor:
                 return self._reject_engine2d_frame()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=vulkan-window-swapchain window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
-            self._mark_external_web_frames_consumed(frames)
-            self.dirty.clear()
             return true
         # CPU/SIMD retained frame switch. The first frame stays on the normal
         # snapshot route and seeds the mirror below. Later frames raster only
@@ -2061,8 +2394,6 @@ class HostCompositor:
             self.pixel_backend.present()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=cpu-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
-            self._mark_external_web_frames_consumed(frames)
-            self.dirty.clear()
             return true
         # Forward the actual host dirty region to the persistent Engine2D
         # owner. Its retained replay remains fail-closed until same-session
@@ -2111,11 +2442,13 @@ class HostCompositor:
         executor.seed_cpu_damage_mirror()
         for frame in frames:
             print "[hosted-wm] content-presented scene_revision={self.render_revision} window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
-        self._mark_external_web_frames_consumed(frames)
-        self.dirty.clear()
         true
 
     me render_frame():
+        # Direct compatibility rendering cannot replace or clear a frame whose
+        # typed provider/presenter acknowledgement is still outstanding.
+        if self.frame_ack_pending:
+            return
         val theme = wm_chrome_theme()
         self.render_revision = self.render_revision + 1
         # Compatibility renderer for explicit direct mode, image/motion

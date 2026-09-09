@@ -1,0 +1,117 @@
+"""Typed hosted-frame acknowledgement contract.
+
+The hosted input loop may advance an input receipt only after a typed
+presented evidence value proves compute completion, presentation completion,
+presenter release, and external-frame release. Pending and Unknown are
+deliberately non-acknowledging states for future asynchronous providers.
+"""
+# @cover src/os/compositor/host_frame_ack.spl 100%
+# @tag: unit, ui, wm, gpu, async, event-ack
+
+use std.spec.*
+use os.compositor.host_frame_ack.*
+
+describe "typed hosted-frame acknowledgement" :
+    it "accepts an exact synchronous receipt without fabricating presenter release":
+        val evidence = host_frame_ack_exact(
+            HostFrameAckState.Presented,
+            HostFrameReceiptKind.SynchronousPresent,
+            7, 11, true, true, false, true,
+            1, 2, 3, 4, 1280, 720,
+            101, 102, 103, 0,
+            [41], [9], "exact-vulkan-present-receipt"
+        )
+        expect(evidence.state).to_be(HostFrameAckState.Presented)
+        expect(evidence.receipt_kind).to_be(
+            HostFrameReceiptKind.SynchronousPresent)
+        expect(evidence.presenter_released).to_be(false)
+        expect(host_frame_ack_can_advance_input(evidence)).to_be(true)
+        expect(host_frame_ack_present_generation(evidence)).to_equal(7)
+
+    it "keeps async submission pending until a later provider fact":
+        val evidence = host_frame_ack_pending(
+            HostFrameReceiptKind.AsyncSubmission,
+            8,
+            12,
+            "provider-present-release-unavailable"
+        )
+        expect(evidence.state).to_be(HostFrameAckState.Pending)
+        expect(evidence.present_complete).to_be(false)
+        expect(evidence.presenter_released).to_be(false)
+        expect(host_frame_ack_can_advance_input(evidence)).to_be(false)
+
+    it "does not acknowledge rejected, unknown, or skipped work":
+        val rejected = host_frame_ack_rejected("provider-rejected")
+        val unknown = host_frame_ack_unknown("missing-receipt")
+        val skipped = host_frame_ack_skipped(13)
+        expect(host_frame_ack_can_advance_input(rejected)).to_be(false)
+        expect(host_frame_ack_can_advance_input(unknown)).to_be(false)
+        expect(host_frame_ack_can_advance_input(skipped)).to_be(false)
+
+    it "requires external source release even when the provider present is complete":
+        val evidence = host_frame_ack_exact(
+            HostFrameAckState.Presented,
+            HostFrameReceiptKind.SynchronousPresent,
+            9, 14, true, true, false, false,
+            1, 2, 3, 4, 1280, 720,
+            101, 102, 103, 0,
+            [41], [10], "external-source-still-retained"
+        )
+        expect(evidence.present_complete).to_be(true)
+        expect(evidence.external_frame_released).to_be(false)
+        expect(host_frame_ack_can_advance_input(evidence)).to_be(false)
+
+    it "does not let the compatibility constructor fabricate an exact receipt":
+        val evidence = host_frame_ack_presented(
+            HostFrameReceiptKind.SynchronousPresent,
+            9, 14, true, "legacy-bool-present")
+        expect(evidence.presenter_released).to_be(false)
+        expect(evidence.surface_epoch).to_equal(0)
+        expect(host_frame_ack_can_advance_input(evidence)).to_be(false)
+
+    it "requires one fresh host presenter generation before host-buffer ack":
+        val pending = host_frame_ack_exact(
+            HostFrameAckState.Pending,
+            HostFrameReceiptKind.HostBufferPresent,
+            0, 15, true, false, false, false,
+            1, 2, 3, 4, 1280, 720,
+            0, 0, 0, 3,
+            [41], [11], "host-buffer-ready-for-present"
+        )
+        val wrong_surface = host_frame_ack_complete_host_present(
+            pending, 0, 1280, 720, 8, 9)
+        val wrong_extent = host_frame_ack_complete_host_present(
+            pending, 71, 1279, 720, 8, 9)
+        val stale = host_frame_ack_complete_host_present(
+            pending, 71, 1280, 720, 8, 8)
+        val completed = host_frame_ack_complete_host_present(
+            pending, 71, 1280, 720, 8, 9)
+        val released = host_frame_ack_with_external_release(completed)
+        expect(wrong_surface.state).to_be(HostFrameAckState.Unknown)
+        expect(wrong_extent.state).to_be(HostFrameAckState.Unknown)
+        expect(stale.state).to_be(HostFrameAckState.Unknown)
+        expect(host_frame_ack_can_advance_input(completed)).to_be(false)
+        expect(released.presenter_released).to_be(true)
+        expect(host_frame_ack_can_advance_input(released)).to_be(true)
+        expect(host_frame_ack_present_generation(released)).to_equal(9)
+
+    it "requires a real future async presenter release receipt":
+        val unretired = host_frame_ack_exact(
+            HostFrameAckState.Presented,
+            HostFrameReceiptKind.AsyncRetired,
+            12, 16, true, true, false, true,
+            1, 2, 3, 4, 1280, 720,
+            101, 102, 103, 0,
+            [], [], "async-retired-without-presenter-release"
+        )
+        val released = host_frame_ack_exact(
+            HostFrameAckState.Presented,
+            HostFrameReceiptKind.PresenterRelease,
+            12, 16, true, true, true, true,
+            1, 2, 3, 4, 1280, 720,
+            101, 102, 103, 0,
+            [], [], "exact-async-presenter-release"
+        )
+        expect(host_frame_ack_can_advance_input(unretired)).to_be(false)
+        expect(host_frame_ack_present_generation(unretired)).to_equal(0)
+        expect(host_frame_ack_can_advance_input(released)).to_be(true)
