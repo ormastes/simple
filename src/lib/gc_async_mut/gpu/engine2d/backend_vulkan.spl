@@ -283,6 +283,19 @@ class VulkanBackend:
     pending_compute_descriptors: [i64] # preallocated, parallel to pipelines
     pending_compute_sources: [i64]     # image source buffer per slot; zero for framebuffer-only work
     pending_compute_count: i64         # live entries in the two arrays above
+    # Batched image composites retain their source buffers until the frame
+    # fence.  Reuse completed per-surface buffers instead of allocating and
+    # freeing one Vulkan storage buffer for every web image draw.
+    image_source_pool: [i64]
+    image_source_pool_capacity: [i64]
+    image_source_pool_device_identity: i64
+    image_source_pool_session_generation: i64
+    image_source_pool_surface_identity: i64
+    image_source_pool_reuse_count: i64
+    image_source_pool_allocation_count: i64
+    image_source_pool_replacement_count: i64
+    image_source_upload_count: i64
+    image_source_upload_bytes: i64
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
     pending_font_glyph_count: i64
@@ -393,6 +406,16 @@ class VulkanBackend:
             pending_compute_descriptors: [0i64; 256],
             pending_compute_sources: [0i64; 256],
             pending_compute_count: 0,
+            image_source_pool: [],
+            image_source_pool_capacity: [],
+            image_source_pool_device_identity: 0,
+            image_source_pool_session_generation: 0,
+            image_source_pool_surface_identity: 0,
+            image_source_pool_reuse_count: 0,
+            image_source_pool_allocation_count: 0,
+            image_source_pool_replacement_count: 0,
+            image_source_upload_count: 0,
+            image_source_upload_bytes: 0,
             pending_font_descriptors: [],
             pending_font_params: [],
             pending_font_glyph_count: 0,
@@ -663,6 +686,16 @@ impl RenderBackend for VulkanBackend:
         self.pending_compute_descriptors = [0i64; 256]
         self.pending_compute_sources = [0i64; 256]
         self.pending_compute_count = 0
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
+        self.image_source_pool_reuse_count = 0
+        self.image_source_pool_allocation_count = 0
+        self.image_source_pool_replacement_count = 0
+        self.image_source_upload_count = 0
+        self.image_source_upload_bytes = 0
         self.cpu_fallback_used = false
         self.cpu_fallback_reason = ""
         true
@@ -700,6 +733,7 @@ impl RenderBackend for VulkanBackend:
                 # quarantine owns eventual process-level cleanup.
                 return
             self.completion_unknown = false
+        self._destroy_image_source_pool()
         if self.presentation_swapchain != 0:
             vulkan_sffi_destroy_swapchain(self.presentation_swapchain)
             self.presentation_swapchain = 0
@@ -1016,13 +1050,28 @@ impl RenderBackend for VulkanBackend:
                 return 0
 
         val src_size = pixel_count * 4
-        val d_src = vulkan_sffi_alloc_buffer(src_size, 0x80)
+        var d_src = if self.frame_batching_enabled:
+            self._acquire_image_source(src_size)
+        else:
+            vulkan_sffi_alloc_buffer(src_size, 0x80)
+        if (d_src <= 0 and self.frame_batching_enabled and
+            self._image_source_pool_is_fully_pending()):
+            # A full source pool means all slots are still dependencies of the
+            # current command buffer.  Flush once, then retry acquisition so a
+            # large image-heavy frame can continue without a CPU fallback.
+            val flushed = self._flush_pending_compute()
+            if flushed < 0:
+                return -1
+            if flushed > 0:
+                d_src = self._acquire_image_source(src_size)
         if d_src <= 0:
             return 0
         val source_bytes = _pixels_to_bytes(pixels, pixel_count)
         if source_bytes.len().to_i64() != src_size or not vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0):
-            vulkan_sffi_free_buffer(d_src)
+            self._release_image_source(d_src)
             return 0
+        self.image_source_upload_count = self.image_source_upload_count + 1
+        self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
         val pc = _pack_image_composite_pc(x, y, dst_w, dst_h, self.w, self.h,
             self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled,
             opacity_milli, composite_mode, src_w, src_h)
