@@ -1,8 +1,8 @@
 # Slang JIT physical prefill reports no memory slot, then SIGBUS
 
 Date: 2026-09-09
-Status: decode-position type corruption fixed in source; physical owner remains
-unqualified after the capped third verification cycle
+Status: decode-position and cleanup-dispatch corruption fixed in source;
+physical generation passes, shutdown telemetry reset remains unqualified
 
 ## Reproducer boundary
 
@@ -104,3 +104,19 @@ The next candidate keeps request close/cancel at lexical WFFI boundaries instead
 of passing their function pointer and handle through `_call1`. It requires a
 fresh owner-smoke run in the next bounded verification cycle before benchmark
 evidence is admissible.
+
+### 2026-09-09 unique cleanup ownership result
+
+A rebuilt branch-local compiler plus temporary stage probes showed that cold
+prefill and all four sample/piece/decode iterations completed. Cleanup invoked
+the backend close correctly first, with the resolved provider address and
+native handle `9`. The following logical `PAGED_MANAGER.close_request(...)`
+was incorrectly dispatched to the unrelated backend free function of the same
+name, producing `f_request_close=37` and a garbage request handle.
+
+The backend functions are now uniquely named `close_backend_request` and
+`cancel_backend_request`. With that collision removed, cold generation,
+exact-repeat reuse, prefix extension, and provider shutdown all complete
+without SIGBUS. The remaining owner-smoke failure is narrower: post-shutdown
+state reports `active=false` and `pool=0`, while the optional telemetry query is
+still observed as non-nil. This must be resolved before benchmark admission.
