@@ -226,6 +226,8 @@ fn _cold_prefill(native_request: GgmlRequest,
         index = index + 1
     if PAGED_MANAGER.request_page_count(logical_request).is_err():
         return Err(PagedExecutorError.ColdRequestInvalid)
+    if PAGED_MANAGER.record_committed_prefill(tokens.len()).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
     Ok(logical_request)
 
 fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
@@ -322,7 +324,56 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
         reservation, retained_checksum, 1, full_checksum):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(_): ()
+    if PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, retained).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
     _drain_reclaimed_pages()
+    Ok(logical_request)
+
+fn _request_tail_occupied(request: KvRequestId) -> Result<i64, PagedExecutorError>:
+    val page_count = match PAGED_MANAGER.request_page_count(request):
+        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    if page_count <= 0:
+        return Err(PagedExecutorError.LogicalRequestInvalid)
+    val tail = match PAGED_MANAGER.request_page_at(request, page_count - 1):
+        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    match PAGED_MANAGER.page_occupied(tail):
+        Err(_): Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): Ok(value)
+
+fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
+                                tokens: [i64]) -> Result<KvRequestId, PagedExecutorError>:
+    val prefix_tokens = match PAGED_MANAGER.prefix_token_count(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    if prefix_tokens <= 0 or prefix_tokens >= tokens.len():
+        return Err(PagedExecutorError.LogicalStateFailed)
+    val logical_request = match PAGED_MANAGER.create_request_from_prefix(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    val initial_tail_occupied = match _request_tail_occupied(logical_request):
+        Err(error):
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(error)
+        Ok(value): value
+    val copied_rows = if initial_tail_occupied < PAGED_PAGE_TOKENS:
+        initial_tail_occupied
+    else:
+        0
+    var index = prefix_tokens
+    while index < tokens.len():
+        match _decode_one(native_request, tokens[index], index):
+            Err(error):
+                PAGED_MANAGER.close_request(logical_request)
+                _drain_reclaimed_pages()
+                return Err(error)
+            Ok(_): ()
+        index = index + 1
+    if PAGED_MANAGER.record_committed_restore(
+        prefix_tokens, tokens.len() - prefix_tokens, 0, copied_rows).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
     Ok(logical_request)
 
 fn _decode_one(native_request: GgmlRequest, token: i64,
@@ -462,8 +513,8 @@ fn _cancel_generation(native_request: GgmlRequest,
 # Executes one request entirely through the external physical-page provider.
 # Once prefill starts, failures are returned from this mode; callers must not
 # replay the request through another context and risk duplicate output.
-fn paged_executor_generate(prompt: text,
-                           max_tokens: i64) -> Result<text, PagedExecutorError>:
+fn _paged_executor_generate_impl(prompt: text,
+                                 max_tokens: i64) -> Result<text, PagedExecutorError>:
     if not paged_executor_active():
         return Err(PagedExecutorError.ProviderUnavailable)
     if _current_request_active():
@@ -492,10 +543,19 @@ fn paged_executor_generate(prompt: text,
             return Err(error)
         Ok(value): value
     val key_hash = _token_hash(tokens, 0, tokens.len())
-    val prefix_result = PAGED_MANAGER.find_prefix(_page_namespace(), key_hash, tokens)
+    val prefix_result = PAGED_MANAGER.find_longest_prefix(_page_namespace(), tokens)
     val prefill_result = match prefix_result:
         Err(_): _cold_prefill(native_request, tokens)
-        Ok(prefix): _restore_exact_prefix(native_request, prefix, tokens)
+        Ok(prefix):
+            val retained = match PAGED_MANAGER.prefix_token_count(prefix):
+                Err(_):
+                    _cancel_generation(native_request, false)
+                    return Err(PagedExecutorError.LogicalStateFailed)
+                Ok(value): value
+            if retained == tokens.len():
+                _restore_exact_prefix(native_request, prefix, tokens)
+            else:
+                _restore_prefix_with_suffix(native_request, prefix, tokens)
     val logical_request = match prefill_result:
         Err(error):
             _cancel_generation(native_request, false)
@@ -506,8 +566,7 @@ fn paged_executor_generate(prompt: text,
             return Err(PagedExecutorError.LogicalRequestInvalid)
     # Cache admission is opportunistic. The active request remains the owner of
     # every page, so a full prefix table cannot change generation correctness.
-    if prefix_result.is_err():
-        PAGED_MANAGER.publish_prefix(logical_request, key_hash, tokens)
+    PAGED_MANAGER.publish_prefix(logical_request, key_hash, tokens)
     var output = ""
     var produced = 0
     while produced < max_tokens:
@@ -535,6 +594,16 @@ fn paged_executor_generate(prompt: text,
     match _close_generation(native_request, true):
         Err(error): Err(error)
         Ok(_): Ok(output)
+
+fn paged_executor_generate(prompt: text,
+                           max_tokens: i64) -> Result<text, PagedExecutorError>:
+    val result = _paged_executor_generate_impl(prompt, max_tokens)
+    match result:
+        Err(error):
+            if PAGED_MANAGER_ACTIVE:
+                PAGED_MANAGER.record_generation_failure()
+            Err(error)
+        Ok(output): Ok(output)
 
 fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
                            page_tokens: i64, page_capacity: i64,

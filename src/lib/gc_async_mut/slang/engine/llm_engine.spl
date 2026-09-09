@@ -4,9 +4,9 @@
 #
 # Master plan slot A5. What is present: model residency (load once, serve many),
 # admission control against the host memory budget, and request-level
-# generation, independently owned request contexts, and bounded serial prefix
-# snapshots. What is deliberately absent: continuous batching, chunked
-# prefill, paged KV ownership, and parallel execution. Requests are still
+# generation, independently owned request contexts, bounded serial prefix
+# snapshots, and optional physical paged-KV ownership. Continuous batching,
+# chunked prefill, and parallel execution remain absent. Requests are still
 # advanced by one serial owner at a time.
 #
 # RESIDENCY IS THE WHOLE POINT. These models are 46-78 GB; loading per request
@@ -17,7 +17,7 @@
 
 use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, PrefixCacheStats, backend_error_text, open_backend, load_model, open_context, generate, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
-use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_activate, paged_executor_shutdown, paged_executor_generate}
+use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown, paged_executor_generate}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
 use std.io_runtime.{file_exists}
@@ -87,6 +87,23 @@ fn engine_loaded_model() -> text:
 fn engine_prefix_cache_stats() -> PrefixCacheStats?:
     if ENGINE_BACKEND == nil:
         return nil
+    if paged_executor_active():
+        val physical = paged_executor_telemetry()
+        if physical == nil:
+            return nil
+        val backend_stats = prefix_cache_stats(ENGINE_BACKEND!)
+        return PrefixCacheStats(
+            capabilities: backend_stats.capabilities,
+            hits: physical!.prefix_hits.to_i64(),
+            misses: physical!.prefix_misses.to_i64(),
+            tokens_reused: physical!.reused_tokens.to_i64(),
+            tokens_prefilled: physical!.prefilled_tokens.to_i64(),
+            admissions: physical!.prefix_admissions.to_i64(),
+            evictions: physical!.prefix_evictions.to_i64(),
+            resident_entries: physical!.active_prefixes,
+            resident_bytes: physical!.allocated_bytes,
+            rejected_bytes: physical!.busy_rejects.to_i64(),
+            restore_failures: physical!.generation_failures.to_i64())
     prefix_cache_stats(ENGINE_BACKEND!)
 
 # Physical-page ABI discovery is not activation. Until a model-specific tensor

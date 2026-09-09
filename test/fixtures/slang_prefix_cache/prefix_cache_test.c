@@ -31,6 +31,7 @@ int64_t slang_ggml_prefix_restore_failures(void);
 int64_t slang_ggml_capabilities(void);
 int64_t slang_ggml_free(void);
 int64_t slang_ggml_request_configure(int64_t);
+int64_t slang_ggml_context_profile_configure(int64_t, int64_t);
 int64_t slang_ggml_request_create(int64_t);
 int64_t slang_ggml_request_close(int64_t);
 int64_t slang_ggml_request_cancel(int64_t);
@@ -75,6 +76,9 @@ int main(void) {
     assert(slang_ggml_request_cancel(1) < 0);
     assert(slang_ggml_request_configure(0) < 0);
     assert(slang_ggml_request_configure(9) < 0);
+    assert(slang_ggml_context_profile_configure(2, 1) < 0);
+    assert(slang_ggml_context_profile_configure(1, -1) < 0);
+    assert(slang_ggml_context_profile_configure(1, 2) == 0);
     slang_ggml_backend_init(); text("model"); assert(slang_ggml_model_load(0) == 0);
     assert(slang_ggml_ctx_create(64) == 0); assert(slang_ggml_capabilities() == 31);
     assert(slang_ggml_ctx_create(64) < 0);
@@ -150,6 +154,7 @@ int main(void) {
     int64_t first = slang_ggml_request_create(32);
     int64_t second = slang_ggml_request_create(48);
     assert(first > 0 && second > 0 && first != second);
+    assert(slang_ggml_context_profile_configure(0, 0) < 0);
     assert(slang_ggml_request_create(32) < 0);
     assert(slang_ggml_request_configure(1) < 0);
     assert(slang_ggml_request_n_ctx(first) == 32);
@@ -200,6 +205,7 @@ int main(void) {
     assert(slang_ggml_request_close(consumer) == 0);
     assert(slang_ggml_prefix_cache_configure(0, 0) == 0);
     assert(slang_ggml_free() == 0);
+    assert(slang_ggml_context_profile_configure(0, 0) == 0);
     assert(slang_ggml_n_ctx() < 0);
     assert(slang_ggml_is_eog(2) < 0);
     assert(slang_ggml_request_token_at(first, 0) < 0);
