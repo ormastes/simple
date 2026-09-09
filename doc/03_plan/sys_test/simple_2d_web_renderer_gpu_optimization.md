@@ -14,6 +14,10 @@ Map REQ-GPUUI-001..008 and NFR-GPUUI-001..007 to one executable scenario suite.
 7. Exercise every hot primitive and fail if a claimed device route falls back.
 8. Compare C/Simple Vulkan and Chrome/Simple records only when admission
    metadata matches; assert p95, RSS, and strict interactive thresholds.
+   The artifact-only companion contract at
+   `test/03_system/check/perf_comparison_admission_contract_spec.spl` covers
+   11 schema/identity/viewport/checksum cases and must remain separate from
+   physical renderer evidence.
 
 Capture typed receipts under `build/test-artifacts/` and generate the mirrored
 manual at
@@ -54,9 +58,11 @@ for future device traces, benchmark records, and raster captures.
 | REQ-GPUUI-004 | `simple_2d_web_renderer_gpu_optimization_spec.spl` | 3 | PORTABLE PASS; real fence pending |
 | REQ-GPUUI-005 | `simple_2d_web_renderer_gpu_optimization_spec.spl` | 3 | PORTABLE PASS; presenter integration pending |
 | REQ-GPUUI-006 | Native primitive/backend suites | 0 new | MISSING |
-| REQ-GPUUI-007 | `test/01_unit/lib/common/gpu/render_benchmark_admission_spec.spl` plus live differential suites | 9 admission cases | ADMISSION PASS; measurements missing |
+| REQ-GPUUI-007 | `test/03_system/check/perf_comparison_admission_contract_spec.spl` plus live differential suites | 11 admission cases | ADMISSION POLICY ONLY; measurements missing |
 | REQ-GPUUI-008 | Existing DrawIR/browser parity suites | 0 new | PARTIAL |
-| NFR-GPUUI-002..004,007 | `render_benchmark_admission_spec.spl` | 9 admission cases | POLICY PASS; receipts missing |
+| NFR-GPUUI-002,003 | `test/03_system/check/perf_comparison_admission_contract_spec.spl` and live comparison receipts | 11 admission cases | ADMISSION POLICY ONLY; measurements missing |
+| NFR-GPUUI-004 | `simple_2d_web_renderer_gpu_optimization_spec.spl`, capture contracts, and live renderer receipts | 1 portable zero-readback scenario | PORTABLE CONTRACT; device capture receipt missing |
+| NFR-GPUUI-007 | `test/03_system/check/perf_comparison_admission_contract_spec.spl` and live renderer receipts | Shared admission schema | PARTIAL; p50/p95, RSS, upload/readback, fence, damage, and device checksum receipts missing |
 | NFR-GPUUI-001,005,006 | Live performance and resource receipts | 0 admitted | MISSING |
 
 Risk areas are backend token honesty, device-loss invalidation, hidden
