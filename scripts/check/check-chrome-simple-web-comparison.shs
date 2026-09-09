@@ -1,0 +1,200 @@
+#!/bin/sh
+# Fail-closed, artifact-only Chrome/Simple web-render comparison admission.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$ROOT/scripts/check/lib/perf-comparison-admission.shs"
+
+fail() { echo "check-chrome-simple-web-comparison: $*" >&2; exit 1; }
+
+if [ "${1:-}" != "--aggregate" ] || [ "$#" -ne 2 ]; then
+    fail "usage: $0 --aggregate ARTIFACT_DIR"
+fi
+DIR=$2
+[ ! -L "$DIR" ] && [ -d "$DIR" ] || fail "invalid artifact directory: $DIR"
+command -v node >/dev/null 2>&1 || fail "node is required for strict JSON admission"
+
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/simple-web-comparison.XXXXXX") || fail "cannot create temporary directory"
+trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+
+# Validate the JSON object and emit only the exact shared admission projection.
+# The JSON itself is never sourced. Newlines/control characters therefore
+# cannot forge a second environment row.
+json_to_projection() {
+    json_path=$1
+    expected_fixture=$2
+    expected_kind=$3
+    prefix=$4
+    env_path=$5
+    node - "$json_path" "$expected_fixture" "$expected_kind" "$prefix" "$DIR" >"$env_path" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const [jsonPath, fixture, expectedKind, prefix, artifactDir] = process.argv.slice(2);
+const keys = [
+  'source', 'comparison_admitted', 'fixture', 'workload_id',
+  'viewport_width', 'viewport_height', 'warmup_count', 'sample_count',
+  'timing_scope', 'readback_mode', 'capture_mode', 'gpu_identity',
+  'fallback_state', 'source_path', 'source_revision', 'checksum_semantics',
+  'binary_kind', 'binary_path', 'binary_sha256', 'binary_admission_path',
+  'binary_admission_sha256', 'artifact_path', 'artifact_sha256', 'checksum',
+  'frame_ms_p95'
+];
+const projectionKeys = keys.slice(3, 24);
+function reject(reason) { process.stderr.write(reason); process.exit(2); }
+function regularUnlinked(file) {
+  try { const s = fs.lstatSync(file); return s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.size > 0; }
+  catch (_) { return false; }
+}
+if (!regularUnlinked(jsonPath)) reject('invalid-json-artifact');
+const raw = fs.readFileSync(jsonPath, 'utf8');
+function scannedTopLevelKeys(text) {
+  let i = 0;
+  const found = [];
+  const ws = () => { while (i < text.length && /\s/.test(text[i])) i++; };
+  const jsonString = () => {
+    if (text[i] !== '"') reject('malformed-json');
+    const start = i++;
+    let escaped = false;
+    while (i < text.length) {
+      const ch = text[i++];
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') return JSON.parse(text.slice(start, i));
+    }
+    reject('malformed-json');
+  };
+  ws(); if (text[i++] !== '{') reject('json-not-object'); ws();
+  if (text[i] === '}') { i++; ws(); return found; }
+  while (i < text.length) {
+    const key = jsonString();
+    if (found.includes(key)) reject(`duplicate-json-key-${key}`);
+    found.push(key); ws(); if (text[i++] !== ':') reject('malformed-json'); ws();
+    if (text[i] === '"') jsonString();
+    else {
+      const start = i;
+      while (i < text.length && text[i] !== ',' && text[i] !== '}') {
+        if (text[i] === '{' || text[i] === '[') reject('nested-json-value');
+        i++;
+      }
+      if (text.slice(start, i).trim() === '') reject('malformed-json');
+    }
+    ws();
+    if (text[i] === ',') { i++; ws(); continue; }
+    if (text[i] === '}') { i++; ws(); break; }
+    reject('malformed-json');
+  }
+  if (i !== text.length) reject('trailing-json-content');
+  return found;
+}
+const scannedKeys = scannedTopLevelKeys(raw);
+let p;
+try { p = JSON.parse(raw); } catch (_) { reject('malformed-json'); }
+if (p === null || Array.isArray(p) || typeof p !== 'object') reject('json-not-object');
+const actual = Object.keys(p).sort();
+const expected = [...keys].sort();
+if (scannedKeys.length !== keys.length || actual.length !== expected.length || actual.some((k, i) => k !== expected[i])) reject('json-keyset-mismatch');
+if (p.source !== 'measured' || p.comparison_admitted !== true) reject('producer-not-admitted');
+if (p.fixture !== fixture) reject('fixture-mismatch');
+if (p.binary_kind !== expectedKind) reject('binary-kind-mismatch');
+for (const k of ['viewport_width', 'viewport_height', 'warmup_count', 'sample_count']) {
+  if (!Number.isSafeInteger(p[k]) || p[k] <= 0) reject(`invalid-${k}`);
+}
+if (typeof p.frame_ms_p95 !== 'number' || !Number.isFinite(p.frame_ms_p95) || p.frame_ms_p95 <= 0) reject('invalid-frame-p95');
+for (const k of keys.filter(k => !['comparison_admitted', 'viewport_width', 'viewport_height', 'warmup_count', 'sample_count', 'frame_ms_p95'].includes(k))) {
+  if (typeof p[k] !== 'string' || p[k].length === 0 || /[\r\n\0]/.test(p[k])) reject(`invalid-${k}`);
+}
+for (const k of ['source_revision', 'binary_sha256', 'binary_admission_sha256', 'artifact_sha256']) {
+  if (!/^[0-9a-f]{64}$/.test(p[k])) reject(`invalid-${k}`);
+}
+const bundle = fs.realpathSync(artifactDir);
+for (const k of ['artifact_path', 'binary_admission_path']) {
+  let real;
+  try { real = fs.realpathSync(p[k]); } catch (_) { reject(`missing-${k}`); }
+  if (!(real.startsWith(bundle + path.sep))) reject(`${k}-outside-bundle`);
+}
+for (const k of projectionKeys) process.stdout.write(`${prefix}${k}=${String(p[k])}\n`);
+process.stdout.write(`${prefix}frame_ms_p95=${String(p.frame_ms_p95)}\n`);
+NODE
+}
+
+value_of() {
+    perf_admission_value_of "$1" "$2"
+}
+
+FIXTURES='static_page scroll_heavy layout_stress paint_heavy'
+aggregate_status=pass
+aggregate_reason=all-rows-admitted
+row_count=0
+admitted_count=0
+
+for fixture in $FIXTURES; do
+    row_count=$((row_count + 1))
+    chrome_json="$DIR/chrome_${fixture}.json"
+    simple_json="$DIR/simple_${fixture}.json"
+    chrome_env="$TMP_ROOT/${fixture}-chrome.env"
+    simple_env="$TMP_ROOT/${fixture}-simple.env"
+    echo "chrome_simple_web_fixture=$fixture"
+    if [ ! -s "$chrome_json" ] || [ ! -s "$simple_json" ]; then
+        echo "chrome_simple_web_status=skipped"
+        echo "chrome_simple_web_reason=missing-canonical-artifact"
+        echo "chrome_simple_web_ratio_x1000=0"
+        aggregate_status=skipped; aggregate_reason=missing-canonical-artifact
+        continue
+    fi
+
+    chrome_error="$TMP_ROOT/${fixture}-chrome.error"
+    simple_error="$TMP_ROOT/${fixture}-simple.error"
+    if ! json_to_projection "$chrome_json" "$fixture" system-browser chrome_ "$chrome_env" 2>"$chrome_error"; then
+        echo "chrome_simple_web_status=skipped"
+        echo "chrome_simple_web_reason=invalid-chrome-artifact:$(head -c 120 "$chrome_error")"
+        echo "chrome_simple_web_ratio_x1000=0"
+        aggregate_status=skipped; aggregate_reason=invalid-chrome-artifact
+        continue
+    fi
+    if ! json_to_projection "$simple_json" "$fixture" admitted-selfhosted simple_ "$simple_env" 2>"$simple_error"; then
+        echo "chrome_simple_web_status=skipped"
+        echo "chrome_simple_web_reason=invalid-simple-artifact:$(head -c 120 "$simple_error")"
+        echo "chrome_simple_web_ratio_x1000=0"
+        aggregate_status=skipped; aggregate_reason=invalid-simple-artifact
+        continue
+    fi
+
+    chrome_ms=$(value_of "$chrome_env" chrome_frame_ms_p95)
+    simple_ms=$(value_of "$simple_env" simple_frame_ms_p95)
+    # Metrics are deliberately removed from the exact admission projections.
+    sed '/_frame_ms_p95=/d' "$chrome_env" >"$chrome_env.row"
+    sed '/_frame_ms_p95=/d' "$simple_env" >"$simple_env.row"
+    perf_compare_admit_env "$chrome_env.row" chrome_ "$simple_env.row" simple_
+    if [ "$PERF_ADMISSION_STATUS" != admitted ]; then
+        echo "chrome_simple_web_status=skipped"
+        echo "chrome_simple_web_reason=admission-$PERF_ADMISSION_REASON"
+        echo "chrome_simple_web_ratio_x1000=0"
+        aggregate_status=skipped; aggregate_reason="admission-$PERF_ADMISSION_REASON"
+        continue
+    fi
+
+    if ! row_ratio=$(awk -v s="$simple_ms" -v c="$chrome_ms" '
+        BEGIN {
+            decimal = "^[0-9]+([.][0-9]+)?$"
+            if (s !~ decimal || c !~ decimal || (s + 0) <= 0 || (c + 0) <= 0) exit 1
+            printf "%d", (s * 1000 / c)
+        }'); then
+        echo "chrome_simple_web_status=skipped"
+        echo "chrome_simple_web_reason=invalid-frame-p95"
+        echo "chrome_simple_web_ratio_x1000=0"
+        aggregate_status=skipped; aggregate_reason=invalid-frame-p95
+        continue
+    fi
+
+    admitted_count=$((admitted_count + 1))
+    echo "chrome_simple_web_status=admitted"
+    echo "chrome_simple_web_reason=admitted"
+    echo "chrome_simple_web_ratio_x1000=$row_ratio"
+done
+
+echo "chrome_simple_web_comparison_status=$aggregate_status"
+echo "chrome_simple_web_comparison_reason=$aggregate_reason"
+echo "chrome_simple_web_comparison_row_count=$row_count"
+echo "chrome_simple_web_comparison_admitted_count=$admitted_count"
+[ "$aggregate_status" = pass ] || exit 0

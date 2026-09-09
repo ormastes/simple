@@ -16,6 +16,9 @@ const { app, BrowserWindow } = require('electron');
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const REQUIRED = ['rect', 'text', 'image', 'pointer', 'keyboard', 'scroll', 'resize'];
+const EXPECTED_ELECTRON = '42.5.0';
+const EXPECTED_CHROME = '148.0.7778.271';
+const ELECTRON_LOCK = require('path').join(__dirname, '..', 'electron-shell', 'package-lock.json');
 
 function fail(message) {
   process.stderr.write(`REAL_CHROMIUM_ORACLE_UNAVAILABLE ${message}\n`);
@@ -27,7 +30,9 @@ function digest(value) {
 }
 
 function scalar(fields) {
-  return Object.keys(fields).sort().map((key) => `${key}=${String(fields[key])}`).join(';');
+  const escaped = (value) => String(value)
+    .replaceAll('%', '%25').replaceAll(';', '%3B').replaceAll('=', '%3D');
+  return Object.keys(fields).sort().map((key) => `${key}=${escaped(fields[key])}`).join(';');
 }
 
 function event(sequence, layer, operation, objectId, parentId, result, error, payload, fields, profile) {
@@ -79,6 +84,15 @@ if (!Array.isArray(request.primitives) || !REQUIRED.every((name) => request.prim
 }
 if (request.schema_version !== 1 || typeof request.run_id !== 'string' || typeof request.environment_profile_id !== 'string') {
   fail('schema-v1-run-and-environment-required');
+}
+if (process.versions.electron !== EXPECTED_ELECTRON || process.versions.chrome !== EXPECTED_CHROME) {
+  fail(`browser-version-mismatch:electron=${process.versions.electron};chrome=${process.versions.chrome}`);
+}
+const brokerSha256 = digest(fs.readFileSync(__filename));
+const lockSha256 = digest(fs.readFileSync(ELECTRON_LOCK));
+if (request.broker_sha256 !== brokerSha256 || request.electron_lock_sha256 !== lockSha256 ||
+    request.electron_version !== EXPECTED_ELECTRON || request.chrome_version !== EXPECTED_CHROME) {
+  fail('oracle-manifest-identity-mismatch');
 }
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
@@ -163,7 +177,7 @@ app.whenReady().then(async () => {
       // turn an otherwise valid Chromium CPU receipt into fixture output.
       gpuError = String(error.message || error);
     }
-    const browser = `electron=${process.versions.electron};chrome=${process.versions.chrome};platform=${process.platform}`;
+    const browser = `electron=${process.versions.electron};chrome=${process.versions.chrome};platform=${process.platform};broker=${brokerSha256};lock=${lockSha256}`;
     const device = gpuError ? 'unavailable' : JSON.stringify(gpuInfo.gpuDevice || gpuInfo.auxAttributes || {});
     const profile = request.environment_profile_id;
     const events = [

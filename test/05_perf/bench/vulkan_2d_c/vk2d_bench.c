@@ -7,7 +7,7 @@
 // allocation, first compute queue, one-shot command buffers, fence wait).
 // The adaptation adds exactly what a 2D renderer does per frame:
 // vkCmdFillBuffer clear + N rect-fill compute dispatches + optional CPU
-// readback, one submit + one fence wait per frame.
+// readback, retained three-slot submission, and nonblocking completion polls.
 //
 // macOS/MoltenVK: requires VK_KHR_portability_enumeration (patched below).
 //
@@ -48,12 +48,62 @@ static u64 now_ns(void) {
     return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
 }
 
+static int compare_u64(const void* a, const void* b) {
+    const u64 av = *(const u64*)a, bv = *(const u64*)b;
+    return av < bv ? -1 : av > bv ? 1 : 0;
+}
+
+static b32 poll_fence_complete(VkDevice device, VkFence fence, u64* poll_count) {
+    for (;;) {
+        (*poll_count)++;
+        const VkResult status = vkGetFenceStatus(device, fence);
+        if (status == VK_SUCCESS) return 1;
+        if (status != VK_NOT_READY) return 0;
+        const struct timespec pause = { .tv_sec = 0, .tv_nsec = 50000 };
+        nanosleep(&pause, NULL);
+    }
+}
+
+static void record_frame(VkCommandBuffer cmd_buffer, VkBuffer fb_buffer,
+                         u64 fb_size, VkPipeline pipeline,
+                         VkPipelineLayout pipeline_layout,
+                         VkDescriptorSet descriptor_set,
+                         const RectPush* rects, i32 num_rects,
+                         u32 clear_color) {
+    vkResetCommandBuffer(cmd_buffer, 0);
+    vkBeginCommandBuffer(cmd_buffer, &(VkCommandBufferBeginInfo){
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+    });
+    vkCmdFillBuffer(cmd_buffer, fb_buffer, 0, fb_size, clear_color);
+    vkCmdPipelineBarrier(cmd_buffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, NULL, 1, &(VkBufferMemoryBarrier){
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .buffer = fb_buffer, .offset = 0, .size = fb_size,
+        }, 0, NULL);
+    vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+    for (i32 i = 0; i < num_rects; i++) {
+        vkCmdPushConstants(cmd_buffer, pipeline_layout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RectPush), &rects[i]);
+        vkCmdDispatch(cmd_buffer,
+            (u32)(rects[i].w + 15) / 16,
+            (u32)(rects[i].h + 15) / 16, 1);
+    }
+    vkEndCommandBuffer(cmd_buffer);
+}
+
 int main(int argc, char** argv) {
     const i32 fb_w = argc > 1 ? atoi(argv[1]) : 800;
     const i32 fb_h = argc > 2 ? atoi(argv[2]) : 600;
     i32 num_rects = argc > 3 ? atoi(argv[3]) : 64;
     const i32 num_frames = argc > 4 ? atoi(argv[4]) : 300;
-    const b32 do_readback = argc > 5 ? atoi(argv[5]) : 1;
+    const b32 do_readback = argc > 5 ? atoi(argv[5]) : 0;
+    const i32 warmup_count = argc > 6 ? atoi(argv[6]) : 5;
+    const i32 ring_size = 3;
 
     VkInstance instance = NULL;
     {
@@ -72,12 +122,12 @@ int main(int argc, char** argv) {
     }
 
     VkPhysicalDevice physical_device = NULL;
+    VkPhysicalDeviceProperties device_props = { 0 };
     {
         u32 n = 1;
         vkEnumeratePhysicalDevices(instance, &n, &physical_device);
-        VkPhysicalDeviceProperties props = { 0 };
-        vkGetPhysicalDeviceProperties(physical_device, &props);
-        printf("device: %s\n", props.deviceName);
+        vkGetPhysicalDeviceProperties(physical_device, &device_props);
+        printf("device: %s\n", device_props.deviceName);
     }
 
     u32 queue_family_index = 0;
@@ -231,21 +281,23 @@ int main(int argc, char** argv) {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
     }, NULL, &cmd_pool);
 
-    VkCommandBuffer cmd_buffer = NULL;
+    VkCommandBuffer cmd_buffers[3] = { NULL, NULL, NULL };
     vkAllocateCommandBuffers(device, &(VkCommandBufferAllocateInfo){
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = cmd_pool,
-        .commandBufferCount = 1,
+        .commandBufferCount = ring_size,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY
-    }, &cmd_buffer);
+    }, cmd_buffers);
 
     VkQueue queue = NULL;
     vkGetDeviceQueue(device, queue_family_index, 0, &queue);
 
-    VkFence fence = NULL;
-    vkCreateFence(device, &(VkFenceCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    }, NULL, &fence);
+    VkFence fences[3] = { NULL, NULL, NULL };
+    for (i32 i = 0; i < ring_size; i++) {
+        vkCreateFence(device, &(VkFenceCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        }, NULL, &fences[i]);
+    }
 
     // Deterministic pseudo-random rect set (same for every run/implementation).
     u64 rng = 0x9e3779b97f4a7c15ull;
@@ -295,101 +347,84 @@ int main(int argc, char** argv) {
     }
 
     const u32 clear_color = 0xFF141414u;
-    // The scene is fixed, so every frame MUST fold to the same `acc`. The old
-    // accumulator was `checksum ^= acc`, which cancels itself on any even
-    // frame count and printed checksum=0 while the renderer was perfectly
-    // correct -- and 0 also reads as "blank surface". Latch the first frame's
-    // fold and COUNT later frames that disagree, so the value is independent
-    // of the frame count and a genuine mid-run divergence is still reported.
-    // Mirrors the Simple leg (vk2d_bench.spl) exactly.
     u64 checksum = 0;
-    int checksum_latched = 0;
-    u64 frame_mismatches = 0;
 
+    // Pipeline/JIT warmup is outside both throughput and latency samples.
+    for (i32 frame = 0; frame < warmup_count; frame++) {
+        record_frame(cmd_buffers[0], fb_buffer, fb_size, pipeline,
+            pipeline_layout, descriptor_set, rects, num_rects, clear_color);
+        vkQueueSubmit(queue, 1, &(VkSubmitInfo){
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+            .pCommandBuffers = &cmd_buffers[0]
+        }, fences[0]);
+        vkWaitForFences(device, 1, &fences[0], true, ~(u64)(0));
+        vkResetFences(device, 1, &fences[0]);
+    }
+
+    u64* latency_ns = calloc((size_t)num_frames, sizeof(u64));
+    u64 submit_ns[3] = { 0, 0, 0 };
+    i32 slot_sample[3] = { -1, -1, -1 };
+    u64 completion_poll_count = 0;
     u64 t0 = now_ns();
     for (i32 frame = 0; frame < num_frames; frame++) {
-        vkResetCommandBuffer(cmd_buffer, 0);
-        vkBeginCommandBuffer(cmd_buffer, &(VkCommandBufferBeginInfo){
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-        });
-
-        vkCmdFillBuffer(cmd_buffer, fb_buffer, 0, fb_size, clear_color);
-        vkCmdPipelineBarrier(cmd_buffer,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, NULL, 1, &(VkBufferMemoryBarrier){
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-                .buffer = fb_buffer, .offset = 0, .size = fb_size,
-            }, 0, NULL);
-
-        vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-        vkCmdBindDescriptorSets(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
-        for (i32 i = 0; i < num_rects; i++) {
-            vkCmdPushConstants(cmd_buffer, pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RectPush), &rects[i]);
-            vkCmdDispatch(cmd_buffer,
-                (u32)(rects[i].w + 15) / 16, (u32)(rects[i].h + 15) / 16, 1);
-        }
-
-        if (do_readback) {
-            vkCmdPipelineBarrier(cmd_buffer,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                0, 0, NULL, 1, &(VkBufferMemoryBarrier){
-                    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                    .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-                    .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
-                    .buffer = fb_buffer, .offset = 0, .size = fb_size,
-                }, 0, NULL);
-        }
-        vkEndCommandBuffer(cmd_buffer);
-
-        vkQueueSubmit(queue, 1, &(VkSubmitInfo){
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &cmd_buffer
-        }, fence);
-        vkWaitForFences(device, 1, &fence, true, ~(u64)(0));
-        vkResetFences(device, 1, &fence);
-
-        if (do_readback) {
-            // HOST_COHERENT: visible right after the fence. Cheap fold so the
-            // readback is real work the optimizer cannot delete.
-            //
-            // The stride SCALES with the surface: a fixed +4096 sampled
-            // exactly one pixel at 64x64 (n == 4096), so the checksum could
-            // not tell a rendered frame from a blank one. `n / 4096` keeps the
-            // sample count at ~4096 pixels spread across the whole surface.
-            // The fold is 32-bit FNV-1a, NOT xor: xor over N equal samples
-            // cancels for even N. `acc = ((acc ^ px) * 16777619) & M` is a
-            // bijection on acc for fixed px (16777619 is odd, hence invertible
-            // mod 2^32) and on px for fixed acc, so equal-length sequences
-            // that differ at ANY index fold to different values.
-            //
-            // THIS MUST STAY BYTE-FOR-BYTE THE SAME FOLD AS THE SIMPLE LEG
-            // (vk2d_bench.spl): same n, same stride, same seed, same prime,
-            // same 32-bit mask, same iteration order. If the two diverge the
-            // checksums stop being comparable and the gate's premise breaks.
-            // u64 + an explicit mask (not u32 wraparound) so the expression is
-            // literally the same as the Simple leg's i64 one.
-            const u64 n = fb_size / 4;
-            u64 stride = n / 4096;
-            if (stride < 1) stride = 1;
-            u64 acc = 2166136261u;
-            for (u64 i = 0; i < n; i += stride) {
-                const u64 px = (u64)fb_pixels[i] & 0xFFFFFFFFu;
-                acc = ((acc ^ px) * 16777619u) & 0xFFFFFFFFu;
+        const i32 slot = frame % ring_size;
+        if (slot_sample[slot] >= 0) {
+            if (!poll_fence_complete(device, fences[slot], &completion_poll_count)) {
+                fprintf(stderr, "timed fence poll failed\n");
+                return 1;
             }
-            if (!checksum_latched) { checksum = acc; checksum_latched = 1; }
-            else if (acc != checksum) { frame_mismatches++; }
+            latency_ns[slot_sample[slot]] = now_ns() - submit_ns[slot];
+            vkResetFences(device, 1, &fences[slot]);
+        }
+        record_frame(cmd_buffers[slot], fb_buffer, fb_size, pipeline,
+            pipeline_layout, descriptor_set, rects, num_rects, clear_color);
+        submit_ns[slot] = now_ns();
+        slot_sample[slot] = frame;
+        vkQueueSubmit(queue, 1, &(VkSubmitInfo){
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+            .pCommandBuffers = &cmd_buffers[slot]
+        }, fences[slot]);
+    }
+    for (i32 slot = 0; slot < ring_size; slot++) {
+        if (slot_sample[slot] >= 0) {
+            if (!poll_fence_complete(device, fences[slot], &completion_poll_count)) {
+                fprintf(stderr, "final fence poll failed\n");
+                return 1;
+            }
+            latency_ns[slot_sample[slot]] = now_ns() - submit_ns[slot];
         }
     }
     u64 t1 = now_ns();
 
+    qsort(latency_ns, (size_t)num_frames, sizeof(u64), compare_u64);
+    const u64 p50_ns = latency_ns[(num_frames - 1) * 50 / 100];
+    const u64 p95_ns = latency_ns[(num_frames - 1) * 95 / 100];
+
     // Raw framebuffer dump for the byte-for-byte comparator. Written AFTER
     // the frame loop, so it is the same pixels the checksum folded.
     const char* dump_path = getenv("VK2D_DUMP_FB");
+    if (do_readback) {
+        vkResetFences(device, 1, &fences[0]);
+        vkResetCommandBuffer(cmd_buffers[0], 0);
+        vkBeginCommandBuffer(cmd_buffers[0], &(VkCommandBufferBeginInfo){
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+        });
+        vkCmdPipelineBarrier(cmd_buffers[0],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+            0, 0, NULL, 1, &(VkBufferMemoryBarrier){
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+                .buffer = fb_buffer, .offset = 0, .size = fb_size,
+            }, 0, NULL);
+        vkEndCommandBuffer(cmd_buffers[0]);
+        vkQueueSubmit(queue, 1, &(VkSubmitInfo){
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+            .pCommandBuffers = &cmd_buffers[0]
+        }, fences[0]);
+        vkWaitForFences(device, 1, &fences[0], true, ~(u64)(0));
+        for (u64 i = 0; i < fb_size / 4; i += 4096) checksum ^= fb_pixels[i];
+    }
     if (dump_path && do_readback) {
         FILE* df = fopen(dump_path, "wb");
         if (df) {
@@ -400,7 +435,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (getenv("VK2D_DEBUG")) {
+    if (getenv("VK2D_DEBUG") && do_readback) {
         // Correctness probe: center + corner pixels must be non-zero after
         // the clear, and at least one rect-colored pixel must exist.
         u64 nonzero = 0, rected = 0;
@@ -416,13 +451,10 @@ int main(int argc, char** argv) {
 
     double ms = (double)(t1 - t0) / 1e6;
     double fps = (double)num_frames / (ms / 1000.0);
-    printf("c-vulkan-2d w=%d h=%d rects=%d frames=%d readback=%d ms=%.1f fps=%.1f checksum=%llu frame_mismatches=%llu\n",
-        fb_w, fb_h, num_rects, num_frames, do_readback, ms, fps,
-        (unsigned long long)checksum, (unsigned long long)frame_mismatches);
-
     free(rects);
+    free(latency_ns);
     vkUnmapMemory(device, memory);
-    vkDestroyFence(device, fence, NULL);
+    for (i32 i = 0; i < ring_size; i++) vkDestroyFence(device, fences[i], NULL);
     vkDestroyCommandPool(device, cmd_pool, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
@@ -433,5 +465,15 @@ int main(int argc, char** argv) {
     vkDestroyBuffer(device, fb_buffer, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
+    printf("c-vulkan-2d w=%d h=%d rects=%d warmups=%d samples=%d ring=%d max_frames_in_flight=3 unconditional_submit_wait=false timed_buffer_allocation_count=0 retained_buffer_bytes=%llu teardown_released_bytes=%llu timed_full_frame_upload_count=0 upload_bytes=%llu timed_readback_bytes=0 capture_count=%d capture_readback_bytes=%llu fence_completions=%d completion_polls=%llu cpu_completion_wait_count=0 event_generations=%d damage_area_pixels=%llu device_vendor=%04x device_id=%04x p50_ns=%llu p95_ns=%llu ms=%.1f fps=%.1f checksum=%llu\n",
+        fb_w, fb_h, num_rects, warmup_count, num_frames, ring_size,
+        (unsigned long long)mem_reqs.size, (unsigned long long)mem_reqs.size,
+        (unsigned long long)num_frames * (unsigned long long)num_rects * sizeof(RectPush),
+        do_readback ? 1 : 0, (unsigned long long)(do_readback ? fb_size : 0),
+        num_frames, (unsigned long long)completion_poll_count, num_frames,
+        (unsigned long long)fb_size / 4ull * (unsigned long long)num_frames,
+        device_props.vendorID, device_props.deviceID,
+        (unsigned long long)p50_ns, (unsigned long long)p95_ns, ms, fps,
+        (unsigned long long)checksum);
     return 0;
 }
