@@ -385,21 +385,101 @@ int64_t rt_vulkan_async_session_create_with_wait(int64_t capacity, int64_t timeo
 int64_t rt_vulkan_async_session_create(int64_t capacity) {
     return rt_vulkan_async_session_create_with_wait(capacity, 1000000);
 }
-GPU_CALL1(int64_t, rt_vulkan_async_session_acquire, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_acquire", -1, int64_t)
-GPU_CALL2(int64_t, rt_vulkan_async_session_command, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_command", -1, int64_t, int64_t)
-GPU_CALL2(int64_t, rt_vulkan_async_session_submit, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_submit", -1, int64_t, int64_t)
-GPU_CALL2(int64_t, rt_vulkan_async_session_poll, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_poll", -1, int64_t, int64_t)
-GPU_CALL2(int64_t, rt_vulkan_async_session_retire, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_retire", -1, int64_t, int64_t)
-GPU_CALL2(int64_t, rt_vulkan_async_session_receipt, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_receipt", 0, int64_t, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_cancel, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_cancel", -1, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_close, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_close", 0, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_capacity, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_capacity", 0, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_in_flight, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_in_flight", -1, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_published_sequence, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_published_sequence", -1, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_recover, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_recover", -1, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_abandon_device, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_abandon_device", -1, int64_t)
-GPU_CALL1(int64_t, rt_vulkan_async_session_snapshot, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_snapshot", -1, int64_t)
-GPU_CALL3(int64_t, rt_vulkan_async_session_snapshot_word, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_async_session_snapshot_word", -1, int64_t, int64_t, int64_t)
+/* Keep the async extension forwards explicit.  The ordinary GPU_CALLn macros
+ * are ABI-correct, but their generated function names are invisible to the
+ * source-level C/Rust dual-lane ratchet.  These wrappers preserve the same
+ * provider lookup and fail-closed sentinels while making the C lane
+ * mechanically auditable. */
+int64_t rt_vulkan_async_session_acquire(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_acquire");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_command(int64_t session, int64_t token) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_command");
+    return fn ? fn(session, token) : -1;
+}
+int64_t rt_vulkan_async_session_submit(int64_t session, int64_t token) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_submit");
+    return fn ? fn(session, token) : -1;
+}
+int64_t rt_vulkan_async_session_poll(int64_t session, int64_t token) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_poll");
+    return fn ? fn(session, token) : -1;
+}
+int64_t rt_vulkan_async_session_retire(int64_t session, int64_t token) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_retire");
+    return fn ? fn(session, token) : -1;
+}
+int64_t rt_vulkan_async_session_receipt(int64_t session, int64_t sequence) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_receipt");
+    return fn ? fn(session, sequence) : 0;
+}
+int64_t rt_vulkan_async_session_cancel(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_cancel");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_close(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_close");
+    return fn ? fn(session) : 0;
+}
+int64_t rt_vulkan_async_session_capacity(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_capacity");
+    return fn ? fn(session) : 0;
+}
+int64_t rt_vulkan_async_session_in_flight(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_in_flight");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_published_sequence(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_published_sequence");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_recover(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_recover");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_abandon_device(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_abandon_device");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_snapshot(int64_t session) {
+    typedef int64_t (*Fn)(int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_snapshot");
+    return fn ? fn(session) : -1;
+}
+int64_t rt_vulkan_async_session_snapshot_word(int64_t session, int64_t snapshot, int64_t index) {
+    typedef int64_t (*Fn)(int64_t, int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_VULKAN,
+        "rt_vulkan_async_session_snapshot_word");
+    return fn ? fn(session, snapshot, index) : -1;
+}
 GPU_CALL2(int64_t, rt_vulkan_alloc_buffer, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_alloc_buffer", 0, int64_t, int64_t)
 
 static int simple_gpu_array_to_bytes(int64_t array_value, uint8_t **bytes, int64_t *length) {
