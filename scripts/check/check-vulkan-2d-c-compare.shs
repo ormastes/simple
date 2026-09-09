@@ -10,8 +10,9 @@
 #   through the identical workload (clear + N draw_rect_filled + submit_batch
 #   + present + read_pixels_with_source).
 #
-#   This script runs both and aggregates an evidence file:
-#     build/vulkan-2d-c-compare/evidence.env
+#   This script runs both and aggregates an evidence file in one immutable
+#   run directory:
+#     build/vulkan-2d-c-compare/runs/<run_id>/evidence.env
 #   with compare_ratio_x1000 = simple_p95_ns * 1000 / c_p95_ns and
 #   compare_status=pass when the ratio meets the selected upper bound (2.0x,
 #   override with VK2D_BUDGET_X1000).
@@ -22,8 +23,9 @@
 #                      MoltenVK ICD, no vulkan seed binary) is recorded as
 #                      status=skipped with an explicit reason — never a fake
 #                      pass.
-#   --aggregate DIR    read DIR/c.env + DIR/simple.env and emit the aggregate
-#                      to stdout only. This is the spec-tested downgrade path.
+#   --aggregate DIR    read the direct immutable DIR/c.env + DIR/simple.env
+#                      and emit the aggregate to stdout only. A `latest`
+#                      pointer is deliberately not accepted as DIR.
 #
 # Exit: 0 when aggregate is pass or skipped, 1 when both legs ran and the
 # ratio is below budget.
@@ -34,6 +36,8 @@ BENCH_DIR="$ROOT/test/05_perf/bench/vulkan_2d_c"
 OUT_DIR="$ROOT/build/vulkan-2d-c-compare"
 ADMISSION_LIB="$ROOT/scripts/check/lib/perf-comparison-admission.shs"
 \. "$ADMISSION_LIB"
+IMMUTABLE_RUN_LIB="$ROOT/scripts/check/lib/immutable-perf-run.shs"
+\. "$IMMUTABLE_RUN_LIB"
 BUDGET_X1000=${VK2D_BUDGET_X1000:-2000}
 W=${VK2D_W:-800}
 H=${VK2D_H:-600}
@@ -50,22 +54,32 @@ done
 [ "$RECTS" -le 1000000 ] && [ "$FRAMES" -le 1000000 ] || fail "workload count exceeds contract bound"
 [ "$BUDGET_X1000" -le 1000000 ] || fail "budget exceeds contract bound"
 
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_TOOL=$(command -v sha256sum)
+    SHA256_STYLE=gnu
+elif command -v shasum >/dev/null 2>&1; then
+    SHA256_TOOL=$(command -v shasum)
+    SHA256_STYLE=bsd
+else
+    fail "SHA-256 tool unavailable"
+fi
+
 hash_file() {
     if [ ! -f "$1" ]; then
         return 0
     fi
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | sed 's/[[:space:]].*$//'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | sed 's/[[:space:]].*$//'
+    if [ "$SHA256_STYLE" = gnu ]; then
+        "$SHA256_TOOL" "$1" | sed 's/[[:space:]].*$//'
+    else
+        "$SHA256_TOOL" -a 256 "$1" | sed 's/[[:space:]].*$//'
     fi
 }
 
 hash_stdin() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | sed 's/[[:space:]].*$//'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | sed 's/[[:space:]].*$//'
+    if [ "$SHA256_STYLE" = gnu ]; then
+        "$SHA256_TOOL" | sed 's/[[:space:]].*$//'
+    else
+        "$SHA256_TOOL" -a 256 | sed 's/[[:space:]].*$//'
     fi
 }
 
@@ -78,6 +92,12 @@ SOURCE_REVISION=$( {
 WORKLOAD_REVISION=$SOURCE_REVISION
 C_SOURCE_REVISION=$(hash_file "$BENCH_DIR/vk2d_bench.c")
 SIMPLE_SOURCE_REVISION=$(hash_file "$BENCH_DIR/vk2d_bench.spl")
+FIXTURE_REVISION=$(hash_file "$BENCH_DIR/scenes.txt")
+CONFIG_REVISION=$(printf '%s\n' \
+    "width=$W" "height=$H" "rects=$RECTS" "frames=$FRAMES" \
+    "warmups=$WARMUPS" "budget_x1000=$BUDGET_X1000" \
+    "readback=post-timing-full-frame" "capture=single-post-timing-capture" \
+    | hash_stdin)
 ICD_SHA256=$(hash_file "${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}")
 
 line_value() {
@@ -183,11 +203,80 @@ project_row() {
     ' "$input" >"$output"
 }
 
+manifest_value_exact() {
+    LC_ALL=C awk -v wanted="$2" '
+        index($0, "\r") != 0 { exit 2 }
+        {
+            eq = index($0, "=")
+            if (eq <= 1) exit 2
+            key = substr($0, 1, eq - 1)
+            if (key == wanted) {
+                if (++seen != 1) exit 2
+                value = substr($0, eq + 1)
+            }
+        }
+        END { if (seen != 1) exit 2; print value }
+    ' "$1"
+}
+
+validate_manifest_file_binding() {
+    immutable_manifest=$1
+    immutable_dir=$2
+    immutable_path_key=$3
+    immutable_hash_key=$4
+    immutable_name=$5
+    immutable_path=$(manifest_value_exact "$immutable_manifest" "$immutable_path_key") || return 1
+    immutable_hash=$(manifest_value_exact "$immutable_manifest" "$immutable_hash_key") || return 1
+    [ "$immutable_path" = "$immutable_dir/$immutable_name" ] || return 1
+    [ ! -L "$immutable_path" ] && [ -f "$immutable_path" ] || return 1
+    if stat -f '%l' "$immutable_path" >/dev/null 2>&1; then
+        [ "$(stat -f '%l' "$immutable_path")" -eq 1 ] || return 1
+    elif stat -c '%h' "$immutable_path" >/dev/null 2>&1; then
+        [ "$(stat -c '%h' "$immutable_path")" -eq 1 ] || return 1
+    else
+        return 1
+    fi
+    perf_admission_valid_sha256 "$immutable_hash" || return 1
+    [ "$(hash_file "$immutable_path")" = "$immutable_hash" ]
+}
+
 if [ "${1:-}" = "--aggregate" ]; then
     [ $# -eq 2 ] || fail "--aggregate needs a row directory"
     dir=$2
     case "$dir" in ''|-*) fail "unsafe row directory path" ;; esac
-    [ ! -L "$dir" ] && [ -d "$dir" ] || fail "invalid row directory"
+    dir_parent=${dir%/*}
+    [ "$dir_parent" != "$dir" ] || dir_parent=.
+    dir_root=${dir_parent%/*}
+    [ "$dir_root" != "$dir_parent" ] || dir_root=.
+    [ "${dir_parent##*/}" = runs ] || fail "invalid row directory"
+    [ ! -L "$dir_root" ] && [ ! -L "$dir_parent" ] && [ ! -L "$dir" ] && [ -d "$dir" ] || fail "invalid row directory"
+    dir=$(CDPATH= cd -- "$dir" && pwd -P) || fail "invalid row directory"
+    run_id=${dir##*/}
+    perf_immutable_valid_run_id "$run_id" || fail "invalid row directory"
+    manifest="$dir/run.manifest.env"
+    [ ! -L "$manifest" ] && [ -f "$manifest" ] || fail "invalid immutable run manifest"
+    [ "$(manifest_value_exact "$manifest" schema)" = immutable-vulkan-2d-c-run-v1 ] || fail "invalid immutable run schema"
+    [ "$(manifest_value_exact "$manifest" run_id)" = "$run_id" ] || fail "invalid immutable run id"
+    [ "$(manifest_value_exact "$manifest" run_dir)" = "$dir" ] || fail "stale immutable run path"
+    for immutable_binding in \
+        'c_row:c_row_sha256:c.env' \
+        'combined_raw_row:combined_raw_row_sha256:c.env.raw' \
+        'simple_row:simple_row_sha256:simple.env' \
+        'aggregate_evidence:aggregate_evidence_sha256:evidence.env' \
+        'c_raw_stdout:c_raw_stdout_sha256:c.stdout.raw' \
+        'c_raw_stderr:c_raw_stderr_sha256:c.stderr.raw' \
+        'c_runtime_receipt:c_runtime_receipt_sha256:c.runtime.env' \
+        'c_toolchain_receipt:c_toolchain_receipt_sha256:c.toolchain.env' \
+        'simple_raw_stdout:simple_raw_stdout_sha256:simple.stdout.raw' \
+        'simple_raw_stderr:simple_raw_stderr_sha256:simple.stderr.raw' \
+        'simple_runtime_receipt:simple_runtime_receipt_sha256:simple.runtime.env'; do
+        immutable_path_key=${immutable_binding%%:*}
+        immutable_remainder=${immutable_binding#*:}
+        immutable_hash_key=${immutable_remainder%%:*}
+        immutable_name=${immutable_remainder#*:}
+        validate_manifest_file_binding "$manifest" "$dir" "$immutable_path_key" "$immutable_hash_key" "$immutable_name" ||
+            fail "stale immutable run receipt:$immutable_name"
+    done
     [ ! -L "$dir/c.env" ] && [ -f "$dir/c.env" ] || fail "invalid $dir/c.env"
     [ ! -L "$dir/simple.env" ] && [ -f "$dir/simple.env" ] || fail "invalid $dir/simple.env"
     projection_dir=$(mktemp -d "${TMPDIR:-/tmp}/vk2d-admission.XXXXXX") || fail "cannot create projection directory"
@@ -206,14 +295,45 @@ if [ "${1:-}" = "--aggregate" ]; then
 fi
 
 # ── live mode ──────────────────────────────────────────────────────────────
-mkdir -p "$OUT_DIR"
+# Every live invocation gets one immutable run directory.  The explicit
+# VK2D_RUN_ID form is preferred for externally coordinated evidence; the
+# generated form remains unique for ordinary local runs.  A repeated ID is a
+# hard collision and never reuses or overwrites an earlier receipt.
+OUT_ROOT=${VK2D_OUT_DIR:-$OUT_DIR}
+RUN_ID=${VK2D_RUN_ID:-}
+if perf_immutable_prepare_run "$OUT_ROOT" "$RUN_ID"; then
+    :
+else
+    prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
+        fail "run-id-collision:${RUN_ID:-generated}"
+    fi
+    fail "cannot prepare immutable run directory"
+fi
+RUN_ID=$PERF_IMMUTABLE_RUN_ID
+OUT_ROOT=$PERF_IMMUTABLE_ROOT
+RUN_DIR=$PERF_IMMUTABLE_STAGE_DIR
+FINAL_RUN_DIR=$PERF_IMMUTABLE_FINAL_DIR
+OUT_DIR=$RUN_DIR
+trap 'perf_immutable_remove_stage "$RUN_DIR"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 c_status=skipped; c_reason=not-attempted; c_p95=0; c_bin="$OUT_DIR/vk2d_bench"
 c_device=; c_checksum=; c_bin_sha=; c_timing_scope=draw-plus-submit-to-fence-p95
 c_artifact="$OUT_DIR/c-framebuffer.rgba"; c_artifact_sha=
 c_stdout_raw="$OUT_DIR/c.stdout.raw"; c_stderr_raw="$OUT_DIR/c.stderr.raw"
 c_metrics="$OUT_DIR/c.runtime.env"; c_toolchain="$OUT_DIR/c.toolchain.env"
+c_bin_public="$FINAL_RUN_DIR/vk2d_bench"
+c_artifact_public="$FINAL_RUN_DIR/c-framebuffer.rgba"
+c_stdout_raw_public="$FINAL_RUN_DIR/c.stdout.raw"
+c_stderr_raw_public="$FINAL_RUN_DIR/c.stderr.raw"
+c_metrics_public="$FINAL_RUN_DIR/c.runtime.env"
+c_toolchain_public="$FINAL_RUN_DIR/c.toolchain.env"
 c_max_rss_bytes=unavailable
+: >"$c_stdout_raw"
+: >"$c_stderr_raw"
 ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
@@ -232,6 +352,8 @@ else
     perf_admission_valid_sha256 "$shader_compiler_sha" || fail "cannot bind shader compiler identity"
     {
         echo "schema=vulkan-2d-c-toolchain-v1"
+        echo "run_id=$RUN_ID"
+        echo "status=available"
         echo "c_compiler_path=$c_compiler"
         echo "c_compiler_sha256=$c_compiler_sha"
         echo "c_compiler_version=$("$c_compiler" --version | sed -n '1p')"
@@ -332,10 +454,27 @@ else
         *) c_status=fail; c_reason="no-fps-line:$(echo "$c_out" | head -c 80)" ;;
     esac
 fi
+if [ ! -f "$c_toolchain" ]; then
+    {
+        echo "schema=vulkan-2d-c-toolchain-v1"
+        echo "run_id=$RUN_ID"
+        echo "status=skipped"
+        echo "reason=$c_reason"
+    } >"$c_toolchain"
+fi
 
 simple_status=skipped; simple_reason=not-attempted; s_p95=0
 simple_device=; simple_checksum=; simple_bin_sha=; simple_timing_scope=draw-plus-submit-to-fence-p95
 simple_artifact="$OUT_DIR/simple-framebuffer.rgba"; simple_artifact_sha=
+simple_artifact_public="$FINAL_RUN_DIR/simple-framebuffer.rgba"
+simple_stdout_raw="$OUT_DIR/simple.stdout.raw"; simple_stderr_raw="$OUT_DIR/simple.stderr.raw"
+simple_metrics="$OUT_DIR/simple.runtime.env"
+simple_stdout_raw_public="$FINAL_RUN_DIR/simple.stdout.raw"
+simple_stderr_raw_public="$FINAL_RUN_DIR/simple.stderr.raw"
+simple_metrics_public="$FINAL_RUN_DIR/simple.runtime.env"
+simple_exit=0
+: >"$simple_stdout_raw"
+: >"$simple_stderr_raw"
 SIMPLE_BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
 if [ "$c_status" = skipped ]; then
     simple_reason=c-leg-skipped
@@ -344,11 +483,16 @@ elif [ ! -x "$SIMPLE_BIN" ]; then
 elif [ -L "$SIMPLE_BIN" ] || simple_binary_is_seed "$SIMPLE_BIN"; then
     simple_reason=bootstrap-seed-forbidden
 else
-    rm -f "$simple_artifact"
-    s_out=$(cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
+    rm -f "$simple_artifact" "$simple_stdout_raw" "$simple_stderr_raw"
+    set +e
+    (cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
         VK_ICD_FILENAMES="$ICD" VK2D_W="$W" VK2D_H="$H" VK2D_RECTS="$RECTS" VK2D_FRAMES="$FRAMES" \
         VK2D_WARMUPS="$WARMUPS" VK2D_READBACK=1 VK2D_DUMP_FB="$simple_artifact" \
-        "$SIMPLE_BIN" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl 2>/dev/null | grep '^simple-vulkan-2d' | tail -1) || true
+        "$SIMPLE_BIN" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl \
+        >"$simple_stdout_raw" 2>"$simple_stderr_raw")
+    simple_exit=$?
+    set -e
+    s_out=$(grep '^simple-vulkan-2d' "$simple_stdout_raw" | tail -1 || true)
     case $s_out in
         simple-vulkan-2d*p95_ns=*)
             simple_reported_status=$(line_value "$s_out" status)
@@ -388,6 +532,9 @@ else
 fi
 
 {
+    echo "run_id=$RUN_ID"
+    echo "run_dir=$FINAL_RUN_DIR"
+    echo "run_publish_schema=immutable-perf-run-v1"
     echo "c_status=$c_status"
     echo "c_reason=$c_reason"
     echo "c_p95_ns=$c_p95"
@@ -424,7 +571,7 @@ fi
     echo "simple_source_revision=$SIMPLE_SOURCE_REVISION"
     echo "c_binary_kind=native-reference"
     echo "simple_binary_kind=admitted-selfhosted"
-    echo "c_binary_path=$c_bin"
+    echo "c_binary_path=$c_bin_public"
     echo "simple_binary_path=$SIMPLE_BIN"
     echo "c_binary_sha256=$c_bin_sha"
     echo "simple_binary_sha256=$simple_bin_sha"
@@ -432,8 +579,8 @@ fi
     echo "simple_binary_admission_path="
     echo "c_binary_admission_sha256="
     echo "simple_binary_admission_sha256="
-    echo "c_artifact_path=$c_artifact"
-    echo "simple_artifact_path=$simple_artifact"
+    echo "c_artifact_path=$c_artifact_public"
+    echo "simple_artifact_path=$simple_artifact_public"
     echo "c_artifact_sha256=$c_artifact_sha"
     echo "simple_artifact_sha256=$simple_artifact_sha"
     echo "c_checksum_semantics=sampled-u32-xor-stride-4096"
@@ -443,16 +590,89 @@ fi
 } | tee "$OUT_DIR/c.env.raw" >/dev/null
 {
     echo "schema=vulkan-2d-c-runtime-metrics-v1"
+    echo "run_id=$RUN_ID"
     echo "c_max_rss_bytes=$c_max_rss_bytes"
-    echo "c_stdout_path=$c_stdout_raw"
+    echo "c_stdout_path=$c_stdout_raw_public"
     echo "c_stdout_sha256=$(hash_file "$c_stdout_raw")"
-    echo "c_stderr_path=$c_stderr_raw"
+    echo "c_stderr_path=$c_stderr_raw_public"
     echo "c_stderr_sha256=$(hash_file "$c_stderr_raw")"
+    echo "c_toolchain_path=$c_toolchain_public"
 } >"$c_metrics"
+{
+    echo "schema=vulkan-2d-simple-runtime-metrics-v1"
+    echo "run_id=$RUN_ID"
+    echo "simple_exit_code=$simple_exit"
+    echo "simple_stdout_path=$simple_stdout_raw_public"
+    echo "simple_stdout_sha256=$(hash_file "$simple_stdout_raw")"
+    echo "simple_stderr_path=$simple_stderr_raw_public"
+    echo "simple_stderr_sha256=$(hash_file "$simple_stderr_raw")"
+    echo "simple_artifact_path=$simple_artifact_public"
+    echo "simple_artifact_sha256=$simple_artifact_sha"
+} >"$simple_metrics"
 # Split rows for the --aggregate contract path.
 sed -n 's/^c_/c_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
 sed -n 's/^simple_/simple_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
 
+set +e
 aggregate "$c_p95" "$s_p95" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
     "$OUT_DIR/c.env" "$OUT_DIR/simple.env" \
-    | tee "$OUT_DIR/evidence.env"
+    >"$OUT_DIR/evidence.env"
+aggregate_rc=$?
+set -e
+{
+    cat "$OUT_DIR/evidence.env"
+    echo "run_id=$RUN_ID"
+    echo "run_dir=$FINAL_RUN_DIR"
+    echo "run_authority=immutable-published-directory"
+    echo "latest_pointer=$OUT_ROOT/latest"
+} >"$OUT_DIR/evidence.env.complete"
+mv "$OUT_DIR/evidence.env.complete" "$OUT_DIR/evidence.env"
+{
+    echo "schema=immutable-vulkan-2d-c-run-v1"
+    echo "run_id=$RUN_ID"
+    echo "run_dir=$FINAL_RUN_DIR"
+    echo "config_sha256=$CONFIG_REVISION"
+    echo "fixture_path=$BENCH_DIR/scenes.txt"
+    echo "fixture_sha256=$FIXTURE_REVISION"
+    echo "c_source_sha256=$C_SOURCE_REVISION"
+    echo "simple_source_sha256=$SIMPLE_SOURCE_REVISION"
+    echo "shader_source_sha256=$(hash_file "$BENCH_DIR/rect.comp.glsl")"
+    echo "shader_binary=$FINAL_RUN_DIR/rect.spv"
+    echo "shader_binary_sha256=$(hash_file "$OUT_DIR/rect.spv")"
+    echo "icd_path=$ICD"
+    echo "icd_sha256=$ICD_SHA256"
+    echo "c_binary_sha256=$c_bin_sha"
+    echo "simple_binary_sha256=$simple_bin_sha"
+    echo "c_raw_stdout=$c_stdout_raw_public"
+    echo "c_raw_stdout_sha256=$(hash_file "$c_stdout_raw")"
+    echo "c_raw_stderr=$c_stderr_raw_public"
+    echo "c_raw_stderr_sha256=$(hash_file "$c_stderr_raw")"
+    echo "c_runtime_receipt=$c_metrics_public"
+    echo "c_runtime_receipt_sha256=$(hash_file "$c_metrics")"
+    echo "c_toolchain_receipt=$c_toolchain_public"
+    echo "c_toolchain_receipt_sha256=$(hash_file "$c_toolchain")"
+    echo "simple_raw_stdout=$simple_stdout_raw_public"
+    echo "simple_raw_stdout_sha256=$(hash_file "$simple_stdout_raw")"
+    echo "simple_raw_stderr=$simple_stderr_raw_public"
+    echo "simple_raw_stderr_sha256=$(hash_file "$simple_stderr_raw")"
+    echo "simple_runtime_receipt=$simple_metrics_public"
+    echo "simple_runtime_receipt_sha256=$(hash_file "$simple_metrics")"
+    echo "c_row=$FINAL_RUN_DIR/c.env"
+    echo "c_row_sha256=$(hash_file "$OUT_DIR/c.env")"
+    echo "combined_raw_row=$FINAL_RUN_DIR/c.env.raw"
+    echo "combined_raw_row_sha256=$(hash_file "$OUT_DIR/c.env.raw")"
+    echo "simple_row=$FINAL_RUN_DIR/simple.env"
+    echo "simple_row_sha256=$(hash_file "$OUT_DIR/simple.env")"
+    echo "aggregate_evidence=$FINAL_RUN_DIR/evidence.env"
+    echo "aggregate_evidence_sha256=$(hash_file "$OUT_DIR/evidence.env")"
+    echo "c_framebuffer=$c_artifact_public"
+    echo "simple_framebuffer=$simple_artifact_public"
+    echo "evidence_env=$FINAL_RUN_DIR/evidence.env"
+} >"$OUT_DIR/run.manifest.env"
+perf_immutable_publish_run "$RUN_DIR" "$FINAL_RUN_DIR" || fail "immutable run publication failed"
+trap - EXIT HUP INT TERM
+if ! perf_immutable_publish_latest_pointer "$OUT_ROOT" "$FINAL_RUN_DIR"; then
+    echo "check-vulkan-2d-c-compare: warning: non-authoritative latest pointer was not updated" >&2
+fi
+cat "$FINAL_RUN_DIR/evidence.env"
+exit "$aggregate_rc"

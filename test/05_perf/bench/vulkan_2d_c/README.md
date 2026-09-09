@@ -49,14 +49,25 @@ SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
 ## Comparison harness + gate
 
 `sh scripts/check/check-vulkan-2d-c-compare.shs` builds/runs both legs and
-writes `build/vulkan-2d-c-compare/evidence.env` (ratio vs budget, explicit
-`skipped` rows when a toolchain leg is missing — never a fake pass).
-It also retains the C producer streams as `c.stdout.raw` and `c.stderr.raw`;
-on macOS the latter includes `/usr/bin/time -l` process statistics. The
+publishes one immutable run under
+`build/vulkan-2d-c-compare/runs/<run_id>/evidence.env` (ratio vs budget,
+explicit `skipped` rows when a toolchain leg is missing — never a fake pass).
+Set `VK2D_RUN_ID` when coordinating a receipt externally; reusing an ID is a
+hard collision and cannot overwrite the earlier run. A private 0700 staging
+directory reserves that ID until its same-filesystem publication rename.
+`latest` at the output root is an atomic, non-authoritative convenience
+pointer only; inability to update it does not invalidate a published run. Pass the
+direct `runs/<run_id>` directory to `--aggregate`; pointers and stale output
+roots are rejected, and bound receipt hashes are rechecked before aggregation.
+Each published run retains the producer streams as `c.stdout.raw`,
+`c.stderr.raw`, `simple.stdout.raw`, and `simple.stderr.raw`; on macOS the C
+stderr includes `/usr/bin/time -l` process statistics. The
 canonical wrapper passes the committed `scenes.txt` as a required table and
 rejects a C receipt unless it reports `scene_source=table`.
-`c.runtime.env` binds those streams and maximum RSS, while `c.toolchain.env`
-binds the C/shader compiler paths, hashes, versions, and exact flags.
+`c.runtime.env` and `simple.runtime.env` bind those streams and hashes, while
+`c.toolchain.env` binds the C/shader compiler paths, hashes, versions, and
+exact flags. The run manifest also binds the combined raw row, compiled shader
+when present, and both framebuffer paths.
 The ratio is Simple p95 divided by C p95 with the selected 2.0x ceiling. Both
 rows must already be `admitted`; raw measured output is intentionally reported
 as `measured-unadmitted` until the common receipt validator accepts it. The live
