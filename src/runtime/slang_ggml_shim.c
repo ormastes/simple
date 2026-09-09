@@ -175,6 +175,8 @@ static int64_t g_compat_handle = 0;
 static uint64_t g_model_generation = 0;
 static char g_load_str[SLANG_STR_CAP];
 static int64_t g_load_str_len = 0;
+static int g_matched_cpu_context = 0;
+static int32_t g_context_threads = 0;
 
 static int64_t slang_request_handle(int64_t slot, uint64_t generation) {
     if (generation == 0 || generation > SLANG_REQUEST_MAX_GENERATION)
@@ -387,6 +389,18 @@ int64_t slang_ggml_request_configure(int64_t entries) {
     return entries;
 }
 
+int64_t slang_ggml_context_profile_configure(int64_t matched_cpu, int64_t threads) {
+    if ((matched_cpu != 0 && matched_cpu != 1) || threads < 0 || threads > INT32_MAX)
+        return SLANG_ERR_INVALID;
+    if (g_request_count != 0) return SLANG_ERR_BUSY;
+#if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
+    if (g_physical_pool.active) return SLANG_ERR_BUSY;
+#endif
+    g_matched_cpu_context = matched_cpu != 0;
+    g_context_threads = (int32_t)threads;
+    return 0;
+}
+
 static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
     if (g_model == NULL) return SLANG_ERR_NO_MODEL;
     if (n_ctx <= 0 || n_ctx > INT32_MAX) return SLANG_ERR_INVALID;
@@ -407,6 +421,20 @@ static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
         struct llama_context_params cp = llama_context_default_params();
         cp.n_ctx = (uint32_t)n_ctx;
         cp.n_batch = cp.n_ctx;
+#if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
+        if (g_matched_cpu_context) {
+            cp.n_ubatch = cp.n_ctx;
+            cp.n_seq_max = 1;
+            cp.type_k = GGML_TYPE_F32;
+            cp.type_v = GGML_TYPE_F32;
+            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            cp.offload_kqv = false;
+        }
+        if (g_context_threads > 0) {
+            cp.n_threads = g_context_threads;
+            cp.n_threads_batch = g_context_threads;
+        }
+#endif
         ctx = llama_init_from_model(g_model, cp);
         if (ctx == NULL) return SLANG_ERR_NO_CTX;
         struct llama_sampler_chain_params sp = llama_sampler_chain_default_params();
@@ -978,6 +1006,10 @@ int64_t slang_ggml_page_pool_create(int64_t execution_namespace,
     cp.type_v = GGML_TYPE_F32;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cp.offload_kqv = false;
+    if (g_context_threads > 0) {
+        cp.n_threads = g_context_threads;
+        cp.n_threads_batch = g_context_threads;
+    }
 
     struct llama_slang_paged_provider_params provider = {
         LLAMA_SLANG_PAGED_PROVIDER_ABI_VERSION,

@@ -3,12 +3,42 @@
 # Single-owner mutable lifecycle transitions for Slang physical KV pages.
 
 export use std.gc_async_mut.slang.core.page_contract.{KvPageState, KvPageError, KvPageId, KvRequestId, KvPrefixId, KvCowReservation, KvPageTelemetry, KvPageManager}
-use std.gc_async_mut.slang.core.page_contract.{KV_U64_MAX, _kv_counter_next, _kv_tokens_equal, _kv_tokens_are_prefix, _kv_copy_bools, _kv_copy_i64s, _kv_copy_u64s, _kv_copy_pages}
+use std.gc_async_mut.slang.core.page_contract.{KV_U64_MAX, _kv_counter_next, _kv_counter_add, _kv_tokens_equal, _kv_tokens_are_prefix, _kv_copy_bools, _kv_copy_i64s, _kv_copy_u64s, _kv_copy_pages}
 
 impl KvPageManager:
 
     fn telemetry() -> KvPageTelemetry:
         self.telemetry_value
+
+    me record_committed_prefill(prefilled_tokens: i64) -> Result<(), KvPageError>:
+        if prefilled_tokens <= 0:
+            return Err(KvPageError.InvalidOccupiedRows)
+        self.telemetry_value.prefilled_tokens = _kv_counter_add(
+            self.telemetry_value.prefilled_tokens, prefilled_tokens.to_u64())
+        Ok(())
+
+    me record_committed_restore(reused_tokens: i64, prefilled_tokens: i64,
+                                boundary_evaluations: i64,
+                                copied_tail_rows: i64) -> Result<(), KvPageError>:
+        if (reused_tokens <= 0 or prefilled_tokens < 0 or
+            boundary_evaluations < 0 or boundary_evaluations > 1 or
+            copied_tail_rows < 0):
+            return Err(KvPageError.InvalidOccupiedRows)
+        self.telemetry_value.committed_prefix_restores = _kv_counter_next(
+            self.telemetry_value.committed_prefix_restores)
+        self.telemetry_value.reused_tokens = _kv_counter_add(
+            self.telemetry_value.reused_tokens, reused_tokens.to_u64())
+        self.telemetry_value.prefilled_tokens = _kv_counter_add(
+            self.telemetry_value.prefilled_tokens, prefilled_tokens.to_u64())
+        self.telemetry_value.boundary_evaluations = _kv_counter_add(
+            self.telemetry_value.boundary_evaluations, boundary_evaluations.to_u64())
+        self.telemetry_value.copied_tail_rows = _kv_counter_add(
+            self.telemetry_value.copied_tail_rows, copied_tail_rows.to_u64())
+        Ok(())
+
+    me record_generation_failure():
+        self.telemetry_value.generation_failures = _kv_counter_next(
+            self.telemetry_value.generation_failures)
 
     fn page_state(page: KvPageId) -> Result<KvPageState, KvPageError>:
         val slot = self._page_slot(page)
@@ -448,6 +478,8 @@ impl KvPageManager:
             self.telemetry_value.cache_references = self.telemetry_value.cache_references + 1
         self.prefix_active[slot] = true
         self.telemetry_value.active_prefixes = self.telemetry_value.active_prefixes + 1
+        self.telemetry_value.prefix_admissions = _kv_counter_next(
+            self.telemetry_value.prefix_admissions)
         self._touch_prefix(slot)
         Ok(self._prefix_id(slot))
 

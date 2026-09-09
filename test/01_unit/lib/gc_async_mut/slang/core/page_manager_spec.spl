@@ -346,4 +346,24 @@ describe "Slang KV telemetry":
         expect(telemetry.cache_references).to_equal(1)
         expect(telemetry.prefix_hits).to_equal(1u64)
         expect(telemetry.prefix_misses).to_equal(1u64)
+        expect(telemetry.prefix_admissions).to_equal(1u64)
         expect(telemetry.active_reservations).to_equal(0)
+
+    it "records only committed physical token work with saturating counters":
+        step("publish cold and restored work after provider commit")
+        var pages = manager()
+        expect(pages.record_committed_prefill(9).is_ok()).to_equal(true)
+        expect(pages.record_committed_restore(8, 3, 0, 2).is_ok()).to_equal(true)
+        pages.record_generation_failure()
+        val telemetry = pages.telemetry()
+        expect(telemetry.committed_prefix_restores).to_equal(1u64)
+        expect(telemetry.reused_tokens).to_equal(8u64)
+        expect(telemetry.prefilled_tokens).to_equal(12u64)
+        expect(telemetry.boundary_evaluations).to_equal(0u64)
+        expect(telemetry.copied_tail_rows).to_equal(2u64)
+        expect(telemetry.generation_failures).to_equal(1u64)
+
+        step("reject impossible observations without changing counters")
+        expect(pages.record_committed_restore(0, 1, 0, 0).unwrap_err()).to_equal(
+            KvPageError.InvalidOccupiedRows)
+        expect(pages.telemetry().committed_prefix_restores).to_equal(1u64)
