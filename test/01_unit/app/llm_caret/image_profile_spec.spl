@@ -1,0 +1,54 @@
+# codex-impl
+use std.spec.*
+use app.llm_caret.config.{parse_config_text, reset_config,
+    config_image_read_api_key, config_image_read_api_key_env}
+use app.llm_caret.image_profile.{configured_image_profile_v1}
+use app.llm_caret.image_completion.{validate_configured_image_secret_v1}
+use app.llm_caret.multimodal_types.{validate_model_profile_v1,
+    MultimodalRequestV1}
+use app.llm_caret.server.{build_models_response_with_image_v1}
+
+describe "REQ-003 explicit image-read profile configuration":
+    it "loads a local vision profile without granting remote fallback":
+        reset_config()
+        val error = parse_config_text("image_read:\n  profile_id: local-vision\n  provider: slang\n  base_url: http://localhost:8721\n  model: fixture-vision\n  model_revision: r1\n  location: local\n  egress: deny\n  vision: true\n  structured_output: true\n  detail: high\n  max_images: 5\n  max_pixels: 40000000\n  max_request_bytes: 20971520\n  max_output_tokens: 16384\n  timeout_ms: 30000\n  max_concurrency: 1\n  trust_scope: test\n")
+        expect(error).to_equal("")
+        val profile = configured_image_profile_v1()
+        expect(profile.profile_id).to_equal("local-vision")
+        expect(profile.provider).to_equal("slang")
+        expect(profile.remote_egress).to_be(false)
+        expect(profile.fallback_provider).to_equal("")
+        expect(validate_model_profile_v1(profile)).to_equal("")
+        val models = build_models_response_with_image_v1(profile.profile_id,
+            profile.model_id, profile.provider)
+        expect(models).to_contain("\"id\":\"fixture-vision\"")
+        expect(models).to_contain("\"capabilities\":[\"vision\",\"structured_output\"]")
+
+    it "does not expose an API secret when no environment name is configured":
+        reset_config()
+        expect(config_image_read_api_key()).to_equal("")
+
+    it "records only the configured API secret reference and clears it on reset":
+        reset_config()
+        val error = parse_config_text("image_read:\n  profile_id: hosted-vision\n  provider: openai\n  base_url: https://api.openai.com\n  model: fixture-vision\n  model_revision: pinned\n  api_key_env: SIMPLE_TEST_INTENTIONALLY_MISSING_IMAGE_SECRET_7F91\n  location: remote\n  egress: allow\n  vision: true\n  structured_output: true\n  max_images: 1\n  max_pixels: 1000000\n  max_request_bytes: 1048576\n  max_output_tokens: 4096\n  timeout_ms: 30000\n  max_concurrency: 1\n  trust_scope: test-hosted\n")
+        expect(error).to_equal("")
+        expect(config_image_read_api_key_env()).to_equal(
+            "SIMPLE_TEST_INTENTIONALLY_MISSING_IMAGE_SECRET_7F91")
+        val profile = configured_image_profile_v1()
+        expect(profile.secret_ref).to_equal(
+            "SIMPLE_TEST_INTENTIONALLY_MISSING_IMAGE_SECRET_7F91")
+        expect(validate_model_profile_v1(profile)).to_equal("")
+        val request = MultimodalRequestV1(messages: [], profile: profile,
+            prompt_version: "test", schema_version: "test",
+            preprocessing_version: "test")
+        # Empty resolution fails before request validation or provider transport.
+        expect(validate_configured_image_secret_v1(request, "")).to_equal(
+            "configured image API secret is unavailable")
+        expect(validate_configured_image_secret_v1(request, "resolved-test-key")).to_equal("")
+        var missing_secret = profile
+        missing_secret.secret_ref = ""
+        expect(validate_model_profile_v1(missing_secret)).to_equal(
+            "hosted image provider requires an API secret reference")
+        reset_config()
+        expect(config_image_read_api_key_env()).to_equal("")
+        expect(configured_image_profile_v1().remote_egress).to_be(false)

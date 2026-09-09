@@ -8,6 +8,10 @@
 #   GET  /v1/health            (health check)
 
 use std.io_runtime.{time_now_unix_micros}
+use std.json.{json_parse, json_object_get, json_get_type, json_serialize,
+    json_array_length, json_array_get, json_to_string}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use app.llm_caret.image_format.{inspect_image_bytes_v1}
 
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
@@ -118,6 +122,16 @@ fn build_models_response() -> text:
     r = r + _Q() + "data" + _Q() + ":" + data
     r = r + _RB()
     r
+
+fn build_models_response_with_image_v1(profile_id: text, model_id: text,
+        provider: text) -> text:
+    val base = build_models_response()
+    if profile_id == "" or model_id == "" or provider == "": return base
+    val image_model = "{\"id\":\"" + _escape_json(model_id) +
+        "\",\"profile_id\":\"" + _escape_json(profile_id) +
+        "\",\"provider\":\"" + _escape_json(provider) +
+        "\",\"capabilities\":[\"vision\",\"structured_output\"]}"
+    base.substring(0, base.len() - 2) + "," + image_model + "]}"
 
 fn build_chat_completion_response(content: text, model: text, finish_reason: text,
         input_tokens: i64, output_tokens: i64) -> text:
@@ -313,6 +327,211 @@ fn parse_chat_request_model(body: text) -> text:
 fn parse_chat_request_content(body: text) -> text:
     # Extract content from the last message in messages array
     _extract_json_string(body, "content")
+
+fn parse_chat_request_system_text(body: text) -> text:
+    val root = json_parse(body)
+    if root == nil or json_get_type(root) != "object": return ""
+    val system = json_object_get(root, "system")
+    if json_get_type(system) == "string": return json_to_string(system) ?? ""
+    ""
+
+# Preserve the complete ordered message array for multimodal dispatch. This
+# scanner returns exactly one JSON array value and respects strings/escapes;
+# provider adapters receive the original content-part shape rather than a
+# lossy last-message text reconstruction.
+fn parse_chat_request_messages_json(body: text) -> text:
+    val root = json_parse(body)
+    if root == nil or json_get_type(root) != "object": return ""
+    val messages = json_object_get(root, "messages")
+    if messages == nil or json_get_type(messages) != "array": return ""
+    json_serialize(messages)
+
+fn multimodal_messages_have_image_v1(messages_json: text) -> bool:
+    val messages = json_parse(messages_json)
+    var message_index = 0
+    while message_index < json_array_length(messages):
+        val content = json_object_get(json_array_get(messages, message_index), "content")
+        var part_index = 0
+        while part_index < json_array_length(content):
+            val part = json_array_get(content, part_index)
+            val kind = json_to_string(json_object_get(part, "type"))
+            if kind != nil and (kind == "image" or kind == "image_url"): return true
+            part_index = part_index + 1
+        message_index = message_index + 1
+    false
+
+fn _strict_base64_payload_v1(payload: text) -> bool:
+    if payload == "" or payload.len() % 4 != 0: return false
+    val bytes = payload.bytes()
+    var padding = 0
+    var index = 0
+    while index < bytes.len():
+        val byte = bytes[index] as i64
+        val alphabet = (byte >= 65 and byte <= 90) or
+            (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or
+            byte == 43 or byte == 47
+        if byte == 61:
+            padding = padding + 1
+            if index < bytes.len() - 2 or padding > 2: return false
+        elif not alphabet or padding > 0:
+            return false
+        index = index + 1
+    true
+
+fn validate_proxy_image_messages_with_limits_v1(messages_json: text, max_bytes: i64,
+        max_images: i64, max_pixels: i64) -> text:
+    val messages = json_parse(messages_json)
+    if messages == nil or json_get_type(messages) != "array": return "messages must be an array"
+    var encoded_bytes = 0
+    var image_count = 0
+    var decoded_pixels = 0
+    var message_index = 0
+    while message_index < json_array_length(messages):
+        val message = json_array_get(messages, message_index)
+        val role = json_to_string(json_object_get(message, "role")) ?? ""
+        val content = json_object_get(message, "content")
+        if json_get_type(content) == "array":
+            var part_index = 0
+            while part_index < json_array_length(content):
+                val part = json_array_get(content, part_index)
+                val kind = json_to_string(json_object_get(part, "type"))
+                var data = ""
+                if kind != nil and kind == "image_url":
+                    val image_url = json_object_get(part, "image_url")
+                    data = json_to_string(json_object_get(image_url, "url")) ?? ""
+                elif kind != nil and kind == "image":
+                    val source = json_object_get(part, "source")
+                    if (json_to_string(json_object_get(source, "type")) ?? "") != "base64":
+                        return "only inline base64 image sources are allowed"
+                    val media = json_to_string(json_object_get(source, "media_type")) ?? ""
+                    val payload = json_to_string(json_object_get(source, "data")) ?? ""
+                    data = "data:" + media + ";base64," + payload
+                if kind != nil and (kind == "image" or kind == "image_url"):
+                    if role != "user": return "image input parts require a user message"
+                    image_count = image_count + 1
+                    if image_count > max_images: return "image count exceeds configured profile limit"
+                    if not (data.starts_with("data:image/png;base64,") or
+                            data.starts_with("data:image/jpeg;base64,") or
+                            data.starts_with("data:image/webp;base64,")):
+                        return "proxy requires PNG, JPEG, or WebP data URLs"
+                    val marker = data.find(";base64,")
+                    val payload = data.substring(marker + 8)
+                    var padding = 0
+                    if payload.ends_with("="): padding = padding + 1
+                    if payload.ends_with("=="): padding = padding + 1
+                    val decoded_size = payload.len() / 4 * 3 - padding
+                    if encoded_bytes + decoded_size > max_bytes:
+                        return "image bytes exceed configured profile limit"
+                    if not _strict_base64_payload_v1(payload): return "image Base64 payload is malformed"
+                    val raw = base64_decode_bytes(payload)
+                    val inspected = inspect_image_bytes_v1(raw)
+                    if inspected.error != "" or inspected.mime_type != data.substring(5, marker):
+                        return "image data URL does not match its declared MIME type"
+                    val width = inspected.width
+                    val height = inspected.height
+                    if width <= 0 or height <= 0: return "PNG dimensions must be positive"
+                    if width > max_pixels or height > max_pixels or width > max_pixels / height:
+                        return "decoded pixels exceed configured profile limit"
+                    val image_pixels = width * height
+                    if image_pixels > max_pixels - decoded_pixels:
+                        return "decoded pixels exceed configured profile limit"
+                    decoded_pixels = decoded_pixels + image_pixels
+                    encoded_bytes = encoded_bytes + decoded_size
+                part_index = part_index + 1
+        message_index = message_index + 1
+    if encoded_bytes > max_bytes: return "image bytes exceed configured profile limit"
+    ""
+
+fn validate_proxy_image_messages_v1(messages_json: text, max_bytes: i64) -> text:
+    validate_proxy_image_messages_with_limits_v1(messages_json, max_bytes, 1024, 1073741824)
+
+fn anthropic_system_text_v1(messages_json: text) -> text:
+    val messages = json_parse(messages_json)
+    var result: [text] = []
+    var message_index = 0
+    while message_index < json_array_length(messages):
+        val message = json_array_get(messages, message_index)
+        val role = json_to_string(json_object_get(message, "role")) ?? ""
+        if role == "system" or role == "developer":
+            val content = json_object_get(message, "content")
+            if json_get_type(content) == "string":
+                result = result + [json_to_string(content) ?? ""]
+            elif json_get_type(content) == "array":
+                var part_index = 0
+                while part_index < json_array_length(content):
+                    val part = json_array_get(content, part_index)
+                    if (json_to_string(json_object_get(part, "type")) ?? "") == "text":
+                        result = result + [json_to_string(json_object_get(part, "text")) ?? ""]
+                    part_index = part_index + 1
+        message_index = message_index + 1
+    result.join("\n\n")
+
+fn openai_messages_to_anthropic_v1(messages_json: text) -> text:
+    val messages = json_parse(messages_json)
+    var encoded_messages: [text] = []
+    var message_index = 0
+    while message_index < json_array_length(messages):
+        val message = json_array_get(messages, message_index)
+        val role = json_to_string(json_object_get(message, "role")) ?? ""
+        if role == "user" or role == "assistant":
+            val content = json_object_get(message, "content")
+            var encoded_parts: [text] = []
+            if json_get_type(content) == "string":
+                encoded_parts = encoded_parts + ["{\"type\":\"text\",\"text\":\"" +
+                    _escape_json(json_to_string(content) ?? "") + "\"}"]
+            elif json_get_type(content) == "array":
+                var part_index = 0
+                while part_index < json_array_length(content):
+                    val part = json_array_get(content, part_index)
+                    val kind = json_to_string(json_object_get(part, "type")) ?? ""
+                    if kind == "text":
+                        encoded_parts = encoded_parts + ["{\"type\":\"text\",\"text\":\"" +
+                            _escape_json(json_to_string(json_object_get(part, "text")) ?? "") + "\"}"]
+                    elif kind == "image":
+                        encoded_parts = encoded_parts + [json_serialize(part)]
+                    elif kind == "image_url":
+                        val data = json_to_string(json_object_get(json_object_get(part, "image_url"), "url")) ?? ""
+                        val marker = data.find(";base64,")
+                        val mime = if marker < 5: "" else: data.substring(5, marker)
+                        val payload = if marker < 0: "" else: data.substring(marker + 8)
+                        encoded_parts = encoded_parts + ["{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"" +
+                            _escape_json(mime) + "\",\"data\":\"" + _escape_json(payload) + "\"}}"]
+                    part_index = part_index + 1
+            encoded_messages = encoded_messages + ["{\"role\":\"" + role +
+                "\",\"content\":[" + encoded_parts.join(",") + "]}"]
+        message_index = message_index + 1
+    "[" + encoded_messages.join(",") + "]"
+
+fn anthropic_messages_to_openai_v1(messages_json: text) -> text:
+    val messages = json_parse(messages_json)
+    var encoded_messages: [text] = []
+    var message_index = 0
+    while message_index < json_array_length(messages):
+        val message = json_array_get(messages, message_index)
+        val role = json_to_string(json_object_get(message, "role")) ?? ""
+        val content = json_object_get(message, "content")
+        var encoded_parts: [text] = []
+        if json_get_type(content) == "string":
+            encoded_parts = encoded_parts + ["{\"type\":\"text\",\"text\":\"" +
+                _escape_json(json_to_string(content) ?? "") + "\"}"]
+        elif json_get_type(content) == "array":
+            var part_index = 0
+            while part_index < json_array_length(content):
+                val part = json_array_get(content, part_index)
+                val kind = json_to_string(json_object_get(part, "type")) ?? ""
+                if kind == "text" or kind == "image_url":
+                    encoded_parts = encoded_parts + [json_serialize(part)]
+                elif kind == "image":
+                    val source = json_object_get(part, "source")
+                    val media = json_to_string(json_object_get(source, "media_type")) ?? ""
+                    val payload = json_to_string(json_object_get(source, "data")) ?? ""
+                    encoded_parts = encoded_parts + ["{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:" +
+                        _escape_json(media) + ";base64," + _escape_json(payload) + "\",\"detail\":\"high\"}}"]
+                part_index = part_index + 1
+        encoded_messages = encoded_messages + ["{\"role\":\"" + _escape_json(role) +
+            "\",\"content\":[" + encoded_parts.join(",") + "]}"]
+        message_index = message_index + 1
+    "[" + encoded_messages.join(",") + "]"
 
 # ============================================================================
 # Route handling (pure - returns response body text)
