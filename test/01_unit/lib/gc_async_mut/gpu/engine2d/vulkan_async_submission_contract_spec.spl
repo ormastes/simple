@@ -1,0 +1,81 @@
+"""Source and contract evidence for the Pure-Simple async Vulkan adapter."""
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.*
+use std.common.gpu.render_surface_contract.{
+    GPU_ASYNC_ACCESS_READ,
+    GPU_ASYNC_ACCESS_WRITE, GPU_ASYNC_ACCESS_READ_WRITE,
+    gpu_async_frame_ring_capacity_v2_valid, gpu_async_wait_timeout_v2_valid
+}
+use std.gc_async_mut.gpu.engine2d.vulkan_async_submission.{
+    VulkanAsyncSubmissionSession, VULKAN_ASYNC_BIND_INVALID
+}
+
+describe "Pure-Simple Vulkan async submission adapter":
+    it "selects the bounded B/N2 3-to-16 ring policy":
+        expect(gpu_async_frame_ring_capacity_v2_valid(2)).to_be(false)
+        expect(gpu_async_frame_ring_capacity_v2_valid(3)).to_be(true)
+        expect(gpu_async_frame_ring_capacity_v2_valid(16)).to_be(true)
+        expect(gpu_async_frame_ring_capacity_v2_valid(17)).to_be(false)
+        expect(gpu_async_wait_timeout_v2_valid(-1)).to_be(false)
+        expect(gpu_async_wait_timeout_v2_valid(0)).to_be(true)
+        expect(gpu_async_wait_timeout_v2_valid(1000000000)).to_be(true)
+        expect(gpu_async_wait_timeout_v2_valid(1000000001)).to_be(false)
+
+    it "keeps access masks closed and validates before the runtime bind call":
+        expect(GPU_ASYNC_ACCESS_READ).to_equal(1)
+        expect(GPU_ASYNC_ACCESS_WRITE).to_equal(2)
+        expect(GPU_ASYNC_ACCESS_READ_WRITE).to_equal(3)
+        val source = rt_file_read_text(
+            "src/lib/gc_async_mut/gpu/engine2d/vulkan_async_submission.spl")
+        expect(source).to_contain("descriptor_set <= 0")
+        expect(source).to_contain("binding > 4294967295")
+        expect(source).to_contain("offset > 9223372036854775807 - range")
+        expect(source).to_contain("vulkan_sffi_async_session_bind_buffer")
+        expect(source).to_contain("VULKAN_ASYNC_BIND_INVALID")
+        expect(source).to_contain("never waits for a prior frame")
+        expect(source).to_contain("gpu_async_frame_ring_capacity_v2_valid(capacity)")
+        expect(source).to_contain("gpu_async_wait_timeout_v2_valid(timeout_ns)")
+
+        # These calls return before SFFI, proving the Pure-Simple rejection
+        # path without manufacturing a live provider session or token.
+        val closed = VulkanAsyncSubmissionSession(
+            handle: 0, capacity: 0, terminal_handle: 0)
+        expect(closed.bind_buffer(1, 1, 0, 1, 0, 4,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_INVALID)
+        val shaped = VulkanAsyncSubmissionSession(
+            handle: 1, capacity: 3, terminal_handle: 0)
+        expect(shaped.bind_buffer(1, 1, 4294967296, 1, 0, 4,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_INVALID)
+        expect(shaped.bind_buffer(1, 1, 0, 1, 9223372036854775807, 1,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_INVALID)
+        expect(shaped.bind_buffer(1, 1, 0, 1, 0, 4, 4)).to_equal(
+            VULKAN_ASYNC_BIND_INVALID)
+
+    it "exports the complete async facade through the no-GC compatibility layer":
+        val source = rt_file_read_text(
+            "src/lib/nogc_async_mut/gpu/engine2d/sffi_vulkan.spl")
+        val names = [
+            "vulkan_sffi_async_session_create",
+            "vulkan_sffi_async_session_acquire",
+            "vulkan_sffi_async_session_bind_buffer",
+            "vulkan_sffi_async_session_command",
+            "vulkan_sffi_async_session_submit",
+            "vulkan_sffi_async_session_poll",
+            "vulkan_sffi_async_session_retire",
+            "vulkan_sffi_async_session_receipt",
+            "vulkan_sffi_async_session_cancel",
+            "vulkan_sffi_async_session_close",
+            "vulkan_sffi_async_session_capacity",
+            "vulkan_sffi_async_session_in_flight",
+            "vulkan_sffi_async_session_published_sequence",
+            "vulkan_sffi_async_session_supported",
+            "vulkan_sffi_async_session_create_with_wait",
+            "vulkan_sffi_async_session_recover",
+            "vulkan_sffi_async_session_abandon_device",
+            "vulkan_sffi_async_session_snapshot",
+            "vulkan_sffi_async_session_snapshot_word"
+        ]
+        for name in names:
+            expect(source).to_contain(name)
