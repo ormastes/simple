@@ -1,0 +1,100 @@
+# Existing HIR codec A1 freeze: malformed wire input is a cache miss, not a
+# process-fatal compiler error.  This is deliberately a narrow RED contract;
+# bounded decoding and canonicalisation belong to separate requirements.
+# @req REQ-HIR-CODEC-A1
+
+use std.spec.*
+use std.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode,
+    hir_codec_header}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.generated.hir_codec.{hc_dec_visibility, hc_dec_hir_expr,
+    hc_dec_hir_expr_kind}
+use compiler.hir.hir_codec_support.{hc_dec_opaque_expr,
+    hc_dec_opaque_block_value}
+
+fn lower(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "hir_codec_a1.spl", "hir_codec_a1",
+        Logger(level: 0))
+    var lowering = HirLowering.with_filename("hir_codec_a1.spl")
+    lowering.lower_module(parsed)
+
+fn given_real_typed_hir_module() -> HirModule:
+    lower("fn identity(value: i64) -> i64:\n    value\n\nfn entry() -> i64:\n    identity(7)\n")
+
+fn given_real_encoded_hir_body() -> text:
+    hir_module_encode(given_real_typed_hir_module())
+
+fn then_decode_returns_nil(blob: text):
+    expect(hir_module_decode(blob)).to_equal(nil)
+
+fn then_unknown_enum_tag_is_nonfatal():
+    # The reader must be marked invalid, without exiting the process.  A fresh
+    # reader in the same test then proves a known enum tag still decodes.
+    val malformed = FlatPoolReader.new("999\n")
+    val rejected = hc_dec_visibility(malformed)
+    expect(rejected).to_equal(nil)
+    expect(malformed.ok).to_equal(false)
+    val valid_reader = FlatPoolReader.new("0\n")
+    expect(hc_dec_visibility(valid_reader)).to_equal(Visibility.Public)
+    expect(valid_reader.ok).to_equal(true)
+    val valid = hir_module_decode(given_real_encoded_hir_body())
+    expect(valid != nil).to_equal(true)
+
+describe "Existing HIR codec nonfatal decode (A1)":
+    it "should decode a real body and preserve bytes on re-encode":
+        step("Decode one real HIR body")
+        val encoded = given_real_encoded_hir_body()
+        expect(encoded.starts_with(hir_codec_header() + "\n")).to_equal(true)
+        val decoded = hir_module_decode(encoded)
+        expect(decoded != nil).to_equal(true)
+        expect(hir_module_encode(decoded.unwrap())).to_equal(encoded)
+
+    it "should return nil for truncation without returning a partial module":
+        step("Truncate the admitted HIR body")
+        val encoded = given_real_encoded_hir_body()
+        then_decode_returns_nil(encoded.substring(0, encoded.len() - 1))
+
+    it "should return nil when the framed body has trailing data":
+        step("Append one trailing wire line")
+        then_decode_returns_nil(given_real_encoded_hir_body() + "999\n")
+
+    it "should reject an unknown enum tag in a nested expression and continue":
+        step("Decode the exact nested tag-999 fixture")
+        val nested = FlatPoolReader.new("1\n999\n")
+        val rejected = hc_dec_hir_expr(nested)
+        expect(rejected).to_equal(nil)
+        expect(nested.ok).to_equal(false)
+        then_unknown_enum_tag_is_nonfatal()
+
+    it "should reject truncated integer payloads without a partial value":
+        step("Truncate an IntLit payload after its suffix marker")
+        val truncated = FlatPoolReader.new("0\n7\n1")
+        val rejected = hc_dec_hir_expr_kind(truncated)
+        expect(rejected).to_equal(nil)
+        expect(truncated.ok).to_equal(false)
+
+    it "should reject opaque expression and block-value tags nonfatally":
+        step("Decode unsupported opaque tags")
+        val opaque_expr = FlatPoolReader.new("2\n")
+        val rejected_expr = hc_dec_opaque_expr(opaque_expr)
+        expect(rejected_expr).to_equal(nil)
+        expect(opaque_expr.ok).to_equal(false)
+        val opaque_block = FlatPoolReader.new("2\n")
+        val rejected_block = hc_dec_opaque_block_value(opaque_block)
+        expect(rejected_block).to_equal(nil)
+        expect(opaque_block.ok).to_equal(false)
+
+    it "should consume a valid reader frame completely":
+        step("Decode one known enum tag and inspect the cursor")
+        val reader = FlatPoolReader.new("0\n")
+        val visibility = hc_dec_visibility(reader)
+        expect(visibility).to_equal(Visibility.Public)
+        expect(reader.ok).to_equal(true)
+        expect(reader.pos).to_equal(1)
