@@ -53,7 +53,8 @@ use std.gpu.engine2d.backend_emu.{
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_is_available,
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
-    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_prefix,
+    vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_readback_u32_into,
     vulkan_sffi_copy_u32_into,
@@ -296,6 +297,12 @@ class VulkanBackend:
     image_source_pool_replacement_count: i64
     image_source_upload_count: i64
     image_source_upload_bytes: i64
+    # Reusable host staging for source-image marshalling. Native ABI lanes may
+    # upload a bounded prefix; interpreter lanes use the exact-size fallback.
+    image_upload_scratch: [u8]
+    image_upload_scratch_reuse_count: i64
+    image_upload_scratch_resize_count: i64
+    image_upload_scratch_fallback_count: i64
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
     pending_font_glyph_count: i64
@@ -416,6 +423,10 @@ class VulkanBackend:
             image_source_pool_replacement_count: 0,
             image_source_upload_count: 0,
             image_source_upload_bytes: 0,
+            image_upload_scratch: [],
+            image_upload_scratch_reuse_count: 0,
+            image_upload_scratch_resize_count: 0,
+            image_upload_scratch_fallback_count: 0,
             pending_font_descriptors: [],
             pending_font_params: [],
             pending_font_glyph_count: 0,
@@ -696,6 +707,10 @@ impl RenderBackend for VulkanBackend:
         self.image_source_pool_replacement_count = 0
         self.image_source_upload_count = 0
         self.image_source_upload_bytes = 0
+        self.image_upload_scratch = []
+        self.image_upload_scratch_reuse_count = 0
+        self.image_upload_scratch_resize_count = 0
+        self.image_upload_scratch_fallback_count = 0
         self.cpu_fallback_used = false
         self.cpu_fallback_reason = ""
         true
@@ -724,6 +739,10 @@ impl RenderBackend for VulkanBackend:
         self.last_error = "Vulkan framebuffer readback byte count mismatch"
 
     me shutdown():
+        # Host-only upload staging is never a GPU dependency. Release it even
+        # when unknown device completion forces the GPU-resource quarantine
+        # path to return early below.
+        self.image_upload_scratch = []
         val pending_status = self._flush_pending_compute()
         if pending_status < 0:
             self.completion_unknown = true
@@ -1066,8 +1085,27 @@ impl RenderBackend for VulkanBackend:
                 d_src = self._acquire_image_source(src_size)
         if d_src <= 0:
             return 0
-        val source_bytes = _pixels_to_bytes(pixels, pixel_count)
-        if source_bytes.len().to_i64() != src_size or not vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0):
+        val scratch_reused = self.image_upload_scratch.len().to_i64() >= src_size
+        val scratch_prepared = self._prepare_image_upload(pixels, pixel_count)
+        var upload_ok = scratch_prepared
+        if scratch_prepared:
+            upload_ok = vulkan_sffi_copy_to_buffer_prefix(
+                d_src, self.image_upload_scratch, src_size, 0)
+            if upload_ok and scratch_reused:
+                # Count only successful prefix uploads that avoided allocating
+                # the legacy exact-size payload, not merely packing attempts.
+                self.image_upload_scratch_reuse_count = self.image_upload_scratch_reuse_count + 1
+            elif not upload_ok:
+                # The prefix facade is unavailable on this ABI lane; the
+                # exact-size fallback below remains behavior-preserving.
+                self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
+        if not upload_ok:
+            # Preserve the exact-size legacy path for oversized images and
+            # interpreter array ABIs that cannot upload a prefix.
+            val source_bytes = _pixels_to_bytes(pixels, pixel_count)
+            upload_ok = source_bytes.len().to_i64() == src_size and
+                vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0)
+        if not upload_ok:
             self._release_image_source(d_src)
             return 0
         self.image_source_upload_count = self.image_source_upload_count + 1
