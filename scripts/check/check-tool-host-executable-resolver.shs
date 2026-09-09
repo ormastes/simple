@@ -76,12 +76,79 @@ case "$(simple_host_family)" in
     set -e
     [ "${status}" -eq 37 ]
     actual_windows_execution=PASS
+
+    if command -v gcc >/dev/null 2>&1; then
+      cat >"${tmp}/path with spaces/tool fixture.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int ends_with(const char *value, const char *suffix) {
+  size_t n = strlen(value), m = strlen(suffix);
+  return n >= m && strcmp(value + n - m, suffix) == 0;
+}
+
+int main(int argc, char **argv) {
+  const char *expected = getenv("FIXTURE_EXPECT");
+  const char *exit_text = getenv("FIXTURE_EXIT");
+  char input[32] = {0};
+  if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+    puts("simple test");
+    return 0;
+  }
+  if (expected && strcmp(expected, "spipe") == 0) {
+    if (argc != 3 || strcmp(argv[1], "alpha beta") || strcmp(argv[2], "quote\"value")) return 41;
+  } else if (expected && strcmp(expected, "devhub") == 0) {
+    if (argc != 5 || strcmp(argv[1], "run") || !ends_with(argv[2], "src/app/devhub/main.spl") ||
+        strcmp(argv[3], "alpha beta") || strcmp(argv[4], "quote\"value")) return 42;
+  }
+  if (fgets(input, sizeof input, stdin) == NULL) input[0] = '\0';
+  fputs("controlled diagnostic\n", stderr);
+  printf("{\"jsonrpc\":\"2.0\",\"args\":\"ok\",\"stdin\":\"%s\"}\n",
+         strcmp(input, "ping\n") == 0 ? "ping" : "empty");
+  return exit_text ? atoi(exit_text) : 0;
+}
+C
+      gcc "${tmp}/path with spaces/tool fixture.c" -o "${tmp}/path with spaces/tool fixture.exe"
+
+      spipe_out=$(printf 'ping\n' | FIXTURE_EXPECT=spipe SIMPLE_SPIPE_MCP_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/spipe_mcp_server" 'alpha beta' 'quote"value' 2>"${tmp}/spipe.err")
+      [ "${spipe_out}" = '{"jsonrpc":"2.0","args":"ok","stdin":"ping"}' ]
+      grep -Fxq 'controlled diagnostic' "${tmp}/spipe.err"
+      set +e
+      FIXTURE_EXPECT=spipe FIXTURE_EXIT=37 SIMPLE_SPIPE_MCP_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/spipe_mcp_server" 'alpha beta' 'quote"value' >/dev/null 2>&1
+      status=$?
+      set -e
+      [ "${status}" -eq 37 ]
+      if SIMPLE_SPIPE_MCP_BINARY="${tmp}/windows-tool.exe" "${root}/bin/spipe_mcp_server" >/dev/null 2>&1; then exit 1; fi
+      if SIMPLE_SPIPE_MCP_BINARY="${tmp}/missing.exe" "${root}/bin/spipe_mcp_server" >/dev/null 2>&1; then exit 1; fi
+
+      devhub_out=$(printf 'ping\n' | FIXTURE_EXPECT=devhub SIMPLE_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/devhub" 'alpha beta' 'quote"value' 2>"${tmp}/devhub.err")
+      [ "${devhub_out}" = '{"jsonrpc":"2.0","args":"ok","stdin":"ping"}' ]
+      [ ! -s "${tmp}/devhub.err" ]
+      set +e
+      FIXTURE_EXPECT=devhub FIXTURE_EXIT=37 SIMPLE_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/devhub" 'alpha beta' 'quote"value' >/dev/null 2>"${tmp}/devhub-fail.err"
+      status=$?
+      set -e
+      [ "${status}" -eq 37 ]
+      grep -Fxq 'controlled diagnostic' "${tmp}/devhub-fail.err"
+      actual_wrapper_execution=PASS
+    else
+      actual_wrapper_execution='BLOCKED(no-windows-c-compiler)'
+    fi
     ;;
-  *) actual_windows_execution='BLOCKED(host-unavailable)' ;;
+  *)
+    actual_windows_execution='BLOCKED(host-unavailable)'
+    actual_wrapper_execution='BLOCKED(host-unavailable)'
+    ;;
 esac
 
 echo 'fixture_contract=PASS hosts=MSYS,MINGW,CYGWIN,WSL1,WSL2,Linux,FreeBSD,OpenBSD,NetBSD,DragonFly,Darwin,SimpleOS'
 echo "actual_windows_execution=${actual_windows_execution}"
+echo "actual_wrapper_execution=${actual_wrapper_execution}"
 echo 'cross_host_resume_linux=sh scripts/check/check-tool-host-executable-resolver.shs'
 echo 'cross_host_resume_macos=sh scripts/check/check-tool-host-executable-resolver.shs'
 echo 'cross_host_resume_bsd=sh scripts/check/check-tool-host-executable-resolver.shs'
