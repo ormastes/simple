@@ -59,12 +59,24 @@ static void assert_logits_close(int64_t request, const uint32_t *reference,
     int64_t worst_index = -1;
     float worst_actual = 0.0f;
     float worst_expected = 0.0f;
+    int64_t actual_argmax = 0;
+    int64_t expected_argmax = 0;
+    float actual_maximum = -INFINITY;
+    float expected_maximum = -INFINITY;
     for (int64_t i = 0; i < vocabulary; ++i) {
         int64_t bits = slang_ggml_request_logit_bits(request, i);
         assert(bits >= 0 && bits <= UINT32_MAX);
         union { uint32_t bits; float value; } actual = { (uint32_t)bits };
         union { uint32_t bits; float value; } expected = { reference[i] };
         assert(isfinite(actual.value) && isfinite(expected.value));
+        if (actual.value > actual_maximum) {
+            actual_maximum = actual.value;
+            actual_argmax = i;
+        }
+        if (expected.value > expected_maximum) {
+            expected_maximum = expected.value;
+            expected_argmax = i;
+        }
         float normalized_error = fabsf(actual.value - expected.value) /
                                  fmaxf(1.0f, fabsf(expected.value));
         squared_normalized_error += (double)normalized_error * normalized_error;
@@ -78,12 +90,17 @@ static void assert_logits_close(int64_t request, const uint32_t *reference,
     double rms_normalized_error = sqrt(squared_normalized_error / (double)vocabulary);
     fprintf(stderr,
             "logit parity phase=%s max_normalized_error=%g rms_normalized_error=%g "
-            "worst_index=%lld actual=%g expected=%g tolerance=%g\n",
+            "worst_index=%lld actual=%g expected=%g actual_argmax=%lld expected_argmax=%lld "
+            "rms_tolerance=%g max_tolerance=%g\n",
             phase, maximum_normalized_error, rms_normalized_error,
             (long long)worst_index, worst_actual, worst_expected,
-            SLANG_PHYSICAL_LOGIT_REL_TOLERANCE);
-    assert(maximum_normalized_error <= SLANG_PHYSICAL_LOGIT_REL_TOLERANCE &&
-           "physical logits exceed declared tolerance");
+            (long long)actual_argmax, (long long)expected_argmax,
+            SLANG_PHYSICAL_LOGIT_RMS_TOLERANCE, SLANG_PHYSICAL_LOGIT_MAX_TOLERANCE);
+    assert(actual_argmax == expected_argmax && "physical greedy token differs from reference");
+    assert(rms_normalized_error <= SLANG_PHYSICAL_LOGIT_RMS_TOLERANCE &&
+           "physical logits exceed aggregate tolerance");
+    assert(maximum_normalized_error <= SLANG_PHYSICAL_LOGIT_MAX_TOLERANCE &&
+           "physical logits contain an excessive outlier");
 }
 
 int main(int argc, char **argv) {

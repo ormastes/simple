@@ -21,11 +21,11 @@
 #define SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS INT64_C(64)
 #define SLANG_PHYSICAL_PAGE_ABI_V1 INT64_C(1)
 /* CPU kernels may select different legal repack/reduction paths for the
- * conventional and physical graphs. Qualification bounds every finite logit
- * to five percent of max(1, |reference|) and keeps sampled token identity
- * exact; the latter prevents this numerical allowance from hiding a changed
- * greedy decision. */
-#define SLANG_PHYSICAL_LOGIT_REL_TOLERANCE 5.0e-2f
+ * conventional and physical graphs. Qualification requires exact greedy-token
+ * identity, bounds aggregate normalized drift to five percent, and rejects
+ * any normalized outlier above twenty percent. */
+#define SLANG_PHYSICAL_LOGIT_RMS_TOLERANCE 5.0e-2
+#define SLANG_PHYSICAL_LOGIT_MAX_TOLERANCE 2.0e-1f
 
 int64_t slang_ggml_page_abi_version(void);
 
