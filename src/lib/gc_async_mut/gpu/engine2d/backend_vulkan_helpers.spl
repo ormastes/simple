@@ -18,6 +18,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_fence_submission_supported,
     vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
+    vulkan_sffi_alloc_buffer,
     vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
     vulkan_sffi_dispatch_buffer_compute_checked,
@@ -158,6 +159,142 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
 
 impl VulkanBackend:
 
+    me _image_source_is_pending(source: i64) -> bool:
+        if source <= 0:
+            return false
+        var i: i64 = 0
+        while i < self.pending_compute_count:
+            if self.pending_compute_sources[i] == source:
+                return true
+            i = i + 1
+        false
+
+    me _image_source_is_pooled(source: i64) -> bool:
+        if source <= 0:
+            return false
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            if self.image_source_pool[i] == source:
+                return true
+            i = i + 1
+        false
+
+    me _image_source_pool_owner_matches() -> bool:
+        if (not self.initialized or self.d_framebuffer <= 0 or
+            not self.session.is_valid() or self.session.device <= 0 or
+            self.session.generation <= 0):
+            return false
+        if self.image_source_pool.len() == 0:
+            return true
+        (self.image_source_pool_device_identity == self.session.device and
+         self.image_source_pool_session_generation == self.session.generation and
+         self.image_source_pool_surface_identity == self.d_framebuffer)
+
+    me _image_source_pool_is_fully_pending() -> bool:
+        val pool_len = self.image_source_pool.len().to_i64()
+        if (not self._image_source_pool_owner_matches() or
+            pool_len < self.pending_compute_sources.len()):
+            return false
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if source <= 0 or not self._image_source_is_pending(source):
+                return false
+            i = i + 1
+        true
+
+    me _acquire_image_source(byte_count: i64) -> i64:
+        """Return a completed source buffer large enough for one image.
+
+        Batched image composites keep their source dependency until the one
+        frame fence.  A pooled buffer is therefore reusable only when it is
+        absent from the current pending dependency table.  The pool is bounded
+        by the same 256-entry table used by the frame batcher; exhaustion keeps
+        the caller's existing fail-closed path intact.
+        """
+        if byte_count <= 0 or byte_count % 4 != 0:
+            return 0
+        val pool_len = self.image_source_pool.len().to_i64()
+        if not self._image_source_pool_owner_matches():
+            return 0
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if (source > 0 and
+                self.image_source_pool_capacity[i] >= byte_count and
+                not self._image_source_is_pending(source)):
+                self.image_source_pool_reuse_count = self.image_source_pool_reuse_count + 1
+                return source
+            i = i + 1
+        if pool_len >= self.pending_compute_sources.len():
+            # The pool can be full of completed buffers that are smaller than
+            # a later image. Replace one completed undersized slot instead of
+            # permanently failing every larger draw after saturation.
+            var replace_index: i64 = -1
+            var replace_capacity: i64 = 9223372036854775807
+            i = 0
+            while i < pool_len:
+                val source = self.image_source_pool[i]
+                val capacity = self.image_source_pool_capacity[i]
+                if source <= 0:
+                    replace_index = i
+                    replace_capacity = -1
+                elif (replace_capacity >= 0 and
+                    not self._image_source_is_pending(source) and
+                    capacity < replace_capacity):
+                    replace_index = i
+                    replace_capacity = capacity
+                i = i + 1
+            if replace_index < 0:
+                return 0
+            val replaced = self.image_source_pool[replace_index]
+            self.image_source_pool[replace_index] = 0
+            self.image_source_pool_capacity[replace_index] = 0
+            if replaced > 0 and not vulkan_sffi_free_buffer(replaced):
+                vulkan_sffi_quarantine_dependencies(0, replaced, 0, 0)
+            val replacement = vulkan_sffi_alloc_buffer(byte_count, 0x80)
+            if replacement <= 0:
+                return 0
+            self.image_source_pool[replace_index] = replacement
+            self.image_source_pool_capacity[replace_index] = byte_count
+            self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
+            if replaced > 0:
+                self.image_source_pool_replacement_count = self.image_source_pool_replacement_count + 1
+            return replacement
+        val source = vulkan_sffi_alloc_buffer(byte_count, 0x80)
+        if source <= 0:
+            return 0
+        if pool_len == 0:
+            self.image_source_pool_device_identity = self.session.device
+            self.image_source_pool_session_generation = self.session.generation
+            self.image_source_pool_surface_identity = self.d_framebuffer
+        self.image_source_pool.push(source)
+        self.image_source_pool_capacity.push(byte_count)
+        self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
+        source
+
+    me _release_image_source(source: i64):
+        # Pooled source buffers remain owned by the surface after the frame
+        # fence.  Transient (non-batched) sources retain the old release path.
+        if source <= 0 or self._image_source_is_pooled(source):
+            return
+        vulkan_sffi_free_buffer(source)
+
+    me _destroy_image_source_pool():
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if source > 0 and not vulkan_sffi_free_buffer(source):
+                vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
+            i = i + 1
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
+
     me _clear_pending_compute_state():
         self.pending_compute_command = 0
         self.pending_compute_pipelines = [0i64; 256]
@@ -174,7 +311,8 @@ impl VulkanBackend:
                     self.pending_compute_descriptors[i], 0, 0, 0)
                 released = false
             val source = self.pending_compute_sources[i]
-            if source > 0 and not vulkan_sffi_free_buffer(source):
+            if (source > 0 and not self._image_source_is_pooled(source) and
+                not vulkan_sffi_free_buffer(source)):
                 vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
                 released = false
             i = i + 1
@@ -188,11 +326,17 @@ impl VulkanBackend:
     me _quarantine_pending_compute_descriptors():
         var i: i64 = 0
         while i < self.pending_compute_count:
+            val source = self.pending_compute_sources[i]
             vulkan_sffi_quarantine_dependencies(
-                self.pending_compute_descriptors[i], self.pending_compute_sources[i], 0, 0)
+                self.pending_compute_descriptors[i],
+                if self._image_source_is_pooled(source): 0 else source,
+                0, 0)
             i = i + 1
         # Any member of the reusable pool may have been referenced by the
         # unknown command. Quarantine every member once and discard the pool.
+        for source in self.image_source_pool:
+            if source > 0:
+                vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
         for descriptor in self.font_descriptor_pool:
             vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
         for params in self.font_params_pool:
@@ -203,6 +347,11 @@ impl VulkanBackend:
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
 
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
@@ -324,29 +473,28 @@ impl VulkanBackend:
         """Consume one uploaded source and retain it through the frame fence."""
         if (self.d_framebuffer <= 0 or pipe <= 0 or d_src <= 0 or
             push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0):
-            if d_src > 0:
-                vulkan_sffi_free_buffer(d_src)
+            self._release_image_source(d_src)
             return 0
         if self.pending_compute_count >= self.pending_compute_descriptors.len():
             val full_status = self._flush_pending_compute()
             if full_status <= 0:
-                vulkan_sffi_free_buffer(d_src)
+                self._release_image_source(d_src)
                 return full_status
         if self.pending_compute_command <= 0:
             if (not vulkan_sffi_reap_dependency_quarantine() or
                 not vulkan_sffi_fence_submission_supported()):
-                vulkan_sffi_free_buffer(d_src)
+                self._release_image_source(d_src)
                 return 0
             self.pending_compute_command = vulkan_sffi_begin_compute()
             if self.pending_compute_command <= 0:
-                vulkan_sffi_free_buffer(d_src)
+                self._release_image_source(d_src)
                 return 0
         val desc = vulkan_sffi_create_descriptor_set(pipe)
         if (desc <= 0 or not vulkan_sffi_bind_buffer(desc, 0, self.d_framebuffer) or
             not vulkan_sffi_bind_buffer(desc, 1, d_src)):
             if desc > 0 and not vulkan_sffi_destroy_descriptor_set(desc):
                 vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
-            vulkan_sffi_free_buffer(d_src)
+            self._release_image_source(d_src)
             val bind_flush = self._flush_pending_compute()
             return if bind_flush < 0: -1 else: 0
         val cmd = self.pending_compute_command

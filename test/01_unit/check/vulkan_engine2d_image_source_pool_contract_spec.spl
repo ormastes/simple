@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "Vulkan Engine2D batched image source pool":
+    it "reuses completed per-surface image buffers in the Pure Simple path":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val engine = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+
+        expect(backend).to_contain("image_source_pool: [i64]")
+        expect(backend).to_contain("image_source_pool_capacity: [i64]")
+        expect(backend).to_contain("image_source_pool_device_identity: i64")
+        expect(backend).to_contain("image_source_pool_session_generation: i64")
+        expect(backend).to_contain("image_source_pool_surface_identity: i64")
+        expect(backend).to_contain("self._acquire_image_source(src_size)")
+        expect(backend).to_contain(
+            "d_src <= 0 and self.frame_batching_enabled and")
+        expect(helpers).to_contain("me _image_source_is_pending(source: i64)")
+        expect(helpers).to_contain("me _acquire_image_source(byte_count: i64)")
+        expect(helpers).to_contain(
+            "not self._image_source_is_pending(source)")
+        expect(helpers).to_contain("me _image_source_pool_owner_matches()")
+        expect(helpers).to_contain("self.session.generation <= 0")
+        expect(helpers).to_contain(
+            "self.image_source_pool_session_generation == self.session.generation")
+        expect(helpers).to_contain(
+            "if source > 0 and not self._image_source_is_pooled(source)")
+        expect(helpers).to_contain(
+            "val desc = vulkan_sffi_create_descriptor_set(pipe)")
+        expect(engine).to_contain("vulkan.enable_frame_batching()")
+
+    it "keeps the old transient allocation path when batching is disabled":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(backend).to_contain(
+            "else:\n            vulkan_sffi_alloc_buffer(src_size, 0x80)")
+        expect(backend).to_contain(
+            "self._release_image_source(d_src)")
+
+    it "replaces a completed undersized slot without adding an allocation-failure wait":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        expect(helpers).to_contain("var replace_index: i64 = -1")
+        expect(helpers).to_contain(
+            "not self._image_source_is_pending(source)")
+        expect(helpers).to_contain(
+            "self.image_source_pool[replace_index] = replacement")
+        expect(backend).to_contain(
+            "self._image_source_pool_is_fully_pending()")
+        expect(helpers).to_contain(
+            "pool_len < self.pending_compute_sources.len()")
+
+    it "requires aligned source ranges and retains upload observability":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        expect(helpers).to_contain(
+            "if byte_count <= 0 or byte_count % 4 != 0:")
+        expect(backend).to_contain(
+            "self.image_source_upload_count = self.image_source_upload_count + 1")
+        expect(backend).to_contain(
+            "self.image_source_upload_bytes = self.image_source_upload_bytes + src_size")
+
+    it "fails closed and quarantines pooled resources after unknown completion":
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(helpers).to_contain(
+            "for source in self.image_source_pool:")
+        expect(helpers).to_contain(
+            "self.image_source_pool = []")
+        expect(helpers).to_contain(
+            "self.image_source_pool_surface_identity = 0")
+        expect(backend).to_contain("self._destroy_image_source_pool()")
