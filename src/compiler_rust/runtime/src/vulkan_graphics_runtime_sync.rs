@@ -41,17 +41,7 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_fence(fence: i64) -> i64 {
     let mut state = STATE.lock();
-    if let Some(owned) = state.fences.remove(&fence) {
-        // The caller's handle is revoked either way; what differs is whether
-        // the vk::Fence underneath is destroyed now or retained for the next
-        // submission. `vkDestroyFence` measured ~700us on NVIDIA GB10 and this
-        // runs twice per Engine2D frame, so retaining a SIGNALLED fence is
-        // worth an explicit branch. `release_fence` itself refuses anything
-        // still unsignalled, which then falls out of scope and is destroyed
-        // exactly as before.
-        if let Ok(device) = state.require_device() {
-            device.release_fence(owned);
-        }
+    if state.fences.remove(&fence).is_some() {
         return 1;
     }
     // A no-wait submit's fence is owned by the quarantine and must NOT be
@@ -77,6 +67,11 @@ pub extern "C" fn rt_vulkan_destroy_fence(_fence: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_fence(fence: i64, timeout_ns: i64) -> i64 {
     let state = STATE.lock();
+    // Session fences are observed through generation-bound session operations;
+    // the legacy API holds STATE across waits and cannot satisfy that contract.
+    if state.async_compute_session_fences.contains(&fence) {
+        return 0;
+    }
     // Resolves both plain fences and the pending fence of a non-blocking
     // `rt_vulkan_submit_no_wait` submission, whose command buffer is still
     // quarantined. Looking only in `state.fences` made every no-wait handle

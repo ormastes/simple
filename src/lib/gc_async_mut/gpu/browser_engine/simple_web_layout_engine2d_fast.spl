@@ -106,9 +106,11 @@ class SimpleWebLayoutEngine2DReadbackResult:
 
 class _WebDrawIrRouteState:
     key: text
+    # A non-zero DrawIr composition generation is an exact revision in this
+    # admitted serial route owner, not a hash. Zero is not cache-eligible.
+    scene_generation: i64
     upload_samples: [i64]
     gpu_samples: [i64]
-    oracle_fingerprint: i64
     pixels_match: bool
     upload_device_proven: bool
     gpu_device_proven: bool
@@ -116,6 +118,13 @@ class _WebDrawIrRouteState:
     device_identity: i64
     complete: bool
     evidence: WebGpuPaintTimingEvidence
+    # Canonical oracle pixels from the first three exact device-vs-oracle
+    # validations for this scene generation. Arrays have language-level value
+    # semantics, so callers receive a copy-on-write value and cannot mutate the
+    # retained owner slot through the returned value. The producer generation
+    # and parked owner token authorize reuse; no hash authorizes it.
+    validated_pixels: [u32]
+    validated_device_token: text
 
 class _WebDrawIrTimedRoute:
     readback: Engine2DReadback
@@ -128,6 +137,7 @@ class _WebDrawIrTimedRoute:
 var _web_draw_ir_route_states: [_WebDrawIrRouteState] = []
 var _web_draw_ir_route_consults: i32 = 0
 var _web_draw_ir_route_canonical_submissions: i32 = 0
+var _web_draw_ir_route_cached_reuses: i32 = 0
 var _web_draw_ir_last_comparison_receipt: text = ""
 var _web_draw_ir_last_evidence: WebGpuPaintTimingEvidence = web_gpu_paint_timing_evidence("", 0, 0, 0, 0, 0, false, false, false)
 val WEB_DRAW_IR_ROUTE_CACHE_MAX: i32 = 16
@@ -152,12 +162,16 @@ class _WebFastEngineSlot:
     backend: text
     width: i32
     height: i32
+    # Cache-owner lifecycle identity. Raw GPU handles can be recycled after
+    # teardown, so they are never sufficient to distinguish two allocations.
+    owner_generation: i64
     engine: Engine2D
 
 var _web_fast_engine_slots: [_WebFastEngineSlot] = []
 var _web_fast_engine_creates: i32 = 0
 var _web_fast_engine_reuses: i32 = 0
 var _web_fast_engine_discards: i32 = 0
+var _web_fast_engine_next_owner_generation: i64 = 1
 # One slot per canonical backend. The route runs at most two backends per frame
 # (the software oracle and the requested lane); the cap only bounds a caller
 # that cycles backend names.
@@ -182,6 +196,77 @@ fn _web_fast_engine_healthy(
             return false
     true
 
+fn _web_fast_engine_cached_device_token(
+    width: i32, height: i32, backend_name: text
+) -> text:
+    """Return the parked surface/device generation token, or empty.
+
+    This is an observation of the existing owner; it submits no work and does
+    not make a device healthy.  A changed framebuffer handle or device
+    identity therefore invalidates a retained frame before it can be reused.
+    The cache-owner generation closes the raw-handle ABA hole after teardown.
+    """
+    val canonical = backend_canonical_name(backend_name)
+    val found = _web_fast_engine_slot_index(canonical)
+    if found < 0:
+        return ""
+    val slot = _web_fast_engine_slots[found]
+    if slot.width != width or slot.height != height:
+        return ""
+    if not _web_fast_engine_healthy(slot.engine, canonical, width, height):
+        return ""
+    if slot.owner_generation <= 0:
+        return ""
+    if canonical == "vulkan":
+        val handle = slot.engine.vulkan_framebuffer_handle()
+        val device = slot.engine.vulkan_device_identity()
+        if handle > 0 and device > 0:
+            return "vulkan;owner=" + slot.owner_generation.to_text() +
+                ";surface=" + handle.to_text() + ";device=" + device.to_text()
+        return ""
+    if canonical == "metal":
+        if val Some(metal) = slot.engine.metal_backend:
+            if metal.initialized and metal.d_framebuffer > 0 and metal.device_identity > 0:
+                return "metal;owner=" + slot.owner_generation.to_text() +
+                    ";surface=" + metal.d_framebuffer.to_text() +
+                    ";device=" + metal.device_identity.to_text()
+    ""
+
+fn _web_fast_engine_validated_device_token(
+    readback: Engine2DReadback, width: i32, height: i32, backend_name: text
+) -> text:
+    """Bind a proven readback to the exact currently parked cache owner."""
+    if readback.backend_handle <= 0 or readback.device_identity <= 0:
+        return ""
+    val canonical = backend_canonical_name(backend_name)
+    val found = _web_fast_engine_slot_index(canonical)
+    if found < 0:
+        return ""
+    val slot = _web_fast_engine_slots[found]
+    if (
+        slot.owner_generation <= 0 or slot.width != width or slot.height != height or
+        not _web_fast_engine_healthy(slot.engine, canonical, width, height)
+    ):
+        return ""
+    if canonical == "vulkan":
+        if (
+            slot.engine.vulkan_framebuffer_handle() != readback.backend_handle or
+            slot.engine.vulkan_device_identity() != readback.device_identity
+        ):
+            return ""
+    elif canonical == "metal":
+        if val Some(metal) = slot.engine.metal_backend:
+            if (
+                metal.d_framebuffer != readback.backend_handle or
+                metal.device_identity != readback.device_identity
+            ):
+                return ""
+        else:
+            return ""
+    else:
+        return ""
+    _web_fast_engine_cached_device_token(width, height, backend_name)
+
 fn _web_fast_engine_slot_index(canonical_backend: text) -> i32:
     var index = 0
     while index < _web_fast_engine_slots.len():
@@ -192,7 +277,7 @@ fn _web_fast_engine_slot_index(canonical_backend: text) -> i32:
 
 fn _web_fast_engine_acquire(
     width: i32, height: i32, backend_name: text
-) -> Engine2D:
+) -> _WebFastEngineSlot:
     val canonical = backend_canonical_name(backend_name)
     val found = _web_fast_engine_slot_index(canonical)
     if found >= 0:
@@ -203,18 +288,33 @@ fn _web_fast_engine_acquire(
             reusable = _web_fast_engine_healthy(slot.engine, canonical, width, height)
         if reusable:
             _web_fast_engine_reuses = _web_fast_engine_reuses + 1
-            return slot.engine
+            return slot
         slot.engine.shutdown()
         _web_fast_engine_discards = _web_fast_engine_discards + 1
     _web_fast_engine_creates = _web_fast_engine_creates + 1
-    Engine2D.create_with_backend_fast(width, height, backend_name)
+    val owner_generation = _web_fast_engine_next_owner_generation
+    if _web_fast_engine_next_owner_generation > 0:
+        if _web_fast_engine_next_owner_generation >= 9223372036854775807:
+            # Exhaustion disables retained-frame authorization. The engine may
+            # still render this call, but a zero generation is never cached.
+            _web_fast_engine_next_owner_generation = 0
+        else:
+            _web_fast_engine_next_owner_generation =
+                _web_fast_engine_next_owner_generation + 1
+    _WebFastEngineSlot(
+        backend: canonical, width: width, height: height,
+        owner_generation: owner_generation,
+        engine: Engine2D.create_with_backend_fast(width, height, backend_name))
 
 fn _web_fast_engine_release(
-    engine: Engine2D, width: i32, height: i32, backend_name: text
+    slot: _WebFastEngineSlot, width: i32, height: i32, backend_name: text
 ):
     val canonical = backend_canonical_name(backend_name)
-    if not _web_fast_engine_healthy(engine, canonical, width, height):
-        engine.shutdown()
+    if (
+        slot.backend != canonical or slot.width != width or slot.height != height or
+        not _web_fast_engine_healthy(slot.engine, canonical, width, height)
+    ):
+        slot.engine.shutdown()
         _web_fast_engine_discards = _web_fast_engine_discards + 1
         return
     if _web_fast_engine_slots.len() >= WEB_FAST_ENGINE_SLOT_MAX:
@@ -222,8 +322,7 @@ fn _web_fast_engine_release(
         _web_fast_engine_slots.remove(0)
         evicted.engine.shutdown()
         _web_fast_engine_discards = _web_fast_engine_discards + 1
-    _web_fast_engine_slots.push(_WebFastEngineSlot(
-        backend: canonical, width: width, height: height, engine: engine))
+    _web_fast_engine_slots.push(slot)
 
 # Teardown for every parked engine. Called from web_draw_ir_gpu_route_policy_reset()
 # so a parked device buffer can never outlive the policy that parked it, and so
@@ -275,6 +374,7 @@ pub fn web_draw_ir_gpu_route_policy_reset():
     _web_draw_ir_route_states = []
     _web_draw_ir_route_consults = 0
     _web_draw_ir_route_canonical_submissions = 0
+    _web_draw_ir_route_cached_reuses = 0
     _web_draw_ir_last_comparison_receipt = ""
     _web_draw_ir_last_evidence = web_gpu_paint_timing_evidence(
         "", 0, 0, 0, 0, 0, false, false, false)
@@ -285,6 +385,9 @@ pub fn web_draw_ir_gpu_route_policy_consult_count() -> i32:
 pub fn web_draw_ir_gpu_route_canonical_submission_count() -> i32:
     _web_draw_ir_route_canonical_submissions
 
+pub fn web_draw_ir_gpu_route_cached_reuse_count() -> i32:
+    _web_draw_ir_route_cached_reuses
+
 pub fn web_draw_ir_gpu_route_last_comparison_receipt() -> text:
     _web_draw_ir_last_comparison_receipt
 
@@ -294,21 +397,20 @@ pub fn web_draw_ir_gpu_route_last_evidence() -> WebGpuPaintTimingEvidence:
 fn _web_draw_ir_key_text(value: text) -> text:
     value.len().to_text() + ":" + value
 
-# TODO(P2,ui): this serializes the whole scene and SHA-256s it on EVERY frame,
-# cache hit or not. The generation counter that would key a memo exists, but the
-# web path rebuilds its composition per call so the memo never fires. Closing
-# evidence: the rebuild path reuses a retained composition, proven by a spec that
-# counts serializations across two frames of unchanged HTML.
 fn _web_draw_ir_key(composition: DrawIrComposition, width: i32, height: i32, backend_name: text) -> text:
-    # Route state used to retain the complete SDN serialization in every cache
-    # key. At the 16-entry cap this kept 16 duplicate large-scene payloads
-    # alive after their frames were gone. Retain a bounded collision-resistant
-    # identity instead: timing samples must never be shared between distinct
-    # scenes merely because a short non-cryptographic hash collided.
-    val serialized = draw_ir_to_sdn(composition)
+    # A non-zero producer generation is exact within this serial route owner
+    # and avoids serializing the whole scene on every steady frame. Unassigned
+    # compositions retain the old diagnostic key, but are never authorized for
+    # retained-frame reuse below.
+    var scene_identity = ""
+    if composition.generation > 0:
+        scene_identity = "draw-ir-generation=" + composition.generation.to_text()
+    else:
+        val serialized = draw_ir_to_sdn(composition)
+        scene_identity = "draw-ir-sha256=" + sha256_text(serialized) +
+            ";draw-ir-bytes=" + serialized.len().to_text()
     (
-        "draw-ir-sha256=" + sha256_text(serialized) +
-        ";draw-ir-bytes=" + serialized.len().to_text() + ";" +
+        scene_identity + ";" +
         width.to_text() + ";" + height.to_text() + ";" +
         _web_draw_ir_key_text(backend_name) +
         _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_ONE_CALL_UPLOAD")) +
@@ -393,17 +495,17 @@ fn _simple_web_layout_render_draw_ir_composition(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
 ) -> Engine2dDrawIrAdvResult:
-    var engine = _web_fast_engine_acquire(width, height, backend_name)
-    engine.clear(0u32)
+    var slot = _web_fast_engine_acquire(width, height, backend_name)
+    slot.engine.clear(0u32)
     var images: [Engine2dResolvedDrawIrImage] = []
     for image in image_resources:
         images.push(engine2d_resolved_draw_ir_image(
             image.image_uri, image.width, image.height, image.pixels
         ))
     val render = engine2d_draw_ir_adv_composition_with_images(
-        engine, composition, true, images
+        slot.engine, composition, true, images
     )
-    _web_fast_engine_release(engine, width, height, backend_name)
+    _web_fast_engine_release(slot, width, height, backend_name)
     render
 
 fn _simple_web_layout_draw_ir_once(
@@ -514,11 +616,9 @@ var _web_draw_ir_fingerprint_pixels_scanned: i64 = 0
 pub fn web_draw_ir_fingerprint_pixels_scanned() -> i64:
     _web_draw_ir_fingerprint_pixels_scanned
 
-# The fingerprint is the operand of the steady-offload correctness gate (the
-# `gpu_match` comparison in _web_draw_ir_choose_route). That gate cannot be
-# reached on a host with no device, so this is the seam a spec uses to prove the
-# gate operand still separates a genuine mismatch — including a pure REORDER,
-# which the order-independent Engine2DReadback.checksum cannot see.
+# Diagnostic seam retained to demonstrate why the order-independent
+# Engine2DReadback.checksum is not a parity proof. The steady cache no longer
+# uses this probabilistic value for authorization; it compares pixels exactly.
 pub fn web_draw_ir_oracle_fingerprint(pixels: [u32]) -> i64:
     _web_draw_ir_pixel_fingerprint(pixels)
 
@@ -534,7 +634,7 @@ fn _web_draw_ir_pixel_fingerprint(pixels: [u32]) -> i64:
         index = index + 1
     first * 2147483629 + second
 
-fn _web_draw_ir_proven(readback: Engine2DReadback, pixel_count: i32, identity: i64) -> bool:
+fn _web_draw_ir_proven(readback: Engine2DReadback, pixel_count: i64, identity: i64) -> bool:
     readback.source == "device_readback" and
         readback.backend_handle > 0 and readback.device_identity > 0 and
         readback.pixel_count == pixel_count and
@@ -562,19 +662,23 @@ fn _web_draw_ir_state_index(key: text) -> i32:
         index = index + 1
     -1
 
-fn _web_draw_ir_state(key: text, backend_name: text) -> _WebDrawIrRouteState:
+fn _web_draw_ir_state(
+    key: text, backend_name: text, scene_generation: i64
+) -> _WebDrawIrRouteState:
     val found = _web_draw_ir_state_index(key)
     if found >= 0:
         return _web_draw_ir_route_states[found]
     if _web_draw_ir_route_states.len() >= WEB_DRAW_IR_ROUTE_CACHE_MAX:
         _web_draw_ir_route_states.remove(0)
     val state = _WebDrawIrRouteState(
-        key: key, upload_samples: [], gpu_samples: [], oracle_fingerprint: 0,
+        key: key, scene_generation: scene_generation,
+        upload_samples: [], gpu_samples: [],
         pixels_match: true, upload_device_proven: true,
         gpu_device_proven: true, commands_complete: true,
         device_identity: 0, complete: false,
         evidence: web_gpu_paint_timing_evidence(
-            backend_name, 0, 0, 0, 0, 0, false, false, false)
+            backend_name, 0, 0, 0, 0, 0, false, false, false),
+        validated_pixels: [], validated_device_token: ""
     )
     _web_draw_ir_route_states.push(state)
     state
@@ -646,12 +750,38 @@ fn _web_draw_ir_gpu_route(
         readback: readback, oracle_pixels: [], elapsed_us: elapsed_us,
         skipped_command_count: render.skipped_command_count)
 
+fn _web_draw_ir_cached_frame_reusable(
+    scene_generation: i64, current_scene_generation: i64,
+    validated_device_token: text, current_device_token: text,
+    validated_pixel_count: i64, current_pixel_count: i64
+) -> bool:
+    # Exact producer revision + exact parked surface/device token + exact
+    # extent.  A probabilistic checksum or hash is intentionally absent.
+    scene_generation > 0 and
+        scene_generation == current_scene_generation and
+        validated_device_token != "" and
+        validated_device_token == current_device_token and
+        validated_pixel_count > 0 and
+        validated_pixel_count == current_pixel_count
+
+pub fn web_draw_ir_gpu_route_cache_generation_match(
+    cached_scene_generation: i64, current_scene_generation: i64,
+    cached_device_token: text, current_device_token: text,
+    cached_pixel_count: i64, current_pixel_count: i64
+) -> bool:
+    """Pure contract seam for exact retained-frame invalidation tests."""
+    _web_draw_ir_cached_frame_reusable(
+        cached_scene_generation, current_scene_generation,
+        cached_device_token, current_device_token,
+        cached_pixel_count, current_pixel_count)
+
 fn _web_draw_ir_choose_route(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text
 ) -> [u32]:
     val key = _web_draw_ir_key(composition, width, height, backend_name)
-    var state = _web_draw_ir_state(key, backend_name)
+    var state = _web_draw_ir_state(key, backend_name, composition.generation)
+    val exact_pixel_count = width.to_i64() * height.to_i64()
     _web_draw_ir_route_consults = _web_draw_ir_route_consults + 1
 
     if state.complete:
@@ -659,15 +789,32 @@ fn _web_draw_ir_choose_route(
             _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
             return []
         if state.evidence.should_offload:
+            val current_device_token = _web_fast_engine_cached_device_token(
+                width, height, backend_name)
+            if _web_draw_ir_cached_frame_reusable(
+                state.scene_generation, composition.generation,
+                state.validated_device_token, current_device_token,
+                state.validated_pixels.len().to_i64(), exact_pixel_count
+            ):
+                _web_draw_ir_route_cached_reuses = _web_draw_ir_route_cached_reuses + 1
+                _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
+                return state.validated_pixels
             val gpu = _web_draw_ir_gpu_route(
                 composition, width, height, backend_name)
             val gpu_proven = _web_draw_ir_proven(
-                gpu.readback, width * height, state.device_identity)
-            val gpu_match = (
-                _web_draw_ir_pixel_fingerprint(gpu.readback.pixels) ==
-                state.oracle_fingerprint
-            )
+                gpu.readback, exact_pixel_count, state.device_identity)
+            # The retained value is the canonical software oracle from the
+            # exact third sampling comparison. Revalidation after a device or
+            # surface-owner change is therefore exact, never hash-authorized.
+            val gpu_match = _web_draw_ir_pixels_equal(
+                gpu.readback.pixels, state.validated_pixels)
             if gpu.skipped_command_count == 0 and gpu_proven and gpu_match:
+                state.validated_device_token =
+                    _web_fast_engine_validated_device_token(
+                        gpu.readback, width, height, backend_name)
+                val validated_index = _web_draw_ir_state_index(key)
+                if validated_index >= 0:
+                    _web_draw_ir_route_states[validated_index] = state
                 _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
                 return gpu.readback.pixels
             val failed_evidence = web_gpu_paint_timing_evidence(
@@ -739,10 +886,10 @@ fn _web_draw_ir_choose_route(
         gpu.skipped_command_count == 0)
     state.upload_device_proven = (
         state.upload_device_proven and
-        _web_draw_ir_proven(upload.readback, width * height, state.device_identity))
+        _web_draw_ir_proven(upload.readback, exact_pixel_count, state.device_identity))
     state.gpu_device_proven = (
         state.gpu_device_proven and
-        _web_draw_ir_proven(gpu.readback, width * height, state.device_identity))
+        _web_draw_ir_proven(gpu.readback, exact_pixel_count, state.device_identity))
     if (
         upload.readback.device_identity <= 0 or
         upload.readback.device_identity != gpu.readback.device_identity
@@ -763,20 +910,15 @@ fn _web_draw_ir_choose_route(
         state.commands_complete)
     state.evidence = evidence
     state.complete = evidence.sample_count >= 3
-    # Item 2 of doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md.
-    # `oracle_fingerprint` has exactly ONE reader: the steady branch above,
-    # guarded by `state.complete and state.evidence.should_offload`. It used to
-    # be recomputed over the whole oracle surface on every sampling frame, so on
-    # a route that offloads the first two writes were overwritten unread, and on
-    # a route that does NOT offload — every host without a proven device — all
-    # three were written and never read at all. Compute it under precisely the
-    # condition it is read under. This is not a weakened comparison: `complete`
-    # latches here and the evidence that latches it is the same evidence the
-    # reader consults, so the stored value is identical to the one the old
-    # last-write-wins assignment left behind. The fingerprint function and the
-    # `gpu_match` comparison are untouched.
+    # The third sample has already compared both device paths with this oracle
+    # pixel-for-pixel. Retain that exact canonical value and bind it to the
+    # parked engine owner while all proof fields are still available. This
+    # makes the first steady frame eligible for reuse and removes the former
+    # probabilistic fingerprint authorization entirely.
     if state.complete and evidence.should_offload:
-        state.oracle_fingerprint = _web_draw_ir_pixel_fingerprint(upload.oracle_pixels)
+        state.validated_pixels = upload.oracle_pixels
+        state.validated_device_token = _web_fast_engine_validated_device_token(
+            gpu.readback, width, height, backend_name)
     val state_index = _web_draw_ir_state_index(key)
     if state_index >= 0:
         _web_draw_ir_route_states[state_index] = state

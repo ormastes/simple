@@ -1979,7 +1979,15 @@ int64_t spl_thread_cpu_count(void) {
  * This function is defined in thread_pool.spl and compiled to C.
  * In interpreter mode, this function may not be available.
  */
+#if defined(__APPLE__)
+/* Mach-O rejects an unresolved `weak` declaration while linking a dylib.
+ * `weak_import` is Darwin's spelling for an optional undefined provider: the
+ * address is null when the Simple thread-pool module is outside the retained
+ * shared-library closure. */
+extern void worker_loop_entry(int64_t pool_id) __attribute__((weak_import));
+#else
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
+#endif
 
 /* Thread worker wrapper for pthread */
 #ifdef SPL_THREAD_PTHREAD

@@ -144,6 +144,80 @@ describe "GPU web event model — transaction contract":
         expect(journal.mutations[1].operation).to_equal(GPU_MUT_OP_SET)
         expect(journal.mutations[2].operation).to_equal(GPU_MUT_OP_ADD)
 
+    it "should sequence-sort every batch boundary without changing arrival ownership":
+        step("Keep the 16-event insertion boundary stable and leave its input unchanged")
+        var small: [GpuInputEvent] = []
+        var small_i: i64 = 15
+        while small_i >= 0:
+            small = small.push(_ev(small_i as u64, 4u64,
+                GPU_EVENT_KIND_POINTER_DOWN, (15 - small_i) as i32))
+            small_i = small_i - 1
+        val small_batch = gpu_event_normalize(small, 4u64)
+        expect(small_batch.events.len()).to_equal(16)
+        expect(small_batch.events[0].sequence).to_equal(0u64)
+        expect(small_batch.events[15].sequence).to_equal(15u64)
+        expect(small[0].sequence).to_equal(15u64)
+        expect(small[15].sequence).to_equal(0u64)
+
+        step("Cross into the merge path at 17 events with deterministic output")
+        var boundary: [GpuInputEvent] = []
+        var boundary_i: i64 = 16
+        while boundary_i >= 0:
+            boundary = boundary.push(_ev(boundary_i as u64, 4u64,
+                GPU_EVENT_KIND_POINTER_DOWN, (16 - boundary_i) as i32))
+            boundary_i = boundary_i - 1
+        val boundary_first = gpu_event_normalize(boundary, 4u64)
+        val boundary_second = gpu_event_normalize(boundary, 4u64)
+        expect(boundary_first.events.len()).to_equal(17)
+        var deterministic_i: i64 = 0
+        while deterministic_i < boundary_first.events.len():
+            expect(boundary_second.events[deterministic_i].sequence).to_equal(
+                boundary_first.events[deterministic_i].sequence)
+            expect(boundary_second.events[deterministic_i].x_fixed).to_equal(
+                boundary_first.events[deterministic_i].x_fixed)
+            deterministic_i = deterministic_i + 1
+
+        step("Build a reverse-arriving batch larger than the small-batch path")
+        var raw: [GpuInputEvent] = []
+        var i: i64 = 31
+        while i >= 0:
+            raw = raw.push(_ev(i as u64, 4u64, GPU_EVENT_KIND_POINTER_DOWN,
+                (31 - i) as i32))
+            i = i - 1
+        val batch = gpu_event_normalize(raw, 4u64)
+        expect(batch.input_count).to_equal(32)
+        expect(batch.events.len()).to_equal(32)
+        expect(batch.events[0].sequence).to_equal(0u64)
+        expect(batch.events[31].sequence).to_equal(31u64)
+        # Sequence values are unique here, so x proves that the reverse input
+        # was actually reordered rather than merely retaining arrival order.
+        expect(batch.events[0].x_fixed).to_equal(31i32)
+        expect(batch.events[31].x_fixed).to_equal(0i32)
+
+        step("Equal values in different merge runs retain arrival order")
+        var equal: [GpuInputEvent] = []
+        equal = equal.push(_ev(7u64, 4u64, GPU_EVENT_KIND_POINTER_DOWN, 10i32))
+        var middle_sequence: i64 = 20
+        while middle_sequence < 35:
+            equal = equal.push(_ev(middle_sequence as u64, 4u64,
+                GPU_EVENT_KIND_POINTER_DOWN, middle_sequence as i32))
+            middle_sequence = middle_sequence + 1
+        equal = equal.push(_ev(7u64, 4u64, GPU_EVENT_KIND_POINTER_DOWN, 11i32))
+        val equal_batch = gpu_event_normalize(equal, 4u64)
+        expect(equal_batch.events.len()).to_equal(17)
+        expect(equal_batch.events[0].x_fixed).to_equal(10i32)
+        expect(equal_batch.events[1].x_fixed).to_equal(11i32)
+
+        step("The unsigned sequence domain orders zero before its maximum")
+        var extremes: [GpuInputEvent] = []
+        extremes = extremes.push(_ev(0xFFFFFFFFFFFFFFFFu64, 4u64,
+            GPU_EVENT_KIND_POINTER_DOWN, 99i32))
+        extremes = extremes.push(_ev(0u64, 4u64,
+            GPU_EVENT_KIND_POINTER_DOWN, 0i32))
+        val extreme_batch = gpu_event_normalize(extremes, 4u64)
+        expect(extreme_batch.events[0].sequence).to_equal(0u64)
+        expect(extreme_batch.events[1].sequence).to_equal(0xFFFFFFFFFFFFFFFFu64)
+
     it "should replay a journal to the same state and the same epoch hash":
         # @req REQ-SSPEC-UNIT
         step("should replay a journal to the same state and the same epoch hash")

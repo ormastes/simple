@@ -1,0 +1,147 @@
+"""Pure-Simple owner facade for the runtime-owned Vulkan B/N2 submission ring.
+
+The facade owns only session and slot tokens. Command buffers, fences, and
+descriptor/buffer owners remain runtime-owned until `retire` returns 1.
+"""
+
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_async_session_acquire,
+    vulkan_sffi_async_session_command,
+    vulkan_sffi_async_session_submit,
+    vulkan_sffi_async_session_poll,
+    vulkan_sffi_async_session_retire,
+    vulkan_sffi_async_session_receipt,
+    vulkan_sffi_async_session_cancel,
+    vulkan_sffi_async_session_close,
+    vulkan_sffi_async_session_capacity,
+    vulkan_sffi_async_session_in_flight,
+    vulkan_sffi_async_session_published_sequence,
+    vulkan_sffi_async_session_supported,
+    vulkan_sffi_async_session_create_with_wait,
+    vulkan_sffi_async_session_recover,
+    vulkan_sffi_async_session_abandon_device,
+    vulkan_sffi_async_session_snapshot,
+    vulkan_sffi_async_session_snapshot_word
+}
+
+pub val VULKAN_ASYNC_RETIRED: i64 = 1
+pub val VULKAN_ASYNC_PENDING: i64 = 0
+pub val VULKAN_ASYNC_INVALID: i64 = -1
+pub val VULKAN_ASYNC_UNKNOWN: i64 = -2
+pub val VULKAN_ASYNC_WOULD_BLOCK: i64 = -3
+pub val VULKAN_ASYNC_CLOSED: i64 = -4
+pub val VULKAN_ASYNC_QUARANTINED: i64 = 2
+
+pub class VulkanAsyncSubmissionSession:
+    handle: i64
+    capacity: i64
+    terminal_handle: i64
+
+    static fn open(capacity: i64) -> VulkanAsyncSubmissionSession:
+        VulkanAsyncSubmissionSession.open_with_wait(capacity, 1000000)
+
+    static fn open_with_wait(capacity: i64, timeout_ns: i64) -> VulkanAsyncSubmissionSession:
+        var handle = 0
+        if vulkan_sffi_async_session_supported() == 1:
+            handle = vulkan_sffi_async_session_create_with_wait(capacity, timeout_ns)
+        VulkanAsyncSubmissionSession(
+            handle: handle,
+            terminal_handle: 0,
+            capacity: if handle > 0:
+                vulkan_sffi_async_session_capacity(handle)
+            else:
+                0
+        )
+
+    fn is_open() -> bool:
+        self.handle > 0
+
+    fn acquire() -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_acquire(self.handle)
+
+    fn command(token: i64) -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_command(self.handle, token)
+
+    fn submit(token: i64) -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_submit(self.handle, token)
+
+    fn poll(token: i64) -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_poll(self.handle, token)
+
+    fn retire(token: i64) -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_retire(self.handle, token)
+
+    fn receipt(sequence: i64) -> i64:
+        if self.handle <= 0:
+            return 0
+        vulkan_sffi_async_session_receipt(self.handle, sequence)
+
+    fn cancel() -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_cancel(self.handle)
+
+    # Explicit device-wide recovery; never used by the normal frame loop.
+    fn recover() -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        vulkan_sffi_async_session_recover(self.handle)
+
+    # Forced device teardown after failed recovery retains the entire device
+    # generation in one bounded runtime quarantine. Result 2 is NOT completion.
+    me abandon_device() -> i64:
+        if self.handle <= 0:
+            return VULKAN_ASYNC_INVALID
+        val result = vulkan_sffi_async_session_abandon_device(self.handle)
+        if result == VULKAN_ASYNC_QUARANTINED:
+            self.terminal_handle = self.handle
+            self.handle = 0
+            self.capacity = 0
+        result
+
+    # Fixed version-1 copied record. Empty means unavailable/stale, never zero
+    # activity. Concurrent snapshot replacement causes explicit rejection.
+    fn telemetry() -> [i64]:
+        val query_handle = if self.handle > 0: self.handle else: self.terminal_handle
+        if query_handle <= 0:
+            return []
+        val snapshot = vulkan_sffi_async_session_snapshot(query_handle)
+        if snapshot <= 0:
+            return []
+        var words: [i64] = []
+        for index in 0..64:
+            val word = vulkan_sffi_async_session_snapshot_word(query_handle, snapshot, index)
+            if word < 0:
+                return []
+            words.push(word)
+        words
+
+    me close() -> i64:
+        if self.handle <= 0:
+            return 1
+        val result = vulkan_sffi_async_session_close(self.handle)
+        if result == 1:
+            self.terminal_handle = self.handle
+            self.handle = 0
+            self.capacity = 0
+        result
+
+    fn in_flight() -> i64:
+        if self.handle <= 0:
+            return 0
+        vulkan_sffi_async_session_in_flight(self.handle)
+
+    fn published_sequence() -> i64:
+        if self.handle <= 0:
+            return 0
+        vulkan_sffi_async_session_published_sequence(self.handle)

@@ -1,0 +1,146 @@
+"""
+# GPU render-surface lifecycle contract
+
+Executable contract for retained surface identity, real device submission,
+frame-slot transitions, zero-readback presentation, explicit capture, and
+memory lifecycle evidence.
+"""
+# @cover src/lib/common/gpu/render_surface_contract.spl 100%
+
+use std.spec.*
+use std.common.gpu.render_surface_contract.*
+
+fn surface(generation: i64) -> GpuRenderSurfaceId:
+    GpuRenderSurfaceId(surface_id: 7, device_generation: generation,
+        width: 3840, height: 2160)
+
+fn token(generation: i64) -> GpuSubmissionToken:
+    GpuSubmissionToken(surface_id: 7, device_generation: generation,
+        submission_id: 9, fence_value: 11, backend: "vulkan",
+        device_identity: "apple-m4-moltenvk", submitted_ns: 100)
+
+describe "GPU render surface contract":
+    it "accepts only bounded two-or-three-frame rings":
+        # @req REQ-GPUUI-004
+        step("Select a bounded frame-ring capacity")
+        expect(gpu_frame_ring_capacity_valid(2)).to_be(true)
+        expect(gpu_frame_ring_capacity_valid(3)).to_be(true)
+        expect(gpu_frame_ring_capacity_valid(1)).to_be(false)
+        expect(gpu_frame_ring_capacity_valid(4)).to_be(false)
+
+    it "allows only the explicit frame lifecycle":
+        # @req REQ-GPUUI-004
+        step("Advance recording through real device completion and presentation")
+        expect(gpu_frame_transition_valid(GPU_FRAME_FREE, GPU_FRAME_RECORDING)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_RECORDING, GPU_FRAME_SUBMITTED)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_SUBMITTED, GPU_FRAME_DEVICE_COMPLETE)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_DEVICE_COMPLETE, GPU_FRAME_PRESENTED)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_PRESENTED, GPU_FRAME_FREE)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_SUBMITTED, GPU_FRAME_PRESENTED)).to_be(false)
+
+    it "keeps capture an explicit post-completion branch":
+        # @req REQ-GPUUI-002
+        step("Branch to capture only after device completion")
+        expect(gpu_frame_transition_valid(GPU_FRAME_DEVICE_COMPLETE, GPU_FRAME_CAPTURE_PENDING)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_CAPTURE_PENDING, GPU_FRAME_PRESENTED)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_CAPTURE_PENDING, GPU_FRAME_DEVICE_COMPLETE)).to_be(true)
+        expect(gpu_frame_transition_valid(GPU_FRAME_CAPTURE_PENDING, GPU_FRAME_FREE)).to_be(false)
+        expect(gpu_frame_transition_valid(GPU_FRAME_SUBMITTED, GPU_FRAME_CAPTURE_PENDING)).to_be(false)
+
+    it "requires a real backend identity and fence":
+        # @req REQ-GPUUI-004
+        step("Validate a device-backed submission token")
+        expect(gpu_submission_token_device_proven(token(2))).to_be(true)
+        val missing_fence = GpuSubmissionToken(surface_id: 7, device_generation: 2,
+            submission_id: 9, fence_value: 0, backend: "vulkan",
+            device_identity: "apple-m4-moltenvk", submitted_ns: 100)
+        expect(gpu_submission_token_device_proven(missing_fence)).to_be(false)
+
+    it "rejects a software token as GPU execution":
+        # @req REQ-GPUUI-008
+        step("Prevent CPU fallback from masquerading as device completion")
+        val cpu = GpuSubmissionToken(surface_id: 7, device_generation: 2,
+            submission_id: 9, fence_value: 11, backend: "software",
+            device_identity: "cpu", submitted_ns: 100)
+        expect(gpu_submission_token_device_proven(cpu)).to_be(false)
+
+    it "admits steady presentation only with zero readback":
+        # @req REQ-GPUUI-002
+        # @req NFR-GPUUI-004
+        step("Present a device-complete frame without downloading pixels")
+        val receipt = GpuPresentReceipt(token: token(2), frame_generation: 3,
+            event_generation: 4, damage_pixels: 100, upload_bytes: 400,
+            readback_bytes: 0, fallback_used: false,
+            completion_source: "device_fence")
+        expect(gpu_present_receipt_admitted(receipt)).to_be(true)
+        val downloaded = GpuPresentReceipt(token: token(2), frame_generation: 3,
+            event_generation: 4, damage_pixels: 100, upload_bytes: 400,
+            readback_bytes: 33177600, fallback_used: false,
+            completion_source: "device_fence")
+        expect(gpu_present_receipt_admitted(downloaded)).to_be(false)
+
+    it "admits explicit capture only from device readback":
+        # @req REQ-GPUUI-002
+        step("Capture exact pixels from the named completed submission")
+        val capture = GpuCaptureReceipt(token: token(2),
+            readback_source: "device_readback", readback_bytes: 33177600,
+            pixel_checksum: 99, fallback_used: false,
+            capture_generation: 1, capture_requested_ns: 101,
+            capture_completed_ns: 102, pixel_width: 3840,
+            pixel_height: 2160, row_stride_bytes: 15360,
+            pixel_format: "argb8888")
+        expect(gpu_capture_receipt_admitted(capture)).to_be(true)
+        val cache = GpuCaptureReceipt(token: token(2),
+            readback_source: "host_cache_after_device_present",
+            readback_bytes: 33177600, pixel_checksum: 99, fallback_used: false,
+            capture_generation: 1, capture_requested_ns: 101,
+            capture_completed_ns: 102, pixel_width: 3840,
+            pixel_height: 2160, row_stride_bytes: 15360,
+            pixel_format: "argb8888")
+        expect(gpu_capture_receipt_admitted(cache)).to_be(false)
+        val early = GpuCaptureReceipt(token: token(2),
+            readback_source: "device_readback", readback_bytes: 33177600,
+            pixel_checksum: 99, fallback_used: false,
+            capture_generation: 1, capture_requested_ns: 101,
+            capture_completed_ns: 100, pixel_width: 3840,
+            pixel_height: 2160, row_stride_bytes: 15360,
+            pixel_format: "argb8888")
+        expect(gpu_capture_receipt_admitted(early)).to_be(false)
+        val wrong_stride = GpuCaptureReceipt(token: token(2),
+            readback_source: "device_readback", readback_bytes: 33177600,
+            pixel_checksum: 99, fallback_used: false,
+            capture_generation: 1, capture_requested_ns: 101,
+            capture_completed_ns: 102, pixel_width: 3840,
+            pixel_height: 2160, row_stride_bytes: 15364,
+            pixel_format: "argb8888")
+        expect(gpu_capture_receipt_admitted(wrong_stride)).to_be(false)
+        # Added fields have fail-closed defaults, preserving source-level
+        # construction compatibility without accepting legacy unbound proof.
+        val legacy = GpuCaptureReceipt(token: token(2),
+            readback_source: "device_readback", readback_bytes: 33177600,
+            pixel_checksum: 99, fallback_used: false)
+        expect(gpu_capture_receipt_admitted(legacy)).to_be(false)
+
+    it "invalidates slots across a device generation change":
+        # @req REQ-GPUUI-003
+        step("Reject an old submitted slot after resize or device loss")
+        val slot = GpuFrameSlot(slot_index: 0, state: GPU_FRAME_SUBMITTED,
+            frame_generation: 3, event_generation: 4, damage_pixels: 100,
+            upload_bytes: 400, token: token(2))
+        expect(gpu_frame_slot_matches_surface(slot, surface(2))).to_be(true)
+        expect(gpu_frame_slot_matches_surface(slot, surface(3))).to_be(false)
+        expect(gpu_frame_slot_reusable(slot)).to_be(false)
+
+    it "admits explicit create resize device-loss and shutdown memory receipts":
+        # @req REQ-GPUUI-003
+        # @req NFR-GPUUI-006
+        step("Account retained allocations at every lifecycle boundary")
+        for cause in ["create", "resize", "device-loss", "shutdown"]:
+            val receipt = GpuSurfaceMemoryReceipt(surface: surface(2),
+                allocation_count: 3, retained_bytes: 4096,
+                staging_bytes: 1024, lifecycle_cause: cause)
+            expect(gpu_surface_memory_receipt_admitted(receipt)).to_be(true)
+        val unknown = GpuSurfaceMemoryReceipt(surface: surface(2),
+            allocation_count: 3, retained_bytes: 4096,
+            staging_bytes: 1024, lifecycle_cause: "cache-hit")
+        expect(gpu_surface_memory_receipt_admitted(unknown)).to_be(false)

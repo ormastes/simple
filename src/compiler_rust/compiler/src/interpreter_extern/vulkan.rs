@@ -70,6 +70,24 @@ pub enum Ret {
 /// 91st unreachable symbol.
 pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_accepted_compute_submit_count", Ret::I, ""),
+    ("rt_vulkan_async_session_acquire", Ret::I, "i"),
+    ("rt_vulkan_async_session_supported", Ret::I, ""),
+    ("rt_vulkan_async_session_create_with_wait", Ret::I, "ii"),
+    ("rt_vulkan_async_session_recover", Ret::I, "i"),
+    ("rt_vulkan_async_session_abandon_device", Ret::I, "i"),
+    ("rt_vulkan_async_session_snapshot", Ret::I, "i"),
+    ("rt_vulkan_async_session_snapshot_word", Ret::I, "iii"),
+    ("rt_vulkan_async_session_cancel", Ret::I, "i"),
+    ("rt_vulkan_async_session_capacity", Ret::I, "i"),
+    ("rt_vulkan_async_session_close", Ret::I, "i"),
+    ("rt_vulkan_async_session_command", Ret::I, "ii"),
+    ("rt_vulkan_async_session_create", Ret::I, "i"),
+    ("rt_vulkan_async_session_in_flight", Ret::I, "i"),
+    ("rt_vulkan_async_session_poll", Ret::I, "ii"),
+    ("rt_vulkan_async_session_published_sequence", Ret::I, "i"),
+    ("rt_vulkan_async_session_receipt", Ret::I, "ii"),
+    ("rt_vulkan_async_session_retire", Ret::I, "ii"),
+    ("rt_vulkan_async_session_submit", Ret::I, "ii"),
     ("rt_vulkan_acquire_next_image", Ret::I, "i"),
     ("rt_vulkan_alloc_buffer", Ret::I, "ii"),
     ("rt_vulkan_begin_compute", Ret::I, ""),
@@ -462,7 +480,7 @@ mod tests {
     /// number so a silent drop is a failure.
     #[test]
     fn family_size_is_one_hundred_eight() {
-        assert_eq!(VULKAN_FNS.len(), 108);
+        assert_eq!(VULKAN_FNS.len(), 120);
     }
 
     /// A duplicated registry row can satisfy source coverage while inflating
