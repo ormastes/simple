@@ -1,0 +1,69 @@
+#!/bin/sh
+# Shared host/artifact resolver for repository launch wrappers.
+
+simple_host_family() {
+  _simple_uname=${1:-$(uname -s 2>/dev/null || printf unknown)}
+  case "${_simple_uname}" in
+    MSYS*|MINGW*|CYGWIN*) printf '%s\n' windows ;;
+    Darwin*) printf '%s\n' darwin ;;
+    Linux*) printf '%s\n' linux ;;
+    FreeBSD*|OpenBSD*|NetBSD*|DragonFly*) printf '%s\n' bsd ;;
+    SimpleOS*) printf '%s\n' simpleos ;;
+    *) printf '%s\n' posix ;;
+  esac
+}
+
+simple_executable_format() {
+  [ -f "$1" ] || { printf '%s\n' missing; return 1; }
+  _simple_magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+  case "${_simple_magic}" in
+    4d5a*) printf '%s\n' pe ;;
+    7f454c46) printf '%s\n' elf ;;
+    feedface|feedfacf|cefaedfe|cffaedfe|cafebabe|bebafeca) printf '%s\n' macho ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
+simple_host_executable_compatible() {
+  _simple_candidate=$1
+  _simple_host=${2:-$(simple_host_family)}
+  if [ "${SIMPLE_HOST_RESOLVER_FIXTURE_MODE:-0}" = 1 ]; then
+    [ -f "${_simple_candidate}" ] || return 1
+  else
+    [ -x "${_simple_candidate}" ] || return 1
+  fi
+  _simple_format=$(simple_executable_format "${_simple_candidate}") || return 1
+  if [ "${SIMPLE_HOST_RESOLVER_FIXTURE_MODE:-0}" = 1 ] && [ "${_simple_format}" = unknown ]; then
+    return 0
+  fi
+  case "${_simple_host}:${_simple_format}" in
+    windows:pe|linux:elf|bsd:elf|simpleos:elf|darwin:macho|posix:elf|posix:macho) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+simple_resolve_host_executable() {
+  _simple_host=$1
+  shift
+  for _simple_candidate in "$@"; do
+    if simple_host_executable_compatible "${_simple_candidate}" "${_simple_host}"; then
+      simple_native_exec_path "${_simple_candidate}" "${_simple_host}"
+      return 0
+    fi
+  done
+  return 127
+}
+
+simple_native_exec_path() {
+  _simple_candidate=$1
+  _simple_host=${2:-$(simple_host_family)}
+  if [ "${SIMPLE_HOST_RESOLVER_FIXTURE_MODE:-0}" = 1 ]; then
+    printf '%s\n' "${_simple_candidate}"
+    return 0
+  fi
+  if [ "${_simple_host}" = windows ] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "${_simple_candidate}"
+  else
+    printf '%s\n' "${_simple_candidate}"
+  fi
+}

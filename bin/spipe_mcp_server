@@ -3,27 +3,35 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
+. "${repo_root}/scripts/lib/host-executable.shs"
+host_family=$(simple_host_family)
 
 : "${SIMPLE_LOG:=error}"
 : "${RUST_LOG:=error}"
 export SIMPLE_LOG RUST_LOG
 
-if [ "${SIMPLE_SPIPE_MCP_BINARY:-}" != "" ] && [ -x "${SIMPLE_SPIPE_MCP_BINARY}" ]; then
-  exec "${SIMPLE_SPIPE_MCP_BINARY}" "$@"
+if [ "${SIMPLE_SPIPE_MCP_BINARY:-}" != "" ]; then
+  simple_host_executable_compatible "${SIMPLE_SPIPE_MCP_BINARY}" "${host_family}" || exit 127
+  exec "$(simple_native_exec_path "${SIMPLE_SPIPE_MCP_BINARY}" "${host_family}")" "$@"
 fi
 
 if [ "${SIMPLE_SPIPE_MCP_PREFER_NATIVE:-}" != "1" ]; then
-  exec "${script_dir}/release/simple" run "${repo_root}/src/app/spipe_mcp/main.spl" "$@"
+  runtime="${script_dir}/release/simple"
+  [ "${host_family}" != windows ] || runtime="${script_dir}/release/x86_64-pc-windows-msvc/simple.exe"
+  simple_host_executable_compatible "${runtime}" "${host_family}" || exit 127
+  exec "$(simple_native_exec_path "${runtime}" "${host_family}")" run "${repo_root}/src/app/spipe_mcp/main.spl" "$@"
 fi
 
 for native in \
   "${repo_root}/build/bootstrap/mcp-package/spipe_mcp" \
   "${script_dir}/release/x86_64-unknown-linux-gnu/spipe_mcp" \
-  "${script_dir}/release/linux-x86_64/spipe_mcp"
+  "${script_dir}/release/linux-x86_64/spipe_mcp" \
+  "${script_dir}/release/x86_64-pc-windows-msvc/spipe_mcp.exe" \
+  "${script_dir}/release/x86_64-pc-windows-gnu/spipe_mcp.exe"
 do
-  if [ -x "${native}" ]; then
-    exec "${native}" "$@"
+  if simple_host_executable_compatible "${native}" "${host_family}"; then
+    exec "$(simple_native_exec_path "${native}" "${host_family}")" "$@"
   fi
 done
 
-exec "${script_dir}/release/simple" run "${repo_root}/src/app/spipe_mcp/main.spl" "$@"
+exit 127

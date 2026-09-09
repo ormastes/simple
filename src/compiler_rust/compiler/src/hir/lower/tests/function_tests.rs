@@ -58,3 +58,20 @@ fn test_function_with_multiple_params() {
     assert_eq!(func.params[2].ty, TypeId::STRING);
     assert_eq!(func.params[3].ty, TypeId::BOOL);
 }
+
+#[test]
+fn extern_call_preserves_declared_optional_array_return_type() {
+    let source = r#"
+extern fn snapshot() -> [(text, text)]?
+
+fn snapshot_len() -> i64:
+    val entries = snapshot() ?? []
+    var seen = 0
+    for entry in entries:
+        val (key, value) = entry
+        if key.len() >= 0 and value.len() >= 0:
+            seen = seen + 1
+    entries.len() + seen
+"#;
+    parse_and_lower(source).expect("declared extern return type must survive calls, coalescing, len, and iteration");
+}
