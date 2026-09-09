@@ -1,0 +1,525 @@
+#!/bin/sh
+# Build and admit the Chromium primitive oracle with an admitted pure-Simple
+# bootstrap compiler.  This script is deliberately fail-closed: it never
+# selects bin/simple, a Rust seed, simple.rejected, or a diagnostic compiler.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+platform=
+bootstrap_output="$root/build/bootstrap"
+output="$root/build/chromium-primitive-oracle/libsimple_chromium_primitive_oracle.dylib"
+dry_run=0
+
+fail() {
+    echo "chromium-oracle-builder: REJECTED — $1" >&2
+    exit 1
+}
+
+usage() {
+    echo "usage: $0 [--bootstrap-output=DIR] [--output=DYLIB] [--dry-run]" >&2
+}
+
+hash_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    else
+        sha256sum -- "$1" | awk '{print $1}'
+    fi
+}
+
+hash_stdin() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        sha256sum | awk '{print $1}'
+    fi
+}
+
+hash_arg_vector() {
+    for arg in "$@"; do
+        arg_bytes=$(printf '%s' "$arg" | wc -c | tr -d ' ')
+        printf '%s:%s\n' "$arg_bytes" "$arg"
+    done | hash_stdin
+}
+
+exact_keys() {
+    file=$1
+    expected=$2
+    actual=$(sed 's/=.*//' "$file" | tr '\n' ' ')
+    [ "$actual" = "$expected" ] || fail "receipt-key-set-invalid:${file}"
+}
+
+host_platform() {
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64|Darwin:aarch64) printf '%s\n' aarch64-apple-darwin ;;
+        Darwin:x86_64) printf '%s\n' x86_64-apple-darwin ;;
+        *) fail "unsupported host (the Chromium oracle is macOS-only)" ;;
+    esac
+}
+
+# A path is admissible only when its spelling is already physical.  This
+# rejects symlinked files and symlinked parent directories, including output
+# paths that would otherwise let a stale artifact escape the checked root.
+physical_file() {
+    value=$1
+    [ -f "$value" ] && [ ! -L "$value" ] || return 1
+    parent=$(CDPATH= cd -- "$(dirname -- "$value")" && pwd -P) || return 1
+    [ "$parent/$(basename -- "$value")" = "$value" ] || return 1
+    printf '%s\n' "$value"
+}
+
+physical_dir() {
+    value=$1
+    [ -d "$value" ] && [ ! -L "$value" ] || return 1
+    parent=$(CDPATH= cd -- "$value" && pwd -P) || return 1
+    [ "$parent" = "$value" ] || return 1
+    printf '%s\n' "$value"
+}
+
+field() {
+    key=$1
+    file=$2
+    [ "$(grep -c "^${key}=" "$file" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^${key}=//p" "$file"
+}
+
+require_field() {
+    key=$1
+    file=$2
+    expected=$3
+    actual=$(field "$key" "$file" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] || fail "${key}-mismatch:${file}"
+}
+
+require_hash_field() {
+    key=$1
+    file=$2
+    actual=$(field "$key" "$file" 2>/dev/null || true)
+    printf '%s\n' "$actual" | grep -Eq '^[0-9a-f]{64}$' ||
+        fail "${key}-missing-or-invalid:${file}"
+}
+
+require_hash_matches() {
+    key=$1
+    file=$2
+    target=$3
+    actual=$(field "$key" "$file" 2>/dev/null || true)
+    expected=$(hash_file "$target") || fail "cannot-hash:${target}"
+    [ "$actual" = "$expected" ] || fail "${key}-stale:${file}"
+}
+
+verify_receipts() (
+    stage3_dir=$1
+    compiler=$2
+    stage2_dir="$bootstrap_output/stage2/$platform"
+    admission="$stage3_dir/stage2-admitted/admission.env"
+    sanity="$stage2_dir/stage2-sanity.receipt"
+    provenance="$stage2_dir/stage2-provenance.receipt"
+    manifest="$stage3_dir/provenance.env"
+    bound_map="$manifest.authority-map.env"
+    stage3_bin="$stage3_dir/simple"
+    source_before="$stage3_dir/source-inputs-before.txt"
+    source_after="$stage3_dir/source-inputs-after.txt"
+    runtime_snapshot="$stage3_dir/runtime-admitted.txt"
+    runtime_authority="$stage3_dir/stage2-runtime-authority"
+    tool_before="$stage3_dir/tool-authority-before.txt"
+    tool_after="$stage3_dir/tool-authority-after.txt"
+    git_after="$stage3_dir/git-state-after.env"
+    stage2_sanity="$stage3_dir/stage2-sanity.env"
+    stage2_receiver="$stage3_dir/stage2-receiver.env"
+    stage2_receiver_log="$stage3_dir/stage2-receiver.log"
+    stage2_transcript="$stage3_dir/stage2-command.transcript"
+    stage3_sanity="$stage3_dir/stage3-sanity.env"
+
+    physical_file "$compiler" >/dev/null || fail compiler-not-canonical
+    physical_file "$admission" >/dev/null ||
+        fail admission-receipt-missing-or-symlink
+    case "$compiler" in
+        */simple.rejected|*/src/compiler_rust/*) fail rejected-or-rust-seed-path ;;
+    esac
+    [ "$(basename -- "$compiler")" = simple ] || fail compiler-name-invalid
+    compiler_sha=$(hash_file "$compiler") || fail compiler-unhashable
+    printf '%s\n' "$compiler_sha" | grep -Eq '^[0-9a-f]{64}$' ||
+        fail compiler-hash-invalid
+    require_field schema "$admission" simple-bootstrap-stage2-admission-v2
+    require_field status "$admission" admitted
+    require_field candidate_path "$admission" "$compiler"
+    require_field candidate_sha256 "$admission" "$compiler_sha"
+
+    for required_file in "$sanity" "$provenance" \
+        "$manifest" "$bound_map" "$stage3_bin" "$source_before" \
+        "$source_after" "$runtime_snapshot" "$tool_before" "$tool_after" \
+        "$git_after" "$stage2_sanity" "$stage2_receiver" \
+        "$stage2_receiver_log" "$stage2_transcript" "$stage3_sanity"; do
+        physical_file "$required_file" >/dev/null ||
+            fail "canonical-bootstrap-file-missing-or-symlink:${required_file}"
+    done
+    physical_dir "$runtime_authority" >/dev/null ||
+        fail stage2-runtime-authority-missing-or-symlink
+
+    require_field checks_executed_at_admission "$admission" 1
+    require_field checks_replayed_during_stage3 "$admission" 0
+    exact_keys "$admission" \
+        'schema status admission_receipt_path candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 simple_abi_policy simple_abi_version simple_abi_deferred sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 receiver_log_path receiver_log_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3 '
+    require_field admission_receipt_path "$admission" "$admission"
+    require_field source_snapshot_path "$admission" "$source_before"
+    require_field runtime_snapshot_path "$admission" "$runtime_snapshot"
+    require_field runtime_authority_path "$admission" "$runtime_authority"
+    require_field tool_authority_path "$admission" "$tool_before"
+    require_field sanity_evidence_path "$admission" "$stage2_sanity"
+    require_field receiver_evidence_path "$admission" "$stage2_receiver"
+    require_field receiver_log_path "$admission" "$stage2_receiver_log"
+    require_field simple_abi_policy "$admission" v1
+    require_field simple_abi_version "$admission" 1
+    require_field simple_abi_deferred "$admission" 0
+    require_hash_matches source_snapshot_sha256 "$admission" "$source_before"
+    require_hash_matches runtime_snapshot_sha256 "$admission" "$runtime_snapshot"
+    require_hash_matches tool_authority_sha256 "$admission" "$tool_before"
+
+    # Replay the producer's own complete Stage-2 admission verifier. This
+    # covers the sanity and receiver evidence, hosted runtime, ABI policy,
+    # exact receipt schema, and admission-identity digest. Handwritten checks
+    # alone previously allowed a synthetic receipt graph to reach --version.
+    SIMPLE_ABI_POLICY=v1
+    export SIMPLE_ABI_POLICY
+    build_args=$(field build_args_sha256 "$admission")
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$admission" "$admission" "$compiler" "$compiler" \
+        "$source_before" "$source_before" \
+        "$runtime_snapshot" "$runtime_snapshot" \
+        "$runtime_authority" "$runtime_authority" \
+        "$tool_before" "$tool_before" "$build_args" \
+        "$stage2_sanity" "$stage2_sanity" "$stage3_dir" \
+        "$stage2_receiver" "$stage2_receiver" \
+        "$stage2_receiver_log" "$stage2_receiver_log" "$root" \
+        >/dev/null 2>&1 || fail stage2-admission-deep-replay-failed
+
+    require_field schema "$sanity" simple-bootstrap-stage2-parent-sanity-v1
+    exact_keys "$sanity" \
+        'schema stage2-sanity: pass candidate_sha256 admission_receipt_path admission_receipt_sha256 '
+    [ "$(grep -c '^stage2-sanity: pass$' "$sanity")" -eq 1 ] || fail stage2-sanity-not-pass
+    require_field candidate_sha256 "$sanity" "$compiler_sha"
+    require_field admission_receipt_path "$sanity" "$admission"
+    require_hash_matches admission_receipt_sha256 "$sanity" "$admission"
+
+    require_field schema "$provenance" simple-bootstrap-stage2-parent-provenance-v1
+    exact_keys "$provenance" \
+        'schema stage2-provenance: pure-simple authority candidate_sha256 admission_receipt_path source_snapshot_sha256 runtime_snapshot_sha256 tool_authority_sha256 admission_receipt_sha256 '
+    [ "$(grep -c '^stage2-provenance: pure-simple$' "$provenance")" -eq 1 ] || fail stage2-provenance-not-pure-simple
+    case "$(field authority "$provenance" 2>/dev/null || true)" in
+        explicit-full-bootstrap-stage2-trust-root|admitted-pure-simple-runtime-stage2-trust-root) ;;
+        *) fail stage2-provenance-authority-invalid ;;
+    esac
+    require_field candidate_sha256 "$provenance" "$compiler_sha"
+    require_field admission_receipt_path "$provenance" "$admission"
+    require_hash_matches admission_receipt_sha256 "$provenance" "$admission"
+    for key in source_snapshot_sha256 runtime_snapshot_sha256 tool_authority_sha256; do
+        require_field "$key" "$provenance" "$(field "$key" "$admission")"
+    done
+
+    require_field schema "$manifest" simple-bootstrap-stage3-provenance-v4
+    require_field status "$manifest" pass
+    require_field artifact_kind "$manifest" pure-simple-bootstrap-compiler
+    require_field full_cli_status "$manifest" separate-not-proven
+    require_field stage2_sanity_status "$manifest" pass
+    require_field stage2_receiver_status "$manifest" pass
+    require_field stage2_admitted_path "$manifest" "$compiler"
+    require_field stage2_admitted_sha256 "$manifest" "$compiler_sha"
+    require_field stage2_admission_receipt_path "$manifest" "$admission"
+    require_hash_matches stage2_admission_receipt_sha256 "$manifest" "$admission"
+    require_field stage2_admission_identity "$manifest" \
+        "$(field admission_identity "$admission")"
+    require_field stage2_checks_executed_at_admission "$manifest" 1
+    require_field stage2_checks_replayed_during_stage3 "$manifest" 0
+    require_field source_snapshot_path "$manifest" "$source_after"
+    require_hash_matches source_snapshot_sha256 "$manifest" "$source_after"
+    require_field source_snapshot_sha256 "$manifest" \
+        "$(field source_snapshot_sha256 "$admission")"
+    require_field source_fingerprint "$manifest" "$(field source_snapshot_sha256 "$manifest")"
+    require_field runtime_admitted_snapshot_path "$manifest" "$runtime_snapshot"
+    require_hash_matches runtime_admitted_snapshot_sha256 "$manifest" "$runtime_snapshot"
+    require_field runtime_admitted_snapshot_sha256 "$manifest" \
+        "$(field runtime_snapshot_sha256 "$admission")"
+    require_field tool_authority_path "$manifest" "$tool_after"
+    require_hash_matches tool_authority_sha256 "$manifest" "$tool_after"
+    require_field tool_authority_sha256 "$manifest" \
+        "$(field tool_authority_sha256 "$admission")"
+    require_field git_state_path "$manifest" "$git_after"
+    require_hash_matches git_state_sha256 "$manifest" "$git_after"
+    require_field stage2_command_transcript_path "$manifest" "$stage2_transcript"
+    require_hash_matches stage2_command_transcript_sha256 "$manifest" "$stage2_transcript"
+    require_field stage3_sanity_evidence_path "$manifest" "$stage3_sanity"
+    require_hash_matches stage3_sanity_evidence_sha256 "$manifest" "$stage3_sanity"
+    require_field stage3_path "$manifest" "$stage3_bin"
+    require_hash_matches stage3_sha256 "$manifest" "$stage3_bin"
+    require_field output_path "$manifest" "$stage3_bin"
+    require_hash_matches output_sha256 "$manifest" "$stage3_bin"
+    require_field bound_artifact_authority_map_path "$manifest" "$bound_map"
+    require_hash_matches bound_artifact_authority_map_sha256 "$manifest" "$bound_map"
+
+    require_field schema "$bound_map" simple-stage3-bound-artifact-authority-map-v2
+    require_field status "$bound_map" ready
+    require_field entry_count "$bound_map" 31
+    require_field stage2_admitted_display "$bound_map" "$compiler"
+    require_field stage2_admitted_sha256 "$bound_map" "$compiler_sha"
+    require_field stage2_admission_receipt_display "$bound_map" "$admission"
+    require_field stage2_admission_receipt_sha256 "$bound_map" \
+        "$(hash_file "$admission")"
+    require_field source_snapshot_display "$bound_map" "$source_after"
+    require_field source_snapshot_sha256 "$bound_map" "$(hash_file "$source_after")"
+    require_field output_display "$bound_map" "$stage3_bin"
+    require_field output_sha256 "$bound_map" "$(hash_file "$stage3_bin")"
+
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$stage3_sanity" "$stage3_sanity" "$stage3_dir" \
+        "$stage3_bin" "$root" >/dev/null 2>&1 ||
+        fail stage3-sanity-evidence-invalid
+
+    require_field bootstrap_script_path "$manifest" \
+        "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+    require_hash_matches bootstrap_script_sha256 "$manifest" \
+        "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+    require_field provenance_helper_path "$manifest" "$provenance_facade"
+    require_hash_matches provenance_helper_sha256 "$manifest" "$provenance_facade"
+    require_field provenance_helper_bundle_fingerprint "$manifest" \
+        "$(bootstrap_stage3_helper_bundle_fingerprint)"
+
+    # Recompute the mutable authorities. Hashing the archived snapshots only
+    # proves that the receipt files did not change; it does not prove that the
+    # current source tree, runtime directory, Git state, and toolchain still
+    # match the admitted generation.
+    verify_tmp=$(mktemp -d "${TMPDIR:-/tmp}/chromium-oracle-authority.XXXXXX")
+    trap 'rm -rf "$verify_tmp"' EXIT HUP INT TERM
+    bootstrap_stage3_source_snapshot "$verify_tmp/source" "$root" ||
+        fail current-source-snapshot-failed
+    cmp -s "$source_after" "$verify_tmp/source" || fail current-source-not-admitted
+    bootstrap_stage3_git_state "$root" "$verify_tmp/git" ||
+        fail current-git-snapshot-failed
+    cmp -s "$git_after" "$verify_tmp/git" || fail current-git-not-admitted
+    bootstrap_stage3_directory_snapshot "$verify_tmp/runtime" "$runtime_authority" ||
+        fail current-runtime-snapshot-failed
+    cmp -s "$runtime_snapshot" "$verify_tmp/runtime" ||
+        fail current-runtime-not-admitted
+    admitted_path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH) ||
+        fail stage2-transcript-path-invalid
+    bootstrap_stage3_tool_authority_snapshot \
+        "$verify_tmp/tools" "$admitted_path" "$root" ||
+        fail current-tool-authority-snapshot-failed
+    cmp -s "$tool_after" "$verify_tmp/tools" || fail current-tools-not-admitted
+    rm -rf "$verify_tmp"
+    trap - EXIT HUP INT TERM
+
+    # The executable itself is the final Rust-seed fence.  An executable with
+    # no trustworthy identity is rejected rather than treated as pure Simple.
+    version=$(
+        "$compiler" --version 2>&1
+    ) || fail compiler-version-probe-failed
+    expected_version="simple-bootstrap $(bootstrap_stage3_canonical_version "$root")"
+    [ "$version" = "$expected_version" ] || fail compiler-version-identity-invalid
+)
+
+verify_macos_oracle() {
+    artifact=$1
+    file_description=$(file -b "$artifact")
+    case "$file_description" in
+        *"Mach-O"*) ;;
+        *) fail "artifact-not-macho:${file_description}" ;;
+    esac
+    case "$platform" in
+        aarch64-apple-darwin) expected_arch=arm64 ;;
+        x86_64-apple-darwin) expected_arch=x86_64 ;;
+        *) fail artifact-platform-invalid ;;
+    esac
+    actual_arch=$(lipo -archs "$artifact" 2>/dev/null) ||
+        fail artifact-architecture-probe-failed
+    [ "$actual_arch" = "$expected_arch" ] ||
+        fail "artifact-architecture-mismatch:${actual_arch}"
+    nm -gU "$artifact" >"$artifact.nm" 2>/dev/null || fail artifact-symbol-probe-failed
+    expected=$(mktemp "${TMPDIR:-/tmp}/simple-chromium-symbols.XXXXXX")
+    trap 'rm -f "$expected" "$artifact.nm"' EXIT HUP INT TERM
+    cat >"$expected" <<'EOF'
+simple_chromium_oracle_abi_version
+simple_chromium_oracle_create
+simple_chromium_oracle_destroy
+simple_chromium_oracle_last_error_into
+simple_chromium_oracle_run_json_into
+EOF
+    actual=$(mktemp "${TMPDIR:-/tmp}/simple-chromium-symbols-actual.XXXXXX")
+    awk '
+        $2 == "T" {
+            name = $NF
+            sub(/^_/, "", name)
+            if (name ~ /^simple_chromium_oracle_/) print name
+        }
+    ' "$artifact.nm" | LC_ALL=C sort >"$actual"
+    if ! cmp -s "$expected" "$actual"; then
+        rm -f "$actual"
+        fail artifact-export-set-mismatch
+    fi
+    symbols_sha=$(hash_file "$actual") || fail artifact-symbol-set-unhashable
+    rm -f "$actual"
+    printf '%s\n' "$symbols_sha"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --bootstrap-output=*) bootstrap_output=${1#*=} ;;
+        --output=*) output=${1#*=} ;;
+        --dry-run) dry_run=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage; exit 64 ;;
+    esac
+    shift
+done
+
+case "$bootstrap_output:$output" in
+    /*:/*) ;;
+    *) fail absolute-paths-required ;;
+esac
+bootstrap_output=$(CDPATH= cd -- "$bootstrap_output" && pwd -P) || fail bootstrap-output-not-canonical
+physical_dir "$bootstrap_output" >/dev/null || fail bootstrap-output-symlink-or-missing
+case "$bootstrap_output" in
+    */simple.rejected|*/simple.rejected/*) fail rejected-bootstrap-output ;;
+esac
+platform=$(host_platform)
+stage3_dir="$bootstrap_output/stage3/$platform"
+compiler="$stage3_dir/stage2-admitted/simple"
+oracle_source="$root/tools/chromium-primitive-oracle/chromium_primitive_oracle.spl"
+provenance_facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+physical_file "$provenance_facade" >/dev/null || fail provenance-facade-not-canonical
+BOOTSTRAP_STAGE3_FACADE_PATH=$provenance_facade
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$provenance_facade" || fail provenance-facade-load-failed
+physical_file "$oracle_source" >/dev/null || fail oracle-source-missing-or-symlink
+source_before=$(hash_file "$oracle_source") || fail oracle-source-unhashable
+
+output_parent=$(dirname -- "$output")
+[ -d "$output_parent" ] || mkdir -p -- "$output_parent"
+output_parent=$(CDPATH= cd -- "$output_parent" && pwd -P) || fail output-parent-not-canonical
+[ "$output_parent/$(basename -- "$output")" = "$output" ] || fail output-parent-symlink-or-noncanonical
+receipt="$output.receipt.env"
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail output-path-collision
+[ ! -e "$receipt" ] && [ ! -L "$receipt" ] || fail receipt-path-collision
+
+verify_receipts "$stage3_dir" "$compiler"
+source_after=$(hash_file "$oracle_source") || fail oracle-source-unhashable-after-preflight
+[ "$source_before" = "$source_after" ] || fail oracle-source-changed-during-preflight
+
+compiler_sha=$(hash_file "$compiler") || fail compiler-unhashable-after-preflight
+admission="$stage3_dir/stage2-admitted/admission.env"
+stage2_sanity_receipt="$bootstrap_output/stage2/$platform/stage2-sanity.receipt"
+stage2_provenance_receipt="$bootstrap_output/stage2/$platform/stage2-provenance.receipt"
+stage3_manifest="$stage3_dir/provenance.env"
+stage2_transcript="$stage3_dir/stage2-command.transcript"
+build_path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH) ||
+    fail stage2-transcript-path-invalid-after-preflight
+admission_sha=$(hash_file "$admission")
+stage2_sanity_receipt_sha=$(hash_file "$stage2_sanity_receipt")
+stage2_provenance_receipt_sha=$(hash_file "$stage2_provenance_receipt")
+stage3_manifest_sha=$(hash_file "$stage3_manifest")
+
+command_text="$compiler native-build --emit-shared --source $(dirname -- "$oracle_source") --entry-closure --entry $oracle_source --backend=llvm --strip --output=<fresh-temp>"
+if [ "$dry_run" -eq 1 ]; then
+    echo "status=ready"
+    echo "compiler=$compiler"
+    echo "compiler_sha256=$(hash_file "$compiler")"
+    echo "oracle_source=$oracle_source"
+    echo "oracle_source_sha256=$source_before"
+    echo "command=$command_text"
+    exit 0
+fi
+
+work=$(mktemp -d "$output_parent/.chromium-primitive-oracle.XXXXXX")
+published_output=0
+tmp_artifact="$work/$(basename -- "$output")"
+cleanup() {
+    if [ "$published_output" -eq 1 ] && [ -e "$output" ] &&
+        [ "$output" -ef "$tmp_artifact" ]; then
+        rm -f -- "$output"
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+compiler_snapshot="$work/simple"
+cp -p -- "$compiler" "$compiler_snapshot" || fail compiler-snapshot-copy-failed
+chmod 500 "$compiler_snapshot" || fail compiler-snapshot-mode-failed
+[ "$(hash_file "$compiler_snapshot")" = "$compiler_sha" ] ||
+    fail compiler-changed-during-snapshot
+mkdir "$work/home" "$work/tmp" "$work/native-cache"
+build_argv_sha=$(hash_arg_vector native-build --emit-shared \
+    --source "$(dirname -- "$oracle_source")" --entry-closure \
+    --entry "$oracle_source" --backend=llvm --strip \
+    --cache-dir "$work/native-cache" --output="$tmp_artifact")
+build_env_sha=$(hash_arg_vector \
+    "HOME=$work/home" "TMPDIR=$work/tmp" "PATH=$build_path" \
+    "SIMPLE_LIB=$root/src" \
+    "SIMPLE_BINARY=$compiler_snapshot" SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_ABI_POLICY=v1)
+set +e
+(
+    unset SIMPLE_LINKER SIMPLE_NATIVE_BUILD_EMIT_OBJECT SIMPLE_NATIVE_BUILD_RUST
+    export HOME="$work/home" TMPDIR="$work/tmp" PATH="$build_path"
+    export SIMPLE_LIB="$root/src"
+    export SIMPLE_BINARY="$compiler_snapshot" SIMPLE_BOOTSTRAP=1
+    export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_ABI_POLICY=v1
+    "$compiler_snapshot" native-build --emit-shared \
+        --source "$(dirname -- "$oracle_source")" --entry-closure \
+        --entry "$oracle_source" --backend=llvm --strip \
+        --cache-dir "$work/native-cache" --output="$tmp_artifact"
+) >"$work/build.stdout" 2>"$work/build.stderr"
+build_rc=$?
+set -e
+[ "$build_rc" -eq 0 ] || fail "compiler-build-failed:$build_rc"
+[ -f "$tmp_artifact" ] && [ ! -L "$tmp_artifact" ] || fail compiler-did-not-produce-dylib
+symbols_sha=$(verify_macos_oracle "$tmp_artifact")
+source_after=$(hash_file "$oracle_source") || fail oracle-source-unhashable-after-build
+[ "$source_before" = "$source_after" ] || fail oracle-source-changed-during-build
+[ "$(hash_file "$compiler")" = "$compiler_sha" ] || fail compiler-changed-during-build
+[ "$(hash_file "$admission")" = "$admission_sha" ] || fail admission-changed-during-build
+[ "$(hash_file "$stage2_sanity_receipt")" = "$stage2_sanity_receipt_sha" ] ||
+    fail stage2-sanity-receipt-changed-during-build
+[ "$(hash_file "$stage2_provenance_receipt")" = "$stage2_provenance_receipt_sha" ] ||
+    fail stage2-provenance-receipt-changed-during-build
+[ "$(hash_file "$stage3_manifest")" = "$stage3_manifest_sha" ] ||
+    fail stage3-manifest-changed-during-build
+
+output_sha=$(hash_file "$tmp_artifact") || fail built-artifact-unhashable
+output_file=$(file -b "$tmp_artifact") || fail built-artifact-file-probe-failed
+receipt_tmp="$work/$(basename -- "$receipt")"
+{
+    echo schema=simple-chromium-primitive-oracle-v1
+    echo status=pass
+    echo compiler_path="$compiler"
+    echo compiler_sha256="$compiler_sha"
+    echo compiler_kind=admitted-pure-simple-stage2
+    echo compiler_execution=private-byte-snapshot
+    echo stage2_sanity_receipt_path="$stage2_sanity_receipt"
+    echo stage2_sanity_receipt_sha256="$stage2_sanity_receipt_sha"
+    echo stage2_provenance_receipt_path="$stage2_provenance_receipt"
+    echo stage2_provenance_receipt_sha256="$stage2_provenance_receipt_sha"
+    echo stage3_provenance_path="$stage3_manifest"
+    echo stage3_provenance_sha256="$stage3_manifest_sha"
+    echo admission_receipt_path="$admission"
+    echo admission_receipt_sha256="$admission_sha"
+    echo oracle_source_path="$oracle_source"
+    echo oracle_source_sha256="$source_after"
+    echo command="$command_text"
+    echo build_argv_sha256="$build_argv_sha"
+    echo build_env_sha256="$build_env_sha"
+    echo output_path="$output"
+    echo output_sha256="$output_sha"
+    echo output_file="$output_file"
+    echo exported_symbols_sha256="$symbols_sha"
+} >"$receipt_tmp" || fail receipt-write-failed
+chmod 400 "$receipt_tmp"
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail output-path-collision-at-publication
+[ ! -e "$receipt" ] && [ ! -L "$receipt" ] || fail receipt-path-collision-at-publication
+ln "$tmp_artifact" "$output" || fail atomic-output-publication-failed
+published_output=1
+ln "$receipt_tmp" "$receipt" || fail atomic-receipt-publication-failed
+published_output=0
+trap - EXIT HUP INT TERM
+rm -rf "$work"
+echo "PASS: Chromium primitive oracle admitted at $output"

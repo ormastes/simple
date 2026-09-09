@@ -5,15 +5,15 @@
 #   test/05_perf/bench/vulkan_2d_c/vk2d_bench.c is the C Vulkan reference (adapted from the
 #   Magicalbat/videos single-file headless compute example): per frame it does
 #   vkCmdFillBuffer clear + N rect-fill compute dispatches + optional host
-#   readback, with ONE queue submit + ONE fence wait per frame.
+#   readback, with a retained three-slot ring and nonblocking completion polls.
 #   test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl drives Simple's Engine2D vulkan backend
 #   through the identical workload (clear + N draw_rect_filled + submit_batch
 #   + present + read_pixels_with_source).
 #
 #   This script runs both and aggregates an evidence file:
 #     build/vulkan-2d-c-compare/evidence.env
-#   with compare_ratio_x1000 = simple_fps * 1000 / c_fps and
-#   compare_status=pass when the ratio meets the budget (default 10%,
+#   with compare_ratio_x1000 = simple_p95_ns * 1000 / c_p95_ns and
+#   compare_status=pass when the ratio meets the selected upper bound (2.0x,
 #   override with VK2D_BUDGET_X1000).
 #
 # MODES
@@ -32,152 +32,278 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 BENCH_DIR="$ROOT/test/05_perf/bench/vulkan_2d_c"
 OUT_DIR="$ROOT/build/vulkan-2d-c-compare"
-BUDGET_X1000=${VK2D_BUDGET_X1000:-100}
+ADMISSION_LIB="$ROOT/scripts/check/lib/perf-comparison-admission.shs"
+\. "$ADMISSION_LIB"
+BUDGET_X1000=${VK2D_BUDGET_X1000:-2000}
 W=${VK2D_W:-800}
 H=${VK2D_H:-600}
 RECTS=${VK2D_RECTS:-64}
 FRAMES=${VK2D_FRAMES:-300}
+WARMUPS=5
 
 fail() { echo "check-vulkan-2d-c-compare: $*" >&2; exit 1; }
 
-# ratio_status C_FPS_X1000 SIMPLE_FPS_X1000 C_STATUS SIMPLE_STATUS C_REASON SIMPLE_REASON
+for numeric_value in "$BUDGET_X1000" "$W" "$H" "$RECTS" "$FRAMES" "$WARMUPS"; do
+    perf_admission_positive_integer "$numeric_value" || fail "invalid positive integer input"
+done
+[ "$W" -le 16384 ] && [ "$H" -le 16384 ] || fail "viewport exceeds 16384"
+[ "$RECTS" -le 1000000 ] && [ "$FRAMES" -le 1000000 ] || fail "workload count exceeds contract bound"
+[ "$BUDGET_X1000" -le 1000000 ] || fail "budget exceeds contract bound"
+
+hash_file() {
+    if [ ! -f "$1" ]; then
+        return 0
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | sed 's/[[:space:]].*$//'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | sed 's/[[:space:]].*$//'
+    fi
+}
+
+hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | sed 's/[[:space:]].*$//'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | sed 's/[[:space:]].*$//'
+    fi
+}
+
+SOURCE_REVISION=$( {
+    hash_file "$BENCH_DIR/vk2d_bench.c"
+    hash_file "$BENCH_DIR/vk2d_bench.spl"
+    hash_file "$BENCH_DIR/rect.comp.glsl"
+    hash_file "$BENCH_DIR/scenes.txt"
+} | hash_stdin )
+WORKLOAD_REVISION=$SOURCE_REVISION
+C_SOURCE_REVISION=$(hash_file "$BENCH_DIR/vk2d_bench.c")
+SIMPLE_SOURCE_REVISION=$(hash_file "$BENCH_DIR/vk2d_bench.spl")
+ICD_SHA256=$(hash_file "${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}")
+
+line_value() {
+    printf '%s\n' "$1" | awk -v wanted="$2" '{
+        for (i = 1; i <= NF; i++) {
+            eq = index($i, "=")
+            if (eq > 1 && substr($i, 1, eq - 1) == wanted) {
+                print substr($i, eq + 1); exit
+            }
+        }
+    }'
+}
+
+simple_binary_is_seed() {
+    case "$1" in *compiler_rust*|*bootstrap*|*rust-seed*|*/seed/*|*seed-simple*) return 0 ;; esac
+    if command -v strings >/dev/null 2>&1 &&
+       LC_ALL=C strings "$1" 2>/dev/null | grep -Eqi 'bootstrap seed only|compiler_rust/target|rust-built Simple binary'; then
+        return 0
+    fi
+    return 1
+}
+
+# ratio_status C_P95_NS SIMPLE_P95_NS C_STATUS SIMPLE_STATUS C_REASON SIMPLE_REASON
 # Emits the four aggregate lines on stdout.
 aggregate() {
-    c_fps=$1; s_fps=$2; c_st=$3; s_st=$4; c_reason=$5; s_reason=$6
+    c_p95=$1; s_p95=$2; c_st=$3; s_st=$4; c_reason=$5; s_reason=$6
+    c_env=$7; simple_env=$8
     echo "compare_budget_x1000=$BUDGET_X1000"
-    if [ "$c_st" != pass ]; then
+    if [ "$c_st" != admitted ]; then
         echo "compare_status=skipped"
         echo "compare_ratio_x1000=0"
         echo "compare_reason=c-leg-$c_st:$c_reason"
         return 0
     fi
-    if [ "$s_st" != pass ]; then
+    if [ "$s_st" != admitted ]; then
         echo "compare_status=skipped"
         echo "compare_ratio_x1000=0"
         echo "compare_reason=simple-leg-$s_st:$s_reason"
         return 0
     fi
-    if [ "$c_fps" -le 0 ]; then
+    perf_compare_admit_env "$c_env" c_ "$simple_env" simple_
+    if [ "$PERF_ADMISSION_STATUS" != admitted ]; then
+        echo "compare_status=skipped"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=admission-$PERF_ADMISSION_REASON"
+        return 0
+    fi
+    case "$c_p95:$s_p95" in
+        *[!0-9:]*|:*|*:)
+            echo "compare_status=fail"
+            echo "compare_ratio_x1000=0"
+            echo "compare_reason=p95-not-unsigned-integer"
+            return 1
+            ;;
+    esac
+    if [ "$c_p95" -le 0 ] || [ "$s_p95" -le 0 ]; then
         echo "compare_status=fail"
         echo "compare_ratio_x1000=0"
-        echo "compare_reason=c-fps-nonpositive:$c_fps"
+        echo "compare_reason=p95-nonpositive:c=$c_p95:simple=$s_p95"
         return 1
     fi
-    ratio=$((s_fps * 1000 / c_fps))
+    ratio=$((s_p95 * 1000 / c_p95))
     echo "compare_ratio_x1000=$ratio"
-    if [ "$ratio" -ge "$BUDGET_X1000" ]; then
+    if [ "$ratio" -le "$BUDGET_X1000" ]; then
         echo "compare_status=pass"
-        echo "compare_reason=within-budget:$ratio>=$BUDGET_X1000"
+        echo "compare_reason=within-budget:$ratio<=$BUDGET_X1000"
         return 0
     fi
     echo "compare_status=fail"
-    echo "compare_reason=below-budget:$ratio<$BUDGET_X1000"
+    echo "compare_reason=above-budget:$ratio>$BUDGET_X1000"
     return 1
 }
 
 value_of() {
-    # value_of FILE KEY — last wins, empty when absent
-    sed -n "s/^$2=//p" "$1" | tail -1
+    perf_admission_value_of "$1" "$2"
+}
+
+project_row() {
+    input=$1; prefix=$2; output=$3
+    LC_ALL=C awk -v prefix="$prefix" '
+        BEGIN {
+            projection = "workload_id viewport_width viewport_height warmup_count sample_count timing_scope readback_mode capture_mode gpu_identity fallback_state source_path source_revision checksum_semantics binary_kind binary_path binary_sha256 binary_admission_path binary_admission_sha256 artifact_path artifact_sha256 checksum"
+            consumer = "status reason p95_ns"
+            n = split(projection, names, " "); for (i = 1; i <= n; i++) allowed[names[i]] = "projection"
+            m = split(consumer, extra, " "); for (i = 1; i <= m; i++) allowed[extra[i]] = "consumer"
+        }
+        {
+            eq = index($0, "="); if (eq <= 1) exit 2
+            key = substr($0, 1, eq - 1)
+            if (substr(key, 1, length(prefix)) != prefix) exit 2
+            suffix = substr(key, length(prefix) + 1)
+            if (!(suffix in allowed) || ++seen[suffix] != 1) exit 2
+            if (allowed[suffix] == "projection") print $0
+        }
+        END {
+            for (i = 1; i <= n; i++) if (!(names[i] in seen)) exit 2
+            for (i = 1; i <= m; i++) if (!(extra[i] in seen)) exit 2
+        }
+    ' "$input" >"$output"
 }
 
 if [ "${1:-}" = "--aggregate" ]; then
     [ $# -eq 2 ] || fail "--aggregate needs a row directory"
     dir=$2
-    [ -f "$dir/c.env" ] || fail "missing $dir/c.env"
-    [ -f "$dir/simple.env" ] || fail "missing $dir/simple.env"
+    case "$dir" in ''|-*) fail "unsafe row directory path" ;; esac
+    [ ! -L "$dir" ] && [ -d "$dir" ] || fail "invalid row directory"
+    [ ! -L "$dir/c.env" ] && [ -f "$dir/c.env" ] || fail "invalid $dir/c.env"
+    [ ! -L "$dir/simple.env" ] && [ -f "$dir/simple.env" ] || fail "invalid $dir/simple.env"
+    projection_dir=$(mktemp -d "${TMPDIR:-/tmp}/vk2d-admission.XXXXXX") || fail "cannot create projection directory"
+    trap 'rm -rf "$projection_dir"' EXIT HUP INT TERM
+    project_row "$dir/c.env" c_ "$projection_dir/c.env" || fail "malformed or inexact C row"
+    project_row "$dir/simple.env" simple_ "$projection_dir/simple.env" || fail "malformed or inexact Simple row"
     aggregate \
-        "$(value_of "$dir/c.env" c_fps_x1000)" \
-        "$(value_of "$dir/simple.env" simple_fps_x1000)" \
+        "$(value_of "$dir/c.env" c_p95_ns)" \
+        "$(value_of "$dir/simple.env" simple_p95_ns)" \
         "$(value_of "$dir/c.env" c_status)" \
         "$(value_of "$dir/simple.env" simple_status)" \
         "$(value_of "$dir/c.env" c_reason)" \
-        "$(value_of "$dir/simple.env" simple_reason)"
+        "$(value_of "$dir/simple.env" simple_reason)" \
+        "$projection_dir/c.env" "$projection_dir/simple.env"
     exit $?
 fi
 
 # ── live mode ──────────────────────────────────────────────────────────────
 mkdir -p "$OUT_DIR"
 
-c_status=skipped; c_reason=not-attempted; c_fps=0; c_bin="$OUT_DIR/vk2d_bench"
-# Vulkan include dir and ICD are DISCOVERED, not assumed. This gate used to
-# hardcode Homebrew's /opt/homebrew paths and a MoltenVK ICD, so on Linux the C
-# leg always reported `no-vulkan-headers` and the Simple leg then reported
-# `c-leg-skipped` -- i.e. this comparison had never once run off macOS, and the
-# Simple-vs-C 2D gap it exists to measure was silently never measured.
-# $VULKAN_INCLUDE_DIR / $VK_ICD_FILENAMES still win when set.
-vk_inc=""
-for cand in ${VULKAN_INCLUDE_DIR:-} ${VULKAN_SDK:+$VULKAN_SDK/include} \
-            /opt/homebrew/include "$HOME/.local/include" /usr/local/include /usr/include; do
-    [ -n "$cand" ] && [ -f "$cand/vulkan/vulkan.h" ] && { vk_inc="$cand"; break; }
-done
-# Find the directory that actually CONTAINS a libvulkan, not merely the first
-# directory that exists. Prefer the linker-friendly unversioned .so; fall back
-# to the versioned soname, which is all a host without the -dev package has
-# (this box: libvulkan.so.1 present, libvulkan.so absent -> `mold: library not
-# found: vulkan`).
-vk_libdir=""; vk_link="-lvulkan"
-for cand in ${VULKAN_LIB_DIR:-} ${VULKAN_SDK:+$VULKAN_SDK/lib} /opt/homebrew/lib \
-            "$HOME/.local/lib" /usr/local/lib /lib/"$(uname -m)"-linux-gnu /usr/lib; do
-    [ -n "$cand" ] || continue
-    if [ -f "$cand/libvulkan.so" ] || [ -f "$cand/libvulkan.dylib" ]; then
-        vk_libdir="$cand"; vk_link="-lvulkan"; break
-    fi
-    soname=$(ls "$cand"/libvulkan.so.1 2>/dev/null | head -1)
-    if [ -n "$soname" ]; then vk_libdir="$cand"; vk_link="$soname"; break; fi
-done
-ICD=${VK_ICD_FILENAMES:-}
-if [ -z "$ICD" ]; then
-    for cand in /opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
-                /usr/share/vulkan/icd.d/nvidia_icd.json \
-                /usr/share/vulkan/icd.d/lvp_icd.json; do
-        [ -f "$cand" ] && { ICD="$cand"; break; }
-    done
-fi
+c_status=skipped; c_reason=not-attempted; c_p95=0; c_bin="$OUT_DIR/vk2d_bench"
+c_device=; c_checksum=; c_bin_sha=; c_timing_scope=submit-to-fence-p95
+c_artifact="$OUT_DIR/c-framebuffer.rgba"; c_artifact_sha=
+ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
 elif ! command -v glslangValidator >/dev/null 2>&1; then
     c_reason=no-glslangValidator
-elif [ -z "$vk_inc" ]; then
+elif [ ! -f /opt/homebrew/include/vulkan/vulkan.h ]; then
     c_reason=no-vulkan-headers
-elif [ -z "$ICD" ] || [ ! -f "$ICD" ]; then
+elif [ ! -f "$ICD" ]; then
     c_reason=no-vulkan-icd
 else
     (cd "$OUT_DIR" && glslangValidator -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
-    # _POSIX_C_SOURCE is required for clock_gettime/CLOCK_MONOTONIC/struct
-    # timespec: under -std=c99 glibc hides them behind the POSIX feature-test
-    # macro, while Darwin's headers expose them unconditionally -- so this
-    # compiled on macOS and broke on Linux the moment the headers were found.
-    clang -std=c99 -D_POSIX_C_SOURCE=199309L -O2 "$BENCH_DIR/vk2d_bench.c" \
-        -I"$vk_inc" ${vk_libdir:+-L"$vk_libdir"} $vk_link -o "$c_bin" ||
+    clang -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
+        -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o "$c_bin" ||
         fail "C reference build failed (toolchain present but compile broke)"
-    c_out=$(cd "$OUT_DIR" && VK_ICD_FILENAMES="$ICD" ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 | tail -1)
+    rm -f "$c_artifact"
+    c_all_out=$(cd "$OUT_DIR" && VK_ICD_FILENAMES="$ICD" VK2D_DUMP_FB="$c_artifact" ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS")
+    c_out=$(printf '%s\n' "$c_all_out" | tail -1)
+    c_device=$(printf '%s\n' "$c_all_out" | sed -n 's/^device: //p' | tail -1)
     case $c_out in
-        c-vulkan-2d*fps=*)
-            c_status=pass; c_reason=measured
-            c_fps=$(echo "$c_out" | sed -n 's/.*fps=\([0-9.]*\).*/\1/p')
-            c_fps=$(awk "BEGIN{ printf \"%d\", $c_fps * 1000 }")
-            echo "c_line=$c_out"
+        c-vulkan-2d*p95_ns=*)
+            if [ -z "$c_device" ] || [ -z "$ICD_SHA256" ] ||
+               [ "$(line_value "$c_out" w)" != "$W" ] ||
+               [ "$(line_value "$c_out" h)" != "$H" ] ||
+               [ "$(line_value "$c_out" rects)" != "$RECTS" ] ||
+               [ "$(line_value "$c_out" warmups)" != "$WARMUPS" ] ||
+               [ "$(line_value "$c_out" samples)" != "$FRAMES" ] ||
+               [ "$(line_value "$c_out" ring)" != 3 ] ||
+               [ "$(line_value "$c_out" max_frames_in_flight)" != 3 ] ||
+               [ "$(line_value "$c_out" unconditional_submit_wait)" != false ] ||
+               [ "$(line_value "$c_out" timed_readback_bytes)" != 0 ] ||
+               [ "$(line_value "$c_out" capture_count)" != 1 ] ||
+               [ "$(line_value "$c_out" cpu_completion_wait_count)" != 0 ]; then
+                c_status=fail; c_reason=invalid-live-contract
+            elif [ ! -s "$c_artifact" ]; then
+                c_status=fail; c_reason=missing-post-timing-capture
+            else
+                c_status=measured-unadmitted; c_reason=receipt-needs-common-admission
+                c_p95=$(line_value "$c_out" p95_ns)
+                c_checksum=$(line_value "$c_out" checksum)
+                c_bin_sha=$(hash_file "$c_bin")
+                c_artifact_sha=$(hash_file "$c_artifact")
+                echo "c_line=$c_out"
+            fi
             ;;
         *) c_status=fail; c_reason="no-fps-line:$(echo "$c_out" | head -c 80)" ;;
     esac
 fi
 
-simple_status=skipped; simple_reason=not-attempted; s_fps=0
-SEED="$ROOT/src/compiler_rust/target/vulkan/release/simple"
+simple_status=skipped; simple_reason=not-attempted; s_p95=0
+simple_device=; simple_checksum=; simple_bin_sha=; simple_timing_scope=draw-plus-submit-to-fence-p95
+simple_artifact="$OUT_DIR/simple-framebuffer.rgba"; simple_artifact_sha=
+SIMPLE_BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
 if [ "$c_status" = skipped ]; then
     simple_reason=c-leg-skipped
-elif [ ! -x "$SEED" ]; then
-    simple_reason=no-vulkan-seed-binary
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    simple_reason=no-selfhosted-simple-binary
+elif [ -L "$SIMPLE_BIN" ] || simple_binary_is_seed "$SIMPLE_BIN"; then
+    simple_reason=bootstrap-seed-forbidden
 else
+    rm -f "$simple_artifact"
     s_out=$(cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
         VK_ICD_FILENAMES="$ICD" VK2D_W="$W" VK2D_H="$H" VK2D_RECTS="$RECTS" VK2D_FRAMES="$FRAMES" \
-        "$SEED" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl 2>/dev/null | grep '^simple-vulkan-2d' | tail -1) || true
+        VK2D_WARMUPS="$WARMUPS" VK2D_READBACK=1 VK2D_DUMP_FB="$simple_artifact" \
+        "$SIMPLE_BIN" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl 2>/dev/null | grep '^simple-vulkan-2d' | tail -1) || true
     case $s_out in
-        simple-vulkan-2d*fps~=*)
-            simple_status=pass; simple_reason=measured
-            s_fps=$(echo "$s_out" | sed -n 's/.*fps~=\([0-9]*\).*/\1/p')
-            s_fps=$((s_fps * 1000))
-            echo "simple_line=$s_out"
+        simple-vulkan-2d*p95_ns=*)
+            simple_reported_status=$(line_value "$s_out" status)
+            if [ "$simple_reported_status" = blocked ]; then
+                simple_status=blocked
+                simple_reason=$(line_value "$s_out" reason)
+            elif [ "$simple_reported_status" != admitted ]; then
+                simple_status=fail; simple_reason=invalid-live-status
+            elif [ "$(line_value "$s_out" w)" != "$W" ] ||
+                 [ "$(line_value "$s_out" h)" != "$H" ] ||
+                 [ "$(line_value "$s_out" rects)" != "$RECTS" ] ||
+                 [ "$(line_value "$s_out" warmups)" != "$WARMUPS" ] ||
+                 [ "$(line_value "$s_out" samples)" != "$FRAMES" ] ||
+                 [ "$(line_value "$s_out" unconditional_submit_wait)" != false ] ||
+                 [ "$(line_value "$s_out" timed_readback_bytes)" != 0 ] ||
+                 [ "$(line_value "$s_out" capture_count)" != 1 ] ||
+                 [ "$(line_value "$s_out" cpu_completion_wait_count)" != 0 ] ||
+                 [ ! -s "$simple_artifact" ]; then
+                simple_status=fail; simple_reason=invalid-live-contract
+            else
+                simple_status=measured-unadmitted; simple_reason=receipt-needs-common-admission
+                s_p95=$(line_value "$s_out" p95_ns)
+                simple_device=$(printf '%s\n' "$s_out" | sed -n 's/.* device=\(.*\) driver=.*/\1/p')
+                simple_checksum=$(line_value "$s_out" checksum)
+                simple_bin_sha=$(hash_file "$SIMPLE_BIN")
+                simple_artifact_sha=$(hash_file "$simple_artifact")
+                if [ -z "$simple_device" ]; then
+                    simple_status=fail; simple_reason=missing-gpu-device-identity
+                elif [ "$c_device" != "$simple_device" ]; then
+                    simple_status=blocked; simple_reason=gpu-device-mismatch
+                fi
+                echo "simple_line=$s_out"
+            fi
             ;;
         *) simple_status=fail; simple_reason="no-fps-line:$(echo "$s_out" | head -c 80)" ;;
     esac
@@ -186,27 +312,61 @@ fi
 {
     echo "c_status=$c_status"
     echo "c_reason=$c_reason"
-    echo "c_fps_x1000=$c_fps"
+    echo "c_p95_ns=$c_p95"
     echo "simple_status=$simple_status"
     echo "simple_reason=$simple_reason"
-    echo "simple_fps_x1000=$s_fps"
+    echo "simple_p95_ns=$s_p95"
+    echo "c_workload_id=vulkan-2d-c-rects-v1-${W}x${H}-rects${RECTS}-scene${WORKLOAD_REVISION}"
+    echo "simple_workload_id=vulkan-2d-c-rects-v1-${W}x${H}-rects${RECTS}-scene${WORKLOAD_REVISION}"
+    echo "c_viewport_width=$W"
+    echo "c_viewport_height=$H"
+    echo "simple_viewport_width=$W"
+    echo "simple_viewport_height=$H"
+    echo "c_warmup_count=$WARMUPS"
+    echo "simple_warmup_count=$WARMUPS"
+    echo "c_sample_count=$FRAMES"
+    echo "simple_sample_count=$FRAMES"
+    echo "c_timing_scope=$c_timing_scope"
+    echo "simple_timing_scope=$simple_timing_scope"
+    echo "c_readback_mode=post-timing-full-frame"
+    echo "simple_readback_mode=post-timing-full-frame"
+    echo "c_capture_mode=single-post-timing-capture"
+    echo "simple_capture_mode=single-post-timing-capture"
+    echo "c_gpu_identity=device:${c_device};icd_sha256=$ICD_SHA256"
+    echo "simple_gpu_identity=device:${simple_device};icd_sha256=$ICD_SHA256"
+    echo "c_fallback_state=none"
+    if [ "$simple_status" = measured-unadmitted ]; then
+        echo "simple_fallback_state=none"
+    else
+        echo "simple_fallback_state=${simple_status:-skipped}"
+    fi
+    echo "c_source_path=$BENCH_DIR/vk2d_bench.c"
+    echo "simple_source_path=$BENCH_DIR/vk2d_bench.spl"
+    echo "c_source_revision=$C_SOURCE_REVISION"
+    echo "simple_source_revision=$SIMPLE_SOURCE_REVISION"
+    echo "c_binary_kind=native-reference"
+    echo "simple_binary_kind=admitted-selfhosted"
+    echo "c_binary_path=$c_bin"
+    echo "simple_binary_path=$SIMPLE_BIN"
+    echo "c_binary_sha256=$c_bin_sha"
+    echo "simple_binary_sha256=$simple_bin_sha"
+    echo "c_binary_admission_path="
+    echo "simple_binary_admission_path="
+    echo "c_binary_admission_sha256="
+    echo "simple_binary_admission_sha256="
+    echo "c_artifact_path=$c_artifact"
+    echo "simple_artifact_path=$simple_artifact"
+    echo "c_artifact_sha256=$c_artifact_sha"
+    echo "simple_artifact_sha256=$simple_artifact_sha"
+    echo "c_checksum_semantics=sampled-u32-xor-stride-4096"
+    echo "simple_checksum_semantics=sampled-u32-xor-stride-4096"
+    echo "c_checksum=$c_checksum"
+    echo "simple_checksum=$simple_checksum"
 } | tee "$OUT_DIR/c.env.raw" >/dev/null
 # Split rows for the --aggregate contract path.
-{ echo "c_status=$c_status"; echo "c_reason=$c_reason"; echo "c_fps_x1000=$c_fps"; } > "$OUT_DIR/c.env"
-{ echo "simple_status=$simple_status"; echo "simple_reason=$simple_reason"; echo "simple_fps_x1000=$s_fps"; } > "$OUT_DIR/simple.env"
+sed -n 's/^c_/c_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
+sed -n 's/^simple_/simple_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
 
-# `aggregate | tee` returned TEE's status, so a `compare_status=fail` run still
-# exited 0 and the gate could not fail. Capture, then propagate (2026-09-06).
-agg_out=$(aggregate "$c_fps" "$s_fps" "$c_status" "$simple_status" "$c_reason" "$simple_reason")
-agg_rc=$?
-printf '%s\n' "$agg_out" > "$OUT_DIR/evidence.env"
-printf '%s\n' "$agg_out"
-
-agg_status=$(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_status" { print $2; exit }')
-case "$agg_status" in
-    pass)    echo "PASS — 2 leg(s) checked (c, simple), ratio_x1000=$(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_ratio_x1000" { print $2; exit }'), 0 below budget" ;;
-    skipped) echo "ERROR — nothing was checked ($(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_reason" { print $2; exit }'))"; exit 2 ;;
-    fail)    echo "FAIL — 2 leg(s) checked (c, simple), $(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_reason" { print $2; exit }')" ;;
-    *)       echo "ERROR — nothing was checked (no compare_status in aggregate output)"; exit 2 ;;
-esac
-exit "$agg_rc"
+aggregate "$c_p95" "$s_p95" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
+    "$OUT_DIR/c.env" "$OUT_DIR/simple.env" \
+    | tee "$OUT_DIR/evidence.env"
