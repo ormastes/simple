@@ -1,0 +1,47 @@
+#!/bin/sh
+# Cache transport only. The canonical bootstrap independently binds source,
+# producer, runtime, tools, command transcript and admission in the new root.
+bootstrap_stage2_clone_cache() {
+    [ "$#" -eq 4 ] || return 64
+    clone_source=$1
+    clone_parent=$2
+    clone_platform=$3
+    clone_lock=$4
+    portable_lock_handle_is_owned "$clone_lock" || return 77
+    [ -d "$clone_source" ] && [ ! -L "$clone_source" ] || return 1
+    [ -d "$clone_parent" ] && [ ! -L "$clone_parent" ] || return 1
+    case "$clone_platform" in ''|*[!A-Za-z0-9_-]*) return 64 ;; esac
+    # FIFOs/devices and symlinks are never a cache input. Copying a FIFO may
+    # block; following a link may copy an unrelated authority or a candidate.
+    if find "$clone_source" ! -type f ! -type d -print -quit | grep -q .; then
+        return 1
+    fi
+    find "$clone_source" -type f -name .cache_scope -print -quit |
+        grep -q . || return 1
+    clone_output=$(mktemp -d "$clone_parent/stage2-resume.XXXXXX") || return 1
+    clone_cache="$clone_output/stage3/$clone_platform/stage2-native-cache"
+    # Retain incomplete clone metadata on failure for diagnosis. Never remove
+    # or rename anything in the old output, including its failed evidence.
+    bootstrap_stage3_directory_snapshot "$clone_output/cache-source-before.txt" \
+        "$clone_source" || return 1
+    bootstrap_stage3_copy_authority "$clone_source" "$clone_cache" || return 1
+    chmod -R u+w "$clone_cache" || return 1
+    bootstrap_stage3_directory_snapshot "$clone_output/cache-source-after.txt" \
+        "$clone_source" || return 1
+    bootstrap_stage3_directory_snapshot "$clone_output/cache-copy.txt" \
+        "$clone_cache" || return 1
+    cmp -s "$clone_output/cache-source-before.txt" \
+        "$clone_output/cache-source-after.txt" || return 1
+    cmp -s "$clone_output/cache-source-before.txt" \
+        "$clone_output/cache-copy.txt" || return 1
+    portable_lock_handle_is_owned "$clone_lock" || return 77
+    clone_sha=$(bootstrap_stage3_hash_file \
+        "$clone_output/cache-copy.txt") || return 1
+    {
+        printf 'schema=simple-stage2-cache-clone-v1\n'
+        printf 'source-cache=%s\n' "$clone_source"
+        printf 'cache-snapshot-sha256=%s\n' "$clone_sha"
+        printf 'admission=none\n'
+    } >"$clone_output/cache-clone.env" || return 1
+    BOOTSTRAP_STAGE2_CLONE_OUTPUT=$clone_output
+}

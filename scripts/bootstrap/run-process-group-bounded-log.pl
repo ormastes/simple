@@ -15,13 +15,17 @@ $SIG{__DIE__} = sub {
     exit(126);
 };
 
-my $darwin = $^O eq 'darwin';
-$darwin || $^O eq 'linux' or die "bounded-log-error: unsupported host\n";
-my $SYS_RENAMEAT2 = $Config{archname} =~ /aarch64/ ? 276 :
-    $Config{archname} =~ /x86_64/ ? 316 : undef;
-$darwin || defined($SYS_RENAMEAT2) or die "bounded-log-error: unsupported renameat2 architecture\n";
-# renameat2 numbers are Linux ABI values. Fail closed rather than silently use
-# pathname rename on an architecture not explicitly admitted above.
+my $IS_LINUX = $^O eq 'linux';
+my $IS_DARWIN = $^O eq 'darwin';
+$IS_LINUX || $IS_DARWIN or die "bounded-log-error: unsupported platform\n";
+my $SYS_RENAMEAT2 = $IS_LINUX ? (
+    $Config{archname} =~ /aarch64/ ? 276 :
+    $Config{archname} =~ /x86_64/ ? 316 : undef
+) : undef;
+$IS_LINUX && !defined($SYS_RENAMEAT2) and
+    die "bounded-log-error: unsupported renameat2 architecture\n";
+# renameat2 numbers are Linux ABI values. Linux fails closed rather than
+# silently using pathname rename on an architecture not admitted above.
 my $RENAME_NOREPLACE = 1;
 
 my %option;
@@ -36,9 +40,11 @@ for my $key (qw(output-parent log-leaf receipt-leaf max-bytes timeout-seconds te
     exists($option{$key}) or die "bounded-log-error: missing option $key\n";
 }
 keys(%option) == 6 or die "bounded-log-error: unknown option\n";
-if ($darwin) {
+my $output_parent_fd;
+if ($IS_DARWIN) {
     $option{'output-parent'} =~ m{\A/dev/fd/([1-9][0-9]*)\z} or
-        die "bounded-log-error: output parent is not an inherited descriptor\n";
+        die "bounded-log-error: output parent is not a devfd descriptor\n";
+    $output_parent_fd = 0 + $1;
 } else {
     $option{'output-parent'} =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z} or
         die "bounded-log-error: output parent is not a procfd descriptor\n";
@@ -56,42 +62,29 @@ for my $key (qw(max-bytes timeout-seconds term-grace-seconds)) {
 $option{'max-bytes'} > 0 && $option{'timeout-seconds'} > 0 or
     die "bounded-log-error: nonpositive limit\n";
 
-my ($parent, $command_cwd);
-if ($darwin) {
-    my ($fd) = $option{'output-parent'} =~ m{/([0-9]+)\z};
-    open($parent, '<&', 0 + $fd) or die "bounded-log-error: duplicate output parent: $!\n";
-    sysopen($command_cwd, '.', O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or
-        die "bounded-log-error: hold command cwd: $!\n";
+my ($parent, $original_cwd);
+if ($IS_DARWIN) {
+    sysopen($original_cwd, '.', O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or
+        die "bounded-log-error: open original cwd: $!\n";
+    fcntl($original_cwd, F_SETFD, FD_CLOEXEC) or
+        die "bounded-log-error: original cwd cloexec: $!\n";
+    open($parent, '<&', $output_parent_fd) or
+        die "bounded-log-error: duplicate output parent: $!\n";
+    fcntl($parent, F_SETFD, FD_CLOEXEC) or
+        die "bounded-log-error: output parent cloexec: $!\n";
 } else {
-    sysopen($parent, "$option{'output-parent'}/.", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or
+    sysopen($parent, "$option{'output-parent'}/.",
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or
         die "bounded-log-error: open output parent: $!\n";
 }
 my @parent_identity = stat($parent);
 @parent_identity && -d _ or die "bounded-log-error: invalid output parent\n";
-if ($darwin) {
-    # fchdir anchors all relative output operations to the held inode even if
-    # its old pathname is renamed/replaced. Only the child restores the caller
-    # cwd, so native-build's repository-relative entries retain their meaning.
-    chdir($parent) or die "bounded-log-error: enter held output parent: $!\n";
-}
-my $parent_ref = $darwin ? '.' : '/proc/self/fd/' . fileno($parent);
-
-sub publish_exclusive {
-    my ($temporary, $leaf) = @_;
-    if ($darwin) {
-        # link is atomic and refuses every existing destination, including a
-        # symlink. Both names are in the supervisor's descriptor-pinned cwd.
-        link($temporary, $leaf) or return 0;
-        unlink($temporary) or die "bounded-log-error: unlink published temporary: $!\n";
-        return 1;
-    }
-    return syscall($SYS_RENAMEAT2, fileno($parent), $temporary,
-        fileno($parent), $leaf, $RENAME_NOREPLACE) == 0;
-}
+chdir($parent) or die "bounded-log-error: pin output parent cwd: $!\n" if $IS_DARWIN;
+my $parent_ref = $IS_DARWIN ? '' : '/proc/self/fd/' . fileno($parent);
 my $log_tmp_leaf = ".$option{'log-leaf'}.tmp.$$";
 my $receipt_tmp_leaf = ".$option{'receipt-leaf'}.tmp.$$";
-my $log_tmp_ref = "$parent_ref/$log_tmp_leaf";
-my $receipt_tmp_ref = "$parent_ref/$receipt_tmp_leaf";
+my $log_tmp_ref = $IS_DARWIN ? $log_tmp_leaf : "$parent_ref/$log_tmp_leaf";
+my $receipt_tmp_ref = $IS_DARWIN ? $receipt_tmp_leaf : "$parent_ref/$receipt_tmp_leaf";
 my ($log_tmp_created, $receipt_tmp_created) = (0, 0);
 my ($log_published, $receipt_published) = (0, 0);
 END {
@@ -134,11 +127,11 @@ defined($pid) or die "bounded-log-error: fork: $!\n";
 if (!$pid) {
     close($stream_r); close($ready_r); close($exec_r);
     $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = 'DEFAULT';
-    if ($darwin) {
-        chdir($command_cwd) or POSIX::_exit(125);
-        close($command_cwd);
-    }
     setsid() >= 0 or POSIX::_exit(125);
+    if ($IS_DARWIN) {
+        chdir($original_cwd) or POSIX::_exit(125);
+        close($original_cwd) or POSIX::_exit(125);
+    }
     syswrite($ready_w, 'R', 1) == 1 or POSIX::_exit(125);
     close($ready_w);
     open(STDOUT, '>&', $stream_w) or POSIX::_exit(125);
@@ -150,6 +143,7 @@ if (!$pid) {
     };
 }
 close($stream_w); close($ready_w); close($exec_w);
+close($original_cwd) or die "bounded-log-error: close original cwd: $!\n" if $IS_DARWIN;
 
 my ($caught, $reaped, $raw_wait) = ('', 0, 0);
 $SIG{TERM} = sub { $caught ||= 'TERM' };
@@ -329,13 +323,21 @@ if (defined($ENV{BOUNDED_LOG_TEST_LATE_SIGNAL_READY_FD}) ||
     close($late_ready) or die "bounded-log-error: close late-signal ready hook: $!\n";
     close($late_ack) or die "bounded-log-error: close late-signal ack hook: $!\n";
 }
-if (!publish_exclusive($log_tmp_leaf, $option{'log-leaf'})) {
+my $log_publish_failed = $IS_DARWIN ?
+    !link($log_tmp_leaf, $option{'log-leaf'}) :
+    syscall($SYS_RENAMEAT2, fileno($parent), $log_tmp_leaf,
+        fileno($parent), $option{'log-leaf'}, $RENAME_NOREPLACE) != 0;
+if ($log_publish_failed) {
     my $error = "$!";
     my $collision = $! == EEXIST;
     unlink($log_tmp_ref) or die "bounded-log-error: cleanup log temporary: $!\n";
     $log_tmp_created = 0;
     die($collision ? "bounded-log-error: log output collision\n" :
         "bounded-log-error: publish log: $error\n");
+}
+if ($IS_DARWIN) {
+    unlink($log_tmp_leaf) or die "bounded-log-error: unlink published log temporary: $!\n";
+    $log_tmp_created = 0;
 }
 $log_published = 1;
 $parent->sync or die "bounded-log-error: fsync log parent: $!\n";
@@ -356,13 +358,21 @@ $receipt_tmp_created = 1;
 write_all($receipt, $receipt_text);
 $receipt->sync or die "bounded-log-error: fsync receipt: $!\n";
 close($receipt) or die "bounded-log-error: close receipt: $!\n";
-if (!publish_exclusive($receipt_tmp_leaf, $option{'receipt-leaf'})) {
+my $receipt_publish_failed = $IS_DARWIN ?
+    !link($receipt_tmp_leaf, $option{'receipt-leaf'}) :
+    syscall($SYS_RENAMEAT2, fileno($parent), $receipt_tmp_leaf,
+        fileno($parent), $option{'receipt-leaf'}, $RENAME_NOREPLACE) != 0;
+if ($receipt_publish_failed) {
     my $error = "$!";
     my $collision = $! == EEXIST;
     unlink($receipt_tmp_ref) or die "bounded-log-error: cleanup receipt temporary: $!\n";
     $receipt_tmp_created = 0;
     die($collision ? "bounded-log-error: receipt output collision; log retained without authoritative receipt\n" :
         "bounded-log-error: publish receipt: $error\n");
+}
+if ($IS_DARWIN) {
+    unlink($receipt_tmp_leaf) or die "bounded-log-error: unlink published receipt temporary: $!\n";
+    $receipt_tmp_created = 0;
 }
 $receipt_published = 1;
 $parent->sync or die "bounded-log-error: fsync receipt parent: $!\n";

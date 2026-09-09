@@ -1,0 +1,66 @@
+# Native bootstrap regression: the real factory must receive the installed
+# registry table. Ports are selection-only fixtures; compiling with them fails.
+use common.plugin.iface_id.{ParamHeader}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileError, compileoptions_default_options}
+use compiler.backend.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.backend.codegen_types.{CodegenOutput, CodegenOutputKind}
+use compiler.backend.backend_port.{BackendDescV1, BackendPortV1, CodegenParamsV1, backend_port_header, backend_port_host_iface}
+use compiler.backend.backend.static_backend_registry.{BackendLinkClass, StaticBackendEntryV1, StaticBackendSelectionError, active_static_backend_table_v1, install_k1_static_backend_table_v1, select_static_backend_v1, static_backend_entry_v1}
+use compiler.mir.mir_instructions.{MirModule}
+
+fn fixture_cranelift_descriptor() -> BackendDescV1:
+    BackendDescV1(ParamHeader("simple.codegen.BackendDescV1", 1, 0, 0),
+        "cranelift", ["*"], ["fixture-selection"], "fixture-cranelift", [])
+
+fn fixture_interpreter_descriptor() -> BackendDescV1:
+    BackendDescV1(ParamHeader("simple.codegen.BackendDescV1", 1, 0, 0),
+        "interpreter", ["*"], ["fixture-selection"], "fixture-interpreter", [])
+
+fn fixture_llvm_descriptor() -> BackendDescV1:
+    BackendDescV1(ParamHeader("simple.codegen.BackendDescV1", 1, 0, 0),
+        "llvm", ["*"], ["fixture-selection"], "fixture-llvm", [])
+
+fn fixture_refuse_compile(params: CodegenParamsV1, module: MirModule) -> Result<CodegenOutput, CompileError>:
+    Err(CompileError("selection-only fixture cannot compile", "fixture", false, nil))
+
+fn fixture_supports(capability: text) -> bool:
+    capability == "fixture-selection"
+
+fn fixture_table() -> [StaticBackendEntryV1]:
+    val cranelift_port = BackendPortV1(backend_port_header(), backend_port_host_iface(),
+        fixture_cranelift_descriptor, fixture_refuse_compile, fixture_supports, [])
+    val interpreter_port = BackendPortV1(backend_port_header(), backend_port_host_iface(),
+        fixture_interpreter_descriptor, fixture_refuse_compile, fixture_supports, [])
+    val llvm_port = BackendPortV1(backend_port_header(), backend_port_host_iface(),
+        fixture_llvm_descriptor, fixture_refuse_compile, fixture_supports, [])
+    [static_backend_entry_v1(BackendKind.Cranelift, BackendLinkClass.KernelLinked,
+        cranelift_port, CodegenOutputKind.ObjectCode),
+     static_backend_entry_v1(BackendKind.Interpreter, BackendLinkClass.KernelLinked,
+        interpreter_port, CodegenOutputKind.InterpretedResult),
+     static_backend_entry_v1(BackendKind.Llvm, BackendLinkClass.KernelLinked,
+        llvm_port, CodegenOutputKind.ObjectCode)]
+
+fn main() -> i64:
+    # An uninstalled registry must fail with a defined error, never read an
+    # unspecified machine argument or manufacture an available backend.
+    match select_static_backend_v1("llvm", active_static_backend_table_v1()):
+        case Err(StaticBackendSelectionError.NotFound(name)):
+            if name != "llvm": return 10
+        case _: return 11
+    if not install_k1_static_backend_table_v1("llvm-cranelift", fixture_table()):
+        return 12
+    val options = compileoptions_default_options()
+    val llvm = CodegenFactory.create(BackendKind.Llvm, options)
+    if llvm.backend_name() != "llvm": return 13
+    if llvm.backend_kind() != BackendKind.Llvm: return 14
+    if not llvm.supports_target(CodegenTarget.Host): return 15
+    if llvm.output_kind() != CodegenOutputKind.ObjectCode: return 16
+    val interpreter = CodegenFactory.create(BackendKind.Interpreter, options)
+    if interpreter.backend_name() != "interpreter": return 17
+    if interpreter.output_kind() != CodegenOutputKind.InterpretedResult: return 18
+    match select_static_backend_v1("missing", active_static_backend_table_v1()):
+        case Err(StaticBackendSelectionError.NotFound(name)):
+            if name != "missing": return 19
+        case _: return 20
+    print "native backend factory active-table regression: PASS"
+    0

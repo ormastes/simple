@@ -702,7 +702,7 @@ bootstrap_stage_sanity() (
     CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend0_log" \
     CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_receipt##*/}" \
-    candidate_frontend_smoke "$candidate_sanity" >"$frontend_log_authority" 2>&1 || frontend_status=$?
+    candidate_frontend_pinned_smoke "$candidate_sanity" "$frontend_log_authority" || frontend_status=$?
   frontend_bootstrap_status=0
   frontend_bootstrap_ran=false
   if [ "$frontend_status" -eq 0 ]; then
@@ -712,7 +712,7 @@ bootstrap_stage_sanity() (
       CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend1_log" \
       CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_receipt##*/}" \
-      candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log_authority" 2>&1 || \
+      candidate_frontend_pinned_smoke "$candidate_sanity" "$frontend_log_authority" || \
       frontend_bootstrap_status=$?
     frontend_status=$frontend_bootstrap_status
   fi

@@ -64,7 +64,7 @@ int main(void) {
     assert((bytes->items[1].as_int >> 3) == 'c');
     assert((bytes->items[2].as_int >> 3) == 'd');
     rt_array_free(bytes);
-    assert(rt_file_view_pread_exact_v1(handle, 5, 2) == 0);
+    assert(rt_file_view_pread_exact_v1(handle, 5, 2) == 3);
     assert(rt_file_view_close_v1(handle));
     assert(!rt_file_view_close_v1(handle));
 
@@ -74,6 +74,14 @@ int main(void) {
     TestText escape_text = text("../data.bin");
     assert(rt_file_view_open_beneath_no_follow_v1(
         (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&escape_text) == -2);
+    const uint8_t invalid_root_bytes[] = {'b', 'a', 'd', 0, 'r', 'o', 'o', 't'};
+    TestText invalid_root = {invalid_root_bytes, 8};
+    assert(rt_file_view_open_beneath_no_follow_v1(
+        (int64_t)(uintptr_t)&invalid_root, (int64_t)(uintptr_t)&path_text) == -2);
+    const uint8_t invalid_path_bytes[] = {'b', 'a', 'd', 0, 'p', 'a', 't', 'h'};
+    TestText invalid_path = {invalid_path_bytes, 8};
+    assert(rt_file_view_open_beneath_no_follow_v1(
+        (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&invalid_path) == -2);
 
     assert(unlink(link_path) == 0);
     assert(unlink(file) == 0);

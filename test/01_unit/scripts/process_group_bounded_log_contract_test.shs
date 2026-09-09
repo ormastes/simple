@@ -3,15 +3,24 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 helper=$root/scripts/bootstrap/run-process-group-bounded-log.pl
+true_bin=/bin/true
+[ -x "$true_bin" ] || true_bin=/usr/bin/true
 work=$(mktemp -d "${TMPDIR:-/tmp}/bounded-log-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 fail() { echo "FAIL: $1" >&2; exit 1; }
-hash() { sha256sum -- "$1" | awk '{print $1}'; }
 case "$(uname -s)" in
-    Darwin) descriptor_root=/dev/fd ;;
-    Linux) descriptor_root=/proc/$$/fd ;;
+    Darwin) descriptor_prefix=/dev/fd ;;
+    Linux) descriptor_prefix=/proc/$$/fd ;;
     *) echo 'SKIP: no bounded collector for this host'; exit 0 ;;
 esac
+output_parent=$descriptor_prefix/9
+hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" | awk '{print $1}'
+    else
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    fi
+}
 wait_dead() {
     dead_pid=$1 dead_limit=200
     while kill -0 "$dead_pid" 2>/dev/null && [ "$dead_limit" -gt 0 ]; do
@@ -20,7 +29,7 @@ wait_dead() {
     ! kill -0 "$dead_pid" 2>/dev/null || fail "descendant $dead_pid survived"
 }
 run_helper() {
-    perl "$helper" --output-parent="$descriptor_root/9" \
+    perl "$helper" --output-parent="$output_parent" \
         --log-leaf="$1" --receipt-leaf="$1.bounded.env" \
         --max-bytes="${2:-4194304}" --timeout-seconds="${3:-5}" \
         --term-grace-seconds=1 -- "${4}" ${5+"$5"}
@@ -45,9 +54,11 @@ grep -qx 'reason=child-exit' "$work/output/normal.log.bounded.env" || fail "norm
 grep -qx "log_sha256=$(hash "$work/output/normal.log")" \
     "$work/output/normal.log.bounded.env" || fail "normal hash binding"
 
-# Descriptor-relative publication must not change the candidate's cwd.
+# The supervised command runs in the collector caller's original directory,
+# even though Darwin pins the output descriptor by changing the collector cwd.
+caller_cwd=$(pwd -P)
 run_helper cwd.log 1024 5 /bin/pwd
-[ "$(cat "$work/output/cwd.log")" = "$(pwd -P)" ] || fail 'candidate cwd changed'
+grep -Fqx "$caller_cwd" "$work/output/cwd.log" || fail "child cwd changed"
 
 # Overflow caps only the combined stream and kills the whole session.
 overflow=$work/overflow.sh
@@ -96,7 +107,7 @@ sleep 30 & echo \$! >"$work/signaled.pid"
 wait
 EOF
 chmod +x "$signaled"
-perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=signaled.log \
+perl "$helper" --output-parent="$output_parent" --log-leaf=signaled.log \
     --receipt-leaf=signaled.log.bounded.env --max-bytes=4194304 \
     --timeout-seconds=20 --term-grace-seconds=1 -- "$signaled" & supervisor=$!
 signal_limit=200
@@ -115,7 +126,7 @@ grep -qx "log_sha256=$(hash "$work/output/signaled.log")" \
 # A child signal and an exec failure remain distinct typed outcomes. Use the
 # full CLI for the multi-argument child-signal command.
 set +e
-perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=child-signal.log \
+perl "$helper" --output-parent="$output_parent" --log-leaf=child-signal.log \
     --receipt-leaf=child-signal.log.bounded.env --max-bytes=1024 \
     --timeout-seconds=5 --term-grace-seconds=1 -- /bin/sh -c 'kill -TERM $$'
 status=$?
@@ -132,7 +143,7 @@ mkfifo "$work/publication.ready" "$work/publication.ack"
 exec 6<>"$work/publication.ready"
 exec 5<>"$work/publication.ack"
 BOUNDED_LOG_TEST_PUBLICATION_READY_FD=6 BOUNDED_LOG_TEST_PUBLICATION_ACK_FD=5 \
-perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=publish-signal.log \
+perl "$helper" --output-parent="$output_parent" --log-leaf=publish-signal.log \
     --receipt-leaf=publish-signal.log.bounded.env --max-bytes=1024 \
     --timeout-seconds=5 --term-grace-seconds=1 -- /bin/echo checkpoint & publish_pid=$!
 dd bs=1 count=1 <&6 >/dev/null 2>&1
@@ -151,7 +162,7 @@ mkfifo "$work/late.ready" "$work/late.ack"
 exec 4<>"$work/late.ready"
 exec 3<>"$work/late.ack"
 BOUNDED_LOG_TEST_LATE_SIGNAL_READY_FD=4 BOUNDED_LOG_TEST_LATE_SIGNAL_ACK_FD=3 \
-perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=late-signal.log \
+perl "$helper" --output-parent="$output_parent" --log-leaf=late-signal.log \
     --receipt-leaf=late-signal.log.bounded.env --max-bytes=1024 \
     --timeout-seconds=5 --term-grace-seconds=1 -- /bin/echo committed & late_pid=$!
 dd bs=1 count=1 <&4 >/dev/null 2>&1
@@ -169,7 +180,7 @@ mkdir "$work/bound-parent"
 exec 7<"$work/bound-parent"
 mv "$work/bound-parent" "$work/bound-parent-held"
 mkdir "$work/bound-parent"
-perl "$helper" --output-parent="$descriptor_root/7" --log-leaf=bound.log \
+perl "$helper" --output-parent="$descriptor_prefix/7" --log-leaf=bound.log \
     --receipt-leaf=bound.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
     --term-grace-seconds=1 -- /bin/echo bound
 [ -f "$work/bound-parent-held/bound.log" ] || fail "held parent not used"
@@ -177,22 +188,22 @@ perl "$helper" --output-parent="$descriptor_root/7" --log-leaf=bound.log \
 
 # Existing leaves, symlink leaves, unsafe parents/leaves, and temp collisions fail closed.
 printf old >"$work/output/existing.log"
-if run_helper existing.log 1024 5 true 2>/dev/null; then fail "existing leaf overwritten"; fi
+if run_helper existing.log 1024 5 "$true_bin" 2>/dev/null; then fail "existing leaf overwritten"; fi
 ln -s normal.log "$work/output/symlink.log"
-if run_helper symlink.log 1024 5 true 2>/dev/null; then fail "symlink leaf overwritten"; fi
+if run_helper symlink.log 1024 5 "$true_bin" 2>/dev/null; then fail "symlink leaf overwritten"; fi
 if perl "$helper" --output-parent="$work/output" --log-leaf=bad.log \
     --receipt-leaf=bad.env --max-bytes=1 --timeout-seconds=1 \
-    --term-grace-seconds=1 -- true 2>/dev/null; then fail "pathname parent accepted"; fi
-if perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=../bad \
+    --term-grace-seconds=1 -- "$true_bin" 2>/dev/null; then fail "pathname parent accepted"; fi
+if perl "$helper" --output-parent="$output_parent" --log-leaf=../bad \
     --receipt-leaf=bad.env --max-bytes=1 --timeout-seconds=1 \
-    --term-grace-seconds=1 -- true 2>/dev/null; then fail "unsafe leaf accepted"; fi
+    --term-grace-seconds=1 -- "$true_bin" 2>/dev/null; then fail "unsafe leaf accepted"; fi
 mkfifo "$work/temp.ready" "$work/temp.ack"
 exec 6<>"$work/temp.ready"
 exec 5<>"$work/temp.ack"
 BOUNDED_LOG_TEST_TEMP_READY_FD=6 BOUNDED_LOG_TEST_TEMP_ACK_FD=5 \
-perl "$helper" --output-parent="$descriptor_root/9" --log-leaf=temp.log \
+perl "$helper" --output-parent="$output_parent" --log-leaf=temp.log \
     --receipt-leaf=temp.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
-    --term-grace-seconds=1 -- true 2>/dev/null & temp_pid=$!
+    --term-grace-seconds=1 -- "$true_bin" 2>/dev/null & temp_pid=$!
 dd bs=1 count=1 <&6 >/dev/null 2>&1
 printf collision >"$work/output/.temp.log.tmp.$temp_pid"
 printf A >&5
@@ -215,12 +226,12 @@ grep -q 'log retained without authoritative receipt' "$work/receipt-collision.er
 for malformed in unknown duplicate missing; do
     set +e
     case "$malformed" in
-      unknown) perl "$helper" --unknown=x -- true 2>/dev/null ;;
-      duplicate) perl "$helper" --output-parent="$descriptor_root/9" \
-        --output-parent="$descriptor_root/9" --log-leaf=x --receipt-leaf=y \
-        --max-bytes=1 --timeout-seconds=1 --term-grace-seconds=1 -- true 2>/dev/null ;;
-      missing) perl "$helper" --output-parent="$descriptor_root/9" \
-        --log-leaf=x --receipt-leaf=y --max-bytes=1 --timeout-seconds=1 -- true 2>/dev/null ;;
+      unknown) perl "$helper" --unknown=x -- "$true_bin" 2>/dev/null ;;
+      duplicate) perl "$helper" --output-parent="$output_parent" \
+        --output-parent="$output_parent" --log-leaf=x --receipt-leaf=y \
+        --max-bytes=1 --timeout-seconds=1 --term-grace-seconds=1 -- "$true_bin" 2>/dev/null ;;
+      missing) perl "$helper" --output-parent="$output_parent" \
+        --log-leaf=x --receipt-leaf=y --max-bytes=1 --timeout-seconds=1 -- /bin/true 2>/dev/null ;;
     esac
     status=$?; set -e
     [ "$status" -eq 126 ] || fail "$malformed option status $status"
@@ -233,15 +244,22 @@ exec 8<"$work/helper.snapshot"
 printf '#!/bin/sh\nexit 99\n' >"$work/helper.replacement"
 chmod +x "$work/helper.replacement"
 mv "$work/helper.replacement" "$work/helper.snapshot"
-perl "$descriptor_root/8" --output-parent="$descriptor_root/9" --log-leaf=held.log \
-    --receipt-leaf=held.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
-    --term-grace-seconds=1 -- /bin/echo held
+if [ "$(uname -s)" = Darwin ]; then
+    perl - --output-parent="$output_parent" --log-leaf=held.log \
+        --receipt-leaf=held.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
+        --term-grace-seconds=1 -- /bin/echo held <&8
+else
+    perl "$descriptor_prefix/8" --output-parent="$output_parent" --log-leaf=held.log \
+        --receipt-leaf=held.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
+        --term-grace-seconds=1 -- /bin/echo held
+fi
 grep -qx held "$work/output/held.log" || fail "held helper descriptor changed"
+exec 8<&-
 
 # Rapid exits exercise the setsid readiness handshake; no setup race may leak a group.
 handshake_index=0
 while [ "$handshake_index" -lt 20 ]; do
-    run_helper "handshake-$handshake_index.log" 1024 2 true
+    run_helper "handshake-$handshake_index.log" 1024 2 "$true_bin"
     handshake_index=$((handshake_index + 1))
 done
 

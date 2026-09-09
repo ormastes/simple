@@ -4573,7 +4573,7 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -4591,6 +4591,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)

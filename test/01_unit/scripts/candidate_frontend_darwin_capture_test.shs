@@ -10,22 +10,44 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 CANDIDATE_FRONTEND_ROOT=$root
 mkdir "$work/output"
 candidate_frontend_capture_setup "$work/output" || fail 'capture setup'
-[ "$CANDIDATE_FRONTEND_CAPTURE_KIND" = darwin-fd ] || fail 'wrong host adapter'
-[ "$CANDIDATE_FRONTEND_CAPTURE_PARENT" = "$(CDPATH= cd -- "$work/output" && pwd -P)" ] || fail 'nonphysical parent'
-build_log=$CANDIDATE_FRONTEND_CAPTURE_PARENT/build.log
-candidate_frontend_capture_leaf "$build_log" || fail 'valid capture leaf rejected'
-if candidate_frontend_capture_leaf "$CANDIDATE_FRONTEND_CAPTURE_PARENT/../escape.log"; then
-    fail 'traversal accepted'
-fi
-candidate_frontend_bounded_build p2_add /bin/echo darwin-capture || fail 'bounded build'
-[ "$(cat "$build_log")" = darwin-capture ] || fail 'output missing'
-[ "$bounded_last_reason" = child-exit ] || fail 'wrong outcome'
-[ "$(sed -n 's/^process_group=//p' "$build_log.bounded.env")" = setsid ] || fail 'missing process group'
-candidate_frontend_bounded_build stage2_mir_retention /bin/echo second-probe || fail 'second probe'
-[ "$(cat "$build_log.stage2-mir-retention")" = second-probe ] || fail 'held helper offset was not rewound'
-before=$(candidate_frontend_hash_file "$build_log")
-if candidate_frontend_bounded_build p2_add /bin/echo replacement 2>"$work/collision.err"; then
-    fail 'existing evidence overwritten'
-fi
-[ "$(candidate_frontend_hash_file "$build_log")" = "$before" ] || fail 'collision changed evidence'
+[ "$CANDIDATE_FRONTEND_CAPTURE_KIND" = darwin-pinned ] || fail 'wrong host adapter'
+[ "$CANDIDATE_FRONTEND_CAPTURE_PARENT" = /dev/fd/6 ] || fail 'non-descriptor parent'
+
+# Exercise capture setup through the real pinned launcher and two real bounded
+# collector invocations. The tiny sourced wrapper replaces only the expensive
+# compiler probe while retaining the production capture/collector functions.
+probe_root=$work/probe-root
+mkdir -p "$probe_root/scripts/check/cert/redeploy_gate"
+cat >"$probe_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs" <<'EOF'
+. "$CANDIDATE_FRONTEND_REAL_HELPER"
+candidate_frontend_smoke() {
+    [ "$CANDIDATE_FRONTEND_CAPTURE_KIND" = darwin-pinned ] || return 91
+    [ "$CANDIDATE_FRONTEND_CAPTURE_PARENT" = /dev/fd/6 ] || return 92
+    [ "$CANDIDATE_FRONTEND_PINNED_CWD" = 1 ] || return 93
+    [ "$CANDIDATE_FRONTEND_LOG_PATH" = ./probe.log ] || return 94
+    [ "$CANDIDATE_FRONTEND_STATUS_PATH" = ./probe.status ] || return 95
+    [ "$(pwd -P)" = "$CANDIDATE_FRONTEND_EXPECTED_CWD" ] || return 96
+    build_log=$CANDIDATE_FRONTEND_LOG_PATH
+    candidate_frontend_bounded_build p2_add /bin/echo first-probe || return $?
+    [ "$bounded_last_reason" = child-exit ] || return 97
+    candidate_frontend_bounded_build stage2_mir_retention /bin/echo second-probe || return $?
+    [ "$bounded_last_reason" = child-exit ] || return 98
+    printf '%s\n' pinned-smoke
+    printf '%s\n' pass >"$CANDIDATE_FRONTEND_STATUS_PATH"
+}
+EOF
+CANDIDATE_FRONTEND_REAL_HELPER=$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
+CANDIDATE_FRONTEND_EXPECTED_CWD=$(CDPATH= cd -- "$work/output" && pwd -P)
+export CANDIDATE_FRONTEND_REAL_HELPER CANDIDATE_FRONTEND_EXPECTED_CWD
+CANDIDATE_FRONTEND_ROOT=$probe_root
+CANDIDATE_FRONTEND_LOG_PATH=/dev/fd/6/probe.log \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH=$work/output/probe.log \
+    CANDIDATE_FRONTEND_STATUS_PATH=/dev/fd/6/probe.status \
+    candidate_frontend_pinned_smoke /bin/true /dev/fd/6/driver.log ||
+    fail 'pinned smoke boundary'
+[ "$(cat "$work/output/probe.log")" = first-probe ] || fail 'first probe output missing'
+[ "$(cat "$work/output/probe.log.stage2-mir-retention")" = second-probe ] ||
+    fail 'held helper offset was not rewound'
+[ "$(cat "$work/output/probe.status")" = pass ] || fail 'status output missing'
+[ "$(cat "$work/output/driver.log")" = pinned-smoke ] || fail 'driver output missing'
 echo 'PASS: macOS frontend capture and bounded receipt integration'

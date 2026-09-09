@@ -8,17 +8,27 @@ helper=$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
 work=$(mktemp -d "${TMPDIR:-/tmp}/candidate-frontend-evidence.XXXXXX") || exit 2
 trap 'rm -rf "$work"' EXIT
 owner_pid=$$
+. "$helper"
+descriptor_root=$(candidate_frontend_descriptor_root "$owner_pid") || exit 2
 exec 6<"$work" \
   7<"$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
-  8<"$(command -v perl)" || exit 2
+  8<"$(candidate_frontend_perl_executable)" || exit 2
 
 cat >"$work/candidate" <<'STUB'
 #!/bin/sh
+[ "${SIMPLE_PACKAGE_INDEX_COLD_INIT:-}" = 1 ] || {
+  echo 'error: E-FRONTEND-FIXTURE isolated probe lacks explicit cold initialization' >&2
+  exit 45
+}
 case ${STUB_MODE:-pass} in
   timeout) sleep 30; exit 0 ;;
   failure) echo 'error: E-FRONTEND-FIXTURE first compiler error' >&2; exit 42 ;;
 esac
 [ "${1:-}" = native-build ] || exit 1
+[ "$(pwd -P)" = "$CANDIDATE_FRONTEND_ROOT" ] || {
+  echo 'error: E-FRONTEND-FIXTURE repository working directory was lost' >&2
+  exit 44
+}
 shift
 entry=
 output=
@@ -66,12 +76,20 @@ run_case() {
   COMPILER_EXEC_TIMEOUT_SECONDS=2 \
   COMPILER_CHECK_KILL_GRACE_SECONDS=1 \
   CANDIDATE_FRONTEND_ROOT=$root \
-  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$owner_pid/fd/8 \
-  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$owner_pid/fd/7 \
-  CANDIDATE_FRONTEND_LOG_PATH=/proc/$owner_pid/fd/6/$name.log \
+  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=$descriptor_root/8 \
+  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$descriptor_root/7 \
+  CANDIDATE_FRONTEND_LOG_PATH=$descriptor_root/6/$name.log \
   CANDIDATE_FRONTEND_LOG_DISPLAY_PATH=$work/$name.log \
-  CANDIDATE_FRONTEND_STATUS_PATH=/proc/$owner_pid/fd/6/$name.status \
-    sh -c '. "$1"; candidate_frontend_smoke "$2"' _ "$helper" "$work/candidate" \
+  CANDIDATE_FRONTEND_STATUS_PATH=$descriptor_root/6/$name.status \
+  SIMPLE_PACKAGE_INDEX_COLD_INIT=0 \
+    sh -c '
+      . "$1"
+      [ "$SIMPLE_PACKAGE_INDEX_COLD_INIT" = 0 ] || exit 46
+      probe_status=0
+      candidate_frontend_pinned_smoke "$2" "$3" || probe_status=$?
+      [ "$SIMPLE_PACKAGE_INDEX_COLD_INIT" = 0 ] || exit 46
+      exit "$probe_status"
+    ' _ "$helper" "$work/candidate" "$descriptor_root/6/$name.stderr" \
       >"$work/$name.stdout" 2>"$work/$name.stderr"
 }
 
@@ -113,4 +131,4 @@ default=$(sed -n 's/^COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SEC
 [ -n "$default" ] && [ "$default" -ge 180 ] || { echo "FAIL: default timeout '$default' is below 180"; failures=$((failures + 1)); }
 
 [ "$failures" -eq 0 ] || exit 1
-echo 'PASS — candidate frontend timeout, failure, pass, and durable evidence contracts'
+echo 'PASS — candidate frontend timeout, failure, pass, durable evidence, and scoped cold-init contracts'

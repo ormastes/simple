@@ -1680,7 +1680,7 @@ bootstrap_stage_sanity() (
     CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
     CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_status_path##*/}" \
-    candidate_frontend_smoke "${candidate}" >"${frontend_log_authority}" 2>&1 ||
+    candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
     frontend_status=$?
   # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
   # invokes this candidate in. The single-pass (SIMPLE_BOOTSTRAP=0) gate
@@ -1697,7 +1697,7 @@ bootstrap_stage_sanity() (
       CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
       CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_status_path##*/}" \
-      candidate_frontend_smoke "${candidate}" >>"${frontend_log_authority}" 2>&1 ||
+      candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
       frontend_bootstrap_status=$?
     frontend_status=${frontend_bootstrap_status}
   fi

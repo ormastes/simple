@@ -1,9 +1,10 @@
 /* Secure, descriptor-pinned read-only file views for compiler snapshots.
  *
  * This is the sole C owner of rt_file_view_* and rt_pinned_archive_*.
- * Paths are opened component-by-component beneath an already opened root;
- * absolute paths, dot components, symlinks, and non-regular leaves fail
- * closed.  Public handles index this TU's private table, not host file
+ * Paths are opened component-by-component beneath an already opened root.
+ * A path may be root-relative or use the root's exact absolute prefix; dot
+ * components, symlinks, and non-regular leaves fail closed. Public handles
+ * index this TU's private table, not host file
  * descriptors, so a forged handle cannot close an unrelated descriptor.
  */
 #include "runtime.h"
@@ -36,8 +37,8 @@
 
 int64_t rt_file_view_open_beneath_no_follow_v1(int64_t root, int64_t path) { (void)root; (void)path; return -1; }
 int8_t rt_file_view_mapping_supported_v1(int64_t handle) { (void)handle; return 0; }
-int64_t rt_file_view_map_copy_v1(int64_t handle, uint64_t offset, uint64_t length) { (void)handle; (void)offset; (void)length; return 0; }
-int64_t rt_file_view_pread_exact_v1(int64_t handle, uint64_t offset, uint64_t length) { (void)handle; (void)offset; (void)length; return 0; }
+int64_t rt_file_view_map_copy_v1(int64_t handle, uint64_t offset, uint64_t length) { (void)handle; (void)offset; (void)length; return 3; }
+int64_t rt_file_view_pread_exact_v1(int64_t handle, uint64_t offset, uint64_t length) { (void)handle; (void)offset; (void)length; return 3; }
 int8_t rt_file_view_prefetch_v1(int64_t handle, uint64_t offset, uint64_t length) { (void)handle; (void)offset; (void)length; return 0; }
 int64_t rt_file_view_device_v1(int64_t handle) { (void)handle; return -1; }
 int64_t rt_file_view_inode_v1(int64_t handle) { (void)handle; return -1; }
@@ -76,7 +77,7 @@ static int copy_text_value(int64_t value, char **out) {
     const uint8_t *data = rt_string_data(value);
     int64_t len = rt_string_len(value);
     if (len < 0 || len > 32768 || (!data && len) ||
-        (len && memchr(data, 0, (size_t)len))) return 0;
+        (len && memchr(data, 0, (size_t)len))) return -1;
     char *copy = (char *)malloc((size_t)len + 1);
     if (!copy) return 0;
     if (len) memcpy(copy, data, (size_t)len);
@@ -98,10 +99,20 @@ static int relative_path_valid(const char *path) {
     }
 }
 
+static const char *path_beneath_root(const char *root, const char *path) {
+    size_t root_len = root ? strlen(root) : 0;
+    if (!root_len || (root_len > 1 && root[root_len - 1] == '/')) return NULL;
+    if (!path || path[0] != '/') return path;
+    if (root[0] != '/') return NULL;
+    if (root_len == 1) return path + 1;
+    if (strncmp(root, path, root_len) != 0 || path[root_len] != '/') return NULL;
+    return path + root_len + 1;
+}
+
 static int open_regular_beneath(const char *root, const char *relative) {
     if (!relative_path_valid(relative)) return -2;
     int current = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (current < 0) return (errno == ELOOP ? -3 : -1);
+    if (current < 0) return (errno == ELOOP || errno == ENOTDIR ? -3 : -1);
     char *work = strdup(relative);
     if (!work) { close(current); return -1; }
     char *save = NULL;
@@ -114,7 +125,7 @@ static int open_regular_beneath(const char *root, const char *relative) {
         close(current);
         if (opened < 0) {
             free(work);
-            return (saved_errno == ELOOP ? -3 : -1);
+            return (saved_errno == ELOOP || saved_errno == ENOTDIR ? -3 : -1);
         }
         current = opened;
         part = next;
@@ -155,13 +166,13 @@ static int lookup_fd_locked(int64_t handle) {
 }
 
 static int64_t bytes_array(const uint8_t *bytes, uint64_t length) {
-    if (length > INT64_MAX) return 0;
+    if (length > INT64_MAX) return 3;
     SplArray *array = rt_array_new((int64_t)length);
-    if (!array) return 0;
+    if (!array) return 3;
     for (uint64_t i = 0; i < length; ++i) {
         if (!rt_array_push(array, (int64_t)bytes[i] << 3)) {
             rt_array_free(array);
-            return 0;
+            return 3;
         }
     }
     return (int64_t)(uintptr_t)array;
@@ -169,10 +180,15 @@ static int64_t bytes_array(const uint8_t *bytes, uint64_t length) {
 
 int64_t rt_file_view_open_beneath_no_follow_v1(int64_t root_value, int64_t path_value) {
     char *root = NULL, *path = NULL;
-    if (!copy_text_value(root_value, &root) || !copy_text_value(path_value, &path)) {
-        free(root); free(path); return -1;
+    int root_copy = copy_text_value(root_value, &root);
+    if (root_copy <= 0) return root_copy < 0 ? -2 : -1;
+    int path_copy = copy_text_value(path_value, &path);
+    if (path_copy <= 0) {
+        free(root);
+        return path_copy < 0 ? -2 : -1;
     }
-    int fd = open_regular_beneath(root, path);
+    const char *relative = path_beneath_root(root, path);
+    int fd = relative ? open_regular_beneath(root, relative) : -2;
     free(root); free(path);
     return fd < 0 ? fd : register_fd(fd);
 }
@@ -187,18 +203,18 @@ int8_t rt_file_view_mapping_supported_v1(int64_t handle) {
 static int64_t read_exact_array(int64_t handle, uint64_t offset, uint64_t length, int mapped) {
     if (offset > (uint64_t)INT64_MAX || length > (uint64_t)SIZE_MAX ||
         length > (uint64_t)INT64_MAX || offset > UINT64_MAX - length ||
-        offset + length > (uint64_t)INT64_MAX) return 0;
+        offset + length > (uint64_t)INT64_MAX) return 3;
     pthread_mutex_lock(&file_view_lock);
     int fd = lookup_fd_locked(handle);
-    if (fd < 0) { pthread_mutex_unlock(&file_view_lock); return 0; }
+    if (fd < 0) { pthread_mutex_unlock(&file_view_lock); return 3; }
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 0 ||
         offset + length > (uint64_t)st.st_size) {
         pthread_mutex_unlock(&file_view_lock);
-        return 0;
+        return 3;
     }
     uint8_t *buffer = length ? (uint8_t *)malloc((size_t)length) : NULL;
-    if (length && !buffer) { pthread_mutex_unlock(&file_view_lock); return 0; }
+    if (length && !buffer) { pthread_mutex_unlock(&file_view_lock); return 3; }
     int ok = 1;
     if (mapped && length) {
         long page = sysconf(_SC_PAGESIZE);
@@ -218,7 +234,7 @@ static int64_t read_exact_array(int64_t handle, uint64_t offset, uint64_t length
             done += (uint64_t)n;
         }
     }
-    int64_t result = ok ? bytes_array(buffer, length) : 0;
+    int64_t result = ok ? bytes_array(buffer, length) : 3;
     free(buffer);
     pthread_mutex_unlock(&file_view_lock);
     return result;
@@ -228,12 +244,17 @@ int64_t rt_file_view_map_copy_v1(int64_t handle, uint64_t offset, uint64_t lengt
 int64_t rt_file_view_pread_exact_v1(int64_t handle, uint64_t offset, uint64_t length) { return read_exact_array(handle, offset, length, 0); }
 
 int8_t rt_file_view_prefetch_v1(int64_t handle, uint64_t offset, uint64_t length) {
+    if (offset > (uint64_t)INT64_MAX || length > (uint64_t)INT64_MAX ||
+        offset > UINT64_MAX - length || offset + length > (uint64_t)INT64_MAX) return 0;
     pthread_mutex_lock(&file_view_lock);
     int fd = lookup_fd_locked(handle);
+    struct stat st;
+    int valid = fd >= 0 && fstat(fd, &st) == 0 && st.st_size >= 0 &&
+        offset + length <= (uint64_t)st.st_size;
 #if defined(POSIX_FADV_WILLNEED)
-    int ok = fd >= 0 && posix_fadvise(fd, (off_t)offset, (off_t)length, POSIX_FADV_WILLNEED) == 0;
+    int ok = valid && posix_fadvise(fd, (off_t)offset, (off_t)length, POSIX_FADV_WILLNEED) == 0;
 #else
-    int ok = fd >= 0; (void)offset; (void)length;
+    int ok = valid; (void)offset; (void)length;
 #endif
     pthread_mutex_unlock(&file_view_lock);
     return (int8_t)ok;

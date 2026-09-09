@@ -1243,7 +1243,12 @@ impl<'a> MirLowerer<'a> {
                         trait_is_implemented(recv)
                     );
                 }
-                return Some((slot_for(recv, sig), sig.param_types.clone(), sig.return_type));
+                // An explicitly trait-typed receiver already proves the ABI:
+                // its authored trait declaration owns this slot even when
+                // entry-closure pruning excludes every concrete impl from the
+                // current native build. The impl-less sentinel is only for
+                // UNKNOWN/duck-typed receivers, where no object ABI is known.
+                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
             }
         }
         // Concrete receiver with its own `Type.method` definition: devirtualize.

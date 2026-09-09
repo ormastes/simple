@@ -1,0 +1,34 @@
+# Reduced native ABI regression for a call whose optional table default is a
+# function call. Mirrors the selector's data boundary, not its plugin behavior.
+struct RegistryEntry:
+    name: text
+    identity: i64
+
+var current_table: [RegistryEntry] = []
+
+fn active_table() -> [RegistryEntry]:
+    current_table
+
+fn select_entry(name: text, table: [RegistryEntry] = active_table()) -> i64:
+    for entry in table:
+        if entry.name == name:
+            return entry.identity
+    -1
+
+fn create_entry(name: text) -> i64:
+    val table = active_table()
+    select_entry(name, table)
+
+fn main() -> i64:
+    if create_entry("llvm") != -1: return 10
+    current_table = [RegistryEntry("cranelift", 11), RegistryEntry("llvm", 22)]
+    if create_entry("llvm") != 22: return 11
+    if create_entry("cranelift") != 11: return 12
+    if create_entry("missing") != -1: return 13
+    # Read the current table at the call site, rather than caching a stale
+    # table at module initialization or inserting a constant empty default.
+    current_table = [RegistryEntry("llvm", 33)]
+    if create_entry("llvm") != 33: return 14
+    if create_entry("cranelift") != -1: return 15
+    print "explicit dynamic table native ABI: PASS (6 checks)"
+    0
