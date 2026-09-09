@@ -131,6 +131,22 @@ fn rt_value_unbox_int_decodes_the_wide_box() {
     }
 }
 
+/// InterpCall uses `rt_value_raw_i64`, not `rt_value_unbox_int`, when an
+/// unresolvable SFFI declaration promises a raw i64. Full-width results such
+/// as execution-namespace hashes are heap-boxed by `RuntimeValue::from_int`;
+/// returning the box pointer corrupts the ABI and the fail-closed guard must
+/// not mistake that valid signed box for a composite result.
+#[test]
+fn rt_value_raw_i64_decodes_signed_wide_sffi_results() {
+    for &v in &[1i64 << 60, i64::MAX, i64::MIN, -(1i64 << 60) - 1] {
+        assert_eq!(
+            simple_runtime::value::sffi::value_ops::rt_value_raw_i64(RuntimeValue::from_int(v)),
+            v,
+            "rt_value_raw_i64(from_int({v:#x})) must preserve the full SFFI result"
+        );
+    }
+}
+
 /// Identity, display and equality must all agree with `as_int` on a wide box,
 /// otherwise a value that round-trips numerically still prints or compares as
 /// something else -- the failure mode heap-boxed floats already had to fix.
