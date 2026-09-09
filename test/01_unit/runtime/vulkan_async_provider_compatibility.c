@@ -47,6 +47,24 @@ int main(void) {
     assert(rt_vulkan_async_session_supported() == 0);
     assert(rt_vulkan_async_session_create_with_wait(8, 250000) == 0);
     assert(created == 0);
+    /* Every optional forward must fail closed when the provider omits the
+     * complete extension; this also keeps the C ABI surface exercised beyond
+     * the capability probe and constructor. */
+    assert(rt_vulkan_async_session_acquire(1) == -1);
+    assert(rt_vulkan_async_session_command(1, 2) == -1);
+    assert(rt_vulkan_async_session_submit(1, 2) == -1);
+    assert(rt_vulkan_async_session_poll(1, 2) == -1);
+    assert(rt_vulkan_async_session_retire(1, 2) == -1);
+    assert(rt_vulkan_async_session_receipt(1, 2) == 0);
+    assert(rt_vulkan_async_session_cancel(1) == -1);
+    assert(rt_vulkan_async_session_close(1) == 0);
+    assert(rt_vulkan_async_session_capacity(1) == 0);
+    assert(rt_vulkan_async_session_in_flight(1) == -1);
+    assert(rt_vulkan_async_session_published_sequence(1) == -1);
+    assert(rt_vulkan_async_session_recover(1) == -1);
+    assert(rt_vulkan_async_session_abandon_device(1) == -1);
+    assert(rt_vulkan_async_session_snapshot(1) == -1);
+    assert(rt_vulkan_async_session_snapshot_word(1, 2, 3) == -1);
     extension_kind = 1;
     assert(rt_vulkan_async_session_supported() == 0);
     assert(rt_vulkan_async_session_create_with_wait(8, 250000) == 0);
