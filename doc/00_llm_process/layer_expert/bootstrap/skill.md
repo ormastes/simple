@@ -26,6 +26,23 @@ worktrees and must not be restored during bootstrap setup.
 
 ## Pipeline Links
 
+### Phase live checks (2026-09-08)
+
+The full SIMD/bootstrap lane requires actual same-phase launches in addition to
+source checks and suites. Use `scripts/check/check-bootstrap-phase-live.py` with
+the producer's admitted compiler/tool manifest for MCP/LSP, SPipe plugin, Caret,
+DevHub and independent GitHub/Jira/Confluence fixture reads. Keep missing phase
+tools, provider identity routes, credentials and read scope as explicit blockers;
+`auth status` configuration output never earns live access PASS. The controller
+cannot create its own admission authority or promote fixture tests to live
+evidence. See `doc/07_guide/tooling/bootstrap_phase_live_services.md` for exact argv
+and receipt contracts.
+
+Rust seed tool discovery is owned by the shell authority boundary. Normalize
+native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
+files on Windows; retain strict policy/PATH checks. A successful focused
+resolver probe does not admit the seed generation or prove Stage 4 readiness.
+
 ## SimpleOS 32-bit cross-target boundary
 
 The shared consumer contract is
