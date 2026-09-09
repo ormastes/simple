@@ -1,6 +1,7 @@
 //! Executes the actual async owner modules with an injected Vulkan boundary.
 //! This proves runtime state/lock/resource behavior, not hardware execution.
-//! Run directly with rustc --test --cfg 'feature="vulkan"' --test-threads=1.
+//! Run directly with `rustc --edition=2021 --test --cfg 'feature="vulkan"'`
+//! and then execute the produced binary with `--test-threads=1`.
 extern crate self as ash;
 extern crate self as parking_lot;
 extern crate self as lazy_static;
