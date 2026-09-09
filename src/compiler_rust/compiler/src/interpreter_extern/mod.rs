@@ -814,6 +814,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpu_is_aarch64", simd::rt_cpu_is_aarch64);
     insert_simple!("rt_cpu_is_riscv64", simd::rt_cpu_is_riscv64);
     insert_simple!("rt_cpuid", simd::rt_cpuid);
+    insert_simple!("rt_xgetbv", simd::rt_xgetbv);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);
     insert_simple!("rt_cargo_check", cargo::rt_cargo_check);
     insert_simple!("rt_cargo_clean", cargo::rt_cargo_clean);
@@ -1722,6 +1723,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_math_cos", math::rt_math_cos_fn);
     insert_simple!("rt_math_exp", math::rt_math_exp_fn);
     insert_simple!("rt_math_floor", math::rt_math_floor_fn);
+    insert_simple!("rt_math_fma", math::rt_math_fma_fn);
     insert_simple!("rt_math_inf", math::rt_math_inf_fn);
     insert_simple!("rt_math_is_finite", math::rt_math_is_finite_fn);
     insert_simple!("rt_math_is_inf", math::rt_math_is_inf_fn);

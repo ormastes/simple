@@ -2391,3 +2391,28 @@ pub fn rt_cpuid(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(d as i64),
     ]))
 }
+
+/// `rt_xgetbv(index: i32) -> i64` — raw x86 extended-control-register value.
+/// Callers must first prove CPUID.OSXSAVE; off x86 this returns zero.
+pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_xgetbv expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    let index = args[0].as_int()? as u32;
+
+    #[cfg(target_arch = "x86_64")]
+    let value = {
+        // SAFETY: simd_capabilities.spl calls this only after CPUID.OSXSAVE.
+        unsafe { std::arch::x86_64::_xgetbv(index) as i64 }
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let value = {
+        let _ = index;
+        0i64
+    };
+
+    Ok(Value::Int(value))
+}

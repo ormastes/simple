@@ -15,7 +15,9 @@ use compiler.backend.backend.native.mach_inst.{EncodedFunction}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompiledModule}
 use compiler.backend.backend.native.isel_x86_64.{isel_module}
 use compiler.backend.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
+use compiler.backend.backend.native.isel_x86_64.{isel_module_with_x86_simd_capability}
 use compiler.backend.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1}
+use compiler.backend.backend.native.native_avx512_capability.{NativeAvx512CapabilityV1}
 use compiler.backend.backend.native.isel_aarch64.{isel_module_aarch64}
 use compiler.backend.backend.native.isel_riscv64.{isel_module_riscv64}
 use compiler.backend.backend.native.isel_riscv32.{isel_module_riscv32}
@@ -67,6 +69,12 @@ fn compile_native_x86_64_avx2(module: MirModule, capability: NativeAvx2Capabilit
     if not capability.avx2_admitted:
         panic("native AVX2 compilation requires an admitted capability receipt")
     val mach_module = isel_module_with_avx2_capability(module, capability)
+    val allocated = regalloc_module(mach_module)
+    val encoded_funcs = encode_module(allocated)
+    emit_elf_x86_64(encoded_funcs, allocated, module)
+
+fn compile_native_x86_64_simd(module: MirModule, avx2_capability: NativeAvx2CapabilityV1, avx512_capability: NativeAvx512CapabilityV1) -> [i64]:
+    val mach_module = isel_module_with_x86_simd_capability(module, avx2_capability, avx512_capability)
     val allocated = regalloc_module(mach_module)
     val encoded_funcs = encode_module(allocated)
     emit_elf_x86_64(encoded_funcs, allocated, module)
@@ -172,6 +180,27 @@ fn native_compile_result_with_avx2_capability(
     val object_bytes = match target:
         case X86_64:
             compile_native_x86_64_avx2(module, capability)
+        case _:
+            compile_native(module, target)
+    CompiledModule(
+        name: module.name,
+        object_code: Some(object_bytes),
+        assembly: nil,
+        llvm_ir: nil,
+        mir_dump: nil,
+        symbols: [],
+        compile_time_ms: 0
+    )
+
+fn native_compile_result_with_x86_simd_capability(
+    module: MirModule,
+    target: CodegenTarget,
+    avx2_capability: NativeAvx2CapabilityV1,
+    avx512_capability: NativeAvx512CapabilityV1
+) -> CompiledModule:
+    val object_bytes = match target:
+        case X86_64:
+            compile_native_x86_64_simd(module, avx2_capability, avx512_capability)
         case _:
             compile_native(module, target)
     CompiledModule(

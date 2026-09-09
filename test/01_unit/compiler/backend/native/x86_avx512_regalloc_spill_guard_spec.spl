@@ -1,0 +1,39 @@
+"""Regression coverage for the fail-closed AVX-512 x86 spill boundary."""
+
+use std.spec.*
+use compiler.backend.native.regalloc.{function_has_x86_avx512, x86_avx512_spill_admitted, regalloc_module}
+use compiler.backend.native.mach_inst.{new_mach_inst, new_mach_block, mach_block_add_inst, new_mach_function, mach_func_add_block, new_mach_module, mach_module_add_func}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn opcode_fixture(opcode: i64):
+    var block = new_mach_block("entry", 0)
+    block = mach_block_add_inst(block, new_mach_inst(opcode, []))
+    var function = new_mach_function("avx512_regalloc_fixture")
+    function = mach_func_add_block(function, block)
+    function
+
+describe "x86 AVX-512 regalloc spill guard":
+    it "classifies the complete reserved AVX-512 opcode interval":
+        expect(function_has_x86_avx512(opcode_fixture(399))).to_be_false()
+        expect(function_has_x86_avx512(opcode_fixture(400))).to_be_true()
+        expect(function_has_x86_avx512(opcode_fixture(450))).to_be_true()
+        expect(function_has_x86_avx512(opcode_fixture(451))).to_be_false()
+
+    it "admits AVX-512 only when generic allocation has no spills":
+        expect(x86_avx512_spill_admitted(false, 3)).to_be_true()
+        expect(x86_avx512_spill_admitted(true, 0)).to_be_true()
+        expect(x86_avx512_spill_admitted(true, 1)).to_be_false()
+
+    it "preserves an admitted physical AVX-512 instruction":
+        var module = new_mach_module("avx512_regalloc")
+        module = mach_module_add_func(module, opcode_fixture(400))
+        val allocated = regalloc_module(module)
+        expect(allocated.functions.len()).to_equal(1)
+        expect(allocated.functions[0].blocks[0].insts[0].opcode).to_equal(400)
+
+    it "keeps the panic and no-spill rewrite wired into x86 allocation":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/native/regalloc.spl") ?? ""
+        expect(source.contains("if not x86_avx512_spill_admitted(has_avx512, result.spills.len()):")).to_be_true()
+        expect(source.contains("x86-avx512 native GPR pressure requires")).to_be_true()
+        expect(source.contains("[rewrite_inst_no_spill(inst, result, \"x86-avx512\")]")).to_be_true()

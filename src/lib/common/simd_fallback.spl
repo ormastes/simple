@@ -1,0 +1,163 @@
+# Platform-neutral scalar fallback for the AVX-512-width portable SIMD slice.
+# These routines contain no ISA probe, intrinsic, extern, or platform branch.
+
+fn _wrap_i32(value: i64) -> i64:
+    val low = value & 0xFFFFFFFF
+    if low >= 2147483648: low - 4294967296 else: low
+
+fn _valid_pair(left_len: i64, right_len: i64, expected: i64) -> bool:
+    left_len == expected and right_len == expected
+
+pub fn simd_f32x16_binop_pure(left: [f32], right: [f32], op: text) -> [f32]:
+    if not _valid_pair(left.len(), right.len(), 16): return []
+    var out: [f32] = []
+    var i = 0
+    while i < 16:
+        val a = left[i]
+        val b = right[i]
+        match op:
+            case "Add": out.push(a + b)
+            case "Sub": out.push(a - b)
+            case "Mul": out.push(a * b)
+            case "Div": out.push(a / b)
+            # Ties and unordered comparisons select rhs. This pins signed-zero
+            # and NaN behavior to the scalar oracle used by x86 MIN/MAX.
+            case "Min": out.push(if a < b: a else: b)
+            case "Max": out.push(if a > b: a else: b)
+            case _: return []
+        i = i + 1
+    out
+
+pub fn simd_f64x8_binop_pure(left: [f64], right: [f64], op: text) -> [f64]:
+    if not _valid_pair(left.len(), right.len(), 8): return []
+    var out: [f64] = []
+    var i = 0
+    while i < 8:
+        val a = left[i]
+        val b = right[i]
+        match op:
+            case "Add": out.push(a + b)
+            case "Sub": out.push(a - b)
+            case "Mul": out.push(a * b)
+            case "Div": out.push(a / b)
+            case "Min": out.push(if a < b: a else: b)
+            case "Max": out.push(if a > b: a else: b)
+            case _: return []
+        i = i + 1
+    out
+
+pub fn simd_i32x16_binop_pure(left: [i64], right: [i64], op: text) -> [i64]:
+    if not _valid_pair(left.len(), right.len(), 16): return []
+    var out: [i64] = []
+    var i = 0
+    while i < 16:
+        val a = _wrap_i32(left[i])
+        val b = _wrap_i32(right[i])
+        match op:
+            case "Add": out.push(_wrap_i32(a + b))
+            case "Sub": out.push(_wrap_i32(a - b))
+            case "Mul": out.push(_wrap_i32(a * b))
+            case "And": out.push(_wrap_i32(a & b))
+            case "Or": out.push(_wrap_i32(a | b))
+            case "Xor": out.push(_wrap_i32(a xor b))
+            case "Min": out.push(if a < b: a else: b)
+            case "Max": out.push(if a > b: a else: b)
+            case _: return []
+        i = i + 1
+    out
+
+fn _cmp_result_i64(a: i64, b: i64, op: text) -> i64:
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: -1
+
+fn _cmp_result_f32(a: f32, b: f32, op: text) -> i64:
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: -1
+
+fn _cmp_result_f64(a: f64, b: f64, op: text) -> i64:
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: -1
+
+pub fn simd_i32x16_cmp_pure(left: [i64], right: [i64], op: text) -> [i64]:
+    if not _valid_pair(left.len(), right.len(), 16): return []
+    var out: [i64] = []
+    var i = 0
+    while i < 16:
+        val bit = _cmp_result_i64(_wrap_i32(left[i]), _wrap_i32(right[i]), op)
+        if bit < 0: return []
+        out.push(bit)
+        i = i + 1
+    out
+
+pub fn simd_f32x16_cmp_pure(left: [f32], right: [f32], op: text) -> [i64]:
+    if not _valid_pair(left.len(), right.len(), 16): return []
+    var out: [i64] = []
+    var i = 0
+    while i < 16:
+        val bit = _cmp_result_f32(left[i], right[i], op)
+        if bit < 0: return []
+        out.push(bit)
+        i = i + 1
+    out
+
+pub fn simd_f64x8_cmp_pure(left: [f64], right: [f64], op: text) -> [i64]:
+    if not _valid_pair(left.len(), right.len(), 8): return []
+    var out: [i64] = []
+    var i = 0
+    while i < 8:
+        val bit = _cmp_result_f64(left[i], right[i], op)
+        if bit < 0: return []
+        out.push(bit)
+        i = i + 1
+    out
+
+pub fn simd_mask_op_pure(left: [i64], right: [i64], op: text) -> [i64]:
+    if op != "Not" and left.len() != right.len(): return []
+    var out: [i64] = []
+    var i = 0
+    while i < left.len():
+        val a = if left[i] == 0: 0 else: 1
+        if op == "Not": out.push(if a == 0: 1 else: 0)
+        else:
+            val b = if right[i] == 0: 0 else: 1
+            if op == "And": out.push(a & b)
+            else if op == "Or": out.push(a | b)
+            else if op == "Xor": out.push(a xor b)
+            else: return []
+        i = i + 1
+    out
+
+pub fn simd_select_i64_pure(mask: [i64], when_true: [i64], when_false: [i64]) -> [i64]:
+    if mask.len() != when_true.len() or mask.len() != when_false.len(): return []
+    var out: [i64] = []
+    var i = 0
+    while i < mask.len():
+        out.push(if mask[i] != 0: when_true[i] else: when_false[i])
+        i = i + 1
+    out
+
+pub fn simd_scalable_min_lanes_pure(element_bits: i64) -> i64:
+    if element_bits <= 0 or element_bits > 64: return 0
+    128 / element_bits
+
+export simd_f32x16_binop_pure, simd_f64x8_binop_pure, simd_i32x16_binop_pure
+export simd_f32x16_cmp_pure, simd_f64x8_cmp_pure, simd_i32x16_cmp_pure
+export simd_mask_op_pure, simd_select_i64_pure, simd_scalable_min_lanes_pure

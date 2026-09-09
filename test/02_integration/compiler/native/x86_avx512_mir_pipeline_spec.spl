@@ -1,0 +1,179 @@
+# Purpose: end-to-end MIR -> x86 ISel -> regalloc -> EVEX byte evidence.
+# @req REQ-SIMD-002 REQ-SIMD-004
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module_with_x86_simd_capability}
+use compiler.backend.native.native_avx2_capability.{native_avx2_denied_v1}
+use compiler.backend.native.native_avx512_capability.{native_avx512_capability_v1}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.mach_inst.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn avx512_pipeline_module() -> MirModule:
+    val f32 = MirType(kind: MirTypeKind.F32)
+    val ptr = MirType(kind: MirTypeKind.Ptr(pointee: f32, mutable: true))
+    val v16f = MirType(kind: MirTypeKind.Vec16f)
+    val v8d = MirType(kind: MirTypeKind.Vec8d)
+    val v16i = MirType(kind: MirTypeKind.Vec16i)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("out"), type_: ptr, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("f_left"), type_: v16f, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("f_right"), type_: v16f, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("f_sum"), type_: v16f, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 6), name: Some("d_left"), type_: v8d, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 7), name: Some("d_right"), type_: v8d, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 8), name: Some("d_div"), type_: v8d, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 9), name: Some("i_left"), type_: v16i, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 10), name: Some("i_right"), type_: v16i, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 11), name: Some("i_xor"), type_: v16i, kind: LocalKind.Temp)
+    ]
+    val instructions = [
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, v16f), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, v16f), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Add"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 2)), true), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 6), MirOperand.copy(LocalId(id: 0)), true, v8d), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 7), MirOperand.copy(LocalId(id: 1)), true, v8d), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 8), MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 7)), "Div"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 8)), MirOperand.copy(LocalId(id: 2)), true), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 9), MirOperand.copy(LocalId(id: 0)), true, v16i), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 10), MirOperand.copy(LocalId(id: 1)), true, v16i), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 11), MirOperand.copy(LocalId(id: 9)), MirOperand.copy(LocalId(id: 10)), "Xor"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 11)), MirOperand.copy(LocalId(id: 2)), true), span: nil)
+    ]
+    val block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "avx512_fixed_ops",
+        signature: MirSignature(params: [ptr, ptr, ptr], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx512_pipeline", functions: functions, statics: {}, constants: {}, types: {})
+
+fn avx512_capability():
+    native_avx512_capability_v1("x86_64-avx512-linux", "integration-injected", "fixture-avx512-v1", true, false, true)
+
+fn avx512_broad_ops_module() -> MirModule:
+    val i32 = MirType(kind: MirTypeKind.I32)
+    val ptr = MirType(kind: MirTypeKind.Ptr(pointee: i32, mutable: true))
+    val vector = MirType(kind: MirTypeKind.Vec16i)
+    val float_vector = MirType(kind: MirTypeKind.Vec16f)
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: ptr, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("out"), type_: ptr, kind: LocalKind.Arg(1))
+    ]
+    for id in 2..16:
+        val kind = if id == 9 or id == 14: LocalKind.Var else: LocalKind.Temp
+        val type_ = if id == 14: MirType.i64() elif id == 15: float_vector else: vector
+        locals.push(MirLocal(id: LocalId(id: id), name: Some("v{id}"), type_: type_, kind: kind))
+    locals.push(MirLocal(id: LocalId(id: 16), name: Some("f16"), type_: float_vector, kind: LocalKind.Temp))
+    locals.push(MirLocal(id: LocalId(id: 17), name: Some("f17"), type_: float_vector, kind: LocalKind.Temp))
+    locals.push(MirLocal(id: LocalId(id: 18), name: Some("reverse"), type_: vector, kind: LocalKind.Temp))
+    locals.push(MirLocal(id: LocalId(id: 19), name: Some("interleave_hi"), type_: vector, kind: LocalKind.Temp))
+    locals.push(MirLocal(id: LocalId(id: 20), name: Some("broadcast_lane"), type_: vector, kind: LocalKind.Temp))
+    val instructions = [
+        MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 2), MirOperand.const_int(3), vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 3), MirOperand.const_int(7), vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 4), MirOperand.const_int(0), vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 15), MirOperand.const_float(2.0), float_vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 16), MirOperand.const_float(3.0), float_vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdTernop(LocalId(id: 17), MirOperand.copy(LocalId(id: 15)), MirOperand.copy(LocalId(id: 16)), MirOperand.copy(LocalId(id: 15)), "Fma"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3)), "Mul"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdUnop(LocalId(id: 6), MirOperand.copy(LocalId(id: 5)), "Neg"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdCmp(LocalId(id: 9), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3)), "Lt"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdMaskOp(LocalId(id: 10), MirOperand.copy(LocalId(id: 9)), MirOperand.copy(LocalId(id: 9)), "Not"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdSelect(LocalId(id: 7), MirOperand.copy(LocalId(id: 10)), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3))), span: nil),
+        MirInst(kind: MirInstKind.MirSimdPermute(LocalId(id: 8), MirOperand.copy(LocalId(id: 7)), MirOperand.copy(LocalId(id: 4))), span: nil),
+        MirInst(kind: MirInstKind.MirSimdShuffle(LocalId(id: 11), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3)), "InterleaveLo"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdShuffle(LocalId(id: 18), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 2)), "Reverse"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdShuffle(LocalId(id: 19), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3)), "InterleaveHi"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdShuffle(LocalId(id: 20), MirOperand.copy(LocalId(id: 3)), MirOperand.const_int(7), "BroadcastLane"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdGather(LocalId(id: 12), MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 4)), vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdScatter(MirOperand.copy(LocalId(id: 12)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 4))), span: nil),
+        MirInst(kind: MirInstKind.MirSimdReduce(LocalId(id: 14), MirOperand.copy(LocalId(id: 11)), "Sum"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 8)), MirOperand.copy(LocalId(id: 1)), false), span: nil)
+    ]
+    val block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "avx512_broad_ops",
+        signature: MirSignature(params: [ptr, ptr], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx512_broad_ops", functions: functions, statics: {}, constants: {}, types: {})
+
+fn contains_bytes(haystack: [i64], needle: [i64]) -> bool:
+    if needle.len() == 0 or haystack.len() < needle.len(): return false
+    for start in 0..(haystack.len() - needle.len() + 1):
+        var matches = true
+        for index in 0..needle.len():
+            if haystack[start + index] != needle[index]: matches = false
+        if matches: return true
+    false
+
+describe "x86 AVX-512 native MIR pipeline":
+    it "selects and encodes every fixed lane arithmetic family without relocations":
+        step("lower f32x16, f64x8, and i32x16 MIR through the native encoder")
+        val selected = isel_module_with_x86_simd_capability(avx512_pipeline_module(), native_avx2_denied_v1(), avx512_capability())
+        val body = selected.functions[0].blocks[1]
+        var f32_adds = 0
+        var f64_divs = 0
+        var i32_xors = 0
+        for inst in body.insts:
+            if inst.opcode == X86_OP_VADDPS_ZMM: f32_adds = f32_adds + 1
+            if inst.opcode == X86_OP_VDIVPD_ZMM: f64_divs = f64_divs + 1
+            if inst.opcode == X86_OP_VPXORD_ZMM: i32_xors = i32_xors + 1
+        assert_equal(f32_adds, 1)
+        assert_equal(f64_divs, 1)
+        assert_equal(i32_xors, 1)
+
+        val encoded = encode_module(regalloc_module(selected))[0]
+        assert_equal(encoded.relocations.len(), 0)
+        assert_true(contains_bytes(encoded.code, [0x62, 0xF1]))
+        assert_true(contains_bytes(encoded.code, [0x58]))
+        assert_true(contains_bytes(encoded.code, [0x5E]))
+        assert_true(contains_bytes(encoded.code, [0xEF]))
+
+    it "selects and encodes masks select permute shuffle gather scatter reduction and unaligned memory":
+        step("lower the broad fixed-width MIR operation set through native encoding")
+        val selected = isel_module_with_x86_simd_capability(avx512_broad_ops_module(), native_avx2_denied_v1(), avx512_capability())
+        val body = selected.functions[0].blocks[1]
+        var broad_ops = 0
+        var vector_permutes = 0
+        var vector_gathers = 0
+        var vector_shuffles = 0
+        var vector_reductions = 0
+        for inst in body.insts:
+            if inst.opcode >= X86_OP_AVX512_LOADU and inst.opcode <= X86_OP_AVX512_GATHER:
+                broad_ops = broad_ops + 1
+            if inst.opcode == X86_OP_AVX512_PERMUTE: vector_permutes = vector_permutes + 1
+            if inst.opcode == X86_OP_AVX512_GATHER: vector_gathers = vector_gathers + 1
+            if inst.opcode == X86_OP_AVX512_SHUFFLE: vector_shuffles = vector_shuffles + 1
+            if inst.opcode == X86_OP_AVX512_EXTRACT_I32: vector_reductions = vector_reductions + 1
+        assert_true(broad_ops >= 14)
+        assert_equal(vector_permutes, 1)
+        assert_equal(vector_gathers, 1)
+        # InterleaveLo, Reverse, and InterleaveHi are vector permutes.
+        # BroadcastLane performs its required scalar bounds/read step before splat.
+        assert_equal(vector_shuffles, 3)
+        assert_equal(vector_reductions, 1)
+        val encoded = encode_module(regalloc_module(selected))[0]
+        assert_equal(encoded.relocations.len(), 0)
+        assert_true(encoded.code.len() > 200)
+        # VPERMD and VPGATHERDD prove the broad operations reached EVEX
+        # vector encoders rather than only their ordered scalar fallbacks.
+        assert_true(contains_bytes(encoded.code, [0x62, 0xF2]))
+        assert_true(contains_bytes(encoded.code, [0x36]))
+        assert_true(contains_bytes(encoded.code, [0x90]))
+        assert_true(contains_bytes(encoded.code, [0x76]))
+        assert_true(contains_bytes(encoded.code, [0x0F, 0x0B]))

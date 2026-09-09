@@ -22,6 +22,11 @@ use std.io_runtime.{file_read_result}
 @unsafe(reason: "raw host CPUID register ABI", capabilities: [ffi])
 extern fn rt_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32)
 
+# x86 XCR query. Call only after CPUID.OSXSAVE is present; returns zero on
+# non-x86 targets. XCR0 is the OS-owned extended-register save-state mask.
+@unsafe(reason: "raw x86 XGETBV register ABI", capabilities: [ffi])
+extern fn rt_xgetbv(index: i32) -> i64
+
 # AArch64: Linux getauxval(AT_HWCAP) / AT_HWCAP2
 @unsafe(reason: "raw host auxiliary-vector capability ABI; zero is a platform sentinel", capabilities: [ffi])
 extern fn rt_getauxval(key: i64) -> i64
@@ -64,6 +69,11 @@ extern fn rt_cuda_sm_version(device: i32) -> i32
 fn _sffi_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32):
     unsafe(capabilities: [ffi]):
         rt_cpuid(leaf, subleaf)
+
+@always_inline
+fn _sffi_xgetbv(index: i32) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_xgetbv(index)
 
 @always_inline
 fn _sffi_getauxval(key: i64) -> i64:
@@ -163,6 +173,9 @@ struct SimdFeatureSet:
     has_avx512vpopcntdq:  bool
     has_avx512fp16:       bool
     has_avx512bf16:       bool
+    has_osxsave:          bool
+    xcr0_xmm_ymm:         bool
+    xcr0_opmask_zmm:      bool
 
     # --- ARM ---
     has_neon:             bool
@@ -220,6 +233,9 @@ fn _simd_features_none() -> SimdFeatureSet:
         has_avx512vpopcntdq: false,
         has_avx512fp16:      false,
         has_avx512bf16:      false,
+        has_osxsave:         false,
+        xcr0_xmm_ymm:        false,
+        xcr0_opmask_zmm:     false,
         has_neon:            false,
         has_neon_fp16:       false,
         has_bf16:            false,
@@ -232,6 +248,42 @@ fn _simd_features_none() -> SimdFeatureSet:
         vlen:                0,
         is_apple_m:          false
     )
+
+# Pure admission record kept separate from CPUID acquisition so unit tests can
+# remove one CPU/OS condition at a time without executing host instructions.
+struct X86SimdEligibilityV1:
+    cpu_avx: bool
+    cpu_avx2: bool
+    cpu_avx512f: bool
+    cpu_avx512dq: bool
+    cpu_avx512bw: bool
+    osxsave: bool
+    xcr0_xmm_ymm: bool
+    xcr0_opmask_zmm: bool
+
+fn x86_simd_eligibility_from_raw(ecx1: i64, ebx70: i64, xcr0: i64) -> X86SimdEligibilityV1:
+    X86SimdEligibilityV1(
+        cpu_avx: (ecx1 & (1 << 28)) != 0,
+        cpu_avx2: (ebx70 & (1 << 5)) != 0,
+        cpu_avx512f: (ebx70 & (1 << 16)) != 0,
+        cpu_avx512dq: (ebx70 & (1 << 17)) != 0,
+        cpu_avx512bw: (ebx70 & (1 << 30)) != 0,
+        osxsave: (ecx1 & (1 << 27)) != 0,
+        xcr0_xmm_ymm: (xcr0 & 0x6) == 0x6,
+        xcr0_opmask_zmm: (xcr0 & 0xE6) == 0xE6
+    )
+
+fn x86_avx_eligible(e: X86SimdEligibilityV1) -> bool:
+    e.cpu_avx and e.osxsave and e.xcr0_xmm_ymm
+
+fn x86_avx2_eligible(e: X86SimdEligibilityV1) -> bool:
+    x86_avx_eligible(e) and e.cpu_avx2
+
+fn x86_avx512f_eligible(e: X86SimdEligibilityV1) -> bool:
+    x86_avx_eligible(e) and e.cpu_avx512f and e.xcr0_opmask_zmm
+
+fn x86_avx512bw_eligible(e: X86SimdEligibilityV1) -> bool:
+    x86_avx512f_eligible(e) and e.cpu_avx512bw
 
 # ============================================================================
 # detect_x86_capabilities — cpuid leaves 1, 7.0, 7.1
@@ -268,7 +320,7 @@ fn detect_x86_capabilities() -> SimdFeatureSet:
     f = SimdFeatureSet(..f, has_ssse3: (ecx1 & (1 << 9))  != 0)
     f = SimdFeatureSet(..f, has_sse41: (ecx1 & (1 << 19)) != 0)
     f = SimdFeatureSet(..f, has_sse42: (ecx1 & (1 << 20)) != 0)
-    f = SimdFeatureSet(..f, has_avx:   (ecx1 & (1 << 28)) != 0)
+    val osxsave = (ecx1 & (1 << 27)) != 0
 
     # Leaf 7.0
     var leaf70 = _sffi_cpuid(7, 0)
@@ -276,20 +328,34 @@ fn detect_x86_capabilities() -> SimdFeatureSet:
     var ecx70 = leaf70.2
     var edx70 = leaf70.3
 
-    f = SimdFeatureSet(..f, has_avx2:             (ebx70 & (1 << 5))  != 0)
-    f = SimdFeatureSet(..f, has_avx512f:          (ebx70 & (1 << 16)) != 0)
-    f = SimdFeatureSet(..f, has_avx512dq:         (ebx70 & (1 << 17)) != 0)
-    f = SimdFeatureSet(..f, has_avx512bw:         (ebx70 & (1 << 30)) != 0)
-    f = SimdFeatureSet(..f, has_avx512vl:         (ebx70 & (1 << 31)) != 0)
-    f = SimdFeatureSet(..f, has_avx512vbmi:       (ecx70 & (1 << 1))  != 0)
-    f = SimdFeatureSet(..f, has_avx512vbmi2:      (ecx70 & (1 << 6))  != 0)
-    f = SimdFeatureSet(..f, has_avx512vpopcntdq:  (ecx70 & (1 << 14)) != 0)
-    f = SimdFeatureSet(..f, has_avx512fp16:       (edx70 & (1 << 23)) != 0)
+    # XGETBV itself is only legal when CPUID.OSXSAVE is set. Admission uses
+    # the pure record below and therefore fails closed when the OS state is
+    # missing even if the CPU advertises AVX/AVX-512 instructions.
+    var xcr0: i64 = 0
+    if osxsave:
+        xcr0 = _sffi_xgetbv(0)
+    val eligibility = x86_simd_eligibility_from_raw(ecx1 as i64, ebx70 as i64, xcr0)
+    f = SimdFeatureSet(..f,
+        has_osxsave: eligibility.osxsave,
+        xcr0_xmm_ymm: eligibility.xcr0_xmm_ymm,
+        xcr0_opmask_zmm: eligibility.xcr0_opmask_zmm,
+        has_avx: x86_avx_eligible(eligibility),
+        has_avx2: x86_avx2_eligible(eligibility))
+
+    val avx512_ready = x86_avx512f_eligible(eligibility)
+    f = SimdFeatureSet(..f, has_avx512f:          avx512_ready)
+    f = SimdFeatureSet(..f, has_avx512dq:         avx512_ready and eligibility.cpu_avx512dq)
+    f = SimdFeatureSet(..f, has_avx512bw:         avx512_ready and eligibility.cpu_avx512bw)
+    f = SimdFeatureSet(..f, has_avx512vl:         avx512_ready and (ebx70 & (1 << 31)) != 0)
+    f = SimdFeatureSet(..f, has_avx512vbmi:       avx512_ready and (ecx70 & (1 << 1))  != 0)
+    f = SimdFeatureSet(..f, has_avx512vbmi2:      avx512_ready and (ecx70 & (1 << 6))  != 0)
+    f = SimdFeatureSet(..f, has_avx512vpopcntdq:  avx512_ready and (ecx70 & (1 << 14)) != 0)
+    f = SimdFeatureSet(..f, has_avx512fp16:       avx512_ready and (edx70 & (1 << 23)) != 0)
 
     # Leaf 7.1 EAX: BF16 (Sapphire Rapids+)
     var leaf71 = _sffi_cpuid(7, 1)
     var eax71 = leaf71.0
-    f = SimdFeatureSet(..f, has_avx512bf16: (eax71 & (1 << 5)) != 0)
+    f = SimdFeatureSet(..f, has_avx512bf16: avx512_ready and (eax71 & (1 << 5)) != 0)
 
     f
 
