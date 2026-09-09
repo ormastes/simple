@@ -1,11 +1,12 @@
 <!-- codex-architecture: Astra review -->
 # Browser renderer GPU surface ownership boundary
 
-Status: selected architecture; implementation and provider admission pending.
+Status: selected architecture; synchronous source integration under review,
+runtime verification and provider admission pending.
 Selection: O1 compositor-owned surfaces + B/N2 runtime-owned tunable bounded
 submission session. This refines the selected
 `simple_2d_web_renderer_gpu_optimization.md` architecture without claiming
-production integration or hardware evidence.
+completed production integration or hardware evidence.
 
 ## Actual production call sites
 
@@ -152,5 +153,51 @@ No surface teardown may silently invoke global idle/drain to claim local release
 6. Relocate caches and wire resize, close and device-loss through the same owner.
    Run the linked production test plan before any performance admission.
 
-No source implementation or runtime/device test was performed for this design.
-The source audit proves the missing boundary and real migration call sites.
+The original design audit established the missing boundary and real migration
+call sites. The synchronous source integration below remains runtime-unverified.
+
+## O1 synchronous provider boundary (PR #520)
+
+The first production slice is now connected at the existing hosted compositor
+owner. `CompositorGpuSurfaceOwner` binds one host output surface, separates its
+surface-backing epoch from physical device generation, and retains the
+immutable DrawIR image-resource snapshot across the real
+`Engine2dCompositorBackend -> VulkanBackend -> VulkanFrameReceipt` path. Its
+submission, device-fence completion, and present-receipt transitions remain
+separate even though the current provider returns them in one synchronous
+receipt. The owner snapshots the provider receipt before each call and admits
+only a contiguous chain with matching extent, framebuffer, device, swapchain,
+submit count, and fence count. Full/idle presentation advances the provider
+frame counter once. Damaged DrawIR emits a `device-retained` compute-finalize
+receipt first and a `window-swapchain` receipt second; the executor retains
+that real intermediate snapshot and the owner validates both consecutive
+counters. A two-frame jump without that snapshot remains rejected. Dirty
+frames and idle retained-window
+re-presents both pass through this owner, so the production loop has no second
+unobserved present route. The existing receipt is the only boundary at which
+this slice releases its host-side producer snapshot; it is not called a
+physical scanout release.
+
+The provider still lacks a distinct presenter-release/scanout receipt and the
+Vulkan path still completes compute synchronously. Therefore this integration
+does not claim B/N2 asynchronous display submission or physical presenter
+release. Ambiguous receipts retain the offered resources and prevent reuse;
+the owner never synthesizes a token or completion. Post-invocation failure is
+quarantined rather than mislabeled as a pre-submit abort. Quarantine holds at
+most one snapshot, limited to 64 resources and 67,108,864 pixels, and blocks
+resize, provider replacement, another offer, or close. A future
+provider-release operation can replace the synchronous boundary without
+changing the owner call-site shape. B/N2 is still not invoked by this slice.
+Terminal host paths call `close_gpu_surface`; it succeeds only for an idle
+owner. If a provider attempt is quarantined, close reports deferred and the
+runtime's provider teardown/quarantine remains the only cleanup authority.
+
+The production resize event reserves an idle provider replacement before
+shutting down/recreating the raster executor. A separate monotonic
+`provider_generation` authorizes its fresh frame-counter baseline even when
+all raw Vulkan handles are reused. Unannounced resets still fail closed;
+pending work blocks both the actual replacement call and compositor resize.
+The owner uses a distinct submitted state, so a completion cannot bypass
+submission observation. This source review admits a WARN development change
+only: the current general Simple CLI/check worker and real device execution
+remain unavailable, and no runtime or performance PASS is inferred.

@@ -60,3 +60,27 @@ only when available. Count accepted/rejected submissions, backpressure,
 in-flight slots, retained/released bytes, CPU waits, unknown completion,
 cancellation, and recovery idles. The linked system plans are authoritative;
 device-free fixtures cannot admit hardware or performance claims.
+
+## Current synchronous O1 integration
+
+`HostCompositor.gpu_surface_owner` retains at most one bounded producer
+snapshot around the existing boolean Engine2D window-present operation.
+`offer -> provider attempt -> submitted -> compute complete -> present receipt`
+are explicit transitions. The damaged DrawIR route supplies its actual
+intermediate `device-retained` receipt before the next `window-swapchain`
+receipt; the full and idle routes supply only the next window receipt. The
+executor clears its optional intermediate snapshot at every owned call.
+Any missing, stale, readback, target-mismatched, or counter-regressing receipt
+quarantines the snapshot. Pre-submit abort is unavailable after provider entry.
+
+The host resize path calls `prepare_gpu_surface_replacement` before executor
+shutdown/recreation. That idle-only transition increments a bounded provider
+generation and resets the provider receipt cursor; surface backing epoch and
+physical-device generation retain their separate meanings. The explicit
+replacement transition also handles complete raw-handle reuse. Pending work
+blocks replacement, compositor resize, another offer, and owner close.
+
+This is source integration for the synchronous adapter only. The bounded B/N2
+runtime is not called by this path, and physical presenter release is still
+unobservable. Focused owner/source specifications cover the intended chain;
+their current revision awaits an admitted runtime and generated SPipe evidence.

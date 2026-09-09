@@ -427,6 +427,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     val evidence = host_wm_evidence_config_from_env()
     if evidence.enabled and not evidence.valid:
         print "ERROR: hosted WM evidence configuration rejected: {evidence.failure_reason}"
+        if not comp.close_gpu_surface():
+            print "[hosted-wm] gpu-surface-close-deferred reason={comp.gpu_surface_owner.last_reason}"
         raster.shutdown()
         rt_winit_window_free(win)
         rt_winit_event_loop_free(el)
@@ -622,6 +624,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 browser_renderer, browser_raster,
                 browser_raster_active, browser_profile
             )
+            if not comp.close_gpu_surface():
+                print "[hosted-wm] gpu-surface-close-deferred reason={comp.gpu_surface_owner.last_reason}"
             raster.shutdown()
             rt_winit_window_free(win)
             rt_winit_event_loop_free(el)
@@ -635,6 +639,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             browser_renderer, browser_raster,
             browser_raster_active, browser_profile
         )
+        if not comp.close_gpu_surface():
+            print "[hosted-wm] gpu-surface-close-deferred reason={comp.gpu_surface_owner.last_reason}"
         raster.shutdown()
         rt_winit_window_free(win)
         rt_winit_event_loop_free(el)
@@ -668,6 +674,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 browser_renderer, browser_raster,
                 browser_raster_active, browser_profile
             )
+            if not comp.close_gpu_surface():
+                print "[hosted-wm] gpu-surface-close-deferred reason={comp.gpu_surface_owner.last_reason}"
             raster.shutdown()
             rt_winit_window_free(win)
             rt_winit_event_loop_free(el)
@@ -1008,11 +1016,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 else:
                     surface.geometry = physical
                 if physical.width > 0 and physical.height > 0:
-                    comp.resize(physical.width, physical.height)
                     if raster.w != physical.width or raster.h != physical.height:
+                        if not comp.prepare_gpu_surface_replacement():
+                            print "ERROR: hosted GPU surface replacement rejected reason={comp.gpu_surface_owner.last_reason}"
+                            running = false
+                            rt_winit_event_free(ev)
+                            ev = 0
+                            break
                         raster.shutdown()
                         raster = _hosted_engine2d_raster_for_window(
                             win, physical.width, physical.height)
+                    comp.resize(physical.width, physical.height)
                     other_dirty = true
                 print "[hosted-wm] event surface kind={kind} mode={surface.mode} phase={surface.phase} nonce={surface.request_nonce} width={physical.width} height={physical.height} scale_milli={physical.scale_milli}"
             elif kind == EVT_MOVE:
@@ -1768,6 +1782,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     other_dirty = true
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 1)
+        if not running:
+            break
         val browser_animation_time_ms = (
             now_micros - browser_animation_origin_micros
         ) / 1000
@@ -1974,7 +1990,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
                 continue
         elif raster.window_present_enabled():
-            if not raster.represent_retained_window():
+            if not comp.represent_retained_engine2d(raster):
                 print "ERROR: hosted WM retained Vulkan frame presentation failed"
                 running = false
                 continue
@@ -2025,6 +2041,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         browser_renderer, browser_raster,
         browser_raster_active, browser_profile
     )
+    if not comp.close_gpu_surface():
+        print "[hosted-wm] gpu-surface-close-deferred reason={comp.gpu_surface_owner.last_reason}"
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)

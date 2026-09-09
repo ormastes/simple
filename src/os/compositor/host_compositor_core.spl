@@ -35,6 +35,7 @@ use common.ui.widget.{UIEvent, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.compositor_gpu_surface_owner.{CompositorGpuSurfaceOwner}
 use os.compositor.dirty_rect.{DirtyRegion}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
@@ -710,6 +711,10 @@ class HostCompositor:
     # recomposition is deferred until profiling demands it (see render_frame).
     dirty: DirtyRegion
     skipped_frame_count: i64
+    # O1 compositor-owned visible GPU surface.  Browser producers offer
+    # immutable resource snapshots here; the owner releases them only after
+    # the exact synchronous Vulkan present receipt is validated.
+    gpu_surface_owner: CompositorGpuSurfaceOwner
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         var comp = HostCompositor(
@@ -760,7 +765,9 @@ class HostCompositor:
             background: shared_wm_background_color(wm_chrome_theme().compositor_bg),
             render_revision: 0,
             dirty: DirtyRegion.new(),
-            skipped_frame_count: 0
+            skipped_frame_count: 0,
+            gpu_surface_owner: CompositorGpuSurfaceOwner.create(
+                1, size.width as i32, size.height as i32)
         )
         # Seed full-screen damage so the very first render_frame() call always
         # renders even though nothing has "changed" from an empty prior state.
@@ -1638,6 +1645,8 @@ class HostCompositor:
         false
 
     me resize(width: i32, height: i32):
+        if self.gpu_surface_owner.has_pending_frame():
+            return
         if width <= 0 or height <= 0:
             return
         if (width.to_i64() * height.to_i64() >
@@ -1839,6 +1848,64 @@ class HostCompositor:
         self.render_revision = self.render_revision - 1
         false
 
+    # Begin one compositor-owned visible-surface transaction from the exact
+    # provider snapshot observed before the call. This prevents a stale latest
+    # receipt from being attached to a newer producer snapshot.
+    me _offer_gpu_surface_frame(
+        executor: Engine2dCompositorBackend,
+        resources: [SimpleOsHostGpuImageResource]
+    ) -> bool:
+        if val Some(before) = executor.latest_vulkan_frame_receipt():
+            if (self.gpu_surface_owner.sync_target(
+                    self.width, self.height, before.backend_handle,
+                    before.device_identity, before.swapchain_identity) and
+                self.gpu_surface_owner.offer_frame(resources, before)):
+                return true
+        print "[hosted-wm] draw-ir-rejected reason=gpu-surface-owner-{self.gpu_surface_owner.last_reason}"
+        false
+
+    # Validate any real damaged-compute intermediate before the next present
+    # receipt. Submission, completion, and present then use the same snapshot.
+    me _accept_gpu_surface_frame(executor: Engine2dCompositorBackend) -> bool:
+        if val Some(finalized) = executor.latest_window_compute_finalize_receipt():
+            if not self.gpu_surface_owner.observe_compute_finalize(finalized):
+                return false
+        if val Some(receipt) = executor.latest_vulkan_frame_receipt():
+            if (self.gpu_surface_owner.observe_submission(receipt) and
+                self.gpu_surface_owner.observe_compute_completion(receipt) and
+                self.gpu_surface_owner.observe_present_receipt(receipt)):
+                return true
+        else:
+            self.gpu_surface_owner.quarantine_after_provider_attempt(
+                "missing-vulkan-frame-receipt")
+        print "[hosted-wm] draw-ir-rejected reason=gpu-surface-owner-{self.gpu_surface_owner.last_reason}"
+        false
+
+    # Every retained idle re-present goes through the same O1 owner. It offers
+    # no new producer resources but still binds the exact provider frame,
+    # device, framebuffer, and swapchain transition.
+    me represent_retained_engine2d(executor: Engine2dCompositorBackend) -> bool:
+        if not executor.window_present_enabled() or not self.dirty.is_empty():
+            return false
+        if not self._offer_gpu_surface_frame(executor, []):
+            return false
+        if not self.gpu_surface_owner.begin_provider_attempt():
+            return false
+        if not executor.represent_retained_window():
+            self.gpu_surface_owner.quarantine_after_provider_attempt(
+                "retained-present-provider-attempt-unproven")
+            return false
+        self._accept_gpu_surface_frame(executor)
+
+    # Terminal host shutdown may close only an idle owner. A quarantined or
+    # pending provider attempt stays retained; Engine2D/runtime teardown owns
+    # recovery and this method never fabricates a release receipt.
+    me close_gpu_surface() -> bool:
+        self.gpu_surface_owner.close()
+
+    me prepare_gpu_surface_replacement() -> bool:
+        self.gpu_surface_owner.prepare_provider_replacement()
+
     me _mark_external_web_frames_consumed(frames: [WmContentFrame]):
         """Receipt that the submitted compositor frame no longer reads pixels.
 
@@ -1946,9 +2013,22 @@ class HostCompositor:
                 resources.push(simpleos_host_gpu_image_resource(
                     shared_wm_content_frame_image_uri(frame), frame.width,
                     frame.height, frame.pixels))
+            # Bind this immutable producer snapshot to the long-lived
+            # compositor-owned output surface before DrawIR submission.  The
+            # owner has a local surface epoch and keeps the resource snapshot
+            # live through the provider receipt; it does not manufacture a
+            # Vulkan token or infer async presenter release.
+            if not self._offer_gpu_surface_frame(executor, resources):
+                return self._reject_engine2d_frame()
+            if not self.gpu_surface_owner.begin_provider_attempt():
+                return self._reject_engine2d_frame()
             if not executor.render_draw_ir_composition_resources_window_revision_damaged(
                 composition, resources, self.render_revision,
                 self.render_revision, dirty_rects):
+                self.gpu_surface_owner.quarantine_after_provider_attempt(
+                    "draw-ir-provider-attempt-unproven")
+                return self._reject_engine2d_frame()
+            if not self._accept_gpu_surface_frame(executor):
                 return self._reject_engine2d_frame()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=vulkan-window-swapchain window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
