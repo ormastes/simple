@@ -92,3 +92,15 @@ helper call. This source repair awaits a fresh owner-smoke cycle.
   exact-repeat, and prefix-extension generation.
 - Produce the
   five-pair snapshot/physical benchmark evidence.
+### 2026-09-09 cleanup-boundary follow-up
+
+The post-repair owner smoke still reaches `cold_generate` and terminates with
+SIGBUS (`rc=135`). GDB again stops at address `0x25`; `spl_wffi_call_i64`
+receives `[Int(37), Array(...), Int(1)]`, with `fptr=37`. This proves the shared
+`_call1(fptr, a0)` cleanup invocation transposes its scalar parameters after the
+physical decode sequence. Request handle 37 is therefore called as an address.
+
+The next candidate keeps request close/cancel at lexical WFFI boundaries instead
+of passing their function pointer and handle through `_call1`. It requires a
+fresh owner-smoke run in the next bounded verification cycle before benchmark
+evidence is admissible.
