@@ -87,7 +87,18 @@ expected_requests() {
 
 validate_sample() {
     local workload=$1 lane=$2 result=$3 vector=$4 total=$5 resident_ms=$6 digest=$7
-    local expected sum=0 value
+    local expected sum=0 value field key
+    local -a values fields
+    local -A metrics=()
+    read -r -a fields <<< "$result"
+    for field in "${fields[@]:1}"; do
+        [[ "$field" == *=* ]] || return 1
+        key=${field%%=*}
+        [[ -n "$key" && ! -v "metrics[$key]" ]] || return 1
+        metrics[$key]=${field#*=}
+    done
+    [[ ${metrics[lane]:-} == "$lane" && ${metrics[workload]:-} == "$workload" ]] || return 1
+    [[ ${metrics[requested_tokens]:-} == "$TOKENS" && ${metrics[threads]:-} == "$THREADS" && ${metrics[n_ctx]:-} == "$N_CTX" ]] || return 1
     [[ "$resident_ms" =~ ^[1-9][0-9]*$ ]] || return 1
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
     [[ "$vector" =~ ^[0-9]+(,[0-9]+)*$ && "$total" =~ ^[0-9]+$ ]] || return 1
@@ -99,19 +110,51 @@ validate_sample() {
         sum=$((sum + value))
     done
     (( sum == total )) || return 1
-    [[ "$result" =~ hits=[0-9]+\ misses=[0-9]+\ reused_tokens=[0-9]+\ prefilled_tokens=[0-9]+ ]] || return 1
-    [[ "$result" =~ restore_failures=[0-9]+ ]] || return 1
-    [[ "$result" == *"cleanup_active=false cleanup_telemetry=nil"* ]] || return 1
+    for key in hits misses reused_tokens prefilled_tokens evictions restore_failures; do
+        [[ ${metrics[$key]:-} =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    done
+    [[ ${metrics[restore_failures]} == 0 ]] || return 1
+    [[ ${metrics[cleanup_active]:-} == false && ${metrics[cleanup_telemetry]:-} == nil ]] || return 1
     if [[ "$lane" == physical_pages ]]; then
-        [[ "$result" =~ physical_telemetry=available\ allocated_pages=[0-9]+\ allocated_bytes=[0-9]+\ provider_allocated_bytes=[0-9]+\ provider_page_bytes=[1-9][0-9]* ]] || return 1
-        [[ "$result" =~ active_requests=0 ]] || return 1
-        [[ "$result" =~ active_reservations=0 ]] || return 1
-        [[ "$result" =~ generation_failures=0 ]] || return 1
+        [[ ${metrics[physical_telemetry]:-} == available ]] || return 1
+        for key in effective_page_capacity effective_request_capacity effective_prefix_capacity effective_byte_limit allocated_pages allocated_bytes provider_allocated_bytes provider_page_bytes page_high_water active_requests request_references active_reservations generation_failures committed_prefix_restores boundary_evaluations copied_tail_rows; do
+            [[ ${metrics[$key]:-} =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+        done
+        (( metrics[effective_page_capacity] == N_CTX / 64 &&
+           metrics[effective_request_capacity] == 1 &&
+           metrics[effective_prefix_capacity] == 4 &&
+           metrics[effective_byte_limit] == 2147483648 )) || return 1
+        (( metrics[provider_page_bytes] > 0 &&
+           metrics[allocated_pages] <= metrics[page_high_water] &&
+           metrics[page_high_water] <= metrics[effective_page_capacity] &&
+           metrics[allocated_bytes] == metrics[provider_allocated_bytes] &&
+           metrics[allocated_bytes] == metrics[allocated_pages] * metrics[provider_page_bytes] &&
+           metrics[allocated_bytes] <= metrics[effective_byte_limit] )) || return 1
+        (( metrics[active_requests] == 0 && metrics[request_references] == 0 &&
+           metrics[active_reservations] == 0 && metrics[generation_failures] == 0 )) || return 1
+        case "$workload" in
+            cold)
+                (( metrics[hits] == 0 && metrics[reused_tokens] == 0 &&
+                   metrics[committed_prefix_restores] == 0 && metrics[prefilled_tokens] > 0 )) || return 1 ;;
+            exact_repeat)
+                (( metrics[hits] >= 1 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 1 && metrics[boundary_evaluations] >= 1 )) || return 1 ;;
+            prefix_extension)
+                (( metrics[hits] >= 1 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 1 && metrics[prefilled_tokens] > 0 )) || return 1 ;;
+            alternating_prefix)
+                (( metrics[hits] >= 2 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 2 )) || return 1 ;;
+            eviction_pressure)
+                (( metrics[evictions] >= 1 && metrics[misses] >= 7 &&
+                   metrics[prefilled_tokens] > 0 )) || return 1 ;;
+        esac
     else
-        [[ "$result" =~ physical_telemetry=unavailable ]] || return 1
+        [[ ${metrics[physical_telemetry]:-} == unavailable ]] || return 1
     fi
 }
 
+effective_config_reference=
 for workload in "${workloads[@]}"; do
     for pair in 1 2 3 4 5; do
         order=0
@@ -147,10 +190,15 @@ for workload in "${workloads[@]}"; do
             effective_n_ctx=$(awk -F'= ' '/llama_context: n_ctx                 =/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
             effective_n_batch=$(awk -F'= ' '/llama_context: n_batch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
             effective_n_ubatch=$(awk -F'= ' '/llama_context: n_ubatch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_config="$effective_n_ctx:$effective_n_batch:$effective_n_ubatch"
+            if [[ -z "$effective_config_reference" && "$effective_config" =~ ^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+                effective_config_reference=$effective_config
+            fi
             if (( code == 0 )) && [[ -n "$result" ]] && \
                [[ "$effective_n_ctx" =~ ^[1-9][0-9]*$ ]] && \
                [[ "$effective_n_batch" =~ ^[1-9][0-9]*$ ]] && \
                [[ "$effective_n_ubatch" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_config" == "$effective_config_reference" ]] && \
                validate_sample "$workload" "$lane" "$result" "$generated_vector" \
                    "$generated_total" "$resident_ms" "$output_digest"; then
                 status=PASS
@@ -169,9 +217,9 @@ for workload in "${workloads[@]}"; do
 done
 
 PARITY="$OUT/parity-$RUN_ID.tsv"
-awk -F '\t' 'BEGIN {OFS="\t"; print "workload","pair","snapshot_digest","physical_digest","snapshot_tokens","physical_tokens","status"}
-NR>1 {d[$4 SUBSEP $2 SUBSEP $5]=$11; v[$4 SUBSEP $2 SUBSEP $5]=$12 ":" $13}
-END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(p=1;p<=5;p++){s=d[names[w] SUBSEP p SUBSEP "snapshot"];q=d[names[w] SUBSEP p SUBSEP "physical_pages"];sv=v[names[w] SUBSEP p SUBSEP "snapshot"];qv=v[names[w] SUBSEP p SUBSEP "physical_pages"];print names[w],p,s,q,sv,qv,(s!=""&&s!="missing"&&s==q&&sv!=""&&sv!~"missing"&&sv==qv?"PASS":"FAIL")}}}' "$MANIFEST" > "$PARITY"
+awk -F '\t' 'BEGIN {OFS="\t"; print "workload","pair","snapshot_digest","physical_digest","snapshot_tokens","physical_tokens","status","snapshot_effective_config","physical_effective_config"}
+NR>1 {key=$4 SUBSEP $2 SUBSEP $5; d[key]=$11; v[key]=$12 ":" $13; c[key]=$18 ":" $19 ":" $20; ok[key]=($6=="PASS"); count[key]++}
+END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(p=1;p<=5;p++){sk=names[w] SUBSEP p SUBSEP "snapshot";qk=names[w] SUBSEP p SUBSEP "physical_pages";s=d[sk];q=d[qk];sv=v[sk];qv=v[qk];sc=c[sk];qc=c[qk];valid=(count[sk]==1&&count[qk]==1&&ok[sk]&&ok[qk]&&s!=""&&s!="missing"&&s==q&&sv!=""&&sv!~"missing"&&sv==qv&&sc~/^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$/&&sc==qc);print names[w],p,s,q,sv,qv,(valid?"PASS":"FAIL"),sc,qc}}}' "$MANIFEST" > "$PARITY"
 
 awk -F '\t' 'BEGIN {OFS="\t"; print "workload","lane","samples","passed","min_resident_ms","median_resident_ms","p95_resident_ms","max_resident_ms","max_rss_kib"}
 NR > 1 {key=$4 SUBSEP $5; n[key]++; if ($6=="PASS") pass[key]++; t[key,n[key]]=$9+0; if (($10+0)>rss[key]) rss[key]=$10+0}

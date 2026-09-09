@@ -1,13 +1,17 @@
 # @gc — one serial owner for Slang's physical paged-KV provider.
 
 use std.gc_async_mut.slang.core.page_manager.{KvPageManager, KvPageId, KvRequestId, KvPrefixId, KvPageTelemetry, KvPageError}
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, GgmlRequest, PhysicalPageProviderStatus, physical_page_provider_status, physical_lightweight_requests_ready, physical_page_execution_namespace, physical_page_pool_create, physical_page_pool_destroy, physical_page_reserve, physical_page_release, physical_page_copy_tail, physical_page_table_begin, physical_page_table_push, physical_page_prefill, physical_page_decode, physical_page_boundary_logits, physical_page_table_commit, physical_page_table_abort, physical_page_bytes, open_physical_request, prepare_request_tokens, request_token_at, request_sample, request_is_eog, request_piece, close_backend_request, cancel_backend_request}
+use std.gc_async_mut.slang.model_executor.backend.{BackendError, GgmlBackend, GgmlRequest, PhysicalPagePoolCreateRequest, PhysicalPageProviderStatus, parse_nonnegative_i64_text_exact, physical_page_provider_status, physical_lightweight_requests_ready, physical_page_execution_namespace, physical_page_pool_create_request, physical_page_pool_destroy, physical_page_reserve, physical_page_release, physical_page_copy_tail, physical_page_table_begin, physical_page_table_push, physical_page_prefill, physical_page_decode, physical_page_boundary_logits, physical_page_table_commit, physical_page_table_abort, physical_page_bytes, open_physical_request, prepare_request_tokens, request_token_at, request_sample, request_is_eog, request_piece, close_backend_request, cancel_backend_request}
 
 enum PagedExecutorError:
     AlreadyActive
     ProviderUnavailable
     InvalidConfiguration
     PoolCreateFailed
+    PoolContextCreateFailed
+    PoolCapacityOverflow
+    PoolConfigurationRejected
+    PoolBusy
     LogicalManagerFailed
     Busy
     ProviderReleaseFailed
@@ -43,6 +47,10 @@ fn paged_executor_error_text(error: PagedExecutorError) -> text:
         PagedExecutorError.ProviderUnavailable: "physical page provider is unavailable"
         PagedExecutorError.InvalidConfiguration: "physical page configuration is invalid"
         PagedExecutorError.PoolCreateFailed: "physical page pool creation failed"
+        PagedExecutorError.PoolContextCreateFailed: "physical page pool context creation failed"
+        PagedExecutorError.PoolCapacityOverflow: "physical page pool capacity overflowed"
+        PagedExecutorError.PoolConfigurationRejected: "physical page pool configuration was rejected"
+        PagedExecutorError.PoolBusy: "physical page pool is busy"
         PagedExecutorError.LogicalManagerFailed: "logical page manager creation failed"
         PagedExecutorError.Busy: "physical paged executor is busy"
         PagedExecutorError.ProviderReleaseFailed: "physical page release failed"
@@ -65,6 +73,7 @@ fn paged_executor_error_text(error: PagedExecutorError) -> text:
         PagedExecutorError.CleanupFailed: "physical request cleanup failed"
 
 var PAGED_BACKEND: GgmlBackend? = nil
+var PAGED_PENDING_BACKEND: GgmlBackend? = nil
 # A direct mutable receiver is required here. Calling `me` methods through an
 # optional unwrap mutates a temporary and loses the page/reference transition.
 var PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
@@ -73,8 +82,21 @@ var PAGED_POOL = 0
 var PAGED_NAMESPACE = 0
 var PAGED_PAGE_TOKENS = 0
 var PAGED_CONTEXT_TOKENS = 0
+var PAGED_PAGE_CAPACITY = 0
+var PAGED_REQUEST_CAPACITY = 0
+var PAGED_PREFIX_CAPACITY = 0
+var PAGED_BYTE_LIMIT = 0
 fn _current_request_active() -> bool:
     PAGED_MANAGER_ACTIVE and PAGED_MANAGER.sole_active_request().is_ok()
+
+fn paged_executor_bind_backend(backend: GgmlBackend) -> bool:
+    if PAGED_MANAGER_ACTIVE or PAGED_PENDING_BACKEND != nil:
+        return false
+    PAGED_PENDING_BACKEND = backend
+    true
+
+fn paged_executor_clear_pending_backend():
+    PAGED_PENDING_BACKEND = nil
 
 fn paged_executor_active() -> bool:
     PAGED_BACKEND != nil and PAGED_MANAGER_ACTIVE and PAGED_POOL > 0 and
@@ -148,7 +170,7 @@ fn _read_tokens(request: GgmlRequest, count: i64) -> Result<[i64], PagedExecutor
     Ok(tokens)
 
 fn _cold_prefill(native_request: GgmlRequest,
-                 tokens: [i64]) -> Result<KvRequestId, PagedExecutorError>:
+                 tokens: [i64]) -> Result<(), PagedExecutorError>:
     if tokens.len() <= 0 or tokens.len() > PAGED_CONTEXT_TOKENS:
         return Err(PagedExecutorError.CapacityExceeded)
     val page_count = (tokens.len() + PAGED_PAGE_TOKENS - 1) / PAGED_PAGE_TOKENS
@@ -236,10 +258,10 @@ fn _cold_prefill(native_request: GgmlRequest,
         return Err(PagedExecutorError.ColdRequestInvalid)
     if PAGED_MANAGER.record_committed_prefill(tokens.len()).is_err():
         return Err(PagedExecutorError.LogicalStateFailed)
-    Ok(logical_request)
+    Ok(())
 
 fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
-                         tokens: [i64]) -> Result<KvRequestId, PagedExecutorError>:
+                         tokens: [i64]) -> Result<(), PagedExecutorError>:
     val prefix_tokens = match PAGED_MANAGER.prefix_token_count(prefix):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(value): value
@@ -299,6 +321,11 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
             PAGED_MANAGER.close_request(logical_request)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
+        if PAGED_MANAGER.record_copied_tail_rows(retained).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.LogicalStateFailed)
     val transaction = match physical_page_table_begin(
         PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count):
         Err(_):
@@ -340,26 +367,13 @@ fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
         reservation, retained_checksum, 1, full_checksum):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(_): ()
-    if PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, retained).is_err():
+    if PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, 0).is_err():
         return Err(PagedExecutorError.LogicalStateFailed)
     _drain_reclaimed_pages()
-    Ok(logical_request)
-
-fn _request_tail_occupied(request: KvRequestId) -> Result<i64, PagedExecutorError>:
-    val page_count = match PAGED_MANAGER.request_page_count(request):
-        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
-        Ok(value): value
-    if page_count <= 0:
-        return Err(PagedExecutorError.LogicalRequestInvalid)
-    val tail = match PAGED_MANAGER.request_page_at(request, page_count - 1):
-        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
-        Ok(value): value
-    match PAGED_MANAGER.page_occupied(tail):
-        Err(_): Err(PagedExecutorError.LogicalStateFailed)
-        Ok(value): Ok(value)
+    Ok(())
 
 fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
-                                tokens: [i64]) -> Result<KvRequestId, PagedExecutorError>:
+                                tokens: [i64]) -> Result<(), PagedExecutorError>:
     val prefix_tokens = match PAGED_MANAGER.prefix_token_count(prefix):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(value): value
@@ -368,16 +382,6 @@ fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
     val logical_request = match PAGED_MANAGER.create_request_from_prefix(prefix):
         Err(_): return Err(PagedExecutorError.LogicalStateFailed)
         Ok(value): value
-    val initial_tail_occupied = match _request_tail_occupied(logical_request):
-        Err(error):
-            PAGED_MANAGER.close_request(logical_request)
-            _drain_reclaimed_pages()
-            return Err(error)
-        Ok(value): value
-    val copied_rows = if initial_tail_occupied < PAGED_PAGE_TOKENS:
-        initial_tail_occupied
-    else:
-        0
     var index = prefix_tokens
     while index < tokens.len():
         match _decode_one(native_request, tokens[index], index):
@@ -388,9 +392,9 @@ fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
             Ok(_): ()
         index = index + 1
     if PAGED_MANAGER.record_committed_restore(
-        prefix_tokens, tokens.len() - prefix_tokens, 0, copied_rows).is_err():
+        prefix_tokens, tokens.len() - prefix_tokens, 0, 0).is_err():
         return Err(PagedExecutorError.LogicalStateFailed)
-    Ok(logical_request)
+    Ok(())
 
 fn _decode_one(native_request: GgmlRequest, token: i64,
                position: i64) -> Result<(), PagedExecutorError>:
@@ -425,6 +429,10 @@ fn _decode_one(native_request: GgmlRequest, token: i64,
             PAGED_MANAGER.abort_cow(reservation)
             _drain_reclaimed_pages()
             return Err(PagedExecutorError.ProviderOperationFailed)
+        if PAGED_MANAGER.record_copied_tail_rows(occupied).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.LogicalStateFailed)
         val transaction_result = physical_page_table_begin(
             PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count)
         val transaction = match transaction_result:
@@ -543,13 +551,13 @@ fn _cancel_generation(native_request: GgmlRequest,
 # replay the request through another context and risk duplicate output.
 fn _paged_executor_generate_impl(input: PagedGenerationRequest) -> Result<PagedGeneration, PagedExecutorError>:
     val prompt = input.prompt
-    val max_tokens = input.max_tokens.parse_i64() ?? -1
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens < 0:
+        return Err(PagedExecutorError.InvalidConfiguration)
     if not paged_executor_active():
         return Err(PagedExecutorError.ProviderUnavailable)
     if _current_request_active():
         return Err(PagedExecutorError.Busy)
-    if max_tokens < 0:
-        return Err(PagedExecutorError.InvalidConfiguration)
     val native_result = open_physical_request(
         PAGED_BACKEND!, PAGED_POOL, PAGED_CONTEXT_TOKENS)
     val native_request = match native_result:
@@ -585,10 +593,15 @@ fn _paged_executor_generate_impl(input: PagedGenerationRequest) -> Result<PagedG
                 _restore_exact_prefix(native_request, prefix, tokens)
             else:
                 _restore_prefix_with_suffix(native_request, prefix, tokens)
-    val logical_request = match prefill_result:
+    match prefill_result:
         Err(error):
             _cancel_generation(native_request, false)
             return Err(error)
+        Ok(_): ()
+    val logical_request = match PAGED_MANAGER.sole_active_request():
+        Err(_):
+            _cancel_generation(native_request, true)
+            return Err(PagedExecutorError.LogicalRequestInvalid)
         Ok(value): value
     if PAGED_MANAGER.request_page_count(logical_request).is_err():
             _cancel_generation(native_request, true)
@@ -644,12 +657,23 @@ fn paged_executor_generate(prompt: text,
         Err(error): Err(error)
         Ok(observed): Ok(observed.output)
 
-fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
-                           page_tokens: i64, page_capacity: i64,
-                           request_capacity: i64, prefix_capacity: i64,
-                           byte_limit: i64) -> Result<(), PagedExecutorError>:
+fn paged_executor_activate_config(config: text) -> Result<(), PagedExecutorError>:
+    if PAGED_PENDING_BACKEND == nil:
+        return Err(PagedExecutorError.ProviderUnavailable)
+    val backend = PAGED_PENDING_BACKEND!
+    # Consume the pending binding exactly once; every failure path is retryable.
+    PAGED_PENDING_BACKEND = nil
+    val fields = config.split("|")
+    if fields.len() != 6:
+        return Err(PagedExecutorError.InvalidConfiguration)
     if paged_executor_active():
         return Err(PagedExecutorError.AlreadyActive)
+    val context_tokens = parse_nonnegative_i64_text_exact(fields[0])
+    val page_tokens = parse_nonnegative_i64_text_exact(fields[1])
+    val page_capacity = parse_nonnegative_i64_text_exact(fields[2])
+    val request_capacity = parse_nonnegative_i64_text_exact(fields[3])
+    val prefix_capacity = parse_nonnegative_i64_text_exact(fields[4])
+    val byte_limit = parse_nonnegative_i64_text_exact(fields[5])
     if (context_tokens <= 0 or page_tokens <= 0 or page_capacity <= 0 or
         request_capacity <= 0 or prefix_capacity <= 0 or byte_limit <= 0 or
         context_tokens > page_tokens * page_capacity):
@@ -661,9 +685,15 @@ fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
     val execution_namespace = match namespace_result:
         Err(_): return Err(PagedExecutorError.PoolCreateFailed)
         Ok(value): value
-    val pool_result = physical_page_pool_create(
-        backend, execution_namespace, page_tokens, page_capacity, byte_limit)
+    val pool_result = physical_page_pool_create_request(PhysicalPagePoolCreateRequest(
+        execution_namespace: execution_namespace.to_text(),
+        page_tokens: fields[1], page_capacity: fields[2],
+        byte_limit: fields[5], backend: backend))
     val pool = match pool_result:
+        Err(BackendError.PhysicalPageNoContext): return Err(PagedExecutorError.PoolContextCreateFailed)
+        Err(BackendError.PhysicalPageOverflow): return Err(PagedExecutorError.PoolCapacityOverflow)
+        Err(BackendError.PhysicalPageInvalid): return Err(PagedExecutorError.PoolConfigurationRejected)
+        Err(BackendError.PhysicalPageBusy): return Err(PagedExecutorError.PoolBusy)
         Err(_): return Err(PagedExecutorError.PoolCreateFailed)
         Ok(value): value
     val page_bytes_result = physical_page_bytes(backend, pool)
@@ -673,8 +703,8 @@ fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
             return Err(PagedExecutorError.LogicalManagerFailed)
         Ok(value): value
     val manager_result = KvPageManager.create(
-        execution_namespace.to_u64(), page_tokens, page_byte_count, page_capacity,
-        request_capacity, prefix_capacity,
+        execution_namespace.to_u64(), page_tokens, page_byte_count,
+        page_capacity, request_capacity, prefix_capacity,
         (context_tokens + page_tokens - 1) / page_tokens, byte_limit)
     val manager = match manager_result:
         Err(_):
@@ -688,10 +718,23 @@ fn paged_executor_activate(backend: GgmlBackend, context_tokens: i64,
     PAGED_NAMESPACE = execution_namespace
     PAGED_PAGE_TOKENS = page_tokens
     PAGED_CONTEXT_TOKENS = context_tokens
+    PAGED_PAGE_CAPACITY = page_capacity
+    PAGED_REQUEST_CAPACITY = request_capacity
+    PAGED_PREFIX_CAPACITY = prefix_capacity
+    PAGED_BYTE_LIMIT = byte_limit
     Ok(())
+
+fn paged_executor_configuration_text() -> text:
+    "effective_page_capacity=" + PAGED_PAGE_CAPACITY.to_text() +
+        " effective_request_capacity=" + PAGED_REQUEST_CAPACITY.to_text() +
+        " effective_prefix_capacity=" + PAGED_PREFIX_CAPACITY.to_text() +
+        " effective_byte_limit=" + PAGED_BYTE_LIMIT.to_text()
 
 fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
     if not paged_executor_active():
+        # Binding transfers one pending reference here. Shutdown is also the
+        # recovery path when activation is abandoned.
+        PAGED_PENDING_BACKEND = nil
         return Ok(())
     if PAGED_MANAGER.telemetry().active_requests != 0:
         return Err(PagedExecutorError.Busy)
@@ -705,16 +748,23 @@ fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
         Err(_): return Err(PagedExecutorError.PoolDestroyFailed)
         Ok(_): ()
     PAGED_BACKEND = nil
+    PAGED_PENDING_BACKEND = nil
     PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
     PAGED_MANAGER_ACTIVE = false
     PAGED_POOL = 0
     PAGED_NAMESPACE = 0
     PAGED_PAGE_TOKENS = 0
     PAGED_CONTEXT_TOKENS = 0
+    PAGED_PAGE_CAPACITY = 0
+    PAGED_REQUEST_CAPACITY = 0
+    PAGED_PREFIX_CAPACITY = 0
+    PAGED_BYTE_LIMIT = 0
     Ok(())
 
 export PagedExecutorError, PagedGeneration, PagedGenerationRequest
 export paged_executor_error_text
 export paged_executor_active, paged_executor_pool, paged_executor_namespace
-export paged_executor_telemetry, paged_executor_activate, paged_executor_shutdown
+export paged_executor_telemetry, paged_executor_activate_config, paged_executor_shutdown
+export paged_executor_bind_backend, paged_executor_clear_pending_backend
+export paged_executor_configuration_text
 export paged_executor_generate, paged_executor_generate_observed, paged_executor_generate_observed_request

@@ -6,11 +6,28 @@ must be able to distinguish.
 """
 
 use std.spec.step
-use std.gc_async_mut.slang.model_executor.backend.{BackendGeneration}
-use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGeneration, PagedGenerationRequest}
-use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationObservation, EngineGenerationRequest}
+use std.gc_async_mut.slang.model_executor.backend.{BackendGeneration, parse_nonnegative_i64_text_exact}
+use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGeneration, PagedGenerationRequest, PagedExecutorError, paged_executor_generate_observed_request}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed_request}
 
 describe "Slang generation observation values":
+    it "parses exact scalar text without tagged optional scaling":
+        step("preserve positive decimal magnitude")
+        expect(parse_nonnegative_i64_text_exact("16")).to_equal(16)
+        expect(parse_nonnegative_i64_text_exact("2147483648")).to_equal(2147483648)
+        expect(parse_nonnegative_i64_text_exact("0")).to_equal(0)
+        expect(parse_nonnegative_i64_text_exact("9223372036854775807")).to_equal(9223372036854775807)
+
+    it "rejects malformed and overflowing budgets before backend use":
+        step("a malformed text budget must not select the default generation limit")
+        for budget in ["", "two", "-1", "+1", "9223372036854775808"]:
+            val engine = engine_generate_observed_request(EngineGenerationRequest(
+                prompt: "budget validation", max_tokens: budget))
+            expect(engine.unwrap_err()).to_equal("max_tokens must be a nonnegative signed 64-bit integer")
+            val paged = paged_executor_generate_observed_request(PagedGenerationRequest(
+                prompt: "budget validation", max_tokens: budget))
+            expect(paged.unwrap_err()).to_equal(PagedExecutorError.InvalidConfiguration)
+
     it "retains the authoritative max-token produced count":
         step("represent a decode loop which consumed its complete four-token budget")
         val backend = BackendGeneration(output: "x", generated_tokens: "4")
