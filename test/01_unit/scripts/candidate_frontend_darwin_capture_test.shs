@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in Darwin) ;; *) echo 'SKIP: Darwin capture requires macOS'; exit 0 ;; esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/candidate-darwin-capture.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+. "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+CANDIDATE_FRONTEND_ROOT=$root
+mkdir "$work/output"
+candidate_frontend_capture_setup "$work/output" || fail 'capture setup'
+[ "$CANDIDATE_FRONTEND_CAPTURE_KIND" = darwin-fd ] || fail 'wrong host adapter'
+[ "$CANDIDATE_FRONTEND_CAPTURE_PARENT" = "$(CDPATH= cd -- "$work/output" && pwd -P)" ] || fail 'nonphysical parent'
+build_log=$CANDIDATE_FRONTEND_CAPTURE_PARENT/build.log
+candidate_frontend_capture_leaf "$build_log" || fail 'valid capture leaf rejected'
+if candidate_frontend_capture_leaf "$CANDIDATE_FRONTEND_CAPTURE_PARENT/../escape.log"; then
+    fail 'traversal accepted'
+fi
+candidate_frontend_bounded_build p2_add /bin/echo darwin-capture || fail 'bounded build'
+[ "$(cat "$build_log")" = darwin-capture ] || fail 'output missing'
+[ "$bounded_last_reason" = child-exit ] || fail 'wrong outcome'
+[ "$(sed -n 's/^process_group=//p' "$build_log.bounded.env")" = setsid ] || fail 'missing process group'
+candidate_frontend_bounded_build stage2_mir_retention /bin/echo second-probe || fail 'second probe'
+[ "$(cat "$build_log.stage2-mir-retention")" = second-probe ] || fail 'held helper offset was not rewound'
+before=$(candidate_frontend_hash_file "$build_log")
+if candidate_frontend_bounded_build p2_add /bin/echo replacement 2>"$work/collision.err"; then
+    fail 'existing evidence overwritten'
+fi
+[ "$(candidate_frontend_hash_file "$build_log")" = "$before" ] || fail 'collision changed evidence'
+echo 'PASS: macOS frontend capture and bounded receipt integration'
