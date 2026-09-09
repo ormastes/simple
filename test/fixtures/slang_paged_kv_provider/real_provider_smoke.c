@@ -52,18 +52,38 @@ static void decode_reference(struct llama_context *context, const llama_token *t
     llama_batch_free(batch);
 }
 
-static void assert_logit_close(int64_t index, uint32_t actual_bits, uint32_t expected_bits) {
-    union { uint32_t bits; float value; } actual = { actual_bits };
-    union { uint32_t bits; float value; } expected = { expected_bits };
-    float tolerance = SLANG_PHYSICAL_LOGIT_REL_TOLERANCE * fmaxf(1.0f, fabsf(expected.value));
-    if (!isfinite(actual.value) || !isfinite(expected.value) ||
-        fabsf(actual.value - expected.value) > tolerance) {
-        fprintf(stderr,
-                "logit mismatch index=%lld actual=%g expected=%g abs_error=%g tolerance=%g\n",
-                (long long)index, actual.value, expected.value,
-                fabsf(actual.value - expected.value), tolerance);
-        assert(0 && "physical logits exceed declared tolerance");
+static void assert_logits_close(int64_t request, const uint32_t *reference,
+                                int64_t vocabulary, const char *phase) {
+    double squared_normalized_error = 0.0;
+    float maximum_normalized_error = 0.0f;
+    int64_t worst_index = -1;
+    float worst_actual = 0.0f;
+    float worst_expected = 0.0f;
+    for (int64_t i = 0; i < vocabulary; ++i) {
+        int64_t bits = slang_ggml_request_logit_bits(request, i);
+        assert(bits >= 0 && bits <= UINT32_MAX);
+        union { uint32_t bits; float value; } actual = { (uint32_t)bits };
+        union { uint32_t bits; float value; } expected = { reference[i] };
+        assert(isfinite(actual.value) && isfinite(expected.value));
+        float normalized_error = fabsf(actual.value - expected.value) /
+                                 fmaxf(1.0f, fabsf(expected.value));
+        squared_normalized_error += (double)normalized_error * normalized_error;
+        if (normalized_error > maximum_normalized_error) {
+            maximum_normalized_error = normalized_error;
+            worst_index = i;
+            worst_actual = actual.value;
+            worst_expected = expected.value;
+        }
     }
+    double rms_normalized_error = sqrt(squared_normalized_error / (double)vocabulary);
+    fprintf(stderr,
+            "logit parity phase=%s max_normalized_error=%g rms_normalized_error=%g "
+            "worst_index=%lld actual=%g expected=%g tolerance=%g\n",
+            phase, maximum_normalized_error, rms_normalized_error,
+            (long long)worst_index, worst_actual, worst_expected,
+            SLANG_PHYSICAL_LOGIT_REL_TOLERANCE);
+    assert(maximum_normalized_error <= SLANG_PHYSICAL_LOGIT_REL_TOLERANCE &&
+           "physical logits exceed declared tolerance");
 }
 
 int main(int argc, char **argv) {
@@ -140,11 +160,7 @@ int main(int argc, char **argv) {
     }
     assert(slang_ggml_page_prefill(transaction, 0, 0, tokens_a) == 0);
     assert(slang_ggml_page_table_commit(transaction) == 0);
-    for (int64_t i = 0; i < vocabulary; ++i) {
-        int64_t bits = slang_ggml_request_logit_bits(request_a, i);
-        assert(bits >= 0 && bits <= UINT32_MAX);
-        assert_logit_close(i, (uint32_t)bits, reference[i]);
-    }
+    assert_logits_close(request_a, reference, vocabulary, "prefill");
     int64_t sample_a = slang_ggml_request_sample(request_a);
     assert(sample_a >= 0);
 
@@ -161,11 +177,7 @@ int main(int argc, char **argv) {
     assert(slang_ggml_page_table_push(transaction, page_b, copied_rows, 1) == 0);
     assert(slang_ggml_page_boundary_logits(transaction, tokens_a - 1, tokens_a - 1) == 0);
     assert(slang_ggml_page_table_commit(transaction) == 0);
-    for (int64_t i = 0; i < vocabulary; ++i) {
-        int64_t bits = slang_ggml_request_logit_bits(request_b, i);
-        assert(bits >= 0 && bits <= UINT32_MAX);
-        assert_logit_close(i, (uint32_t)bits, reference[i]);
-    }
+    assert_logits_close(request_b, reference, vocabulary, "boundary");
     assert(slang_ggml_request_sample(request_b) == sample_a);
 
     llama_token next_token = (llama_token)sample_a;
@@ -198,11 +210,7 @@ int main(int argc, char **argv) {
     assert(slang_ggml_page_table_commit(transaction) == 0);
     if (extra_full_page == 0)
         assert(slang_ggml_page_release(pool, old_page_b) == 0);
-    for (int64_t i = 0; i < vocabulary; ++i) {
-        int64_t bits = slang_ggml_request_logit_bits(request_b, i);
-        assert(bits >= 0 && bits <= UINT32_MAX);
-        assert_logit_close(i, (uint32_t)bits, reference[i]);
-    }
+    assert_logits_close(request_b, reference, vocabulary, "decode");
 
     int64_t poisoned_page = slang_ggml_page_reserve(pool);
     int64_t published_final_rows = final_rows < 4 ? final_rows + 1 : 1;
