@@ -9,7 +9,12 @@ use std.common.gpu.render_surface_contract.{
     gpu_async_frame_ring_capacity_v2_valid, gpu_async_wait_timeout_v2_valid
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_async_submission.{
-    VulkanAsyncSubmissionSession, VULKAN_ASYNC_BIND_INVALID
+    VulkanAsyncSubmissionSession, VULKAN_ASYNC_BIND_INVALID,
+    VULKAN_ASYNC_BIND_UNSUPPORTED, vulkan_async_session_bind_buffer_supported
+}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_async_session_bind_buffer,
+    vulkan_sffi_async_session_bind_buffer_supported
 }
 
 describe "Pure-Simple Vulkan async submission adapter":
@@ -32,11 +37,15 @@ describe "Pure-Simple Vulkan async submission adapter":
         expect(source).to_contain("descriptor_set <= 0")
         expect(source).to_contain("binding > 4294967295")
         expect(source).to_contain("offset > 9223372036854775807 - range")
-        expect(source).to_contain("vulkan_sffi_async_session_bind_buffer")
+        expect(source).to_contain("vulkan_sffi_async_session_bind_buffer_supported")
+        expect(source).to_contain("vulkan_async_session_bind_buffer_supported()")
+        expect(source).to_contain("VULKAN_ASYNC_BIND_UNSUPPORTED")
         expect(source).to_contain("VULKAN_ASYNC_BIND_INVALID")
         expect(source).to_contain("never waits for a prior frame")
         expect(source).to_contain("gpu_async_frame_ring_capacity_v2_valid(capacity)")
         expect(source).to_contain("gpu_async_wait_timeout_v2_valid(timeout_ns)")
+        expect(vulkan_async_session_bind_buffer_supported()).to_be(false)
+        expect(vulkan_sffi_async_session_bind_buffer_supported()).to_be(false)
 
         # These calls return before SFFI, proving the Pure-Simple rejection
         # path without manufacturing a live provider session or token.
@@ -52,6 +61,23 @@ describe "Pure-Simple Vulkan async submission adapter":
             GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_INVALID)
         expect(shaped.bind_buffer(1, 1, 0, 1, 0, 4, 4)).to_equal(
             VULKAN_ASYNC_BIND_INVALID)
+        expect(shaped.bind_buffer(1, 1, 0, 1, 0, 4,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_UNSUPPORTED)
+        expect(vulkan_sffi_async_session_bind_buffer(0, 1, 1, 0, 1, 0, 4,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_INVALID)
+        expect(vulkan_sffi_async_session_bind_buffer(1, 1, 1, 0, 1, 0, 4,
+            GPU_ASYNC_ACCESS_READ)).to_equal(VULKAN_ASYNC_BIND_UNSUPPORTED)
+
+        val owner_source = rt_file_read_text(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
+        val bind_start = owner_source.index_of(
+            "fn vulkan_sffi_async_session_bind_buffer(session")
+        val bind_end = owner_source.index_of("@unsafe(reason:", bind_start)
+        expect(bind_start).to_be_greater_than(-1)
+        expect(bind_end).to_be_greater_than(bind_start)
+        val bind_body = owner_source.substring(bind_start, bind_end)
+        expect(bind_body).to_not_contain("rt_vulkan_")
+        expect(bind_body).to_not_contain("vulkan_sffi_bind_buffer(")
 
     it "exports the complete async facade through the no-GC compatibility layer":
         val source = rt_file_read_text(
@@ -60,6 +86,7 @@ describe "Pure-Simple Vulkan async submission adapter":
             "vulkan_sffi_async_session_create",
             "vulkan_sffi_async_session_acquire",
             "vulkan_sffi_async_session_bind_buffer",
+            "vulkan_sffi_async_session_bind_buffer_supported",
             "vulkan_sffi_async_session_command",
             "vulkan_sffi_async_session_submit",
             "vulkan_sffi_async_session_poll",

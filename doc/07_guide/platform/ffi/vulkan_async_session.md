@@ -38,6 +38,17 @@ completion or physical release. Device reinitialization is rejected until
 process restart; automatic loss/recreation needs additional provider integration
 and concurrency evidence. Telemetry keeps the nonzero retained-owner state.
 
+Managed range binding is currently an explicit unsupported capability. Query
+`vulkan_async_session_bind_buffer_supported()` before calling the session's
+`bind_buffer`; the canonical no-GC SFFI owner reports `false`, and a valid
+binding request returns `VULKAN_ASYNC_BIND_UNSUPPORTED` without invoking a
+native symbol or mutating descriptors/resources. Malformed scalar arguments
+remain `VULKAN_ASYNC_BIND_INVALID`. The legacy unscoped
+`vulkan_sffi_bind_buffer` operation is not a substitute for this checked
+admission contract. The scoped `vulkan_sffi_async_session_bind_buffer` name is
+retained for API compatibility, but its Pure Simple owner also returns invalid
+or unsupported and performs no native call while the capability query is false.
+
 ## Telemetry version 1
 
 `telemetry()` copies 64 signed scalar words from one frozen snapshot. An empty
