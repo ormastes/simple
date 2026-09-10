@@ -217,8 +217,11 @@ bootstrap_stage3_stage2_canonical_env_names() {
     [ "$#" -eq 1 ] || return 1
     printf '%s' 'RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
-        *windows-gnu*|*windows-msvc*)
+        *windows-gnu*)
             printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR'
+            ;;
+        *windows-msvc*)
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC CXX'
             ;;
     esac
     printf ' %s\n' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
@@ -454,6 +457,16 @@ bootstrap_stage3_host_platform() {
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
+            # Honor an explicitly selected MSVC-compatible compiler.  This is
+            # needed on hosts where cl.exe passes the lightweight authority
+            # probe but fails later in cc-rs while clang-cl succeeds under the
+            # same MSVC ABI and hermetic environment.  The runnable compiler
+            # probe remains the admission gate, and its exact path is included
+            # in the tool-authority fingerprint.
+            if [ -n "${CC:-}" ]; then
+                bootstrap_stage3_windows_runnable_compiler "$CC" '/?' &&
+                    return 0
+            fi
             bootstrap_stage3_windows_runnable_compiler cl.exe '/?' ||
                 bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
             ;;
@@ -713,15 +726,40 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         return 1
     }
     bootstrap_stage3_installed_host=$(
-        awk -F= '
+        awk -F= -v channel="$bootstrap_stage3_installed_channel" '
             /^[[:space:]]*default_host_tuple[[:space:]]*=/ {
                 value = $2
                 gsub(/^[[:space:]]*"/, "", value)
                 gsub(/"[[:space:]]*$/, "", value)
-                print value
-                count += 1
+                legacy = value
+                legacy_count += 1
             }
-            END { if (count != 1) exit 1 }
+            /^[[:space:]]*default_toolchain[[:space:]]*=/ {
+                value = $2
+                gsub(/^[[:space:]]*"/, "", value)
+                gsub(/"[[:space:]]*$/, "", value)
+                modern = value
+                modern_count += 1
+            }
+            END {
+                if (legacy_count > 1 || modern_count > 1) exit 1
+                if (legacy_count == 1) {
+                    if (modern_count == 1) {
+                        prefix = channel "-"
+                        if (index(modern, prefix) != 1) exit 1
+                        modern_host = substr(modern, length(prefix) + 1)
+                        if (modern_host == "" || modern_host != legacy) exit 1
+                    }
+                    print legacy
+                    exit 0
+                }
+                if (modern_count != 1) exit 1
+                prefix = channel "-"
+                if (index(modern, prefix) != 1) exit 1
+                host = substr(modern, length(prefix) + 1)
+                if (host == "") exit 1
+                print host
+            }
         ' "$bootstrap_stage3_installed_settings"
     ) || {
         bootstrap_stage3_rust_toolchain_trace settings-host=parse-fail
