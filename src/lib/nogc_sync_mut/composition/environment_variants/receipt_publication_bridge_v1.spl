@@ -1,0 +1,188 @@
+# codex-impl
+# Typed bridge from safe publication admission to lifecycle receipts.
+#
+# Low-level receipt transitions remain implementation machinery.  Product
+# callers use this bridge so an arbitrary nonzero digest cannot stand in for
+# environment, dependency, generation, and artifact-trust admission.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, ENV_VARIANT_SCHEMA_V1,
+    ENV_VARIANT_MAX_FACET_BINDINGS_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+    artifact_trust_receipt_valid_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.{
+    ENV_PUBLICATION_ADMISSION_SCHEMA_V1,
+    EnvironmentPublicationAdmissionV1, PublicationArtifactEvidenceV1
+}
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.{
+    EnvironmentVariantReceiptV1, EnvironmentVariantReceiptIdentityV1,
+    environment_variant_receipt_identity_matches_v1,
+    environment_variant_receipt_mark_eligible_v1,
+    environment_variant_receipt_mark_mapped_v1
+}
+
+pub enum EnvironmentReceiptPublicationBridgeErrorV1:
+    AdmissionSchemaMismatch
+    AdmissionPlanInvalid
+    AdmissionIdentityMismatch
+    AdmissionGenerationMismatch
+    AdmissionRootMismatch
+    AdmissionClosureInvalid
+    AdmissionArtifactMissing
+    AdmissionArtifactInvalid
+    AdmissionArtifactDuplicate
+    AdmissionRootArtifactMissing
+    MappingPlanMismatch
+    ReceiptTransitionFailed
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _publication_contains_identity_v1(
+    admission: EnvironmentPublicationAdmissionV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> bool:
+    var i = 0
+    while i < admission.admitted_artifacts.len():
+        val evidence = admission.admitted_artifacts[i]
+        if _digest_equal_v1(evidence.provider_identity, identity.provider_identity) and
+           _digest_equal_v1(evidence.variant_identity, identity.variant_identity) and
+           _digest_equal_v1(evidence.artifact_digest, identity.artifact_digest) and
+           evidence.provider_generation == identity.provider_generation:
+            return true
+        i = i + 1
+    false
+
+fn _plan_shape_valid_v1(admission: EnvironmentPublicationAdmissionV1) -> bool:
+    val plan = admission.plan
+    plan.schema_version == ENV_VARIANT_SCHEMA_V1 and
+    plan.descriptor_size >= 224u32 and
+    _digest_declared_v1(plan.plan_digest) and
+    _digest_declared_v1(plan.environment_identity) and
+    _digest_declared_v1(plan.catalog_digest) and
+    _digest_declared_v1(plan.policy_digest) and
+    _digest_declared_v1(plan.dependency_lock_digest) and
+    plan.environment_generation > 0u64 and
+    plan.catalog_generation > 0u64 and
+    plan.publication_generation > 0u64 and
+    plan.facet_bindings.offset == 0u32 and
+    plan.facet_bindings.count > 0u32 and
+    plan.facet_bindings.count <= ENV_VARIANT_MAX_FACET_BINDINGS_V1 and
+    plan.selected_variant_identities.offset == 0u32 and
+    plan.selected_variant_identities.count > 0u32 and
+    plan.selected_variant_identities.count <= ENV_VARIANT_MAX_FACET_BINDINGS_V1 and
+    plan.rejections.offset == 0u32 and
+    plan.rejections.count <= ENV_VARIANT_MAX_FACET_BINDINGS_V1
+
+fn _artifact_evidence_valid_v1(
+    evidence: PublicationArtifactEvidenceV1
+) -> bool:
+    _digest_equal_v1(evidence.artifact_digest, evidence.observed_artifact_digest) and
+    evidence.provider_generation > 0u64 and
+    evidence.minimum_verifier_generation > 0u64 and
+    artifact_trust_receipt_valid_v1(evidence.trust_receipt) and
+    evidence.trust_receipt.authentication_status == ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 and
+    _digest_equal_v1(evidence.trust_receipt.artifact_digest, evidence.artifact_digest) and
+    _digest_equal_v1(evidence.trust_receipt.trust_policy_digest, evidence.required_trust_policy_digest) and
+    _digest_equal_v1(evidence.trust_receipt.verifier_identity, evidence.required_verifier_identity) and
+    evidence.trust_receipt.verifier_generation >= evidence.minimum_verifier_generation
+
+fn _artifact_evidence_unique_before_v1(
+    evidence: PublicationArtifactEvidenceV1,
+    all_evidence: [PublicationArtifactEvidenceV1], before: i64
+) -> bool:
+    var i = 0
+    while i < before:
+        val prior = all_evidence[i]
+        if _digest_equal_v1(evidence.provider_identity, prior.provider_identity) and
+           _digest_equal_v1(evidence.variant_identity, prior.variant_identity):
+            return false
+        i = i + 1
+    true
+
+fn _publication_artifacts_valid_v1(
+    admission: EnvironmentPublicationAdmissionV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<(), EnvironmentReceiptPublicationBridgeErrorV1>:
+    if admission.admitted_artifacts.len() == 0 or
+       admission.admitted_artifacts.len() as u32 > ENV_VARIANT_MAX_FACET_BINDINGS_V1 or
+       admission.plan.selected_variant_identities.count != admission.admitted_artifacts.len() as u32:
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactMissing)
+    var root_found = false
+    var i = 0
+    while i < admission.admitted_artifacts.len():
+        val evidence = admission.admitted_artifacts[i]
+        if not _artifact_evidence_valid_v1(evidence):
+            return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactInvalid)
+        if not _artifact_evidence_unique_before_v1(evidence, admission.admitted_artifacts, i):
+            return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactDuplicate)
+        if _digest_equal_v1(evidence.provider_identity, identity.provider_identity) and
+           _digest_equal_v1(evidence.variant_identity, identity.variant_identity) and
+           _digest_equal_v1(evidence.artifact_digest, identity.artifact_digest) and
+           evidence.provider_generation == identity.provider_generation:
+            root_found = true
+        i = i + 1
+    if not root_found:
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionRootArtifactMissing)
+    Ok(())
+
+fn _publication_matches_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    admission: EnvironmentPublicationAdmissionV1
+) -> Result<(), EnvironmentReceiptPublicationBridgeErrorV1>:
+    if admission.schema_version != ENV_PUBLICATION_ADMISSION_SCHEMA_V1:
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionSchemaMismatch)
+    if not _plan_shape_valid_v1(admission):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionPlanInvalid)
+    if not environment_variant_receipt_identity_matches_v1(receipt, identity) or
+       not _digest_equal_v1(admission.plan.environment_identity, identity.environment_identity):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionIdentityMismatch)
+    if admission.plan.environment_generation != identity.environment_generation:
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionGenerationMismatch)
+    if not _digest_equal_v1(admission.root_provider_identity, identity.provider_identity) or
+       not _digest_equal_v1(admission.root_variant_identity, identity.variant_identity):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionRootMismatch)
+    if not _digest_declared_v1(admission.dependency_closure_digest):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionClosureInvalid)
+    match _publication_artifacts_valid_v1(admission, identity):
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
+    if not _publication_contains_identity_v1(admission, identity):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactMissing)
+    Ok(())
+
+pub fn environment_receipt_admit_publication_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    admission: EnvironmentPublicationAdmissionV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentReceiptPublicationBridgeErrorV1>:
+    match _publication_matches_v1(receipt, identity, admission):
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
+    match environment_variant_receipt_mark_eligible_v1(
+        receipt, identity, admission.plan.plan_digest):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentReceiptPublicationBridgeErrorV1.ReceiptTransitionFailed)
+
+pub fn environment_receipt_mark_admitted_mapping_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    admission: EnvironmentPublicationAdmissionV1,
+    mapping_handle: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentReceiptPublicationBridgeErrorV1>:
+    match _publication_matches_v1(receipt, identity, admission):
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
+    if not _digest_equal_v1(receipt.eligibility_digest, admission.plan.plan_digest):
+        return Err(EnvironmentReceiptPublicationBridgeErrorV1.MappingPlanMismatch)
+    match environment_variant_receipt_mark_mapped_v1(receipt, identity, mapping_handle):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentReceiptPublicationBridgeErrorV1.ReceiptTransitionFailed)

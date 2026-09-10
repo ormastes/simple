@@ -1,0 +1,472 @@
+# Atomic reserve -> canonical publication -> finalize coordinator.
+# It does not map, pin, call, or prove executable ownership.
+use compiler.driver.environment_composite_publication_owner_v1.*
+use compiler.driver.environment_variant_composite_publication_v1.EnvironmentCompositePublicationV1
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.EnvironmentVariantCatalogPolicyProjectionV1
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.PublicationArtifactEvidenceV1
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+
+pub enum EnvironmentPublicationActivationCoordinatorErrorV1:
+    InvalidOwner
+    InvalidRootPlaceholders
+    CapacityExceeded
+    CounterOverflow
+    ReservationRejected
+    PublicationRejected
+    FinalizeRejected
+    UnknownOrSubstituted
+    PinsLive
+    CleanupFailed
+    AlreadyReleased
+    PinCapacityExceeded
+    PinUnknown
+
+pub struct EnvironmentPublicationActivationCoordinatorTokenV1:
+    token_id: u64
+    owner_identity: u64
+pub struct EnvironmentPublicationActivationProjectionV1:
+    activation: ProviderGenerationActivationV2
+    root_provider_identity: EnvironmentDigest256V1
+    root_variant_identity: EnvironmentDigest256V1
+    provider_generation: u64
+    publication_plan_digest: EnvironmentDigest256V1
+pub struct EnvironmentPublicationActivationPinTokenV1:
+    pin_id: u64
+    owner_identity: u64
+pub struct EnvironmentPublicationActivationUseTokenV1:
+    use_id: u64
+    owner_identity: u64
+pub struct EnvironmentPublicationActivationPinProjectionV1:
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
+    provider_handle: u64
+    provider_generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    runtime_publication_plan_digest: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    generation_authority_digest: EnvironmentDigest256V1
+struct _EnvironmentPublicationActivationPinRecordV1:
+    token: EnvironmentPublicationActivationPinTokenV1
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
+    raw_pin: ProviderGenerationPinV2
+    authority: ProviderGenerationPinnedCacheAuthorityV2
+struct _EnvironmentPublicationActivationUseRecordV1:
+    token: EnvironmentPublicationActivationUseTokenV1
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
+    pin_token: EnvironmentPublicationActivationPinTokenV1
+    authority: EnvironmentPublicationActivationPinProjectionV1
+struct _EnvironmentPublicationActivationRecordV1:
+    token: EnvironmentPublicationActivationCoordinatorTokenV1
+    projection: EnvironmentPublicationActivationProjectionV1
+    publication_token: EnvironmentCompositePublicationOwnerTokenV1
+    pre: ProviderPrePublicationEvidenceV2
+    generation_retired: bool
+    publication_released: bool
+
+var _next_epac_owner_identity_v1: u64 = 1u64
+pub class EnvironmentPublicationActivationCoordinatorV1:
+    var owner_identity: u64
+    var next_token_id: u64
+    var publications: EnvironmentCompositePublicationOwnerV1
+    var generations: ProviderGenerationManagerV2
+    var records: [_EnvironmentPublicationActivationRecordV1]
+    var pins: [_EnvironmentPublicationActivationPinRecordV1]
+    var next_pin_id: u64
+    var uses: [_EnvironmentPublicationActivationUseRecordV1]
+    var next_use_id: u64
+    pub static fn create() -> EnvironmentPublicationActivationCoordinatorV1:
+        val candidate = _next_epac_owner_identity_v1
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64: _next_epac_owner_identity_v1 = identity + 1u64
+        EnvironmentPublicationActivationCoordinatorV1(owner_identity: identity,
+            next_token_id: 1u64, publications: EnvironmentCompositePublicationOwnerV1.create(),
+            generations: ProviderGenerationManagerV2.create(), records: [], pins: [], next_pin_id: 1u64,
+            uses: [], next_use_id: 1u64)
+
+fn _same_epac(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+pub fn environment_publication_activation_prepare_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    pre: ProviderPrePublicationEvidenceV2,
+    snapshot: EnvironmentSnapshotV1, arena_bytes: [u8], feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1],
+    resolution: EnvironmentDependencyResolutionV1,
+    evidence: [PublicationArtifactEvidenceV1], catalog_generation: u64,
+    publication_generation: u64, bindings: [VariantFacetBindingV1],
+    policy: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<EnvironmentPublicationActivationCoordinatorTokenV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if owner.owner_identity == 0u64: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.InvalidOwner)
+    if owner.records.len() >= 256: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CapacityExceeded)
+    if owner.next_token_id == 0u64 or owner.next_token_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CounterOverflow)
+    if not _same_epac(pre.provider_identity, root.provider_identity) or
+       not _same_epac(pre.variant_identity, root.variant_identity) or bindings.len() != 1 or
+       not _same_epac(pre.artifact_identity, root.artifact_digest) or
+       not _same_epac(pre.abi_identity, root.abi_digest) or
+       not _same_epac(pre.contract_identity, root.contract_identity) or
+       not _same_epac(pre.semantic_identity, root.semantic_identity) or
+       not _same_epac(pre.grammar_identity, root.grammar_identity) or
+       not _same_epac(pre.program_identity, root.program_identity) or
+       not _same_epac(pre.environment_identity, snapshot.snapshot_identity) or
+       pre.environment_generation != snapshot.snapshot_generation or
+       not _same_epac(bindings[0].provider_identity, root.provider_identity) or
+       not _same_epac(bindings[0].variant_identity, root.variant_identity) or
+       bindings[0].provider_generation != 0u64:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.InvalidRootPlaceholders)
+    var root_count = 0
+    for row in evidence:
+        if _same_epac(row.provider_identity, root.provider_identity) and
+           _same_epac(row.variant_identity, root.variant_identity):
+            root_count = root_count + 1
+            if row.provider_generation != 0u64:
+                return Err(EnvironmentPublicationActivationCoordinatorErrorV1.InvalidRootPlaceholders)
+    if root_count != 1: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.InvalidRootPlaceholders)
+    val reservation = match provider_generation_reserve_v2(owner.generations, pre):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentPublicationActivationCoordinatorErrorV1.ReservationRejected)
+    var admitted: [PublicationArtifactEvidenceV1] = []
+    for original in evidence:
+        var row = original
+        if _same_epac(row.provider_identity, root.provider_identity) and
+           _same_epac(row.variant_identity, root.variant_identity):
+            row.provider_generation = reservation.generation
+        admitted.push(row)
+    var root_binding = bindings[0]; root_binding.provider_generation = reservation.generation
+    val publication_token = match environment_composite_publication_owner_admit_v1(owner.publications,
+        snapshot, arena_bytes, feature_words, gpu_devices, root, descriptors, dependencies,
+        resolution, admitted, catalog_generation, publication_generation, [root_binding], policy):
+        case Ok(value): value
+        case Err(_):
+            _ = provider_generation_cancel_reservation_v2(owner.generations, reservation)
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PublicationRejected)
+    val publication = match environment_composite_publication_owner_project_v1(
+        owner.publications, publication_token):
+        case Ok(value): value
+        case Err(_):
+            _ = environment_composite_publication_owner_release_v1(owner.publications, publication_token)
+            _ = provider_generation_cancel_reservation_v2(owner.generations, reservation)
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PublicationRejected)
+    val activation = match provider_generation_finalize_reservation_v2(owner.generations,
+        reservation, publication.admission.plan.plan_digest):
+        case Ok(value): value
+        case Err(_):
+            _ = environment_composite_publication_owner_release_v1(owner.publications, publication_token)
+            _ = provider_generation_cancel_reservation_v2(owner.generations, reservation)
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.FinalizeRejected)
+    val token = EnvironmentPublicationActivationCoordinatorTokenV1(token_id: owner.next_token_id,
+        owner_identity: owner.owner_identity)
+    val projection = EnvironmentPublicationActivationProjectionV1(
+        activation: activation, root_provider_identity: root.provider_identity,
+        root_variant_identity: root.variant_identity, provider_generation: activation.generation,
+        publication_plan_digest: publication.admission.plan.plan_digest)
+    owner.records.push(_EnvironmentPublicationActivationRecordV1(token: token,
+        projection: projection, publication_token: publication_token,
+        pre: pre, generation_retired: false,
+        publication_released: false))
+    owner.next_token_id = owner.next_token_id + 1u64
+    Ok(token)
+
+pub fn environment_publication_activation_project_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    token: EnvironmentPublicationActivationCoordinatorTokenV1
+) -> Result<EnvironmentPublicationActivationProjectionV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    for record in owner.records:
+        if record.token == token: return Ok(record.projection)
+    Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+
+pub fn environment_publication_activation_publication_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    token: EnvironmentPublicationActivationCoordinatorTokenV1
+) -> Result<EnvironmentCompositePublicationV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    for record in owner.records:
+        if record.token == token:
+            match environment_composite_publication_owner_project_v1(owner.publications,
+                record.publication_token):
+                case Ok(value): return Ok(value)
+                case Err(_): return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+
+pub fn environment_publication_activation_live_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    token: EnvironmentPublicationActivationCoordinatorTokenV1) -> bool:
+    var index: i64 = -1; var i = 0
+    while i < owner.records.len():
+        if owner.records[i].token == token and token.owner_identity == owner.owner_identity: index = i
+        i = i + 1
+    if index < 0: return false
+    val record = owner.records[index]; val p = record.projection; val e = record.pre
+    if record.generation_retired or record.publication_released: return false
+    val publication = environment_composite_publication_owner_project_v1(
+        owner.publications, record.publication_token)
+    if publication.is_err(): return false
+    val published = publication.unwrap()
+    if not _same_epac(published.admission.root_provider_identity, e.provider_identity) or
+       not _same_epac(published.admission.root_variant_identity, e.variant_identity) or
+       not _same_epac(published.root_descriptor.provider_identity, e.provider_identity) or
+       not _same_epac(published.root_descriptor.variant_identity, e.variant_identity) or
+       not _same_epac(published.root_descriptor.artifact_digest, e.artifact_identity) or
+       not _same_epac(published.root_descriptor.abi_digest, e.abi_identity) or
+       not _same_epac(published.root_descriptor.contract_identity, e.contract_identity) or
+       not _same_epac(published.root_descriptor.semantic_identity, e.semantic_identity) or
+       not _same_epac(published.root_descriptor.grammar_identity, e.grammar_identity) or
+       not _same_epac(published.root_descriptor.program_identity, e.program_identity) or
+       published.selected_variant_identities.len() != 1 or
+       not _same_epac(published.selected_variant_identities[0], e.variant_identity) or
+       published.facet_bindings.len() != 1 or
+       not _same_epac(published.facet_bindings[0].provider_identity, e.provider_identity) or
+       not _same_epac(published.facet_bindings[0].variant_identity, e.variant_identity) or
+       published.facet_bindings[0].provider_generation != p.activation.generation:
+        return false
+    val full = ProviderActivationEvidenceV2(provider_identity: e.provider_identity,
+        variant_identity: e.variant_identity, artifact_identity: e.artifact_identity,
+        abi_identity: e.abi_identity, contract_identity: e.contract_identity,
+        semantic_identity: e.semantic_identity, grammar_identity: e.grammar_identity,
+        program_identity: e.program_identity, plan_identity: p.publication_plan_digest,
+        environment_identity: e.environment_identity, environment_generation: e.environment_generation,
+        mapped_handle: e.mapped_handle, callable_binding_identity: e.callable_binding_identity,
+        activation_authority_identity: e.activation_authority_identity)
+    provider_generation_active_matches_v2(owner.generations, p.activation, full)
+
+pub fn environment_publication_activation_release_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    token: EnvironmentPublicationActivationCoordinatorTokenV1
+) -> Result<(), EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    var index: i64 = -1; var i = 0
+    while i < owner.records.len():
+        if owner.records[i].token == token: index = i
+        i = i + 1
+    if index < 0: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.AlreadyReleased)
+    for pin in owner.pins:
+        if pin.activation_token == token:
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinsLive)
+    for retained_use in owner.uses:
+        if retained_use.activation_token == token:
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinsLive)
+    var record = owner.records[index]; val e = record.pre; val p = record.projection
+    val full = ProviderActivationEvidenceV2(provider_identity: e.provider_identity,
+        variant_identity: e.variant_identity, artifact_identity: e.artifact_identity,
+        abi_identity: e.abi_identity, contract_identity: e.contract_identity,
+        semantic_identity: e.semantic_identity, grammar_identity: e.grammar_identity,
+        program_identity: e.program_identity, plan_identity: p.publication_plan_digest,
+        environment_identity: e.environment_identity, environment_generation: e.environment_generation,
+        mapped_handle: e.mapped_handle, callable_binding_identity: e.callable_binding_identity,
+        activation_authority_identity: e.activation_authority_identity)
+    if not record.generation_retired:
+        match provider_generation_retire_exact_v2(owner.generations, p.activation, full):
+            case Ok(_):
+                record.generation_retired = true; owner.records[index] = record
+            case Err(ProviderGenerationErrorV2.PinsLive):
+                return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinsLive)
+            case Err(_): return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CleanupFailed)
+    if not record.publication_released:
+        if environment_composite_publication_owner_release_v1(owner.publications,
+            record.publication_token).is_err():
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CleanupFailed)
+        record.publication_released = true; owner.records[index] = record
+    var kept: [_EnvironmentPublicationActivationRecordV1] = []; i = 0
+    while i < owner.records.len():
+        if i != index: kept.push(owner.records[i])
+        i = i + 1
+    owner.records = kept; Ok(())
+
+pub fn environment_publication_activation_pin_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
+) -> Result<EnvironmentPublicationActivationPinTokenV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if not environment_publication_activation_live_v1(owner, activation_token):
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    if owner.pins.len() >= 256: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinCapacityExceeded)
+    if owner.next_pin_id == 0u64 or owner.next_pin_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CounterOverflow)
+    val activation = environment_publication_activation_project_v1(owner, activation_token).unwrap().activation
+    val raw = match provider_generation_pin_v2(owner.generations, activation):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    val authority = match provider_generation_pinned_cache_authority_v2(owner.generations, raw):
+        case Ok(value): value
+        case Err(_):
+            _ = provider_generation_pin_release_v2(owner.generations, raw)
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    val token = EnvironmentPublicationActivationPinTokenV1(pin_id: owner.next_pin_id,
+        owner_identity: owner.owner_identity)
+    owner.pins.push(_EnvironmentPublicationActivationPinRecordV1(token: token,
+        activation_token: activation_token, raw_pin: raw, authority: authority))
+    owner.next_pin_id = owner.next_pin_id + 1u64
+    Ok(token)
+
+pub fn environment_publication_activation_pin_project_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    token: EnvironmentPublicationActivationPinTokenV1
+) -> Result<EnvironmentPublicationActivationPinProjectionV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinUnknown)
+    for record in owner.pins:
+        if record.token == token and record.activation_token == activation_token:
+            val a = record.authority
+            return Ok(EnvironmentPublicationActivationPinProjectionV1(
+                activation_token: activation_token, provider_handle: a.provider_handle,
+                provider_generation: a.generation, provider_identity: a.provider_identity,
+                variant_identity: a.variant_identity, artifact_identity: a.artifact_identity,
+                abi_identity: a.abi_identity, contract_identity: a.contract_identity,
+                semantic_identity: a.semantic_identity, grammar_identity: a.grammar_identity,
+                program_identity: a.program_identity, runtime_publication_plan_digest: a.plan_identity,
+                environment_identity: a.environment_identity, environment_generation: a.environment_generation,
+                generation_authority_digest: a.authority_digest))
+    Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinUnknown)
+
+pub fn environment_publication_activation_pin_live_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    token: EnvironmentPublicationActivationPinTokenV1,
+    projection: EnvironmentPublicationActivationPinProjectionV1) -> bool:
+    # Admission/new-use predicate: the activation must still be current.
+    if not environment_publication_activation_live_v1(owner, activation_token): return false
+    for record in owner.pins:
+        if record.token == token and record.activation_token == activation_token and
+           provider_generation_pinned_cache_authority_live_v2(owner.generations,
+               record.raw_pin, record.authority):
+            return environment_publication_activation_pin_project_v1(
+                owner, activation_token, token) == Ok(projection)
+    false
+
+pub fn environment_publication_activation_pin_continuation_live_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    token: EnvironmentPublicationActivationPinTokenV1,
+    projection: EnvironmentPublicationActivationPinProjectionV1) -> bool:
+    # Existing-use/drain predicate: replacement closes new admission but does
+    # not falsify an exact historical pin that still owns its generation.
+    var retained_activation = false
+    for activation in owner.records:
+        if activation.token == activation_token and
+           activation_token.owner_identity == owner.owner_identity and
+           not activation.publication_released:
+            retained_activation = true
+    if not retained_activation: return false
+    for record in owner.pins:
+        if record.token == token and record.activation_token == activation_token and
+           provider_generation_pinned_cache_authority_live_v2(owner.generations,
+               record.raw_pin, record.authority):
+            return environment_publication_activation_pin_project_v1(
+                owner, activation_token, token) == Ok(projection)
+    false
+
+pub fn environment_publication_activation_use_acquire_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    pin_token: EnvironmentPublicationActivationPinTokenV1
+) -> Result<EnvironmentPublicationActivationUseTokenV1,
+            EnvironmentPublicationActivationCoordinatorErrorV1>:
+    if owner.uses.len() >= 256:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CapacityExceeded)
+    if owner.next_use_id == 0u64 or owner.next_use_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CounterOverflow)
+    val projection = match environment_publication_activation_pin_project_v1(
+        owner, activation_token, pin_token):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinUnknown)
+    if not environment_publication_activation_pin_live_v1(
+        owner, activation_token, pin_token, projection):
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    val token = EnvironmentPublicationActivationUseTokenV1(
+        use_id: owner.next_use_id, owner_identity: owner.owner_identity)
+    owner.uses.push(_EnvironmentPublicationActivationUseRecordV1(token: token,
+        activation_token: activation_token, pin_token: pin_token, authority: projection))
+    owner.next_use_id = owner.next_use_id + 1u64
+    Ok(token)
+
+pub fn environment_publication_activation_use_live_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    pin_token: EnvironmentPublicationActivationPinTokenV1,
+    token: EnvironmentPublicationActivationUseTokenV1
+) -> bool:
+    if token.owner_identity != owner.owner_identity: return false
+    for retained in owner.uses:
+        if retained.token == token and retained.activation_token == activation_token and
+           retained.pin_token == pin_token:
+            val projection = environment_publication_activation_pin_project_v1(
+                owner, activation_token, pin_token)
+            return projection.is_ok() and projection.unwrap() == retained.authority and
+                environment_publication_activation_pin_continuation_live_v1(owner,
+                    activation_token, pin_token, retained.authority)
+    false
+
+pub fn environment_publication_activation_use_release_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    pin_token: EnvironmentPublicationActivationPinTokenV1,
+    token: EnvironmentPublicationActivationUseTokenV1
+) -> Result<(), EnvironmentPublicationActivationCoordinatorErrorV1>:
+    var index: i64 = -1; var i = 0
+    while i < owner.uses.len():
+        if owner.uses[i].token == token and owner.uses[i].activation_token == activation_token and
+           owner.uses[i].pin_token == pin_token and token.owner_identity == owner.owner_identity:
+            index = i
+        i = i + 1
+    if index < 0: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.UnknownOrSubstituted)
+    var kept: [_EnvironmentPublicationActivationUseRecordV1] = []; i = 0
+    while i < owner.uses.len():
+        if i != index: kept.push(owner.uses[i])
+        i = i + 1
+    owner.uses = kept
+    Ok(())
+
+pub fn environment_publication_activation_pin_release_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    token: EnvironmentPublicationActivationPinTokenV1
+) -> Result<(), EnvironmentPublicationActivationCoordinatorErrorV1>:
+    for retained in owner.uses:
+        if retained.activation_token == activation_token and retained.pin_token == token:
+            return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinsLive)
+    var index: i64 = -1; var i = 0
+    while i < owner.pins.len():
+        if owner.pins[i].token == token and owner.pins[i].activation_token == activation_token and
+           token.owner_identity == owner.owner_identity: index = i
+        i = i + 1
+    if index < 0: return Err(EnvironmentPublicationActivationCoordinatorErrorV1.PinUnknown)
+    if provider_generation_pin_release_v2(owner.generations, owner.pins[index].raw_pin).is_err():
+        return Err(EnvironmentPublicationActivationCoordinatorErrorV1.CleanupFailed)
+    var kept: [_EnvironmentPublicationActivationPinRecordV1] = []; i = 0
+    while i < owner.pins.len():
+        if i != index: kept.push(owner.pins[i])
+        i = i + 1
+    owner.pins = kept; Ok(())
+
+# Aggregate diagnostics for rollback/lifecycle tests; child owners remain hidden.
+pub fn environment_publication_activation_record_count_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1) -> u64:
+    owner.records.len() as u64
+pub fn environment_publication_activation_pending_count_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1) -> u64:
+    owner.generations.reservations.len() as u64
+pub fn environment_publication_activation_active_count_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1) -> u64:
+    var count = 0u64
+    for record in owner.generations.generations:
+        if record.active: count = count + 1u64
+    count

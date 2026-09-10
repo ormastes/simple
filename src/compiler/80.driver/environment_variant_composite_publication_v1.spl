@@ -1,0 +1,231 @@
+# codex-impl
+# Canonical-publication wrapper preserving atomic composite selection evidence.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.{EnvironmentVariantCatalogPolicyProjectionV1, environment_variant_policy_digest256_v1}
+use compiler.common.structural_contracts.environment_variant_composite_selector_v1.EnvironmentVariantCompositeSelectionV1
+use compiler.common.structural_contracts.environment_variant_composite_selector_v1.environment_variant_catalog_select_composite_v1
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
+use std.nogc_sync_mut.composition.environment_variants.admission.binding_plan_create_v1
+use std.nogc_sync_mut.composition.environment_variants.catalog_v1.environment_variant_catalog_create_canonical_v1
+use std.nogc_sync_mut.composition.environment_variants.catalog_identity_v1.environment_variant_descriptor_identity_v1
+use std.nogc_sync_mut.composition.environment_variants.binding_runtime_v1.{
+    BindingRuntimeV1, BindingRuntimeReceiptV1, binding_runtime_publish_plan_v1
+}
+use std.nogc_sync_mut.composition.provider_generation.ProviderGenerationManagerV1
+
+pub enum EnvironmentCompositePublicationErrorV1:
+    SelectionNotPublishable
+    SelectionAuthorityMismatch
+    CatalogCreationFailed
+    CompositeSelectionFailed
+    CanonicalAdmissionFailed
+    PlanCreationFailed
+    RootFacetBindingMismatch
+
+pub struct EnvironmentCompositePublicationV1:
+    admission: EnvironmentPublicationAdmissionV1
+    canonical_base_plan_digest: EnvironmentDigest256V1
+    preferred_fallback: bool
+    policy_explanation_digest: text
+    facet_bindings: [VariantFacetBindingV1]
+    selected_variant_identities: [EnvironmentDigest256V1]
+    rejections: [VariantRejectionV1]
+    root_descriptor: VariantDescriptorV1
+    root_descriptor_digest: EnvironmentDigest256V1
+    root_artifact_location_bytes: [u8]
+    root_referenced_feature_words: [u64]
+    root_referenced_dependencies: [VariantDependencyV1]
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _push64(out: [i64], v: u64):
+    for i in 0..8: out.append(((v >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _push_digest(out: [i64], v: EnvironmentDigest256V1):
+    _push64(out, v.w0); _push64(out, v.w1); _push64(out, v.w2); _push64(out, v.w3)
+fn _read64(raw: [i64], at: i64) -> u64:
+    var v = 0u64
+    for i in 0..8: v = v | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    v
+fn _copy_bindings(values: [VariantFacetBindingV1]) -> [VariantFacetBindingV1]:
+    var copied: [VariantFacetBindingV1] = []
+    for value in values: copied.append(value)
+    copied
+fn _composite_plan_digest(base: EnvironmentDigest256V1, policy: EnvironmentDigest256V1,
+                          root_descriptor_digest: EnvironmentDigest256V1,
+                          bindings: [VariantFacetBindingV1],
+                          selected: [EnvironmentDigest256V1],
+                          rejections: [VariantRejectionV1]) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push64(material, 1u64); _push_digest(material, base); _push_digest(material, policy)
+    _push_digest(material, root_descriptor_digest)
+    _push64(material, bindings.len() as u64)
+    for row in bindings:
+        _push64(material, row.facet_id as u64); _push64(material, row.interface_major as u64)
+        _push64(material, row.interface_minor as u64); _push64(material, row.slot_index as u64)
+        _push_digest(material, row.provider_identity); _push_digest(material, row.variant_identity)
+        _push64(material, row.provider_generation); _push64(material, row.interface_handle)
+        _push64(material, row.provider_context)
+    _push64(material, selected.len() as u64)
+    for identity in selected: _push_digest(material, identity)
+    _push64(material, rejections.len() as u64)
+    for row in rejections:
+        _push_digest(material, row.provider_identity); _push_digest(material, row.variant_identity)
+        _push64(material, row.reason_code as u64); _push64(material, row.phase_code as u64)
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(w0: _read64(raw, 0), w1: _read64(raw, 8),
+        w2: _read64(raw, 16), w3: _read64(raw, 24))
+
+pub fn environment_composite_publication_sidecars_valid_v1(
+    publication: EnvironmentCompositePublicationV1
+) -> bool:
+    (publication.canonical_base_plan_digest.w0 != 0u64 or
+     publication.canonical_base_plan_digest.w1 != 0u64 or
+     publication.canonical_base_plan_digest.w2 != 0u64 or
+     publication.canonical_base_plan_digest.w3 != 0u64) and
+    _same(publication.root_descriptor_digest,
+        environment_variant_descriptor_identity_v1(publication.root_descriptor,
+            publication.root_artifact_location_bytes,
+            publication.root_referenced_feature_words,
+            publication.root_referenced_dependencies)) and
+    _same(publication.admission.plan.plan_digest,
+        environment_composite_publication_expected_plan_digest_v1(publication))
+
+pub fn environment_composite_publication_expected_plan_digest_v1(
+    publication: EnvironmentCompositePublicationV1
+) -> EnvironmentDigest256V1:
+    _composite_plan_digest(publication.canonical_base_plan_digest,
+        publication.admission.plan.policy_digest, publication.root_descriptor_digest,
+        publication.facet_bindings,
+        publication.selected_variant_identities, publication.rejections)
+
+fn _environment_composite_selection_publishable_v1(
+    composite: EnvironmentVariantCompositeSelectionV1,
+    root_provider: EnvironmentDigest256V1, root_variant: EnvironmentDigest256V1,
+    closure: EnvironmentDigest256V1, catalog_generation: u64,
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<(), EnvironmentCompositePublicationErrorV1>:
+    if composite.required_missing or composite.selection.selected_index < 0:
+        return Err(EnvironmentCompositePublicationErrorV1.SelectionNotPublishable)
+    if not _same(composite.selection.selected_provider_identity, root_provider) or
+       not _same(composite.selection.selected_variant_identity, root_variant) or
+       not _same(composite.selection.selected_dependency_closure_digest, closure) or
+       composite.selection.catalog_generation != catalog_generation or
+       composite.policy_digest != projection.explain_policy_digest or
+       not _same(composite.binding_policy_digest, projection.binding_policy_digest):
+        return Err(EnvironmentCompositePublicationErrorV1.SelectionAuthorityMismatch)
+    Ok(())
+
+pub fn environment_composite_publication_admit_v1(
+    snapshot: EnvironmentSnapshotV1, arena_bytes: [u8], feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1],
+    resolution: EnvironmentDependencyResolutionV1,
+    evidence: [PublicationArtifactEvidenceV1], catalog_generation: u64,
+    publication_generation: u64, bindings: [VariantFacetBindingV1],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<EnvironmentCompositePublicationV1, EnvironmentCompositePublicationErrorV1>:
+    val canonical_policy_digest = match environment_variant_policy_digest256_v1(
+        projection.explain_policy_digest):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationErrorV1.SelectionAuthorityMismatch)
+    if not _same(canonical_policy_digest, projection.binding_policy_digest):
+        return Err(EnvironmentCompositePublicationErrorV1.SelectionAuthorityMismatch)
+    val catalog = match environment_variant_catalog_create_canonical_v1(arena_bytes,
+        feature_words, catalog_generation, descriptors, dependencies):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationErrorV1.CatalogCreationFailed)
+    # Recompute atomically here: callers cannot provide, omit, or rewrite the
+    # selected index or ordered rejection evidence used for publication.
+    val composite = match environment_variant_catalog_select_composite_v1(catalog,
+        snapshot, feature_words, gpu_devices, projection):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationErrorV1.CompositeSelectionFailed)
+    val publishable = _environment_composite_selection_publishable_v1(composite,
+        root.provider_identity, root.variant_identity, resolution.closure_identity,
+        catalog_generation, projection)
+    if publishable != Ok(()): return Err(publishable.unwrap_err())
+    # V1 deliberately supports one selected root facet. Multi-facet publication
+    # needs a V2 selector result that binds every facet independently.
+    if bindings.len() != 1 or
+       not _same(bindings[0].provider_identity, composite.selection.selected_provider_identity) or
+       not _same(bindings[0].variant_identity, composite.selection.selected_variant_identity):
+        return Err(EnvironmentCompositePublicationErrorV1.RootFacetBindingMismatch)
+    var root_evidence_count = 0
+    var root_generation = 0u64
+    for row in evidence:
+        if _same(row.provider_identity, composite.selection.selected_provider_identity) and
+           _same(row.variant_identity, composite.selection.selected_variant_identity):
+            root_evidence_count = root_evidence_count + 1
+            root_generation = row.provider_generation
+    if root_evidence_count != 1 or root_generation == 0u64 or
+       bindings[0].provider_generation != root_generation:
+        return Err(EnvironmentCompositePublicationErrorV1.RootFacetBindingMismatch)
+    val canonical = match environment_publication_admit_canonical_v1(snapshot, arena_bytes,
+        feature_words, gpu_devices, root, descriptors, dependencies, resolution, evidence,
+        catalog_generation, projection.binding_policy_digest, publication_generation, bindings):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationErrorV1.CanonicalAdmissionFailed)
+    if not _same(canonical.plan.catalog_digest, composite.selection.catalog_digest) or
+       not _same(canonical.plan.dependency_lock_digest, composite.selection.dependency_lock_digest):
+        return Err(EnvironmentCompositePublicationErrorV1.SelectionAuthorityMismatch)
+    # Binding runtime correlates selected identities positionally with facet
+    # bindings. Dependencies remain bound by the canonical closure/admission;
+    # they are not invented as facet selections.
+    var selected: [EnvironmentDigest256V1] = [composite.selection.selected_variant_identity]
+    val base_plan_digest = canonical.plan.plan_digest
+    var root_location: [u8] = []
+    var ri = 0u32
+    while ri < root.artifact_location.count:
+        root_location.push(arena_bytes[(root.artifact_location.offset + ri) as i64]); ri = ri + 1u32
+    var root_features: [u64] = []
+    for range in [root.required_cpu_features.words, root.required_os_state_words, root.required_device_features]:
+        var rw = 0u32
+        while rw < range.count:
+            root_features.push(feature_words[(range.offset + rw) as i64]); rw = rw + 1u32
+    var root_dependencies: [VariantDependencyV1] = []
+    ri = 0u32
+    while ri < root.dependencies.count:
+        root_dependencies.push(dependencies[(root.dependencies.offset + ri) as i64]); ri = ri + 1u32
+    val root_descriptor_digest = environment_variant_descriptor_identity_v1(root,
+        root_location, root_features, root_dependencies)
+    val digest = _composite_plan_digest(base_plan_digest, projection.binding_policy_digest,
+        root_descriptor_digest,
+        bindings, selected, composite.selection.rejections)
+    val plan = match binding_plan_create_v1(digest, canonical.plan.environment_identity,
+        canonical.plan.environment_generation, canonical.plan.catalog_digest,
+        canonical.plan.catalog_generation, projection.binding_policy_digest,
+        canonical.plan.dependency_lock_digest, publication_generation, bindings,
+        selected, composite.selection.rejections):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationErrorV1.PlanCreationFailed)
+    var admission = canonical
+    admission.plan = plan
+    Ok(EnvironmentCompositePublicationV1(admission: admission,
+        canonical_base_plan_digest: base_plan_digest,
+        preferred_fallback: composite.preferred_fallback,
+        policy_explanation_digest: composite.policy_digest,
+        facet_bindings: _copy_bindings(bindings),
+        selected_variant_identities: selected,
+        rejections: composite.selection.rejections,
+        root_descriptor: root, root_descriptor_digest: root_descriptor_digest,
+        root_artifact_location_bytes: root_location,
+        root_referenced_feature_words: root_features,
+        root_referenced_dependencies: root_dependencies))
+
+pub fn environment_composite_publication_commit_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1,
+    prepared: EnvironmentCompositePublicationV1, provider_handles: [u64]
+) -> BindingRuntimeReceiptV1:
+    # The binding owner performs the final dense-plan, sidecar cardinality,
+    # handle, publication-generation, and active-provider-generation checks
+    # before mutating runtime state.
+    if not environment_composite_publication_sidecars_valid_v1(prepared):
+        return binding_runtime_publish_plan_v1(runtime, manager, prepared.admission.plan,
+            prepared.facet_bindings, prepared.selected_variant_identities,
+            prepared.rejections, [])
+    binding_runtime_publish_plan_v1(runtime, manager, prepared.admission.plan,
+        prepared.facet_bindings, prepared.selected_variant_identities,
+        prepared.rejections, provider_handles)

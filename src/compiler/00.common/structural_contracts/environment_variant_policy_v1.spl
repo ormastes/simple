@@ -1,0 +1,344 @@
+# codex-impl
+# Pure policy resolution for environment-selected compiler variants.
+#
+# This module deliberately does not read CLI arguments, environment variables,
+# or project files. Callers provide the four ordinary policy layers explicitly;
+# the administrator layer is an intersection restriction, never a precedence
+# override that can broaden a request.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.structural_contracts.frontend_offload_switch.{
+    parse_frontend_offload_value
+}
+use compiler.common.structural_contracts.offload_profile.{
+    OffloadMode, OffloadFallbackPolicy
+}
+
+pub const ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1: i64 = 1
+
+pub enum EnvironmentVariantParserProviderV1:
+    Auto
+    Scalar
+    Simd
+
+pub enum EnvironmentVariantParserRequirementV1:
+    None
+    Scalar
+    Simd
+
+pub enum EnvironmentVariantHostCpuMaxV1:
+    Default
+    X86_64V1
+    X86_64V2
+    X86_64V3
+    X86_64V4
+    Native
+
+# The ordinary layers use precedence. Empty fields mean absent. The same shape
+# is used for CLI, environment, project, and user input so their provenance is
+# retained without making this resolver responsible for source access.
+pub struct EnvironmentVariantPolicyLayerV1:
+    parser_prefer: text
+    parser_require: text
+    host_cpu_max: text
+    frontend_offload: text
+    frontend_fallback: text
+
+# Admin values are restrictions. Empty or "any" means unrestricted. A provider
+# restriction allows only that provider; CPU/offload values are upper bounds;
+# fallback "require-requested" can tighten but never loosen a caller request.
+pub struct EnvironmentVariantAdminRestrictionsV1:
+    parser_provider: text
+    host_cpu_max: text
+    frontend_offload_max: text
+    frontend_fallback: text
+
+pub struct EnvironmentVariantPolicyInputsV1:
+    cli: EnvironmentVariantPolicyLayerV1
+    env: EnvironmentVariantPolicyLayerV1
+    project: EnvironmentVariantPolicyLayerV1
+    user: EnvironmentVariantPolicyLayerV1
+    admin: EnvironmentVariantAdminRestrictionsV1
+
+# This is a typed, explainable decision input for a builder/provider. It carries
+# both requested and effective values so a soft preference or admin cap cannot
+# be mistaken for the original request.
+pub struct EnvironmentVariantPolicyDecisionInputV1:
+    schema_version: i64
+    parser_prefer_requested: EnvironmentVariantParserProviderV1
+    parser_prefer: EnvironmentVariantParserProviderV1
+    parser_require: EnvironmentVariantParserRequirementV1
+    parser_source: text
+    parser_require_source: text
+    host_cpu_max_requested: EnvironmentVariantHostCpuMaxV1
+    host_cpu_max: EnvironmentVariantHostCpuMaxV1
+    host_cpu_source: text
+    frontend_offload_requested: OffloadMode
+    frontend_offload: OffloadMode
+    frontend_offload_auto: bool
+    frontend_offload_source: text
+    frontend_fallback: OffloadFallbackPolicy
+    frontend_fallback_source: text
+    admin_applied: bool
+    explanation: text
+    policy_digest: text
+
+struct _ResolvedPolicyTextV1:
+    value: text
+    source: text
+
+fn _pick(cli: text, env: text, project: text, user: text, default_value: text) -> _ResolvedPolicyTextV1:
+    if cli != "":
+        return _ResolvedPolicyTextV1(value: cli, source: "cli")
+    if env != "":
+        return _ResolvedPolicyTextV1(value: env, source: "env")
+    if project != "":
+        return _ResolvedPolicyTextV1(value: project, source: "project")
+    if user != "":
+        return _ResolvedPolicyTextV1(value: user, source: "user")
+    _ResolvedPolicyTextV1(value: default_value, source: "default")
+
+fn _provider_text(value: EnvironmentVariantParserProviderV1) -> text:
+    match value:
+        case EnvironmentVariantParserProviderV1.Auto: "auto"
+        case EnvironmentVariantParserProviderV1.Scalar: "scalar"
+        case EnvironmentVariantParserProviderV1.Simd: "simd"
+
+fn _requirement_text(value: EnvironmentVariantParserRequirementV1) -> text:
+    match value:
+        case EnvironmentVariantParserRequirementV1.None: "none"
+        case EnvironmentVariantParserRequirementV1.Scalar: "scalar"
+        case EnvironmentVariantParserRequirementV1.Simd: "simd"
+
+fn _cpu_text(value: EnvironmentVariantHostCpuMaxV1) -> text:
+    match value:
+        case EnvironmentVariantHostCpuMaxV1.Default: "default"
+        case EnvironmentVariantHostCpuMaxV1.X86_64V1: "x86-64-v1"
+        case EnvironmentVariantHostCpuMaxV1.X86_64V2: "x86-64-v2"
+        case EnvironmentVariantHostCpuMaxV1.X86_64V3: "x86-64-v3"
+        case EnvironmentVariantHostCpuMaxV1.X86_64V4: "x86-64-v4"
+        case EnvironmentVariantHostCpuMaxV1.Native: "native"
+
+fn _offload_text(value: OffloadMode) -> text:
+    match value:
+        case OffloadMode.CpuReference: "off"
+        case OffloadMode.HybridVectorGpu: "on"
+        case OffloadMode.ResidentGpu: "resident"
+
+fn _fallback_text(value: OffloadFallbackPolicy) -> text:
+    match value:
+        case OffloadFallbackPolicy.AllowCpu: "allow-cpu"
+        case OffloadFallbackPolicy.RequireRequested: "require-requested"
+
+fn _parse_provider(raw: text) -> Result<EnvironmentVariantParserProviderV1, text>:
+    if raw == "auto":
+        return Ok(EnvironmentVariantParserProviderV1.Auto)
+    if raw == "scalar":
+        return Ok(EnvironmentVariantParserProviderV1.Scalar)
+    if raw == "simd":
+        return Ok(EnvironmentVariantParserProviderV1.Simd)
+    Err("unknown parser provider preference '{raw}' (expected auto|scalar|simd)")
+
+fn _parse_requirement(raw: text) -> Result<EnvironmentVariantParserRequirementV1, text>:
+    if raw == "none":
+        return Ok(EnvironmentVariantParserRequirementV1.None)
+    if raw == "scalar":
+        return Ok(EnvironmentVariantParserRequirementV1.Scalar)
+    if raw == "simd":
+        return Ok(EnvironmentVariantParserRequirementV1.Simd)
+    Err("unknown parser provider requirement '{raw}' (expected none|scalar|simd)")
+
+fn _parse_cpu(raw: text) -> Result<EnvironmentVariantHostCpuMaxV1, text>:
+    if raw == "default":
+        return Ok(EnvironmentVariantHostCpuMaxV1.Default)
+    if raw == "x86-64-v1":
+        return Ok(EnvironmentVariantHostCpuMaxV1.X86_64V1)
+    if raw == "x86-64-v2":
+        return Ok(EnvironmentVariantHostCpuMaxV1.X86_64V2)
+    if raw == "x86-64-v3":
+        return Ok(EnvironmentVariantHostCpuMaxV1.X86_64V3)
+    if raw == "x86-64-v4":
+        return Ok(EnvironmentVariantHostCpuMaxV1.X86_64V4)
+    if raw == "native":
+        return Ok(EnvironmentVariantHostCpuMaxV1.Native)
+    Err("unknown host CPU max '{raw}' (expected default|native|x86-64-v1..x86-64-v4)")
+
+fn _parse_admin_provider(raw: text) -> Result<EnvironmentVariantParserProviderV1, text>:
+    if raw == "" or raw == "any":
+        return Ok(EnvironmentVariantParserProviderV1.Auto)
+    if raw == "auto":
+        return Err("administrator parser provider restriction cannot be auto (expected any|scalar|simd)")
+    _parse_provider(raw)
+
+fn _parse_admin_cpu(raw: text) -> Result<EnvironmentVariantHostCpuMaxV1, text>:
+    if raw == "" or raw == "any":
+        return Ok(EnvironmentVariantHostCpuMaxV1.Native)
+    _parse_cpu(raw)
+
+fn _parse_admin_offload(raw: text) -> Result<OffloadMode, text>:
+    if raw == "" or raw == "any":
+        return Ok(OffloadMode.ResidentGpu)
+    if raw == "off":
+        return Ok(OffloadMode.CpuReference)
+    if raw == "on" or raw == "hybrid":
+        return Ok(OffloadMode.HybridVectorGpu)
+    if raw == "resident":
+        return Ok(OffloadMode.ResidentGpu)
+    Err("unknown frontend offload maximum '{raw}' (expected any|off|on|resident)")
+
+fn _parse_admin_fallback(raw: text) -> Result<OffloadFallbackPolicy, text>:
+    if raw == "" or raw == "any" or raw == "allow-cpu":
+        return Ok(OffloadFallbackPolicy.AllowCpu)
+    if raw == "require-requested":
+        return Ok(OffloadFallbackPolicy.RequireRequested)
+    Err("unknown frontend fallback restriction '{raw}' (expected any|allow-cpu|require-requested)")
+
+fn _cpu_rank(value: EnvironmentVariantHostCpuMaxV1) -> i64:
+    match value:
+        case EnvironmentVariantHostCpuMaxV1.Default: 5
+        case EnvironmentVariantHostCpuMaxV1.X86_64V1: 1
+        case EnvironmentVariantHostCpuMaxV1.X86_64V2: 2
+        case EnvironmentVariantHostCpuMaxV1.X86_64V3: 3
+        case EnvironmentVariantHostCpuMaxV1.X86_64V4: 4
+        case EnvironmentVariantHostCpuMaxV1.Native: 5
+
+fn _cpu_min(left: EnvironmentVariantHostCpuMaxV1, right: EnvironmentVariantHostCpuMaxV1) -> EnvironmentVariantHostCpuMaxV1:
+    if _cpu_rank(left) <= _cpu_rank(right):
+        return left
+    right
+
+fn _offload_rank(value: OffloadMode) -> i64:
+    match value:
+        case OffloadMode.CpuReference: 0
+        case OffloadMode.HybridVectorGpu: 1
+        case OffloadMode.ResidentGpu: 2
+
+fn _provider_matches_requirement(
+    provider: EnvironmentVariantParserProviderV1,
+    requirement: EnvironmentVariantParserRequirementV1
+) -> bool:
+    match requirement:
+        case EnvironmentVariantParserRequirementV1.None: true
+        case EnvironmentVariantParserRequirementV1.Scalar: provider == EnvironmentVariantParserProviderV1.Scalar
+        case EnvironmentVariantParserRequirementV1.Simd: provider == EnvironmentVariantParserProviderV1.Simd
+
+fn _admin_restriction_set(raw: text) -> bool:
+    raw != "" and raw != "any"
+
+pub fn environment_variant_policy_layer_empty_v1() -> EnvironmentVariantPolicyLayerV1:
+    EnvironmentVariantPolicyLayerV1(
+        parser_prefer: "", parser_require: "", host_cpu_max: "",
+        frontend_offload: "", frontend_fallback: "")
+
+pub fn environment_variant_admin_restrictions_empty_v1() -> EnvironmentVariantAdminRestrictionsV1:
+    EnvironmentVariantAdminRestrictionsV1(
+        parser_provider: "", host_cpu_max: "", frontend_offload_max: "",
+        frontend_fallback: "")
+
+pub fn environment_variant_policy_resolve_v1(
+    inputs: EnvironmentVariantPolicyInputsV1
+) -> Result<EnvironmentVariantPolicyDecisionInputV1, text>:
+    val prefer_raw = _pick(inputs.cli.parser_prefer, inputs.env.parser_prefer,
+        inputs.project.parser_prefer, inputs.user.parser_prefer, "auto")
+    val require_raw = _pick(inputs.cli.parser_require, inputs.env.parser_require,
+        inputs.project.parser_require, inputs.user.parser_require, "none")
+    val cpu_raw = _pick(inputs.cli.host_cpu_max, inputs.env.host_cpu_max,
+        inputs.project.host_cpu_max, inputs.user.host_cpu_max, "default")
+    val offload_raw = _pick(inputs.cli.frontend_offload, inputs.env.frontend_offload,
+        inputs.project.frontend_offload, inputs.user.frontend_offload, "off")
+    val fallback_raw = _pick(inputs.cli.frontend_fallback, inputs.env.frontend_fallback,
+        inputs.project.frontend_fallback, inputs.user.frontend_fallback, "allow-cpu")
+
+    val prefer_requested = _parse_provider(prefer_raw.value)?
+    val requirement = _parse_requirement(require_raw.value)?
+    val cpu_requested = _parse_cpu(cpu_raw.value)?
+    val offload_parsed = parse_frontend_offload_value(offload_raw.value)?
+    val fallback_parsed = if fallback_raw.value == "" or fallback_raw.value == "allow-cpu":
+        OffloadFallbackPolicy.AllowCpu
+    elif fallback_raw.value == "require-requested":
+        OffloadFallbackPolicy.RequireRequested
+    else:
+        return Err("unknown frontend fallback '{fallback_raw.value}' (expected allow-cpu|require-requested) from {fallback_raw.source}")
+
+    val admin_provider = _parse_admin_provider(inputs.admin.parser_provider)?
+    val admin_cpu = _parse_admin_cpu(inputs.admin.host_cpu_max)?
+    val admin_offload = _parse_admin_offload(inputs.admin.frontend_offload_max)?
+    val admin_fallback = _parse_admin_fallback(inputs.admin.frontend_fallback)?
+
+    if requirement != EnvironmentVariantParserRequirementV1.None and
+       prefer_requested != EnvironmentVariantParserProviderV1.Auto and
+       not _provider_matches_requirement(prefer_requested, requirement):
+        return Err("parser provider prefer conflicts with require")
+    if admin_provider != EnvironmentVariantParserProviderV1.Auto and
+       requirement != EnvironmentVariantParserRequirementV1.None and
+       not _provider_matches_requirement(admin_provider, requirement):
+        return Err("admin parser provider restriction conflicts with require")
+
+    var prefer = prefer_requested
+    var prefer_source = prefer_raw.source
+    if admin_provider != EnvironmentVariantParserProviderV1.Auto:
+        prefer = admin_provider
+        if prefer != prefer_requested:
+            prefer_source = "admin"
+    if prefer == EnvironmentVariantParserProviderV1.Auto and requirement == EnvironmentVariantParserRequirementV1.Scalar:
+        prefer = EnvironmentVariantParserProviderV1.Scalar
+    elif prefer == EnvironmentVariantParserProviderV1.Auto and requirement == EnvironmentVariantParserRequirementV1.Simd:
+        prefer = EnvironmentVariantParserProviderV1.Simd
+
+    val cpu = _cpu_min(cpu_requested, admin_cpu)
+    val cpu_source = if cpu != cpu_requested: "admin" else: cpu_raw.source
+    var offload = offload_parsed.mode
+    var offload_auto = offload_parsed.auto
+    var offload_source = offload_raw.source
+    var fallback = fallback_parsed
+    var fallback_source = fallback_raw.source
+    if admin_fallback == OffloadFallbackPolicy.RequireRequested:
+        fallback = OffloadFallbackPolicy.RequireRequested
+        if fallback != fallback_parsed:
+            fallback_source = "admin"
+    if _offload_rank(offload) > _offload_rank(admin_offload):
+        if fallback == OffloadFallbackPolicy.RequireRequested:
+            return Err("admin frontend offload maximum conflicts with require-requested")
+        offload = admin_offload
+        offload_auto = false
+        offload_source = "admin"
+
+    val admin_applied = _admin_restriction_set(inputs.admin.parser_provider) or
+        _admin_restriction_set(inputs.admin.host_cpu_max) or
+        _admin_restriction_set(inputs.admin.frontend_offload_max) or
+        _admin_restriction_set(inputs.admin.frontend_fallback)
+    val explanation = "parser_prefer_requested={_provider_text(prefer_requested)}" +
+        ";parser_prefer={_provider_text(prefer)}" +
+        ";parser_require={_requirement_text(requirement)}" +
+        ";host_cpu_max_requested={_cpu_text(cpu_requested)}" +
+        ";host_cpu_max={_cpu_text(cpu)}" +
+        ";frontend_offload_requested={_offload_text(offload_parsed.mode)}" +
+        ";frontend_offload_auto_requested={offload_parsed.auto}" +
+        ";frontend_offload={_offload_text(offload)}" +
+        ";frontend_offload_auto={offload_auto}" +
+        ";frontend_fallback={_fallback_text(fallback)}" +
+        ";sources={prefer_raw.source},{require_raw.source},{cpu_raw.source},{offload_raw.source},{fallback_raw.source}" +
+        ";effective_sources={prefer_source},{cpu_source},{offload_source},{fallback_source}" +
+        ";admin={inputs.admin.parser_provider},{inputs.admin.host_cpu_max},{inputs.admin.frontend_offload_max},{inputs.admin.frontend_fallback}" +
+        ";admin_applied={admin_applied}"
+    val digest = sha256_text("simple/environment-variant-policy/v1|" + explanation)
+    Ok(EnvironmentVariantPolicyDecisionInputV1(
+        schema_version: ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1,
+        parser_prefer_requested: prefer_requested, parser_prefer: prefer,
+        parser_require: requirement, parser_source: prefer_source,
+        parser_require_source: require_raw.source,
+        host_cpu_max_requested: cpu_requested, host_cpu_max: cpu,
+        host_cpu_source: cpu_source,
+        frontend_offload_requested: offload_parsed.mode, frontend_offload: offload,
+        frontend_offload_auto: offload_auto, frontend_offload_source: offload_source,
+        frontend_fallback: fallback, frontend_fallback_source: fallback_source,
+        admin_applied: admin_applied, explanation: explanation, policy_digest: digest))
+
+export ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1
+export EnvironmentVariantParserProviderV1, EnvironmentVariantParserRequirementV1
+export EnvironmentVariantHostCpuMaxV1
+export EnvironmentVariantPolicyLayerV1, EnvironmentVariantAdminRestrictionsV1
+export EnvironmentVariantPolicyInputsV1, EnvironmentVariantPolicyDecisionInputV1
+export environment_variant_policy_layer_empty_v1
+export environment_variant_admin_restrictions_empty_v1
+export environment_variant_policy_resolve_v1
