@@ -66,6 +66,8 @@ async function runMcp(requests) {
 
 try {
   const cli = loadFixture("legacy_cli.json");
+  const packageVersion = JSON.parse(readFileSync(join(moduleRoot, "package.json"), "utf8")).version;
+  assert.equal(cli.version.stdout, `${packageVersion}\n`, "legacy CLI fixture must track the package release version");
   runCli(cli.help);
   runCli(cli.version);
   const info = runCli(cli.info)
