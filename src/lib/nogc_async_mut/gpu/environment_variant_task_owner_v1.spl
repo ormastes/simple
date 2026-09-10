@@ -10,6 +10,7 @@ use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
 use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
 
 pub enum GpuEnvironmentTaskErrorV1:
+    NativeAuthorityUnavailable
     InvalidHostAuthority
     AdmissionRejected
     AdmissionMismatch
@@ -25,6 +26,14 @@ pub enum GpuEnvironmentTaskErrorV1:
     CompletionMismatch
     TerminalFenceRequired
     SubmissionUncertain
+
+# These fail-closed gates document the three native owner boundaries that do
+# not yet exist. They must not be enabled merely because a caller supplies a
+# well-shaped digest/receipt. Wiring requires independently retained mapper,
+# allocator and backend queue/fence issuers.
+pub const GPU_ENVIRONMENT_NATIVE_PROVIDER_MAPPER_AVAILABLE_V1: bool = false
+pub const GPU_ENVIRONMENT_NATIVE_RESOURCE_OWNER_AVAILABLE_V1: bool = false
+pub const GPU_ENVIRONMENT_NATIVE_CALLBACK_ISSUER_AVAILABLE_V1: bool = false
 
 pub enum GpuEnvironmentProviderTerminalV1:
     Completed
@@ -273,6 +282,8 @@ pub fn gpu_environment_resource_lease_issue_v1(
     # Owner boundary called only after the provider/native allocator has issued
     # the exact source/output arenas. The returned opaque authority, not the
     # caller-shaped lease DTO, is what prepare retains and submit revalidates.
+    if not GPU_ENVIRONMENT_NATIVE_RESOURCE_OWNER_AVAILABLE_V1:
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
     if owner.owner_identity == 0u64 or owner.next_handle == 0u64 or
        owner.next_handle == 0xffffffffffffffffu64 or owner.leases.len() >= 256 or
        not _digest_declared(source_arena_identity) or
@@ -381,6 +392,8 @@ pub fn gpu_environment_provider_callback_port_register_v1(
     provider_generation: u64,
     callable_binding_identity: EnvironmentDigest256V1
 ) -> Result<GpuEnvironmentProviderCallbackPortV1, GpuEnvironmentTaskErrorV1>:
+    if not GPU_ENVIRONMENT_NATIVE_CALLBACK_ISSUER_AVAILABLE_V1:
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
     if owner.owner_identity == 0u64 or owner.next_handle == 0u64 or
        owner.next_handle == 0xffffffffffffffffu64 or owner.ports.len() >= 256 or
        not _digest_declared(provider_identity) or not _digest_declared(variant_identity) or
@@ -416,6 +429,8 @@ pub fn gpu_environment_provider_callback_record_v1(
     # Backend callback boundary: terminal fields enter the task owner only via
     # this callback-owner-retained authority. The task lifecycle never accepts
     # raw caller-populated fence/readback digests as completion authority.
+    if not GPU_ENVIRONMENT_NATIVE_CALLBACK_ISSUER_AVAILABLE_V1:
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
     if _callback_port_index(owner, port) < 0 or
        port.provider_generation != submission.provider_generation or
        submission.owner_identity == 0u64 or submission.task_id == 0u64 or
@@ -454,7 +469,7 @@ pub fn gpu_environment_provider_callback_record_v1(
         commit_observed: commit_observed))
     Ok(handle)
 
-fn _provider_callback_consume_v1(
+fn _provider_callback_peek_v1(
     owner: GpuEnvironmentProviderCallbackOwnerV1,
     authority: GpuEnvironmentProviderCallbackAuthorityV1
 ) -> Result<_GpuEnvironmentProviderCallbackRecordV1, GpuEnvironmentTaskErrorV1>:
@@ -466,7 +481,20 @@ fn _provider_callback_consume_v1(
         if owner.callbacks[i].handle == authority: index = i
         i = i + 1
     if index < 0: return Err(GpuEnvironmentTaskErrorV1.CompletionUnknown)
-    val value = owner.callbacks[index]
+    Ok(owner.callbacks[index])
+
+fn _provider_callback_consume_v1(
+    owner: GpuEnvironmentProviderCallbackOwnerV1,
+    authority: GpuEnvironmentProviderCallbackAuthorityV1
+) -> Result<_GpuEnvironmentProviderCallbackRecordV1, GpuEnvironmentTaskErrorV1>:
+    val pending = _provider_callback_peek_v1(owner, authority)
+    if pending.is_err(): return Err(pending.unwrap_err())
+    var index: i64 = -1
+    var i = 0
+    while i < owner.callbacks.len():
+        if owner.callbacks[i].handle == authority: index = i
+        i = i + 1
+    val value = pending.unwrap()
     var kept: [_GpuEnvironmentProviderCallbackRecordV1] = []
     i = 0
     while i < owner.callbacks.len():
@@ -557,6 +585,8 @@ pub fn gpu_environment_task_provider_admit_v1(
     image_authority: GpuDeviceProgramImageAuthorityV1,
     device: GpuEnabledDeviceAuthorityV1
 ) -> Result<GpuEnvironmentAdmittedProviderV1, GpuEnvironmentTaskErrorV1>:
+    if not GPU_ENVIRONMENT_NATIVE_PROVIDER_MAPPER_AVAILABLE_V1:
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
     if owner.admissions.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
         return Err(GpuEnvironmentTaskErrorV1.TaskCapacityExceeded)
     if not provider_generation_active_matches_v2(owner.generation_manager, activation, evidence):
@@ -820,13 +850,17 @@ pub fn gpu_environment_task_completion_record_v1(
         return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
     if owner.completions.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
         return Err(GpuEnvironmentTaskErrorV1.TaskCapacityExceeded)
-    val callback = _provider_callback_consume_v1(callback_owner, callback_authority)
+    val callback = _provider_callback_peek_v1(callback_owner, callback_authority)
     if callback.is_err(): return Err(callback.unwrap_err())
     val terminal_record = callback.unwrap()
     if terminal_record.lease_generation != record.lease.lease_generation or
        terminal_record.readback_bytes > record.task.output_arena.length:
         return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+    # Reserve and validate the destination before consuming the only backend
+    # event. Counter exhaustion can therefore never strand the task pin.
     val id = _next_handle(owner)?
+    val consumed = _provider_callback_consume_v1(callback_owner, callback_authority)
+    if consumed.is_err(): return Err(consumed.unwrap_err())
     val authority = GpuEnvironmentRetainedCompletionV1(
         completion_id: id, owner_identity: owner.owner_identity,
         task_id: handle.task_id, submission_id: submission.submission_id)
