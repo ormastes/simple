@@ -34,6 +34,7 @@ for expected in 0 125 137; do
         'literal $(no-shell-expansion) argument' || actual=$?
     [ "$actual" = "$expected" ] || fail "expected status $expected, got $actual"
     receipt=$(sed -n 's/^process_receipt=//p' "$log")
+    grep -qx "supervisor_shell_status=$expected" "$log" || fail 'supervisor status missing'
     [ -f "$receipt" ] || fail 'missing native receipt'
     grep -qx "native_exit_status=$expected" "$receipt" || fail 'native status changed'
     grep -qx "raw_status=$expected" "$receipt" || fail 'shell status changed'
@@ -41,5 +42,38 @@ for expected in 0 125 137; do
     grep -qx 'command_environment=clean-prefix' "$receipt" || fail 'clean env envelope missing'
     grep -q '^Finished .*bootstrap.* profile' "$log" || fail 'build output missing'
 done
-[ "$(wc -l <"$work/launches" | tr -d ' ')" = 3 ] || fail 'child repeated or skipped'
-printf 'PASS: native Cargo status 0/125/137, exact clean env and literal argv; evidence=%s\n' "$work"
+
+# Reproduce an abrupt supervisor exit after collecting the child output, before
+# publishing either artifact. os._exit intentionally bypasses finally cleanup;
+# the copied helper's launch hash remains honest, and no real build is started.
+for supervisor_status in 0 87; do
+    abrupt_root="$work/abrupt-$supervisor_status"
+    mkdir -p "$abrupt_root/scripts/bootstrap"
+    "$python_bin" - "$root/scripts/bootstrap/run-process-group-bounded-log-windows.py" \
+        "$abrupt_root/scripts/bootstrap/run-process-group-bounded-log-windows.py" "$supervisor_status" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+point = "        if digest(helper) != args.helper_sha256:\n"
+assert source.count(point) == 1, "supervisor publication checkpoint changed"
+Path(sys.argv[2]).write_text(source.replace(point, f"        os._exit({int(sys.argv[3])})\n" + point), encoding="utf-8")
+PY
+    log="$work/abrupt-$supervisor_status.log"
+    : >"$log"
+    actual=0
+    bootstrap_logged_windows_cargo "$abrupt_root" "$log" env -i \
+        "HOME=$work/home with space" "LAUNCH_MARKER=$work/launches" \
+        "SystemRoot=${SystemRoot:-${SYSTEMROOT:-C:\WINDOWS}}" \
+        "$python_bin" "$work/native child.py" 0 \
+        'literal $(no-shell-expansion) argument' 2>"$log.stderr" || actual=$?
+    [ "$actual" = 126 ] || fail 'abrupt supervisor bypassed receipt admission'
+    grep -qx "supervisor_shell_status=$supervisor_status" "$log" || fail 'abrupt supervisor status lost'
+    grep -Fxq "bootstrap-native-cargo-error: missing native process receipt (supervisor_shell_status=$supervisor_status)" \
+        "$log.stderr" || fail 'missing receipt diagnostic lost supervisor status'
+    receipt=$(sed -n 's/^process_receipt=//p' "$log")
+    [ ! -f "$receipt" ] && [ ! -f "${receipt%.env}.log" ] || fail 'abrupt supervisor published evidence'
+    [ "$(find "${receipt%/*}" -name '.command.log.tmp.*' -type f | wc -l | tr -d ' ')" = 1 ] || fail 'partial capture lost'
+    ! grep -q '^native_process_status=' "$log" || fail 'native status fabricated without receipt'
+done
+[ "$(wc -l <"$work/launches" | tr -d ' ')" = 5 ] || fail 'child repeated or skipped'
+printf 'PASS: native Cargo status 0/125/137, exact clean env, literal argv, abrupt supervisor 0/87 rejection; evidence=%s\n' "$work"
