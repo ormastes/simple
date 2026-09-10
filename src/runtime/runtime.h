@@ -1822,6 +1822,7 @@ void     simd_text_init(void);
 bool     rt_simd_has_sse(void);
 bool     rt_simd_has_avx(void);
 bool     rt_simd_has_avx2(void);
+bool     rt_x86_avx512_os_state_usable(void);
 bool     rt_simd_has_neon(void);
 bool     rt_simd_has_rvv(void);
 

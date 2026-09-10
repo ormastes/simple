@@ -103,6 +103,35 @@ bool rt_simd_has_avx2(void) {
 #endif
 }
 
+bool rt_x86_avx512_os_state_usable(void) {
+#if defined(SIMPLE_RUNTIME_FORCE_NO_X86_XSTATE)
+    return false;
+#elif SIMD_HAS_X86 && defined(_MSC_VER)
+    int regs[4];
+    __cpuid(regs, 1);
+    const uint32_t ecx = (uint32_t)regs[2];
+    const uint32_t xsave_osxsave = (1U << 26) | (1U << 27);
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    return simd_x86_avx512_os_state_usable_from_raw(
+        ecx, (uint64_t)_xgetbv(0));
+#elif SIMD_HAS_X86 && (defined(__GNUC__) || defined(__clang__))
+    unsigned int eax = 0;
+    unsigned int ebx = 0;
+    unsigned int ecx = 0;
+    unsigned int edx = 0;
+    const unsigned int xsave_osxsave = (1U << 26) | (1U << 27);
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    unsigned int xcr0_eax = 0;
+    unsigned int xcr0_edx = 0;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+    const uint64_t xcr0 = ((uint64_t)xcr0_edx << 32) | xcr0_eax;
+    return simd_x86_avx512_os_state_usable_from_raw(ecx, xcr0);
+#else
+    return false;
+#endif
+}
+
 bool rt_simd_has_neon(void) {
 #if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
     return true;
