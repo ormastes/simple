@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import {
   createKnowledgeCompilerCommitPublisherV1, selectCanonicalAuthorityInputV1
 } from "../../src/core/knowledge_compiler_commit_publisher.js";
 import { ImmutableSnapshotStore } from "../../src/storage/snapshot_store.js";
+import { canonicalJson } from "../../src/storage/canonical.js";
 import { WorkspaceRegistry } from "../../src/workspace/registry.js";
 
 const WORKSPACE = "W-000000000000000000000000000000B1";
@@ -27,6 +29,11 @@ function input(overrides = {}) {
     expectedRegistryRevisionId: "rr-1", expectedBaseSnapshotUidOrNull: null,
     expectedPublicationUidOrNull: null, inputDeltas: [], ...overrides
   };
+}
+
+function replayLockPath(cacheRoot, commitId = "commit-1") {
+  const scope = createHash("sha256").update(canonicalJson({ schema_version: 1, commit_id: commitId })).digest("hex");
+  return join(cacheRoot, "shared", "spipe", "commit-replay-v1", "locks", `${scope}.lock`);
 }
 
 test("P1 composition root admits only the internal canonical-input path", () => {
@@ -163,6 +170,68 @@ test("P2 two independent processes create an absent nested ledger after a barrie
       join(fixture.cacheRoot, "shared"), join(fixture.cacheRoot, "shared", "spipe"),
       replayRoot, join(replayRoot, "records"), join(replayRoot, "locks")
     ]) assert.equal(existsSync(directory), true);
+  } finally { rmSync(fixture.cacheRoot, { recursive: true, force: true }); }
+});
+
+test("P2 retries when a raced owner lock disappears before its receipt read", async () => {
+  const fixture = root();
+  try {
+    const publisher = createKnowledgeCompilerCommitPublisherV1(fixture);
+    const lock = replayLockPath(fixture.cacheRoot);
+    writeFileSync(lock, canonicalJson({ schema_version: 1, pid: process.pid }));
+    const modulePath = new URL("../../src/core/knowledge_compiler_commit_publisher.js", import.meta.url).pathname;
+    const registryPath = new URL("../../src/workspace/registry.js", import.meta.url).pathname;
+    const snapshotsPath = new URL("../../src/storage/snapshot_store.js", import.meta.url).pathname;
+    const source = `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      const originalReadFileSync = fs.readFileSync;
+      let removed = false;
+      fs.readFileSync = function(path, ...args) {
+        if (!removed && String(path) === process.env.SPIPE_LOCK) { removed = true; fs.unlinkSync(path); }
+        return originalReadFileSync.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+      const { createKnowledgeCompilerCommitPublisherV1 } = await import(${JSON.stringify(modulePath)});
+      const { WorkspaceRegistry } = await import(${JSON.stringify(registryPath)});
+      const { ImmutableSnapshotStore } = await import(${JSON.stringify(snapshotsPath)});
+      const registry = new WorkspaceRegistry({ root: process.env.SPIPE_ROOT, workspaceUid: process.env.SPIPE_WORKSPACE });
+      const snapshotStore = new ImmutableSnapshotStore({ cacheRoot: process.env.SPIPE_ROOT });
+      const publisher = createKnowledgeCompilerCommitPublisherV1({ registry, snapshotStore });
+      process.stdout.write(JSON.stringify(publisher.recordReplayEnvelopeV1(JSON.parse(process.env.SPIPE_INPUT))));
+    `;
+    const output = await childProcess(source, {
+      ...process.env, SPIPE_LOCK: lock, SPIPE_ROOT: fixture.cacheRoot,
+      SPIPE_WORKSPACE: WORKSPACE, SPIPE_INPUT: JSON.stringify(input())
+    });
+    assert.equal(JSON.parse(output).canonical_input.commit_id, "commit-1");
+    assert.equal(existsSync(lock), false);
+  } finally { rmSync(fixture.cacheRoot, { recursive: true, force: true }); }
+});
+
+test("P2 fails closed when a corrupt owner receipt remains at the lock path", async () => {
+  const fixture = root();
+  try {
+    createKnowledgeCompilerCommitPublisherV1(fixture);
+    const lock = replayLockPath(fixture.cacheRoot);
+    writeFileSync(lock, "{not-json");
+    const modulePath = new URL("../../src/core/knowledge_compiler_commit_publisher.js", import.meta.url).pathname;
+    const registryPath = new URL("../../src/workspace/registry.js", import.meta.url).pathname;
+    const snapshotsPath = new URL("../../src/storage/snapshot_store.js", import.meta.url).pathname;
+    const source = `
+      import { createKnowledgeCompilerCommitPublisherV1 } from ${JSON.stringify(modulePath)};
+      import { WorkspaceRegistry } from ${JSON.stringify(registryPath)};
+      import { ImmutableSnapshotStore } from ${JSON.stringify(snapshotsPath)};
+      const registry = new WorkspaceRegistry({ root: process.env.SPIPE_ROOT, workspaceUid: process.env.SPIPE_WORKSPACE });
+      const snapshotStore = new ImmutableSnapshotStore({ cacheRoot: process.env.SPIPE_ROOT });
+      const publisher = createKnowledgeCompilerCommitPublisherV1({ registry, snapshotStore });
+      publisher.recordReplayEnvelopeV1(JSON.parse(process.env.SPIPE_INPUT));
+    `;
+    await assert.rejects(() => childProcess(source, {
+      ...process.env, SPIPE_ROOT: fixture.cacheRoot,
+      SPIPE_WORKSPACE: WORKSPACE, SPIPE_INPUT: JSON.stringify(input())
+    }), /replay ledger lock owner receipt is corrupt/);
+    assert.equal(existsSync(lock), true);
   } finally { rmSync(fixture.cacheRoot, { recursive: true, force: true }); }
 });
 
