@@ -17,10 +17,9 @@ Date: 2026-09-08
 - PASS — Static coverage now includes typed timeout/truncation propagation and
   corrupted-cache rejection. Obsolete standalone inventory/extract/audit prompt
   helpers were removed so the test surface matches the single-request protocol.
-- FAIL — The working-tree direct-env/runtime guard reports violations in
-  `src/app/io/debug_stubs.spl` and `src/app/io/file_shell.spl`. Those files are
-  pre-existing concurrent work outside this feature lane and were not folded
-  into this change.
+- PASS — In the clean PR integration worktree rebased onto
+  `origin/main@ff2431632dc4cbefa5484727bcb6518d38fc1abc`, both
+  `direct-env-runtime-guard.shs --working` and `--staged` report `STATUS: PASS`.
 - FAIL — No authoritative Simple compile/test result exists. A fresh three-cycle
   audit fixed backend diagnostic collection and two staged module-surface
   dictionary-boundary failures. The final `v6` candidate completed surface
@@ -88,4 +87,4 @@ Date: 2026-09-08
   and trusted provider-side inference timing remain an NFR-009 gap; the receipt
   no longer presents the aggregate as inference-only measurement.
 
-STATUS: FAIL (3 failures, 11 warnings)
+STATUS: FAIL (2 failures, 11 warnings)
