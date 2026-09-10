@@ -1,12 +1,13 @@
-import { randomBytes } from "node:crypto";
 import {
   closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
   readFileSync, renameSync, statSync, unlinkSync, writeFileSync
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import { canonicalJson, freezeDeep, sha256Hex } from "../storage/canonical.js";
 import { isImmutableSnapshotStoreV1 } from "../storage/snapshot_store.js";
+import { isAuthorityPublicationJournalV1 } from "../storage/authority_publication_journal.js";
 import { isWorkspaceRegistryV1 } from "../workspace/registry.js";
 
 const STORE_STATE = new WeakMap();
@@ -402,4 +403,76 @@ export function createKnowledgeCompilerCommitPublisherV1({ registry, snapshotSto
       return replayLedger.record(selected);
     }
   });
+}
+
+/** Compatibility composition root for the durable Wave-5A publication API. */
+export class KnowledgeCompilerCommitPublisherV1 {
+  constructor({ registry, snapshotStore, journal } = {}) {
+    if (!isWorkspaceRegistryV1(registry)) throw new TypeError("registry must be a composition-root branded WorkspaceRegistryV1");
+    if (!isImmutableSnapshotStoreV1(snapshotStore)) throw new TypeError("snapshotStore must be a composition-root branded ImmutableSnapshotStoreV1");
+    if (!isAuthorityPublicationJournalV1(journal)) throw new TypeError("journal must be an AuthorityPublicationJournalV1");
+    this.registry = registry; this.snapshotStore = snapshotStore; this.journal = journal;
+  }
+
+  commit(input) {
+    const selected = selectCanonicalAuthorityInputV1(input);
+    const registryRevisionId = this.registry.registryRevisionId();
+    if (selected.workspace_uid !== this.registry.workspace_uid || selected.expected_registry_revision_id !== registryRevisionId) {
+      throw new Error("stale or altered registry tuple");
+    }
+    const worktree = this.registry.worktree(selected.worktree_uid);
+    if (!worktree || worktree.revision_id !== selected.revision_id) throw new Error("stale worktree revision tuple");
+    const projects = this.registry.toRecord().projects;
+    const byProject = new Map();
+    for (const delta of selected.input_deltas) {
+      if (!delta || typeof delta.project_uid !== "string" || !projects.some((project) => project.uid === delta.project_uid)) {
+        throw new Error("input delta references an unknown project");
+      }
+      if (byProject.has(delta.project_uid)) throw new Error("duplicate project input delta");
+      byProject.set(delta.project_uid, delta);
+    }
+    if (byProject.size !== projects.length || projects.some((project) => !byProject.has(project.uid))) {
+      throw new Error("all-and-only registered projects must contribute input deltas");
+    }
+
+    const current = this.journal.current();
+    if (current && current.commit_id === selected.commit_id) return Object.freeze({ status: "replayed", record: current, build: this.#build(selected, current.base_snapshot_uid) });
+    if ((current?.publication_uid ?? null) !== selected.expected_publication_uid_or_null ||
+        (selected.expected_base_snapshot_uid_or_null !== null && current?.base_snapshot_uid !== selected.expected_base_snapshot_uid_or_null)) {
+      throw new Error("stale or altered publication tuple");
+    }
+    const baseSnapshotUid = selected.expected_base_snapshot_uid_or_null ?? this.#snapshot(selected);
+    const build = this.#build(selected, baseSnapshotUid);
+    const inventory = {
+      schema: "spipe-target-inventory-v1", base_snapshot_uid: baseSnapshotUid,
+      registry_revision_id: registryRevisionId, projects: build.projects, aggregate: build.aggregate
+    };
+    const inventoryDigest = this.journal.putImmutableObjectV1(Buffer.from(`${canonicalJson(inventory)}\n`, "utf8"));
+    const authoritySnapshotUid = `spka1-${sha256Hex(canonicalJson({ base_snapshot_uid: baseSnapshotUid, registry_revision_id: registryRevisionId, worktree_uid: selected.worktree_uid }))}`;
+    const authority = { schema: "spipe-authority-manifest-v1", base_snapshot_uid: baseSnapshotUid,
+      authority_snapshot_uid: authoritySnapshotUid, registry_revision_id: registryRevisionId, inventory_manifest_digest: inventoryDigest };
+    const authorityDigest = this.journal.putImmutableObjectV1(Buffer.from(`${canonicalJson(authority)}\n`, "utf8"));
+    const recordBase = { schema: "spipe-authority-publication-v1", publication_uid: "pending", commit_id: selected.commit_id,
+      worktree_uid: selected.worktree_uid, revision_id: selected.revision_id, registry_revision_id: registryRevisionId,
+      base_snapshot_uid: baseSnapshotUid, authority_snapshot_uid: authoritySnapshotUid,
+      authority_manifest_digest: authorityDigest, inventory_manifest_digest: inventoryDigest };
+    const publicationUid = `app1-${sha256Hex(canonicalJson(recordBase)).slice(0, 32)}`;
+    const result = this.journal.publishAuthorityPublicationV1(selected.expected_publication_uid_or_null, { ...recordBase, publication_uid: publicationUid });
+    return Object.freeze({ ...result, build });
+  }
+
+  #snapshot(selected) {
+    const record = this.snapshotStore.put({ project_uid: selected.project_uid_or_null ?? this.registry.toRecord().projects[0].uid,
+      worktree_uid: selected.worktree_uid, revision_id: selected.revision_id, base_generation_hash: "a".repeat(64),
+      overlay_generation_hash: "0".repeat(64), policy_hash: "b".repeat(64), parser_version: "p1", analyzer_version: "a1", provider_contract_version: "v1" });
+    return record.snapshot_uid;
+  }
+
+  #build(selected, baseSnapshotUid) {
+    const projects = this.registry.toRecord().projects.sort((left, right) => left.uid.localeCompare(right.uid)).map((project) => ({
+      project_uid: project.uid, revision_id: selected.revision_id, base_snapshot_uid: baseSnapshotUid,
+      input: selected.input_deltas.find((delta) => delta.project_uid === project.uid)
+    }));
+    return freezeDeep({ projects, aggregate: { contributors: projects.map((project) => ({ project_uid: project.project_uid, base_snapshot_uid: project.base_snapshot_uid })) } });
+  }
 }
