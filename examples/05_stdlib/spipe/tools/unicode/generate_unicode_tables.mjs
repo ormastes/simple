@@ -45,7 +45,9 @@ function parseRange(text) {
 }
 
 function mergeRanges(ranges) {
-  const sorted = ranges.toSorted((a, b) => a[0] - b[0] || a[1] - b[1]);
+  // Keep the generator runnable on the Node 18 runtime used by Linux MCP
+  // package smoke tests; Array.prototype.toSorted was added in Node 20.
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const out = [];
   for (const [start, end] of sorted) {
     const last = out.at(-1);
