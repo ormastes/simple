@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$ROOT/scripts/lib/simple-runtime-provenance.shs"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/devhub-wrapper-runtime.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+make_runtime() {
+runtime=$1
+receipt_target=$2
+mkdir -p "$(dirname -- "$runtime")"
+cat >"$runtime" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) printf '%s\n' 'Simple v9.9.9-test' ;;
+  --help) printf '%s\n' 'simple test' ;;
+  run) printf '%s\n' 'devhub — famous-CLI ergonomics' ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$runtime"
+hash=$(sha256sum "$runtime" | awk '{print $1}')
+cat >"${runtime}.provenance.env" <<EOF
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=pure-simple
+artifact_sha256=$hash
+target_triple=$receipt_target
+version_output=Simple v9.9.9-test
+producer=unit-test
+evidence=unit-test
+EOF
+}
+
+host=$(uname -s 2>/dev/null || echo unknown)
+case "$host" in
+  MSYS*|MINGW*|CYGWIN*)
+    accepted_targets='x86_64-pc-windows-msvc x86_64-pc-windows-gnu'
+    ;;
+  *)
+    accepted_targets=$(simple_runtime_host_target)
+    ;;
+esac
+
+for target in $accepted_targets; do
+  case "$host" in
+    MSYS*|MINGW*|CYGWIN*) runtime="$WORK/admitted/$target/simple.exe" ;;
+    *) runtime="$WORK/admitted/$target/simple" ;;
+  esac
+  make_runtime "$runtime" "$target"
+  admitted_output="$WORK/$target.out"
+  SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1 SIMPLE_BINARY="$runtime" \
+      sh "$ROOT/bin/devhub" --help >"$admitted_output"
+  grep -Fq 'devhub — famous-CLI ergonomics' "$admitted_output" || {
+      echo "FAIL: admitted runtime was not selected for $target" >&2
+      exit 1
+  }
+done
+
+wrong_runtime="$WORK/admitted/$host/wrong"
+wrong_target=$(simple_runtime_host_target)
+case "$wrong_target" in
+  *-msvc) wrong_receipt_target="${wrong_target%-msvc}-gnu" ;;
+  *-gnu) wrong_receipt_target="${wrong_target%-gnu}-msvc" ;;
+  *) wrong_receipt_target=x86_64-pc-windows-msvc ;;
+esac
+make_runtime "$wrong_runtime" "$wrong_receipt_target"
+
+seed_output="$WORK/seed.out"
+if timeout 5s env SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1 \
+    SIMPLE_BINARY="$ROOT/bin/simple.exe" sh "$ROOT/bin/devhub" --help \
+    >"$seed_output" 2>&1; then
+    echo 'FAIL: bootstrap seed was accepted by DevHub wrapper' >&2
+    exit 1
+fi
+grep -Fq 'error: no Simple runtime found for devhub' "$seed_output" || {
+    echo 'FAIL: seed rejection did not fail closed' >&2
+    cat "$seed_output" >&2
+    exit 1
+}
+
+if SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1 SIMPLE_BINARY="$wrong_runtime" \
+    sh "$ROOT/bin/devhub" --help >"$WORK/wrong.out" 2>&1; then
+    echo 'FAIL: cross-ABI provenance was accepted' >&2
+    exit 1
+fi
+
+echo 'PASS devhub-wrapper-runtime-selection seed=reject admitted=msvc+gnu cross-abi=reject bounded=5s'
