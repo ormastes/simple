@@ -1,0 +1,85 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/devhub-launch-modes.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+mkdir -p "$WORK/repo/bin" "$WORK/repo/scripts/lib"
+cp "$ROOT/bin/devhub" "$WORK/repo/bin/devhub"
+cp "$ROOT/scripts/lib/host-executable.shs" "$ROOT/scripts/lib/simple-runtime-provenance.shs" "$WORK/repo/scripts/lib/"
+. "$ROOT/scripts/lib/simple-runtime-provenance.shs"
+export SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1
+unset DEVHUB_MODE DEVHUB_LOADING_LOADER DEVHUB_LOADING_RUNTIME
+export DEVHUB_TEST_MARKER="$WORK/executed"
+export SIMPLE_BINARY="$WORK/runtime with spaces"
+cat >"$SIMPLE_BINARY" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >>"$DEVHUB_TEST_MARKER"
+case "$1" in
+  --version) printf '%s\n' 'Simple v9.9.9-test' ;;
+  --help) printf '%s\n' 'simple test' ;;
+  run) shift 2; printf '<%s>\n' "$@"; exit "${DEVHUB_TEST_EXIT:-0}" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$SIMPLE_BINARY"
+cat >"${SIMPLE_BINARY}.provenance.env" <<EOF
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=pure-simple
+artifact_sha256=$(simple_runtime_sha256 "$SIMPLE_BINARY")
+target_triple=$(simple_runtime_host_target)
+version_output=Simple v9.9.9-test
+EOF
+invoke() {
+  rm -f "$DEVHUB_TEST_MARKER"
+  status=0
+  sh "$WORK/repo/bin/devhub" "$@" >"$WORK/out" 2>"$WORK/err" || status=$?
+}
+require_status() {
+  [ "$status" -eq "$1" ] || { cat "$WORK/err" >&2; echo "FAIL expected=$1 actual=$status" >&2; exit 1; }
+}
+require_no_execution() { [ ! -e "$DEVHUB_TEST_MARKER" ]; }
+
+# REQ-DHLM-001/004: default and explicit ordinary dispatch; preserve quoting.
+invoke --name 'value with spaces'
+require_status 0
+grep -Fxq '<value with spaces>' "$WORK/out"
+grep -q 'mode=ordinary runtime=.* receipt=.* version=Simple v9.9.9-test' "$WORK/err"
+DEVHUB_MODE=loading invoke --mode ordinary --name 'value with spaces'
+require_status 0
+grep -Fxq '<--name>' "$WORK/out"
+if grep -Fq '<ordinary>' "$WORK/out"; then exit 1; fi
+invoke --mode=ordinary --verbose --name 'value with spaces'
+require_status 0
+grep -Fxq '<value with spaces>' "$WORK/out"
+
+# REQ-DHLM-002/003/005: unsupported loading must not even probe a runtime.
+invoke --mode loading --help
+require_status 78
+require_no_execution
+grep -q 'mode=loading is unsupported' "$WORK/err"
+DEVHUB_MODE=loading invoke --help
+require_status 78
+require_no_execution
+DEVHUB_LOADING_LOADER="$SIMPLE_BINARY" DEVHUB_LOADING_RUNTIME="$SIMPLE_BINARY" invoke --mode=loading
+require_status 78
+require_no_execution
+invoke --mode invalid
+require_status 2
+require_no_execution
+invoke --mode
+require_status 2
+require_no_execution
+
+# Dispatch failures preserve the runtime's exit and do not retry.
+DEVHUB_TEST_EXIT=41 invoke --mode ordinary --help
+require_status 41
+[ "$(grep -c '^run$' "$DEVHUB_TEST_MARKER")" -eq 1 ]
+
+# Stale hashes fail before executing the changed artifact.
+printf '\n# changed after admission\n' >>"$SIMPLE_BINARY"
+invoke --mode ordinary
+require_status 127
+require_no_execution
+grep -q 'mode=ordinary; no fallback' "$WORK/err"
+echo 'PASS devhub-launch-modes ordinary=args+identity loading=unsupported-no-exec invalid=2 failure=preserved stale-hash=rejected'
