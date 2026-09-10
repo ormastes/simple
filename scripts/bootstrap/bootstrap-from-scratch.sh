@@ -1864,7 +1864,13 @@ rust_authority_current_marker="${repo_root}/src/compiler_rust/target/bootstrap.c
 rust_authority_compatibility_path="${repo_root}/src/compiler_rust/target/bootstrap"
 
 bootstrap_acquire_rust_authority() {
-  [ -z "${rust_target_lock_handle}" ] || return 0
+  if [ -n "${rust_target_lock_handle}" ]; then
+    bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
+      echo "error: Rust authority lock ownership was lost" >&2
+      return 1
+    }
+    return 0
+  fi
   portable_lock_acquire "${rust_authority_lock_root}" authority \
     "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || {
     echo "error: timed out waiting for shared Rust authority publication" >&2
@@ -2013,7 +2019,9 @@ fi
 
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
-  rust_authority_target="${rust_authority_root}/target"
+  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
+    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
+    "${rust_authority_root}") || exit 1
   rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
@@ -2113,7 +2121,7 @@ prepare_rust_authority_workspace() {
     return 0
   fi
 
-  # The authority root is already content-addressed by every Rust seed input.
+  # Both the authority root and Cargo target bind every Rust seed input.
   # Preserve its Cargo target so an interrupted/retried build with the same
   # fingerprint can reuse dependency artifacts. Ephemeral HOME/config/tmp state
   # is recreated below; a changed fingerprint selects a different root.
@@ -2152,6 +2160,14 @@ prepare_rust_authority_workspace() {
 }
 
 run_rust_authority_cargo() {
+  # Cargo outputs are shared across output roots on Windows. Acquire the
+  # existing authority lock before even preparing the workspace, and retain
+  # it across every Cargo call, immutable snapshot, publication and runtime
+  # normalization. Lock order stays output -> authority; later acquisitions
+  # revalidate this same handle instead of trying to acquire a second lock.
+  if [ "${os}" = windows ]; then
+    bootstrap_acquire_rust_authority || return 1
+  fi
   rust_authority_log=$1
   rust_authority_lto=$2
   shift 2
