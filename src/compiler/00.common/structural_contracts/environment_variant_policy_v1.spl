@@ -193,6 +193,13 @@ fn _parse_admin_fallback(raw: text) -> Result<OffloadFallbackPolicy, text>:
         return Ok(OffloadFallbackPolicy.RequireRequested)
     Err("unknown frontend fallback restriction '{raw}' (expected any|allow-cpu|require-requested)")
 
+fn _parse_fallback(raw: text) -> Result<OffloadFallbackPolicy, text>:
+    if raw == "" or raw == "allow-cpu":
+        return Ok(OffloadFallbackPolicy.AllowCpu)
+    if raw == "require-requested":
+        return Ok(OffloadFallbackPolicy.RequireRequested)
+    Err("unknown frontend fallback '{raw}' (expected allow-cpu|require-requested)")
+
 fn _cpu_rank(value: EnvironmentVariantHostCpuMaxV1) -> i64:
     match value:
         case EnvironmentVariantHostCpuMaxV1.Default: 5
@@ -235,6 +242,31 @@ pub fn environment_variant_admin_restrictions_empty_v1() -> EnvironmentVariantAd
         parser_provider: "", host_cpu_max: "", frontend_offload_max: "",
         frontend_fallback: "")
 
+# Validate a single ordinary layer before precedence is applied. This prevents
+# a malformed lower-priority value from being hidden by a valid higher layer.
+# All grammars stay owned by the same canonical parsers used by the resolver.
+pub fn environment_variant_policy_layer_validate_v1(
+    layer: EnvironmentVariantPolicyLayerV1
+) -> Result<EnvironmentVariantPolicyLayerV1, text>:
+    var prefer = EnvironmentVariantParserProviderV1.Auto
+    var requirement = EnvironmentVariantParserRequirementV1.None
+    if layer.parser_prefer != "":
+        prefer = _parse_provider(layer.parser_prefer)?
+    if layer.parser_require != "":
+        requirement = _parse_requirement(layer.parser_require)?
+    if layer.parser_prefer != "" and layer.parser_require != "" and
+       requirement != EnvironmentVariantParserRequirementV1.None and
+       prefer != EnvironmentVariantParserProviderV1.Auto and
+       not _provider_matches_requirement(prefer, requirement):
+        return Err("parser provider prefer conflicts with require within one policy layer")
+    if layer.host_cpu_max != "":
+        val _cpu = _parse_cpu(layer.host_cpu_max)?
+    if layer.frontend_offload != "":
+        val _offload = parse_frontend_offload_value(layer.frontend_offload)?
+    if layer.frontend_fallback != "":
+        val _fallback = _parse_fallback(layer.frontend_fallback)?
+    Ok(layer)
+
 pub fn environment_variant_policy_resolve_v1(
     inputs: EnvironmentVariantPolicyInputsV1
 ) -> Result<EnvironmentVariantPolicyDecisionInputV1, text>:
@@ -250,29 +282,38 @@ pub fn environment_variant_policy_resolve_v1(
         inputs.project.frontend_fallback, inputs.user.frontend_fallback, "allow-cpu")
 
     val prefer_requested = _parse_provider(prefer_raw.value)?
-    val requirement = _parse_requirement(require_raw.value)?
+    val requirement_requested = _parse_requirement(require_raw.value)?
     val cpu_requested = _parse_cpu(cpu_raw.value)?
     val offload_parsed = parse_frontend_offload_value(offload_raw.value)?
-    val fallback_parsed = if fallback_raw.value == "" or fallback_raw.value == "allow-cpu":
-        OffloadFallbackPolicy.AllowCpu
-    elif fallback_raw.value == "require-requested":
-        OffloadFallbackPolicy.RequireRequested
-    else:
-        return Err("unknown frontend fallback '{fallback_raw.value}' (expected allow-cpu|require-requested) from {fallback_raw.source}")
+    val fallback_parsed = _parse_fallback(fallback_raw.value)?
 
     val admin_provider = _parse_admin_provider(inputs.admin.parser_provider)?
     val admin_cpu = _parse_admin_cpu(inputs.admin.host_cpu_max)?
     val admin_offload = _parse_admin_offload(inputs.admin.frontend_offload_max)?
     val admin_fallback = _parse_admin_fallback(inputs.admin.frontend_fallback)?
 
-    if requirement != EnvironmentVariantParserRequirementV1.None and
+    if requirement_requested != EnvironmentVariantParserRequirementV1.None and
        prefer_requested != EnvironmentVariantParserProviderV1.Auto and
-       not _provider_matches_requirement(prefer_requested, requirement):
+       not _provider_matches_requirement(prefer_requested, requirement_requested):
         return Err("parser provider prefer conflicts with require")
     if admin_provider != EnvironmentVariantParserProviderV1.Auto and
-       requirement != EnvironmentVariantParserRequirementV1.None and
-       not _provider_matches_requirement(admin_provider, requirement):
+       requirement_requested != EnvironmentVariantParserRequirementV1.None and
+       not _provider_matches_requirement(admin_provider, requirement_requested):
         return Err("admin parser provider restriction conflicts with require")
+
+    # An administrator provider restriction is an eligibility intersection,
+    # not a soft preference. Model it as the effective hard predicate so the
+    # downstream PREFER selector cannot fall back to a prohibited provider.
+    var requirement = requirement_requested
+    var requirement_source = require_raw.source
+    if admin_provider == EnvironmentVariantParserProviderV1.Scalar and
+       requirement == EnvironmentVariantParserRequirementV1.None:
+        requirement = EnvironmentVariantParserRequirementV1.Scalar
+        requirement_source = "admin"
+    elif admin_provider == EnvironmentVariantParserProviderV1.Simd and
+         requirement == EnvironmentVariantParserRequirementV1.None:
+        requirement = EnvironmentVariantParserRequirementV1.Simd
+        requirement_source = "admin"
 
     var prefer = prefer_requested
     var prefer_source = prefer_raw.source
@@ -309,6 +350,7 @@ pub fn environment_variant_policy_resolve_v1(
         _admin_restriction_set(inputs.admin.frontend_fallback)
     val explanation = "parser_prefer_requested={_provider_text(prefer_requested)}" +
         ";parser_prefer={_provider_text(prefer)}" +
+        ";parser_require_requested={_requirement_text(requirement_requested)}" +
         ";parser_require={_requirement_text(requirement)}" +
         ";host_cpu_max_requested={_cpu_text(cpu_requested)}" +
         ";host_cpu_max={_cpu_text(cpu)}" +
@@ -326,7 +368,7 @@ pub fn environment_variant_policy_resolve_v1(
         schema_version: ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1,
         parser_prefer_requested: prefer_requested, parser_prefer: prefer,
         parser_require: requirement, parser_source: prefer_source,
-        parser_require_source: require_raw.source,
+        parser_require_source: requirement_source,
         host_cpu_max_requested: cpu_requested, host_cpu_max: cpu,
         host_cpu_source: cpu_source,
         frontend_offload_requested: offload_parsed.mode, frontend_offload: offload,
@@ -341,4 +383,5 @@ export EnvironmentVariantPolicyLayerV1, EnvironmentVariantAdminRestrictionsV1
 export EnvironmentVariantPolicyInputsV1, EnvironmentVariantPolicyDecisionInputV1
 export environment_variant_policy_layer_empty_v1
 export environment_variant_admin_restrictions_empty_v1
+export environment_variant_policy_layer_validate_v1
 export environment_variant_policy_resolve_v1
