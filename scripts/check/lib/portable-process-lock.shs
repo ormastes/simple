@@ -18,8 +18,22 @@ portable_lock_identity() {
 }
 
 portable_lock_actual_process_identity() {
-  portable_lock_owner_snapshot=$(perl "${PORTABLE_LOCK_ATOMIC_HELPER_PATH}" \
-    owner-snapshot) || return 1
+  # owner-snapshot identifies its immediate parent. Command substitution can
+  # introduce a short-lived shell parent, notably while Bash executes EXIT
+  # traps, so run the helper directly and only substitute the captured text.
+  # mktemp creates a private file atomically; every observed failure removes it.
+  portable_lock_owner_snapshot_file=$(mktemp \
+    "${TMPDIR:-/tmp}/simple-lock-owner.XXXXXX") || return 1
+  if ! perl "${PORTABLE_LOCK_ATOMIC_HELPER_PATH}" owner-snapshot \
+    >"${portable_lock_owner_snapshot_file}"; then
+    rm -f -- "${portable_lock_owner_snapshot_file}"
+    return 1
+  fi
+  if ! portable_lock_owner_snapshot=$(cat -- "${portable_lock_owner_snapshot_file}"); then
+    rm -f -- "${portable_lock_owner_snapshot_file}"
+    return 1
+  fi
+  rm -f -- "${portable_lock_owner_snapshot_file}" || return 1
   PORTABLE_LOCK_OWNER_PID=$(printf '%s\n' "${portable_lock_owner_snapshot}" |
     sed -n 's/^pid=//p')
   PORTABLE_LOCK_OWNER_START_HEX=$(printf '%s\n' \
