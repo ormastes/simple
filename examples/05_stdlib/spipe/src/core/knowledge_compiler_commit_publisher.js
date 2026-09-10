@@ -24,7 +24,11 @@ const REPLAY_RESULT_FIELDS = Object.freeze(["canonical_input", "replay_envelope_
 
 function fsyncDirectory(path) {
   const descriptor = openSync(path, "r");
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  try {
+    try { fsyncSync(descriptor); } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
+    }
+  } finally { closeSync(descriptor); }
 }
 
 /**
