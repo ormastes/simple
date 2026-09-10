@@ -73,7 +73,12 @@ function atomicWrite(path, bytes) {
 
 function syncDirectory(path) {
   let fd;
-  try { fd = openSync(path, "r"); fsyncSync(fd); }
+  try {
+    fd = openSync(path, "r");
+    try { fsyncSync(fd); } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
+    }
+  }
   finally { if (fd !== undefined) closeSync(fd); }
 }
 

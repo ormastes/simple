@@ -29,6 +29,14 @@ function durableWrite(path, value) {
   const fd = openSync(path, "wx");
   try { writeFileSync(fd, value, { encoding: "utf8" }); fsyncSync(fd); } finally { closeSync(fd); }
 }
+function syncDirectory(path) {
+  const directory = openSync(path, "r");
+  try {
+    try { fsyncSync(directory); } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
+    }
+  } finally { closeSync(directory); }
+}
 function monotonic(current, next) {
   if (next.revocationEpoch < current.revocationEpoch) return false;
   const revoked = new Set(next.revokedReceiptUids);
@@ -66,7 +74,7 @@ export class ReadReceiptPolicyStore {
       const next = record(nextPolicy), temporary = `${this.path}.tmp-${process.pid}-${Date.now()}`;
       durableWrite(temporary, `${canonicalJson(next)}\n`);
       renameSync(temporary, this.path);
-      const directory = openSync(dirname(this.path), "r"); try { fsyncSync(directory); } finally { closeSync(directory); }
+      syncDirectory(dirname(this.path));
       return next;
     } catch (error) {
       if (error?.code === "EEXIST") return null;

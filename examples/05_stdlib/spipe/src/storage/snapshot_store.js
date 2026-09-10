@@ -6,8 +6,6 @@ import { canonicalSnapshotTuple as canonicalModelSnapshotTuple, createSnapshotId
 import { safeNamespace } from "../workspace/paths.js";
 import { canonicalRoot } from "../workspace/paths.js";
 
-const SNAPSHOT_STORE_V1 = new WeakSet();
-
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 export const SNAPSHOT_ID_PREFIX = "spks1-";
 
@@ -204,5 +202,5 @@ export function createSnapshotStore(options) {
 }
 
 export function isSnapshotStoreV1(value) {
-  return SNAPSHOT_STORE_V1.has(value);
+  return IMMUTABLE_SNAPSHOT_STORE_V1_BRAND.has(value);
 }

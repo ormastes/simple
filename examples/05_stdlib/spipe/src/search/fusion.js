@@ -1,9 +1,19 @@
+import { createHash } from 'node:crypto';
+
+import { canonicalJson, freezeDeep } from '../storage/canonical.js';
+
 export const RRF_CONTRACT_V1 = 'rrf-fixed-v1';
 export const RRF_SCALE_V1 = 1_000_000_000;
 export const RRF_DEFAULT_K_V1 = 60;
 export const RRF_DEFAULT_SOURCE_K_V1 = 1000;
+export const RRF_DEFAULT_LIMIT_V1 = 1000;
 export const RRF_MAX_SOURCES_V1 = 3;
 export const RRF_MAX_DOC_ID_BYTES_V1 = 512;
+export const RRF_POOL_CONTRACT_V2 = 'rrf-complete-pool-v2';
+export const RRF_ARITHMETIC_CONTRACT_V2 = RRF_CONTRACT_V1;
+export const RRF_MAX_SOURCE_K_V2 = 1000;
+export const RRF_MAX_POOL_HITS_V2 = 3000;
+export const RRF_MAX_PUBLIC_HITS_V2 = 1000;
 
 const CONTEXT_FIELDS = Object.freeze([
   'workspaceId',
@@ -220,6 +230,102 @@ export function fuseRrfRawV1(request) {
         hits,
       },
     };
+  } catch (_error) {
+    return failure('invalid_request');
+  }
+}
+
+const RRF_SOURCE_POOL_DOMAIN_V2 = 'spipe-rrf-source-pool-v1\0';
+const RRF_COMPLETE_SOURCE_SET_DOMAIN_V2 = 'spipe-rrf-complete-source-set-v1\0';
+const RRF_COMPLETE_OUTPUT_DOMAIN_V2 = 'spipe-rrf-complete-output-v1\0';
+
+function rrfDigestV2(domain, value) {
+  return `sha256:${createHash('sha256').update(domain, 'utf8').update(canonicalJson(value), 'utf8').digest('hex')}`;
+}
+
+function rrfCandidateDigestV2(name, sourceIdentity, documentIds) {
+  return rrfDigestV2(RRF_SOURCE_POOL_DOMAIN_V2, { name, sourceIdentity, documentIds });
+}
+
+function rrfSourcePoolDigestV2(sources) {
+  return rrfDigestV2(RRF_COMPLETE_SOURCE_SET_DOMAIN_V2, sources.map((source) => ({
+    name: source.name,
+    sourceIdentity: source.sourceIdentity,
+    complete: source.complete,
+    candidateCount: source.candidateCount,
+    candidateDigest: source.candidateDigest,
+  })));
+}
+
+/** Fuse complete, digest-bound source pools without exposing a truncated pool. */
+export function fuseRrfCompletePoolV2(request) {
+  try {
+    if (!isRecord(request) || !hasOnlyKeys(request, new Set(['context', 'k', 'sourceK', 'sources']))) return failure('invalid_request');
+    const context = request.context;
+    if (!isRecord(context) || !hasOnlyKeys(context, CONTEXT_FIELD_SET)) return failure('invalid_context', { field: CONTEXT_FIELDS[0] });
+    for (const field of CONTEXT_FIELDS) if (!validBoundedString(context[field], RRF_MAX_DOC_ID_BYTES_V1)) return failure('invalid_context', { field });
+    const k = request.k === undefined ? RRF_DEFAULT_K_V1 : request.k;
+    const sourceK = request.sourceK === undefined ? RRF_DEFAULT_SOURCE_K_V1 : request.sourceK;
+    if (!Number.isSafeInteger(k) || k < 1 || k > 10_000) return failure('invalid_k');
+    if (!Number.isSafeInteger(sourceK) || sourceK < 1 || sourceK > RRF_MAX_SOURCE_K_V2) return failure('invalid_source_k');
+    if (!Array.isArray(request.sources) || request.sources.length < 2 || request.sources.length > RRF_MAX_SOURCES_V1) return failure('invalid_sources');
+
+    const sources = [];
+    let previousOrdinal = -1;
+    const names = request.sources.map((source) => isRecord(source) ? source.name : undefined);
+    if (!names.includes('lexical')) return failure('missing_required_source', { source: 'lexical' });
+    if (!names.includes('graph')) return failure('missing_required_source', { source: 'graph' });
+    for (const name of names) {
+      const ordinal = SOURCE_ORDER.indexOf(name);
+      if (ordinal < 0 || ordinal < previousOrdinal) return failure('invalid_source_order', { source: name });
+      previousOrdinal = ordinal;
+    }
+    if (new Set(names).size !== names.length) return failure('duplicate_source');
+
+    for (const source of request.sources) {
+      if (!isRecord(source) || !hasOnlyKeys(source, new Set(['name', 'sourceIdentity', 'complete', 'candidateCount', 'candidateDigest', 'candidates']))) {
+        return failure('invalid_source_identity', { source: source?.name });
+      }
+      if (!validBoundedString(source.sourceIdentity, RRF_MAX_DOC_ID_BYTES_V1)) return failure('invalid_source_identity', { source: source.name });
+      if (source.complete !== true) return failure('incomplete_source_page', { source: source.name });
+      if (!Number.isSafeInteger(source.candidateCount) || source.candidateCount < 0) return failure('invalid_candidate_count', { source: source.name });
+      if (!Array.isArray(source.candidates) || source.candidates.length !== source.candidateCount) return failure('invalid_candidate_page', { source: source.name });
+      if (source.candidateCount > sourceK || source.candidateCount > RRF_MAX_SOURCE_K_V2) return failure('too_many_candidates', { source: source.name });
+      const seen = new Set();
+      const documentIds = [];
+      for (let index = 0; index < source.candidates.length; index += 1) {
+        const candidate = source.candidates[index];
+        if (!isRecord(candidate) || !hasOnlyKeys(candidate, CANDIDATE_FIELDS) || !validBoundedString(candidate.documentId, RRF_MAX_DOC_ID_BYTES_V1)) return failure('invalid_candidate', { source: source.name, candidateIndex: index });
+        if (seen.has(candidate.documentId)) return failure('duplicate_document_id', { source: source.name, candidateIndex: index });
+        seen.add(candidate.documentId); documentIds.push(candidate.documentId);
+      }
+      const candidateDigest = rrfCandidateDigestV2(source.name, source.sourceIdentity, documentIds);
+      if (source.candidateDigest !== candidateDigest) return failure('candidate_digest_mismatch', { source: source.name });
+      sources.push({ name: source.name, sourceIdentity: source.sourceIdentity, complete: true, candidateCount: source.candidateCount, candidateDigest, candidates: source.candidates });
+    }
+
+    const accumulated = new Map();
+    for (const source of sources) for (let index = 0; index < source.candidates.length; index += 1) {
+      const documentId = source.candidates[index].documentId;
+      let hit = accumulated.get(documentId);
+      if (!hit) {
+        if (accumulated.size >= RRF_MAX_POOL_HITS_V2) return failure('pool_too_large');
+        hit = { documentId, rawScoreUnits: 0, contributions: [] }; accumulated.set(documentId, hit);
+      }
+      const sourceRank = index + 1;
+      const contributionUnits = Math.floor(RRF_SCALE_V1 / (k + sourceRank));
+      const nextScore = hit.rawScoreUnits + contributionUnits;
+      if (!Number.isSafeInteger(nextScore)) return failure('arithmetic_overflow');
+      hit.rawScoreUnits = nextScore;
+      hit.contributions.push({ source: source.name, sourceIdentity: source.sourceIdentity, sourceRank, contributionUnits });
+    }
+    const ranked = Array.from(accumulated.values()).sort((left, right) => left.rawScoreUnits === right.rawScoreUnits
+      ? unsignedUtf8CompareV1(left.documentId, right.documentId) : right.rawScoreUnits - left.rawScoreUnits);
+    const hits = ranked.map((hit, index) => ({ documentId: hit.documentId, fusedRank: index + 1, rawScoreUnits: hit.rawScoreUnits, contributions: hit.contributions }));
+    const orderedSources = sources.map(({ name, sourceIdentity, complete, candidateCount, candidateDigest }) => ({ name, sourceIdentity, complete, candidateCount, candidateDigest }));
+    const identity = { contractVersion: RRF_POOL_CONTRACT_V2, arithmeticContractVersion: RRF_ARITHMETIC_CONTRACT_V2, k, sourceK, orderedSources, context: Object.fromEntries(CONTEXT_FIELDS.map((field) => [field, context[field]])), complete: true, uniqueDocumentCount: hits.length, sourcePoolDigest: rrfSourcePoolDigestV2(orderedSources) };
+    const rawFusionDigest = rrfDigestV2(RRF_COMPLETE_OUTPUT_DOMAIN_V2, { identity, hits });
+    return freezeDeep({ ok: true, value: { identity: { ...identity, rawFusionDigest }, hits } });
   } catch (_error) {
     return failure('invalid_request');
   }

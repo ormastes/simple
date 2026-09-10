@@ -1,4 +1,4 @@
-import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
+import { createHash, createPublicKey, sign, timingSafeEqual, verify } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, fsyncSync, closeSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -10,6 +10,8 @@ import { isReadReceiptPolicyStore } from "../storage/read_receipt_policy_store.j
 const TRUSTED_PORTS = new WeakSet();
 const VERIFIED_READ_GRANTS = new WeakSet();
 const VERIFIED_CURSOR_GRANTS = new WeakSet();
+const EXPECTED_READ_BINDINGS = new WeakMap();
+const READ_GRANT_CLAIMS = new WeakMap();
 
 const READ_RECEIPT_V1_FIELDS = Object.freeze([
   "receiptVersion", "authorityKeyId", "authorityKeyEpoch", "normalizedAliasUriOrNull",
@@ -36,6 +38,52 @@ function readReceiptUid(payload, cursor = false) {
 
 function exactBinding(payload, expected) {
   return Object.keys(expected).every((field) => payload[field] === expected[field]);
+}
+
+const READ_FIELDS = Object.freeze([...READ_RECEIPT_V1_FIELDS, "signature"]);
+
+function exactFields(value, fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const names = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) return false;
+  return fields.every((field) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    return descriptor?.enumerable === true && Object.hasOwn(descriptor, "value") && !Object.hasOwn(descriptor, "get");
+  });
+}
+
+function readPayload(input) {
+  const payload = {};
+  for (const field of READ_RECEIPT_V1_FIELDS) payload[field] = input[field];
+  return payload;
+}
+
+function validReadPayload(payload) {
+  return payload.receiptVersion === "v1" && payload.decision === "allow" &&
+    typeof payload.authorityKeyId === "string" && Number.isSafeInteger(payload.authorityKeyEpoch) && payload.authorityKeyEpoch >= 0 &&
+    (payload.normalizedAliasUriOrNull === null || typeof payload.normalizedAliasUriOrNull === "string") &&
+    typeof payload.canonicalUri === "string" && typeof payload.workspaceUid === "string" &&
+    (payload.projectUidOrNull === null || typeof payload.projectUidOrNull === "string") &&
+    typeof payload.targetKind === "string" && typeof payload.targetUid === "string" &&
+    typeof payload.snapshotUid === "string" && typeof payload.revisionId === "string" &&
+    typeof payload.viewKind === "string" && typeof payload.normalizedLogicalPath === "string" &&
+    typeof payload.selectorDigest === "string" && typeof payload.effectiveScopeDigest === "string" &&
+    typeof payload.orderingVersion === "string" && (payload.pageLimitOrNull === null || Number.isSafeInteger(payload.pageLimitOrNull)) &&
+    (typeof payload.policyVersion === "string" || Number.isSafeInteger(payload.policyVersion)) &&
+    Number.isSafeInteger(payload.issuedAtMs) && Number.isSafeInteger(payload.expiresAtMs) &&
+    typeof payload.receiptUid === "string" && typeof payload.issuerKeyId === "string" && Number.isSafeInteger(payload.revocationEpoch);
+}
+
+function readIdentity(payload) { return readReceiptUid(payload); }
+function readSigningBytes(payload) { return readReceiptV1Bytes(payload); }
+function legacyReadReceiptUid(payload) {
+  const unsigned = { ...payload, receiptUid: undefined };
+  return createHash("sha256").update("spipe-uri-read-id-v1\0", "utf8").update(canonicalJson(unsigned), "utf8").digest("hex");
+}
+
+function cursorSigningBytes(payload) {
+  return Buffer.from(`spipe-uri-cursor-v1\0${canonicalJson(payload)}`);
 }
 
 function digest(value) {
@@ -82,7 +130,7 @@ export function signEdgeAcceptanceReceipt(input, privateKey) {
 }
 
 /** Verification-only capability injected by the trusted composition root. */
-export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], now = () => Date.now(), canonicalReadPolicy = null, canonicalReadPolicyStore = null } = {}) {
+export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], now = () => Date.now(), canonicalReadPolicy = null, canonicalReadPolicyStore = null, cursorPolicyStore = null, cursorKeyProvider = null } = {}) {
   const keys = new Map(Object.entries(publicKeys ?? {}));
   if (!keys.size) throw new TypeError("AuthorizationPort requires trusted public keys");
   const revoked = new Set(revokedReceiptUids);
@@ -92,6 +140,85 @@ export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], n
   if (readPolicy !== null && (!exactFields(readPolicy, ["policyVersion", "revocationEpoch", "keys", "revokedReceiptUids"]) ||
       !Number.isSafeInteger(readPolicy.revocationEpoch) || !Array.isArray(readPolicy.keys) || !Array.isArray(readPolicy.revokedReceiptUids))) {
     throw new TypeError("canonical read policy is invalid");
+  }
+  function cursorPolicy() {
+    if (!cursorPolicyStore || typeof cursorPolicyStore.load !== "function") return null;
+    return cursorPolicyStore.load();
+  }
+  function cursorKey(policy, id) { return policy?.keyRecords?.find((item) => item.authorityKeyId === id) ?? null; }
+  function cursorPositionValid(position) {
+    return Array.isArray(position) && position.length > 0 && position.every((value) =>
+      (typeof value === "string" && value.length > 0) || (typeof value === "number" && Number.isSafeInteger(value)));
+  }
+  function createExpectedReadBindingV1(binding) {
+    if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
+    const outward = Object.freeze({ ...binding });
+    const claims = { ...binding, pageLimitOrNull: binding.pageLimitOrNull ?? binding.pageLimit ?? null };
+    delete claims.pageLimit;
+    EXPECTED_READ_BINDINGS.set(outward, Object.freeze(claims));
+    return outward;
+  }
+  function issueCursorReceiptV1(grant, request = {}, clockNowMs = now()) {
+    try {
+      const claims = READ_GRANT_CLAIMS.get(grant); const policy = cursorPolicy();
+      if (!claims || !policy || !cursorPositionValid(request.pagePosition) || !Number.isSafeInteger(clockNowMs)) return null;
+      const key = cursorKey(policy, policy.currentAuthorityKeyId);
+      if (!key || !cursorKeyProvider || typeof cursorKeyProvider.getPrivateKey !== "function") return null;
+      const privateKey = cursorKeyProvider.getPrivateKey({ authorityKeyId: key.authorityKeyId, algorithm: key.algorithm, purpose: "spipe-cursor-receipt-v1" });
+      const requested = request.requestedExpiresAtMs;
+      const maxTtl = Number.isSafeInteger(policy.maxTtlMs) ? policy.maxTtlMs : 0;
+      const expiresAtMs = Number.isSafeInteger(requested) ? requested : clockNowMs + maxTtl;
+      if (!privateKey || expiresAtMs <= clockNowMs || expiresAtMs > claims.expiresAtMs || expiresAtMs > clockNowMs + maxTtl) return null;
+      const payload = { cursorVersion: "v1", binding: claims, pagePosition: request.pagePosition, issuedAtMs: clockNowMs, expiresAtMs,
+        cursorAuthorityKeyId: key.authorityKeyId, cursorAuthorityKeyEpoch: key.authorityKeyEpoch, cursorRevocationEpoch: policy.currentReceiptRevocationEpoch };
+      const signature = sign(null, cursorSigningBytes(payload), privateKey).toString("base64url");
+      return freezeDeep({ ...payload, signature });
+    } catch { return null; }
+  }
+  function verifyCursorReceiptV1(receipt, grant, clockNowMs = now()) {
+    try {
+      const claims = READ_GRANT_CLAIMS.get(grant); const policy = cursorPolicy();
+      if (!claims || !policy || !receipt || typeof receipt !== "object" || !cursorPositionValid(receipt.pagePosition)) return null;
+      if (receipt.cursorVersion !== "v1" || receipt.issuedAtMs > clockNowMs || receipt.expiresAtMs <= clockNowMs || receipt.expiresAtMs > claims.expiresAtMs) return null;
+      if (receipt.cursorRevocationEpoch !== policy.currentReceiptRevocationEpoch) return null;
+      if (canonicalJson(receipt.binding) !== canonicalJson(claims)) return null;
+      const key = cursorKey(policy, receipt.cursorAuthorityKeyId);
+      if (!key || (key.status !== "current" && !(key.status === "grace" && Number.isSafeInteger(key.graceUntilMs) && clockNowMs < key.graceUntilMs)) || key.authorityKeyEpoch !== receipt.cursorAuthorityKeyEpoch) return null;
+      const publicKey = key.publicVerificationKey ? createPublicKey({ key: Buffer.from(key.publicVerificationKey, "base64"), format: "der", type: "spki" }) : null;
+      if (!publicKey || typeof receipt.signature !== "string" || !verify(null, cursorSigningBytes({ cursorVersion: receipt.cursorVersion, binding: receipt.binding, pagePosition: receipt.pagePosition, issuedAtMs: receipt.issuedAtMs, expiresAtMs: receipt.expiresAtMs, cursorAuthorityKeyId: receipt.cursorAuthorityKeyId, cursorAuthorityKeyEpoch: receipt.cursorAuthorityKeyEpoch, cursorRevocationEpoch: receipt.cursorRevocationEpoch }), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
+      return receipt;
+    } catch { return null; }
+  }
+  function rotateCursorReceiptKeyV1(request, clockNowMs = now()) {
+    try {
+      const policy = cursorPolicy();
+      if (!policy || !request || policy.policyVersion !== request.expectedPolicyVersion || policy.rotationRecords?.some((item) => item.rotationUid === request.rotationUid)) return policy?.rotationRecords?.some((item) => item.rotationUid === request.rotationUid) ? policy : null;
+      const next = JSON.parse(JSON.stringify(policy));
+      next.keyRecords.push({ authorityKeyId: request.newAuthorityKeyId, algorithm: request.newAlgorithm, authorityKeyEpoch: request.newAuthorityKeyEpoch, issuerKeyId: request.newIssuerKeyId, publicVerificationKey: request.newPublicVerificationKey, status: "pending", activateAtMs: request.activateAtMs, graceUntilMsOrNull: request.priorGraceUntilMs, revokedAtMsOrNull: null, revocationEpochAtRevocationOrNull: null });
+      next.rotationRecords.push({ ...request }); next.policyVersion += 1;
+      return cursorPolicyStore.compareAndSwap(policy.policyVersion, next) ? next : null;
+    } catch { return null; }
+  }
+  function applyDueCursorReceiptKeyTransitionsV1(clockNowMs = now()) {
+    try {
+      const policy = cursorPolicy(); if (!policy) return null;
+      const next = JSON.parse(JSON.stringify(policy)); let changed = false;
+      for (const rotation of next.rotationRecords ?? []) {
+        if (rotation.appliedAtMs === undefined && clockNowMs >= rotation.activateAtMs) {
+          const old = next.keyRecords.find((item) => item.authorityKeyId === next.currentAuthorityKeyId); const fresh = next.keyRecords.find((item) => item.authorityKeyId === rotation.newAuthorityKeyId);
+          if (old) { old.status = "grace"; old.graceUntilMs = rotation.priorGraceUntilMs; }
+          if (fresh) fresh.status = "current";
+          next.currentAuthorityKeyId = rotation.newAuthorityKeyId; rotation.appliedAtMs = clockNowMs; changed = true;
+        }
+        if (rotation.appliedAtMs !== undefined && rotation.revocationEpochAtPriorRevocation !== undefined && clockNowMs >= rotation.priorGraceUntilMs && next.currentReceiptRevocationEpoch < rotation.revocationEpochAtPriorRevocation) {
+          const old = next.keyRecords.find((item) => item.authorityKeyId !== next.currentAuthorityKeyId && item.status === "grace"); if (old) { old.status = "revoked"; old.revokedAtMsOrNull = clockNowMs; old.revocationEpochAtRevocationOrNull = rotation.revocationEpochAtPriorRevocation; }
+          next.currentReceiptRevocationEpoch = rotation.revocationEpochAtPriorRevocation; changed = true;
+        }
+      }
+      if (!changed) return next;
+      next.policyVersion += 1;
+      return cursorPolicyStore.compareAndSwap(policy.policyVersion, next) ? next : null;
+    } catch { return null; }
   }
   const port = Object.freeze({
     verifyTrustReceipt(receipt, expected) {
@@ -137,17 +264,21 @@ export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], n
     },
     verifyCanonicalReadReceiptV1(receipt, expectedBinding, clockNowMs = now()) {
       try {
-        const expected = expectedReadBindingClaimsV1(expectedBinding);
-        const activePolicy = canonicalReadPolicyStore === null ? readPolicy : canonicalReadPolicyStore.read().policy;
-        if (!expected || !activePolicy || activePolicy.policyVersion !== expected.policyVersion || !exactFields(receipt, READ_FIELDS)) return null;
+        const expected = expectedReadBindingClaimsV1(expectedBinding) ?? EXPECTED_READ_BINDINGS.get(expectedBinding);
+        const activePolicy = canonicalReadPolicyStore === null ? readPolicy :
+          (typeof canonicalReadPolicyStore.read === "function" ? canonicalReadPolicyStore.read().policy : canonicalReadPolicyStore.load());
+        if (!expected || !exactFields(receipt, READ_FIELDS)) return null;
         const payload = readPayload(receipt);
-        if (!validReadPayload(payload) || payload.policyVersion !== activePolicy.policyVersion || typeof receipt.signature !== "string" || !/^[A-Za-z0-9_-]+$/.test(receipt.signature)) return null;
+        if (!validReadPayload(payload) || (activePolicy && payload.policyVersion !== activePolicy.policyVersion) || typeof receipt.signature !== "string" || !/^[A-Za-z0-9_-]+$/.test(receipt.signature)) return null;
         const unsignedForId = { ...payload, receiptUid: undefined };
         const expectedUid = readIdentity(unsignedForId);
-        if (payload.receiptUid !== expectedUid || activePolicy.revokedReceiptUids.includes(payload.receiptUid)) return null;
-        const key = new Map(activePolicy.keys.map((item) => [item.authorityKeyId, item])).get(payload.authorityKeyId);
-        if (!key || key.issuerKeyId !== payload.issuerKeyId || key.algorithm !== "ed25519" || key.epoch !== payload.authorityKeyEpoch ||
-            key.status !== "current" || payload.revocationEpoch !== activePolicy.revocationEpoch) return null;
+        if (payload.receiptUid !== expectedUid && payload.receiptUid !== legacyReadReceiptUid(payload)) return null;
+        if (activePolicy && activePolicy.revokedReceiptUids.includes(payload.receiptUid)) return null;
+        if (activePolicy) {
+          const key = new Map(activePolicy.keys.map((item) => [item.authorityKeyId, item])).get(payload.authorityKeyId);
+          if (!key || key.issuerKeyId !== payload.issuerKeyId || key.algorithm !== "ed25519" || key.epoch !== payload.authorityKeyEpoch ||
+              key.status !== "current" || payload.revocationEpoch !== activePolicy.revocationEpoch) return null;
+        }
         const publicKey = keys.get(payload.issuerKeyId);
         if (!publicKey || !verify(null, readSigningBytes(payload), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
         if (!Number.isSafeInteger(clockNowMs) || payload.issuedAtMs > clockNowMs || payload.expiresAtMs <= clockNowMs) return null;
@@ -155,18 +286,24 @@ export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], n
           if (field === "worktreeUid" || field === "authorityInstanceUid" || field === "authorityManifestDigest") continue;
           if (payload[field] !== expected[field]) return null;
         }
-        const grant = Object.freeze({});
-        READ_GRANTS.set(grant, freezeDeep({ ...payload, worktreeUid: expected.worktreeUid, authorityInstanceUid: expected.authorityInstanceUid, authorityManifestDigest: expected.authorityManifestDigest }));
+        const grant = freezeDeep({ ...payload, ...expected });
+        VERIFIED_READ_GRANTS.add(grant);
+        READ_GRANT_CLAIMS.set(grant, freezeDeep({ ...payload, ...expected }));
         return grant;
       } catch { return null; }
-    }
+    },
+    createExpectedReadBindingV1,
+    issueCursorReceiptV1,
+    verifyCursorReceiptV1,
+    rotateCursorReceiptKeyV1,
+    applyDueCursorReceiptKeyTransitionsV1
   });
   TRUSTED_PORTS.add(port);
   return port;
 }
 
-export function isVerifiedReadGrantV1(value) { return READ_GRANTS.has(value); }
-export function verifiedReadGrantClaimsV1(value) { return READ_GRANTS.get(value) ?? null; }
+export function isVerifiedReadGrantV1(value) { return VERIFIED_READ_GRANTS.has(value); }
+export function verifiedReadGrantClaimsV1(value) { return READ_GRANT_CLAIMS.get(value) ?? null; }
 
 export function isTrustedAuthorizationPort(port) {
   return Boolean(port && TRUSTED_PORTS.has(port));
@@ -239,9 +376,9 @@ export function createCanonicalReadAuthorizationPort({
 /** Test/composition-root helper; production callers should issue receipts off hot paths. */
 export function signCanonicalReadReceiptV1(binding, privateKey) {
   const payload = readReceiptV1Payload(binding);
-  if (payload.receiptVersion !== 1 || privateKey?.asymmetricKeyType !== "ed25519") throw new TypeError("invalid canonical read receipt v1");
+  if (payload.receiptVersion !== "v1" || privateKey?.asymmetricKeyType !== "ed25519") throw new TypeError("invalid canonical read receipt v1");
   const signedPayload = { ...payload, receiptUid: readReceiptUid(payload) };
-  return freezeDeep({ ...signedPayload, signature: sign(null, readReceiptV1Bytes(signedPayload), privateKey).toString("base64") });
+  return freezeDeep({ ...signedPayload, signature: sign(null, readReceiptV1Bytes(signedPayload), privateKey).toString("base64url") });
 }
 
 export function isVerifiedCanonicalReadGrantV1(grant) {
