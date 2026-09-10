@@ -1,0 +1,67 @@
+#!/bin/sh
+# Actual owner identity during EXIT traps; no TTL, ownership or signal bypass.
+set -eu
+case "${1:-}" in ''|--foreign-only) ;; *) exit 64 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/lock-exit-owner.XXXXXX")
+mkdir "$work/tmp"
+fail() { printf 'FAIL: %s; evidence=%s\n' "$1" "$work" >&2; exit 1; }
+cat >"$work/worker.sh" <<'SH'
+#!/bin/sh
+set -eu
+root=$1 work=$2 mode=$3
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+TMPDIR="$work/tmp"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH TMPDIR
+. "$root/scripts/check/lib/portable-process-lock.shs"
+if [ "$mode" = foreign ]; then
+    claim=$(cat "$work/parent.claim")
+    if portable_lock_release "$claim"; then exit 97; fi
+    trap 'saved=$?; if portable_lock_release "$claim"; then exit 98; fi; exit "$saved"' EXIT
+    exit 1
+fi
+portable_lock_acquire "$work/locks" "$mode" 2
+claim=$PORTABLE_LOCK_HANDLE
+if [ "$mode" = parent ]; then
+    printf '%s\n' "$claim" >"$work/parent.claim"
+    foreign_status=0
+    sh "$work/worker.sh" "$root" "$work" foreign || foreign_status=$?
+    [ "$foreign_status" = 1 ]
+    portable_lock_handle_is_owned "$claim"
+fi
+trap 'saved=$?; portable_lock_release "$claim" || exit 99; exit "$saved"' EXIT
+[ "$mode" != failure ] || exit 9
+exit 0
+SH
+modes='success failure parent'
+[ "${1:-}" != --foreign-only ] || modes=parent
+for mode in $modes; do
+    status=0
+    sh "$work/worker.sh" "$root" "$work" "$mode" >"$work/$mode.log" 2>&1 || status=$?
+    expected=0
+    [ "$mode" != failure ] || expected=9
+    [ "$status" = "$expected" ] || fail "$mode exit/cleanup status $status, expected $expected"
+    [ ! -f "$work/locks/.$mode.lock" ] || fail "$mode EXIT retained owner lock"
+done
+if [ "${1:-}" = --foreign-only ]; then
+    printf 'PASS: foreign release rejection exits1 through EXIT, parent retains ownership and releases; evidence=%s\n' "$work"
+    exit 0
+fi
+# A failing snapshot helper cannot admit an owner or leak its temporary file.
+printf 'exit 1;\n' >"$work/failing-snapshot.pl"
+if ROOT="$root" WORK="$work" sh -c '
+    . "$ROOT/scripts/check/lib/portable-process-lock.shs"
+    TMPDIR="$WORK/tmp"
+    PORTABLE_LOCK_ATOMIC_HELPER_PATH="$WORK/failing-snapshot.pl"
+    portable_lock_actual_process_identity
+'; then fail 'failed identity helper admitted an owner'; fi
+if ROOT="$root" WORK="$work" sh -c '
+    . "$ROOT/scripts/check/lib/portable-process-lock.shs"
+    TMPDIR="$WORK/tmp"
+    PORTABLE_LOCK_ATOMIC_HELPER_PATH="$ROOT/scripts/check/lib/portable-hardlink-lock.pl"
+    cat() { return 42; }
+    portable_lock_actual_process_identity
+'; then fail 'failed snapshot read admitted an owner'; fi
+[ "$(find "$work/tmp" -name 'simple-lock-owner.*' -type f | wc -l | tr -d ' ')" = 0 ] || fail 'snapshot temporary leaked'
+printf 'PASS: owner identity survives success/error EXIT traps, foreign processes cannot release, snapshot failures clean up; evidence=%s\n' "$work"
