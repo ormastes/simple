@@ -20,13 +20,13 @@ the release gate cannot be made green by counting CPU fallback as GPU evidence.
 
 | ID | Property | Evidence required | Current status |
 |---|---|---|---|
-| GPU-PREP-V001 | generated grammar manifest completeness and digest equality | one manifest registry and digest check across compiler, interpreter, Tree-sitter, SDN, and SHS | MissingEvidence |
+| GPU-PREP-V001 | generated grammar manifest completeness and digest equality | per-dialect manifest/digest checks: Simple compiler/interpreter/native+Wasm Tree-sitter projection and `.shs`; SdnDialect for SDN; SoshDialect for `src/os/apps/shell/**` | MissingEvidence |
 | GPU-PREP-V002 | progress, no epsilon cycle, bounded lookahead, lexical-state composition | finite model checker plus bounded chunk-summary oracle | MissingEvidence |
 | GPU-PREP-V003 | stack/action/arena bounds, count/scan/emit determinism, exact-capacity and one-over behavior | checked count/scan/emit receipts and deterministic capacity property suite | MissingEvidence |
 | GPU-PREP-V004 | region partition soundness and clean-vs-partitioned parity | ordered disjoint coverage, boundary-state, and fingerprint equality oracle | MissingEvidence |
 | GPU-PREP-V005 | deterministic fallback/recovery, cancellation, generation mismatch, malformed UTF-8 | admission/recovery receipt contract with CPU replay and no partial commit | MissingEvidence |
 | GPU-PREP-V006 | clean-vs-incremental equivalence | stabilization, reuse, invalidation, and clean-reparse fingerprint equality | MissingEvidence |
-| GPU-PREP-V007 | generated-consumer valid-source equivalence | generated-consumer corpus run with canonical digest and diagnostic parity | MissingEvidence |
+| GPU-PREP-V007 | generated-consumer valid-source equivalence | per-dialect generated-consumer corpus run with canonical digest, public API, and diagnostic parity | MissingEvidence |
 
 ## Existing passing sub-properties
 

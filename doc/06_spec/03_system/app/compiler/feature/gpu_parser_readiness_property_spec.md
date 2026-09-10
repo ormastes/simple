@@ -16,7 +16,11 @@ not yet owned. It does not imply that a GPU parser is implemented.
 1. **GPU-PREP-V001 — Grammar manifest completeness and digest**
    - Validates the flat lexical manifest shape.
    - Rejects malformed table shape.
-   - `MissingEvidence`: generated manifest registry and cross-consumer digest.
+   - `MissingEvidence`: per-dialect generated manifest registry and digest:
+     the Simple digest binds compiler/interpreter, native+Wasm Tree-sitter
+     projection, and `.shs`; SDN binds `SdnDialect`; and
+     `src/os/apps/shell/**` binds `SoshDialect`.
+   - `.shs` is full Simple plus `std.shell` imports; it is not `SoshDialect`.
 
 2. **GPU-PREP-V002 — Progress, bounded lookahead, and lexical composition**
    - Exercises finite scalar progress and transition bounds.
@@ -44,7 +48,8 @@ not yet owned. It does not imply that a GPU parser is implemented.
 
 7. **GPU-PREP-V007 — Generated-consumer equivalence**
    - Establishes a non-empty scalar source fingerprint.
-   - `MissingEvidence`: compiler/interpreter/Tree-sitter/SDN/SHS parity.
+   - `MissingEvidence`: public API and diagnostic parity within each dialect's
+     generated consumer set.
 
 ## Outcome
 

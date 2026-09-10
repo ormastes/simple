@@ -15,11 +15,18 @@ The lane uses the existing `ParseDialect`, `ParseRequest`, `ParseResult`,
 `ParseLexProgram`, `ParallelLexPlan`, and `IncrementalParsePlan` surfaces.
 Property IDs are frozen as:
 
-`GPU-PREP-V001` grammar manifest; `GPU-PREP-V002` progress/lookahead;
+`GPU-PREP-V001` per-dialect grammar manifests and digests; `GPU-PREP-V002` progress/lookahead;
 `GPU-PREP-V003` bounded arenas/count-emit; `GPU-PREP-V004` region partition;
 `GPU-PREP-V005` fallback/recovery/cancellation/generation;
 `GPU-PREP-V006` incremental equivalence; `GPU-PREP-V007` generated-consumer
 equivalence.
+
+V001/V007 use dialect-scoped parity, not one digest across unrelated
+languages. The Simple grammar digest binds compiler/interpreter, native+Wasm
+Tree-sitter projection, and `.shs`; `.shs` is full Simple plus `std.shell`
+imports and is not `SoshDialect`. SDN binds `SdnDialect`, while
+`src/os/apps/shell/**` binds `SoshDialect`. Public API and diagnostics must
+remain equivalent within each dialect set.
 
 Manual step names are `Build the canonical flat lexical manifest`, `Run the
 scalar oracle on an empty source and a representative source`, `Submit a
