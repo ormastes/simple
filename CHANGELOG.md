@@ -5,6 +5,16 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Authenticated unchanged native-build admission** — bind the complete
+  normalized invocation, requested inputs, compiler/toolchain environment, and
+  actual source closure to immutable content-addressed receipts; recursively
+  verify every ancestor before admitting a warm build; preserve and recover
+  unselected generation-name collisions; and expose real parser/HIR/MIR/codegen/link
+  scheduler counters with native crash-boundary and end-to-end SPipe coverage.
+  The environment identity now has one canonical semantic/non-semantic field
+  schema plus a sorted presence-aware snapshot of every present `SIMPLE_*`
+  control; a repository-wide owned-code registry makes new unclassified reads
+  fail its project-aware acceptance gate.
 - **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
   commit-ready textual evidence tree, validate them from the exact pushed Git
   revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
@@ -148,8 +158,9 @@ All notable changes to Simple Language will be documented in this file.
 
 ## [1.0.1-beta.1] - 2026-09-07
 
-Beta cut of the 1.0 line, built and deployed from a full four-stage bootstrap on
-`aarch64-unknown-linux-gnu`.
+Version-only beta cut of the 1.0 line. It ships **no self-hosted binary**: Stage 2
+admission does not pass on any host tried, so the bootstrap could not be
+completed and `bin/simple` remains the Rust seed. See Known issues.
 
 ### Changed
 - **Product version is now `1.0.1-beta.1`** (`release/version.sdn`, `channel: beta`),
@@ -169,6 +180,16 @@ Beta cut of the 1.0 line, built and deployed from a full four-stage bootstrap on
   `E1002`. The underlying authority modules are intact; only the CLI adapter
   layer is missing. See
   `doc/08_tracking/bug/release_cli_dispatch_functions_missing_2026-09-07.md`.
+- **No `native-build` completes without `SIMPLE_BOOTSTRAP=1`.** The scalar
+  object-path AOT route is builtin-LLVM-only, and the Stage-2 binary carries no
+  such provider even when built with `--backend=llvm`, so it cannot pass its own
+  admission gate. The diagnostic that says so is destroyed between the driver
+  and the build summary, which is why it reported an empty reason for months.
+  See `doc/08_tracking/bug/native_build_blocked_missing_sdl2_and_bootstrap_env_aarch64_2026-09-07.md`.
+- **Linux hosts need SDL2 installed to link anything.**
+  `native_linking.spl:351` pushes `-lSDL2` unconditionally, so a host without
+  the SDL2 development package fails every native-build — a hello world with no
+  UI code included. Windows already dlopens SDL instead; Linux has no such path.
 
 ## [1.0.0-beta] - 2026-05-20
 

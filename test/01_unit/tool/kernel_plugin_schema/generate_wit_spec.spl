@@ -1,0 +1,98 @@
+# @req REQ-KPF-SCHEMA-003
+# @cover src/tool/kernel_plugin_schema/generate_wit.spl
+
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use tool.kernel_plugin_schema.compiler.{compile_kpf_schema}
+use tool.kernel_plugin_schema.generate_wit.{generate_wit_component}
+
+fn schema_ab() -> text:
+    """package: example.echo
+version: 1.0
+interfaces:
+  - name: QueryService
+    major: 1
+    operations:
+      - name: poll_result
+        required: false
+      - name: SubmitBatch
+        required: true
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+"""
+
+fn schema_ba() -> text:
+    """version: 1.0
+package: example.echo
+interfaces:
+  - operations:
+      - required: true
+        name: close
+    major: 2
+    name: Admin
+  - operations:
+      - required: true
+        name: SubmitBatch
+      - required: false
+        name: poll_result
+    major: 1
+    name: QueryService
+"""
+
+fn fixture_schema() -> text:
+    """package: example.echo
+version: 1.0
+interfaces:
+  - name: Query
+    major: 1
+    operations:
+      - name: poll
+        required: false
+      - name: submit
+        required: true
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+"""
+
+describe "KPF WIT generator":
+    it "derives deterministic component interfaces from canonical schema IR":
+        step("generate WIT from reordered equivalent canonical schemas")
+        val first = generate_wit_component(compile_kpf_schema(schema_ab()).unwrap())
+        val second = generate_wit_component(compile_kpf_schema(schema_ba()).unwrap())
+        expect(first).to_equal(second)
+        expect(first).to_contain("package example:echo;")
+        expect(first).to_contain("interface admin {")
+        expect(first).to_contain("interface query-service {")
+        expect(first).to_contain("submit-batch: func(input: list<u8>) -> result<list<u8>, kpf-error>;")
+        expect(first).to_contain("poll-result: func(input: list<u8>) -> result<list<u8>, kpf-error>;")
+        expect(first).to_contain("world echo-plugin {")
+        expect(first).to_contain("export query-service;")
+
+    it "projects canonical identities slots and requiredness into metadata":
+        step("inspect generated KPF metadata comments")
+        val package_ir = compile_kpf_schema(schema_ab()).unwrap()
+        val generated = generate_wit_component(package_ir)
+        expect(generated).to_contain("// kpf-schema-digest: {package_ir.schema_digest}")
+        expect(generated).to_contain("// kpf-interface-id: {package_ir.interfaces[0].interface_id}")
+        expect(generated).to_contain("// kpf-required-operation-mask: 1")
+        expect(generated).to_contain("// kpf-operation-slot: 0")
+        expect(generated).to_contain("// kpf-operation-required: true")
+        expect(generated).to_contain("// kpf-operation-required: false")
+
+    it "uses one opaque batch projection rather than inventing a second type schema":
+        step("verify every projected operation uses canonical byte batches")
+        val generated = generate_wit_component(compile_kpf_schema(schema_ab()).unwrap())
+        expect(generated).to_contain("close: func(input: list<u8>) -> result<list<u8>, kpf-error>;")
+        expect(generated).to_contain("variant kpf-error")
+        expect(generated).to_contain("capacity-exceeded")
+
+    it "matches the checked-in generated WIT fixture":
+        step("hash canonical generated output against the fixture evidence")
+        val generated = generate_wit_component(compile_kpf_schema(fixture_schema()).unwrap())
+        expect(sha256_text(generated)).to_equal("952dc4bef4d924937c3c0d37da72f247ccbd293d3ab1cb99383b0ba7e306929a")

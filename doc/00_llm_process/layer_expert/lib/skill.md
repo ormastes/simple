@@ -24,6 +24,14 @@ Maintain process knowledge for the `lib` layer: owned source, architecture links
 
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.
 
+## SciLib Handoff
+
+SciLib's public typed-array and linear-algebra contract is documented in
+`doc/07_guide/lib/scilib/scilib_ndarray_linalg_guide.md`; its active port
+handoff is `doc/03_plan/lib/scilib/ports/scilib_port_remaining_agents.md`.
+Use the feature expert at `doc/00_llm_process/feature_expert/scilib_port/skill.md`
+for layer ownership, wrapper-boundary rules, and scenario evidence.
+
 Template: [layer_skill.md](../../template/layer_skill.md)
 
 ## Session update 2026-09-06 — silent-rewind merges

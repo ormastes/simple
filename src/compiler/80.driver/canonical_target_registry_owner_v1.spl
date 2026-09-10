@@ -1,0 +1,144 @@
+# Repository-owned target-triple registry. Numeric identities are explicit,
+# versioned constants; they are never derived from a text hash.
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.environment_target_identity_mapping_candidate_v1.*
+use compiler.driver.environment_target_identity_mapping_lookup_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_ARCH_X86_64_V1, ENV_ARCH_AARCH64_V1, ENV_ARCH_RISCV64_V1,
+    ENV_ARCH_WASM32_V1}
+
+pub const CANONICAL_TARGET_REGISTRY_GENERATION_V1: u64 = 1u64
+pub const CANONICAL_TARGET_REGISTRY_IDENTITY_V1: text = "simple.target.registry/canonical/v1"
+# Initial registered subset: Linux GNU for x86-64/AArch64/RISC-V 64, plus
+# wasm32-unknown. Other repository targets remain unknown until assigned here.
+pub const CANONICAL_TARGET_REGISTRY_SUPPORTED_PROFILE_COUNT_V1: u32 = 4u32
+
+pub enum CanonicalTargetRegistryErrorV1:
+    InvalidOwner
+    UnknownTargetTriple
+    StaleToken
+
+pub struct CanonicalTargetRegistryTokenV1:
+    registry_identity: text
+    mapping_generation: u64
+    mapping_digest: text
+    token_digest: text
+
+pub struct CanonicalTargetRegistryResolutionV1:
+    token: CanonicalTargetRegistryTokenV1
+    row: EnvironmentTargetIdentityMappingRowV1
+    supplied_target_triple: text
+    canonical_target_triple: text
+    resolution_digest: text
+
+pub class CanonicalTargetRegistryOwnerV1:
+    candidate: EnvironmentTargetIdentityMappingCandidateV1
+
+fn _row_ctr(profile_id: u32, architecture_id: u16, architecture: text,
+    os_id: u32, os: text, abi_id: u32, abi: text, format_id: u32,
+    format: text, pointer_width: u16
+) -> EnvironmentTargetIdentityMappingRowV1:
+    EnvironmentTargetIdentityMappingRowV1(target_profile_id: profile_id,
+        target_triple: architecture + "-unknown-" + os + "-" + abi,
+        architecture_id: architecture_id, architecture: architecture,
+        vendor: "unknown", os_id: os_id, os: os, abi_id: abi_id, abi: abi,
+        object_format_id: format_id, object_format: format,
+        endian_id: 1u16, pointer_width_bits: pointer_width)
+
+fn _candidate_ctr() -> EnvironmentTargetIdentityMappingCandidateV1:
+    environment_target_identity_mapping_candidate_v1(
+        CANONICAL_TARGET_REGISTRY_GENERATION_V1,
+        CANONICAL_TARGET_REGISTRY_IDENTITY_V1, [
+            _row_ctr(1u32, ENV_ARCH_X86_64_V1, "x86_64", 1u32, "linux",
+                1u32, "gnu", 1u32, "elf", 64u16),
+            _row_ctr(2u32, ENV_ARCH_AARCH64_V1, "aarch64", 1u32, "linux",
+                1u32, "gnu", 1u32, "elf", 64u16),
+            _row_ctr(3u32, ENV_ARCH_RISCV64_V1, "riscv64", 1u32, "linux",
+                1u32, "gnu", 1u32, "elf", 64u16),
+            _row_ctr(4u32, ENV_ARCH_WASM32_V1, "wasm32", 2u32, "unknown",
+                2u32, "unknown", 2u32, "wasm", 32u16)
+        ]).unwrap()
+
+fn _token_digest_ctr(candidate: EnvironmentTargetIdentityMappingCandidateV1) -> text:
+    sha256_text("simple/canonical-target-registry-token/v1\n" +
+        candidate.registry_identity + "\n" + candidate.mapping_generation.to_text() +
+        "\n" + candidate.mapping_digest)
+
+fn _resolution_digest_ctr(token: CanonicalTargetRegistryTokenV1,
+    row: EnvironmentTargetIdentityMappingRowV1, supplied: text, canonical: text
+) -> text:
+    sha256_text("simple/canonical-target-registry-resolution/v1\n" +
+        token.token_digest + "\n" + supplied.len().to_text() + ":" + supplied +
+        "\n" + canonical.len().to_text() + ":" + canonical + "\n" +
+        row.target_profile_id.to_text() + ":" + row.architecture_id.to_text() + ":" +
+        row.os_id.to_text() + ":" + row.abi_id.to_text() + ":" +
+        row.object_format_id.to_text() + ":" + row.endian_id.to_text() + ":" +
+        row.pointer_width_bits.to_text())
+
+fn _owner_valid_ctr(owner: CanonicalTargetRegistryOwnerV1) -> bool:
+    val expected = _candidate_ctr()
+    owner.candidate.registry_identity == expected.registry_identity and
+        owner.candidate.mapping_generation == expected.mapping_generation and
+        owner.candidate.mapping_digest == expected.mapping_digest and
+        environment_target_mapping_lookup_profile_id_v1(owner.candidate, 1u32).is_ok()
+
+pub fn canonical_target_registry_owner_v1() -> CanonicalTargetRegistryOwnerV1:
+    CanonicalTargetRegistryOwnerV1(candidate: _candidate_ctr())
+
+pub fn canonical_target_registry_token_v1(owner: CanonicalTargetRegistryOwnerV1
+) -> Result<CanonicalTargetRegistryTokenV1, CanonicalTargetRegistryErrorV1>:
+    if not _owner_valid_ctr(owner): return Err(CanonicalTargetRegistryErrorV1.InvalidOwner)
+    val candidate = owner.candidate
+    Ok(CanonicalTargetRegistryTokenV1(registry_identity: candidate.registry_identity,
+        mapping_generation: candidate.mapping_generation, mapping_digest: candidate.mapping_digest,
+        token_digest: _token_digest_ctr(candidate)))
+
+fn _normalize_ctr(target_triple: text) -> text?:
+    match target_triple:
+        case "x86_64-unknown-linux-gnu" | "amd64-unknown-linux-gnu" | "x86-64-unknown-linux-gnu":
+            "x86_64-unknown-linux-gnu"
+        case "aarch64-unknown-linux-gnu" | "arm64-unknown-linux-gnu":
+            "aarch64-unknown-linux-gnu"
+        case "riscv64-unknown-linux-gnu": "riscv64-unknown-linux-gnu"
+        case "wasm32-unknown-unknown-unknown": "wasm32-unknown-unknown-unknown"
+        case _: nil
+
+pub fn canonical_target_registry_resolve_v1(owner: CanonicalTargetRegistryOwnerV1,
+    target_triple: text
+) -> Result<CanonicalTargetRegistryResolutionV1, CanonicalTargetRegistryErrorV1>:
+    val token_result = canonical_target_registry_token_v1(owner)
+    if token_result.is_err(): return Err(token_result.unwrap_err())
+    val canonical = _normalize_ctr(target_triple)
+    if canonical.is_none(): return Err(CanonicalTargetRegistryErrorV1.UnknownTargetTriple)
+    val row_result = environment_target_mapping_lookup_triple_v1(owner.candidate, canonical.unwrap())
+    if row_result.is_err(): return Err(CanonicalTargetRegistryErrorV1.UnknownTargetTriple)
+    val token = token_result.unwrap()
+    val row = row_result.unwrap()
+    Ok(CanonicalTargetRegistryResolutionV1(token: token, row: row,
+        supplied_target_triple: target_triple, canonical_target_triple: canonical.unwrap(),
+        resolution_digest: _resolution_digest_ctr(token, row, target_triple, canonical.unwrap())))
+
+pub fn canonical_target_registry_token_live_v1(owner: CanonicalTargetRegistryOwnerV1,
+    token: CanonicalTargetRegistryTokenV1
+) -> Result<(), CanonicalTargetRegistryErrorV1>:
+    val current = canonical_target_registry_token_v1(owner)
+    if current.is_err(): return Err(current.unwrap_err())
+    if current.unwrap() != token: return Err(CanonicalTargetRegistryErrorV1.StaleToken)
+    Ok(())
+
+pub fn canonical_target_registry_resolution_live_v1(owner: CanonicalTargetRegistryOwnerV1,
+    resolution: CanonicalTargetRegistryResolutionV1
+) -> Result<(), CanonicalTargetRegistryErrorV1>:
+    if canonical_target_registry_token_live_v1(owner, resolution.token).is_err():
+        return Err(CanonicalTargetRegistryErrorV1.StaleToken)
+    val canonical = _normalize_ctr(resolution.supplied_target_triple)
+    if canonical.is_none() or canonical.unwrap() != resolution.canonical_target_triple:
+        return Err(CanonicalTargetRegistryErrorV1.StaleToken)
+    val current_row = environment_target_mapping_lookup_triple_v1(
+        owner.candidate, resolution.canonical_target_triple)
+    if current_row.is_err() or current_row.unwrap() != resolution.row:
+        return Err(CanonicalTargetRegistryErrorV1.StaleToken)
+    if resolution.resolution_digest != _resolution_digest_ctr(resolution.token,
+        resolution.row, resolution.supplied_target_triple, resolution.canonical_target_triple):
+        return Err(CanonicalTargetRegistryErrorV1.StaleToken)
+    Ok(())

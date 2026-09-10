@@ -369,6 +369,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_file_view.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
@@ -475,6 +476,19 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // see the TU header; behavioural tests in
         // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
+        // Backend-plugin transport (spl_backend_plugin_run_v1), backing
+        // compiler.backend.backend_plugin.transport. Same never-an-archive-member
+        // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
+        // is defined in src/runtime/runtime_backend_plugin.c and declared in
+        // runtime.h, but this list never carried the TU, so a core-lane native
+        // link of any entry whose closure reaches the backend-plugin transport
+        // left it undefined. Surfaced by the Stage4 compiler DRIVER entry on the
+        // dynamic-runtime lane, where it was the ONLY unresolved symbol left
+        // after the shared runtime and the core-C supplement resolved everything
+        // else. Measured before adding: the TU defines exactly one global symbol
+        // and has ZERO overlap with the 1,302 symbols defined by the other
+        // members of this list.
+        "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
@@ -496,6 +510,18 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
+    } else {
+        // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
+        // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
+        // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
+        // lane (this branch, include_stage4_hosted == false) needs these: the
+        // real symbols are defined in Rust
+        // (compiler/src/codegen/cranelift_sffi.rs) and already exported by
+        // libsimple_compiler.so / native_all, which is what
+        // build_stage4_c_runtime_library's lane links. Adding them there too
+        // would be an immediate "symbol is already defined" break -- keep
+        // this in the include_stage4_hosted == false arm only.
+        runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
@@ -1282,6 +1308,18 @@ const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
 
 const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
 
+/// Undefined symbols a provider MAY carry without being required to.
+///
+/// `_tlv_bootstrap` is emitted by clang into any Mach-O object that declares a
+/// thread-local — `runtime_timestamp.c:15` defines `RT_TIME_THREAD_LOCAL` as
+/// `_Thread_local`, so every macOS build of that provider references it. It is
+/// resolved by dyld/libSystem, never by us. It cannot appear in an ELF object,
+/// so permitting it unconditionally weakens nothing on Linux while unblocking
+/// the Stage-4 link on Apple targets. Membership here only removes a symbol
+/// from `unexpected_undefined`; it is never treated as required, so a provider
+/// that does not reference it still validates.
+const STAGE4_C_PERMITTED_UNDEFINED: &[&str] = &["_tlv_bootstrap"];
+
 const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
     // NUL-terminating copies (commit 8d04ee87582) allocate with malloc/free and
     // need the string length; sqlite reads past the end without them.
@@ -1384,6 +1422,7 @@ fn validate_stage4_cli_c_provider_archive(
     let unexpected_undefined: Vec<&str> = actual_undefined
         .difference(&expected_undefined)
         .map(String::as_str)
+        .filter(|symbol| !STAGE4_C_PERMITTED_UNDEFINED.contains(symbol))
         .collect();
     if !missing.is_empty()
         || !unexpected.is_empty()
@@ -1647,11 +1686,16 @@ fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_
             .arg("-Wl,-undefined,error")
             .arg(format!("-Wl,-force_load,{}", archive.display()));
         if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
-            // These two ABI names are deliberately owned by the adjacent
+            // These three ABI names are deliberately owned by the adjacent
             // core-C capsule; every remaining undefined must resolve through
             // the macOS SDK's SQLite/System libraries in this strict probe.
+            // The set must stay in step with STAGE4_C_SQLITE_UNDEFINED and with
+            // validate_stage4_system_library_ownership, which both already list
+            // all three. `_rt_string_len` was missing here, so `_borrow_string`
+            // in runtime_sqlite.o failed this probe on every macOS Stage-4 link.
             command
                 .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_len")
                 .arg("-Wl,-U,_rt_string_new")
                 .arg("-lsqlite3");
         }
@@ -1951,6 +1995,7 @@ fn project_stage4_archive_closure(
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
     let localized_object = temp_dir.join(format!("{stem}_local.o"));
     let localize_path = temp_dir.join(format!("{stem}_localize.syms"));
+    let weaken_path = temp_dir.join(format!("{stem}_weaken.syms"));
     if inputs.is_empty() {
         return Err("Stage4 archive projection requires at least one input".to_string());
     }
@@ -2105,11 +2150,15 @@ fn project_stage4_archive_closure(
             // leaves the final link undefined (observed run 9, 2026-07-24).
             .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
             // Allowed-external runtime symbols are OWNED by the outer link (the
-            // Rust runtime's rt_heap_* accounting). The core-C archive ships
-            // WEAK fallbacks for them in the same object as rt_mem_snapshot_*,
-            // so the closure carries them; localizing a weak fallback would bind
-            // the capsule to a private copy the strong owner can never override.
-            // Keep them global; `verify` below insists they stay weak.
+            // Rust runtime's rt_heap_* accounting, or -- for the Stage4 Rust
+            // runtime projection -- every rt_/spl_ symbol the core-C providers
+            // also define). The closure carries them because `ld -r` cannot
+            // drop a symbol from an object it otherwise needs (Rust's codegen
+            // units bundle many functions per .o, so pulling in one requested
+            // root can pull its whole CGU's exports along as passengers, e.g.
+            // rt_array_get/rt_string_concat riding in with unrelated roots on
+            // aarch64-apple-darwin, 2026-09-07). Keep them global rather than
+            // localizing a copy the strong owner could never override.
             .filter(|raw| !allowed_external.contains(canonical_archive_symbol(raw)))
             .map(String::as_str)
             .collect::<Vec<_>>()
@@ -2124,9 +2173,41 @@ fn project_stage4_archive_closure(
         )
         .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
+        // Allowed-external symbols that are kept global (above) must yield to
+        // the owner at the final link, i.e. be WEAK, not strong. The core-C
+        // archive already ships its allowed-external fallbacks
+        // (rt_heap_live_bytes/rt_heap_peak_bytes) as source-level
+        // `__attribute__((weak))`, so weakening them again here is a no-op.
+        // The Rust runtime crate's rt_/spl_ C-ABI exports (rt_array_get,
+        // rt_string_concat, ...) have no such attribute available on stable
+        // Rust -- `#[no_mangle] pub extern "C" fn` is always STRONG -- so
+        // without this step every one of them that rides along in a closure
+        // (see above) trips "defines owner-provided runtime symbols STRONGLY"
+        // even though nothing about the source is wrong; the property this
+        // projection promises (owner-overridable) was previously only
+        // ASSUMED true of the input archive instead of being enforced by the
+        // tool that makes the promise. `--weaken-symbols` makes it true
+        // unconditionally, and the STRONGLY check below still verifies it.
+        let weaken_text = closure_defined
+            .keys()
+            .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &weaken_path,
+            if weaken_text.is_empty() {
+                String::new()
+            } else {
+                weaken_text + "\n"
+            },
+        )
+        .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
+
         let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg(format!("--weaken-symbols={}", weaken_path.display()))
             .arg("--remove-section=.init_array")
             .arg("--remove-section=.init_array.*")
             .arg("--remove-section=.ctors")

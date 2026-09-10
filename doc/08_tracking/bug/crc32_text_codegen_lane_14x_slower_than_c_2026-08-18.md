@@ -45,3 +45,45 @@ jit_module_val_array_indexing_15x_slow_2026-08-18.md):
 
 Both lanes re-verified after the fix: crosslang differential 5/5;
 interpreter perf spec 1/1 (copy cost negligible there, as predicted).
+
+## RE-MEASURED 2026-09-06 (aarch64) — this finding is CLOSED at 1.2x
+
+**Host:** aarch64 Linux, 20 CPUs, shared/loaded (a full bootstrap plus three
+other agent sessions concurrent). **Binary:** the Rust bootstrap seed at
+`bin/release/aarch64-unknown-linux-gnu/simple`, 50,093,192 bytes, sha256
+prefix `3d120a6f9ab5704b` — it prints the `bootstrap seed only` banner, so
+this is the same binary CLASS as the original x86_64 measurement, not a
+self-hosted build. **Method:** identical in shape to the record above —
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 bin/simple run`, 500 iters,
+body_len 2090, output equality (`crc32_text(body) == rt_crc32_text(body)`)
+asserted in-run BEFORE any timing, exit 0 with no strict-mode refusal.
+Harness: `bench_crc32_codegen.spl` (scratchpad, not committed), a `run`-lane
+twin of the committed interpreter-lane spec
+`test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl`.
+
+```
+lane=codegen iters=500 body_len=2090
+c_us      = 5695 / 5681 / 5686      (three consecutive runs)
+simple_us = 7030 / 6978 / 6996
+ratio     = 1.23x / 1.23x / 1.23x
+```
+
+**The 14.4x is gone and the record above was stale.** The two fixes it
+already describes — the `rt_string_bytes` bulk-fill and the module-val
+initializer fix that let `gzip/crc.spl` drop its `_table_copy()` mitigation
+(removed 2026-08-20; the file's own comment records this) — both landed and
+are in the deployed seed. Nothing further was needed for this kernel: the
+per-byte CRC loop is now within noise of a C extern call, and `c_us` here is
+extern-call overhead, so 1.23x is effectively parity for this shape.
+
+Re-measured after the 2026-09-06 runtime changes described in the sibling
+record (`codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md`):
+`simple_us = 6819`, ratio 1.20x — no regression, no material gain, as
+expected since `crc32_text` neither joins nor converts bytes to text.
+
+**Status change: OPEN -> RESOLVED for the codegen lane.** The root-cause
+candidate list above (bounds checks per byte, boxed i64 arithmetic, no
+register promotion) was NOT what the gap turned out to be, and none of those
+were fixed — measured directly on this host, a `[u8]` indexed-store loop runs
+at ~3 ns/byte and a bare `push` loop at ~2 ns/byte, i.e. the JIT's scalar
+array code is already fine. Do not re-open this against those hypotheses.

@@ -67,7 +67,6 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
-pub mod secure_staging;
 pub mod io_file;
 pub mod terminal;
 pub mod torch;
@@ -389,6 +388,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
     insert_simple!("rt_heap_live_bytes", memory::rt_heap_live_bytes);
+    insert_simple!("rt_heap_peak_bytes", memory::rt_heap_peak_bytes);
+    insert_simple!("rt_heap_alloc_count", memory::rt_heap_alloc_count);
+    insert_simple!("rt_heap_free_count", memory::rt_heap_free_count);
     insert_simple!("rt_heap_aux_live_bytes", memory::rt_heap_aux_live_bytes);
     insert_simple!("rt_heap_array_capacity_bytes", memory::rt_heap_array_capacity_bytes);
     insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);
@@ -456,6 +458,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_stdout_is_tty", terminal::rt_terminal_stdout_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
+    // See doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md —
+    // `rt_atexit_install` was the one extern in terminal.spl never bridged here;
+    // `rt_signal_install`/`rt_signal_check` (used by the very next line in
+    // `terminal_install_recovery`) were found missing during the same fix.
+    insert_simple!("rt_atexit_install", terminal::rt_atexit_install);
+    insert_simple!("rt_signal_install", terminal::rt_signal_install);
+    insert_simple!("rt_signal_check", terminal::rt_signal_check);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
@@ -1316,6 +1325,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
+    insert_simple!("rt_env_vars", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);
     insert_simple!("rt_env_define_var", env_sffi::rt_env_define);
     insert_simple!("rt_env_exists", system::rt_env_exists);
@@ -1428,6 +1438,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_win32_dib_read_pixel", win32_hosted::rt_win32_dib_read_pixel);
     insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
+    insert_simple!("rt_secure_temp_dir", file_io::rt_secure_temp_dir);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
     insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
@@ -1438,13 +1449,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
-    // Secure staging: both call the C in src/runtime/runtime_secure_staging.c
-    // that the native lane calls, so the interpreter cannot drift from it.
-    insert_simple!("rt_secure_temp_dir", secure_staging::rt_secure_temp_dir);
-    insert_simple!(
-        "rt_file_publish_noreplace",
-        secure_staging::rt_file_publish_noreplace
-    );
+    insert_simple!("rt_file_publish_noreplace", file_io::rt_file_publish_noreplace);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);
@@ -1819,6 +1824,53 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_run_owned_observed_bounded_value",
         system::rt_process_run_owned_observed_bounded_value
     );
+    // The native V3 adapter keeps RtOwnedProcessTokenV2 private.  Register
+    // every name for deterministic interpreter resolution, but fail closed
+    // instead of fabricating an opaque lease or receipt projection.
+    insert_simple!(
+        "rt_process_owned_v3_start_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_poll_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_input_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_cancel_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_result_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_collect_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_release_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pin_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_close_pinned_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pinned_executable_sha256_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_start_pinned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real
@@ -2182,6 +2234,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
+    insert_simple!("rt_cpu_affinity_avx2_acquire", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_generation", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_thread_id", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
+    insert_simple!("rt_cpu_affinity_avx2_cpu", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
+    insert_simple!("rt_cpu_affinity_avx2_validate", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_release", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_call_enter", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_cpu_affinity_avx2_call_exit", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
+    insert_simple!("rt_parser_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
+    insert_simple!("rt_parser_lexical_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
     insert_simple!("spl_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("spl_thread_yield", concurrency::rt_thread_yield);
     insert_simple!("spl_mutex_create", concurrency::spl_mutex_create);
@@ -2814,10 +2876,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // PTY (pseudo-terminal) operations
     insert_simple!("rt_pty_open", pty::rt_pty_open);
     insert_simple!("rt_pty_spawn", pty::rt_pty_spawn);
-    insert_simple!("rt_pty_write", pty::rt_pty_write);
-    insert_simple!("rt_pty_read", pty::rt_pty_read);
-    insert_simple!("rt_pty_close", pty::rt_pty_close);
-    insert_simple!("rt_pty_is_running", pty::rt_pty_is_running);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);
@@ -3265,6 +3323,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn env_snapshot_aliases_have_identical_typed_results_and_arity() {
+        let all = EXTERN_DISPATCH.get("rt_env_all").expect("registered rt_env_all");
+        let vars = EXTERN_DISPATCH.get("rt_env_vars").expect("registered rt_env_vars");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let all_value = all(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .expect("rt_env_all snapshot");
+        let vars_value = vars(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+            .expect("rt_env_vars snapshot");
+        assert_eq!(format!("{all_value:?}"), format!("{vars_value:?}"));
+
+        for handler in [all, vars] {
+            assert!(handler(
+                &[Value::Int(1)],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn loader_memory_extern_family_includes_page_size_alignment_query() {
         for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
             assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
@@ -3294,7 +3381,10 @@ mod tests {
         .expect("managed array shallow-free dispatch should succeed");
 
         assert_eq!(result, Value::Nil);
-        assert_eq!(managed.as_array().map(|items| items.len()), Some(2));
+        // `Value` has never exposed `as_array` -- the call that made 398665ef526
+        // delete this test instead of fixing it. Assert the same property
+        // directly: the managed array must still carry both original elements.
+        assert_eq!(managed, Value::array(vec![Value::Int(11), Value::Int(22)]));
     }
 
     #[test]

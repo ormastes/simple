@@ -1,0 +1,99 @@
+# Codegen (Cranelift JIT) lane perf fixture for base64url encode+decode.
+#
+# NOT a `bin/simple test` spec: `test` hard-defaults to the tree-walk
+# interpreter, and this fixture exists precisely to measure the CODEGEN lane.
+# It is driven by `scripts/check/check-base64url-codegen-lane-perf.shs`, which
+# runs it under `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 bin/simple run`
+# (strict mode turns any silent interpreter fallback into a hard error, so a
+# number printed here cannot be an interpreter number in disguise).
+#
+# Guards the fix in doc/08_tracking/bug/
+# codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md: bulk text
+# builtins used to do a per-element boxed round trip, which put this kernel at
+# 420x the C oracle. Correctness first — the KAT below compares every vector
+# against the C oracle for BOTH encode and decode and refuses to print a
+# timing line if any vector disagrees, so a fast wrong answer fails the gate
+# rather than passing it.
+
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode}
+use std.io_runtime.{time_now_unix_micros}
+
+extern fn rt_base64url_encode(input: text, len: i64) -> text
+extern fn rt_base64url_decode(encoded: text) -> text
+
+val ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+fn make_corpus(n: i64) -> [text]:
+    """Deterministic LCG corpus: `n` printable-ASCII vectors, lengths 0..1999.
+
+    Pinned so a before/after comparison is over identical work — the earlier
+    A/B in this bug's history was invalidated by comparing two different
+    corpora."""
+    var out: [text] = []
+    var seed = 12345
+    var k = 0
+    while k < n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        val ln = seed % 2000
+        var s = ""
+        var j = 0
+        while j < ln:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            s = s + ALPHA.char_at(seed % 62)
+            j = j + 1
+        out.push(s)
+        k = k + 1
+    return out
+
+fn main():
+    val corpus = make_corpus(100)
+
+    # KAT BEFORE TIMING. Encode must match the C oracle byte for byte, and the
+    # pure-Simple decode must round-trip the original back.
+    var bad = 0
+    var i = 0
+    while i < corpus.len():
+        val v = corpus[i]
+        val se = base64url_encode(v)
+        val ce = rt_base64url_encode(v, v.bytes().len())
+        if se != ce:
+            bad = bad + 1
+        else:
+            if base64url_decode(se) != v:
+                bad = bad + 1
+        i = i + 1
+    if bad != 0:
+        print("KAT FAIL: {bad}/{corpus.len()} vectors disagree with the C oracle")
+        return
+    print("KAT OK: {corpus.len()}/{corpus.len()} vectors match (encode+decode)")
+
+    val reps = 50
+    var acc = 0
+
+    val t0 = time_now_unix_micros()
+    var r = 0
+    while r < reps:
+        var q = 0
+        while q < corpus.len():
+            val cv = corpus[q]
+            val e = rt_base64url_encode(cv, cv.bytes().len())
+            acc = acc + rt_base64url_decode(e).len()
+            q = q + 1
+        r = r + 1
+    val c_us = time_now_unix_micros() - t0
+
+    val t2 = time_now_unix_micros()
+    var r2 = 0
+    while r2 < reps:
+        var q2 = 0
+        while q2 < corpus.len():
+            val e2 = base64url_encode(corpus[q2])
+            acc = acc + base64url_decode(e2).len()
+            q2 = q2 + 1
+        r2 = r2 + 1
+    val s_us = time_now_unix_micros() - t2
+
+    # keep acc observable so neither loop can be elided
+    if acc == -1:
+        print("impossible")
+    print("perf_evidence: lane=codegen kernel=base64url reps={reps} vectors={corpus.len()} c_us={c_us} simple_us={s_us}")

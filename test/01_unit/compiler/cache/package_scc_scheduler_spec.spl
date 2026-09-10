@@ -1,0 +1,158 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1, PackageTldrHeaderV1
+}
+use compiler.driver.cache.package_scc_scheduler.{
+    PackageCompileResultV1, package_scc_consume_index_schedule_v1,
+    package_scc_publication_batch_v1, package_scc_schedule_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn scheduler_variant() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1(
+        target_triple: "aarch64-apple-darwin-macho",
+        backend: "cranelift",
+        features: ["atomic-apk"],
+        build_mode: "debug",
+        language_abi: "v1",
+        normalized_options: ["opt=0"],
+        environment_inputs: ["SIMPLE_LIB=src"])
+
+fn scheduler_header(
+    name: text, imports: [text], dependents: [text]
+) -> PackageTldrHeaderV1:
+    PackageTldrHeaderV1(
+        schema_version: 1,
+        producer_digest: sha256_text("producer"),
+        package_identity: name,
+        module_identity: name,
+        source_identity: "src/{name}.spl",
+        variant: scheduler_variant(),
+        source_digest: sha256_text("source:{name}"),
+        source_witness_digest: sha256_text("witness:{name}"),
+        smf_digest: sha256_text("smf:{name}"),
+        smf_sections: [
+            PackageSmfSectionV1("exports", 0, 32, sha256_text("exports:{name}"))
+        ],
+        export_digest: sha256_text("export:{name}"),
+        abi_digest: sha256_text("abi:{name}"),
+        initializer_digest: sha256_text("init:{name}"),
+        provider_digest: sha256_text("provider:{name}"),
+        generated_source_digest: sha256_text("generated:{name}"),
+        reverse_projection_digest: sha256_text("reverse:{name}"),
+        direct_imports: imports,
+        reverse_dependents: dependents,
+        scc_identity: "declared:{name}",
+        scc_members: [name],
+        interface_archive_digest: sha256_text("interface:{name}"),
+        action_archive_digest: sha256_text("action:{name}"))
+
+fn scheduler_graph() -> [PackageTldrHeaderV1]:
+    [
+        scheduler_header("a", [], ["b", "c"]),
+        scheduler_header("b", ["a", "c"], ["c"]),
+        scheduler_header("c", ["a", "b"], ["d"]),
+        scheduler_header("d", ["c"], [])
+    ]
+
+fn index_entry(
+    package_identity: text, module_identity: text, scc_identity: text,
+    imports: [text], dependents: [text]
+) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_identity: package_identity,
+        module_identity: module_identity,
+        source_identity: "src/{module_identity}.spl",
+        source_digest: sha256_text("source:{module_identity}"),
+        smf_metadata_digest: sha256_text("smf:{module_identity}"),
+        export_digest: sha256_text("export:{module_identity}"),
+        abi_digest: sha256_text("abi:{module_identity}"),
+        initializer_digest: sha256_text("init:{module_identity}"),
+        provider_digest: sha256_text("provider:{module_identity}"),
+        action_digest: sha256_text("action:{module_identity}"),
+        manifest_digest: sha256_text("manifest:{module_identity}"),
+        scc_identity: scc_identity,
+        direct_imports: imports,
+        reverse_dependents: dependents)
+
+fn indexed_schedule_generation() -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        schema_version: 1,
+        producer_digest: sha256_text("producer"),
+        root_generation: "root-v1",
+        scv_revision_id: "revision-v1",
+        scv_commit_id: "commit-v1",
+        scv_tree_id: "tree-v1",
+        inventory_digest: sha256_text("inventory"),
+        entries: [
+            index_entry("a", "a", "scc-a", [], ["b"]),
+            index_entry("b", "b", "scc-bc", ["a", "c"], ["c"]),
+            index_entry("c", "c", "scc-bc", ["b"], ["d"]),
+            index_entry("d", "d", "scc-d", ["c"], [])
+        ])
+
+describe "deterministic SCC package scheduling":
+    it "consumes the production package-index schedule as SCC waves":
+        val consumed = package_scc_consume_index_schedule_v1(
+            indexed_schedule_generation(), ["d", "c", "b", "a"])
+        expect(consumed.valid).to_equal(true)
+        expect(consumed.package_order).to_equal(["a", "b", "c", "d"])
+        expect(consumed.waves).to_equal([["a"], ["b", "c"], ["d"]])
+
+    it "propagates through reverse dependencies and condenses cycles":
+        val schedule = package_scc_schedule_v1(
+            scheduler_graph(), scheduler_variant(), ["a"])
+        expect(schedule.valid).to_equal(true)
+        expect(schedule.dirty_packages).to_equal(["a", "b", "c", "d"])
+        expect(schedule.groups.len()).to_equal(3)
+        expect(schedule.waves.len()).to_equal(3)
+        expect(schedule.waves[0].groups[0].members).to_equal(["a"])
+        expect(schedule.waves[1].groups[0].members).to_equal(["b", "c"])
+        expect(schedule.waves[2].groups[0].members).to_equal(["d"])
+
+    it "produces identical waves independent of header discovery order":
+        val forward = package_scc_schedule_v1(
+            scheduler_graph(), scheduler_variant(), ["a"])
+        val reverse = package_scc_schedule_v1(
+            [scheduler_graph()[3], scheduler_graph()[2],
+             scheduler_graph()[1], scheduler_graph()[0]],
+            scheduler_variant(), ["a"])
+        expect(reverse.valid).to_equal(true)
+        expect(reverse.waves.len()).to_equal(forward.waves.len())
+        expect(reverse.waves[1].groups[0].identity).to_equal(
+            forward.waves[1].groups[0].identity)
+
+    it "exposes independent SCCs in one parallel-ready wave":
+        val graph = [
+            scheduler_header("a", [], ["c"]),
+            scheduler_header("b", [], ["c"]),
+            scheduler_header("c", ["a", "b"], [])
+        ]
+        val schedule = package_scc_schedule_v1(
+            graph, scheduler_variant(), ["a", "b"])
+        expect(schedule.valid).to_equal(true)
+        expect(schedule.waves[0].groups.len()).to_equal(2)
+        expect(schedule.waves[0].groups[0].members).to_equal(["a"])
+        expect(schedule.waves[0].groups[1].members).to_equal(["b"])
+
+    it "publishes a complete SCC atomically in canonical member order":
+        val schedule = package_scc_schedule_v1(
+            scheduler_graph(), scheduler_variant(), ["b"])
+        val group = schedule.waves[0].groups[0]
+        val b = PackageCompileResultV1(
+            group.identity, "b", sha256_text("key:b"),
+            sha256_text("interface:b"), sha256_text("action:b"), true)
+        val c = PackageCompileResultV1(
+            group.identity, "c", sha256_text("key:c"),
+            sha256_text("interface:c"), sha256_text("action:c"), true)
+        val complete = package_scc_publication_batch_v1(group, [c, b])
+        expect(complete.valid).to_equal(true)
+        expect(complete.ordered_results[0].package_identity).to_equal("b")
+        expect(complete.ordered_results[1].package_identity).to_equal("c")
+
+        val partial = package_scc_publication_batch_v1(group, [b])
+        expect(partial.valid).to_equal(false)
+        expect(partial.reason).to_equal("partial-group-result")

@@ -1,0 +1,94 @@
+#!/bin/sh
+# Codegen (Cranelift JIT) lane perf ratchet for base64url encode+decode.
+#
+# Guards the 2026-09-06 fix recorded in doc/08_tracking/bug/
+# codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md. Before that
+# fix the pure-Simple kernel measured 420x the C oracle on this corpus; after
+# it, 17.6x. The ceiling below sits between the two, far enough under 420 that
+# a return of the per-element-allocation defect is caught, and far enough over
+# 17.6 to survive a loaded shared box.
+#
+# CORRECTNESS FIRST: the fixture asserts a 100-vector KAT against the C oracle
+# for both encode and decode BEFORE it times anything, and prints no timing
+# line at all if any vector disagrees. This script treats a missing KAT line as
+# a hard failure, so a fast wrong answer can never produce a PASS.
+#
+# Verdict is always the LAST line of stdout, per scripts/check convention:
+#   PASS  — <n> vector(s) KAT-verified, ratio ...      exit 0
+#   FAIL  — ...                                        exit 1
+#   ERROR — nothing was checked (<reason>)             exit 2
+# A run that measured nothing is ERROR, never a pass.
+
+set -u
+
+CEILING="${BASE64URL_CODEGEN_RATIO_CEILING:-60}"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+fixture="$repo_root/test/05_perf/lib/base64url_codegen_lane_perf.spl"
+simple="$repo_root/bin/simple"
+
+if [ ! -f "$fixture" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $fixture)"
+    exit 2
+fi
+if [ ! -x "$simple" ]; then
+    echo "ERROR — nothing was checked (no runnable bin/simple at $simple)"
+    exit 2
+fi
+
+out=$(cd "$repo_root" && SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 \
+    "$simple" run "$fixture" 2>&1)
+# Read the status DIRECTLY, never through a pipe: a pipeline's $? is the last
+# command's status and has produced false greens in this repo before.
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked (fixture exited $rc; strict JIT refusal or run failure)"
+    printf '%s\n' "$out" | tail -5 >&2
+    exit 2
+fi
+
+if printf '%s\n' "$out" | grep -q '^KAT FAIL'; then
+    echo "FAIL — $(printf '%s\n' "$out" | grep '^KAT FAIL' | head -1)"
+    exit 1
+fi
+
+kat_line=$(printf '%s\n' "$out" | grep '^KAT OK:' | head -1)
+if [ -z "$kat_line" ]; then
+    echo "ERROR — nothing was checked (no KAT line; output equality was never established)"
+    printf '%s\n' "$out" | tail -5 >&2
+    exit 2
+fi
+
+perf_line=$(printf '%s\n' "$out" | grep '^perf_evidence: ' | head -1)
+if [ -z "$perf_line" ]; then
+    echo "ERROR — nothing was checked (KAT passed but no perf_evidence line)"
+    exit 2
+fi
+
+vectors=$(printf '%s\n' "$perf_line" | sed -n 's/.* vectors=\([0-9][0-9]*\).*/\1/p')
+c_us=$(printf '%s\n' "$perf_line" | sed -n 's/.* c_us=\([0-9][0-9]*\).*/\1/p')
+s_us=$(printf '%s\n' "$perf_line" | sed -n 's/.* simple_us=\([0-9][0-9]*\).*/\1/p')
+
+if [ -z "$vectors" ] || [ -z "$c_us" ] || [ -z "$s_us" ]; then
+    echo "ERROR — nothing was checked (unparseable perf line: $perf_line)"
+    exit 2
+fi
+if [ "$vectors" -le 0 ] || [ "$c_us" -le 0 ] || [ "$s_us" -le 0 ]; then
+    echo "ERROR — nothing was checked (vectors=$vectors c_us=$c_us simple_us=$s_us; a zero means no work was measured)"
+    exit 2
+fi
+
+# Integer ratio scaled by 10 so the verdict can report one decimal place.
+ratio10=$(( (s_us * 10) / c_us ))
+ratio_whole=$(( ratio10 / 10 ))
+ratio_frac=$(( ratio10 % 10 ))
+
+if [ "$ratio_whole" -ge "$CEILING" ]; then
+    echo "FAIL — $vectors vector(s) KAT-verified, ratio ${ratio_whole}.${ratio_frac}x exceeds ceiling ${CEILING}x (c_us=$c_us simple_us=$s_us)"
+    exit 1
+fi
+
+echo "PASS — $vectors vector(s) KAT-verified, ratio ${ratio_whole}.${ratio_frac}x under ceiling ${CEILING}x (c_us=$c_us simple_us=$s_us)"
+exit 0

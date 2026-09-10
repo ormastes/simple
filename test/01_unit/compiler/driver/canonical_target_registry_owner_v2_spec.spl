@@ -1,0 +1,79 @@
+use std.spec.*
+use compiler.driver.canonical_target_registry_owner_v2.*
+
+describe "canonical target registry owner V2":
+    it "binds aliases into owner-issued resolution and use tokens":
+        val owner = canonical_target_registry_owner_v2(101u64).unwrap()
+        val resolution = canonical_target_registry_resolve_v2(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        val use_token = canonical_target_registry_acquire_use_v2(owner, resolution).unwrap()
+        val projected = canonical_target_registry_project_v2(owner, use_token).unwrap()
+        expect(projected.target_profile_id).to_equal(1u32)
+        expect(projected.supplied_target_triple).to_equal("amd64-unknown-linux-gnu")
+        expect(projected.canonical_target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(canonical_target_registry_release_v2(owner, use_token).is_ok()).to_be(true)
+
+    it "rejects cross-owner tokens and duplicate release":
+        val first = canonical_target_registry_owner_v2(201u64).unwrap()
+        val second = canonical_target_registry_owner_v2(202u64).unwrap()
+        val resolution = canonical_target_registry_resolve_v2(first,
+            "x86_64-unknown-linux-gnu").unwrap()
+        expect(canonical_target_registry_acquire_use_v2(second, resolution)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.CrossOwner))
+        val use_token = canonical_target_registry_acquire_use_v2(first, resolution).unwrap()
+        expect(canonical_target_registry_release_v2(first, use_token).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(first, use_token)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.DuplicateRelease))
+
+    it "drains pinned generations and retires them after final release":
+        val owner = canonical_target_registry_owner_v2(301u64).unwrap()
+        val old = canonical_target_registry_resolve_v2(owner,
+            "arm64-unknown-linux-gnu").unwrap()
+        val use_token = canonical_target_registry_acquire_use_v2(owner, old).unwrap()
+        expect(canonical_target_registry_replace_v2(owner, owner.candidate,
+            owner.aliases).is_ok()).to_be(true)
+        expect(canonical_target_registry_resolution_state_v2(owner, old).unwrap()).to_equal(
+            CanonicalTargetRegistryStateV2.Draining)
+        expect(canonical_target_registry_acquire_use_v2(owner, old)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.Draining))
+        expect(canonical_target_registry_project_v2(owner, use_token).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(owner, use_token).is_ok()).to_be(true)
+        expect(canonical_target_registry_resolution_state_v2(owner, old).unwrap()).to_equal(
+            CanonicalTargetRegistryStateV2.Retired)
+
+    it "prevents ABA substitution and fails closed on unknown targets":
+        val owner = canonical_target_registry_owner_v2(401u64).unwrap()
+        val old = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        expect(canonical_target_registry_replace_v2(owner, owner.candidate,
+            owner.aliases).is_ok()).to_be(true)
+        val current = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        expect(current.owner_generation).to_equal(2u64)
+        expect(current.serial == old.serial).to_be(false)
+        expect(current.binding_digest == old.binding_digest).to_be(false)
+        expect(canonical_target_registry_acquire_use_v2(owner, old)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.Draining))
+        expect(canonical_target_registry_resolve_v2(owner,
+            "x86_64-pc-windows-msvc")).to_equal(
+                Err(CanonicalTargetRegistryErrorV2.UnknownTargetTriple))
+
+    it "fails closed before serial or generation overflow":
+        var owner = canonical_target_registry_owner_v2(501u64).unwrap()
+        owner.next_serial = 0xffffffffffffffffu64
+        expect(canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu")).to_equal(
+                Err(CanonicalTargetRegistryErrorV2.SerialOverflow))
+        owner = canonical_target_registry_owner_generation_v2(
+            502u64, 0xffffffffffffffffu64).unwrap()
+        expect(canonical_target_registry_replace_v2(owner, owner.candidate,
+            owner.aliases)).to_equal(Err(CanonicalTargetRegistryErrorV2.GenerationOverflow))
+
+    it "bounds unresolved resolution records":
+        val owner = canonical_target_registry_owner_v2(601u64).unwrap()
+        for i in 0..CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2:
+            expect(canonical_target_registry_resolve_v2(owner,
+                "x86_64-unknown-linux-gnu").is_ok()).to_be(true)
+        expect(canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu")).to_equal(
+                Err(CanonicalTargetRegistryErrorV2.CapacityExceeded))

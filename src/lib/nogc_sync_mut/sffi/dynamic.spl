@@ -47,10 +47,53 @@ extern fn rt_file_hash_sha256(path: text) -> text
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 @unsafe(reason: "checked integer-only foreign call ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
+@unsafe(reason: "allocation-free checked integer status/out ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
 
 @unsafe(reason: "minimal raw dynamic FFI scope; caller validates status and result shape", capabilities: [ffi])
 fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
     spl_wffi_call_i64_checked(fptr, args, args.len())
+
+# Does this lane actually deliver the `*mut i64` writeback?
+#
+# A null function pointer with a valid out slot is answered
+# SPL_WFFI_NULL_FUNCTION (2) by every provider that honours the contract: both
+# the C provider and the Rust provider zero the out slot and only then reject
+# the pointer, and neither enters foreign code, so the probe has no side
+# effects and costs no allocation. A lane that cannot carry the out parameter
+# rejects the argument shape first and answers SPL_WFFI_INVALID_ARGUMENT (1) —
+# which is exactly what the seed interpreter lane does today, the same
+# writeback loss `_sffi_dlopen_checked` already works around. Measured
+# 2026-09-06 on the aarch64 seed: `spl_dlsym_checked` reports status 1 with the
+# out slot untouched, and so does `spl_wffi_try_call_i64_out`.
+@unsafe(reason: "probes the raw status/out ABI without entering foreign code", capabilities: [ffi, raw_ptr])
+fn _sffi_i64_out_transport_honoured() -> bool:
+    var probe: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(0, [], 0, &mut probe)
+    status == 2
+
+# Canonical checked integer dispatch. The scalar status/out transport allocates
+# nothing, so the cached hot path performs no allocation and needs no release.
+# Only when the out transport is not honoured by this lane does the call fall
+# back to the allocating `[status, value]` transport, which stays the public
+# API. A valid foreign zero remains distinct from a bridge failure either way.
+@unsafe(reason: "checked transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
+fn _sffi_call_i64_checked(fptr: i64, args: [i64], symbol: text) -> Result<i64, text>:
+    var value: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), &mut value)
+    if status == 0:
+        return Ok(value)
+    if _sffi_i64_out_transport_honoured():
+        return Err("E-SFFI-014: foreign bridge rejected {symbol} with status {status}")
+    val result = _sffi_call_i64_raw_checked(fptr, args)
+    if result.len() != 2:
+        return Err("E-SFFI-017: corrupt checked transport result: {symbol}")
+    val fallback_status = result[0]
+    if fallback_status == 0:
+        return Ok(result[1])
+    Err("E-SFFI-014: foreign bridge rejected {symbol} with status {fallback_status}")
 
 @unsafe(reason: "checked loader returns an unverified raw provider handle", capabilities: [ffi, raw_ptr])
 fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
@@ -115,13 +158,7 @@ impl DynI64FnSlot:
     fn call_checked(args: [i64]) -> Result<i64, text>:
         if args.len() != self.arity:
             return Err("E-SFFI-003: {self.symbol} expects {self.arity} i64 arguments, got {args.len()}")
-        val result = _sffi_call_i64_raw_checked(self.fptr, args)
-        if result.len() != 2:
-            return Err("E-SFFI-017: corrupt checked transport result: {self.symbol}")
-        val status = result[0]
-        if status == 0:
-            return Ok(result[1])
-        Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
+        _sffi_call_i64_checked(self.fptr, args, self.symbol)
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use std.io_runtime.{env_get, file_exists}
@@ -343,8 +380,9 @@ impl DynLib:
         val nargs = args.len()
         spl_wffi_call_i64(fptr, args, nargs)
 
-    # Canonical checked dispatch. The raw transport returns [status, value]
-    # so a valid foreign zero remains distinct from a bridge failure.
+    # Canonical checked dispatch, delegated to the allocation-free scalar
+    # status/out transport. A valid foreign zero stays distinct from a bridge
+    # failure.
     @unsafe(reason: "checked transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
         if self.handle <= 0:
@@ -352,13 +390,7 @@ impl DynLib:
         val fptr = match _sffi_dlsym_checked(self.handle, name):
             case Ok(symbol): symbol
             case Err(error): return Err(error)
-        val result = _sffi_call_i64_raw_checked(fptr, args)
-        if result.len() != 2:
-            return Err("E-SFFI-017: corrupt checked transport result: {name}")
-        val status = result[0]
-        if status == 0:
-            return Ok(result[1])
-        Err("E-SFFI-014: foreign bridge rejected {name} with status {status}")
+        _sffi_call_i64_checked(fptr, args, name)
 
     # Resolve one exact integer-only ABI slot. Callers cache the returned slot
     # and avoid dlsym/string lookup on every invocation.
@@ -574,5 +606,5 @@ fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
     loader.call_checked(lib_path, func_name, args)
 
 export spl_dlopen, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked, spl_dlclose
-export spl_wffi_call_i64, spl_wffi_call_i64_checked
+export spl_wffi_call_i64, spl_wffi_call_i64_checked, spl_wffi_try_call_i64_out
 export DynI64FnSlot, DynLib, DynLoader

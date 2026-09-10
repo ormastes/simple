@@ -1,0 +1,71 @@
+# @gc — pure activation policy for Slang's optional physical-page backend.
+#
+# Negotiating the ABI is necessary but not sufficient. Physical pages become
+# the execution mode only after model support, pool creation, and owner
+# dispatch are all proven. Until then inference stays on the snapshot path.
+
+use std.gc_async_mut.slang.model_executor.backend.{PhysicalPageProviderStatus}
+
+enum PhysicalModelSupport:
+    Unknown
+    Unsupported
+    Supported
+
+enum PhysicalPageActivation:
+    ProviderUnavailable
+    ModelSupportUnknown
+    ModelUnsupported
+    PoolInactive
+    OwnerDisconnected
+    Active
+
+enum KvExecutionMode:
+    Unavailable
+    Snapshot
+    PhysicalPages
+
+fn physical_page_activation(provider: PhysicalPageProviderStatus,
+                            model_support: PhysicalModelSupport,
+                            pool_handle: i64,
+                            owner_connected: bool) -> PhysicalPageActivation:
+    if provider != PhysicalPageProviderStatus.Ready:
+        return PhysicalPageActivation.ProviderUnavailable
+    match model_support:
+        PhysicalModelSupport.Unknown:
+            return PhysicalPageActivation.ModelSupportUnknown
+        PhysicalModelSupport.Unsupported:
+            return PhysicalPageActivation.ModelUnsupported
+        PhysicalModelSupport.Supported:
+            ()
+    if pool_handle <= 0:
+        return PhysicalPageActivation.PoolInactive
+    if not owner_connected:
+        return PhysicalPageActivation.OwnerDisconnected
+    PhysicalPageActivation.Active
+
+fn kv_execution_mode(context_ready: bool,
+                     activation: PhysicalPageActivation) -> KvExecutionMode:
+    if not context_ready:
+        return KvExecutionMode.Unavailable
+    if activation == PhysicalPageActivation.Active:
+        return KvExecutionMode.PhysicalPages
+    KvExecutionMode.Snapshot
+
+fn kv_execution_mode_text(mode: KvExecutionMode) -> text:
+    match mode:
+        KvExecutionMode.Unavailable: "unavailable"
+        KvExecutionMode.Snapshot: "snapshot"
+        KvExecutionMode.PhysicalPages: "physical_pages"
+
+fn physical_page_activation_text(activation: PhysicalPageActivation) -> text:
+    match activation:
+        PhysicalPageActivation.ProviderUnavailable: "provider-unavailable"
+        PhysicalPageActivation.ModelSupportUnknown: "model-support-unknown"
+        PhysicalPageActivation.ModelUnsupported: "model-unsupported"
+        PhysicalPageActivation.PoolInactive: "pool-inactive"
+        PhysicalPageActivation.OwnerDisconnected: "owner-disconnected"
+        PhysicalPageActivation.Active: "active"
+
+export PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode
+export physical_page_activation, kv_execution_mode
+export kv_execution_mode_text, physical_page_activation_text

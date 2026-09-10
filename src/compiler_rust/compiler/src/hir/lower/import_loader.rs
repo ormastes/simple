@@ -265,6 +265,7 @@ impl Lowerer {
             Node::Const(const_stmt) => const_stmt.name == name,
             Node::Let(let_stmt) => Self::extract_pattern_name(&let_stmt.pattern).as_deref() == Some(name),
             Node::Extern(extern_fn) => extern_fn.name == name,
+            Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
             _ => false,
         }
     }
@@ -285,6 +286,7 @@ impl Lowerer {
         match item {
             Node::Function(func_def) => func_def.name == name,
             Node::Extern(extern_fn) => extern_fn.name == name,
+            Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
             _ => false,
         }
     }
@@ -314,6 +316,9 @@ impl Lowerer {
 
             if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
                 self.globals.insert(alias_name.clone(), symbol_ty);
+            }
+            if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
+                self.method_return_types.insert(alias_name.clone(), return_ty);
             }
 
             let is_callable = items

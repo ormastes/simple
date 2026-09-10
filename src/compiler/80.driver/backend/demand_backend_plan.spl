@@ -1,0 +1,110 @@
+use std.common.crypto.sha256.{sha256_text}
+
+enum DemandBaselineBackendV1:
+    Bytecode
+    Cranelift
+
+struct PrecompiledPlatformIdentityV1:
+    runtime_action_digest: text
+    runtime_abi_digest: text
+    std_action_digest: text
+    std_abi_digest: text
+
+struct DemandBackendIdentityV1:
+    snapshot_revision: text
+    snapshot_tree_digest: text
+    snapshot_inventory_digest: text
+    semantic_digest: text
+    target_triple: text
+    variant_digest: text
+    platform: PrecompiledPlatformIdentityV1
+
+struct ForegroundBackendBudgetV1:
+    priority: i64
+    memory_bytes: i64
+    deadline_millis: i64
+    cancelled: bool
+
+struct DemandBackendPlanV1:
+    valid: bool
+    reason: text
+    baseline_backend: DemandBaselineBackendV1
+    baseline_action_digest: text
+    promotion_action_digest: text
+    return_without_promotion: bool
+    enqueue_llvm_promotion: bool
+
+fn demand_backend_identity_valid_v1(identity: DemandBackendIdentityV1) -> bool:
+    identity.snapshot_revision != "" and
+        identity.snapshot_tree_digest != "" and
+        identity.snapshot_inventory_digest != "" and
+        identity.semantic_digest != "" and
+        identity.target_triple != "" and
+        identity.variant_digest != "" and
+        identity.platform.runtime_action_digest != "" and
+        identity.platform.runtime_abi_digest != "" and
+        identity.platform.std_action_digest != "" and
+        identity.platform.std_abi_digest != ""
+
+fn demand_backend_identity_digest_v1(identity: DemandBackendIdentityV1) -> text:
+    if not demand_backend_identity_valid_v1(identity):
+        return ""
+    sha256_text(
+        "simple/demand-backend-identity/v1" +
+        "|snapshot={identity.snapshot_revision}" +
+        "|tree={identity.snapshot_tree_digest}" +
+        "|inventory={identity.snapshot_inventory_digest}" +
+        "|semantic={identity.semantic_digest}" +
+        "|target={identity.target_triple}" +
+        "|variant={identity.variant_digest}" +
+        "|runtime-action={identity.platform.runtime_action_digest}" +
+        "|runtime-abi={identity.platform.runtime_abi_digest}" +
+        "|std-action={identity.platform.std_action_digest}" +
+        "|std-abi={identity.platform.std_abi_digest}")
+
+fn demand_backend_plan_v1(
+    identity: DemandBackendIdentityV1,
+    budget: ForegroundBackendBudgetV1,
+    bytecode_compatible: bool,
+    cranelift_compatible: bool,
+    llvm_explicit: bool
+) -> DemandBackendPlanV1:
+    val identity_digest = demand_backend_identity_digest_v1(identity)
+    if identity_digest == "":
+        return DemandBackendPlanV1(
+            false, "identity-invalid", DemandBaselineBackendV1.Bytecode,
+            "", "", true, false)
+    if budget.cancelled:
+        return DemandBackendPlanV1(
+            false, "foreground-cancelled", DemandBaselineBackendV1.Bytecode,
+            "", "", true, false)
+    if budget.priority < 0 or budget.memory_bytes <= 0 or budget.deadline_millis <= 0:
+        return DemandBackendPlanV1(
+            false, "foreground-budget-invalid", DemandBaselineBackendV1.Bytecode,
+            "", "", true, false)
+    if not bytecode_compatible and not cranelift_compatible:
+        return DemandBackendPlanV1(
+            false, "baseline-backend-unavailable", DemandBaselineBackendV1.Bytecode,
+            "", "", true, false)
+
+    val baseline = if cranelift_compatible:
+        DemandBaselineBackendV1.Cranelift
+    else:
+        DemandBaselineBackendV1.Bytecode
+    val baseline_name = if baseline == DemandBaselineBackendV1.Cranelift:
+        "cranelift"
+    else:
+        "bytecode"
+    DemandBackendPlanV1(
+        true,
+        if llvm_explicit: "explicit-llvm-queued-after-baseline" else: "baseline-ready",
+        baseline,
+        sha256_text("simple/baseline-action/v1|{identity_digest}|{baseline_name}"),
+        sha256_text("simple/llvm-promotion-action/v1|{identity_digest}"),
+        true,
+        true)
+
+export DemandBaselineBackendV1, PrecompiledPlatformIdentityV1
+export DemandBackendIdentityV1, ForegroundBackendBudgetV1, DemandBackendPlanV1
+export demand_backend_identity_valid_v1, demand_backend_identity_digest_v1
+export demand_backend_plan_v1

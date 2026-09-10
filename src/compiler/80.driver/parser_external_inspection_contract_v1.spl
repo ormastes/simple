@@ -1,0 +1,246 @@
+# Bounded normalized contract joining terminal tool execution to complete
+# executable-section inspection. This validates supplied evidence; only a
+# future registered tool/process owner may issue authority from it.
+use std.common.crypto.sha256.sha256_text
+
+pub const PARSER_EXTERNAL_INSPECTION_MAX_SECTIONS_V1: i64 = 4096
+pub const PARSER_EXTERNAL_INSPECTION_MAX_RELOCATIONS_V1: i64 = 1048576
+pub const PARSER_EXTERNAL_INSPECTION_MAX_INSTRUCTIONS_V1: i64 = 16777216
+pub const PARSER_EXTERNAL_INSPECTION_MAX_OUTPUT_BYTES_V1: i64 = 67108864
+
+pub enum ParserExternalInspectionErrorV1:
+    InvalidIdentity
+    ToolExecutionIncomplete
+    ResourceLimit
+    NoncanonicalOrder
+    InvalidSection
+    IncompleteInstructionCoverage
+    InvalidRelocation
+    UnsupportedInstruction
+    InvalidFeatureClaim
+
+pub struct ParserInspectionToolTerminalV1:
+    tool_bundle_digest: text
+    tool_generation: u64
+    argv_digest: text
+    environment_digest: text
+    input_digest: text
+    input_byte_count: i64
+    input_fully_written_and_closed: bool
+    exit_code: i64
+    timed_out: bool
+    cancelled: bool
+    stdout_digest: text
+    stdout_seen_bytes: i64
+    stdout_kept_bytes: i64
+    stderr_digest: text
+    stderr_seen_bytes: i64
+    stderr_kept_bytes: i64
+    output_overflow: bool
+    process_identity_revalidated: bool
+    process_group_terminated: bool
+    reaped: bool
+    collected: bool
+
+pub struct ParserInspectionSectionV1:
+    section_index: i64
+    name: text
+    file_offset: i64
+    byte_count: i64
+    byte_digest: text
+
+pub struct ParserInspectionRelocationV1:
+    section_index: i64
+    section_offset: i64
+    relocation_type: text
+    symbol_identity: text
+    target_section_index: i64
+
+pub struct ParserInspectionInstructionV1:
+    section_index: i64
+    section_offset: i64
+    byte_count: i64
+    byte_digest: text
+    opcode_identity: text
+    required_feature: text
+    recognized: bool
+
+pub struct ParserExternalInspectionInputV1:
+    terminal: ParserInspectionToolTerminalV1
+    object_format: text
+    architecture: text
+    known_section_indices: [i64]
+    sections: [ParserInspectionSectionV1]
+    relocations: [ParserInspectionRelocationV1]
+    instructions: [ParserInspectionInstructionV1]
+    requested_simd_features: [text]
+    observed_simd_features: [text]
+    scalar_reference: bool
+
+pub struct ParserExternalInspectionProjectionV1:
+    input_digest: text
+    executable_section_count: i64
+    executable_byte_count: i64
+    relocation_count: i64
+    instruction_count: i64
+    observed_vector_instruction_count: i64
+    normalized_digest: text
+
+fn _digest_shape_pei(value: text) -> bool:
+    if value.len() != 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f')): return false
+    true
+
+fn _canonical_texts_pei(values: [text]) -> bool:
+    var prior = ""
+    for value in values:
+        if value == "" or (prior != "" and value <= prior): return false
+        prior = value
+    true
+
+fn _contains_text_pei(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+pub fn parser_external_inspection_normalize_v1(input: ParserExternalInspectionInputV1
+) -> Result<ParserExternalInspectionProjectionV1, ParserExternalInspectionErrorV1>:
+    val terminal = input.terminal
+    if (not _digest_shape_pei(terminal.tool_bundle_digest) or terminal.tool_generation == 0u64 or
+        not _digest_shape_pei(terminal.argv_digest) or
+        not _digest_shape_pei(terminal.environment_digest) or
+        not _digest_shape_pei(terminal.input_digest) or terminal.input_byte_count <= 0 or
+        not _digest_shape_pei(terminal.stdout_digest) or
+        not _digest_shape_pei(terminal.stderr_digest)):
+        return Err(ParserExternalInspectionErrorV1.InvalidIdentity)
+    if (not terminal.input_fully_written_and_closed or terminal.exit_code != 0 or
+        terminal.timed_out or terminal.cancelled or terminal.output_overflow or
+        not terminal.process_identity_revalidated or not terminal.reaped or not terminal.collected or
+        terminal.stdout_seen_bytes != terminal.stdout_kept_bytes or
+        terminal.stderr_seen_bytes != terminal.stderr_kept_bytes):
+        return Err(ParserExternalInspectionErrorV1.ToolExecutionIncomplete)
+    if (terminal.stdout_seen_bytes < 0 or terminal.stderr_seen_bytes < 0 or
+        terminal.stdout_seen_bytes > PARSER_EXTERNAL_INSPECTION_MAX_OUTPUT_BYTES_V1 or
+        terminal.stderr_seen_bytes > PARSER_EXTERNAL_INSPECTION_MAX_OUTPUT_BYTES_V1 or
+        input.sections.len() > PARSER_EXTERNAL_INSPECTION_MAX_SECTIONS_V1 or
+        input.relocations.len() > PARSER_EXTERNAL_INSPECTION_MAX_RELOCATIONS_V1 or
+        input.instructions.len() > PARSER_EXTERNAL_INSPECTION_MAX_INSTRUCTIONS_V1):
+        return Err(ParserExternalInspectionErrorV1.ResourceLimit)
+    if (input.object_format != "elf64-le-relocatable" or input.architecture != "x86_64" or
+        input.sections.len() == 0):
+        return Err(ParserExternalInspectionErrorV1.InvalidSection)
+    var prior_known = -1
+    for index in input.known_section_indices:
+        if index <= prior_known: return Err(ParserExternalInspectionErrorV1.NoncanonicalOrder)
+        prior_known = index
+    if (not _canonical_texts_pei(input.requested_simd_features) or
+        not _canonical_texts_pei(input.observed_simd_features)):
+        return Err(ParserExternalInspectionErrorV1.InvalidFeatureClaim)
+
+    var executable_bytes = 0
+    var previous_section = -1
+    for section in input.sections:
+        if (section.section_index <= previous_section or section.name == "" or
+            section.file_offset < 0 or section.byte_count <= 0 or
+            not _digest_shape_pei(section.byte_digest)):
+            return Err(ParserExternalInspectionErrorV1.NoncanonicalOrder)
+        if section.byte_count > 67108864 - executable_bytes:
+            return Err(ParserExternalInspectionErrorV1.ResourceLimit)
+        executable_bytes = executable_bytes + section.byte_count
+        previous_section = section.section_index
+
+    var vector_count = 0
+    var instruction_index = 0
+    for section in input.sections:
+        var expected_offset = 0
+        while instruction_index < input.instructions.len() and
+              input.instructions[instruction_index].section_index == section.section_index:
+            val instruction = input.instructions[instruction_index]
+            if (instruction.section_offset != expected_offset or instruction.byte_count <= 0 or
+                instruction.byte_count > section.byte_count - expected_offset or
+                not _digest_shape_pei(instruction.byte_digest) or instruction.opcode_identity == ""):
+                return Err(ParserExternalInspectionErrorV1.IncompleteInstructionCoverage)
+            if not instruction.recognized:
+                return Err(ParserExternalInspectionErrorV1.UnsupportedInstruction)
+            if instruction.required_feature != "":
+                if not _contains_text_pei(input.observed_simd_features, instruction.required_feature):
+                    return Err(ParserExternalInspectionErrorV1.InvalidFeatureClaim)
+                vector_count = vector_count + 1
+            expected_offset = expected_offset + instruction.byte_count
+            instruction_index = instruction_index + 1
+        if expected_offset != section.byte_count:
+            return Err(ParserExternalInspectionErrorV1.IncompleteInstructionCoverage)
+    if instruction_index != input.instructions.len():
+        return Err(ParserExternalInspectionErrorV1.NoncanonicalOrder)
+    for observed in input.observed_simd_features:
+        var seen = false
+        for instruction in input.instructions:
+            if instruction.required_feature == observed: seen = true
+        if not seen: return Err(ParserExternalInspectionErrorV1.InvalidFeatureClaim)
+
+    var previous_relocation_section = -1
+    var previous_relocation_offset = -1
+    for relocation in input.relocations:
+        if (relocation.section_index < previous_relocation_section or
+            (relocation.section_index == previous_relocation_section and
+             relocation.section_offset <= previous_relocation_offset)):
+            return Err(ParserExternalInspectionErrorV1.NoncanonicalOrder)
+        var source_size = -1
+        var target_found = relocation.target_section_index < 0
+        for section in input.sections:
+            if section.section_index == relocation.section_index: source_size = section.byte_count
+        for known in input.known_section_indices:
+            if known == relocation.target_section_index: target_found = true
+        if (source_size <= 0 or relocation.section_offset < 0 or
+            relocation.section_offset >= source_size or relocation.relocation_type == "" or
+            relocation.symbol_identity == "" or not target_found):
+            return Err(ParserExternalInspectionErrorV1.InvalidRelocation)
+        previous_relocation_section = relocation.section_index
+        previous_relocation_offset = relocation.section_offset
+
+    if input.scalar_reference:
+        if input.requested_simd_features.len() != 0 or input.observed_simd_features.len() != 0 or
+            vector_count != 0:
+            return Err(ParserExternalInspectionErrorV1.InvalidFeatureClaim)
+    else:
+        if input.requested_simd_features.len() == 0 or vector_count == 0:
+            return Err(ParserExternalInspectionErrorV1.UnsupportedInstruction)
+        for feature in input.requested_simd_features:
+            if not _contains_text_pei(input.observed_simd_features, feature):
+                return Err(ParserExternalInspectionErrorV1.InvalidFeatureClaim)
+
+    var rows: [text] = [terminal.tool_bundle_digest, terminal.tool_generation.to_text(),
+        terminal.argv_digest, terminal.environment_digest, terminal.input_digest,
+        terminal.input_byte_count.to_text(), terminal.stdout_digest,
+        terminal.stdout_seen_bytes.to_text(), terminal.stderr_digest,
+        terminal.stderr_seen_bytes.to_text(), terminal.exit_code.to_text(),
+        terminal.input_fully_written_and_closed.to_text(),
+        terminal.process_identity_revalidated.to_text(), terminal.reaped.to_text(),
+        terminal.collected.to_text(), input.object_format, input.architecture]
+    var known_rows: [text] = []
+    for known in input.known_section_indices: known_rows.push(known.to_text())
+    rows.push("K:" + known_rows.join(","))
+    for section in input.sections:
+        rows.push("S:" + section.section_index.to_text() + ":" + section.name.len().to_text() +
+            ":" + section.name + ":" + section.file_offset.to_text() + ":" +
+            section.byte_count.to_text() + ":" + section.byte_digest)
+    for relocation in input.relocations:
+        rows.push("R:" + relocation.section_index.to_text() + ":" +
+            relocation.section_offset.to_text() + ":" + relocation.relocation_type.len().to_text() +
+            ":" + relocation.relocation_type + ":" + relocation.symbol_identity.len().to_text() +
+            ":" + relocation.symbol_identity + ":" + relocation.target_section_index.to_text())
+    for instruction in input.instructions:
+        rows.push("I:" + instruction.section_index.to_text() + ":" +
+            instruction.section_offset.to_text() + ":" + instruction.byte_count.to_text() +
+            ":" + instruction.byte_digest + ":" + instruction.opcode_identity.len().to_text() +
+            ":" + instruction.opcode_identity + ":" + instruction.required_feature + ":" +
+            instruction.recognized.to_text())
+    rows.push("Q:" + input.requested_simd_features.join(","))
+    rows.push("O:" + input.observed_simd_features.join(","))
+    Ok(ParserExternalInspectionProjectionV1(input_digest: terminal.input_digest,
+        executable_section_count: input.sections.len(), executable_byte_count: executable_bytes,
+        relocation_count: input.relocations.len(), instruction_count: input.instructions.len(),
+        observed_vector_instruction_count: vector_count,
+        normalized_digest: sha256_text("simple/parser-external-inspection/v1\n" + rows.join("\n"))))

@@ -1,11 +1,46 @@
 #!/bin/sh
-# Bootstrap Gate 5R rollback: given <canonical-triple>, restore
-# bin/release/<triple>/simple from the retained
-# bin/release/<triple>/simple.pre_deploy written by
-# bootstrap-from-scratch.sh's deploy step, verify the restored SHA-256
-# against the pre-deploy hash, and re-run the arithmetic smoke
-# (-c 'print(1+1)'), printing a rollback receipt (command, exit status,
-# path, pre/post/restored hashes, smoke output).
+# Bootstrap Gate 5R rollback: given <canonical-triple>, undo the last deploy of
+# bin/release/<triple>/simple and print a rollback receipt.
+#
+# TWO deploy designs exist and this entrypoint serves both, dispatching on the
+# `schema=` line of the deploy receipt it finds. Guessing is not allowed: an
+# unrecognised schema is ERROR, never a pass.
+#
+#   bootstrap-deploy-receipt-v1  — the legacy design. The deploy retained a
+#     sibling `<current>.pre_deploy` copy; rolling back means installing that
+#     copy back over `<current>`, verifying its recorded SHA-256, and re-running
+#     the arithmetic smoke (-c 'print(1+1)').
+#
+#   bootstrap-deploy-receipt-v3  — what bootstrap-from-scratch.sh writes today.
+#     There is no `.pre_deploy` sibling at all: deploys are immutable generation
+#     directories under
+#     bin/release/<triple>/.bootstrap-deploy-generations/<triple>/<id>/ plus an
+#     atomic pointer swap, and rolling back means swapping the pointer back to
+#     `previous_pointer_target` after re-verifying the generation manifests and
+#     the eight authority artefacts. That verification+swap is implemented by
+#     bootstrap_deploy_tx_rollback_generation() in
+#     scripts/bootstrap/bootstrap-deploy-transaction.shs, which this script
+#     delegates to rather than reimplementing. Its happy path is exercised by
+#     test/01_unit/scripts/bootstrap_deploy_transaction_test.shs.
+#
+# Until 2026-09-07 this script hardcoded the v1 schema check, so a binary
+# deployed by the current bootstrap could not be rolled back at all: every
+# invocation died at `deploy receipt has unexpected schema`. The two halves are
+# now on the same receipt format.
+#
+# Two honest limits of the v3 path, stated rather than papered over:
+#   * `--dry-run` on v3 is RECEIPT-ONLY. It reports the generation that would be
+#     rolled back and the pointer target that would be restored, but does not
+#     re-verify the previous generation's manifests or authority artefacts the
+#     way the v1 dry-run re-verifies its backup. Doing so properly means calling
+#     into the transaction library, and its entry point recovers (i.e. can
+#     COMPLETE) an interrupted transaction — which a dry run must never do.
+#   * A rollback receipt left by an earlier rollback is not cleared. The
+#     transaction library refuses to overwrite one, so a second rollback FAILs
+#     rather than silently clobbering the first one's evidence. That is
+#     fail-closed and deliberate; remove the stale receipt by hand if a second
+#     rollback is genuinely wanted.
+#
 # See doc/08_tracking/todo/rollback_bootstrap_deploy_script_missing_2026-08-08.md.
 #
 # Usage:
@@ -25,7 +60,7 @@ SELF=$(basename "$0")
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 cd "${repo_root}"
 
-SELFTEST_EXPECTED=3
+SELFTEST_EXPECTED=6
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -96,6 +131,10 @@ build_fixture_common() {
   mkdir -p "${fx}/scripts/bootstrap" "${fx}/scripts/setup" "${fx}/bin/release/selftest-platform"
   cp "${repo_root}/scripts/bootstrap/rollback-bootstrap-deploy.shs" "${fx}/scripts/bootstrap/rollback-bootstrap-deploy.shs"
   chmod 755 "${fx}/scripts/bootstrap/rollback-bootstrap-deploy.shs"
+  # The v3 fixtures exercise the real delegation, so the transaction library
+  # goes into the fixture too. Without it the v3 path would ERROR on a missing
+  # library instead of on the condition the fixture is actually testing.
+  cp "${repo_root}/scripts/bootstrap/bootstrap-deploy-transaction.shs" "${fx}/scripts/bootstrap/bootstrap-deploy-transaction.shs"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "${fx}/scripts/setup/setup.shs"
   chmod 755 "${fx}/scripts/setup/setup.shs"
 }
@@ -190,10 +229,89 @@ selftest_case_dangling() {
   [ "${ok}" -eq 1 ]
 }
 
+# write_fixture_receipt_v3: the shape bootstrap-from-scratch.sh writes today.
+# $1 = fixture root, $2 = generation id, $3 = previous_pointer_target
+write_fixture_receipt_v3() {
+  {
+    echo "schema=bootstrap-deploy-receipt-v3"
+    echo "platform=selftest-platform"
+    echo "generation_id=$2"
+    echo "generation_path=bin/release/.bootstrap-deploy-generations/selftest-platform/$2"
+    echo "current_pointer_path=bin/release/selftest-platform/simple"
+    echo "current_pointer_target=.bootstrap-deploy-generations/selftest-platform/$2"
+    echo "previous_pointer_target=$3"
+    echo "current_path=bin/release/selftest-platform/simple"
+    echo "deployment_status=pass"
+    echo "platform_acceptance_claimed=false"
+  } > "$1/bin/release/selftest-platform/bootstrap-deploy-receipt.env"
+}
+
+# Fixture 4: a v3 receipt whose previous_pointer_target is `none` — the first
+# deploy on this platform. There is no generation to go back to, so this must
+# ERROR (exit 2), never silently pass and never claim it rolled something back.
+selftest_case_v3_no_previous() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  write_fixture_receipt_v3 "${fx}" gen-0001 none
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 2 ] || ok=0
+  case "${out}" in *"ERROR — nothing was rolled back"*) ;; *) ok=0 ;; esac
+  case "${out}" in *"no previous generation"*) ;; *) ok=0 ;; esac
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
+# Fixture 5: a v3 receipt naming a previous generation, but the transaction
+# library refuses (no generation tree, no manifests, no authority artefacts in
+# this fixture). A refused rollback is FAIL (exit 1) — evidence exists but is
+# not trustworthy — and the binary must be left exactly as it was.
+selftest_case_v3_refused() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  write_fixture_receipt_v3 "${fx}" gen-0002 \
+    .bootstrap-deploy-generations/selftest-platform/gen-0001
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 1 ] || ok=0
+  case "${out}" in *"FAIL — "*) ;; *) ok=0 ;; esac
+  grep -q current-generation "${fx}/bin/release/selftest-platform/simple" 2>/dev/null || ok=0
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
+# Fixture 6: a receipt with a schema this script does not implement. Dispatch
+# must be fail-closed: an unknown schema is ERROR, never treated as v1.
+selftest_case_unknown_schema() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  {
+    echo "schema=bootstrap-deploy-receipt-v99"
+    echo "platform=selftest-platform"
+    echo "current_path=bin/release/selftest-platform/simple"
+  } > "${fx}/bin/release/selftest-platform/bootstrap-deploy-receipt.env"
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 2 ] || ok=0
+  case "${out}" in *"ERROR — nothing was rolled back"*) ;; *) ok=0 ;; esac
+  case "${out}" in *"unsupported schema"*) ;; *) ok=0 ;; esac
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
 selftest() {
   selftest_case_normal || { echo "${SELF}: SELFTEST FAIL: a normal rollback did not restore the previous binary" >&2; return 1; }
   selftest_case_no_deploy || { echo "${SELF}: SELFTEST FAIL: a rollback with no prior deploy recorded did not ERROR" >&2; return 1; }
   selftest_case_dangling || { echo "${SELF}: SELFTEST FAIL: a rollback that would leave bin/simple dangling did not FAIL" >&2; return 1; }
+  selftest_case_v3_no_previous || { echo "${SELF}: SELFTEST FAIL: a v3 receipt with no previous generation did not ERROR" >&2; return 1; }
+  selftest_case_v3_refused || { echo "${SELF}: SELFTEST FAIL: a v3 rollback the transaction library refuses did not FAIL" >&2; return 1; }
+  selftest_case_unknown_schema || { echo "${SELF}: SELFTEST FAIL: an unknown deploy receipt schema did not ERROR" >&2; return 1; }
   return 0
 }
 
@@ -256,8 +374,57 @@ trap 'exit 130' HUP INT TERM
 
 if [ -L "${receipt}" ]; then fail_receipt receipt_symlink; fi
 [ -f "${receipt}" ] || error_receipt "no deploy receipt recorded for platform ${platform} (expected ${receipt})"
-[ "$(value schema)" = "bootstrap-deploy-receipt-v1" ] || error_receipt "deploy receipt has unexpected schema (expected bootstrap-deploy-receipt-v1)"
+receipt_schema="$(value schema)"
+case "${receipt_schema}" in
+  bootstrap-deploy-receipt-v1|bootstrap-deploy-receipt-v3) ;;
+  *) error_receipt "deploy receipt has unsupported schema '${receipt_schema}' (expected bootstrap-deploy-receipt-v1 or bootstrap-deploy-receipt-v3)" ;;
+esac
 [ "$(value platform)" = "${platform}" ] || error_receipt "deploy receipt platform mismatch (expected ${platform})"
+
+# -------------------------------------------------------------------------
+# v3: generation-pointer rollback, delegated to the transaction library that
+# owns the format. This script contributes the entrypoint, the fail-closed
+# preconditions, the dry-run, and the verdict convention; it deliberately does
+# NOT reimplement manifest/authority verification or the pointer swap, because
+# a second implementation of that contract is exactly how the two halves fell
+# out of step in the first place.
+# -------------------------------------------------------------------------
+if [ "${receipt_schema}" = "bootstrap-deploy-receipt-v3" ]; then
+  tx_lib="${repo_root}/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+  [ -f "${tx_lib}" ] && [ ! -L "${tx_lib}" ] || error_receipt "deploy transaction library ${tx_lib} is missing; a v3 receipt cannot be rolled back without it"
+  generation_id="$(value generation_id)"
+  previous_target="$(value previous_pointer_target)"
+  case "${generation_id}" in '.'|'..'|*[!A-Za-z0-9._-]*|'') error_receipt "v3 deploy receipt has an unusable generation_id" ;; esac
+  [ -n "${previous_target}" ] || error_receipt "v3 deploy receipt records no previous_pointer_target"
+  if [ "${previous_target}" = none ]; then
+    error_receipt "no previous generation recorded for platform ${platform} (generation ${generation_id} is the first deploy; there is nothing to roll back to)"
+  fi
+  if [ "${dry_run}" -eq 1 ]; then
+    echo "dry_run=true"
+    echo "platform=${platform}"
+    echo "receipt_schema=${receipt_schema}"
+    echo "would_roll_back_generation_id=${generation_id}"
+    echo "would_restore_pointer_target=${previous_target}"
+    echo "${SELF}: DRY-RUN — would restore 1 artifact(s): pointer ${deploy_dir}/simple -> ${previous_target} (rolling back generation ${generation_id})"
+    exit 0
+  fi
+  # shellcheck source=scripts/bootstrap/bootstrap-deploy-transaction.shs
+  . "${tx_lib}"
+  tx_status=0
+  bootstrap_deploy_tx_rollback_generation \
+    "${repo_root}/bin/release" "${platform}" "${generation_id}" \
+    "${repo_root}/${rollback_receipt}" || tx_status=$?
+  # Read on the line after the call, never through a pipe: a pipeline's $? is
+  # the last command's status and has produced false greens in this repo.
+  if [ "${tx_status}" -ne 0 ]; then
+    fail_receipt "transaction rollback of generation ${generation_id} refused (bootstrap_deploy_tx_rollback_generation exit ${tx_status})"
+  fi
+  [ -f "${repo_root}/${rollback_receipt}" ] || fail_receipt "transaction rollback reported success but wrote no rollback receipt"
+  echo "rollback_status=pass"
+  echo "rollback_receipt=${rollback_receipt}"
+  echo "${SELF}: PASS — 1 artifact(s) restored (pointer ${deploy_dir}/simple -> ${previous_target}, generation ${generation_id} rolled back)"
+  exit 0
+fi
 current="$(value current_path)"; backup="$(value backup_path)"
 [ "${current}" = "${deploy_dir}/simple" ] || [ "${current}" = "${deploy_dir}/simple.exe" ] || fail_receipt current_path
 [ "${backup}" = "${current}.pre_deploy" ] || fail_receipt backup_path

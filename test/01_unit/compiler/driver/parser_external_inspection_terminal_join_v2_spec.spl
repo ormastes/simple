@@ -1,0 +1,86 @@
+use std.spec.*
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.parser_external_inspection_contract_v1.{
+    ParserInspectionToolTerminalV1, ParserInspectionInstructionV1}
+use compiler.driver.parser_llvm_inspection_projection_join_v1.ParserLlvmInspectionDataV1
+use compiler.driver.parser_external_inspection_features_v2.{
+    ParserExternalInspectionFeaturesProjectionV2, ParserInspectionInstructionFeaturesV2}
+use compiler.driver.parser_external_inspection_terminal_join_v2.*
+
+const D1_PIT: text = "1111111111111111111111111111111111111111111111111111111111111111"
+const D2_PIT: text = "2222222222222222222222222222222222222222222222222222222222222222"
+const D3_PIT: text = "3333333333333333333333333333333333333333333333333333333333333333"
+
+fn terminal_pit(stdout_text: text, stderr_text: text, argv: text
+) -> ParserInspectionToolTerminalV1:
+    ParserInspectionToolTerminalV1(tool_bundle_digest: D1_PIT, tool_generation: 7u64,
+        argv_digest: argv, environment_digest: D2_PIT, input_digest: D3_PIT,
+        input_byte_count: 19, input_fully_written_and_closed: true, exit_code: 0,
+        timed_out: false, cancelled: false, stdout_digest: sha256_text(stdout_text),
+        stdout_seen_bytes: stdout_text.len(), stdout_kept_bytes: stdout_text.len(),
+        stderr_digest: sha256_text(stderr_text), stderr_seen_bytes: stderr_text.len(),
+        stderr_kept_bytes: stderr_text.len(), output_overflow: false,
+        process_identity_revalidated: true, process_group_terminated: false,
+        reaped: true, collected: true)
+
+fn data_pit() -> ParserLlvmInspectionDataV1:
+    ParserLlvmInspectionDataV1(known_section_indices: [0], executable_sections: [],
+        executable_relocations: [], instructions: [], group_digest: D1_PIT,
+        projection_digest: D2_PIT)
+
+fn features_pit() -> ParserExternalInspectionFeaturesProjectionV2:
+    ParserExternalInspectionFeaturesProjectionV2(inspection_data_digest: D2_PIT,
+        classifier_digest: D1_PIT, instructions: [], requested_features: [],
+        observed_features: [], vector_instruction_count: 0, scalar_reference: true,
+        projection_digest: D3_PIT)
+
+describe "parser external inspection terminal join V2":
+    it "binds two exact terminal outputs to data and feature projections":
+        val result = parser_external_inspection_terminal_join_v2(
+            terminal_pit("{}", "", D1_PIT), terminal_pit("dis", "", D2_PIT),
+            "{}", "", "dis", "", data_pit(), features_pit()).unwrap()
+        expect(result.input_digest).to_equal(D3_PIT)
+        expect(result.input_byte_count).to_equal(19)
+        expect(result.inspection_data_digest).to_equal(D2_PIT)
+        expect(result.feature_projection_digest).to_equal(D3_PIT)
+        expect(result.terminal_pair_digest.len()).to_equal(64)
+        expect(result.projection_digest.len()).to_equal(64)
+
+    it "rejects mismatched input identity and replayed argv identity":
+        val readobj = terminal_pit("{}", "", D1_PIT)
+        var objdump = terminal_pit("dis", "", D2_PIT)
+        objdump.input_byte_count = 20
+        expect(parser_external_inspection_terminal_join_v2(readobj, objdump,
+            "{}", "", "dis", "", data_pit(), features_pit())).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.InputMismatch))
+        objdump = terminal_pit("dis", "", D1_PIT)
+        expect(parser_external_inspection_terminal_join_v2(readobj, objdump,
+            "{}", "", "dis", "", data_pit(), features_pit())).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.InvalidIdentity))
+
+    it "rejects incomplete process facts and output substitution":
+        var readobj = terminal_pit("{}", "", D1_PIT)
+        readobj.output_overflow = true
+        expect(parser_external_inspection_terminal_join_v2(readobj,
+            terminal_pit("dis", "", D2_PIT), "{}", "", "dis", "",
+            data_pit(), features_pit())).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.IncompleteProcess))
+        expect(parser_external_inspection_terminal_join_v2(
+            terminal_pit("{}", "", D1_PIT), terminal_pit("dis", "", D2_PIT),
+            "xx", "", "dis", "", data_pit(), features_pit())).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.OutputMismatch))
+
+    it "rejects feature-to-data projection substitution":
+        var features = features_pit()
+        features.inspection_data_digest = D1_PIT
+        expect(parser_external_inspection_terminal_join_v2(
+            terminal_pit("{}", "", D1_PIT), terminal_pit("dis", "", D2_PIT),
+            "{}", "", "dis", "", data_pit(), features)).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.ProjectionMismatch))
+        var readobj = terminal_pit("{}", "", D1_PIT)
+        var objdump = terminal_pit("dis", "", D2_PIT)
+        readobj.input_byte_count = PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_INPUT_V2 + 1
+        objdump.input_byte_count = readobj.input_byte_count
+        expect(parser_external_inspection_terminal_join_v2(readobj, objdump,
+            "{}", "", "dis", "", data_pit(), features_pit())).to_equal(
+                Err(ParserExternalInspectionTerminalJoinErrorV2.ResourceLimit))

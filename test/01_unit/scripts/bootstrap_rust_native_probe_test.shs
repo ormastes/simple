@@ -1,0 +1,87 @@
+#!/bin/sh
+# Fault regression for bounded metadata recovery, not native Windows admission.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-rust-native-probe.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+case "$fixture" in /*/simple-rust-native-probe.*) ;; *) exit 1 ;; esac
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+cat >"$fixture/native-tool" <<'EOF'
+#!/bin/sh
+[ -z "${RUSTFLAGS:-}" ] || exit 99
+printf x >>"$0.calls"
+attempt=$(wc -c <"$0.calls")
+case "$1" in
+    success) printf 'cargo fixture version\n' ;;
+    failure)
+        printf 'invalid partial metadata\n'
+        printf 'native startup fault\n' >&2
+        awk 'BEGIN { for (i=0;i<6000;i++) printf "x" }' >&2
+        exit "$((46 + attempt))"
+        ;;
+    recover)
+        if [ "$attempt" -eq 1 ]; then
+            printf 'invalid partial metadata\n'
+            printf 'first launch fault\n' >&2
+            exit 47
+        fi
+        printf 'cargo fixture version\n'
+        printf 'second launch diagnostic\n' >&2
+        ;;
+    mutate-failure|mutate-success)
+        printf '\n# executable changed during launch\n' >>"$0"
+        printf 'must not be published\n'
+        [ "$1" = mutate-success ] && exit 0
+        exit 49
+        ;;
+    *) exit 98 ;;
+esac
+EOF
+chmod +x "$fixture/native-tool"
+for scenario in success failure recover mutate-failure mutate-success; do
+    cp "$fixture/native-tool" "$fixture/$scenario"
+done
+RUSTFLAGS=must-not-leak bootstrap_stage3_native_metadata_probe cargo-version \
+    "$fixture/success" success >"$fixture/pass.stdout" 2>"$fixture/pass.stderr"
+[ "$(cat "$fixture/pass.stdout")" = 'cargo fixture version' ]
+[ ! -s "$fixture/pass.stderr" ]
+[ "$(wc -c <"$fixture/success.calls")" -eq 1 ]
+status=0
+RUSTFLAGS=must-not-leak bootstrap_stage3_native_metadata_probe cargo-version \
+    "$fixture/failure" failure >"$fixture/fail.stdout" 2>"$fixture/fail.stderr" || status=$?
+[ "$status" -eq 48 ]
+[ ! -s "$fixture/fail.stdout" ]
+[ "$(wc -c <"$fixture/failure.calls")" -eq 2 ]
+grep -Fx 'bootstrap-native-metadata-probe=cargo-version attempt=1 shell-status=47' "$fixture/fail.stderr" >/dev/null
+grep -Fx 'bootstrap-native-metadata-probe=cargo-version attempt=2 shell-status=48' "$fixture/fail.stderr" >/dev/null
+[ "$(grep -c '^native startup fault$' "$fixture/fail.stderr")" -eq 2 ]
+expected=$(printf 'bootstrap-native-metadata-probe=cargo-version attempt=1 shell-status=47\nbootstrap-native-metadata-probe=cargo-version attempt=2 shell-status=48\n' | wc -c)
+expected=$((expected + 2 * (4096 + 1)))
+[ "$(wc -c <"$fixture/fail.stderr")" -eq "$expected" ]
+RUSTFLAGS=must-not-leak bootstrap_stage3_native_metadata_probe llvm-config-version \
+    "$fixture/recover" recover >"$fixture/recover.stdout" 2>"$fixture/recover.stderr"
+[ "$(wc -c <"$fixture/recover.calls")" -eq 2 ]
+[ "$(cat "$fixture/recover.stdout")" = 'cargo fixture version' ]
+grep -Fx 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-status=47' "$fixture/recover.stderr" >/dev/null
+grep -Fx 'bootstrap-native-metadata-probe=llvm-config-version attempt=2 shell-status=0' "$fixture/recover.stderr" >/dev/null
+grep -Fx 'first launch fault' "$fixture/recover.stderr" >/dev/null
+grep -Fx 'second launch diagnostic' "$fixture/recover.stderr" >/dev/null
+for scenario in mutate-failure mutate-success; do
+    if bootstrap_stage3_native_metadata_probe llvm-config-prefix \
+        "$fixture/$scenario" "$scenario" >"$fixture/$scenario.stdout" \
+        2>"$fixture/$scenario.stderr"; then
+        echo 'FAIL: changed executable admitted' >&2
+        exit 1
+    fi
+    [ "$(wc -c <"$fixture/$scenario.calls")" -eq 1 ]
+    [ ! -s "$fixture/$scenario.stdout" ]
+    grep -Fx 'bootstrap-native-metadata-probe=llvm-config-prefix result=binary-changed' "$fixture/$scenario.stderr" >/dev/null
+done
+if (cd "$fixture" && PATH="$fixture:$PATH" bootstrap_stage3_native_metadata_probe \
+    cargo-version native-tool success) >"$fixture/relative.stdout" 2>"$fixture/relative.stderr"; then
+    echo 'FAIL: PATH lookup admitted' >&2
+    exit 1
+fi
+[ ! -e "$fixture/native-tool.calls" ]
+printf 'PASS: metadata recovery is bounded to two exact launches, retains diagnostics, isolates environment and stdout, and rejects changed executables\n'

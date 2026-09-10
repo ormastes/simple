@@ -1,0 +1,379 @@
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, pinned_archive_read_member_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+val INTERFACE_ACTION_ARCHIVE_SCHEMA_V1: text =
+    "simple-interface-action-archive-v1"
+
+enum InterfaceActionArchiveErrorV1:
+    invalid_capability
+    identity_mismatch
+    unsupported_schema
+    incompatible_producer
+    incompatible_target
+    incompatible_variant
+    dependency_digest_mismatch
+    malformed_interface
+    malformed_action
+    duplicate_symbol
+    unresolved_type
+    install_conflict
+    source_read_attempted
+
+struct InterfaceArchiveSymbolV1:
+    name: text
+    kind: text
+    type_identity: text
+    semantic_digest: text
+
+struct CompileArchiveActionV1:
+    key: text
+    kind: text
+    target_symbol: text
+    action_digest: text
+
+struct InterfaceActionArchiveV1:
+    package_key: text
+    variant_key: ConfigVariantKeyV1
+    producer_digest: text
+    dependency_interface_digests: [text]
+    interface_payload_digest: text
+    action_payload_digest: text
+    interface_symbols: [InterfaceArchiveSymbolV1]
+    compile_actions: [CompileArchiveActionV1]
+
+struct InstalledInterfaceActionV1:
+    package_key: text
+    interface_digest: text
+    action_digest: text
+    installed_symbol_count: i64
+    installed_action_count: i64
+
+struct SemanticContext:
+    archive_package_keys: [text]
+    archive_symbols: [InterfaceArchiveSymbolV1]
+
+struct CompileActionRegistry:
+    archive_package_keys: [text]
+    archive_actions: [CompileArchiveActionV1]
+
+struct RouteArchiveInstallTransactionV1:
+    archives: [InterfaceActionArchiveV1]
+    package_keys: [text]
+    closed: bool
+
+struct InterfaceActionManifestV1:
+    package_key: text
+    variant_digest: text
+    producer_digest: text
+    dependencies: [text]
+    interface_digest: text
+    action_digest: text
+
+fn interface_action_archive_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r") and
+        not value.contains("|")
+
+fn interface_action_archive_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or
+                (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn interface_action_archive_sorted_unique_digests_v1(
+    values: [text]
+) -> [text]?:
+    var sorted = values
+    var left = 0
+    while left < sorted.len():
+        var least = left
+        var right = left + 1
+        while right < sorted.len():
+            if sorted[right] < sorted[least]:
+                least = right
+            right = right + 1
+        if least != left:
+            val swap = sorted[left]
+            sorted[left] = sorted[least]
+            sorted[least] = swap
+        left = left + 1
+    var previous = ""
+    for digest in sorted:
+        if (not interface_action_archive_digest_valid_v1(digest) or
+                digest == previous):
+            return nil
+        previous = digest
+    Some(sorted)
+
+fn interface_action_archive_manifest_decode_v1(
+    content: text
+) -> Result<InterfaceActionManifestV1, InterfaceActionArchiveErrorV1>:
+    val lines = content.split("\n")
+    if lines.len() != 7 or lines[0] != INTERFACE_ACTION_ARCHIVE_SCHEMA_V1:
+        return Err(InterfaceActionArchiveErrorV1.unsupported_schema)
+    var values: [text] = []
+    val keys = ["package=", "variant=", "producer=", "dependencies=",
+        "interface=", "action="]
+    var index = 0
+    while index < keys.len():
+        if not lines[index + 1].starts_with(keys[index]):
+            return Err(InterfaceActionArchiveErrorV1.identity_mismatch)
+        values.push(lines[index + 1][keys[index].len():lines[index + 1].len()])
+        index = index + 1
+    val dependencies = if values[3] == "0;":
+        []
+    else:
+        val framed = values[3].split(";")
+        if framed.len() != 2:
+            return Err(InterfaceActionArchiveErrorV1.dependency_digest_mismatch)
+        val parsed = framed[1].split(",")
+        if (framed[0].parse_int() ?? -1) != parsed.len():
+            return Err(InterfaceActionArchiveErrorV1.dependency_digest_mismatch)
+        parsed
+    val canonical_dependencies =
+        interface_action_archive_sorted_unique_digests_v1(dependencies)
+    if (not interface_action_archive_text_valid_v1(values[0]) or
+            not interface_action_archive_digest_valid_v1(values[1]) or
+            not interface_action_archive_digest_valid_v1(values[2]) or
+            canonical_dependencies == nil or
+            not interface_action_archive_digest_valid_v1(values[4]) or
+            not interface_action_archive_digest_valid_v1(values[5])):
+        return Err(InterfaceActionArchiveErrorV1.identity_mismatch)
+    Ok(InterfaceActionManifestV1(
+        values[0], values[1], values[2], canonical_dependencies!,
+        values[4], values[5]))
+
+fn interface_action_archive_symbols_decode_v1(
+    content: text
+) -> Result<[InterfaceArchiveSymbolV1], InterfaceActionArchiveErrorV1>:
+    var symbols: [InterfaceArchiveSymbolV1] = []
+    var names: [text] = []
+    for line in content.split("\n"):
+        if line == "":
+            continue
+        val fields = line.split("|")
+        if (fields.len() != 5 or fields[0] != "symbol" or
+                not interface_action_archive_text_valid_v1(fields[1]) or
+                not interface_action_archive_text_valid_v1(fields[2]) or
+                not interface_action_archive_text_valid_v1(fields[3]) or
+                not interface_action_archive_digest_valid_v1(fields[4])):
+            return Err(InterfaceActionArchiveErrorV1.malformed_interface)
+        if fields[3] == "unknown" or fields[3] == "unresolved":
+            return Err(InterfaceActionArchiveErrorV1.unresolved_type)
+        if names.contains(fields[1]):
+            return Err(InterfaceActionArchiveErrorV1.duplicate_symbol)
+        names.push(fields[1])
+        symbols.push(InterfaceArchiveSymbolV1(
+            fields[1], fields[2], fields[3], fields[4]))
+    if symbols.len() == 0:
+        return Err(InterfaceActionArchiveErrorV1.malformed_interface)
+    Ok(symbols)
+
+fn interface_action_archive_actions_decode_v1(
+    content: text
+) -> Result<[CompileArchiveActionV1], InterfaceActionArchiveErrorV1>:
+    var actions: [CompileArchiveActionV1] = []
+    var keys: [text] = []
+    for line in content.split("\n"):
+        if line == "":
+            continue
+        val fields = line.split("|")
+        if (fields.len() != 5 or fields[0] != "action" or
+                not interface_action_archive_text_valid_v1(fields[1]) or
+                not interface_action_archive_text_valid_v1(fields[2]) or
+                not interface_action_archive_text_valid_v1(fields[3]) or
+                not interface_action_archive_digest_valid_v1(fields[4]) or
+                keys.contains(fields[1])):
+            return Err(InterfaceActionArchiveErrorV1.malformed_action)
+        keys.push(fields[1])
+        actions.push(CompileArchiveActionV1(
+            fields[1], fields[2], fields[3], fields[4]))
+    if actions.len() == 0:
+        return Err(InterfaceActionArchiveErrorV1.malformed_action)
+    Ok(actions)
+
+fn interface_action_archive_decode_v1(
+    capability: PinnedArchiveCapability,
+    receipt: PackageArchiveReceiptV1
+) -> Result<InterfaceActionArchiveV1, InterfaceActionArchiveErrorV1>:
+    if capability.archive_digest == "" or capability.receipt_digest == "":
+        return Err(InterfaceActionArchiveErrorV1.invalid_capability)
+    val manifest_result = pinned_archive_read_member_v1(
+        capability, "manifest.sdn")
+    val interface_result = pinned_archive_read_member_v1(
+        capability, "interface.smf")
+    val action_result = pinned_archive_read_member_v1(
+        capability, "actions.smf")
+    if manifest_result.is_err() or interface_result.is_err() or
+            action_result.is_err():
+        return Err(InterfaceActionArchiveErrorV1.invalid_capability)
+    val manifest_result_v1 = interface_action_archive_manifest_decode_v1(
+        manifest_result.unwrap())
+    if manifest_result_v1.is_err():
+        return Err(manifest_result_v1.unwrap_err())
+    val manifest = manifest_result_v1.unwrap()
+    if (manifest.package_key != receipt.package_key or
+            capability.archive_digest != receipt.archive_digest):
+        return Err(InterfaceActionArchiveErrorV1.identity_mismatch)
+    if manifest.producer_digest != receipt.producer_digest:
+        return Err(InterfaceActionArchiveErrorV1.incompatible_producer)
+    if manifest.variant_digest != receipt.variant_digest:
+        return Err(InterfaceActionArchiveErrorV1.incompatible_variant)
+    if manifest.dependencies != receipt.dependency_interface_digests:
+        return Err(InterfaceActionArchiveErrorV1.dependency_digest_mismatch)
+    val interface_content = interface_result.unwrap()
+    val action_content = action_result.unwrap()
+    if sha256_text(interface_content) != manifest.interface_digest:
+        return Err(InterfaceActionArchiveErrorV1.malformed_interface)
+    if sha256_text(action_content) != manifest.action_digest:
+        return Err(InterfaceActionArchiveErrorV1.malformed_action)
+    val symbols = interface_action_archive_symbols_decode_v1(interface_content)
+    if symbols.is_err():
+        return Err(symbols.unwrap_err())
+    val actions = interface_action_archive_actions_decode_v1(action_content)
+    if actions.is_err():
+        return Err(actions.unwrap_err())
+    Ok(InterfaceActionArchiveV1(
+        manifest.package_key, ConfigVariantKeyV1(
+            "archive", "archive", [], "archive", "v1", [], []),
+        manifest.producer_digest,
+        manifest.dependencies, manifest.interface_digest,
+        manifest.action_digest, symbols.unwrap(), actions.unwrap()))
+
+fn interface_action_archive_install_v1(
+    archive: InterfaceActionArchiveV1,
+    semantic_owner: &mut SemanticContext,
+    action_owner: &mut CompileActionRegistry
+) -> Result<InstalledInterfaceActionV1, InterfaceActionArchiveErrorV1>:
+    if (semantic_owner.archive_package_keys.contains(archive.package_key) or
+            action_owner.archive_package_keys.contains(archive.package_key)):
+        return Err(InterfaceActionArchiveErrorV1.install_conflict)
+    var existing_symbols: [text] = []
+    for symbol in semantic_owner.archive_symbols:
+        existing_symbols.push(symbol.name)
+    for symbol in archive.interface_symbols:
+        if existing_symbols.contains(symbol.name):
+            return Err(InterfaceActionArchiveErrorV1.install_conflict)
+        existing_symbols.push(symbol.name)
+    var existing_actions: [text] = []
+    for action in action_owner.archive_actions:
+        existing_actions.push(action.key)
+    for action in archive.compile_actions:
+        if (existing_actions.contains(action.key) or
+                not existing_symbols.contains(action.target_symbol)):
+            return Err(InterfaceActionArchiveErrorV1.install_conflict)
+        existing_actions.push(action.key)
+    # Both owners are mutated only after the complete validation pass.
+    for symbol in archive.interface_symbols:
+        semantic_owner.archive_symbols.push(symbol)
+    for action in archive.compile_actions:
+        action_owner.archive_actions.push(action)
+    semantic_owner.archive_package_keys.push(archive.package_key)
+    action_owner.archive_package_keys.push(archive.package_key)
+    Ok(InstalledInterfaceActionV1(
+        archive.package_key, archive.interface_payload_digest,
+        archive.action_payload_digest, archive.interface_symbols.len(),
+        archive.compile_actions.len()))
+
+fn route_archive_install_begin_v1() -> RouteArchiveInstallTransactionV1:
+    RouteArchiveInstallTransactionV1([], [], false)
+
+struct RouteArchiveInstallStageTransferV1:
+    transaction: RouteArchiveInstallTransactionV1
+    result: Result[(), InterfaceActionArchiveErrorV1]
+
+struct RouteArchiveInstallCommitTransferV1:
+    transaction: RouteArchiveInstallTransactionV1
+    semantic_owner: SemanticContext
+    action_owner: CompileActionRegistry
+    result: Result[[InstalledInterfaceActionV1], InterfaceActionArchiveErrorV1]
+
+fn route_archive_install_stage_v1(
+    transaction: &mut RouteArchiveInstallTransactionV1,
+    archive: InterfaceActionArchiveV1
+) -> Result[(), InterfaceActionArchiveErrorV1]:
+    if transaction.closed or transaction.package_keys.contains(archive.package_key):
+        return Err(InterfaceActionArchiveErrorV1.install_conflict)
+    transaction.archives.push(archive)
+    transaction.package_keys.push(archive.package_key)
+    Ok(())
+
+fn route_archive_install_commit_v1(
+    transaction: &mut RouteArchiveInstallTransactionV1,
+    semantic_owner: &mut SemanticContext,
+    action_owner: &mut CompileActionRegistry
+) -> Result<[InstalledInterfaceActionV1], InterfaceActionArchiveErrorV1>:
+    if transaction.closed:
+        return Err(InterfaceActionArchiveErrorV1.install_conflict)
+    var staged_semantic = SemanticContext(
+        semantic_owner.archive_package_keys, semantic_owner.archive_symbols)
+    var staged_actions = CompileActionRegistry(
+        action_owner.archive_package_keys, action_owner.archive_actions)
+    var installed: [InstalledInterfaceActionV1] = []
+    for archive in transaction.archives:
+        val result = interface_action_archive_install_v1(
+            archive, &mut staged_semantic, &mut staged_actions)
+        if result.is_err():
+            transaction.closed = true
+            return Err(result.unwrap_err())
+        installed.push(result.unwrap())
+    semantic_owner.archive_package_keys = staged_semantic.archive_package_keys
+    semantic_owner.archive_symbols = staged_semantic.archive_symbols
+    action_owner.archive_package_keys = staged_actions.archive_package_keys
+    action_owner.archive_actions = staged_actions.archive_actions
+    transaction.closed = true
+    Ok(installed)
+
+fn route_archive_install_rollback_v1(
+    transaction: &mut RouteArchiveInstallTransactionV1
+):
+    transaction.archives = []
+    transaction.package_keys = []
+    transaction.closed = true
+
+fn route_archive_install_stage_owned_v1(
+    transaction: RouteArchiveInstallTransactionV1,
+    archive: InterfaceActionArchiveV1
+) -> RouteArchiveInstallStageTransferV1:
+    var owned = transaction
+    val result = route_archive_install_stage_v1(&mut owned, archive)
+    RouteArchiveInstallStageTransferV1(owned, result)
+
+fn route_archive_install_commit_owned_v1(
+    transaction: RouteArchiveInstallTransactionV1,
+    semantic_owner: SemanticContext,
+    action_owner: CompileActionRegistry
+) -> RouteArchiveInstallCommitTransferV1:
+    var owned_transaction = transaction
+    var owned_semantic = semantic_owner
+    var owned_actions = action_owner
+    val result = route_archive_install_commit_v1(
+        &mut owned_transaction, &mut owned_semantic, &mut owned_actions)
+    RouteArchiveInstallCommitTransferV1(
+        owned_transaction, owned_semantic, owned_actions, result)
+
+fn route_archive_install_rollback_owned_v1(
+    transaction: RouteArchiveInstallTransactionV1
+) -> RouteArchiveInstallTransactionV1:
+    var owned = transaction
+    route_archive_install_rollback_v1(&mut owned)
+    owned
+
+export InterfaceActionArchiveErrorV1, InterfaceArchiveSymbolV1
+export CompileArchiveActionV1, InterfaceActionArchiveV1
+export InstalledInterfaceActionV1, SemanticContext, CompileActionRegistry
+export RouteArchiveInstallTransactionV1
+export RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1
+export interface_action_archive_decode_v1, interface_action_archive_install_v1
+export route_archive_install_begin_v1, route_archive_install_stage_v1
+export route_archive_install_commit_v1, route_archive_install_rollback_v1
+export route_archive_install_stage_owned_v1
+export route_archive_install_commit_owned_v1, route_archive_install_rollback_owned_v1

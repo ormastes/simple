@@ -50,16 +50,14 @@ const richCustomEditor_1 = require("./richCustomEditor");
 const simpleOutlineProvider_1 = require("./outline/simpleOutlineProvider");
 const extensionHostServices_1 = require("./services/extensionHostServices");
 const simpleCliService_1 = require("./services/simpleCliService");
+const simpleLspServerResolver_1 = require("./services/simpleLspServerResolver");
 const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
 const testCodeLensProvider_1 = require("./testing/testCodeLensProvider");
 const testController_1 = require("./testing/testController");
 const editorMarkers_1 = require("./testing/editorMarkers");
 const testWorkspacePanel_1 = require("./testing/testWorkspacePanel");
 const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
-const SIMPLE_SELECTOR = [
-    { scheme: 'file', language: 'simple' },
-    { scheme: 'untitled', language: 'simple' },
-];
+const SIMPLE_SELECTOR = (0, simpleLspServerResolver_1.createSimpleLspDocumentSelector)();
 let activeLspSurface;
 async function activate(context) {
     const services = new extensionHostServices_1.ExtensionHostServices();

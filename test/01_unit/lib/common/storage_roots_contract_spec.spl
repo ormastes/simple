@@ -1,0 +1,69 @@
+use std.common.storage_roots.*
+
+fn sample_roots() -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: "/user/simple"),
+        worktree_root: CanonicalPath(value: "/worktree/simple"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.PlatformDefault,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1, w1: 2, w2: 3, w3: 4),
+    )
+
+describe "centralized storage root contract":
+    it "freezes exactly the two public environment names":
+        expect(SIMPLE_USER_STORAGE_ROOT).to_equal("SIMPLE_USER_STORAGE_ROOT")
+        expect(SIMPLE_WORKTREE_STORAGE_ROOT).to_equal("SIMPLE_WORKTREE_STORAGE_ROOT")
+        expect(SIMPLE_USER_STORAGE_ROOT == SIMPLE_WORKTREE_STORAGE_ROOT).to_equal(false)
+
+    it "carries both roots and their derivation atomically":
+        val roots = sample_roots()
+        expect(roots.user_root.value).to_equal("/user/simple")
+        expect(roots.worktree_root.value).to_equal("/worktree/simple")
+        expect(roots.policy_version).to_equal(1u32)
+        expect(roots.worktree_identity.w3).to_equal(4u64)
+
+    it "represents deterministic child environment ownership":
+        val environment = StableEnvironment(bindings: [
+            EnvironmentBinding(
+                key: SIMPLE_USER_STORAGE_ROOT,
+                value: "/user/simple",
+                ownership: StorageOwnership.SimpleManaged,
+            ),
+            EnvironmentBinding(
+                key: "FOREIGN_CACHE",
+                value: "/foreign/cache",
+                ownership: StorageOwnership.External,
+            ),
+        ])
+        expect(environment.bindings.len()).to_equal(2)
+        expect(environment.bindings[0].key).to_equal(SIMPLE_USER_STORAGE_ROOT)
+        expect(environment.bindings[1].ownership == StorageOwnership.External).to_equal(true)
+
+    it "keeps publication and cleanup evidence immutable and typed":
+        val evidence = ArtifactEvidence(
+            digest: Digest256(w0: 10, w1: 20, w2: 30, w3: 40),
+            byte_count: 4096u64,
+            item_count: 2u64,
+        )
+        val receipt = PublishReceipt(
+            destination: CanonicalPath(value: "/worktree/simple/build/app"),
+            evidence: evidence,
+            operation: OperationId(value: "native-build"),
+        )
+        val cleanup = CleanupRequest(
+            root_kind: StorageRootKind.Worktree,
+            target: CanonicalPath(value: "/worktree/simple/tmp/run-1"),
+            intent: CleanupIntent.DryRun,
+            expected_root_identity: sample_roots().worktree_identity,
+        )
+        expect(receipt.evidence.byte_count).to_equal(4096u64)
+        expect(receipt.operation.value).to_equal("native-build")
+        expect(cleanup.intent == CleanupIntent.DryRun).to_equal(true)
+
+    it "exposes fail-closed error families without fallback values":
+        expect(StorageRootError.EmptyExplicitRoot == StorageRootError.EmptyExplicitRoot).to_equal(true)
+        expect(StoragePathError.OutsideRoot == StoragePathError.OutsideRoot).to_equal(true)
+        expect(PublishError.CrossFilesystemPublish == PublishError.CrossFilesystemPublish).to_equal(true)
+        expect(CleanupError.MarkerMissing == CleanupError.MarkerMissing).to_equal(true)
+        expect(StorageReceiptError.InvalidReceipt == StorageReceiptError.InvalidReceipt).to_equal(true)

@@ -155,8 +155,8 @@ mod tests {
     use cranelift_module::Linkage;
 
     use super::{
-        boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target,
-        sffi_alias_target_shadowed, text_arg_indices,
+        boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed,
+        text_arg_indices,
     };
 
     /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
@@ -186,6 +186,23 @@ mod tests {
         for name in ["rt_secure_temp_dir", "rt_file_publish_noreplace"] {
             assert_eq!(text_arg_indices(name), Some(&[0, 1][..]), "{name}");
         }
+    }
+
+    #[test]
+    fn owned_process_v3_start_expands_only_command_text() {
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
+            Some((&[0][..], &[1][..]))
+        );
+    }
+
+    #[test]
+    fn owned_pinned_process_path_expands_to_ptr_len() {
+        assert_eq!(text_arg_indices("rt_process_pin_executable_owned_value"), Some(&[0][..]));
+        assert_eq!(
+            super::process_c_runtime_arg_indices("rt_process_owned_v3_start_pinned_value"),
+            None
+        );
     }
 
     #[test]
@@ -1291,135 +1308,6 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
         .jump(tail_scalar_block, &[next_tail_sum, next_tail_idx, next_tail_cursor]);
     builder.seal_block(tail_body_block);
     builder.seal_block(tail_scalar_block);
-    builder.seal_block(tail_block);
-
-    builder.switch_to_block(done_block);
-    let result = builder.block_params(done_block)[0];
-    builder.seal_block(done_block);
-    ctx.vreg_values.insert(*dest, result);
-    Ok(true)
-}
-
-fn compile_inline_hash_text<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    dest: &Option<VReg>,
-    args: &[VReg],
-) -> InstrResult<bool> {
-    if args.len() != 1 {
-        return Ok(false);
-    }
-    let Some(dest) = dest else {
-        return Ok(false);
-    };
-
-    let value = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let zero = builder.ins().iconst(types::I64, 0);
-    let hash_seed = builder.ins().iconst(types::I64, 5381);
-    let tag = builder.ins().band_imm(value, 7);
-    let is_text = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
-    let ptr = builder.ins().band_imm(value, !7i64);
-
-    let ptr_block = builder.create_block();
-    let kind_block = builder.create_block();
-    let len_block = builder.create_block();
-    let loop_block = builder.create_block();
-    let word_block = builder.create_block();
-    let tail_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(loop_block, types::I64);
-    builder.append_block_param(loop_block, types::I64);
-    builder.append_block_param(word_block, types::I64);
-    builder.append_block_param(word_block, types::I64);
-    builder.append_block_param(tail_block, types::I64);
-    builder.append_block_param(tail_block, types::I64);
-    builder.append_block_param(done_block, types::I64);
-
-    builder.ins().brif(is_text, ptr_block, &[], done_block, &[zero]);
-
-    builder.switch_to_block(ptr_block);
-    let ptr_valid = builder.ins().icmp_imm(IntCC::SignedGreaterThan, ptr, 0);
-    builder.ins().brif(ptr_valid, kind_block, &[], done_block, &[zero]);
-    builder.seal_block(ptr_block);
-
-    builder.switch_to_block(kind_block);
-    let kind = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
-    let masked_kind = builder.ins().band_imm(kind, 0xFFFF_FFFF);
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
-    builder.ins().brif(is_string, len_block, &[], done_block, &[zero]);
-    builder.seal_block(kind_block);
-
-    builder.switch_to_block(len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr, 8);
-    let data = builder.ins().iadd_imm(ptr, 16);
-    builder.ins().jump(loop_block, &[hash_seed, zero]);
-    builder.seal_block(len_block);
-
-    builder.switch_to_block(loop_block);
-    let hash = builder.block_params(loop_block)[0];
-    let index = builder.block_params(loop_block)[1];
-    let index_plus_three = builder.ins().iadd_imm(index, 3);
-    let has_word = builder.ins().icmp(IntCC::SignedLessThan, index_plus_three, len);
-    builder
-        .ins()
-        .brif(has_word, word_block, &[hash, index], tail_block, &[hash, index]);
-
-    builder.switch_to_block(word_block);
-    let hash = builder.block_params(word_block)[0];
-    let index = builder.block_params(word_block)[1];
-    let byte0_ptr = builder.ins().iadd(data, index);
-    let index1 = builder.ins().iadd_imm(index, 1);
-    let index2 = builder.ins().iadd_imm(index, 2);
-    let index3 = builder.ins().iadd_imm(index, 3);
-    let byte1_ptr = builder.ins().iadd(data, index1);
-    let byte2_ptr = builder.ins().iadd(data, index2);
-    let byte3_ptr = builder.ins().iadd(data, index3);
-    let byte0 = builder.ins().load(types::I8, MemFlags::new(), byte0_ptr, 0);
-    let byte1 = builder.ins().load(types::I8, MemFlags::new(), byte1_ptr, 0);
-    let byte2 = builder.ins().load(types::I8, MemFlags::new(), byte2_ptr, 0);
-    let byte3 = builder.ins().load(types::I8, MemFlags::new(), byte3_ptr, 0);
-    let byte0_64 = builder.ins().uextend(types::I64, byte0);
-    let byte1_64 = builder.ins().uextend(types::I64, byte1);
-    let byte2_64 = builder.ins().uextend(types::I64, byte2);
-    let byte3_64 = builder.ins().uextend(types::I64, byte3);
-    let hash_scaled = builder.ins().imul_imm(hash, 1185921);
-    let term0 = builder.ins().imul_imm(byte0_64, 35937);
-    let term1 = builder.ins().imul_imm(byte1_64, 1089);
-    let term2 = builder.ins().imul_imm(byte2_64, 33);
-    let partial0 = builder.ins().iadd(hash_scaled, term0);
-    let partial1 = builder.ins().iadd(partial0, term1);
-    let partial2 = builder.ins().iadd(partial1, term2);
-    let next_hash = builder.ins().iadd(partial2, byte3_64);
-    let next_index = builder.ins().iadd_imm(index, 4);
-    let next_index_plus_three = builder.ins().iadd_imm(next_index, 3);
-    let has_next_word = builder.ins().icmp(IntCC::SignedLessThan, next_index_plus_three, len);
-    builder.ins().brif(
-        has_next_word,
-        loop_block,
-        &[next_hash, next_index],
-        tail_block,
-        &[next_hash, next_index],
-    );
-    builder.seal_block(word_block);
-    builder.seal_block(loop_block);
-
-    builder.switch_to_block(tail_block);
-    let hash = builder.block_params(tail_block)[0];
-    let index = builder.block_params(tail_block)[1];
-    let has_tail = builder.ins().icmp(IntCC::SignedLessThan, index, len);
-    let tail_body_block = builder.create_block();
-    builder.ins().brif(has_tail, tail_body_block, &[], done_block, &[hash]);
-
-    builder.switch_to_block(tail_body_block);
-    let byte_ptr = builder.ins().iadd(data, index);
-    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-    let byte_64 = builder.ins().uextend(types::I64, byte);
-    let shifted = builder.ins().ishl_imm(hash, 5);
-    let hash_times_33 = builder.ins().iadd(shifted, hash);
-    let next_hash = builder.ins().iadd(hash_times_33, byte_64);
-    let next_index = builder.ins().iadd_imm(index, 1);
-    builder.ins().jump(tail_block, &[next_hash, next_index]);
-    builder.seal_block(tail_body_block);
     builder.seal_block(tail_block);
 
     builder.switch_to_block(done_block);
@@ -2696,7 +2584,13 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
-        | "rt_file_create_excl" => Some(&[0, 1]),
+        | "rt_file_create_excl"
+        // rt_file_copy_create_excl_no_follow / rt_file_link_create_excl_no_follow
+        // are (source_ptr, source_len, destination_ptr, destination_len) --
+        // same (ptr, len) x2 shape, see runtime/src/value/sffi/file_io/file_ops.rs
+        // and the pure-Simple twin table text_extern_abi.spl.
+        | "rt_file_copy_create_excl_no_follow"
+        | "rt_file_link_create_excl_no_follow" => Some(&[0, 1]),
         // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
         // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
         // phase_ptr, phase_len, source_index, path_ptr, path_len, ...).
@@ -2711,7 +2605,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
-        "rt_process_run_with_limits" => Some(&[0]),
+        // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
+        // embedded NUL in the native provider without requiring C-string text.
+        "rt_process_run_with_limits"
+        | "rt_process_pin_executable_owned_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
         // from every text-arg table, so JIT/native passed the RuntimeString
@@ -2872,7 +2769,8 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
-        | "rt_process_run_bounded" => Some((&[0], &[1])),
+        | "rt_process_run_bounded"
+        | "rt_process_owned_v3_start_value" => Some((&[0], &[1])),
         _ => None,
     }
 }
@@ -3285,9 +3183,17 @@ pub fn compile_call<M: Module>(
     if sffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args, false)? {
         return Ok(());
     }
-    if sffi_name == "rt_hash_text" && compile_inline_hash_text(ctx, builder, dest, args)? {
-        return Ok(());
-    }
+    // NOTE: rt_hash_text deliberately has NO inline Cranelift fast path.
+    // It previously reimplemented the string heap layout by hand
+    // (compile_inline_hash_text, removed 2026-09-07) with a DJB2 algorithm
+    // that both disagreed with the canonical FNV-1a in the C/Rust runtimes
+    // AND silently fell back to a content-independent 0 whenever its
+    // hand-rolled precondition checks (tag/kind-marker match) didn't hold —
+    // which they didn't, for every real string tested. Falling through to
+    // the ordinary ctx.runtime_funcs call below links directly to the real
+    // rt_hash_text symbol (Rust runtime or C runtime, per build), which is
+    // both correct and already cross-lane consistent.
+    // See doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
     if matches!(sffi_name, "rt_array_set_len_known" | "rt_array_set_len_known_text")
         && compile_inline_array_set_len_known(ctx, builder, dest, args)?
     {

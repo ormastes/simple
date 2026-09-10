@@ -779,6 +779,22 @@ bool rt_process_is_running(int64_t pid) {
     return exit_code == STILL_ACTIVE;
 }
 
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        CloseHandle(process);
+        return 0;
+    }
+    CloseHandle(process);
+    ULARGE_INTEGER value;
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
+}
+
 bool rt_process_kill(int64_t pid) {
     if (pid <= 0) return false;
 

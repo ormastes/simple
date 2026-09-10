@@ -8,6 +8,14 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Owned-process V3 exposes opaque native leases that the interpreter cannot
+/// safely manufacture or project. Keep every registered entry fail-closed.
+pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::Runtime(
+        "OwnedProcessV3 requires the native runtime".to_string(),
+    ))
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
@@ -473,7 +481,10 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// # Returns
 /// * Array of (key, value) tuples
-pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_env_all(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_env_all/rt_env_vars require no arguments"));
+    }
     unsafe {
         let result = sffi_env_all();
         Ok(runtime_to_value(result))
@@ -1292,7 +1303,44 @@ pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
             Ok(None) => Ok(Value::Bool(true)), // still running
             _ => Ok(Value::Bool(false)),       // exited or error
         },
-        None => Ok(Value::Bool(false)), // not tracked
+        // Not one of OUR children. `false` here is wrong: a pid we did not
+        // spawn can be perfectly alive. The C runtime
+        // (src/runtime/runtime_process.c:54) already gets this right — it
+        // falls back to `kill(pid, 0)` when waitpid reports ECHILD — and the
+        // interpreter must match, or callers silently get "dead" for every
+        // process they did not spawn themselves.
+        //
+        // This was reported as a caret bug: `cs`'s roster showed every agent
+        // as `exited: pane pid <N> is not running` while `tmux list-panes`
+        // said `dead=0`, because tmux — not cs — is the pane's parent.
+        // See doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md
+        None => Ok(Value::Bool(pid_is_live(pid))),
+    }
+}
+
+/// Liveness probe for a pid this process did not spawn.
+///
+/// Signal 0 performs the permission and existence checks without delivering a
+/// signal. EPERM means the process exists but belongs to another user, which
+/// is still "alive" for our purposes — treating it as dead is the bug this
+/// exists to avoid.
+fn pid_is_live(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // No cheap portable probe here; report unknown as not-running rather
+        // than claiming liveness we did not verify.
+        false
     }
 }
 

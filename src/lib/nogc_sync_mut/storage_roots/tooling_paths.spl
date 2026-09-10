@@ -1,0 +1,71 @@
+"""Centralized storage paths for IDE, tooling, MCP, and LSP producers."""
+
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.environment_owner.{resolve_ambient_storage_roots}
+use std.nogc_sync_mut.storage_roots.path_policy.{derive_user_storage_path, derive_worktree_storage_path}
+
+var _tooling_roots: StorageRoots? = nil
+
+pub fn tooling_storage_roots() -> Result<StorageRoots, StorageRootError>:
+    if _tooling_roots != nil:
+        return Ok(_tooling_roots!)
+    val roots = resolve_ambient_storage_roots("tooling-storage-v1")?
+    _tooling_roots = Some(roots)
+    Ok(roots)
+
+pub fn reset_tooling_storage_roots_for_test():
+    _tooling_roots = nil
+
+pub fn tooling_workspace_path(producer: text, session: text, item: text) -> Result<CanonicalPath, StoragePathError>:
+    val resolved = tooling_storage_roots()
+    if resolved.is_err():
+        return Err(StoragePathError.OutsideRoot)
+    tooling_workspace_path_in(resolved.unwrap(), producer, session, item)
+
+pub fn tooling_workspace_path_in(roots: StorageRoots, producer: text, session: text, item: text) -> Result<CanonicalPath, StoragePathError>:
+    derive_worktree_storage_path(roots, WorktreePathRequest(
+        storage_class: StorageClass.Ephemeral,
+        producer: producer,
+        operation: OperationId(value: producer),
+        session: session,
+        item: item,
+    ))
+
+pub fn tooling_build_path(producer: text, session: text, item: text) -> Result<CanonicalPath, StoragePathError>:
+    val resolved = tooling_storage_roots()
+    if resolved.is_err():
+        return Err(StoragePathError.OutsideRoot)
+    tooling_build_path_in(resolved.unwrap(), producer, session, item)
+
+pub fn tooling_build_path_in(roots: StorageRoots, producer: text, session: text, item: text) -> Result<CanonicalPath, StoragePathError>:
+    derive_worktree_storage_path(roots, WorktreePathRequest(
+        storage_class: StorageClass.Build,
+        producer: producer,
+        operation: OperationId(value: producer),
+        session: session,
+        item: item,
+    ))
+
+pub fn tooling_shared_cache_path(producer: text, schema: text, identity: text) -> Result<CanonicalPath, StoragePathError>:
+    val resolved = tooling_storage_roots()
+    if resolved.is_err():
+        return Err(StoragePathError.OutsideRoot)
+    tooling_shared_cache_path_in(resolved.unwrap(), producer, schema, identity)
+
+pub fn tooling_shared_cache_path_in(roots: StorageRoots, producer: text, schema: text, identity: text) -> Result<CanonicalPath, StoragePathError>:
+    derive_user_storage_path(roots, UserPathRequest(
+        storage_class: StorageClass.ReusableCache,
+        producer: producer,
+        schema: schema,
+        key: identity,
+    ))
+
+pub fn tooling_child_environment(tool_id: text) -> Result<StableEnvironment, StoragePathError>:
+    val resolved = tooling_storage_roots()
+    if resolved.is_err():
+        return Err(StoragePathError.OutsideRoot)
+    project_child_storage_environment(resolved.unwrap(), ToolStoragePolicy(
+        tool_id: tool_id,
+        preserve_external_overrides: false,
+        temporary_class: StorageClass.Ephemeral,
+    ))

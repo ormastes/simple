@@ -316,3 +316,156 @@ inlining the kernel more aggressively at the JIT level or accepting that a
 software Newton fallback can never match a hardware FP instruction within 2x
 for this shape of workload. C-MIG-0029/0030 registry entries updated with
 `perf_codegen` fields recording this verdict in full.
+
+## RE-MEASURED + PARTIALLY FIXED 2026-09-06 (aarch64): base64url 420x -> 17.6x
+
+**Host/binary.** aarch64 Linux, 20 CPUs, shared and loaded (a full bootstrap
+plus three other agent sessions running concurrently — treat absolute
+microseconds as an envelope, but every A/B below is same-host, same-corpus,
+same-session). Baseline binary: the Rust bootstrap seed at
+`bin/release/aarch64-unknown-linux-gnu/simple`, 50,093,192 bytes, sha256
+prefix `3d120a6f9ab5704b`. Fixed binary: same tree plus the runtime changes
+below, 51,104,760 bytes. Both print the `bootstrap seed only` banner. All
+runs under `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 bin/simple run`,
+exit 0, no strict-mode refusal — real codegen-lane numbers, and a silent
+interpreter fallback is impossible.
+
+**Harnesses** (scratchpad, not committed): `bench_b64_codegen.spl`,
+`bench_utf8_codegen.spl`, `bench_crc32_codegen.spl`, plus the attribution
+probes `probe_stages.spl`, `probe_stages2.spl`, `probe_scaling.spl`,
+`probe_join_correct.spl`. Every timing harness asserts its KAT against the C
+oracle BEFORE timing and aborts on mismatch; base64url's prints
+`KAT OK: 100/100 vectors match (encode+decode)` on a pinned 100-vector LCG
+corpus (lengths 0..2000, printable ASCII), and the utf8 one prints
+`KAT OK: 88/88 vectors agree with the C oracle`.
+
+### Where the time actually went — NOT where this record guessed
+
+`perf`/attach profiling is unavailable here (`perf_event_paranoid=4`,
+`ptrace_scope=1`), so cost was attributed by timing each stage of the kernel
+in isolation over the same 300,000 bytes:
+
+| stage (probe) | ns/byte |
+|---|---|
+| pre-sized `[u8]` indexed store (`out[i] = src[i]`) | 3 |
+| `[u8]` growth, `out = out.push(b)` (reassigned) | 2 |
+| `[u8]` growth, `out.push(b)` (bare) | 2 |
+| `s.bytes()` | <1 |
+| **`[text]` accumulate + `join("")` (the `_bytes_to_text` shape)** | **328** |
+
+Two conclusions, both contradicting this record's stated hypotheses:
+
+1. **The generated code is not the defect.** `[u8]` scalar loops run at
+   2-3 ns/byte, and `crc32_text` measured 1.23x the C oracle on this host
+   (see the sibling crc32 record). The JIT's array/scalar codegen is fine.
+2. **`out = out.push(x)` is NOT O(n^2).** Scaling at n = 750/1500/3000 with
+   reps fixed gave 273/518/1014 us — dead linear. The "reassigned push
+   rebuilds the array" theory that this file and `crc.spl` both repeat is
+   wrong for `[u8]`; reassignment is free.
+
+Decomposing the 328 ns/byte at n = 750/1500/3000 (all linear, so these are
+per-element CONSTANTS, not quadratic terms):
+
+- `[text]` push: ~47 ns/element (25x the `[u8]` push at ~2 ns)
+- **`join("")`: ~237 ns/element** — the single largest term
+- `char_from_codepoint` per byte: a fresh 1-char `text` per byte
+
+Root cause, read out of the runtime source rather than guessed:
+
+- `rt_string_join` (`runtime/src/value/collections.rs:4117`) calls
+  `rt_value_to_string` on EVERY element. That is
+  `value_to_display_string` (a Rust `String` allocation) followed by
+  `rt_string_new` (a fresh interned `RuntimeValue`) — two allocations per
+  element, performed purely to read back bytes an already-`text` element
+  already owned. `.join` dispatches here, not to `rt_array_join`
+  (`codegen/instr/calls.rs:3622`, `closures_structs.rs:2157` both map
+  `"join" => "rt_string_join"`).
+- `rt_bytes_to_text` (`runtime/src/value/sffi/file_io/file_ops.rs:1439`)
+  read each byte through a boxed `rt_array_get` — measured ~46 ns/BYTE for
+  what should be a memcpy — even though a bulk accessor for the packed `[u8]`
+  representation already existed two functions below it (`byte_array_bytes`,
+  used by `rt_file_write_bytes_array`).
+- `_bytes_to_text` (base64.spl) and `base_encoding_bytes_to_text`
+  (utilities.spl) both minted one `text` PER BYTE and then joined or
+  concatenated them. This function is on the path of every base64/base64url
+  encode AND decode, which is why the gap was symmetric.
+
+### Fix (commit `9e5671ad32d`, branch `work/codegen-text-builtin-per-element-allocs`)
+
+Four files, one root cause (per-element boxed round-trips in bulk text/byte
+builtins):
+
+1. `rt_string_join` — an element that is already a heap `String` has its own
+   bytes appended directly; non-`String` elements keep the display-formatter
+   path verbatim, so `[1,2,3].join(",")` is unaffected.
+2. `rt_bytes_to_text` — new `packed_byte_array_bytes` fast path
+   (`collections.rs`). A packed `[u8]`'s elements are `u8` by construction,
+   so neither of the function's rejections (non-int, out of 0..255) can fire
+   for it; skipping the per-element check is behaviour-preserving, not a
+   relaxation. Boxed-element arrays keep the checked loop.
+3. `_bytes_to_text` (base64.spl) and 4. `base_encoding_bytes_to_text`
+   (utilities.spl) — both now accumulate `[u8]` and convert once. Validation
+   walks and branch structure are untouched. Equivalence is by construction:
+   `join("")` IS the concatenation of the parts' UTF-8 bytes, and for
+   `b < 0x80` the part was `char_from_code(b)` = `table[b:b+1]` = exactly
+   that one byte. The multibyte branches still call `char_from_codepoint` and
+   push ITS bytes, so their deliberately-unvalidated behaviour is preserved
+   rather than reinterpreted. As a side effect utilities.spl drops from 5
+   in-loop `rt_bytes_to_text` call sites to 1 (net -4 on the direct-`rt_*`
+   ratchet in `src`).
+
+### After — same harness, same pinned corpus, same session
+
+| kernel | baseline simple_us | after simple_us | c_us before/after | ratio before -> after |
+|---|---|---|---|---|
+| base64url (50 reps x 100 vectors) | 5,293,846 | **220,515** | 12,605 / 12,031 | **420x -> 17.6x** (24x faster) |
+| crc32_text (500 iters, 2090 B) | 7,030 | 6,819 | 5,691 | 1.23x -> 1.20x (no regression) |
+| utf8_validate (300 reps x 88 vectors) | 488,614 | 482,616 | 12,705 / 12,607 | **38x -> 38x (UNCHANGED)** |
+
+Attribution of the base64url win, measured in two steps on this host:
+library fix alone, on the UNMODIFIED baseline binary, 5,293,846 -> 1,232,227
+(4.3x); adding the two runtime fixes, -> 220,515 (a further 5.6x). Both
+halves were needed — the library fix removes the per-byte `text`, and the
+runtime fix removes the per-byte boxed read in the one bulk conversion that
+replaced it.
+
+**Correctness.** `test/01_unit/lib/common/base_encoding/` reports
+`125 total, 120 passed, 5 failed, 5 skipped` **both before and after** — the
+5 failures are pre-existing and unrelated (the C oracle
+`rt_base64url_decode` rejects `+`/`/` input, which the characterization
+example expects it to tolerate; reproduced on the pristine tree with the
+pristine binary). Zero new failures, zero fixed. `probe_join_correct.spl`
+additionally checks 12 join/bytes cases through the new fast paths
+(already-string, mixed separators, empty elements, multibyte, `[i64]` and
+`[bool]` join, packed/pre-sized/empty `[u8]`): all pass.
+
+### What remains OPEN
+
+- **base64url is still 17.6x, not <=2x.** The per-byte `text` allocation and
+  the per-byte boxed byte read are both gone; what is left is the pure-Simple
+  per-byte loop itself (encode is already a pre-sized indexed-store loop at
+  ~3 ns/byte) plus `base64url_decode`'s extra full pass (it rewrites `-`/`_`
+  to `+`/`/` into a second `[u8]`, then delegates to `base64_decode`, which
+  walks the result again, so a decode is 3 passes over the data where the C
+  oracle does 1). Collapsing decode to a single pass is the obvious next
+  step and needs no runtime change.
+- **utf8_validate is ~38x on this host and my fixes did not move it** (0.4%,
+  within noise — verified by running the same harness on both binaries). Its
+  cost is the per-byte scalar branch cascade, exactly as finding 2 above
+  says; it already ends in ONE bulk `rt_bytes_to_text`, so it never paid the
+  per-element defect. The `u64`-window all-ASCII check finding 2 prescribes
+  is still the right next step. Note this 38x is NOT comparable to the 8.27x
+  recorded above: different host, different corpus (88 vectors of length
+  0..1044 with a multibyte char every 7th), and a different oracle framing.
+- **`rt_array_join` (`collections.rs:5543`) has the same defect in a worse
+  form** — it builds its result with a fresh `rt_string_concat` per element,
+  i.e. N allocations AND O(n^2) bytes copied. It is NOT on the `.join`
+  dispatch path (that is `rt_string_join`) so it was left alone under a
+  smallest-diff rule, but any caller reaching it pays the quadratic. Fix it
+  the same way when something is shown to use it.
+- **`char_from_code` allocates a 1-char `text` via a string slice for every
+  ASCII codepoint** (`utf8.spl:376`, `table[code:code+1]`). Any remaining
+  per-character text-building loop in the stdlib still pays ~200 ns/char for
+  this. The fix applied here (accumulate bytes, convert once) is the pattern
+  to copy; a census of other `parts.push(char_*)`-then-`join` loops has not
+  been done.

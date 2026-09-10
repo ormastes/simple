@@ -107,3 +107,86 @@ What remains unproven is narrower and still true: **no Metal device has
 executed the packed path.** The parity spec proves the packer and the frame
 contract without a device, and this host has no Metal-featured binary. Do not
 read a green parity run as evidence the GPU produced correct pixels.
+
+## 2026-09-06 — GPU/2D honesty sweep (Vulkan / Metal / DirectX)
+
+All `file:line` read at `origin/main` `461e48379ff`. PRs #410 and #422 were both
+**OPEN** on this date — read every "fixed" below as "fixed on an unmerged branch",
+not as a property of `main`.
+
+**Vulkan is genuinely real, and unusually honest about it.** Readback provenance
+discriminates five distinct states, all five literals emitted in one readback
+body — `completion_unknown` (`backend_vulkan.spl:1468`, `:1482`),
+`readback_failed` (`:1494`, `:1510`), `cpu_fallback` (`:1496`, `:1512`),
+`device_readback` (`:1498`), `host_cache_after_device_copy` (`:1519`). Backed by
+a sticky `cpu_fallback_used` field (`:293`) and a `completion_unknown` field
+(`:295`) that gate the device-purity predicates at `:411-412` and `:430`. Shutdown quarantines on `completion_unknown` instead of
+freeing in-flight resources. Use this backend as the reference for what an honest
+provenance ladder looks like; the other two are measured against it.
+
+**Three fakes found and fixed on PR #410:**
+1. `backend_directx.spl:444,452` returned `source = "device_readback"` with a
+   positive handle for pixels the CPU rasterized — over an ICD whose own docstring
+   says queue submit/present are "pending rt_dlopen for real libvulkan"
+   (`nogc_async_mut/gpu/vulkan_icd_sffi.spl:204,218`). A spec *pinned* the fake.
+2. `session/backend_vulkan_adapter.spl:24 init_device()` could report success
+   through unbacked externs (silent nil). The whole layer is now deleted — see
+   `doc/08_tracking/bug/gpu_session_layer_orphan_deleted_2026-09-06.md`.
+3. `MetalFontBackendState.frame_batch_contract_met()`
+   (`backend_metal_font.spl:162`) had **zero callers** — the one method that would
+   read the counters a real frame produced was dead code, while the parity spec
+   asserted the contract over hand-fed literals. **Measured on committed content,
+   not assumed:** `grep -c` gives **0** at `origin/main` `461e48379ff` and **2**
+   at #410 head `a5990b23ed2` (`backend_metal.spl:815`, `:821`), which also adds
+   the caller spec `backend_metal_device_free_contract_spec.spl:77,89,101`. So it
+   is fixed **on #410 only**, still unmerged. Anything you see in the shared jj
+   WC is uncommitted peer work — verify against a committed ref before citing.
+
+**Hazard class: self-mocking specs.** The pre-rewrite copies at
+`test/unit/gpu/{graphics_session,session_mode_separation,backend_session_sharing}_spec.spl`
+imported only `std.io` / `std.spec` and then defined their **own** local
+`GraphicsSession`, `Caps`, `SessionHandle`, `SessionPolicy` classes. They could
+not fail, because they tested nothing that ships. This is worth grepping for as a
+class: a spec whose `use` lines name no product module, or that declares a class
+with the same name as the subject, is vacuous by construction.
+
+**Correction — "Vulkan `draw_text` never reaches the atlas" was too broad.**
+`Engine2D.draw_text` (`engine.spl`) already routes TTF/vector text into the
+Vulkan font atlas: `draw_text` -> `has_sffi_ttf` -> `draw_text_configured` ->
+`stage_text_configured` -> `_draw_font_batch_staged` -> `_draw_font_batch_plan`
+-> `composite_font_batch`. Only the built-in **5x7 bitmap** path lacked an atlas
+lane (`backend_vulkan.spl` `me draw_text`, CPU `text_blit_buffer` then
+`draw_image_blend`) — that is what PR #422 adds, reusing the frozen composite
+SPIR-V; no new shader.
+
+**No Metal device evidence exists on this machine. None.**
+`build/test-macos-metal-render-log-pass/capture.env` is a hand-written **spec
+fixture**: the literal `macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE`,
+sitting beside `-fail`, `-bad-capture-magic`, `-missing-inputs` and six other
+fixture dirs. `doc/08_tracking/test/test_result.md` records both Metal perf specs
+as `unknown` — never a pass. Read every green Metal run as "the device-free
+contract holds", never as "the GPU produced correct pixels".
+
+**Two unpinned Vulkan session seams (`engine2d/vulkan_session.spl`):**
+- `create_command_buffer()` `:315-321` calls `vulkan_sffi_begin_compute()` with
+  **no session/initialized guard**, so it can hand back a handle on an engine
+  with no device — a false oracle for anything that treats a non-zero return as
+  proof of a session.
+- `_cleanup()` `:486` zeroes `command_pool`/`pipeline_cache`/`allocator`
+  `:547-549` with no destroy call. Read the nuance before filing a leak: those
+  three fields are declared "runtime-managed placeholder" `:78-80` and are
+  initialised to 0 `:131-133`, so the zeroing is *vacuous*, not a leak. The real
+  finding is that the fields exist and nothing owns them.
+
+**Deferred, recorded, not faked** (both keep their `# TODO:` markers — deferred
+is not done, never convert to NOTE):
+- GPU **glyph rasterization** (outline -> coverage) on Vulkan and Metal:
+  `doc/08_tracking/bug/gpu_glyph_rasterization_gpu_deferred_no_device_2026-09-06.md`.
+  Note the distinction that keeps being lost: the atlas blit is a **lookup**, not
+  a raster. Bitmap raster already exists on the generated-kernel lane
+  (`cuda_session.spl:394`, `opencl_session.spl:417`, `rocm_session.spl:242`
+  `bitmap_glyph_raster_kernel`) and Metal blits bitmap glyphs on-GPU
+  (`backend_metal.spl:708`, `:1914` `kernel_glyph_atlas_blit`).
+- **DirectX GPU text**, both platforms: `backend_directx.spl:382-384` (`draw_text`)
+  and `:221-223` (`draw_text_bg`) are `sw.draw_text*` + `_poison_native_receipt()`.
+  `doc/08_tracking/bug/directx_gpu_text_deferred_no_windows_host_2026-09-06.md`.

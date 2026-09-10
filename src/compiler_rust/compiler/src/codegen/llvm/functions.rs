@@ -536,6 +536,45 @@ impl LlvmBackend {
         Ok(())
     }
 
+    /// LLVM type to use when spilling/reloading a vreg to/from its
+    /// per-instruction cross-block alloca.
+    ///
+    /// `compile_function` spills EVERY vreg's value to its own alloca after
+    /// the defining instruction and reloads it before the next use (a naive
+    /// SSA-without-liveness scheme; see `vreg_map.clear()` after each
+    /// instruction below). Every one of those reload/store sites used to
+    /// hardcode `self.runtime_int_type()` (i64 on 64-bit targets), which is
+    /// correct for the general tagged-RuntimeValue ABI but WRONG for a plain
+    /// unboxed `f64`/`f32` vreg: the round trip bitcasts the double to i64 on
+    /// store (bit-exact) but then reloads it as a bare `IntValue` with no
+    /// cast back, so the very next instruction sees an integer holding the
+    /// double's raw bits instead of a float. `compile_binop` dispatches on
+    /// the LLVM value's actual kind (`IntValue` vs `FloatValue`), so it took
+    /// the INTEGER add path and summed the two doubles' bit patterns.
+    ///
+    /// Measured before this fix (`zz_sum.spl`, `var x = 1.5; print(x + 2.5)`,
+    /// native `core-c-bootstrap`, `aarch64-apple-darwin`): `x` reloaded as
+    /// `IntValue(0x3ff8000000000000)` (bits of 1.5), the literal `2.5` as
+    /// `IntValue(0x4004000000000000)`, `BinOp::Add` computed
+    /// `0x3ff8000000000000 + 0x4004000000000000 = 0x7ffc000000000000`, and
+    /// the program printed `NaN`. Using the vreg's real type (via
+    /// `vreg_types`) for every spill/reload site below, the same program
+    /// prints `4`, and `dotp([1.0,2.0],[3.0,4.0])` prints `11`, both matching
+    /// the interpreter.
+    #[cfg(feature = "llvm")]
+    fn native_slot_type(
+        &self,
+        vreg_types: &VRegTypes,
+        vreg: &crate::mir::VReg,
+    ) -> inkwell::types::BasicTypeEnum<'static> {
+        use crate::hir::TypeId as T;
+        match vreg_types.get(vreg).copied() {
+            Some(T::F64) => self.context_ref().f64_type().into(),
+            Some(T::F32) => self.context_ref().f32_type().into(),
+            _ => self.runtime_int_type().into(),
+        }
+    }
+
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
@@ -811,11 +850,11 @@ impl LlvmBackend {
             // At the start of each block, reload the vregs that are live-in to
             // that block. For the entry block, seed parameter vregs.
             if Some(block.id) == is_entry_block_id {
-                let i64_type = self.runtime_int_type();
                 for (i, _param) in func.params.iter().enumerate() {
                     let vreg = crate::mir::VReg(i as u32);
+                    let slot_type = self.native_slot_type(&vreg_types, &vreg);
                     if let Some(&alloca) = vreg_allocas.get(&vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(vreg, val);
                         }
                     }
@@ -856,10 +895,10 @@ impl LlvmBackend {
                 }
 
                 // Load only live-in vregs from allocas
-                let i64_type = self.runtime_int_type();
                 for vreg in &live_in {
+                    let slot_type = self.native_slot_type(&vreg_types, vreg);
                     if let Some(&alloca) = vreg_allocas.get(vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(*vreg, val);
                         }
                     }
@@ -873,13 +912,13 @@ impl LlvmBackend {
 
             // Compile each instruction by dispatching to helper methods
             for inst in &block.instructions {
-                let i64_type = self.runtime_int_type();
                 for used in inst.uses() {
                     if vreg_map.contains_key(&used) {
                         continue;
                     }
+                    let slot_type = self.native_slot_type(&vreg_types, &used);
                     if let Some(&alloca) = vreg_allocas.get(&used) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", used.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", used.0)) {
                             vreg_map.insert(used, val);
                         }
                     }
@@ -890,11 +929,11 @@ impl LlvmBackend {
                 // Store any newly defined vreg to its alloca (for cross-block access)
                 for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
-                        let rv_type = self.runtime_int_type();
-                        let i64_val = self
-                            .coerce_value_to_type(val, Some(rv_type.into()), builder)
+                        let slot_type = self.native_slot_type(&vreg_types, &d);
+                        let slot_val = self
+                            .coerce_value_to_type(val, Some(slot_type), builder)
                             .unwrap_or(val);
-                        let _ = builder.build_store(alloca, i64_val);
+                        let _ = builder.build_store(alloca, slot_val);
                     }
                 }
 
@@ -902,12 +941,12 @@ impl LlvmBackend {
             }
 
             // Compile terminator
-            let i64_type = self.runtime_int_type();
             match &block.terminator {
                 crate::mir::Terminator::Return(Some(v)) => {
                     if !vreg_map.contains_key(v) {
+                        let slot_type = self.native_slot_type(&vreg_types, v);
                         if let Some(&alloca) = vreg_allocas.get(v) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", v.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", v.0)) {
                                 vreg_map.insert(*v, val);
                             }
                         }
@@ -915,8 +954,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Branch { cond, .. } => {
                     if !vreg_map.contains_key(cond) {
+                        let slot_type = self.native_slot_type(&vreg_types, cond);
                         if let Some(&alloca) = vreg_allocas.get(cond) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", cond.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", cond.0)) {
                                 vreg_map.insert(*cond, val);
                             }
                         }
@@ -924,8 +964,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Switch { discriminant, .. } => {
                     if !vreg_map.contains_key(discriminant) {
+                        let slot_type = self.native_slot_type(&vreg_types, discriminant);
                         if let Some(&alloca) = vreg_allocas.get(discriminant) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", discriminant.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", discriminant.0)) {
                                 vreg_map.insert(*discriminant, val);
                             }
                         }
@@ -2575,6 +2616,35 @@ impl LlvmBackend {
                         "to_u32" | "to_i32" => self.context_ref().i32_type(),
                         _ => self.context_ref().i64_type(),
                     };
+                    // See the twin block in emitter.rs (`emit_method_call_static`)
+                    // for the measured incident: `to_i64`/`to_int` on an
+                    // already-i64-wide value coerces to itself, and a `text`
+                    // handle IS an i64 here, so the receiver's own word was
+                    // returned instead of the parsed number. `rt_to_int_dynamic`
+                    // parses a registry-validated heap string and is the
+                    // IDENTITY for everything else, so the genuinely-i64 case is
+                    // bit-for-bit unchanged; the narrowing targets keep the
+                    // coercion because they really do change width.
+                    if matches!(method, "to_i64" | "to_int")
+                        && recv_val.is_int_value()
+                        && recv_val.into_int_value().get_type() == int_type
+                    {
+                        let dyn_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let dyn_func = module
+                            .get_function("rt_to_int_dynamic")
+                            .unwrap_or_else(|| module.add_function("rt_to_int_dynamic", dyn_fn_type, None));
+                        let dyn_call = builder
+                            .build_call(dyn_func, &[recv_val.into_int_value().into()], "to_int_dyn")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_to_int_dynamic", &e))?;
+                        let dyn_val = dyn_call
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, dyn_val);
+                        }
+                        return Ok(());
+                    }
                     let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
                     if let Some(d) = dest {
                         vreg_map.insert(*d, converted);
@@ -2712,9 +2782,60 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // A qualified receiver is TYPE EVIDENCE and must not be thrown
+                // away in favour of a leaf-name shim. `XTri.to_text` names a
+                // USER method that merely shares its leaf with the builtin
+                // `to_text -> rt_to_string` alias below; rewriting it by leaf
+                // silently changes the call target, and `rt_to_string` renders
+                // any non-string receiver as `<enum@0x...>` / `<value:0x...>` /
+                // `<invalid-heap:0x...>` instead of running the user's method.
+                //
+                // This is the SAME predicate that already guards the sibling
+                // qualified-redirect site (`functions/calls.rs`, the
+                // `qualified_runtime_method_owner_is_builtin(func_name_raw)`
+                // gate) and the exact case its doc comment names: "Imported
+                // user methods can share leaves such as `to_text`, `get`, or
+                // `len`". The LLVM `MethodCallStatic` arm was left without it.
+                // The Cranelift twin (`codegen/instr/calls.rs`,
+                // `codegen/instr/closures_structs.rs`) carries the same
+                // unguarded leaf table and is NOT fixed here — it is off the
+                // LLVM-built Stage-2 path, but CI exercises both backends.
+                //
+                // The `direct_func` block above already returns whenever the
+                // target symbol is resolvable in THIS LLVM module — so the gap
+                // bites only a CROSS-UNIT call, which is why it is invisible in
+                // a single-file `native-build` and fatal in the multi-unit
+                // (`--source ... --entry ...`) project lane that emits Stage 2.
+                //
+                // Measured 2026-09-07 on the aarch64 Stage-2 candidate: the
+                // whole 152 MB binary carried only 4 `.to_text` symbols for 218
+                // `fn to_text` definitions in source, and
+                // `BuiltinBackendCompileAdapter.compile_aot_into_path` called
+                // `rt_to_string` where `BackendKind.to_text` should have been.
+                // `--backend cranelift` therefore reached
+                // `compile_module_with_backend_target_cpu_storage_bindings`
+                // with the backend NAME `<enum@0x2ced1710>`, fell through that
+                // function's `var kind = BackendKind.Llvm` default, and ran the
+                // LLVM lane; there `config.triple.to_text()` was hijacked the
+                // same way, so `llc` was invoked with
+                // `-mtriple=<invalid-heap:0x13dedef1>`, which `/bin/sh -c`
+                // parses as an input REDIRECT (`cannot open
+                // invalid-heap:0x...: No such file`, exit 2) -> "backend
+                // object-path status 1" on the Stage-2 hello-world probe.
+                //
+                // A bare (unqualified) name still reaches the table: that is a
+                // genuinely erased receiver, where `rt_to_string` is correct.
+                let qualified_owner_is_user_type = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    dotted.contains('.') && !super::qualified_runtime_method_owner_is_builtin(func_name)
+                };
+
                 // Map well-known methods to runtime functions
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
-                let runtime_func = match method {
+                let runtime_func = if qualified_owner_is_user_type {
+                    None
+                } else {
+                    match method {
                     // Copied verbatim from Cranelift lines 3163-3200
                     "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
@@ -2735,7 +2856,11 @@ impl LlvmBackend {
                     "pop" => Some("rt_array_pop"),
                     "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
-                    "trim" => Some("rt_string_trim"),
+                    // "strip"/"trimmed" synonyms for "trim" (this table's own
+                    // comment below documents this exact class of gap for
+                    // lines/partition/is_*; strip fell through the same way,
+                    // undefined `str.strip` at the Stage-4 macOS link 2026-09-07).
+                    "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                     "trim_start" => Some("rt_string_trim_start"),
                     "trim_end" => Some("rt_string_trim_end"),
                     "split" => Some("rt_string_split"),
@@ -2809,7 +2934,8 @@ impl LlvmBackend {
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
-                    _ => None,
+                        _ => None,
+                    }
                 };
 
                 if let Some(rt_name) = runtime_func {
@@ -3033,9 +3159,19 @@ impl LlvmBackend {
                         suffix_match()?
                     };
 
-                    let fallback_name = resolved
-                        .map(|n| n.replace("_dot_", "."))
-                        .unwrap_or_else(|| dotted_name.clone());
+                    // `resolved` (from use_map/import_map) is already the correct,
+                    // final mangled symbol name for a genuine cross-module
+                    // function -- it must be declared verbatim. Blindly
+                    // replacing "_dot_" -> "." here corrupted any identifier that
+                    // merely CONTAINS that substring as ordinary text (not a
+                    // dot-escape marker), e.g. `cosine_from_dot_and_magnitudes`
+                    // -> `cosine_from.and_magnitudes`, producing an undefined
+                    // symbol at the final Stage-4 macOS link (2026-09-07). No
+                    // `RUNTIME_FUNCS` spec name ever contains a literal '.', so
+                    // the replace never helped a real lookup either -- only the
+                    // unresolved bare-name fallback (`dotted_name`) still needs
+                    // dot-unescaping, for genuine `Owner_dot_method` shims.
+                    let fallback_name = resolved.map(|n| n.to_string()).unwrap_or_else(|| dotted_name.clone());
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
                         .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name);
@@ -3069,12 +3205,74 @@ impl LlvmBackend {
                     } else {
                         i64_type.fn_type(&fallback_param_types, false)
                     };
+                    // Project mangling runs before per-unit LLVM emission and may
+                    // already replace a cross-unit call target with its final
+                    // `module__path__function` symbol. Such a target is neither a
+                    // builtin receiver qualifier nor a name that use/import maps
+                    // are required to retain. Preserve it verbatim as an extern;
+                    // otherwise the builtin fail-closed branch below rejects every
+                    // already-mangled free-function call in Stage 2.
+                    let already_mangled_project_symbol =
+                        func_name.contains("__") && !func_name.contains('.') && !func_name.contains("_dot_");
                     let func = if let Some(spec) = runtime_spec {
                         module
                             .get_function(spec.name)
                             .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
+                    } else if let Some(f) = called_func {
+                        f
+                    } else if already_mangled_project_symbol {
+                        module.add_function(func_name, fallback_fn_type, None)
+                    } else if qualified_owner_is_user_type {
+                        // Owner is a genuine (non-builtin) user type -- e.g.
+                        // `DbValue.to_text`. `fallback_name` is load-bearing
+                        // here: real Stage-2 binaries carry symbols spelled
+                        // exactly this way for cross-unit qualified user
+                        // methods (see the #4 fix comment above). Preserve the
+                        // existing behaviour.
+                        module.add_function(&fallback_name, fallback_fn_type, None)
                     } else {
-                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None))
+                        // Owner IS a builtin receiver (str/text/...), and
+                        // `runtime_func`/`called_func`/`runtime_spec` have all
+                        // already failed to find real backing for `method`.
+                        // `fallback_name` ("text.split_whitespace" etc.) was
+                        // never a real exported symbol -- it is MIR's
+                        // receiver-type qualifier, invented for builtin
+                        // dispatch, not a mangled name any compiled unit ever
+                        // emits. Blindly declaring it here is exactly the
+                        // "resolve by name, ignore the receiver type" defect
+                        // that hijacked `to_i64`, struct offsets, struct field
+                        // types, and `to_text` in this codebase: it silently
+                        // manufactures an extern that can never link, so a
+                        // real cross-unit UFCS method sharing a leaf with no
+                        // builtin (`str.split_whitespace`) surfaces as an
+                        // undefined symbol at Stage-2 link instead of running.
+                        //
+                        // The one resolution `use_map`/`import_map` can still
+                        // give us is by the BARE method name: those maps are
+                        // keyed on the imported symbol's own name (see
+                        // `collect_use_imports`), never on the "Type.method"
+                        // qualifier MIR synthesizes for a builtin-typed
+                        // receiver, so the `func_name`-keyed lookups above
+                        // never had a chance to find a real UFCS function
+                        // here. Try that lookup now; if it also comes up
+                        // empty, fail closed instead of guessing.
+                        let bare_resolved = self
+                            .use_map
+                            .get(method)
+                            .or_else(|| self.import_map.get(method))
+                            .map(|s| s.as_str());
+                        let bare_func = bare_resolved.and_then(|n| {
+                            module.get_function(n).or_else(|| module.get_function(&n.replace("_dot_", ".")))
+                        });
+                        match bare_func.or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
+                        {
+                            Some(f) => f,
+                            None => {
+                                return Err(CompileError::semantic(format!(
+                                    "cannot resolve method call `{func_name}`: receiver is a builtin type but `{method}` is neither a known runtime method nor a resolvable user definition (checked use_map/import_map for `{method}`)"
+                                )));
+                            }
+                        }
                     };
                     let declared_param_types = func.get_type().get_param_types();
                     let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
@@ -3218,7 +3416,9 @@ impl LlvmBackend {
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
-                    ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
+                    ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
+                        Some("rt_string_trim")
+                    }
                     ("String" | "string" | "str" | "text", "trim_start") => Some("rt_string_trim_start"),
                     ("String" | "string" | "str" | "text", "trim_end") => Some("rt_string_trim_end"),
                     ("String" | "string", "replace") => Some("rt_string_replace"),
@@ -3393,9 +3593,15 @@ impl LlvmBackend {
                 let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     all_args.iter().map(|_| i64_type.into()).collect();
                 let fn_type = i64_type.fn_type(&param_types, false);
+                // Same defect class as the MethodCallStatic fallback above: a
+                // resolved use_map/import_map symbol is already the correct
+                // final mangled name and must not be dot-unescaped, or an
+                // identifier that merely contains "_dot_" as ordinary text
+                // gets corrupted into an undefined symbol at link time
+                // (2026-09-07).
                 let fallback_name = resolved_full
-                    .map(|n| n.replace("_dot_", "."))
-                    .or_else(|| resolved_method.map(|n| n.replace("_dot_", ".")))
+                    .map(|n| n.to_string())
+                    .or_else(|| resolved_method.map(|n| n.to_string()))
                     .unwrap_or_else(|| dotted_full.clone());
                 let func = func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -4384,5 +4590,154 @@ mod tests {
         assert!(!suffix_owner_matches("lib__common__target__PointerSize", "string"));
         assert!(!suffix_owner_matches("Vec4f", "f64"));
         assert!(suffix_owner_matches("f64", "f64"));
+    }
+
+    /// Regression test for the fifth instance of the "resolve UFCS calls by
+    /// name, ignoring the receiver type" defect family (see the four listed
+    /// in the #4 fix comment above `qualified_owner_is_user_type`): a real
+    /// user-defined free function (e.g. `mymod.wordtools.split_whitespace`,
+    /// a genuine stdlib-shaped UFCS method with NO compiler-builtin backing
+    /// on `text`) must still resolve to its real cross-unit symbol when the
+    /// receiver's static builtin type makes MIR qualify the call as
+    /// `text.split_whitespace`. `use_map`/`import_map` key on the BARE
+    /// imported name (see `collect_use_imports`), never on that
+    /// receiver-type qualifier, so every qualified lookup earlier in this
+    /// match arm (`direct_func`, the first `resolved` in the fallback) can
+    /// never find it -- only a bare-name lookup can.
+    #[test]
+    fn ufcs_builtin_receiver_user_method_resolves_via_bare_use_map() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("ufcs_builtin_receiver_resolve").unwrap();
+
+        // The real cross-unit definition, under its true mangled name --
+        // never spelled "text.split_whitespace" anywhere.
+        let mut real_fn = MirFunction::new(
+            "mymod__wordtools__split_whitespace".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        real_fn.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        real_fn.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        // MIR qualifies this the same way it qualifies a real
+        // `some_text.split_whitespace()` UFCS call on a builtin receiver --
+        // "text.split_whitespace" is not a real symbol anywhere.
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let mut use_map = HashMap::new();
+        use_map.insert(
+            "split_whitespace".to_string(),
+            "mymod__wordtools__split_whitespace".to_string(),
+        );
+        backend.set_use_map(use_map);
+
+        backend.compile_function(&real_fn).unwrap();
+        backend.compile_function(&caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @mymod__wordtools__split_whitespace(i64"),
+            "did not call the real cross-unit function:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@\"text.split_whitespace\""),
+            "declared a phantom extern for the MIR-synthesized qualifier instead of the real symbol:\n{ir}"
+        );
+        backend.verify().unwrap();
+    }
+
+    /// Sibling of the test above: when NEITHER a runtime shim NOR a real
+    /// user definition backs a builtin-receiver-qualified method call, this
+    /// must fail closed with a compile error rather than silently declaring
+    /// an extern spelled like the MIR qualifier -- a symbol no compiled unit
+    /// ever exports, and undefined at Stage-2 link. This is the check that
+    /// FAILS on the pre-fix shape: before this change, the fallback declared
+    /// `module.add_function("text.split_whitespace", ...)` unconditionally
+    /// and returned `Ok(())`.
+    #[test]
+    fn ufcs_builtin_receiver_unresolvable_method_fails_closed() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("ufcs_builtin_receiver_fail_closed").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let result = backend.compile_function(&caller);
+        assert!(
+            result.is_err(),
+            "must fail closed instead of silently declaring a phantom extern for an unresolvable builtin-receiver method"
+        );
+    }
+
+    #[test]
+    fn already_mangled_project_method_call_is_declared_verbatim() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("already_mangled_project_method").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "compiler__frontend__core__types__str_len".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&caller).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @compiler__frontend__core__types__str_len(i64"),
+            "canonical project symbol was not preserved:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@rt_len("),
+            "canonical free function was hijacked by the len builtin:\n{ir}"
+        );
+        backend.verify().unwrap();
     }
 }

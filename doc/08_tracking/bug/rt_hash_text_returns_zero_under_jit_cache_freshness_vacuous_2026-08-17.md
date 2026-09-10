@@ -1,7 +1,14 @@
 # rt_hash_text returns 0 under JIT/native — every cache source-hash check is vacuous
 
 **Filed:** 2026-08-17
-**Status:** FIXED 2026-08-17 in source (JIT now returns the interpreter hash); needs a seed rebuild+redeploy to take effect for `bin/simple` users
+**Status:** SUPERSEDED 2026-09-07 — the "Fix landed" claim below was wrong: `compile_inline_hash_text`
+and its call site were both still present in the tree as of 2026-09-07 (never
+actually deleted, or reverted after this doc was written), and the interpreter
+extern and native runtime used a DIFFERENT algorithm (DJB2) from the C runtime
+(FNV-1a) on top of the 0-fallback bug. Both problems are now actually fixed —
+see `doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md`
+for the real fix, verification, and a runnable cross-lane check. Do not trust
+the "Fix landed" section below as a description of the current tree.
 **Severity:** HIGH — silently consumes stale compiled artifacts
 **Area:** compiler / cache consistency, runtime externs
 

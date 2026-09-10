@@ -1,0 +1,53 @@
+# codex-system-test
+# @req REQ-KPF-CHECK-SEMANTIC-001 REQ-KPF-CHECK-SEMANTIC-002 REQ-KPF-CHECK-SYNTAX-ONLY-001
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use common.lint_kernel.model.{LintVerdict}
+use compiler.tools.lint.semantic_check.{
+    simple_semantic_check_source,
+    simple_syntax_check_result,
+    simple_check_coverage_name,
+    simple_check_is_clean
+}
+
+val FIXTURE_ROOT = "test/fixtures/compiler/semantic_check"
+
+fn analyze_fixture(name: text):
+    val path = "{FIXTURE_ROOT}/{name}.spl"
+    val source = read_file_text(path)
+    if source.trim() == "":
+        fail("semantic-check fixture unavailable: {path}")
+    simple_semantic_check_source(source, path)
+
+describe "Simple semantic-check convergence":
+    it "proves complete syntax and semantic coverage for a valid file":
+        step("analyze a valid fixture through the real parser HIR lowerer and HM inference")
+        val result = analyze_fixture("clean")
+        expect(simple_check_coverage_name(result.coverage)).to_equal("semantic")
+        expect(result.proof.coverage.requested_phase_bits).to_equal(3)
+        expect(result.proof.coverage.completed_phase_bits).to_equal(3)
+        expect(result.proof.verdict).to_equal(LintVerdict.CompleteClean)
+        expect(simple_check_is_clean(result)).to_equal(true)
+
+    it "cannot report a type-error fixture as complete clean":
+        step("analyze an annotated return-type mismatch through HM inference")
+        val result = analyze_fixture("type_error")
+        expect(result.diagnostics.len()).to_be_greater_than(0)
+        expect(result.proof.verdict).to_equal(LintVerdict.CompleteWithFindings)
+        expect(simple_check_is_clean(result)).to_equal(false)
+
+    it "cannot report an unresolved-name fixture as complete clean":
+        step("analyze an unresolved value reference through HM inference")
+        val result = analyze_fixture("unresolved_name")
+        expect(result.diagnostics.len()).to_be_greater_than(0)
+        expect(result.proof.verdict).to_equal(LintVerdict.CompleteWithFindings)
+        expect(simple_check_is_clean(result)).to_equal(false)
+
+    it "labels syntax-only coverage without claiming semantic completion":
+        step("construct the explicit syntax-only proof projection")
+        val result = simple_syntax_check_result(0)
+        expect(simple_check_coverage_name(result.coverage)).to_equal("syntax-only")
+        expect(result.proof.coverage.requested_phase_bits).to_equal(1)
+        expect(result.proof.coverage.completed_phase_bits).to_equal(1)
+        expect(result.proof.coverage.requested_rule_count).to_equal(1)

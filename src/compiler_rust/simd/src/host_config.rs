@@ -771,8 +771,16 @@ mod tests {
         with_cpu_config_path(&path, || {
             let detected = detected_config();
             let mut config = detected.clone();
+            // Request every set this host could legitimately allow, plus one
+            // bogus entry and one duplicate. The assertion below is that the
+            // rewrite keeps exactly the allowed sets in canonical order and
+            // drops `wasm128`, so the requested list has to be a superset of
+            // `allowed` — otherwise it would be testing the filter's
+            // narrowing behaviour instead. `avx512f` is filtered out anyway on
+            // a host that does not support it, which keeps this host-agnostic.
             config.enabled.instruction_sets = vec![
                 "wasm128".to_string(),
+                "avx512f".to_string(),
                 "avx2".to_string(),
                 "sse2".to_string(),
                 "sse2".to_string(),
@@ -797,13 +805,23 @@ mod tests {
 
     #[test]
     fn simple_support_excludes_unimplemented_host_only_instruction_sets() {
+        // AVX-512 is now an implemented tier (512-bit byte-search kernels in
+        // `runtime/src/value/byte_kernels.rs`), so an AVX-512 host keeps it as
+        // its preferred tier instead of being downgraded to AVX2. SVE/SVE2 and
+        // wasm128 below remain unimplemented and are still downgraded, which is
+        // what this test is really guarding.
         let avx512_host = simple_supported_tiers_for_host(SimdTier::X86_64Avx512);
         let avx512_sets = supported_instruction_sets_for_tiers(&avx512_host);
         assert_eq!(
             avx512_host,
-            vec![SimdTier::X86_64Avx2, SimdTier::X86_64Sse2, SimdTier::Scalar]
+            vec![
+                SimdTier::X86_64Avx512,
+                SimdTier::X86_64Avx2,
+                SimdTier::X86_64Sse2,
+                SimdTier::Scalar
+            ]
         );
-        assert_eq!(avx512_sets, vec!["sse2", "avx2"]);
+        assert_eq!(avx512_sets, vec!["sse2", "avx2", "avx512f"]);
 
         let sve2_host = simple_supported_tiers_for_host(SimdTier::Aarch64Sve2);
         let sve2_sets = supported_instruction_sets_for_tiers(&sve2_host);

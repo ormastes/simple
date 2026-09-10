@@ -352,17 +352,33 @@ pub(crate) fn mangle_mir(
             .chain(local_mangled.values())
             .cloned()
             .collect();
+        // Only the "." -> "_dot_" direction is safe to generate here: a
+        // genuinely dot-bearing mangled name (e.g. the module-mangled
+        // `Owner.method` form noted in `suffix_owner_matches`'s doc comment,
+        // like `lib__common__target__PointerSize.bytes`) is rare and its
+        // dot is always a real separator, so aliasing it to an underscored
+        // spelling can't collide with anything.
+        //
+        // The REVERSE direction ("_dot_" -> ".") was removed: `set` holds
+        // every mangled function name reachable from this compilation unit,
+        // and "_dot_" is also an ordinary substring of plenty of real
+        // identifiers with no dot-escape meaning at all (e.g.
+        // `cosine_from_dot_and_magnitudes`). Generating a "." alias for
+        // those inserted a PHANTOM entry
+        // (`..._math_utils__cosine_from.and_magnitudes`) into `known_mangled`
+        // that `canonicalize_equivalent_dot_name` then trusted as if it were
+        // a real symbol, corrupting the call target and leaving it
+        // undefined at the Stage-4 macOS final link (2026-09-07). No genuine
+        // case needs this direction: a real `Owner_dot_method` MIR call
+        // target whose dotted form is a real symbol already finds it
+        // directly, because that dotted form is already IN the base `set`
+        // (values are literal mangled names, not re-derived) -- the forward
+        // alias above is what lets such a target be found via its
+        // underscored spelling, and nothing here ever needs to invent a
+        // dot out of an underscored name that never had one.
         let extras: Vec<String> = set
             .iter()
-            .filter_map(|v| {
-                if v.contains('.') {
-                    Some(v.replace('.', "_dot_"))
-                } else if v.contains("_dot_") {
-                    Some(v.replace("_dot_", "."))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|v| if v.contains('.') { Some(v.replace('.', "_dot_")) } else { None })
             .collect();
         set.extend(extras);
         set
@@ -545,6 +561,28 @@ fn resolve_name(
     local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<String> {
+    // `_dot_` is this backend's escape for a `.` inside a Simple identifier, so
+    // the branch below rewrites `Type_dot_method` back to `Type.method`. A raw
+    // runtime ABI symbol is not a Simple identifier and must never be rewritten:
+    // `rt_numeric_dot_f64` (dot *product*, defined in libsimple_native_all.a and
+    // the Rust libsimple_runtime.a) was being turned into `rt_numeric.f64`, a
+    // name that is not a valid C identifier and that no archive can own. That
+    // reached the Stage-4 link as
+    //   Stage4 requested symbols have no archive owner: rt_numeric.f64
+    // from the f64 dot-product loops in src/lib/common/search/types.spl and
+    // src/app/office/sheets/formula.spl (macOS, 2026-09-06).
+    //
+    // `rt_` is the runtime ABI prefix throughout this repo and is never the
+    // leading segment of a mangled Simple owner, so passing these through
+    // verbatim is safe and keeps every other name on the existing path.
+    if name.starts_with("rt_") {
+        return local_map
+            .get(name)
+            .or_else(|| use_map.get(name))
+            .or_else(|| import_map.get(name))
+            .cloned()
+            .or_else(|| Some(name.to_string()));
+    }
     if let Some(mangled) = local_map.get(name) {
         Some(mangled.clone())
     } else if name.contains("_dot_") {
@@ -598,6 +636,23 @@ fn resolve_call_target(
     prefix: &str,
     unresolved_count: &mut usize,
 ) {
+    // Try the RAW name first. `_dot_` is only a genuine dot-escape marker for
+    // names built by joining an "Owner" and "method" token; it is also, by
+    // coincidence, an ordinary substring of plenty of real identifiers (e.g.
+    // `cosine_from_dot_and_magnitudes`). Decoding it unconditionally before
+    // any resolution attempt corrupted such names into
+    // `cosine_from.and_magnitudes`, which then resolves to nothing and gets
+    // emitted verbatim as an undefined call target -- the Stage-4 macOS
+    // final link (2026-09-07) and, per the SIMD-kernel `rt_numeric_dot_f64`
+    // -> `rt_numeric.f64` defect this mirrors, likely others historically.
+    // A raw-name lookup is always correct for a genuine cross-module
+    // function (use_map/import_map key it by the UNMODIFIED source
+    // identifier), so try it before ever computing the decoded form.
+    if let Some(resolved) = resolve_name_variants(name, use_map, import_map) {
+        *target = target.with_name(resolved);
+        return;
+    }
+
     let lookup_name_storage;
     let lookup_name = if name.contains("_dot_") {
         lookup_name_storage = name.replace("_dot_", ".");
@@ -728,6 +783,15 @@ fn resolve_method_call_static(
     local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) {
+    // A raw runtime ABI symbol is not a mangled Simple identifier: `_dot_` in
+    // it is literal, not an escaped `.`. Rewriting turned the SIMD reduction
+    // kernel `rt_numeric_dot_f64` (dot *product*) into `rt_numeric.f64`, which
+    // is not a valid C identifier and which no archive can own, failing the
+    // Stage-4 link with "requested symbols have no archive owner:
+    // rt_numeric.f64" (macOS, 2026-09-06). Leave `rt_*` exactly as emitted.
+    if func_name.starts_with("rt_") {
+        return;
+    }
     let lookup_name_storage;
     let lookup_name = if func_name.contains("_dot_") {
         lookup_name_storage = func_name.replace("_dot_", ".");
@@ -879,6 +943,28 @@ fn resolve_method_call_static(
                 // have no such evidence and retain the unique-candidate
                 // fallback.
                 if !has_type_qualifier && candidates.len() == 1 {
+                    candidates.first()
+                } else {
+                    None
+                }
+            });
+            let best = best.or_else(|| {
+                // Text UFCS gap (Stage-4 macOS final link, 2026-09-07): a
+                // qualified `str.split_whitespace` / `str.index_of_from` never
+                // matches the `contains(&type_part_lower)` owner filter above
+                // because the real definition lives in an unrelated module
+                // (`lib/common/text_advanced.spl`, `sffi_gen/intern_codegen.spl`)
+                // whose mangled path does not literally contain "str" — these
+                // are plain top-level `fn f(text, ...)` functions called via
+                // UFCS on a text receiver, not methods of a type named "str".
+                // Scoped to the STRING type aliases only (never widens generic
+                // type-qualified matching, which stays strict to avoid the
+                // `str.rfind`-vs-`DoubleEndedIterator.rfind` ambiguity above),
+                // and only when there is a single unambiguous candidate.
+                if has_type_qualifier
+                    && matches!(type_part_lower.as_str(), "str" | "text" | "string")
+                    && candidates.len() == 1
+                {
                     candidates.first()
                 } else {
                     None

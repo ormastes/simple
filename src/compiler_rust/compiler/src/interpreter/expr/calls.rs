@@ -10,8 +10,26 @@ use crate::value::Value;
 use super::super::{
     evaluate_call, evaluate_call_args, evaluate_method_call, exec_function_with_values, exec_method_function,
     find_and_exec_method_with_self, find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums,
-    Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
+    set_owned_global, Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    MODULE_GLOBALS,
 };
+
+fn write_back_identifier_receiver(env: &mut Env, name: &str, value: Value) {
+    let owned_binding = if env.is_local(name) {
+        None
+    } else {
+        env.global_binding(name)
+    };
+    env.insert(name.to_owned(), value.clone());
+    if let Some((owner, source_name)) = owned_binding {
+        set_owned_global(&owner, &source_name, value.clone(), false);
+    }
+    if !env.is_local(name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert(name.to_owned(), value);
+        });
+    }
+}
 
 /// Call a method whose receiver is a *place* — a variable followed by an
 /// arbitrary chain of field/index projections (`a.b.c`, `a.b[i].c`, `self.w.s`)
@@ -147,12 +165,7 @@ pub(super) fn eval_call_expr(
                             Some(pair) => pair,
                             None => unreachable!("object_method_exists checked before the receiver was taken"),
                         };
-                        env.insert(var_name.clone(), new_self.clone());
-                        if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut().insert(var_name.clone(), new_self);
-                            });
-                        }
+                        write_back_identifier_receiver(env, var_name, new_self);
                         return Ok(Some(result));
                     }
                 }
@@ -169,15 +182,11 @@ pub(super) fn eval_call_expr(
                 )?;
                 // If self was updated (from a me method), update the variable in env
                 if let Some(new_self) = updated_self {
-                    env.insert(var_name.clone(), new_self.clone());
-                    // Sync mutating method updates to MODULE_GLOBALS so that
-                    // module-level vars (e.g., arrays used as global state)
-                    // persist across function calls within an imported module.
-                    if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(var_name.clone(), new_self);
-                        });
-                    }
+                    // Keep both the compatibility map and the owner-indexed
+                    // store current. A cloned control-flow frame refreshes from
+                    // the owner store before dirty write-back; updating only the
+                    // flat map restores the pre-call object at match-arm exit.
+                    write_back_identifier_receiver(env, var_name, new_self);
                 }
                 Ok(Some(result))
             } else if let Expr::FieldAccess {

@@ -184,7 +184,10 @@ pub(crate) fn assert_dirty_names_invariant(block_env: &Env) {
 }
 
 pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
-    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+    // A subject/condition can leave an older owned-global aggregate in the
+    // caller overlay. Repointing only the scope does not help because overlay
+    // lookup wins; refresh bound overlay copies before applying block writes.
+    super::interpreter_call::refresh_live_bound_globals(env);
     // Off-path cost: one bool load (see `strict_mem_enabled()`); the check
     // itself is skipped entirely rather than called-and-short-circuited.
     if strict_mem_enabled() {

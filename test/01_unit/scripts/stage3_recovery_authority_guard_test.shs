@@ -1,0 +1,425 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard="$repo_root/scripts/bootstrap/check-stage3-recovery-authority.shs"
+tmp_base=${TMPDIR:-/tmp}
+tmp_base=${tmp_base%/}
+tmp_created=$(mktemp -d "$tmp_base/stage3-recovery-authority.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp_created" && pwd -P)
+cleanup() {
+  jobs -p 2>/dev/null | xargs kill 2>/dev/null || true
+  chmod -R u+rwX "$tmp" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+fixture="$tmp/repo"
+mkdir -p \
+  "$fixture/src/compiler" "$fixture/src/app/cli" "$fixture/src/lib" \
+  "$fixture/src/compositions" \
+  "$fixture/src/compiler_rust" "$fixture/examples/10_tooling" \
+  "$fixture/release" \
+  "$fixture/doc/04_architecture/compiler/plugin_arch"
+cp "$repo_root/src/compiler_rust/rust-toolchain.toml" \
+  "$fixture/src/compiler_rust/rust-toolchain.toml"
+cp "$repo_root/src/app/cli/bootstrap_reason_planner.spl" \
+  "$fixture/src/app/cli/bootstrap_reason_planner.spl"
+cp "$repo_root/src/app/cli/bootstrap_identity.spl" \
+  "$fixture/src/app/cli/bootstrap_identity.spl"
+cp "$repo_root/release/version.sdn" "$fixture/release/version.sdn"
+cp "$repo_root/VERSION" "$fixture/VERSION"
+printf 'compiler authority\n' >"$fixture/src/compiler/marker.spl"
+printf 'library authority\n' >"$fixture/src/lib/marker.spl"
+printf 'composition authority\n' >"$fixture/src/compositions/marker.spl"
+printf 'tooling authority\n' >"$fixture/examples/10_tooling/marker.spl"
+cat >"$fixture/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" <<'EOF'
+schema: simple-kernel-closure-policy-v1
+k1_policy: llvm-cranelift
+simple_abi_policy: v1
+plugin_manifest_policy: simple-sdn
+coverage_cutover_policy: atomic-apk-only
+EOF
+printf 'build/\n' >"$fixture/.gitignore"
+git -C "$fixture" init -q
+git -C "$fixture" config user.email recovery-guard@example.invalid
+git -C "$fixture" config user.name recovery-guard
+git -C "$fixture" add .
+git -C "$fixture" commit -qm 'fixture: recovery authority'
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$fixture
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo_root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+
+platform=$(bootstrap_stage3_host_platform)
+output="$fixture/build/recovery"
+stage2_dir="$output/stage2/$platform"
+stage3_dir="$output/stage3/$platform"
+admitted_dir="$stage3_dir/stage2-admitted"
+runtime="$stage3_dir/stage2-runtime-authority"
+mkdir -p "$stage2_dir" "$admitted_dir" "$runtime/deps" \
+  "$stage3_dir/stage2-native-cache" "$stage3_dir/stage3-native-cache" \
+  "$stage3_dir/stage2-home" "$stage3_dir/stage2-tmp" \
+  "$fixture/build/phase_snapshots/phase1_1_phase2_2"
+
+produced="$stage2_dir/simple"
+admitted="$admitted_dir/simple"
+printf '#!/bin/sh\nexit 0\n' >"$produced"
+chmod 500 "$produced"
+cp -p "$produced" "$admitted"
+cp -p "$produced" "$fixture/build/phase_snapshots/phase1_1_phase2_2/simple"
+parent_sha=$(bootstrap_stage3_hash_file "$produced")
+
+printf '#!/bin/sh\nexit 0\n' >"$runtime/simple"
+printf 'hosted runtime fixture\n' >"$runtime/deps/libspl_hosted_runtime-fixture.rlib"
+runtime_rlib_sha=$(bootstrap_stage3_hash_file \
+  "$runtime/deps/libspl_hosted_runtime-fixture.rlib")
+cat >"$runtime/hosted-runtime.env" <<EOF
+schema=simple-bootstrap-hosted-runtime-authority-v1
+status=frozen
+relative_path=deps/libspl_hosted_runtime-fixture.rlib
+sha256=$runtime_rlib_sha
+EOF
+chmod 500 "$runtime/simple"
+chmod 400 "$runtime/deps/libspl_hosted_runtime-fixture.rlib" \
+  "$runtime/hosted-runtime.env"
+chmod 500 "$runtime/deps" "$runtime"
+
+source_snapshot="$stage3_dir/source-inputs-before.txt"
+git_snapshot="$stage3_dir/git-state-before.env"
+runtime_snapshot="$stage3_dir/runtime-admitted.txt"
+tool_snapshot="$stage3_dir/tool-authority-before.txt"
+tool_path=
+old_ifs=$IFS
+IFS=:
+for tool_dir in $PATH; do
+  IFS=$old_ifs
+  [ -d "$tool_dir" ] || { IFS=:; continue; }
+  tool_dir=$(CDPATH= cd -- "$tool_dir" && pwd -P)
+  case ":$tool_path:" in *":$tool_dir:"*) ;; *)
+    if [ -n "$tool_path" ]; then tool_path="$tool_path:$tool_dir"
+    else tool_path=$tool_dir
+    fi ;;
+  esac
+  IFS=:
+done
+IFS=$old_ifs
+bootstrap_stage3_source_snapshot "$source_snapshot" "$fixture"
+bootstrap_stage3_git_state "$fixture" "$git_snapshot"
+bootstrap_stage3_directory_snapshot "$runtime_snapshot" "$runtime"
+bootstrap_stage3_tool_authority_snapshot "$tool_snapshot" "$tool_path" "$fixture"
+source_sha=$(bootstrap_stage3_hash_file "$source_snapshot")
+
+sanity="$stage3_dir/stage2-sanity.env"
+empty_sha=$(printf '' | bootstrap_stage3_hash_stream)
+version=$(bootstrap_stage3_canonical_version "$fixture")
+cat >"$sanity" <<EOF
+schema=simple-bootstrap-sanity-evidence-v1
+status=pass
+candidate_sha256_before=$parent_sha
+version_status=0
+version_output=simple-bootstrap $version
+version_expected=$version
+version_expect_status=0
+version_match_status=0
+unsupported_status=1
+unsupported_output_sha256=$empty_sha
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0
+frontend_smoke_output_sha256=$empty_sha
+candidate_sha256_after=$parent_sha
+EOF
+receiver_log="$stage3_dir/stage2-receiver.log"
+printf 'receiver pass\n' >"$receiver_log"
+receiver="$stage3_dir/stage2-receiver.env"
+cat >"$receiver" <<EOF
+schema=simple-bootstrap-stage2-receiver-evidence-v1
+status=pass
+probe_exit=0
+candidate_sha256_before=$parent_sha
+candidate_sha256_after=$parent_sha
+runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+probe_log=$receiver_log
+probe_log_sha256=$(bootstrap_stage3_hash_file "$receiver_log")
+EOF
+
+transcript="$stage3_dir/stage2-command.transcript"
+stage2_cache="$stage3_dir/stage2-native-cache"
+stage3_cache="$stage3_dir/stage3-native-cache"
+bootstrap_stage3_write_command_transcript \
+  "$transcript" "$fixture" "$stage3_dir/stage2-home" \
+  "$stage3_dir/stage2-tmp" "$tool_path" \
+  RUST_LOG=error LIBRARY_PATH= SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent \
+  SIMPLE_BOOTSTRAP=1 SIMPLE_ABI_POLICY=v1 \
+  SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn \
+  SIMPLE_KERNEL_K1_POLICY=llvm-cranelift \
+  SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only \
+  SIMPLE_K1_COMPOSITION_SHA256_BEFORE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+  SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_BUILD_PROGRESS_EVENTS="$output/bootstrap-build-progress.events" \
+  SIMPLE_FRONTEND_CACHE=1 \
+  SIMPLE_FRONTEND_CACHE_DIR="$stage2_cache/frontend" \
+  SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE="$stage3_dir/phase2-compatibility.manifest" \
+  SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="$stage3_cache" \
+  SIMPLE_BINARY="$runtime/simple" -- \
+  "$runtime/simple" native-build --target "$platform" --backend cranelift \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compositions/kernel_llvm_cranelift --source src/compiler \
+  --source src/app --source src/lib --entry-closure --threads 1 \
+  --cache-dir "$stage2_cache" --mode dynload \
+  --entry src/app/cli/bootstrap_main.spl --runtime-path "$runtime" \
+  -o "$produced"
+
+stage2_args_sha=$(perl -MDigest::SHA -e '
+  use strict; use warnings; my $sha=Digest::SHA->new(256); my $first=1;
+  while (<>) { chomp; if ($first) { $first=0; next }
+    my ($kind,$n,$payload)=/^(cwd|host-env|explicit-env|executable|argv):(\d+):(.*)$/ or exit 1;
+    length($payload)==$n or exit 1;
+    next unless $kind eq "explicit-env" || $kind eq "argv";
+    $sha->add(length($payload).":".$payload."\n");
+  } print $sha->hexdigest,"\n";
+' "$transcript")
+
+admission="$admitted_dir/admission.env"
+SIMPLE_ABI_POLICY=v1
+export SIMPLE_ABI_POLICY
+bootstrap_stage3_write_stage2_admission_receipt \
+  "$admission" "$admitted" "$source_snapshot" "$runtime_snapshot" \
+  "$tool_snapshot" "$stage2_args_sha" "$sanity" "$receiver" "$fixture"
+admission_sha=$(bootstrap_stage3_hash_file "$admission")
+parent_sanity="$stage2_dir/stage2-sanity.receipt"
+parent_provenance="$stage2_dir/stage2-provenance.receipt"
+cat >"$parent_sanity" <<EOF
+schema=simple-bootstrap-stage2-parent-sanity-v1
+stage2-sanity: pass
+candidate_sha256=$parent_sha
+admission_receipt_path=$admission
+admission_receipt_sha256=$admission_sha
+EOF
+cat >"$parent_provenance" <<EOF
+schema=simple-bootstrap-stage2-parent-provenance-v1
+stage2-provenance: pure-simple
+authority=explicit-full-bootstrap-stage2-trust-root
+candidate_sha256=$parent_sha
+admission_receipt_path=$admission
+source_snapshot_sha256=$(bootstrap_stage3_hash_file "$source_snapshot")
+runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+tool_authority_sha256=$(bootstrap_stage3_hash_file "$tool_snapshot")
+admission_receipt_sha256=$admission_sha
+EOF
+
+closure_sha_seed=$(printf 'planner closure\n' | bootstrap_stage3_hash_stream)
+runtime_sha=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+cache_scope=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha_seed" | \
+  bootstrap_stage3_hash_stream)
+planner_dir="$fixture/build/bootstrap/admission/$cache_scope"
+mkdir -p "$planner_dir"
+cp "$runtime_snapshot" "$planner_dir/runtime.snapshot"
+printf 'planner closure\n' >"$planner_dir/planner-source-closure.snapshot"
+cp "$git_snapshot" "$planner_dir/git-state.txt"
+cp "$runtime/simple" "$planner_dir/planner"
+printf 'planner smoke pass\n' >"$planner_dir/planner-smoke.txt"
+planner_source="$fixture/src/app/cli/bootstrap_reason_planner.spl"
+planner_sha=$(bootstrap_stage3_hash_file "$planner_dir/planner")
+bootstrap_planner_v2_authorization_text \
+  //bootstrap:stage3 verify-landed-compiler-fix "$parent_sha" \
+  "$runtime_sha" "$closure_sha_seed" "$planner_sha" \
+  >"$planner_dir/authorization.receipt"
+planner_argv=$(bootstrap_planner_v2_canonical_argv_text \
+  "$planner_dir/planner" verify-landed-compiler-fix //bootstrap:stage3 \
+  "$parent_sha" "$runtime_sha" "$closure_sha_seed" "$planner_sha" \
+  "$planner_dir/authorization.receipt")
+planner_env=$(bootstrap_planner_v2_canonical_env_text "$runtime")
+planner_receipt="$output/stage3-planner-admission-v2.env"
+cat >"$planner_receipt" <<EOF
+schema=simple-bootstrap-planner-admission-v2
+status=pass
+platform=$platform
+target=//bootstrap:stage3
+reason=verify-landed-compiler-fix
+parent_compiler_path=$produced
+parent_compiler_sha256=$parent_sha
+parent_stage2_sanity_path=$parent_sanity
+parent_stage2_sanity_sha256=$(bootstrap_stage3_hash_file "$parent_sanity")
+parent_stage2_provenance_path=$parent_provenance
+parent_stage2_provenance_sha256=$(bootstrap_stage3_hash_file "$parent_provenance")
+runtime_dir=$runtime
+runtime_snapshot_path=$planner_dir/runtime.snapshot
+runtime_snapshot_sha256=$runtime_sha
+planner_source_path=$planner_source
+planner_source_sha256=$(bootstrap_stage3_hash_file "$planner_source")
+planner_source_closure_snapshot_path=$planner_dir/planner-source-closure.snapshot
+planner_source_closure_snapshot_sha256=$closure_sha_seed
+git_state_path=$planner_dir/git-state.txt
+git_state_sha256=$(bootstrap_stage3_hash_file "$planner_dir/git-state.txt")
+build_argv_sha256=$(bootstrap_planner_v2_hash_text "$planner_argv")
+build_env_sha256=$(bootstrap_planner_v2_hash_text "$planner_env")
+cache_scope_key=$cache_scope
+planner_path=$planner_dir/planner
+planner_sha256=$planner_sha
+planner_smoke_path=$planner_dir/planner-smoke.txt
+planner_smoke_sha256=$(bootstrap_stage3_hash_file "$planner_dir/planner-smoke.txt")
+authorization_receipt_path=$planner_dir/authorization.receipt
+authorization_receipt_sha256=$(bootstrap_stage3_hash_file "$planner_dir/authorization.receipt")
+EOF
+
+guard_out="$tmp/guard.out"
+guard_err="$tmp/guard.err"
+run_guard() {
+  expected_exit=$1
+  expected_status=$2
+  expected_reason=$3
+  shift 3
+  set +e
+  guard_parent=$parent_sha
+  guard_source=$source_sha
+  guard_minimum=1
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --expected-parent-sha256=*) guard_parent=${1#*=} ;;
+      --expected-source-snapshot-sha256=*) guard_source=${1#*=} ;;
+      --minimum-free-bytes=*) guard_minimum=${1#*=} ;;
+      *) fail "unsupported run_guard override: $1" ;;
+    esac
+    shift
+  done
+  "$guard" --source-root="$fixture" --output-dir="$output" \
+    --planner-receipt="$planner_receipt" \
+    --expected-parent-sha256="$guard_parent" \
+    --expected-source-snapshot-sha256="$guard_source" \
+    --minimum-free-bytes="$guard_minimum" >"$guard_out" 2>"$guard_err"
+  actual_exit=$?
+  set -e
+  [ "$actual_exit" -eq "$expected_exit" ] || \
+    fail "exit $actual_exit, expected $expected_exit for $expected_reason: $(cat "$guard_err")"
+  [ "$(sed -n 's/^status=//p' "$guard_out")" = "$expected_status" ] || \
+    fail "status mismatch for $expected_reason"
+  [ "$(sed -n 's/^reason=//p' "$guard_out")" = "$expected_reason" ] || \
+    fail "reason mismatch for $expected_reason: $(cat "$guard_out")"
+  [ "$(wc -l <"$guard_out" | tr -d ' ')" -eq 15 ] || \
+    fail "terminal receipt did not have exactly 15 fields"
+  grep -qx "stage3 recovery authority: status=$expected_status reason=$expected_reason" \
+    "$guard_err" || fail "terminal diagnostic missing for $expected_reason"
+}
+
+snapshot_output() {
+  find "$output" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+    printf '%s  %s\n' "$(bootstrap_stage3_hash_file "$path")" "$path"
+  done
+}
+
+snapshot_output >"$tmp/output.before"
+run_guard 0 pass authority-complete
+snapshot_output >"$tmp/output.after"
+cmp -s "$tmp/output.before" "$tmp/output.after" || \
+  fail 'pass preflight mutated output evidence or caches'
+[ ! -e "$output.lock" ] || fail 'preflight created an output lock'
+[ ! -e "$stage3_dir/simple" ] || fail 'preflight created a Stage 3 candidate'
+[ ! -e "$stage3_dir/provenance.env" ] || fail 'preflight created Stage 3 provenance'
+
+run_guard 1 refused produced-parent-sha256-mismatch \
+  --expected-parent-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+run_guard 1 refused source-snapshot-sha256-mismatch \
+  --expected-source-snapshot-sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+cp "$parent_sanity" "$tmp/parent-sanity"
+chmod u+w "$parent_sanity"
+sed 's/^admission_receipt_sha256=.*/admission_receipt_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' \
+  "$tmp/parent-sanity" >"$parent_sanity"
+run_guard 1 refused parent-admission-digest-stale
+cp "$tmp/parent-sanity" "$parent_sanity"
+
+cp "$runtime_snapshot" "$tmp/runtime-snapshot"
+printf 'runtime mutation\n' >>"$runtime_snapshot"
+run_guard 1 refused admission-runtime_snapshot_sha256-mismatch
+cp "$tmp/runtime-snapshot" "$runtime_snapshot"
+
+cp "$tool_snapshot" "$tmp/tool-snapshot"
+printf 'tool mutation\n' >>"$tool_snapshot"
+run_guard 1 refused admission-tool_authority_sha256-mismatch
+cp "$tmp/tool-snapshot" "$tool_snapshot"
+
+cp "$transcript" "$tmp/transcript"
+sed 's/argv:9:cranelift/argv:7:invalid/' "$tmp/transcript" >"$transcript"
+run_guard 1 refused backend-invalid
+cp "$tmp/transcript" "$transcript"
+
+cp "$transcript" "$tmp/transcript"
+awk '
+  /^executable:/ && !inserted {
+    value="SIMPLE_UNRECORDED_AUTHORITY=1"
+    print "explicit-env:" length(value) ":" value
+    inserted=1
+  }
+  { print }
+' "$tmp/transcript" >"$transcript"
+run_guard 1 refused stage2-transcript-environment-set-mismatch
+cp "$tmp/transcript" "$transcript"
+
+policy="$fixture/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+cp "$policy" "$tmp/policy"
+sed 's/simple_abi_policy: v1/simple_abi_policy: deferred/' "$tmp/policy" >"$policy"
+run_guard 1 refused abi-policy-drift
+cp "$tmp/policy" "$policy"
+
+cp "$planner_dir/planner" "$tmp/planner"
+chmod u+w "$planner_dir/planner"
+printf 'planner mutation\n' >>"$planner_dir/planner"
+run_guard 1 refused planner-receipt-invalid
+cp "$tmp/planner" "$planner_dir/planner"
+
+mv "$planner_receipt" "$tmp/planner-receipt"
+run_guard 1 refused planner-receipt-missing-or-noncanonical
+mv "$tmp/planner-receipt" "$planner_receipt"
+
+mv "$produced" "$tmp/produced"
+mv "$admitted" "$tmp/admitted"
+run_guard 1 refused required-stage2-authority-file-missing
+mv "$tmp/produced" "$produced"
+mv "$tmp/admitted" "$admitted"
+
+set +e
+"$guard" --source-root="$fixture" --output-dir="$output" \
+  --planner-receipt="$planner_receipt" \
+  --expected-parent-sha256="$parent_sha" \
+  --expected-source-snapshot-sha256="$source_sha" \
+  >"$guard_out" 2>"$guard_err"
+missing_capacity_exit=$?
+set -e
+[ "$missing_capacity_exit" -ne 0 ] && \
+  grep -qx 'reason=minimum-free-bytes-required' "$guard_out" || \
+  fail 'missing capacity did not fail closed'
+run_guard 1 refused insufficient-free-bytes --minimum-free-bytes=999999999999999999
+
+relative_output=${output#"$fixture"/}
+(cd "$fixture" && exec sh -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' \
+  "$fixture/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --stop-after-stage3 "--output=$relative_output") &
+owner_pid=$!
+sleep 1
+run_guard 3 pending live-output-owner
+kill "$owner_pid" 2>/dev/null || true
+wait "$owner_pid" 2>/dev/null || true
+
+(cd / && exec sh -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' \
+  "$fixture/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --stop-after-stage3 "--output=$relative_output") &
+wrong_cwd_pid=$!
+sleep 1
+run_guard 1 refused live-owner-cwd-mismatch
+kill "$wrong_cwd_pid" 2>/dev/null || true
+wait "$wrong_cwd_pid" 2>/dev/null || true
+
+snapshot_output >"$tmp/output.final"
+cmp -s "$tmp/output.before" "$tmp/output.final" || \
+  fail 'mutation tests did not restore immutable output evidence'
+
+echo 'stage3_recovery_authority_guard_test: PASS'

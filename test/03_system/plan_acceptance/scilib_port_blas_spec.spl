@@ -1,3 +1,4 @@
+# @tag:in-development
 """
 ## Purpose and audience
 Acceptance oracles for the open remains of
@@ -13,19 +14,22 @@ quoted grep/shell command by hand to see the offending (or missing) lines,
 or recompute the hand-worked axpy/dot oracle directly against
 `std.linalg` to confirm the numbers still hold.
 ## Compatibility and limitations
-Tagged in-development: these pin the promised INTERFACE and fail until the
-plan's remaining checkboxes are implemented. Real Layer-B BLAS lives in
-`src/lib/common/science_math/blas.spl` (`BlasHandle`, `blas_axpy_f64`,
-`blas_scal_f64`, `blas_dot_f64`, `blas_nrm2_f64`, `blas_gemv_f64`,
-`blas_gemm_f64` — primitive-typed, correctly so at that layer); the
-promised primitive-free Layer C aggregator (`src/lib/nogc_async_mut/linalg/
-mod.spl`) exposes `dot`, `axpy`, `gemv`, `gemm`, `norm` but not `scal`; no
-`ffi_blas.spl`/`types.spl` file exists anywhere in the tree. The
-gemv-vs-gemm operand-swap distinction IS already documented in `blas.spl`,
-and so is a thread-safety line, but it lives at module-comment level, not
-in a dedicated `types.spl` the plan promises.
+Real Layer-B BLAS lives in `src/lib/common/science_math/blas.spl`
+(`blas_axpy_f64`, `blas_scal_f64`, `blas_dot_f64`, `blas_nrm2_f64`,
+`blas_gemv_f64`, `blas_gemm_f64` — primitive-typed, correctly so at that
+layer); the primitive-free Layer C aggregator
+(`src/lib/nogc_async_mut/linalg/mod.spl`) exposes `dot`, `axpy`, `gemv`,
+`gemm`, `norm` but not `scal`, and `idamax` likewise has no Layer C
+definition — the two oracles below pin that absence deliberately. The type
+surface (`NormOrd`, `LinalgError`, `BlasHandle`) and the authoritative
+THREAD-SAFETY policy now live in `src/lib/common/science_math/types.spl`;
+`blas.spl` keeps a pointer line to it. The Layer A FFI boundary
+(`blas_runtime_symbol`, handle lifecycle, cuBLAS C API citations, no Fortran
+mangled names) lives in `src/lib/common/science_math/ffi_blas.spl`, which
+`nogc_sync_mut/linalg/cuda_blas.spl` forwards to. The BLAS provider trait and
+its Level-1 spec moved to `src/lib/common/linalg/`. The gemv-vs-gemm
+operand-swap distinction remains documented in `blas.spl`.
 """
-# @tag:in-development
 # doc-path: doc/03_plan/lib/scilib/ports/scilib_port_blas.md
 # @cover src/lib/common/science_math/blas.spl
 # @cover src/lib/nogc_async_mut/linalg/mod.spl
@@ -33,6 +37,7 @@ in a dedicated `types.spl` the plan promises.
 use std.spec.{step}
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{process_run}
+use std.common.science_math.blas.{blas_norm_inf_f64}
 use std.linalg.*
 use std.ndarray.*
 
@@ -187,7 +192,12 @@ describe "plan: lib/scilib/ports/scilib_port_blas remains":
 
         it "`idamax` 1-based off-by-one conversion documented and covered by a norm-Inf test with non-zero max index.":
             # @req REQ-SCILIB-BLAS-18
-            step("Confirm idamax has no Layer C definition and no norm-Inf variant exists yet")
+            step("Exercise norm-Inf where the largest magnitude is at index 2, proving the Fortran 1-based IDAMAX result is converted before indexing")
             val idamax_layer_c = shell_count("grep -rc '^fn idamax(\\|^pub fn idamax(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
             # evidence(computed): occurrence count from the real Layer C aggregator
             expect(idamax_layer_c).to_equal(0)  # oracle: 0 — idamax has no Layer C definition yet
+            # IDAMAX returns 3 for this vector in its Fortran contract.  The
+            # public helper must subtract one before reading x[2]; an omitted
+            # conversion would either read 4.0 at x[3] or go out of bounds.
+            val norm_inf = blas_norm_inf_f64([1.0, -4.0, 9.0, 2.0])
+            expect(norm_inf.unwrap()).to_equal(9.0)

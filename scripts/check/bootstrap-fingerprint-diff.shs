@@ -1,0 +1,173 @@
+#!/bin/sh
+# Compare a current Rust-seed fingerprint with a published stamp.
+#
+# The command is read-only with respect to source and toolchain inputs.  It may
+# write one caller-selected receipt and, when input arguments are supplied,
+# uses a private temporary directory for the current observation.  A missing
+# historical details sidecar is reported as BLOCKED; an aggregate mismatch is
+# never silently described as a source-only change.
+set -u
+
+usage() {
+    cat >&2 <<'EOF'
+usage: bootstrap-fingerprint-diff.shs --published-stamp=FILE --output=FILE
+       [--published-details=FILE] [--current-details=FILE]
+       [--root=DIR --backend=NAME --features=TEXT --tool-path=PATH
+        [--target=TRIPLE]]
+EOF
+}
+
+die() { echo "bootstrap fingerprint diff: $*" >&2; exit 2; }
+root= published_stamp= published_details= current_details= output= backend=
+features= tool_path= target= current_inputs= current_error=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --published-stamp=*) published_stamp=${1#*=} ;;
+        --published-details=*) published_details=${1#*=} ;;
+        --current-details=*) current_details=${1#*=} ;;
+        --output=*) output=${1#*=} ;;
+        --root=*) root=${1#*=} ;;
+        --backend=*) backend=${1#*=} ;;
+        --features=*) features=${1#*=} ;;
+        --tool-path=*) tool_path=${1#*=} ;;
+        --target=*) target=${1#*=} ;;
+        --help) usage; exit 0 ;;
+        *) usage; die "unknown option: $1" ;;
+    esac
+    shift
+done
+[ -n "$published_stamp" ] && [ -f "$published_stamp" ] || die 'published stamp is missing'
+[ -n "$output" ] || die 'output receipt is required'
+
+value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+valid_sha() {
+    [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+valid_path() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq '[[:space:][:cntrl:]]' && return 1
+    [ ! -L "$1" ]
+}
+valid_path "$published_stamp" || die 'published stamp path is not canonical'
+published_inputs=$(value inputs_fingerprint "$published_stamp")
+valid_sha "$published_inputs" || die 'published stamp aggregate is invalid'
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-fingerprint-diff.XXXXXX") || die 'cannot create scratch directory'
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT HUP INT TERM
+
+published_file=$(value fingerprint_details_file "$published_stamp")
+published_details_sha=$(value fingerprint_details_sha256 "$published_stamp")
+case "$published_file" in
+    ''|.|..|/*|*/*|*[!A-Za-z0-9_.-]*) published_bound_details= ;;
+    *) published_bound_details="$(dirname -- "$published_stamp")/$published_file" ;;
+esac
+if [ -z "$published_details" ]; then
+    published_details=$published_bound_details
+fi
+published_details_status=missing
+if [ -n "$published_bound_details" ] &&
+    [ "$published_details" = "$published_bound_details" ] &&
+    valid_sha "$published_details_sha" && valid_path "$published_details" &&
+    [ -f "$published_details" ] &&
+    [ "$(sha256sum "$published_details" | awk '{print $1}')" = \
+      "$published_details_sha" ]; then
+    published_details_status=present
+fi
+
+if [ -z "$current_details" ] && [ -n "$root" ]; then
+    case "$root" in /*) ;; *) die 'current root must be absolute' ;; esac
+    [ -n "$backend" ] && [ -n "$tool_path" ] || die 'current input arguments are incomplete'
+    case "$tool_path" in /*) ;; *) die 'current tool path must be absolute' ;; esac
+    # shellcheck disable=SC1091
+    . "$(dirname -- "$0")/lib/bootstrap-stage3/authority.shs" || die 'cannot load authority helper'
+    current_details="$tmp/current.details.env"
+    current_error="$tmp/current.error.log"
+    current_inputs=$(BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="$current_details" \
+        BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1 TMPDIR="$tmp" \
+        bootstrap_stage3_seed_inputs_fingerprint "$root" "$backend" \
+        "$features" "$tool_path" "$target" 2>"$current_error") || {
+        current_inputs=missing
+    }
+fi
+current_details_status=missing
+if [ -n "$current_details" ] && valid_path "$current_details" &&
+    [ -f "$current_details" ]; then
+    current_details_status=present
+fi
+
+categories='compiler_sources cargo_path_dependencies runtime_sources policy toolchain native_tools recipes unclassified'
+details_valid() {
+    [ -f "$1" ] || return 1
+    [ "$(value schema "$1")" = simple-bootstrap-fingerprint-details-v1 ] || return 1
+    aggregate=$(value aggregate_sha256 "$1")
+    valid_sha "$aggregate" || return 1
+    [ "$(value category_count "$1")" = 8 ] || return 1
+    for category in $categories; do
+        count=$(value "category_${category}_count" "$1")
+        sha=$(value "category_${category}_sha256" "$1")
+        case "$count" in ''|*[!0-9]*) return 1 ;; esac
+        valid_sha "$sha" || return 1
+    done
+}
+published_valid=0; current_valid=0
+[ "$published_details_status" = present ] && details_valid "$published_details" &&
+    [ "$(value aggregate_sha256 "$published_details")" = "$published_inputs" ] &&
+    published_valid=1
+[ "$current_details_status" = present ] && details_valid "$current_details" && current_valid=1
+
+status=BLOCKED
+aggregate_status=unavailable
+changed=0
+receipt_tmp="${output}.tmp.$$"
+mkdir -p "$(dirname -- "$output")" || die 'cannot create receipt directory'
+{
+    echo 'schema=simple-bootstrap-fingerprint-diff-v1'
+    echo "published_stamp_path=$published_stamp"
+    echo "published_inputs_fingerprint=$published_inputs"
+    echo "published_details_path=${published_details:-missing}"
+    echo "published_details_status=$([ "$published_valid" -eq 1 ] && echo present || echo missing-or-invalid)"
+    echo "current_details_path=${current_details:-missing}"
+    echo "current_details_status=$([ "$current_valid" -eq 1 ] && echo present || echo missing-or-invalid)"
+    if [ "$current_valid" -eq 1 ]; then
+        current_aggregate=$(value aggregate_sha256 "$current_details")
+        echo "current_inputs_fingerprint=$current_aggregate"
+    else
+        echo "current_inputs_fingerprint=${current_inputs:-missing}"
+    fi
+    if [ "$published_valid" -eq 1 ] && [ "$current_valid" -eq 1 ]; then
+        published_aggregate=$(value aggregate_sha256 "$published_details")
+        current_aggregate=$(value aggregate_sha256 "$current_details")
+        if [ "$published_aggregate" = "$current_aggregate" ] &&
+            [ "$published_aggregate" = "$published_inputs" ]; then
+            aggregate_status=equal
+            status=PASS
+        else
+            aggregate_status=different
+            status=DIFFERENT
+        fi
+        for category in $categories; do
+            old=$(value "category_${category}_sha256" "$published_details")
+            new=$(value "category_${category}_sha256" "$current_details")
+            if [ "$old" != "$new" ]; then
+                changed=$((changed + 1))
+                echo "changed_category=$category"
+                echo "published_${category}_sha256=$old"
+                echo "current_${category}_sha256=$new"
+            fi
+        done
+    fi
+    echo "aggregate_status=$aggregate_status"
+    echo "changed_category_count=$changed"
+    echo "status=$status"
+} >"$receipt_tmp" || die 'cannot write receipt'
+chmod 400 "$receipt_tmp" || die 'cannot freeze receipt'
+mv -f "$receipt_tmp" "$output" || die 'cannot publish receipt'
+case "$status" in
+    PASS) echo 'PASS: fingerprint inputs match published aggregate' ; exit 0 ;;
+    DIFFERENT) echo "DIFFERENT: $changed fingerprint category(ies) changed; receipt=$output" ; exit 1 ;;
+    *) echo "BLOCKED: exact historical category diff unavailable; receipt=$output" ; exit 2 ;;
+esac

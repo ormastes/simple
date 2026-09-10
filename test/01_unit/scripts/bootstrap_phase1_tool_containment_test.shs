@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-phase1-authority.shs"
+work=$(mktemp -d "$root/build/native_probe/phase1-tool-containment.XXXXXX")
+fail() { echo "FAIL: $1; evidence=$work" >&2; exit 1; }
+bootstrap_stage3_hash_file() { sha256sum "$1" | awk '{print $1}'; }
+mkdir "$work/phase"
+p1a_work=$work/phase
+p1a_tools=$p1a_work/tools.sha256
+: >"$p1a_tools"
+printf '#!/bin/sh\nexit 0\n' >"$work/tool"
+chmod +x "$work/tool"
+expected=$(bootstrap_stage3_hash_file "$work/tool")
+if bootstrap_phase1_register_tool "$work/phase/../tool" "$expected"; then fail 'parent traversal registered'; fi
+cp "$work/tool" "$work/phase/tool"
+if bootstrap_phase1_register_tool "$work/phase/./tool" "$expected"; then fail 'directory alias registered'; fi
+bootstrap_phase1_register_tool "$work/phase/tool" "$expected" || fail 'canonical child refused'
+[ "$(wc -l <"$p1a_tools" | tr -d ' ')" = 1 ] || fail 'rejected tool modified registry'
+printf 'PASS: Phase1 physical containment, traversal rejection and canonical registration; evidence=%s\n' "$work"

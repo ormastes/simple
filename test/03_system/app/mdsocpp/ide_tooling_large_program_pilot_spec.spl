@@ -1,0 +1,115 @@
+# Purpose: executable MDSOC++ large-program pilot for the existing IDE/tooling subsystem.
+# @req REQ-KPF-MDSOCPP-PILOT
+# @cover src/lib/mdsocpp/pilot 90%
+
+"""
+# MDSOC++ IDE/Tooling Large-Program Pilot
+
+This scenario seals a realistic editor/tooling capsule graph, proves optional
+AI composition, rejects authority and memory violations, admits a compatible
+document-state upgrade, and records rollback to the active generation when a
+candidate cannot be admitted.
+"""
+
+use std.spec.*
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.mdsocpp.*
+use std.mdsocpp.pilot.*
+use tooling_kernel.contract.model.{ToolingDocumentHandleV1, ToolingStatusV1}
+use tooling_kernel.plugin_adapter.adapter.ToolingAnalysisRequestV1
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn baseline() -> IdeToolingPilotGenerationV1:
+    ide_tooling_pilot_generation_v1(10, digest(10), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false, 1, 0, 1, 0)
+
+describe "MDSOC++ IDE/tooling pilot composition":
+    it "seals required facets while leaving the optional AI facet unbound":
+        step("Seal document, workspace, analysis, test, and shell capsules")
+        val result = ide_tooling_pilot_seal_v1(baseline())
+        expect(result.seal.status).to_equal(MdsocppSealStatus.Ok)
+        expect(result.seal.receipt.capsule_count).to_equal(5u32)
+        expect(result.seal.receipt.binding_count).to_equal(7u32)
+        expect(result.seal.receipt.startup_slots).to_equal([4u32, 3u32, 2u32, 1u32, 0u32])
+        expect(result.seal.receipt.shutdown_slots).to_equal([0u32, 1u32, 2u32, 3u32, 4u32])
+
+    it "binds the optional AI facet only when its provider and authority are admitted":
+        step("Add the AI capsule and grant its network authority")
+        val generation = ide_tooling_pilot_generation_v1(11, digest(20), IDE_PILOT_CAPABILITIES_ALL, 8192, true, 1, 0, 1, 0)
+        val result = ide_tooling_pilot_seal_v1(generation)
+        expect(result.seal.status).to_equal(MdsocppSealStatus.Ok)
+        expect(result.seal.receipt.capsule_count).to_equal(6u32)
+        expect(result.seal.receipt.binding_count).to_equal(10u32)
+        expect(result.seal.receipt.startup_slots).to_equal([4u32, 3u32, 2u32, 5u32, 1u32, 0u32])
+
+    it "projects analysis through the existing tooling provider contract":
+        step("Complete a document analysis request through the tooling adapter")
+        val request = ToolingAnalysisRequestV1(
+            workspace_id: KpfId128(hi: 0, lo: 1),
+            language_id: KpfId128(hi: 0, lo: 2),
+            provider_id: KpfId128(hi: 0, lo: 3),
+            provider_generation: 10,
+            document: ToolingDocumentHandleV1(slot: 4, epoch: 1),
+            revision: 7,
+            content_digest: digest(70),
+            required_fact_bits: 7,
+        )
+        val receipt = ide_tooling_pilot_analysis_receipt_v1(request, 7, ToolingStatusV1.Ok)
+        expect(receipt.status).to_equal(ToolingStatusV1.Ok)
+        expect(receipt.provider_generation).to_equal(10u64)
+        expect(receipt.revision).to_equal(7u64)
+        expect(receipt.completed_fact_bits).to_equal(7u64)
+
+describe "MDSOC++ IDE/tooling admission policy":
+    it "rejects an optional provider whose requested capability is not granted":
+        step("Attempt to admit AI without network authority")
+        val generation = ide_tooling_pilot_generation_v1(11, digest(20), IDE_PILOT_CAPABILITIES_LOCAL, 8192, true, 1, 0, 1, 0)
+        val result = ide_tooling_pilot_seal_v1(generation)
+        expect(result.seal.status).to_equal(MdsocppSealStatus.CapabilityDenied)
+        expect(result.seal.subject_slot).to_equal(5u32)
+
+    it "rejects the graph when its measured capsule memory exceeds policy":
+        step("Measure the accepted graph, then lower its budget by one byte")
+        val accepted = ide_tooling_pilot_seal_v1(baseline())
+        var constrained = baseline()
+        constrained.policy.memory_budget_bytes = accepted.seal.receipt.total_memory_bytes - 1
+        val rejected = ide_tooling_pilot_seal_v1(constrained)
+        expect(rejected.seal.status).to_equal(MdsocppSealStatus.MemoryBudgetExceeded)
+
+describe "MDSOC++ IDE/tooling generation transaction":
+    it "publishes a successor with an additive document-state migration":
+        step("Upgrade document state from schema 1.0 to 1.1")
+        val active = ide_tooling_pilot_seal_v1(baseline())
+        val candidate = ide_tooling_pilot_generation_v1(11, digest(30), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false, 1, 0, 1, 1)
+        val receipt = ide_tooling_pilot_try_upgrade_v1(active, candidate)
+        expect(receipt.status).to_equal(IdeToolingPilotUpgradeStatusV1.Accepted)
+        expect(receipt.published_generation).to_equal(11u64)
+        expect(receipt.rolled_back).to_equal(false)
+        expect(receipt.candidate_seal_status).to_equal(MdsocppSealStatus.Ok)
+
+    it "retains the active generation and emits a rollback receipt for a rejected candidate":
+        step("Attempt an AI upgrade without network authority")
+        val active = ide_tooling_pilot_seal_v1(baseline())
+        val candidate = ide_tooling_pilot_generation_v1(11, digest(40), IDE_PILOT_CAPABILITIES_LOCAL, 8192, true, 1, 0, 1, 1)
+        val receipt = ide_tooling_pilot_try_upgrade_v1(active, candidate)
+        expect(receipt.status).to_equal(IdeToolingPilotUpgradeStatusV1.CandidateSealRejected)
+        expect(receipt.candidate_seal_status).to_equal(MdsocppSealStatus.CapabilityDenied)
+        expect(receipt.published_generation).to_equal(10u64)
+        expect(receipt.restored_generation).to_equal(10u64)
+        expect(receipt.rolled_back).to_equal(true)
+
+    it "rejects a missing migration and a non-successor generation":
+        step("Remove the declared document migration from a successor")
+        val active = ide_tooling_pilot_seal_v1(baseline())
+        var missing = ide_tooling_pilot_generation_v1(11, digest(50), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false, 1, 0, 1, 1)
+        missing.capsules[4].state_migrations = []
+        val missing_receipt = ide_tooling_pilot_try_upgrade_v1(active, missing)
+        expect(missing_receipt.status).to_equal(IdeToolingPilotUpgradeStatusV1.MigrationMissing)
+        expect(missing_receipt.rolled_back).to_equal(true)
+
+        step("Reject a generation that skips the immediate successor")
+        val skipped = ide_tooling_pilot_generation_v1(12, digest(60), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false, 1, 0, 1, 1)
+        val skipped_receipt = ide_tooling_pilot_try_upgrade_v1(active, skipped)
+        expect(skipped_receipt.status).to_equal(IdeToolingPilotUpgradeStatusV1.GenerationNotSuccessor)
+        expect(skipped_receipt.published_generation).to_equal(10u64)

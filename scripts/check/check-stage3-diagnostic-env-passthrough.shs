@@ -75,7 +75,7 @@ run_tmp=$(CDPATH= cd -- "$run_tmp" && pwd -P)
 stub="$work/probe-stub"
 cat >"$stub" <<'STUB'
 #!/bin/sh
-for name in SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_BOOTSTRAP_DIAG \
+for name in SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_MIR_TAG_PROBE SIMPLE_BOOTSTRAP_DIAG \
     SIMPLE_MIR_FIELD_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
     SIMPLE_DEBUG_INFO_LEVEL; do
     eval "value=\${$name-<unset>}"
@@ -201,8 +201,9 @@ echo "pre-fix-baseline:         $hash_without"
 # A var that IS passed through MUST change the hash -- a hash that omitted part
 # of the environment would be the weaker gate.
 echo "=== invariant 2: an enabled probe changes the args hash ==="
-SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
-export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+SIMPLE_MIR_TAG_PROBE=1
+export SIMPLE_MIR_TAG_PROBE
 inv_set=$(bootstrap_stage3_diagnostic_env)
 # shellcheck disable=SC2086
 hash_diag=$(bootstrap_stage3_args_sha256 $baseline_env $inv_set -- stub)
@@ -210,12 +211,15 @@ EV_CHECKED=$((EV_CHECKED + 1))
 echo "with-probe-enabled:       $hash_diag"
 [ "$hash_diag" != "$hash_without" ] ||
     note_fail "invariant2:enabled-probe-did-not-change-hash"
+printf '%s\n' "$inv_set" | grep -qx 'SIMPLE_MIR_TAG_PROBE=1' ||
+    note_fail "invariant2:mir-tag-probe-not-emitted"
 
 # ------------------------------------------- invariant: value/name scope ----
 # Only the literal value 1 is accepted, and only allowlisted names.  A
 # path-valued or codegen-affecting knob must never appear.
 echo "=== invariant 3: value and name scope ==="
 EV_CHECKED=$((EV_CHECKED + 1))
+unset SIMPLE_MIR_TAG_PROBE
 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=/etc/passwd
 SIMPLE_DIAG_FILE=/tmp/evil
 SIMPLE_KEEP_LLVM_IR=1
@@ -225,7 +229,7 @@ export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
 scope=$(bootstrap_stage3_diagnostic_env)
 printf 'emitted with hostile values: [%s]\n' "$(printf '%s' "$scope" | tr '\n' ' ')"
 [ -z "$scope" ] || note_fail "invariant3:emitted-non-allowlisted-or-non-1-value"
-unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_MIR_TAG_PROBE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
     SIMPLE_DEBUG_INFO_LEVEL
 
 # ------------------------------------------------------------- verdict ------

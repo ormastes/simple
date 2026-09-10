@@ -97,3 +97,7 @@ mixed-runtime hazard, is not Windows-specific.)
 A correct fix has to discriminate on the object itself — a per-runtime magic, a
 disjoint tag space, or a header bit — not on where the code is being compiled to
 run.
+- 2026-09-08 SIMD symbol ownership: compiled Simple `rt_simd_*` tagged-value
+  ABI exports are owned solely by `src/runtime/runtime_simd_dispatch.c`. Rust
+  SIMD lane helpers must retain mangled Rust symbols; adding `#[no_mangle]` to
+  those helpers recreates the 23-symbol runtime-cdylib link failure.

@@ -254,7 +254,18 @@ bootstrap_stage3_verify_frontend_status_receipt() {
         [ "$(bootstrap_stage3_manifest_value log_leaf "$bootstrap_stage3_probe_receipt_authority")" = \
             "${bootstrap_stage3_probe_log##*/}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-leaf || return 1
         [ "$(bootstrap_stage3_manifest_value combined_stream "$bootstrap_stage3_probe_receipt_authority")" = stdout-stderr ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-stream || return 1
-        [ "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" = setsid ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-group || return 1
+        case "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" in
+          setsid) ;;
+          windows-job)
+            bootstrap_stage3_collector_helper=${bootstrap_stage3_sanity_root:-${BOOTSTRAP_STAGE3_VERSION_ROOT:-}}/scripts/bootstrap/run-process-group-bounded-log-windows.py
+            [ -f "$bootstrap_stage3_collector_helper" ] && [ ! -L "$bootstrap_stage3_collector_helper" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-authority || return 1
+            [ "$(bootstrap_stage3_manifest_value helper_sha256 "$bootstrap_stage3_probe_receipt_authority")" = \
+                "$(bootstrap_stage3_hash_file "$bootstrap_stage3_collector_helper")" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-sha || return 1
+            [ "$(bootstrap_stage3_manifest_value native_exit_status "$bootstrap_stage3_probe_receipt_authority")" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-native-exit || return 1
+            [ "$(bootstrap_stage3_manifest_value termination "$bootstrap_stage3_probe_receipt_authority")" = job-terminate ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-termination || return 1
+            ;;
+          *) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-group; return 1 ;;
+        esac
         [ "$(bootstrap_stage3_manifest_value artifact_limit "$bootstrap_stage3_probe_receipt_authority")" = none ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-artifact-limit || return 1
         bootstrap_stage3_collector_max=$(bootstrap_stage3_manifest_value \
             max_bytes "$bootstrap_stage3_probe_receipt_authority") || return 1
@@ -562,6 +573,20 @@ bootstrap_stage3_write_stage2_admission_receipt() (
     bootstrap_stage3_admission_receiver=${17} bootstrap_stage3_admission_receiver_display=${18}
     bootstrap_stage3_admission_receiver_log=${19} bootstrap_stage3_admission_receiver_log_display=${20}
     bootstrap_stage3_admission_root=${21}
+    # The ABI policy the whole bootstrap was launched under
+    # (bootstrap-from-scratch.sh:1200-1217 validates and exports it) is recorded
+    # IN the admission receipt, so a Stage 3 replay cannot silently admit a
+    # Stage 2 candidate that was built under a different ABI. Fail closed: an
+    # unset or unrecognised policy refuses to write a receipt at all, rather
+    # than writing one with an empty field.
+    bootstrap_stage3_admission_abi_policy=${SIMPLE_ABI_POLICY:-}
+    case "$bootstrap_stage3_admission_abi_policy" in
+        v1)
+            bootstrap_stage3_admission_abi_version=1
+            bootstrap_stage3_admission_abi_deferred=0
+            ;;
+        *) return 1 ;;
+    esac
     for bootstrap_stage3_admission_display in "$bootstrap_stage3_admission_receipt_display" \
         "$bootstrap_stage3_admission_candidate_display" "$bootstrap_stage3_admission_source_display" \
         "$bootstrap_stage3_admission_runtime_display" "$bootstrap_stage3_admission_tool_display" \
@@ -646,6 +671,9 @@ $BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256
         echo "tool_authority_path=$bootstrap_stage3_admission_tool_display"
         echo "tool_authority_sha256=$bootstrap_stage3_admission_tool_sha"
         echo "build_args_sha256=$bootstrap_stage3_admission_args_sha"
+        echo "simple_abi_policy=$bootstrap_stage3_admission_abi_policy"
+        echo "simple_abi_version=$bootstrap_stage3_admission_abi_version"
+        echo "simple_abi_deferred=$bootstrap_stage3_admission_abi_deferred"
         echo "sanity_evidence_path=$bootstrap_stage3_admission_sanity_display"
         echo "sanity_evidence_sha256=$bootstrap_stage3_admission_sanity_sha"
         echo "receiver_evidence_path=$bootstrap_stage3_admission_receiver_display"
@@ -698,16 +726,22 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_receiver_log" "$bootstrap_stage3_admission_receiver_log_display" || return 1
     bootstrap_stage3_sanity_regular_authority \
         "$bootstrap_stage3_admission_receipt" || return 1
-    [ "$(wc -l <"$bootstrap_stage3_admission_receipt" | tr -d ' ')" = 24 ] || return 1
+    # 24 keys + the three simple_abi_* rows the writer emits between
+    # build_args_sha256 and sanity_evidence_path. The count and the ordered key
+    # list are derived from bootstrap_stage3_write_stage2_admission_receipt
+    # above and must be updated together with it.
+    [ "$(wc -l <"$bootstrap_stage3_admission_receipt" | tr -d ' ')" = 27 ] || return 1
     bootstrap_stage3_admission_keys=$(sed 's/=.*//' "$bootstrap_stage3_admission_receipt" | tr '\n' ' ')
     [ "$bootstrap_stage3_admission_keys" = \
-"schema status admission_receipt_path candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 receiver_log_path receiver_log_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3 " ] || return 1
+"schema status admission_receipt_path candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 simple_abi_policy simple_abi_version simple_abi_deferred sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 receiver_log_path receiver_log_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3 " ] || return 1
     for bootstrap_stage3_admission_key in schema status admission_receipt_path candidate_path \
         candidate_sha256 source_snapshot_path source_snapshot_sha256 \
         runtime_snapshot_path runtime_snapshot_sha256 tool_authority_path \
         runtime_authority_path hosted_runtime_relative_path \
         hosted_runtime_sha256 \
-        tool_authority_sha256 build_args_sha256 sanity_evidence_path \
+        tool_authority_sha256 build_args_sha256 \
+        simple_abi_policy simple_abi_version simple_abi_deferred \
+        sanity_evidence_path \
         sanity_evidence_sha256 receiver_evidence_path receiver_log_path receiver_log_sha256 \
         receiver_evidence_sha256 admission_identity \
         checks_executed_at_admission checks_replayed_during_stage3; do
@@ -723,6 +757,27 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_receipt")" = 1 ] || return 1
     [ "$(bootstrap_stage3_manifest_value checks_replayed_during_stage3 \
         "$bootstrap_stage3_admission_receipt")" = 0 ] || return 1
+    # The receipt's recorded ABI policy must equal the policy THIS replay is
+    # running under, not merely be well-formed: a receipt written under a
+    # different SIMPLE_ABI_POLICY is not evidence for this one. Unset or
+    # unrecognised refuses, same fail-closed rule as the writer.
+    bootstrap_stage3_admission_abi_policy=${SIMPLE_ABI_POLICY:-}
+    case "$bootstrap_stage3_admission_abi_policy" in
+        v1)
+            bootstrap_stage3_admission_abi_version=1
+            bootstrap_stage3_admission_abi_deferred=0
+            ;;
+        *) return 1 ;;
+    esac
+    [ "$(bootstrap_stage3_manifest_value simple_abi_policy \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_abi_policy" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value simple_abi_version \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_abi_version" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value simple_abi_deferred \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_abi_deferred" ] || return 1
     for bootstrap_stage3_admission_binding in \
         "candidate_path:$bootstrap_stage3_admission_candidate_display" \
         "admission_receipt_path:$bootstrap_stage3_admission_receipt_display" \

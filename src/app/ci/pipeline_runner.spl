@@ -1,0 +1,255 @@
+# Simple CI orchestration runner — applies the orchestration model to CI.
+#
+# A `Pipeline` expands into ordinary `Job`s (see
+# `std.common.contracts.orchestration.ci_v1`) and this runner executes them in
+# dependency order through a runtime provider, producing one receipt per job and
+# one per run. There is no second scheduler: the Job path is the only execution
+# path (research §12.1).
+#
+# Honest isolation policy (research §4.1, §4.5, ORCH-006):
+# a `native-container` job runs ONLY when the host's container lane probes
+# available. When it does not, the job is recorded BLOCKED with the probe's
+# reason — it is never silently downgraded to a host process.
+#
+# Engine preference is podman, then docker, then a bare OCI runtime. Podman is
+# the default because it is the only one of the three whose normal mode is
+# ROOTLESS, so a CI node does not have to hand a daemon root to run a build.
+#
+# Two platform facts the engine order must not paper over:
+#
+#   * Podman on Windows is a Linux VM (`podman machine` -> WSL2/Hyper-V). It has
+#     no Windows-container backend and cannot produce a process-isolated Windows
+#     container. On Windows the native lane is containerd+runhcs or Docker's
+#     Windows-containers backend, and `podman` there is a `virtual-machine`
+#     class engine, never `native-container`.
+#   * "Rootless" is a Linux property. Windows process isolation requires
+#     Administrator, and a FreeBSD jail requires root; neither has a rootless
+#     equivalent. `ProbeV1.privilege` records which one this host would use so a
+#     receipt never implies an unprivileged container where none exists.
+
+use app.io.mod.{process_run_timeout, file_read, host_os}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1}
+use std.common.contracts.orchestration.ci_v1.{JobV1, PipelineV1, OrderedJobV1,
+    expand_pipeline, RUN_POLICY_ALWAYS}
+
+pub const VERDICT_PASS = "PASS"
+pub const VERDICT_FAIL = "FAIL"
+pub const VERDICT_NOT_RUN = "NOT_RUN"
+pub const VERDICT_BLOCKED = "BLOCKED"
+
+# Default per-job wall clock bound. A job that outlives it is FAIL, never PASS.
+pub const DEFAULT_JOB_TIMEOUT_MS = 60000
+
+# Engine candidates for the native-container lane, in preference order.
+pub const ENGINE_PODMAN = "podman"
+pub const ENGINE_DOCKER = "docker"
+pub const ENGINE_RUNC = "runc"
+
+# How the lane would run, once available. Never inferred from the engine name:
+# rootless podman and root-daemon docker are both "podman"/"docker".
+pub const PRIVILEGE_ROOTLESS = "rootless"
+pub const PRIVILEGE_ROOT = "root"
+pub const PRIVILEGE_UNKNOWN = "unknown"
+
+pub struct ProbeV1:
+    available: bool
+    # "" when no engine qualified.
+    engine: text
+    privilege: text
+    reason: text
+
+pub struct JobReceiptV1:
+    job_name: text
+    attempt: i64
+    runtime_class: text
+    verdict: text
+    reason: text
+    exit_code: i64
+    stdout: text
+    node_boot_id: text
+
+pub struct RunReceiptV1:
+    run_id: text
+    pipeline: text
+    verdict: text
+    jobs: [JobReceiptV1]
+
+# Node identity, so a receipt can be tied to the boot instance that produced it
+# (research §11.3). Empty when the host does not publish one.
+pub fn node_boot_id() -> text:
+    val raw = file_read("/proc/sys/kernel/random/boot_id") ?? ""
+    raw.trim()
+
+fn engine_present(engine: text) -> bool:
+    process_run_timeout(engine, ["--version"], 5000).2.to_i64() == 0
+
+# True when this host permits the namespace work a rootless container needs.
+#
+# This is a POSITIVE probe, not a capability list read: it nests a mount
+# namespace inside a user namespace, which is exactly what rootless podman's
+# and runc's nsexec do, and exactly what fails where unprivileged user
+# namespaces are restricted. Checking `--version` alone reports available on a
+# host where every launch fails.
+fn userns_nesting() -> (bool, text):
+    val ns = process_run_timeout("unshare", ["--user", "--mount", "true"], 5000)
+    if ns.2.to_i64() != 0:
+        return (false, ns.1.trim())
+    (true, "")
+
+# True when a rootless engine can map a range of subordinate ids. Without
+# `newuidmap`/`newgidmap` a rootless container is confined to a single id, which
+# most images cannot run under.
+fn subid_mapping() -> bool:
+    engine_present("newuidmap")
+
+# Probe the native-container lane, preferring podman.
+#
+# Reports the engine it would use AND whether that lane would be rootless or
+# root, because those are independent: an available engine says nothing about
+# the privilege the launch requires. Windows is refused outright for podman —
+# podman there is a Linux VM, not a Windows container (see the module header).
+pub fn probe_container_lane() -> ProbeV1:
+    val os = host_os()
+
+    if engine_present(ENGINE_PODMAN):
+        if os == "windows":
+            # Deliberately not "available with a caveat": a VM-backed engine
+            # cannot satisfy a native-container request.
+            return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+                reason: "podman-on-windows-is-a-vm: podman machine runs a Linux guest and has no " +
+                        "Windows-container backend; use containerd+runhcs or docker's Windows backend")
+        val nest = userns_nesting()
+        if nest.0 and subid_mapping():
+            return ProbeV1(available: true, engine: ENGINE_PODMAN, privilege: PRIVILEGE_ROOTLESS,
+                reason: "podman present, user+mount namespace nesting permitted, subordinate id mapping available")
+        var why = ""
+        if not nest.0:
+            why = "userns-nesting-denied (" + nest.1 + ")"
+        else:
+            why = "subordinate-id-mapping-absent (newuidmap/newgidmap missing)"
+        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+            reason: "podman-rootless-unavailable: " + why)
+
+    if engine_present(ENGINE_DOCKER):
+        # Docker's engine runs as root and the client needs socket access; a
+        # successful `--version` is the CLIENT only, so reach the daemon.
+        val info = process_run_timeout(ENGINE_DOCKER, ["info", "--format", "ok"], 15000)
+        if info.2.to_i64() != 0:
+            return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+                reason: "docker-daemon-unreachable: " + info.1.trim())
+        return ProbeV1(available: true, engine: ENGINE_DOCKER, privilege: PRIVILEGE_ROOT,
+            reason: "docker daemon reachable; this lane is root-privileged")
+
+    if engine_present(ENGINE_RUNC):
+        val nest = userns_nesting()
+        if nest.0 and subid_mapping():
+            return ProbeV1(available: true, engine: ENGINE_RUNC, privilege: PRIVILEGE_ROOTLESS,
+                reason: "runc present with rootless prerequisites; no image management")
+        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+            reason: "runc-rootless-unavailable: userns-nesting-denied (" + nest.1 + ")")
+
+    ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+        reason: "no-container-engine: none of podman, docker or runc answered --version")
+
+# "" when this runner can execute the job shape, else why not.
+fn job_shape_error(spec: PodSpecV1) -> text:
+    if spec.containers.len() != 1:
+        return "this runner executes single-container jobs; found " + spec.containers.len().to_text()
+    ""
+
+# Execute one job's single container on the host process lane.
+fn run_process_job(name: text, spec: PodSpecV1, boot: text) -> JobReceiptV1:
+    val c = spec.containers[0]
+    var argv: [text] = []
+    var i = 1
+    while i < c.command.len():
+        argv.push(c.command[i])
+        i = i + 1
+    for a in c.args:
+        argv.push(a)
+    val res = process_run_timeout(c.command[0], argv, DEFAULT_JOB_TIMEOUT_MS)
+    val rc = res.2.to_i64()
+    var verdict = VERDICT_FAIL
+    var reason = "exit status " + rc.to_text()
+    if rc == 0:
+        verdict = VERDICT_PASS
+        reason = "exited 0"
+    JobReceiptV1(job_name: name, attempt: 1, runtime_class: spec.runtime_class,
+                 verdict: verdict, reason: reason, exit_code: rc,
+                 stdout: res.0, node_boot_id: boot)
+
+fn blocked_receipt(name: text, spec: PodSpecV1, reason: text, boot: text) -> JobReceiptV1:
+    JobReceiptV1(job_name: name, attempt: 0, runtime_class: spec.runtime_class,
+                 verdict: VERDICT_BLOCKED, reason: reason, exit_code: 0,
+                 stdout: "", node_boot_id: boot)
+
+fn not_run_receipt(name: text, spec: PodSpecV1, reason: text, boot: text) -> JobReceiptV1:
+    JobReceiptV1(job_name: name, attempt: 0, runtime_class: spec.runtime_class,
+                 verdict: VERDICT_NOT_RUN, reason: reason, exit_code: 0,
+                 stdout: "", node_boot_id: boot)
+
+fn verdict_of(name: text, receipts: [JobReceiptV1]) -> text:
+    for r in receipts:
+        if r.job_name == name:
+            return r.verdict
+    VERDICT_NOT_RUN
+
+# Run a pipeline end to end. Returns a rejection when the pipeline itself is
+# invalid (unresolved reference, cycle); an executed run always returns a
+# receipt, including when every job was blocked.
+pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -> Result<RunReceiptV1, RejectionV1>:
+    var ordered: [OrderedJobV1] = []
+    match expand_pipeline(p, templates):
+        case Err(r): return Err(r)
+        case Ok(o): ordered = o
+
+    val boot = node_boot_id()
+    val probe = probe_container_lane()
+    var receipts: [JobReceiptV1] = []
+
+    for entry in ordered:
+        val name = entry.node.name
+        val spec = entry.job.template
+
+        # An upstream failure blocks dependents, while independent jobs continue
+        # (research §12.2). `runPolicy: always` runs anyway, for diagnostics.
+        var upstream_bad = ""
+        for dep in entry.node.run_after:
+            val dv = verdict_of(dep, receipts)
+            if dv != VERDICT_PASS and upstream_bad == "":
+                upstream_bad = dep + " -> " + dv
+        if upstream_bad != "" and entry.node.run_policy != RUN_POLICY_ALWAYS:
+            receipts.push(not_run_receipt(name, spec, "upstream " + upstream_bad, boot))
+            continue
+
+        val shape = job_shape_error(spec)
+        if shape != "":
+            receipts.push(blocked_receipt(name, spec, "unsupported-job-shape: " + shape, boot))
+            continue
+
+        if spec.runtime_class == "native-container":
+            if not probe.available:
+                receipts.push(blocked_receipt(name, spec, probe.reason, boot))
+                continue
+            # A real native-container launch belongs to the OCI provider, which
+            # is not implemented in this slice. Refuse rather than run the
+            # workload on a weaker lane.
+            receipts.push(blocked_receipt(name, spec,
+                "oci-provider-not-implemented: host lane probes available but the " +
+                "native-container provider is the next slice", boot))
+            continue
+
+        receipts.push(run_process_job(name, spec, boot))
+
+    var run_verdict = VERDICT_PASS
+    var any_blocked = false
+    for r in receipts:
+        if r.verdict == VERDICT_FAIL:
+            run_verdict = VERDICT_FAIL
+        if r.verdict == VERDICT_BLOCKED:
+            any_blocked = true
+    if run_verdict != VERDICT_FAIL and any_blocked:
+        run_verdict = VERDICT_BLOCKED
+
+    Ok(RunReceiptV1(run_id: run_id, pipeline: p.meta.name,
+                    verdict: run_verdict, jobs: receipts))

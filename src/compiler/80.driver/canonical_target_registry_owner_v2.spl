@@ -1,0 +1,309 @@
+# Parent-authoritative bounded registry lifecycle over V1 inert mapping content.
+# The caller supplies a unique nonzero instance identity; no global mutable
+# identity allocator is used.
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.environment_target_identity_mapping_candidate_v1.*
+use compiler.driver.environment_target_identity_mapping_lookup_v1.*
+use compiler.driver.canonical_target_registry_owner_v1.{
+    canonical_target_registry_owner_v1}
+
+pub const CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2: i64 = 256
+pub const CANONICAL_TARGET_REGISTRY_MAX_USES_V2: i64 = 1024
+pub const CANONICAL_TARGET_REGISTRY_MAX_ALIASES_V2: i64 = 64
+
+pub enum CanonicalTargetRegistryStateV2:
+    Active
+    Draining
+    Retired
+
+pub enum CanonicalTargetRegistryErrorV2:
+    InvalidOwner
+    InvalidMapping
+    InvalidAliasTable
+    UnknownTargetTriple
+    CapacityExceeded
+    SerialOverflow
+    GenerationOverflow
+    CrossOwner
+    StaleToken
+    Draining
+    DuplicateRelease
+
+pub struct CanonicalTargetAliasV2:
+    alias: text
+    canonical: text
+
+pub struct CanonicalTargetResolutionTokenV2:
+    owner_instance: u64
+    owner_generation: u64
+    serial: u64
+    registry_digest: text
+    binding_digest: text
+
+pub struct CanonicalTargetUseTokenV2:
+    owner_instance: u64
+    resolution_serial: u64
+    use_serial: u64
+    binding_digest: text
+    use_digest: text
+
+pub struct CanonicalTargetProjectionV2:
+    target_profile_id: u32
+    supplied_target_triple: text
+    canonical_target_triple: text
+    architecture_id: u16
+    os_id: u32
+    abi_id: u32
+    object_format_id: u32
+    endian_id: u16
+    pointer_width_bits: u16
+    registry_generation: u64
+    registry_digest: text
+    binding_digest: text
+
+struct _CanonicalTargetResolutionRecordV2:
+    token: CanonicalTargetResolutionTokenV2
+    row: EnvironmentTargetIdentityMappingRowV1
+    supplied: text
+    canonical: text
+    state: CanonicalTargetRegistryStateV2
+    pin_count: u64
+
+struct _CanonicalTargetUseRecordV2:
+    token: CanonicalTargetUseTokenV2
+    live: bool
+
+pub class CanonicalTargetRegistryOwnerV2:
+    owner_instance: u64
+    generation: u64
+    next_serial: u64
+    candidate: EnvironmentTargetIdentityMappingCandidateV1
+    aliases: [CanonicalTargetAliasV2]
+    registry_digest: text
+    resolutions: [_CanonicalTargetResolutionRecordV2]
+    uses: [_CanonicalTargetUseRecordV2]
+
+fn _default_aliases_ctr2() -> [CanonicalTargetAliasV2]:
+    [CanonicalTargetAliasV2(alias: "amd64-unknown-linux-gnu",
+         canonical: "x86_64-unknown-linux-gnu"),
+     CanonicalTargetAliasV2(alias: "arm64-unknown-linux-gnu",
+         canonical: "aarch64-unknown-linux-gnu"),
+     CanonicalTargetAliasV2(alias: "x86-64-unknown-linux-gnu",
+         canonical: "x86_64-unknown-linux-gnu")]
+
+fn _digest_shape_ctr2(value: text) -> bool:
+    if value.len() != 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f')): return false
+    true
+
+fn _mapping_valid_ctr2(candidate: EnvironmentTargetIdentityMappingCandidateV1) -> bool:
+    val checked = environment_target_identity_mapping_candidate_v1(candidate.mapping_generation,
+        candidate.registry_identity, candidate.rows)
+    checked.is_ok() and checked.unwrap().mapping_digest == candidate.mapping_digest
+
+fn _aliases_valid_ctr2(candidate: EnvironmentTargetIdentityMappingCandidateV1,
+    aliases: [CanonicalTargetAliasV2]) -> bool:
+    if aliases.len() > CANONICAL_TARGET_REGISTRY_MAX_ALIASES_V2: return false
+    var prior = ""
+    for entry in aliases:
+        if entry.alias == "" or entry.canonical == "" or entry.alias <= prior or
+           entry.alias == entry.canonical:
+            return false
+        if environment_target_mapping_lookup_triple_v1(candidate, entry.alias).is_ok() or
+           environment_target_mapping_lookup_triple_v1(candidate, entry.canonical).is_err():
+            return false
+        prior = entry.alias
+    true
+
+fn _registry_digest_ctr2(instance: u64, generation: u64,
+    candidate: EnvironmentTargetIdentityMappingCandidateV1,
+    aliases: [CanonicalTargetAliasV2]) -> text:
+    var rows = [instance.to_text(), generation.to_text(), candidate.mapping_digest,
+        aliases.len().to_text()]
+    for entry in aliases:
+        rows.push(entry.alias.len().to_text() + ":" + entry.alias + ":" +
+            entry.canonical.len().to_text() + ":" + entry.canonical)
+    sha256_text("simple/canonical-target-registry-owner/v2\n" + rows.join("\n"))
+
+fn _owner_content_valid_ctr2(owner: CanonicalTargetRegistryOwnerV2) -> bool:
+    owner.owner_instance != 0u64 and owner.generation != 0u64 and
+        owner.next_serial != 0u64 and _mapping_valid_ctr2(owner.candidate) and
+        _aliases_valid_ctr2(owner.candidate, owner.aliases) and
+        _digest_shape_ctr2(owner.registry_digest) and
+        owner.registry_digest == _registry_digest_ctr2(owner.owner_instance,
+            owner.generation, owner.candidate, owner.aliases)
+
+fn _canonical_ctr2(owner: CanonicalTargetRegistryOwnerV2, supplied: text) -> text?:
+    if environment_target_mapping_lookup_triple_v1(owner.candidate, supplied).is_ok():
+        return Some(supplied)
+    for entry in owner.aliases:
+        if entry.alias == supplied: return Some(entry.canonical)
+    nil
+
+fn _binding_digest_ctr2(owner: CanonicalTargetRegistryOwnerV2, serial: u64,
+    row: EnvironmentTargetIdentityMappingRowV1, supplied: text, canonical: text) -> text:
+    sha256_text("simple/canonical-target-resolution/v2\n" + owner.owner_instance.to_text() +
+        "\n" + owner.generation.to_text() + "\n" + serial.to_text() + "\n" +
+        owner.registry_digest + "\n" + supplied.len().to_text() + ":" + supplied +
+        "\n" + canonical.len().to_text() + ":" + canonical + "\n" +
+        row.target_profile_id.to_text() + ":" + row.architecture_id.to_text() + ":" +
+        row.os_id.to_text() + ":" + row.abi_id.to_text() + ":" +
+        row.object_format_id.to_text() + ":" + row.endian_id.to_text() + ":" +
+        row.pointer_width_bits.to_text())
+
+pub fn canonical_target_registry_owner_v2(owner_instance: u64
+) -> Result<CanonicalTargetRegistryOwnerV2, CanonicalTargetRegistryErrorV2>:
+    canonical_target_registry_owner_generation_v2(owner_instance, 1u64)
+
+pub fn canonical_target_registry_owner_generation_v2(owner_instance: u64,
+    generation: u64
+) -> Result<CanonicalTargetRegistryOwnerV2, CanonicalTargetRegistryErrorV2>:
+    if owner_instance == 0u64 or generation == 0u64:
+        return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    val candidate = canonical_target_registry_owner_v1().candidate
+    val aliases = _default_aliases_ctr2()
+    Ok(CanonicalTargetRegistryOwnerV2(owner_instance: owner_instance, generation: generation,
+        next_serial: 1u64, candidate: candidate, aliases: aliases,
+        registry_digest: _registry_digest_ctr2(owner_instance, generation, candidate, aliases),
+        resolutions: [], uses: []))
+
+pub fn canonical_target_registry_resolve_v2(owner: CanonicalTargetRegistryOwnerV2,
+    supplied: text
+) -> Result<CanonicalTargetResolutionTokenV2, CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    if owner.resolutions.len() >= CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2:
+        return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
+    if owner.next_serial == 0xffffffffffffffffu64:
+        return Err(CanonicalTargetRegistryErrorV2.SerialOverflow)
+    val canonical = _canonical_ctr2(owner, supplied)
+    if canonical.is_none(): return Err(CanonicalTargetRegistryErrorV2.UnknownTargetTriple)
+    val row = environment_target_mapping_lookup_triple_v1(owner.candidate, canonical.unwrap()).unwrap()
+    val serial = owner.next_serial
+    val binding = _binding_digest_ctr2(owner, serial, row, supplied, canonical.unwrap())
+    val token = CanonicalTargetResolutionTokenV2(owner_instance: owner.owner_instance,
+        owner_generation: owner.generation, serial: serial, registry_digest: owner.registry_digest,
+        binding_digest: binding)
+    owner.next_serial = serial + 1u64
+    owner.resolutions.push(_CanonicalTargetResolutionRecordV2(token: token, row: row,
+        supplied: supplied, canonical: canonical.unwrap(), state: CanonicalTargetRegistryStateV2.Active,
+        pin_count: 0u64))
+    Ok(token)
+
+fn _resolution_index_ctr2(owner: CanonicalTargetRegistryOwnerV2,
+    token: CanonicalTargetResolutionTokenV2) -> i64:
+    if token.owner_instance != owner.owner_instance: return -2
+    for i in 0..owner.resolutions.len():
+        if owner.resolutions[i].token == token: return i
+    -1
+
+pub fn canonical_target_registry_acquire_use_v2(owner: CanonicalTargetRegistryOwnerV2,
+    token: CanonicalTargetResolutionTokenV2
+) -> Result<CanonicalTargetUseTokenV2, CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    val index = _resolution_index_ctr2(owner, token)
+    if index == -2: return Err(CanonicalTargetRegistryErrorV2.CrossOwner)
+    if index < 0: return Err(CanonicalTargetRegistryErrorV2.StaleToken)
+    if owner.resolutions[index].state != CanonicalTargetRegistryStateV2.Active:
+        return Err(CanonicalTargetRegistryErrorV2.Draining)
+    if owner.uses.len() >= CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
+        return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
+    if owner.next_serial == 0xffffffffffffffffu64:
+        return Err(CanonicalTargetRegistryErrorV2.SerialOverflow)
+    val use_serial = owner.next_serial
+    val use_digest = sha256_text("simple/canonical-target-use/v2\n" +
+        token.binding_digest + "\n" + use_serial.to_text())
+    val use_token = CanonicalTargetUseTokenV2(owner_instance: owner.owner_instance,
+        resolution_serial: token.serial, use_serial: use_serial,
+        binding_digest: token.binding_digest, use_digest: use_digest)
+    owner.next_serial = use_serial + 1u64
+    var record = owner.resolutions[index]; record.pin_count = record.pin_count + 1u64
+    owner.resolutions[index] = record
+    owner.uses.push(_CanonicalTargetUseRecordV2(token: use_token, live: true))
+    Ok(use_token)
+
+fn _use_index_ctr2(owner: CanonicalTargetRegistryOwnerV2, use_token: CanonicalTargetUseTokenV2) -> i64:
+    if use_token.owner_instance != owner.owner_instance: return -2
+    for i in 0..owner.uses.len():
+        if owner.uses[i].token == use_token: return i
+    -1
+
+pub fn canonical_target_registry_project_v2(owner: CanonicalTargetRegistryOwnerV2,
+    use_token: CanonicalTargetUseTokenV2
+) -> Result<CanonicalTargetProjectionV2, CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    val use_index = _use_index_ctr2(owner, use_token)
+    if use_index == -2: return Err(CanonicalTargetRegistryErrorV2.CrossOwner)
+    if use_index < 0 or not owner.uses[use_index].live:
+        return Err(CanonicalTargetRegistryErrorV2.StaleToken)
+    for record in owner.resolutions:
+        if record.token.serial == use_token.resolution_serial and
+           record.token.binding_digest == use_token.binding_digest and
+           record.state != CanonicalTargetRegistryStateV2.Retired:
+            val row = record.row
+            return Ok(CanonicalTargetProjectionV2(target_profile_id: row.target_profile_id,
+                supplied_target_triple: record.supplied, canonical_target_triple: record.canonical,
+                architecture_id: row.architecture_id, os_id: row.os_id, abi_id: row.abi_id,
+                object_format_id: row.object_format_id, endian_id: row.endian_id,
+                pointer_width_bits: row.pointer_width_bits,
+                registry_generation: record.token.owner_generation,
+                registry_digest: record.token.registry_digest,
+                binding_digest: record.token.binding_digest))
+    Err(CanonicalTargetRegistryErrorV2.StaleToken)
+
+pub fn canonical_target_registry_release_v2(owner: CanonicalTargetRegistryOwnerV2,
+    use_token: CanonicalTargetUseTokenV2) -> Result<(), CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    val use_index = _use_index_ctr2(owner, use_token)
+    if use_index == -2: return Err(CanonicalTargetRegistryErrorV2.CrossOwner)
+    if use_index < 0: return Err(CanonicalTargetRegistryErrorV2.StaleToken)
+    if not owner.uses[use_index].live: return Err(CanonicalTargetRegistryErrorV2.DuplicateRelease)
+    for i in 0..owner.resolutions.len():
+        if owner.resolutions[i].token.serial == use_token.resolution_serial and
+           owner.resolutions[i].token.binding_digest == use_token.binding_digest:
+            if owner.resolutions[i].pin_count == 0u64:
+                return Err(CanonicalTargetRegistryErrorV2.StaleToken)
+            var resolution = owner.resolutions[i]
+            resolution.pin_count = resolution.pin_count - 1u64
+            if resolution.pin_count == 0u64 and resolution.state == CanonicalTargetRegistryStateV2.Draining:
+                resolution.state = CanonicalTargetRegistryStateV2.Retired
+            owner.resolutions[i] = resolution
+            var use_record = owner.uses[use_index]; use_record.live = false
+            owner.uses[use_index] = use_record
+            return Ok(())
+    Err(CanonicalTargetRegistryErrorV2.StaleToken)
+
+pub fn canonical_target_registry_replace_v2(owner: CanonicalTargetRegistryOwnerV2,
+    candidate: EnvironmentTargetIdentityMappingCandidateV1,
+    aliases: [CanonicalTargetAliasV2]
+) -> Result<(), CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    if not _mapping_valid_ctr2(candidate): return Err(CanonicalTargetRegistryErrorV2.InvalidMapping)
+    if not _aliases_valid_ctr2(candidate, aliases):
+        return Err(CanonicalTargetRegistryErrorV2.InvalidAliasTable)
+    if owner.generation == 0xffffffffffffffffu64:
+        return Err(CanonicalTargetRegistryErrorV2.GenerationOverflow)
+    for i in 0..owner.resolutions.len():
+        var record = owner.resolutions[i]
+        if record.state == CanonicalTargetRegistryStateV2.Active:
+            record.state = if record.pin_count == 0u64:
+                CanonicalTargetRegistryStateV2.Retired
+            else:
+                CanonicalTargetRegistryStateV2.Draining
+            owner.resolutions[i] = record
+    owner.generation = owner.generation + 1u64
+    owner.candidate = candidate
+    owner.aliases = aliases
+    owner.registry_digest = _registry_digest_ctr2(owner.owner_instance,
+        owner.generation, candidate, aliases)
+    Ok(())
+
+pub fn canonical_target_registry_resolution_state_v2(owner: CanonicalTargetRegistryOwnerV2,
+    token: CanonicalTargetResolutionTokenV2
+) -> Result<CanonicalTargetRegistryStateV2, CanonicalTargetRegistryErrorV2>:
+    if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
+    val index = _resolution_index_ctr2(owner, token)
+    if index == -2: return Err(CanonicalTargetRegistryErrorV2.CrossOwner)
+    if index < 0: return Err(CanonicalTargetRegistryErrorV2.StaleToken)
+    Ok(owner.resolutions[index].state)

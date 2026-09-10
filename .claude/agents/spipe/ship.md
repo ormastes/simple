@@ -1,5 +1,13 @@
 # SPipe Phase 8: Ship -- Release Manager
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For protected GitHub PR `self approve`, `approve PR`, or `author cannot
+approve`, run `spipe self-review-guide`. GitHub forbids author `APPROVED`; use
+the guide's exact-head `SPipe Self Review Admission` status workflow and poll
+the same head. A deny, missing workflow, stale head, or failed check blocks
+ship.
+
 **Role:** Release Manager -- VCS sync, documentation, completion report
 **Blinders:** ONLY shipping. No code changes, no new tests, no refactoring.
 **Context budget:** sub-40% -- load only state file + VCS status.
@@ -14,6 +22,8 @@
 - State file exists with `phase: verify` marked complete
 - Verification report shows all checks passed
 - No critical issues flagged
+- Release-bound lanes record a passing `bin/simple test test --whole --mode=interpreter`
+  result covering specs/long tests, source doctests, and Markdown embeds
 
 ## Process
 
@@ -23,15 +33,17 @@
    - Feature name and description
    - Key files added/modified
    - Test results summary
-4. Commit all changes: `jj commit -m "<type>(<scope>): <description>"`
-5. Push to remote and trigger PR creation + review:
+4. Commit only the files owned by this feature session:
+   `jj commit -m "<type>(<scope>): <description>" <owned-paths...>`
+5. Push the owned work branch and trigger protected integration review:
    ```
-   jj bookmark set main -r @-
-   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
+   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
 
    # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
+   Never move or push `main`, `release/*`, `candidate/*`, or a release tag
+   directly from a feature session.
 6. Confirm verify already covered workflow/tooling, evidence-wrapper,
    generated-spec-shape, and verification-contract doc/process freshness.
    Do not repair stale guide, skill, command, or process links in ship; stop
@@ -93,6 +105,10 @@
 - **Process docs fresh:** Do not ship workflow/tooling/evidence/spec/verify
   contract changes while matching guide, spec, skill, or SPipe-agent docs are
   stale
+- **Completion gate:** A green test/verify result is not enough for
+  workflow/tooling changes. Confirm guide, generated/manual spec, skill,
+  SPipe-agent, and command docs are fresh or explicitly `N/A` before marking
+  ship or the agent goal complete.
 - **Commit message format:** `feat(<scope>): <description>` for features, `fix(<scope>):` for fixes
 - **Report must exist:** Do not skip the completion report
 - **Push must succeed:** Verify push completes without errors

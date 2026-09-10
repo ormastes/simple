@@ -409,18 +409,15 @@ fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
     let flattened_ast = crate::pipeline::module_loader::load_module_with_imports(&path, &mut visited)
         .expect("load flattened declaration owner");
     let project_hint = crate::pipeline::native_single_file_project_hint(&path);
-    let flattened_hir = crate::hir::lower_with_context_lenient_and_project_hint(
-        &flattened_ast,
-        &path,
-        project_hint.as_deref(),
-    )
-    .expect("JIT-compatible HIR lower flattened declaration owner");
-    let flattened_mir = lower_to_mir(&flattened_hir)
-        .expect("JIT-compatible MIR lower flattened declaration owner");
+    let flattened_hir =
+        crate::hir::lower_with_context_lenient_and_project_hint(&flattened_ast, &path, project_hint.as_deref())
+            .expect("JIT-compatible HIR lower flattened declaration owner");
+    let flattened_mir = lower_to_mir(&flattened_hir).expect("JIT-compatible MIR lower flattened declaration owner");
     assert!(
-        flattened_mir.functions.iter().any(|function| {
-            function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()
-        }),
+        flattened_mir
+            .functions
+            .iter()
+            .any(|function| { function.name == "_sffi_env_get_i64" && !function.blocks.is_empty() }),
         "flattened JIT MIR must retain the private helper body under its exact spelling"
     );
     let flattened_caller = flattened_mir
@@ -462,15 +459,24 @@ fn probe_private_env_helper() -> i64:
     let mir = lower_to_mir(&hir).expect("MIR lower flattened declaration module");
 
     assert!(
-        mir.functions.iter().any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
+        mir.functions
+            .iter()
+            .any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
         "MIR must retain the private helper body under its exact spelling"
     );
-    let caller = mir.functions.iter().find(|function| function.name == "probe_private_env_helper")
+    let caller = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "probe_private_env_helper")
         .expect("private helper caller");
     assert!(
-        caller.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
-            matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
-        }),
+        caller
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+            }),
         "the caller must target the retained helper by its exact MIR definition name"
     );
     assert!(
@@ -485,8 +491,7 @@ fn probe_private_env_helper() -> i64:
     let mut jit = JitCompiler::new_static().expect("create static JIT");
     jit.compile_module(&mir)
         .expect("private helper must resolve locally while rt_env_get_i64 resolves through runtime provider");
-    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }
-        .expect("call private helper fixture");
+    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }.expect("call private helper fixture");
     assert_eq!(result, 42, "private helper and known-good helper must both execute");
 }
 
@@ -916,7 +921,7 @@ fn hosted_freebsd_cross_target_build_fails_closed() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
     let mut objects = Vec::new();
     for (index, source) in sources.iter().enumerate() {
@@ -2621,6 +2626,18 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    for symbol in [
+        "rt_file_view_open_beneath_no_follow_v1",
+        "rt_file_view_pread_exact_v1",
+        "rt_file_view_close_v1",
+        "rt_pinned_archive_open_beneath_v1",
+        "rt_pinned_archive_close_v1",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must include file-view provider `{symbol}`"
+        );
+    }
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",
@@ -3696,13 +3713,8 @@ fn test_stage4_core_c_argv_capsule_exports_one_initialized_provider_family() {
         .iter()
         .map(|symbol| (*symbol).to_string())
         .collect::<Vec<_>>();
-    let capsule = build_stage4_runtime_capsule_archive(
-        &core,
-        &providers,
-        &requested,
-        &temp.path().join("capsule"),
-    )
-    .unwrap();
+    let capsule =
+        build_stage4_runtime_capsule_archive(&core, &providers, &requested, &temp.path().join("capsule")).unwrap();
 
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     assert_eq!(
@@ -3853,6 +3865,53 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
 }
 
+// Reproduces the macOS Stage4 link gate 2026-09-07: Rust's own C-ABI runtime
+// exports (`#[no_mangle] pub extern "C" fn rt_array_get`, etc. in
+// runtime/src/value/collections.rs) are always STRONG on stable Rust -- there
+// is no portable `#[linkage = "weak"]`. When one of those symbols shares an
+// object/codegen-unit with a requested root, `ld -r` cannot drop it from the
+// closure, so it rides along even though nothing requested it. If that
+// symbol is also owned by the core-C providers (an `allowed_external`
+// runtime symbol), the projection must demote it to WEAK so the outer C
+// definition can still win the final link -- the whole point of
+// `allowed_external`. Before the 2026-09-07 fix this fixture failed with
+// "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_stage4_rust_runtime_projection_weakens_owner_provided_passenger_symbol() {
+    let temp = tempfile::tempdir().unwrap();
+    // `rt_passenger_owned` sits in the SAME translation unit as the requested
+    // root `rt_projected_root2`, mimicking a Rust codegen unit that bundles
+    // multiple `#[no_mangle]` exports into one object: pulling in the root
+    // for liveness necessarily pulls in the passenger too, strong and all.
+    let rust_runtime = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_rust_runtime_source2",
+        &[r#"
+void rt_projected_root2(void) { }
+void rt_passenger_owned(void) { }
+"#],
+    );
+    let output = build_stage4_rust_runtime_projection_archive(
+        &rust_runtime,
+        &["rt_projected_root2".to_string()],
+        &["rt_passenger_owned".to_string()],
+        &temp.path().join("projection2"),
+    )
+    .unwrap();
+
+    let (defined, _undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    let weak = super::tools::archive_weak_global_symbols(&output).unwrap();
+    assert!(
+        defined.keys().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "passenger symbol must still be present (kept global, not localized): {defined:?}"
+    );
+    assert!(
+        weak.iter().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "owner-provided passenger symbol must be demoted to WEAK so the outer C definition can override it, found strong: {weak:?}"
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
@@ -3934,6 +3993,105 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     match old_compiler_entry {
         Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
         None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+}
+
+/// The Stage4 compiler entry may link the SHARED runtime.
+///
+/// Pre-fix this test fails at the lane assertion: `dynamic-runtime` was not a
+/// name `resolve_runtime_lane` knew, so it fell through to `core-c-bootstrap`,
+/// and `selected_runtime_library` then short-circuited every authorized Stage4
+/// entry onto the core-C static archive -- hard-erroring "Stage4 compiler entry
+/// requires the core-c-bootstrap runtime lane" for any other lane. The shared
+/// `libsimple_runtime.so` was therefore unreachable and the Stage4 link died
+/// with 167 unresolved `rt_*` symbols. Simple does not unwind, so nothing about
+/// that archive was load-bearing for the compiler binary.
+///
+/// The other two assertions pin the scope of the change: the lane is refused for
+/// a non-Stage4 entry, and it is never inferred -- only an explicit
+/// `--runtime-bundle dynamic-runtime` selects it.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
+    let old_bundle = std::env::var_os("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+    let old_runtime_path = std::env::var_os("SIMPLE_RUNTIME_PATH");
+    unsafe {
+        std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+        std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let shared = runtime_dir.join("libsimple_runtime.so");
+    std::fs::write(&shared, b"\x7fELF-not-really-but-non-empty").unwrap();
+
+    let entry = temp.path().join("src/compiler/80.driver/main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+
+    let dynamic_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out/simple"))
+        .config(dynamic_config)
+        .entry_file(entry.clone());
+    assert!(builder.is_authorized_stage4_compiler_entry());
+    assert_eq!(builder.resolve_runtime_lane().display_name(), "dynamic-runtime");
+
+    // THE regression assertion: pre-fix this was
+    // Err("Stage4 compiler entry requires the core-c-bootstrap runtime lane").
+    let (selected, is_native_all) = builder
+        .selected_runtime_library(temp.path())
+        .expect("the Stage4 compiler entry must be allowed onto the dynamic runtime lane")
+        .expect("the dynamic lane must select a runtime library");
+    assert_eq!(selected, shared);
+    assert!(!is_native_all);
+
+    // Scope 1: the lane is refused for an entry that is not the Stage4 compiler.
+    let other_entry = temp.path().join("src/app/tool/main.spl");
+    std::fs::create_dir_all(other_entry.parent().unwrap()).unwrap();
+    std::fs::write(&other_entry, "fn main() -> i64: 0\n").unwrap();
+    let other_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let other = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("other-out"))
+        .config(other_config)
+        .entry_file(other_entry);
+    let err = other
+        .selected_runtime_library(temp.path())
+        .expect_err("only the Stage4 compiler entry may use the dynamic lane");
+    assert!(err.contains("dynamic-runtime lane is available only"), "{err}");
+
+    // Scope 2: the lane is never inferred. Without the explicit bundle the same
+    // Stage4 entry still resolves to the core-C lane it always did.
+    let auto_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir),
+        ..Default::default()
+    };
+    let auto = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("auto-out"))
+        .config(auto_config)
+        .entry_file(entry);
+    assert_eq!(auto.resolve_runtime_lane().display_name(), "core-c-bootstrap");
+
+    match old_compiler_entry {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+    match old_bundle {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE") },
+    }
+    match old_runtime_path {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_RUNTIME_PATH") },
     }
 }
 
@@ -4441,8 +4599,16 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(defined.intersection(&secure_staging).count(), 0,
-        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider");
+    // `defined` is a BTreeMap<String, usize>, not a set, so intersect over its keys.
+    // Trim the leading '_' the same way the rest of this test does (Mach-O mangling).
+    assert_eq!(
+        defined
+            .keys()
+            .filter(|symbol| secure_staging.contains(symbol.trim_start_matches('_')))
+            .count(),
+        0,
+        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
+    );
     // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
     // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
     // the capsule may carry them only as weak globals the owner overrides --
@@ -6383,7 +6549,9 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
     // Must stay an EXACT match, not a prefix: an unrelated application symbol
     // that merely starts with "__cpu" is a real stub candidate and must not
     // be silently swallowed by this exclusion.
-    assert!(!super::tools::is_compiler_rt_builtin_symbol("__cpu_scaling_governor_get"));
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "__cpu_scaling_governor_get"
+    ));
 }
 
 #[test]

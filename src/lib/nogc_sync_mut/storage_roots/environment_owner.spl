@@ -1,0 +1,66 @@
+"""Sole ambient environment/filesystem owner for storage-root resolution."""
+
+use std.common.storage_roots.{StorageRootError}
+use std.io_runtime.{file_exists, is_dir, platform_name}
+use std.nogc_sync_mut.env.platform.{get_current_dir}
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.sffi.io.{path_absolute, path_parent}
+use std.nogc_sync_mut.storage_roots.model.*
+use std.nogc_sync_mut.storage_roots.resolver.{inspect_storage_roots}
+
+fn _optional_environment(key: text) -> text?:
+    val value = env_get(key)
+    if value == "": nil else: Some(value)
+
+fn _repository_root(start: text) -> text?:
+    var current = path_absolute(start)
+    if current == "":
+        return nil
+    while true:
+        if is_dir(current + "/.git") or file_exists(current + "/.git"):
+            return Some(current)
+        val parent = path_parent(current)
+        if parent == "" or parent == current:
+            return nil
+        current = parent
+    nil
+
+pub fn storage_root_environment_snapshot() -> StorageRootEnvironmentSnapshot:
+    """Capture only root authorities and platform-default inputs; never TMPDIR/TMP/TEMP."""
+    StorageRootEnvironmentSnapshot(
+        user_root: _optional_environment("SIMPLE_USER_STORAGE_ROOT"),
+        worktree_root: _optional_environment("SIMPLE_WORKTREE_STORAGE_ROOT"),
+        home: _optional_environment("HOME"),
+        xdg_cache_home: _optional_environment("XDG_CACHE_HOME"),
+        local_app_data: _optional_environment("LOCALAPPDATA"),
+    )
+
+pub fn inspect_ambient_storage_roots(platform: StoragePlatform, overrides: StorageRootOverrides, worktree_metadata: text) -> Result<StorageRootResolution, StorageRootError>:
+    """Inspect roots without creating directories, files, processes, or caches."""
+    val worktree = _repository_root(get_current_dir())
+    if worktree == nil:
+        return Err(StorageRootError.InvalidWorktreeIdentity)
+    inspect_storage_roots(StorageRootResolverInput(
+        platform: platform,
+        cli: overrides,
+        environment: storage_root_environment_snapshot(),
+        canonical_worktree: worktree!,
+        worktree_metadata: worktree_metadata,
+    ))
+
+pub fn storage_platform_for_host() -> StoragePlatform:
+    val platform = platform_name().lower()
+    if platform == "macos" or platform == "darwin":
+        return StoragePlatform.MacOS
+    if platform == "windows":
+        return StoragePlatform.Windows
+    if platform == "linux":
+        return StoragePlatform.Linux
+    StoragePlatform.SimpleOS
+
+pub fn resolve_ambient_storage_roots(worktree_metadata: text) -> Result<StorageRoots, StorageRootError>:
+    inspect_ambient_storage_roots(
+        storage_platform_for_host(),
+        StorageRootOverrides(user_root: nil, worktree_root: nil),
+        worktree_metadata,
+    ).map(_.roots)

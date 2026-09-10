@@ -2,12 +2,80 @@
 # Mandatory aggregate for the SFFI v2 source-authority guards introduced by
 # PR 75. This list is intentionally explicit: check-guard-wiring.shs can prove
 # every child is reachable, and a missing or renamed child fails closed.
+#
+# Flags: --rev <REV>       run the 46 guards against the COMMITTED tree at REV
+#        --baseline-rev <R> push ratchet: reject failures absent at committed R
+#        --root <DIR>      treat DIR as the repository root
+#        --selftest        fixtures only, no real scan
+#        --guard-list <F>  selftest only: drive the loop from a file of
+#                          repo-relative guard paths instead of the frozen 46
+#
+# Why --rev exists (2026-09-07). As a `tree`-mode push row this BLOCKING gate
+# ran the 46 sub-guards against the shared WORKING CHECKOUT, not the commit
+# being pushed. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# WHY `git archive` AND NOT `git worktree add --detach` (measured 2026-09-07,
+# reversing the census's provisional design). The census assumed the 46
+# sub-guards might run git themselves, which would demand a real worktree.
+# They do not: `grep -lE '(^|[^a-z])git ' scripts/audit/*sffi*.shs
+# scripts/audit/rt-time-contract.shs` returns **0 files**, and all 46 resolve
+# their root the same way — 234 hits for `cd -- "$(dirname -- "$0")/../.."`
+# and no `rev-parse --show-toplevel` anywhere. So an extracted tree is enough,
+# and it avoids writing shared `.git/worktrees/` state on a box where ~20
+# agent sessions push concurrently, plus the stale-registration cleanup a
+# crashed run would leave behind.
+#
+# THE TRAP THAT MAKES THIS WORK: because every sub-guard derives its root from
+# its OWN `$0`, the wrapper must execute the copies INSIDE the materialised
+# tree. Running `$ROOT/scripts/audit/...` with merely the cwd changed would
+# read the working copy straight back through `$0` — that IS the rot axis.
+# Repointing ROOT at the extraction does both halves at once, since
+# `run_guard` already invokes `sh "$ROOT/$guard_rel"`.
+#
+# SCOPE: src test scripts examples, minus the vendored trees named in
+# CLAUDE.md's Owned-Code Scope. Excluding vendor takes the archive from 2.0 GB
+# / 19s to 551 MB / 3.3s, and was verified NOT to change the outcome: run
+# inside the materialised tree the 46 guards produce the byte-identical
+# verdict set (the same 3 failures) as a working-tree run.
 set -u
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P) || {
-    echo "sffi-v2-authority: ERROR — cannot resolve repository root"
+SELF=$0
+ROOT=""
+REV=""
+BASELINE_REV=""
+MODE=scan
+GUARD_LIST_FILE=""
+FAILURE_LIST=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE=selftest; shift ;;
+        --rev) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--rev needs a value)"; exit 2; }
+               REV="$2"; shift 2 ;;
+        --baseline-rev) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--baseline-rev needs a value)"; exit 2; }
+               BASELINE_REV="$2"; shift 2 ;;
+        --failure-list) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--failure-list needs a value)"; exit 2; }
+               FAILURE_LIST="$2"; shift 2 ;;
+        --root) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--root needs a value)"; exit 2; }
+               ROOT="$2"; shift 2 ;;
+        --guard-list) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--guard-list needs a value)"; exit 2; }
+               GUARD_LIST_FILE="$2"; shift 2 ;;
+        *) echo "sffi-v2-authority: ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+if [ -n "$BASELINE_REV" ] && [ -z "$REV" ]; then
+    echo "sffi-v2-authority: ERROR — nothing was checked (--baseline-rev requires --rev)"
     exit 2
-}
+fi
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/../.." 2>/dev/null && pwd -P) || {
+        echo "sffi-v2-authority: ERROR — cannot resolve repository root"
+        exit 2
+    }
+fi
 
 guard_count=0
 guard_failures=0
@@ -17,10 +85,10 @@ run_tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-sffi-v2-authority.XXXXXX") || {
 }
 guard_output="$run_tmp/guard.out"
 cleanup() {
-    rm -f "$guard_output"
-    rmdir "$run_tmp"
+    rm -rf "$run_tmp"
 }
 trap cleanup EXIT HUP INT TERM
+[ -n "$FAILURE_LIST" ] && : > "$FAILURE_LIST"
 
 run_guard() {
     guard_rel=$1
@@ -28,6 +96,7 @@ run_guard() {
     if [ ! -f "$ROOT/$guard_rel" ]; then
         echo "sffi-v2-authority: MISSING $guard_rel"
         guard_failures=$((guard_failures + 1))
+        [ -n "$FAILURE_LIST" ] && printf '%s\n' "$guard_rel" >> "$FAILURE_LIST"
         return
     fi
     echo "sffi-v2-authority: RUN $guard_rel"
@@ -38,9 +107,164 @@ run_guard() {
         cat "$guard_output"
         echo "sffi-v2-authority: FAIL $guard_rel"
         guard_failures=$((guard_failures + 1))
+        [ -n "$FAILURE_LIST" ] && printf '%s\n' "$guard_rel" >> "$FAILURE_LIST"
     fi
 }
 
+selftest() {
+    _st=$(mktemp -d "${TMPDIR:-/tmp}/simple-sffi-v2-selftest.XXXXXX") || {
+        echo "sffi-v2-authority: ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _rc=0
+    if ! command -v git >/dev/null 2>&1; then
+        echo "sffi-v2-authority: selftest git unavailable, cannot verify the --rev committed-content path"
+        rm -rf "$_st"; return 1
+    fi
+
+    # A miniature repo driven through the REAL run_guard loop: two fake audit
+    # guards that resolve their own root from $0 exactly as the 46 do, and
+    # assert on a marker file inside that root.
+    mkdir -p "$_st/f/scripts/audit" "$_st/f/scripts/check" "$_st/f/src"
+    for _n in fake_one fake_two; do
+        {
+            printf '#!/bin/sh\n'
+            printf 'r=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)\n'
+            printf 'grep -q COMMITTED_TOKEN "$r/src/marker.txt" || { echo "FAIL — marker absent"; exit 1; }\n'
+            printf 'echo "PASS — marker present"\n'
+        } > "$_st/f/scripts/audit/$_n.shs"
+    done
+    printf 'COMMITTED_TOKEN\n' > "$_st/f/src/marker.txt"
+    printf 'scripts/audit/fake_one.shs\nscripts/audit/fake_two.shs\n' > "$_st/list.txt"
+    ( cd "$_st/f" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest \
+      && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+
+    # WORKING COPY ONLY, never committed. Two independent rot axes:
+    #   axis 1 — the CONTENT the sub-guards read reverts to the checkout.
+    #   axis 2 — the SUB-GUARD SCRIPTS THEMSELVES are content too. A wrapper
+    #            that materialises the sources but still executes
+    #            $ROOT/scripts/audit/... (or lets $0 resolve there) runs the
+    #            sabotaged copy. This axis is specific to a wrapper-of-guards
+    #            and has no analogue in a baseline-file gate.
+    printf 'DIRTY_NOT_COMMITTED\n' > "$_st/f/src/marker.txt"
+    printf '#!/bin/sh\necho "FAIL — sabotaged working-copy guard"\nexit 1\n' \
+        > "$_st/f/scripts/audit/fake_two.shs"
+
+    _got=$(SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --guard-list "$_st/list.txt" 2>&1 | tail -1)
+    case "$_got" in
+      "sffi-v2-authority: PASS — all 2 guard(s) passed") : ;;
+      *) echo "sffi-v2-authority: selftest --rev did not read committed content, got [$_got]"; _rc=1 ;;
+    esac
+    # The SAME tree run as a working tree must DISAGREE, proving the two paths
+    # differ rather than both being blind to the edits.
+    _got=$(SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --guard-list "$_st/list.txt" 2>&1 | tail -1)
+    case "$_got" in
+      "sffi-v2-authority: FAIL — 2 of 2 guard(s) failed") : ;;
+      *) echo "sffi-v2-authority: selftest working-tree run did not see the dirty edits, got [$_got]"; _rc=1 ;;
+    esac
+    # Non-vacuity: a guard named in the list but absent from the revision is
+    # MISSING, never a silent skip.
+    printf 'scripts/audit/fake_one.shs\nscripts/audit/nope.shs\n' > "$_st/list2.txt"
+    _got=$(SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --guard-list "$_st/list2.txt" 2>&1 | tail -1)
+    case "$_got" in
+      "sffi-v2-authority: FAIL — 1 of 2 guard(s) failed") : ;;
+      *) echo "sffi-v2-authority: selftest absent guard was not reported missing, got [$_got]"; _rc=1 ;;
+    esac
+
+    # Base-relative push mode admits an unchanged failing guard but rejects a
+    # guard that newly fails in the tip.
+    ( cd "$_st/f" \
+      && printf '#!/bin/sh\necho "FAIL — committed debt"\nexit 1\n' > scripts/audit/fake_two.shs \
+      && git add scripts/audit/fake_two.shs && git commit -q -m base-red \
+      && printf 'harmless\n' > note.txt && git add note.txt && git commit -q -m unchanged ) >/dev/null 2>&1
+    if SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --baseline-rev HEAD~1 --guard-list "$_st/list.txt" >/dev/null 2>&1; then :; else
+      echo "sffi-v2-authority: selftest unchanged base failure did not pass"; _rc=1
+    fi
+    ( cd "$_st/f" \
+      && printf '#!/bin/sh\necho "FAIL — new debt"\nexit 1\n' > scripts/audit/fake_one.shs \
+      && git add scripts/audit/fake_one.shs && git commit -q -m new-red ) >/dev/null 2>&1
+    if SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --baseline-rev HEAD~1 --guard-list "$_st/list.txt" >/dev/null 2>&1; then
+      echo "sffi-v2-authority: selftest newly failing guard passed"; _rc=1
+    else
+      _delta_rc=$?; [ "$_delta_rc" = 1 ] || { echo "sffi-v2-authority: selftest new failure returned $_delta_rc"; _rc=1; }
+    fi
+
+    rm -rf "$_st"
+    [ "$_rc" -eq 0 ] || return 1
+    echo "sffi-v2-authority: selftest 5 fixtures, ok"
+    return 0
+}
+
+# The fixtures invoke this script recursively; re-running the selftest there
+# would recurse without end. The children exercise the real run_guard loop,
+# which is the whole point.
+if [ "${SFFI_V2_SELFTEST_CHILD:-0}" != 1 ]; then
+    selftest || { echo "sffi-v2-authority: ERROR — nothing was checked (selftest failed)"; exit 2; }
+fi
+if [ "$MODE" = selftest ]; then
+    echo "sffi-v2-authority: PASS — 5 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+if [ -n "$BASELINE_REV" ]; then
+    base_failures="$run_tmp/base.failures"
+    if [ -n "$GUARD_LIST_FILE" ]; then
+        SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$ROOT" --rev "$BASELINE_REV" --guard-list "$GUARD_LIST_FILE" --failure-list "$base_failures" >/dev/null 2>&1
+        base_rc=$?
+    else
+        SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$ROOT" --rev "$BASELINE_REV" --failure-list "$base_failures" >/dev/null 2>&1
+        base_rc=$?
+    fi
+    if [ "$base_rc" -eq 0 ]; then
+        :
+    else
+        [ "$base_rc" -eq 1 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (could not measure baseline revision $BASELINE_REV)"; exit 2; }
+    fi
+    [ -f "$base_failures" ] || { echo "sffi-v2-authority: ERROR — nothing was checked (baseline failure set absent)"; exit 2; }
+    tip_failures="$run_tmp/tip.failures"
+    FAILURE_LIST="$tip_failures"
+    : > "$FAILURE_LIST"
+fi
+
+# --rev: run the guards against the COMMITTED tree. See the header for why an
+# extraction is used rather than a detached worktree, and why repointing ROOT
+# is what makes the sub-guards' own $0 resolve inside it.
+if [ -n "$REV" ]; then
+    if ! ( cd "$ROOT" && git rev-parse --verify --quiet "$REV^{commit}" ) >/dev/null 2>&1; then
+        echo "sffi-v2-authority: ERROR — nothing was checked (not a commit in $ROOT: $REV)"
+        exit 2
+    fi
+    mkdir -p "$run_tmp/rev"
+    # One tolerant invocation per tree: `git archive` fails the WHOLE archive
+    # on a pathspec that matches nothing, so folding these together would
+    # break any revision lacking one of them (and did break the fixtures).
+    # The required trees are asserted immediately after.
+    for _tree in src scripts test examples; do
+        ( cd "$ROOT" && git archive "$REV" -- "$_tree" \
+            ':(exclude,glob)src/compiler_rust/vendor/**' \
+            ':(exclude,glob)src/runtime/vendor/**' ) 2>/dev/null \
+          | tar -x -C "$run_tmp/rev" 2>/dev/null || true
+    done
+    if [ ! -d "$run_tmp/rev/scripts/audit" ] || [ ! -d "$run_tmp/rev/src" ]; then
+        echo "sffi-v2-authority: ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    ROOT="$run_tmp/rev"
+fi
+
+if [ -n "$GUARD_LIST_FILE" ]; then
+    # Selftest path only: drive the real loop from a supplied list so the
+    # fixtures do not have to reproduce all 46 production guards.
+    [ -f "$GUARD_LIST_FILE" ] || { echo "sffi-v2-authority: ERROR — nothing was checked (no guard list $GUARD_LIST_FILE)"; exit 2; }
+    expected_guards=$(grep -c . "$GUARD_LIST_FILE")
+    [ "$expected_guards" -gt 0 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (empty guard list)"; exit 2; }
+    while IFS= read -r _g; do
+        [ -n "$_g" ] || continue
+        run_guard "$_g"
+    done < "$GUARD_LIST_FILE"
+else
+    expected_guards=46
 run_guard "scripts/audit/app-check-sffi-authority.shs"
 run_guard "scripts/audit/app-io-hub-sffi-authority.shs"
 run_guard "scripts/audit/backend-compile-c-sffi-authority.shs"
@@ -87,10 +311,24 @@ run_guard "scripts/audit/time-utils-sffi-authority.shs"
 run_guard "scripts/audit/tls-oidc-clock-sffi-authority.shs"
 run_guard "scripts/audit/torch-dyn-sffi-authority.shs"
 run_guard "scripts/audit/wm-lane-boundary-sffi-authority.shs"
+fi
 
-if [ "$guard_count" -ne 46 ]; then
-    echo "sffi-v2-authority: ERROR — expected 46 guards, ran $guard_count"
+if [ "$guard_count" -ne "$expected_guards" ]; then
+    echo "sffi-v2-authority: ERROR — expected $expected_guards guards, ran $guard_count"
     exit 2
+fi
+if [ -n "$BASELINE_REV" ]; then
+    sort -u "$base_failures" -o "$base_failures"
+    sort -u "$tip_failures" -o "$tip_failures"
+    comm -23 "$tip_failures" "$base_failures" > "$run_tmp/new.failures"
+    new_failures=$(wc -l < "$run_tmp/new.failures" | tr -d ' ')
+    if [ "$new_failures" -ne 0 ]; then
+        echo "sffi-v2-authority: FAIL — $new_failures newly failing guard(s) versus base $BASELINE_REV: $(tr '\n' ' ' < "$run_tmp/new.failures")"
+        exit 1
+    fi
+    echo "sffi_v2_authority_ok=true"
+    echo "sffi-v2-authority: PASS — 0 newly failing guard(s) versus base $BASELINE_REV ($guard_failures existing failure(s))"
+    exit 0
 fi
 if [ "$guard_failures" -ne 0 ]; then
     echo "sffi_v2_authority_ok=false"

@@ -6,6 +6,14 @@ Status: implementation design for the selected `B + S1 + D1 + A1 + V1 + L1 + C1 
 
 ## 1. Design invariants
 
+The local/untracked historical `cache_writer_mutation_scope.md` is unavailable
+as repository evidence. Its essential proposed boundary is retained inline:
+only the private host lock owner may consume a verified `CacheCommitFrameV1`,
+durably journal it, and return a `CacheCommitReceiptV1`; readiness, caller-made
+receipts, and legacy `result_manifest_put` confer no authority. This does not
+replace journal/CAS or DB ownership. Production publication remains disabled
+pending native authority qualification.
+
 1. Immutable CAS bytes and the admitted action/root journal are authority. PureDatabase is a disposable, rebuildable projection.
 2. A compile consumes exactly one published `CompileSnapshotV1`; no live pathname is read after publication.
 3. Cache identity contains semantic content and declared effects, never worktree root, branch, inode, mtime, database row ID, or presentation path.
@@ -246,7 +254,7 @@ Compile frontend flow:
 1. Look up `FileAstV1` by `{SourceBlob, grammar, compiler owner}`.
 2. In shadow mode, parse fresh and compare canonical AST bytes, diagnostics and `PublicSummaryV1`; a hit cannot affect output.
 3. After activation gates pass, decode/validate the AST and summary. Imported unchanged modules contribute `PublicSummaryV1` only.
-4. Resolver records selected `body_refs`: generic specialization, cross-module inline, CTFE/macro expansion, selected trait implementation and selected AOP advice. Fetch each immutable body by digest only when selected.
+4. Resolver records selected `body_refs` for body-consuming operations: generic specialization, cross-module inline, CTFE/macro expansion, consumed trait default/generic implementation, and explicitly inlined or body-observed AOP advice. An ordinary non-inlined advice call consumes only its typed callable/interface/effect reference; compile its body as its own object rather than loading it into every advised caller. Fetch each immutable body by digest only when the query actually consumes it.
 5. Recomputed `SemanticReadSetV1` must equal the action's declared set before an authoritative result can publish.
 
 The virtual text renderer is a pure function `render_tldr(PublicSummaryV1) -> bytes`. It emits provenance comments, then every canonical bodyless forward declaration, then dependency-ordered grammar-valid public surfaces and metadata. It must not synthesize executable private bodies; body references use a reserved non-importing summary annotation already admitted by grammar/design. A real `_tldr.spl` remains an ordinary real file and is never shadowed by the virtual URI.
@@ -281,6 +289,25 @@ page(auth, snapshot, virtual_uri, continuation?, max_bytes, max_entries)
 The facade has no parser, source-reader or generator method. Absence returns `SummaryLookupV1(present=false)`, never an error; it cannot reparse source, enqueue generation, switch snapshots or consult a consumer-local index. Summary generation occurs exactly once in the admitted compile projection path, which publishes `PublicSummaryV1` before the facade can expose it. Consumers obtain the facade only from `CacheGatewayV1.virtual_source_store()` and can neither name nor import private `SummaryStoreV1`.
 
 The Simple compiler/CLI, MCP, LSP MCP and SPipe all receive the same injected `VirtualSourceStoreV1`. MCP translates it into the `simple-summary://...` read-only generated resource. LSP MCP uses the identical list/stat/read/page results for symbols/hover without private AST leakage. SPipe exposes them through a typed evidence/plugin adapter, capturing URI, snapshot and page digest so manuals are reproducible. Consumers may translate protocol shapes but cannot access `SummaryStoreV1`, scan the tree, reread source, start a subprocess per request, render `_tldr.spl`, or maintain a competing generator/index.
+
+`LspQuerySessionV1` owns one lazy sequential query worker. Query-engine
+functions first gain result-returning adapters; only CLI entrypoints print, so
+an in-process or persistent adapter cannot corrupt MCP protocol stdout. Worker
+V1 deliberately rereads source/import inputs for each query while retaining its
+loaded Simple executable and modules. Its frame includes schema, request ID,
+workspace root, execution generation, operation and bounded arguments; its
+response includes status, exact payload length and payload. The host enforces
+the existing 10-second/1-MiB policy while draining both output channels,
+distinguishes no-data/EOF/error, and kills/reaps the entire failed child before
+one bounded one-shot retry.
+
+Only immutable outline snapshots may be cached initially, under an exact source
+digest plus parser options and a byte-budgeted eviction owner. File mtime alone
+is never authority. References, visibility, traits, macros and aspect answers
+remain uncached until their imported bodies, directory membership, negative
+resolution witnesses, configuration and editor overlays bind to a verified
+workspace generation. Nested `grep` execution must become bounded or be
+replaced by the canonical reference index before persistent-worker activation.
 
 ## 10. MDSOC startup and delayed loading
 
@@ -410,3 +437,129 @@ Bootstrap evidence must use the pure-Simple self-hosted runtime. Build Phase 2, 
 ## 15. Migration constraints
 
 No compatibility wrapper may make PureDatabase authoritative, accept legacy unhashed objects, derive identity from absolute paths, silently load all capsules, or expose private AST through tools. Existing caches remain read-disabled until explicitly imported through a verifying one-way migrator. Schema rollout is additive and versioned; rollback selects the previous admitted generation and does not rewrite new objects.
+
+For application context indexes, `backend: sqlite` is a caller-visible
+compatibility label, not permission to retain the C SQLite adapter forever.
+Migration to the repository's Simple SQLite (`PureDatabase`) uses a versioned
+adapter: new/empty stores are created in the PureDatabase format; an existing
+SQLite-header file is read only by an explicit one-way import command into a
+new staged file, verified row-for-row, and atomically selected. Normal startup
+does not load both database engines or reinterpret one format as the other.
+Production runs the PureDatabase adapter from a cached SMF/native carrier;
+interpreter execution remains diagnostic fallback. Until this importer and its
+receipts exist, the current context SQLite store is `migration-pending`, not a
+completed native-to-Simple conversion.
+
+## 16. Physical metadata and portable-object detail (2026-09-08)
+
+### 16.1 Frozen records
+
+Implementation interface baseline:
+[L7 three-payload owner/DTO freeze](three_payload_interface_freeze_2026-09-08.md).
+It reserves exact ports/files, retains current V1 compatibility, and introduces
+a separately versioned strict seal; existing model fields are not silently
+upgraded into production physical-IO authority.
+
+- `GenerationManifestV1`: snapshot, catalog, package-init, summary, scope, RR-shard, portable-object, target-artifact, and diagnostic refs.
+- `PackageInitTldV1`: package identity, ordered members, independent scope-root refs for aspects, traits, macros, extensions, templates, and initializers.
+- `ThreePayloadClosureSealV2`: generation and inventory identity, bounded section inventory, embedded logical-object identities, positive/negative and membership witness roots, completeness dimensions, byte/RSS bounds, and canonical seal digest. The retained V1 compile/seal model does not acquire this strict-profile meaning.
+- `SemanticQueryReadManifestV1`: ordered producer-query to consumer-query reads with facet/dimension, ordinal, membership/absence evidence, covered partition, and completeness; distinct from external-effect `SemanticReadSetV1`.
+- `ReverseReferenceShardV1`: sorted `(producer, dimension, consumer)` edges plus consumed facet and semantic-query-read-manifest identity.
+- `PortableBaseSioV1`: pre-composition content profile, IR/schema versions, stable entities/joinpoints, portable bodies, symbolic target requirements, semantic constraints, ordered reads, source-map refs, and section integrity.
+- `PortableComposedSioV1`: separately keyed final portable profile containing the verified advice-call plan, common-pass pipeline/result, complete ordered reads, and base-object identity.
+- `AdviceCallPlanV1`: stable joinpoint, advice function, typed arguments/result, effects, order, captures, and exit policy.
+
+All records use the shared canonical codec generator and bounded indexed sections. Cross-object edges use stable semantic IDs plus immutable content identity; module-local compact IDs travel with their verified tables.
+
+Before codec reuse is admitted, a lossless preservation matrix classifies exported/reexported symbols and visibility, generic/trait/extension facts, initializer and CTFE ownership, exceptional cleanup/effects, dynamic-dispatch and aspect joinpoints, ABI/layout/atomics/runtime-service requirements, debug/source provenance, and relocation/link requirements as `portable_symbolic`, `target_family`, `target_exact`, or `forbidden`. Golden decode/encode and cross-stage tests must prove every required field survives; an unclassified or lossy field rejects portable publication.
+
+Canonical binary `PublicSummaryV1` bytes own meaning. Versioned golden vectors prove equivalent module `.tld` and `simple-summary://.../_tldr.spl` renderings and prove `PackageInitTldV1`/`__init__.tld` membership, scope roots, and initializer order round-trip. Unknown optional fields are preserved by lossless tooling; unknown mandatory fields and unsupported downgrade requests fail closed.
+
+### 16.2 Read algorithm
+
+1. Pin and verify the current generation manifest.
+2. Resolve the package through its indexed catalog entry and decode `PackageInitTldV1`.
+3. Validate membership and selected semantic-scope roots.
+4. Decode only requested module summaries and facets.
+5. Validate recorded positive, negative, membership, trait, macro, and pointcut witnesses.
+6. Fetch an exceptional body or portable section only when a query actually consumes it.
+7. Treat absence alone as a typed miss. Corruption, schema mismatch, truncation, or incomplete admitted content returns its exact closed error and quarantine evidence; an explicit bounded recovery action may rebuild from the same frozen source but cannot relabel corruption as absence.
+
+After snapshot acquisition, an unchanged validated closure records zero additional dependency-source opens and zero private-AST decodes during metadata consumption. Snapshot inventory/read counters remain separate and cannot be hidden by this metric. `.rr` is consulted only for reverse impact/explain/rebuild operations, not ordinary forward compilation.
+
+For the `three_payload_compile_v2` strict profile, counters separately report `{control, source, target_summary, package_scope, imported_summary, exceptional_body, rr}` opens, bytes, and decoded sections. `ThreePayloadClosureSealV2` binds the profile. After control-plane pinning, eligibility requires exactly one source payload, zero-or-one prior target summary, one package scope, and zero imported-summary, exceptional-body, and RR reads. The cold-first-build receipt records `prior_summary=absent-output-not-yet-published`; any needed external facet/body records a typed fallback reason instead of weakening the count. `ThreePayloadCompileV1` remains compatibility/model-only.
+
+The existing catalog/codec owner performs `seal_three_payload_closure_v2(snapshot, parent_generation, module, verified_objects, bounds) -> Result<PreparedThreePayloadV2, ThreePayloadFallbackV1>` before worker admission. It enumerates required logical objects and completeness dimensions, packs their canonical indexed sections without changing ownership, verifies the frozen inventory and witness roots, enforces configured bytes/section-count/decode-RSS limits, and returns `PreparedThreePayloadV2` containing `ThreePayloadClosureSealV2` or a closed `ThreePayloadFallbackV1` reason: `ExternalFacetRequired`, `ExternalBodyRequired`, `MembershipIncomplete`, `WitnessIncomplete`, `ScopeGenerationMismatch`, `BoundsExceeded`, or `UnsupportedSemantics`. A cold absent prior summary is the successful status `absent-output-not-yet-published`, not a fallback error. The restricted worker receives only the two-or-three admitted payload handles plus the seal; cache, network, and filesystem access is unavailable through that worker interface. Preparation, worker, target lowering, linking, and runtime initialization retain separate read/byte/time counters.
+
+The target and package `.tld` payloads use bounded section tables and embed the canonical records required for eligibility. Section entries retain original content identities and are decoded lazily. Text inspection is generated from those records. No compiler hot path reparses a rendered header or follows an unbounded reference chain while still claiming three-payload admission.
+
+Closure completeness is semantic rather than lexical-directory locality. Referenced features may be authored elsewhere. Macro/CTFE and consumed generic/default-trait bodies must be embedded when the worker executes them. Ordinary concrete trait calls and call-only advice carry complete callable signatures, effects and selection/coherence facts plus symbolic object/body digests; the frontend emits dependency/relocation records without opening implementation bytes. Inlining, body-observing analysis, compile-time execution, or local generation of that body requires embedding or a typed multi-payload fallback. `.rr` schedules which owners/projections require refresh but never supplies or embeds their content; coordinator `.rr` reads occur before worker admission and are reported only as control-plane reads, while `rr_worker_reads` must remain zero.
+
+`PackageInitTldV1` returns ordered initializer body refs and effect contracts to the existing initialization owner. Query/check may avoid loading those bodies. Interpreted execution evaluates required runtime initializers exactly once under established ordering; native compilation retains and lowers them into the generated artifact, and the generated program—not the compiler—executes their runtime effects once. Explicit compile-time evaluation remains a separately declared CTFE query and dependency.
+
+### 16.3 Publication and invalidation
+
+Stage immutable blobs, verify length/digest/schema, publish the coherent generation manifest through the journal, atomically select it, and then update/replay the PureDatabase projection. Summary and RR identities never refer to each other's final digest. Changed query reads generate inserted/removed reverse deltas; adding a consumer cannot invalidate the producer summary.
+
+Impact processing retains the prior outgoing reads while reevaluating. Facet changes enqueue deduplicated consumer queries/files from relevant RR shards; unchanged results stop propagation. Successful evaluation diffs old/new outgoing reads, removes abandoned-branch edges, inserts new edges, and publishes summary/scope/RR/object roots atomically. Failure publishes none of them. Membership, candidate-set and absence-root changes handle new facts with no prior edge; file add/delete/rename is admitted only after frozen inventory reconciliation. Pointcut changes evaluate the union of old/new domains and remove obsolete weave plans. Semantic SCCs use one fixed-point group publication.
+
+RR coverage records generation, schema, query-read-manifest root, covered scope/partitions and completeness. Missing shards are rebuilt from `SemanticQueryReadManifestV1` forward reads; external-effect `SemanticReadSetV1` entries cannot reconstruct causal query edges. Corruption or incomplete/unknown coverage is not a miss and causes quarantine plus conservative scope recomputation, widening to workspace when necessary.
+
+`ReverseReferenceShardV1` alone represents causal semantic reads. It projects through explicit adapters to the existing folder-navigation `smf.reverse_references.v1` view and target/publication `ReverseReferenceKeyV1` view. Those views preserve their current loader/session owners and shared stable-ID framing, but never become semantic-key inputs.
+
+### 16.4 Pure-Simple blob and server API
+
+The shared Pure Simple contracts are `begin_put`, `write_chunk`, `commit_blob`, `abort_put`, `open_blob`, `attach_blob`, and `release_blob_reference`. Publication and attachment operations require the existing epoch-bound `CacheWriterV1` capability; readers receive only verified immutable refs and leases. Implementations use bounded buffers and immutable inline/pack/standalone storage selected by measured artifact-size policy. Private `CacheServiceCore` implements capability, batch-action lookup, missing-object discovery, streamed upload/download, publication, and read-lease operations behind `CacheGatewayV1`. Direct, IPC, and HTTP adapters share the same typed results. Stream leases/pins survive through final verification or cancellation, and remote bytes cannot publish before local journal/CAS admission. Auth, quotas, digest verification, decompression bounds, tenant namespace, retry class, and circuit breaking are mandatory at the transport adapter.
+
+### 16.5 Query and aspect fast paths
+
+Query identity is `(kind, stable_entity, semantic_profile, parameters)` and results store fingerprint, ordered reads, status, and deterministic work-budget receipt. Recursive semantics use explicit SCC/fixed-point owners. The initial AOP fast path accepts only complete typed `before`/`after` selectors and emits `AdviceCallPlanV1`; anything else returns `composition_profile_required` before cache publication.
+
+`AdviceCallPlanV1` is valid only for statically fixed advice in its artifact generation. Dynloaded aspects continue through the existing admitted typed-facet/session contract, with generation pinning and revocation; the compiler may not erase that dispatch into a direct call unless activation is proven immutable for the artifact identity.
+
+Static advice admission provenance includes the aspect-pack catalog generation. Caller reuse identity includes only consumed selector, precedence/ordering, callable interface/effect, activation mode, and explicitly body-consuming analysis fingerprints in `PortableComposedSioV1`; an unrelated catalog-generation change alone cannot invalidate every caller. Dynamic aspects retain guarded dispatch; their registry generation and lease enter only target/runtime publication identity. Target fan-out delegates to the existing build-plan/`BinaryObjectActionV1` owner with portable digest plus exact target mapping, features, ABI, object format, numeric policy, backend/toolchain, dependency lock, accepted-feature receipt, and emitted bytes.
+
+### 16.6 Performance harness
+
+The cross-language harness pins tool binaries, versions, source generators, frozen corpus digest, target, warm/cold state, command, output identity, hardware, and quiet-runner receipt. For each source-size/state lane it performs one warmup and at least fifteen measured runs in a balanced rotating order. It reports nearest-rank p95, median paired ratio, deterministic bootstrap 95% confidence interval, CV, CPU, peak RSS, input/output bytes, parsed bytes, query counts, and phase timings. `JavaClassParityV1` compares composed `.sio` with `.class`; `GoTargetObjectParityV1` compares target object/package generation with Go package compilation. Final link/LTO and unequal-work cross-product rows are separate and never satisfy parity. A confidence interval wholly at or below 1.10 can pass; one wholly above 1.10 fails; one straddling 1.10 is inconclusive. Independently valid/stable p95 or RSS violations fail. NFR-CSM-013 independently decides each product verdict.
+
+Runtime and compiler sampling have separate count-checked cyclic schedules because
+they measure different operations. Each schedule records round, rotated position,
+lane, row count, and canonical digest. Compiler rows additionally bind the exact
+source and argv digests; grouping one language's samples ahead of another is not
+claim-bearing evidence.
+
+Semantic-feature comparisons are decomposed instead of pretending every language
+has equivalent macros or AOP:
+
+| Stage | Admission and comparison |
+|---|---|
+| K0 expanded core | One fixed integer corpus/kernel, exact iteration/checksum and source identity across Simple, C, Rust, Go, Java, Python, and Bun |
+| K1 dispatch | Trait/interface/function-table variants; compare only rows with the same recorded static, devirtualized, or dynamic dispatch class |
+| K2 macro | Compile the identical expanded K0 source everywhere; compare native macro expansion only within languages that support it; unsupported is `unavailable`, never zero cost |
+| K3 aspect/load | Simple-only A/B/C: explicit typed call, statically woven call-only advice, and admitted guarded dynload; report composition, startup, and steady runtime separately |
+
+K3 receipts bind advice count/order, input/output digests, activation generation,
+actual static/dynamic mode, and `fallback=false`. No combined
+macro+trait+aspect+dynload row may satisfy a cross-language parity verdict.
+The current explicit low-level probe candidate is not K3-A: its fixture-local
+decision ID and decision set do not yet match the compiler-woven lane. K3-A
+requires an identical canonical ordered decision-record digest and count, with
+short-circuit evaluated/true/masked masks preserved and overflow excluded.
+The existing MC/DC `static-on` lane is reusable as K3-B evidence. Its current
+`dynamic-enabled` lane activates a built-in registry provider and records
+`actual_dynload=false`; it is not K3-C. K3-C1 uses the existing product route
+`ApkModuleSourceV2 -> apk_build_pack_v2 -> generate_aspect_pack_smf -> outer
+ModuleLoader.load_with_intent(SmfArtifact) -> install_aspect_catalog -> pinned
+facet -> private materialization of the admitted nested payload -> the same
+ModuleLoader.load_with_intent(SmfArtifact) -> execute nested entrypoint -> MCDC
+controller`. The materialization step is mandatory until the missing direct
+prepare/map/relocate/publish transaction exists. C1 may report
+`actual_dynload=true`, `mapped_payload_executed=true`, and
+`activation_gated_by_dynload=true` only after a live facet/mapping receipt, but
+must report `probe_impl_origin=linked_adapter` because the recorder remains
+linked. K3-C2, a future typed callback ABI whose implementation bytes themselves
+come from the loaded pack, is the only lane allowed to report a dynloaded probe
+implementation. K3 remains ineligible until the explicit typed-hook A lane and
+executable C1 mapping receipts include loader generation, catalog identity,
+pack/module counters, no fallback, and a separately measured cold-load boundary.

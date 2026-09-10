@@ -1,8 +1,8 @@
 # Recent Bugs
 
-**Generated:** 2026-08-21
+**Generated:** 2026-09-07
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 1277 | **Closed:** 2
+**Open:** 1264 | **Closed:** 32
 
 ## Open Bugs
 
@@ -16,7 +16,6 @@
 | add_remove_log_modes_timeout_resource_limit_2026-07-17 | P3 | open | add_remove_log_modes_spec times out from SIMPLE_LIB=src 600+ file interpreter load | `test/02_integration/app/add_remove_log_modes_spec.spl:0` |
 | aes128_ccm_rfc3610_kat_mismatch_2026-07-20 | P1 | open | AES-128-CCM RFC3610 KAT mismatch: wrong ciphertext and auth tag | `src/lib/common/aes/modes.spl:0` |
 | aes256_ctr_keystream_wrong_after_first_block_2026-07-20 | P1 | open | AES-256-CTR keystream diverges from NIST SP800-38A after first block | `src/lib/common/aes/modes.spl:0` |
-| aes_utilities_unseeded_key_iv_nonce_generators_are_lcg_constants_2026-08-08 | P2 | open | generate_aes_key/generate_iv/generate_nonce are constant-seeded LCGs | `src/lib/common/aes/utilities.spl:286` |
 | after_each_captured_var_compound_assignment_lost_2026-08-04 | P2 | open | Write in after_each that reads the captured var is lost; constant write is not | `src/lib/nogc_sync_mut/spec.spl:0` |
 | aliased_array_mut_param_mutation_lost_interpreter_2026-08-06 | P1 | open | Array passed as both mut and non-mut param silently discards the mutation | `src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:0` |
 | angle_bracket_index_lint_parse_mismatch_2026-06-06 | P2 | open | Angle-bracket index lint suggests a form the parser rejects | `src/compiler/10.frontend/core/parser_stmts.spl:0` |
@@ -50,7 +49,6 @@
 | backend_optimization_facts_gating_not_enforced_2026-07-20 | P3 | open | Backend optimization skip reasons retain optional fact wrappers | `test/01_unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl:0` |
 | backend_session_kind_cpu_simd_api_drift_2026-06-01 | P3 | open | BackendSessionKind CPU SIMD API drift across the two engine2d tiers | `src/lib/nogc_sync_mut/gpu/engine2d/backend_session.spl:0` |
 | backend_trait_undefined_impls_unchecked_2026-07-24 | P2 | open | Compiler `Backend` trait is declared nowhere; five impls silently unchecked | `src/compiler/70.backend/backend/backend_api.spl:0` |
-| bare_assert_statement_vacuity_2026-08-02 | P1 | open | Pure-Simple compiler discards bare `assert` entirely | `src/compiler/10.frontend/core/parser_stmts.spl:732` |
 | bare_field_reference_in_methods_is_illegal_but_pervasive_2026-08-10 | P2 | open | Bare field reference inside methods illegal in every lane yet ~740 product sites use it | `src/compiler/20.hir/hir_lowering/expressions.spl:0` |
 | bare_hardware_namespace_import_unresolved_2026-07-20 | P2 | open | Bare `use hardware.*` imports do not resolve; std. prefix required | `src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:0` |
 | baremetal_entry_closure_class_instantiation_fault_2026-07-06 | P1 | open | Baremetal --entry-closure imported-class instantiation faults at runtime | `src/app/cli/native_build_main.spl:0` |
@@ -66,7 +64,6 @@
 | board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11 | P2 | open | Board-Vulkan lanes compared against fabricated counterpart output | `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl:104` |
 | board_vulkan_no_headless_lavapipe_pixel_dump_binary_2026-08-11 | P3 | open | No installed CLI can drive lavapipe to a raw pixel dump without new host code | `src/os/drivers/gpu/board_vulkan/boundary_readback_gate.spl:0` |
 | bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04 | P2 | open | A bool-declared parameter silently accepts a non-bool (rejection half still open) | `src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs:68` |
-| bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17 | P1 | open | Bootstrap admission v2 unconditionally fail-closed; no bootstrap can start | `scripts/check/lib/bootstrap-planner-admission-bound.shs:105` |
 | bootstrap_default_len_is_empty_not_materialized_2026-07-13 | P3 | open | Bootstrap default Len.is_empty is not materialized | `src/compiler/20.hir/hir_lowering/expressions.spl:0` |
 | bootstrap_diagnostic_missing_child_preflight_2026-08-02 | P3 | open | Bootstrap diagnostic sweep missing-child preflight | `src/app/cli/check_entry.spl:0` |
 | bootstrap_erased_text_rfind_optional_abi_2026-07-13 | P2 | open | Bootstrap erased-text rfind loses Optional not-found semantics | `src/compiler/50.mir/mir_lowering_stmts.spl:0` |
@@ -236,7 +233,6 @@
 | decorator_aop_interpreter_fallback_noop_2026-07-20 | P2 | open | @decorator wrapping and AOP pc{} weaving are no-ops under the tree-walking interpreter | `src/compiler/10.frontend/core/interpreter/eval.spl:0` |
 | deep_recheck_2026-07-05 | P2 | open | Deep-recheck bug inventory 2026-07-05 (umbrella, mixed status) | `src/compiler/10.frontend/core/interpreter/eval_calls.spl:280` |
 | deployed_binary_interp_extern_and_module_table_constraints_2026-07-07 | P3 | open | Deployed binary: interpret-mode extern registration + baked module table constraints | `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:0` |
-| deployed_bin_simple_bootstrap_only_2026-07-31 | P2 | open | Deployed bin/simple is bootstrap-only: no test/run/lint, cannot parse @extern | `bin/simple:0` |
 | deployed_bin_simple_still_seed_2026-08-05 | P2 | open | Deployed bin/simple is still the Rust seed, not the self-hosted binary | `bin/simple:0` |
 | deployed_seed_test_runner_init_hang_2026-07-17 | P3 | open | Deployed release binary: single-file simple test hangs on ALL specs (stale seed) | `bin/simple:0` |
 | deployed_selfhost_env_set_miscompile_segv_2026-07-14 | P1 | open | Tracked release/ pure-Simple CLI SIGSEGVs in setenv: rt_env_set gets a boxed int as char* | `release/x86_64-unknown-linux-gnu/simple:0` |
@@ -261,7 +257,6 @@
 | draw_ir_sdn_roundtrip_composition_field_assign_on_non_object_2026-08-15 | P2 | open | SDN-roundtripped Draw IR composition renders with cannot assign field on non-object | `src/lib/common/ui/draw_ir_sdn.spl:0` |
 | draw_ir_window_shadow_clipped_2026-07-13 | P3 | open | WM window shadow RECT is clipped by the embedded surface and overwritten by the body RECT | `src/lib/common/ui/draw_ir_sdn.spl:0` |
 | ds_utils_t_optional_wrapping_inconsistency_2026-06-26 | P2 | open | Same -> T? method returns Option::Some(N) in one call site and bare N in another | `src/lib/tooling/ds_utils.spl:0` |
-| dual_backend_generic_typed_seam_2026-06-15 | P2 | open | Generic fn with a trait bound fails with Unknown type: T in the interpreter | `src/compiler/40.mono/instantiation.spl:0` |
 | duplicate_backend_types_terminal_declarations | P2 | open | Enums declared in multiple terminal modules with divergent variant orders are undetected | `src/compiler/70.backend/backend_types.spl:40` |
 | duplicate_check_eager_semantic_native_closure_2026-07-24 | P2 | open | Native entry-closure pulls semantic/Ollama modules despite `use lazy`, failing link on | `src/compiler/90.tools/duplicate_check/main.spl:0` |
 | duplicate_hirtype_enum_decls_drop_module_to_interpreter_2026-08-04 | P3 | open | 26 duplicate `enum HirType` declarations still shadow the canonical struct as a latent | `src/compiler/20.hir/hir_lowering/types.spl:0` |
@@ -306,7 +301,6 @@
 | enum_associated_fn_vacuous_spec_sweep_2026-07-28 | P2 | open | Unknown count of specs pass vacuously because the JIT enum-associated-fn hijack fakes r... | `test/shared/control_flow/static_fn_spec.spl:0` |
 | enum_bare_name_collision_registry_2026-08-01 | P1 | open | Bare enum-name registry keys make a match arm silently select the wrong cross-module enum | `src/compiler/10.frontend/core/types.spl:559` |
 | enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08 | P2 | open | Rust seed hashes enum discriminants while pure-Simple uses positional index; nothing detects a mix | `src/compiler_rust/compiler/src/codegen/instr/result.rs:102` |
-| enum_field_in_nested_call_arg_join_not_found_2026-08-17 | P2 | open | Struct literal with enum-typed field inside a call arg fails with method join not found | `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs:0` |
 | enum_impl_static_fn_method_call_path_skips_impl_methods_2026-07-20 | P2 | open | EnumName.static_method() reports unknown variant or method when declared in a separate impl block | `src/compiler_rust/compiler/src/interpreter_method/mod.rs:0` |
 | enum_impl_static_fn_scoping_2026-07-29 | P1 | open | Declared enum associated fns yield silent wrong values on the JIT engine | `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs:0` |
 | enum_pattern_match_optional_value_silent_fallthrough_2026-07-20 | P1 | open | match on a T? enum silently falls through to _ for every field-binding variant arm | `src/app/ui.browser/event_bridge.spl:0` |
@@ -314,7 +308,6 @@
 | enum_variant_struct_name_collision_census_2026-07-30 | P2 | open | Same-named structs shadow enum variants in bare match patterns beyond the fixed SymbolKind case | `src/compiler/10.frontend/parser_types.spl:0` |
 | env_gated_spec_switches_are_inert_under_test_daemon_2026-08-09 | P2 | open | Env vars set by the caller never reach the spec body under bin/simple test so gates fail open | `src/app/test_runner_new/test_runner_client.spl:0` |
 | env_get_nil_coalesce_dead_fallback_2026-07-25 | P1 | open | env_get(...) ?? default never takes the fallback because env_get returns text  not text? | `src/lib/nogc_sync_mut/io_runtime.spl:174` |
-| excel_floor_ceiling_negative_significance_sign_2026-07-20 | P2 | open | excel_floor/excel_ceiling return the wrong value for negative significance (must use abs) | `src/app/office/sheets/math_bridge.spl:224` |
 | exec_cap_check_caller_identity_not_threaded_2026-08-07 | P2 | open | exec_cap_check's scalar-caller ABI cannot carry a CapabilitySet so non-kernel callers are always denied | `src/os/kernel/loader/cap_exec_gate.spl:0` |
 | executable_checker_failed_only_retry_peak_rss_2026-08-02 | P3 | open | Failed-only executable-checker retry peaked at 40.6 GiB RSS across four workers | `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl:0` |
 | exp_cli_script_delegation_falls_back_to_usage_2026-07-20 | P2 | open | exp CLI prints its usage banner instead of delegating to the experiment script | `src/app/exp/main.spl:0` |
@@ -391,10 +384,8 @@
 | host_wm_cached_chrome_full_frame_blit_2026-07-06 | P3 | open | Host WM blits the entire cached desktop frame every repaint instead of dirty subrects | `src/os/compositor/host_compositor_entry.spl:0` |
 | hpack_huffman_single_symbol_decode_empty_2026-06-30 | P2 | open | hpack_huffman_decode([0x1F],0,1) returns Ok([]) dropping symbol 97, and concat-built [u8] | `src/lib/common/hpack/huffman_h2.spl:329` |
 | hwir_foundation_spec_residual_failures_2026-08-16 | P2 | open | hwir_foundation_spec.spl has 21 substantive failures (17x expected false to equal true) | `test/01_unit/compiler/50.mir/hwir_foundation_spec.spl:0` |
-| i8_array_literal_reads_back_wrong_value_2026-08-17 | P1 | open | [5i8, 6i8] reads element 0 back as 43 under the cranelift JIT with no diagnostic | `src/compiler_rust/compiler/src/codegen/instr/helpers.rs:0` |
 | ide_feature_check_jit_fallback_static_self_2026-06-01 | P2 | open | IDE --feature-check falls back to interpreter with 'cannot use self in static method' HIR | `src/app/ide/main.spl:0` |
 | ide_feature_check_tui_mode_falsy_call_result_2026-07-20 | P2 | open | ide --feature-check --tui: truthy call result evaluates to 0, TUI branch never taken | `src/app/ide/main.spl:0` |
-| if_expression_dead_branch_binds_empty_list_2026-08-06 | P1 | open | if-expr with constant-false condition binds the DEAD branch's [] not the live value | `src/compiler/20.hir/hir_lowering/module_surface.spl:0` |
 | image_builder_nvfs_rootfs_marker_preexisting_2026-06-28 | P2 | open | image_builder nvfs rootfs backend marker assertion fails (pre-existing red) | `src/os/installer/image_builder.spl:0` |
 | image_wrapper_close_needs_live_handle_fixture_2026-08-07 | P3 | open | Image/FileLock wrapper double-close on a genuinely-acquired handle has no test fixture | `src/lib/nogc_sync_mut/io/image_sffi.spl:0` |
 | img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11 | P3 | open | IMG BXE encoder submit builds envelope only; no kernel UAPI submission is verified | `src/os/drivers/gpu/board_vulkan/encoder_img_bxe.spl:0` |
@@ -404,7 +395,6 @@
 | interp_class_name_collision_breaks_test_db_persistence_2026-08-10 | P2 | open | Interpreter resolves a class by name across modules, breaking test-DB run persistence | `src/compiler/10.frontend/core/interpreter/eval_tables.spl:0` |
 | interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03 | P2 | open | CompositorBackend.put_pixel clones the entire framebuffer on every pixel write | `src/compiler_rust/compiler/src/interpreter_method/collections.rs:0` |
 | interp_crossmod_local_slot_aliasing_2026-06-15 | P1 | open | Cross-module fn receiving a local object arg aliases the caller's local slot | `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:0` |
-| interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06 | P1 | open | Dict<K,ClassInstance>.get()/.set() copies the value so mutations are silently lost | `src/compiler_rust/compiler/src/interpreter_method/collections.rs:0` |
 | interp_enum_match_class_name_collision_2026-07-06 | P2 | open | Enum-variant match returns nil when a class shares the variant name (closure-dependent) | `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs:0` |
 | interp_env_get_name_collision_nil_root_2026-07-26 | P2 | open | Interpreter resolves an explicit env_get import to a same-named fn in another module | `src/compiler/10.frontend/core/interpreter/resolve.spl:0` |
 | interp_expect_inline_equality_arg_misevaluates_2026-07-07 | P1 | open | expect(a == b).to_equal(false) mis-evaluates the inline == argument | `src/lib/nogc_sync_mut/spec.spl:0` |
@@ -418,7 +408,6 @@
 | interp_lint_main_then_frontend_dict_to_int_2026-07-28 | P2 | open | lint-main then frontend in one interpreter session fails 'cannot convert dict to int' | `src/compiler/10.frontend/core/interpreter/eval.spl:0` |
 | interp_logical_short_circuit_2026-07-15 | P1 | open | Interpreter and/or eagerly evaluate the right operand instead of short-circuiting | `src/compiler/10.frontend/core/interpreter/ops.spl:0` |
 | interp_match_expr_binding_scope_leak_2026-07-15 | P2 | open | Interpreter match-expression bindings leak out into the caller's scope | `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl:0` |
-| interp_me_method_first_param_times8_conditional_2026-06-29 | P1 | open | Interpreter binds the first param of some multi-param me methods to value x 8 | `src/compiler_rust/runtime/src/value/tags.rs:0` |
 | interp_mixed_numeric_arithmetic_2026-07-15 | P2 | open | Interpreter mixed integer/float arithmetic returns wrong values or is rejected | `src/compiler/10.frontend/core/interpreter/ops.spl:0` |
 | interp_module_global_stale_read_in_spec_blocks_2026-07-05 | P2 | open | Module global read inside a spec block returns a stale value | `src/lib/nogc_sync_mut/diag.spl:0` |
 | interp_option_struct_semantics_macos_parity_2026-07-25 | P2 | open | Option/struct interpreted-lane semantics differ on macOS in deployed and stage4 binaries | `src/compiler/10.frontend/core/interpreter/value.spl:0` |
@@ -433,7 +422,6 @@
 | interpreter_eval_access_calls_drifted_duplicate_definitions_2026-08-11 | P2 | open | Ten drifted duplicate interpreter fn definitions exist and the STALE copies win name resolution | `src/compiler/80.driver/driver_source_loading.spl:0` |
 | interpreter_extern_registry_gap_blocks_os_specs_2026-08-04 | P2 | open | unsafe_addr_of and rt_x86_syscall have no interpreter extern binding so hosted OS unit specs fail closed | `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:0` |
 | interpreter_first_class_fn_dispatch_drops_nested_array_writeback_2026-08-09 | P1 | open | Two mutating me calls in one first-class-fn-dispatched invocation drop the first nested array write | `src/lib/nogc_sync_mut/http_server/router.spl:0` |
-| interpreter_gc_root_scan_blowup_large_array_2026-07-25 | P2 | open | Font load goes from ~8s to 2+min merely by keeping an unrelated Engine2D alive on the interpreter stack | `src/compiler_rust/compiler/src/value.rs:0` |
 | interpreter_if_val_nil_mismatch_option_2026-07-03 | P2 | open | if val x = <nil Option> wrongly takes the match branch in the interpreter | `src/compiler/10.frontend/core/interpreter/eval.spl:0` |
 | interpreter_ifval_optioncheck_return_divergence_2026-07-17 | P2 | open | Seed interpreter diverges from native on if val v = x.? and on return inside a value-match arm | `src/compiler/50.mir/mir_lowering_stmts.spl:0` |
 | interpreter_list_generic_nil_2026-06-12 | P2 | open | Seed interpreter List<T>() constructor yields a nil receiver | `src/compiler/10.frontend/core/interpreter/value.spl:271` |
@@ -464,7 +452,6 @@
 | iterator_collect_generic_restoration_2026-07-17 | P3 | open | Iterator.collect loses its generic type parameter and needs restoration across the three vec types | `src/compiler_rust/lib/std/src/core/list.spl:0` |
 | itf_minio_sigv4_not_runnable_interp_or_native_2026-06-16 | P2 | open | itf minio SigV4 round-trip still not runnable: JIT bridge and module/native gaps remain after rt_http_request | `src/app/io/http_sffi.spl:0` |
 | jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07 | P1 | open | JIT array out-of-bounds read leaks the raw RT_NIL sentinel 3 instead of nil or a panic | `src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:0` |
-| jit_cannot_resolve_native_socket_externs_2026-08-09 | P2 | open | JIT cannot resolve native_tcp_bind so every JIT-mode networking run silently falls back to the interpreter | `src/compiler_rust/common/src/runtime_symbols.rs:0` |
 | jit_class_mutation_drop_characterization_2026-07-04 | P1 | open | Mutations to class instances read out of an array are silently dropped in interpret mode | `src/compiler/70.backend/backend/mod.spl:0` |
 | jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06 | P2 | open | JIT refuses whole module containing a lambda, demoting it to the interpreter | `src/compiler_rust/compiler/src/codegen/jit.rs:0` |
 | jit_corrupts_i64_array_returned_from_sha1_bytes_2026-08-04 | P1 | open | JIT returns tag-corrupted [i64] from sha1_bytes: floats/nil/heap tags inside an i64 list | `src/compiler_rust/compiler/src/codegen/instr/methods.rs:0` |
@@ -499,7 +486,6 @@
 | json_logic_spec_blocked_stub_modules_2026-06-26 | P2 | open | json_logic_spec blocked by stub-only json sub-modules | `src/lib/common/text_advanced.spl:0` |
 | js_subset_interpreter_limitations_2026-06-30 | P3 | open | Browser-session JS subset interpreter gaps worked around in the ES-module transform instead of the engine | `src/lib/gc_async_mut/web/browser_session_modules.spl:0` |
 | js_vm_dom_bridge_retention_quadratic_2026-07-30 | P2 | open | JS VM DOM bridge retention is frame-linear and property scan is quadratic | `src/lib/nogc_sync_mut/js/engine/vm_object_store.spl:0` |
-| jupyter_labextension_missing_federated_build_packaging_2026-08-07 | P3 | open | JupyterLab labextension has no installable federated-extension build pipeline | `src/app/jupyter_kernel/main.spl:0` |
 | kernel_table_mut_writeback_lost_through_nested_free_fn_2026-08-07 | P2 | open | CpuKernelTable mut write-back is lost through a nested free fn / self.field in the interpreter | `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl:0` |
 | kv260_naxriscv_bitstream_no_jtag_observability | P2 | open | KV260 NaxRiscv bitstream exposes no JTAG/PS debug path to the softcore, blocking physical RISC-V bring-up | `scripts/fpga/load_elf_k26.shs:0` |
 | kv260_ps_bd_pl_clk0_unreachable_jtag_bringup_2026-07-24 | P2 | open | KV260 PS block-design pl_clk0/pl_resetn0 are unreachable in JTAG-only bring-up | `scripts/fpga/build_k26_rv32.shs:0` |
@@ -522,9 +508,7 @@
 | lint_native_fast_path_activation_blocked_seed_uncompilable_2026-08-07 | P2 | open | lint native fast path landed but never activated; seed rebuild blocked by pre-existing E0425s | `scripts/build/build-lint-native.shs:0` |
 | lint_profile_optional_assertion_runner_failure_2026-07-19 | P3 | open | Lint profile optional-assertion runner fails; doc is a 571B stub with no root cause | `src/app/io/cli_lint_commands.spl:0` |
 | lint_reports_clean_on_module_that_fails_to_parse_2026-08-09 | P2 | open | bin/simple lint reports all files clean on a module that does not parse (fail-open) | `src/compiler_rust/parser/src/parser_impl/items.rs:0` |
-| lint_req_comment_stmt_arena_oob_decorators_2026-08-07 | P2 | open | bin/simple lint crashes with stmt-arena OOB on src/lib/nogc_sync_mut/spec/decorators.spl | `src/compiler/35.semantics/lint/required_comment.spl:0` |
 | lint_single_file_superlinear_timeout_on_line_count_2026-08-06 | P2 | open | bin/simple lint cost is superlinear in line count (~3.3-4.0s per fn decl), 120-line file ~119s | `src/compiler/90.tools/lint/main.spl:0` |
-| lint_stub001_false_positive_on_string_interpolation_param_2026-07-29 | P3 | open | lint STUB001 false-positives on a param used only inside a string interpolation | `src/compiler/35.semantics/lint/stub_impl.spl:0` |
 | linux_secure_server_perf_runtime_blockers_2026-08-14 | P2 | open | Native PureDatabase fails first post-insert check with invalid-array-handle; HTTP server installs no listener | `src/app/postgres_mimic_server/main.spl:0` |
 | linux_vulkan_renderdoc_reason_forwarding_spec_daemon_timeout_2026-06-28 | P3 | open | Vulkan RenderDoc reason-forwarding spec times out under the test daemon | `test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl:0` |
 | list_first_returns_raw_value_not_option_2026-07-20 | P2 | open | List<T>.first returns a raw nilable value instead of Option<T> as documented | `src/compiler_rust/compiler/src/interpreter_method/collections.rs:139` |
@@ -640,7 +624,6 @@
 | native_cli_run_std_hardware_brace_import_unresolved_2026-07-24 | P2 | open | bin/simple run leaves brace-imports from std.hardware.* unresolved (transport_sim_loopback, tap_create, CH_JTAG) | `src/app/io/cli_ops.spl:0` |
 | native_concurrent_backend_spawn_not_backend_aware_join_is_2026-08-04 | P1 | open | With a non-PureStd concurrent backend spawn skips the provider registry while join reads it, so every join returns nil | `src/compiler_rust/compiler/src/interpreter_extern/concurrency.rs:215` |
 | native_crossmodule_arithmetic_exit_5_2026-07-23 | P2 | open | Native cross-module arithmetic probe exits 5 instead of the expected status | `test/fixtures/native_crossmodule_result_u8/main.spl:0` |
-| native_dict_get_miss_returns_zero_not_nil_2026-07-28 | P1 | open | Dict<K,text>.get() on a MISS returns a zero value rather than nil, silently taking the found branch | `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:0` |
 | native_dynload_module_var_static_init_dropped_2026-07-11 | P2 | open | Native dynload build drops static initializers on module-level var globals, leaving them zeroed | `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:0` |
 | native_empty_dict_text_value_sigsegv_2026-07-20 | P1 | open | A text value stored into an empty-literal {} dict SIGSEGVs on read or compare under native-build | `src/runtime/runtime_native.c:8008` |
 | native_engine2d_readback_aggregate_abi_2026-07-26 | P3 | open | Engine2D readback aggregate return does not follow the native aggregate ABI | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:0` |
@@ -674,7 +657,6 @@
 | native_nil_dict_get_phantom_option_rootcause_2026-07-27 | P2 | open | Native .get() on a nil Dict receiver returns a phantom Some and .len() returns -1 | `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:0` |
 | native_nil_receiver_crossmodule_method_scalar_return_2026-07-27 | P1 | open | Cranelift AOT mis-tags a cross-module struct method's scalar return: x as i64 yields 0 | `src/runtime/runtime_native.c:0` |
 | native_object_cache_whole_build_fingerprint_granularity_2026-08-02 | P3 | open | Native object cache invalidates the whole build when any compiler byte changes | `src/compiler_rust/driver/src/cli/native_build.rs:0` |
-| native_optional_tuple_payload_extraction_broken_2026-07-29 | P1 | open | Optional-tuple payload extraction is wrong in every consumption form on the native lane | `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:0` |
 | native_option_bool_eq_against_raw_literal_2026-08-08 | P1 | open | Native Option<bool> compared against a raw bool literal returns the wrong answer | `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:0` |
 | native_pool_loop_closure_capture_fanout_2026-06-07 | P3 | open | Pool loop closure capture fanout count mismatches expectation in the perf lane | `scripts/check/check-cross-language-perf.shs:0` |
 | native_primitive_to_i64_ufcs_collision_2026-07-24 | P2 | open | Primitive to_i64 collides with an imported custom to_i64 method under native lowering | `src/lib/nogc_sync_mut/failsafe/core.spl:0` |
@@ -710,7 +692,6 @@
 | nested_run_subprocess_empty_stdout_under_test_2026-07-20 | P2 | open | Nested 'bin/simple run app/main.spl' subprocess returns empty stdout under bin/simple test | `src/app/plugin/main.spl:0` |
 | network_coverage_illusion_and_spec_tree_duplication_2026-08-05 | P3 | open | Network e2e specs assert on source-text substrings, not sockets; spec tree duplicated 5, | `src/lib/nogc_sync_mut/io/tcp.spl:0` |
 | newtype_run_path_and_enforcement_gaps_2026-06-29 | P2 | open | newtype gives no type-safety enforcement: mix(Lba, Ppn) accepted and JIT cannot lower it | `src/compiler/30.types/type_system/builtin_registry.spl:0` |
-| noalloc_decorator_unbound_in_seed_interpreter_2026-08-08 | P2 | open | @noalloc is unbound in the seed interpreter: module fails to load with 'variable noalloc | `src/compiler_rust/compiler/src/interpreter_eval.rs:0` |
 | nogc_engine2d_backend_lane_missing_helpers_availability_2026-07-06 | P3 | open | nogc Engine2D backend_lane lacks helpers_availability so qualcomm/intel font-offload pic | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl:0` |
 | no_general_spl_to_svmg_path_blocks_dap_gpu_attach_2026-08-09 | P3 | open | lower_svmg_program has no callers outside 70.backend so DAP GPU attach is routing-only | `src/compiler/70.backend/svmg_lowering.spl:0` |
 | non_discriminating_spec_family_2026-08-08 | P2 | open | Enumerated family of vacuous specs that pass regardless of implementation behavior | `scripts/check/check-vacuous-specs.shs:0` |
@@ -728,7 +709,6 @@
 | os_namespace_uninitialized_array_module_var_not_found_2026-08-02 | P2 | open | Module-level uninitialized array var is unresolvable in the os.* namespace only | `src/compiler_rust/compiler/src/interpreter/node_exec.rs:0` |
 | p256_fe_from_bytes_missing_ct_property_blocked_2026-07-20 | P2 | open | ecdh_p256.spl calls fe_from_bytes which has no P-256-field implementation | `src/os/crypto/ecdh_p256.spl:0` |
 | p256_stack_imports_nonexistent_fe_p256_module_2026-08-04 | P1 | open | p256.spl imports std.common.math.field.fe_p256 which does not exist; P-256 unloadable | `src/os/crypto/p256.spl:21` |
-| paren_less_accessor_whole_module_de_jit_2026-08-08 | P2 | open | Paren-less .length/.len/.size accessor drops the whole module out of JIT on compile lane | `src/compiler_rust/driver/src/exec_core.rs:0` |
 | parse_claude_json_response_name_collision_2026-07-20 | P2 | open | parse_claude_json_response defined in two modules; registry mis-dispatch fails 8 examples | `src/lib/nogc_async_mut/llm/claude_cli.spl:0` |
 | parse_family_strips_option_jit_native_2026-08-02 | P1 | open | parse_i64/parse_f64 text-method family silently strips the Option under JIT and native | `src/compiler_rust/compiler/src/interpreter_method/string.rs:0` |
 | parser_array_index_misread_as_generics_2026-06-14 | P2 | open | Array indexing name[expr] is misread as a [...] generic type application in some contexts | `src/lib/common/ui/style.spl:0` |
@@ -736,10 +716,8 @@
 | parser_trailing_comparison_line_continuation_2026-08-04 | P2 | open | Parser rejects line continuation after a trailing comparison operator (`if a >` nl `b:`) | `src/compiler_rust/parser/src/stmt_parsing/control_flow.rs:0` |
 | parser_trailing_operator_line_continuation_2026-07-13 | P2 | open | Trailing-operator continuation with a single-line body fails `expected expression, Dedent` | `src/compiler/10.frontend/core/parser_stmts.spl:0` |
 | paseto_v4_tampered_token_signature_accepted_2026-07-20 | P1 | open | PASETO v4 verification accepts a tampered token instead of rejecting the bad signature | `test/unit/lib/crypto/paseto_v4_kat_spec.spl:0` |
-| pem_encode_bytes_method_not_found_on_array_2026-07-20 | P2 | open | os.crypto.pem pem_encode chain calls .bytes() on an array value that has no such method | `src/os/crypto/pem.spl:0` |
 | phase2_parser_threads_not_wired_global_state_blocker_2026-08-02 | P2 | open | SIMPLE_NATIVE_BUILD_THREADS ignored by Phase 2; parse_full_frontend runs serially | `src/compiler/80.driver/driver_source_pipeline_parsing.spl:0` |
 | placeholder_lambda_as_fn_param_callback_unevaluated_2026-07-20 | P1 | open | Placeholder lambda (_1 + 1) passed to a user free-function param is never invoked | `src/lib/nogc_async_immut/combinators/__init__.spl:0` |
-| poly1305_key_gen_missing_2026-07-20 | P2 | open | std.crypto.poly1305 does not export poly1305_key_gen (RFC 8439 2.6.2); 2 of 9 examples red | `src/lib/common/crypto/poly1305.spl:0` |
 | pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07 | P2 | open | Interpreter rejects assignment through a complex indexed-field receiver (pool[i].next = x) | `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl:0` |
 | portable_compute_cuda_emitter_pure_simple_segfault_2026-07-17 | P1 | open | portable_compute_emit main.spl segfaults on the release binary, emitting empty PTX source | `src/app/portable_compute_emit/main.spl:0` |
 | prelude_builtins_rebindable_by_transitive_import_2026-08-10 | P2 | open | 50 prelude builtins beyond `exit` remain silently shadowable by a transitive top-level fn | `src/compiler_rust/compiler/src/interpreter_call/mod.rs:0` |
@@ -764,7 +742,6 @@
 | pure_simple_full_cli_process_run_inherit_spipe_docgen_crash_2026-07-18 | P2 | open | Pure-Simple full CLI crashes in rt_process_run_inherit delegating spipe-docgen | `test/03_system/app/hardware/feature/riscv32_riscv64_fpga_simpleos_production_spec.spl:0` |
 | pure_simple_hir_untyped_return_tuple_2026-07-31 | P2 | open | Cache-free pure-Simple execution of a dynamic frontend-to-HIR path crashes on an untyped | `test/01_unit/compiler/backend/vulkan_source_storage_buffer_abi_spec.spl:0` |
 | pure_simple_native_build_load_sources_segfault_2026-07-13 | P2 | open | Pure-Simple native-build stalls before native object discovery in all three bounded | `src/app/cli/native_build_main.spl:0` |
-| pure_simple_parser_missing_pipe_lambda_form_2026-08-08 | P3 | open | Pipe-lambda per-param types are parsed and validated then dropped: flat AST has no slot | `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:0` |
 | pure_simple_provider_host_runtime_capsule_link_required_2026-08-14 | P2 | open | Pure Simple provider host proof needs an admitted runtime capsule; --export-dynamic on | `src/os/smf/provider_loader.spl:0` |
 | pure_simple_spipe_docgen_vector_font_spec_crash_2026-07-11 | P2 | open | Pure-Simple binary exits with signal 11 running spipe-docgen on | `test/03_system/app/simple_2d/feature/simple_2d_vector_fonts_spec.spl:0` |
 | pure_simple_test_runner_core_c_runtime_abi_gap_2026-07-17 | P2 | open | Stage-2-compiled src/app/test_runner_new/main.spl does not link against core-c-bootstrap | `src/app/test_runner_new/main.spl:0` |
@@ -804,7 +781,6 @@
 | riscv_gen2_stateful_retire_lineage_contract_2026-08-12 | P3 | open | Gen2 parcel frontend cannot reject a pre-reset stale retirement without an architectural retirement producer | `src/compiler/50.mir/hwir/sequential.spl:0` |
 | riscv_ghdl_validate_rv32_analyze_only_blind_to_semantics_2026-07-28 | P2 | open | ghdl_validate_rv32 --analyze exits 0 at line 35 before elaboration, so a semantically broken CPU passes the gate | `scripts/fpga/ghdl_validate_rv32.shs:35` |
 | riscv_hw_gates_shared_log_path_race_and_fpu_coverage_gaps_2026-07-28 | P3 | open | check-riscv-hardware-gates writes every probe to fixed build/riscv_hw_gates/<name>.log, racing concurrent sessions | `src/lib/hardware/rv64gc_rtl/fpu.spl:0` |
-| riscv_jtag_stage1_idcode_check_is_self_referential_2026-07-28 | P3 | open | tb_jtag_dtm_dmi configures the DUT with its own expected IDCODE, so a wrong IDCODE cannot fail STAGE1 | `src/lib/hardware/debug/tb_jtag_dtm_dmi.vhd:0` |
 | riscv_priv_mmu_rv64regression_findings_2026-07-21 | P2 | open | rv32i_rtl CoreState has no privilege fields and no Sv32 MMU translation; addresses route direct | `src/lib/hardware/rv32i_rtl/core.spl:0` |
 | riscv_qemu_lanes_boot_bare_kernel_without_opensbi_2026-08-09 | P2 | open | RISC-V QEMU scenario lanes still push -kernel instead of an OpenSBI firmware proxy | `src/os/_QemuRunner/scenario_exec.spl:461` |
 | root_cli_provider_activation_requires_process_callable_loader_2026-08-14 | P2 | open | Root CLI never binds provider query-call/owned-session slices to an SCI command record | `src/app/cli/dispatch.spl:47` |
@@ -857,7 +833,6 @@
 | seed_constructor_static_method_no_literal_coercion_2026-07-20 | P2 | open | Seed constructor dispatch needs an exact runtime type: an int literal will not coerce to a | `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs:0` |
 | seed_crossmodule_struct_field_option_poison_2026-06-14 | P2 | open | Seed interpreter poisons cross-module struct field access to Option under a broad import c | `src/compiler_rust/compiler/src/interpreter/core_types.rs:0` |
 | seed_emit_object_superlinear_hang_large_module_2026-07-20 | P1 | open | native-build --emit-object never emits IR for a 479-fn module; runs killed at 1h, 3h and 6 | `src/compiler/70.backend/backend/_MirToLlvm:0` |
-| seed_gc_js_engine_typeof_undefined_and_for_desugar_regression_2026-08-15 | P1 | open | Seed breaks the in-process JS engine: 'for is not defined', '__simple_i is not defined', t | `src/compiler_rust/compiler/src/interpreter/node_exec.rs:0` |
 | seed_interp_defer_lazy_imports_module_globals_2026-07-24 | P1 | open | Seed native-build --backend llvm dies parsing file 1: 'array index out of bounds: index 3, | `src/compiler_rust/compiler/src/interpreter/expr/collections.rs:0` |
 | seed_interp_ecs_lower_and_freefn_closure_byref | P2 | open | Seed interpreter cannot lower ECS Entity/ComponentStore<T>; free-fn mutation lost inside | `src/os/services/devfs_service.spl:0` |
 | seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11 | P1 | open | Passing explicit i64 budget_ms arg to software_pixels renderer paints all backgrounds | `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:0` |
@@ -873,10 +848,8 @@
 | seed_jit_spl_f64_to_bits_miscompile_2026-07-23 | P1 | open | Seed JIT returns spl_f64_to_bits result float-tagged: array readback differs and i64 == | `src/compiler_rust/compiler/src/codegen/instr/calls.rs:0` |
 | seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28 | P1 | open | text.to_i64()/.to_int() return a FLOAT-tagged value under seed JIT so 42.to_i64() == 42 | `src/compiler_rust/compiler/src/codegen/instr/calls.rs:0` |
 | seed_jit_u32_cross_module_const_import_zero_2026-07-23 | P2 | open | Seed JIT evaluates a top-level u32 val initialized from a cross-module const or an `as | `src/lib/hardware/riscv_common/mmio_map.spl:0` |
-| seed_jit_unresolved_symbol_segfault_and_silent_pass_2026-08-10 | P1 | open | Seed JIT SIGSEGVs on `[i64]()` and silently passes a bare undefined-variable read the | `src/compiler_rust/compiler/src/codegen/jit.rs:0` |
 | seed_jit_wide_i64_literal_miscompile_2026-07-27 | P1 | open | Seed JIT materializes 0x7FFFFFFFFFFFFFFF as -1 and 0x8000000000000000 as 0; interpreter | `src/compiler_rust/runtime/src/value/core.rs:0` |
 | seed_lexer_literal_soft_keyword_shadows_identifier_2026-07-30 | P2 | open | Seed lexer maps the bare word `literal` to TokenKind::Literal so reassigning a var named | `src/compiler_rust/parser/src/lexer/identifiers.rs:254` |
-| seed_nested_tuple_index_float_munch_2026-08-06 | P2 | open | Seed lexer munches r.0.1 as Float(0.1) so nested tuple indexing fails to parse | `src/compiler_rust/parser/src/lexer/numbers.rs:0` |
 | seed_overload_score_option_bytes_misleading_unknown_static_2026-07-20 | P2 | open | Static-call overload scoring reports unknown static method object on class | `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs:0` |
 | seed_parser_no_return_expression_kills_jit_2026-07-26 | P2 | open | Seed parser has no `return` in expression position; `x ?? return e` hard-fails and drops | `src/compiler_rust/compiler/src/hir/lower/error.rs:0` |
 | seed_parser_rejects_multiline_if_expression_chain_2026-07-27 | P2 | open | Seed parser rejects a multi-line if-expression chain in value position with expected | `src/lib/hardware/rv64gc_rtl/protected_core.spl:0` |
@@ -979,13 +952,11 @@
 | smf_elf_text_selection_diverges_on_truncated_and_function_sections_objects_2026-08-08 | P2 | open | extract_code_from_object and extract_elf_relocations disagree on truncated .text sections | `src/compiler/80.driver/smf_elf_parser.spl:124` |
 | smf_header_source_hash_offset_mismatch_2026-06-13 | P2 | open | SMF header writes source_hash at offset 68 but cache_validator reads it at header_start+84 | `src/compiler/70.backend/linker/smf_header.spl:398` |
 | smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10 | P1 | open | Simple and Rust SMF headers disagree on every offset from section_table_offset onward | `src/compiler/70.backend/linker/smf_header.spl:0` |
-| smf_reader_bridge_silent_nil | P1 | open | rt_smf_reader_open has no implementation so SmfReaderFfi.open returns Ok for any path | `src/compiler/70.backend/linker/smf_reader.spl:61` |
 | smf_writer_kernel_trailer_layout_skew | P2 | open | No compiler-emitted .smf is accepted as a role-2 library: writer and kernel trailer | `src/os/kernel/loader/smf.spl:27` |
 | smux_legacy_specs_zero_examples_red_2026-08-16 | P2 | open | smux_spec.spl is main()/print-based so the runner reports executed=0 reason=zero-examples | `test/01_unit/os/smux_spec.spl:0` |
 | sosix_qemu_matrix_remaining_owners_2026-08-14 | P2 | open | RV64/x86_32/ARM32 SOSIX QEMU rows lack an admitted Stage-4 runner so no exit-37 reap | `scripts/check/check-sosix-qemu-matrix.shs:0` |
 | sosix_qemu_v2_admission_record_hash_binding_2026-08-16 | P2 | open | v2 matrix manifest recorded admission_record_path_b64 without a sha256 binding the | `src/os/sosix/qemu_evidence/trusted_importer.spl:0` |
 | source_fixture_spec_unescaped_interpolation_and_content_drift_2026-07-20 | P2 | open | Source-guard specs put {ident} in interpolating strings so they die with `variable | `test/01_unit/compiler/hir/module_lowering_dict_keys_source_spec.spl:0` |
-| spawn_call_expr_silently_becomes_nillit_2026-07-29 | P1 | open | spawn(...) call expressions lower to HirExprKind.NilLit, discarding callee and args with | `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:0` |
 | spec_cross_module_eval_warnings_not_observed_2026-08-05 | P3 | open | A spec importing eval_tables and eval separately reads eval_warnings back as 0 after a | `src/compiler/10.frontend/core/interpreter/eval.spl:0` |
 | spec_harness_module_global_mutation_via_function_invisible_2026-08-07 | P1 | open | Under bin/simple test a module var mutated inside a called fn reads back unchanged; run | `src/app/test_runner_new/test_runner_single.spl:0` |
 | spec_imports_declared_nowhere_2026-08-04 | P2 | open | 1003 names imported by 294 spec files are declared nowhere in owned src/, only warned not | `src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:0` |
@@ -1087,7 +1058,6 @@
 | string_literal_double_brace_collapse_2026-06-16 | P2 | open | {{ and }} collapse to a single brace in ALL string literals, not just interpolated ones | `src/compiler_rust/parser/src/lexer/strings.rs:0` |
 | struct_ctor_field_var_cross_module_2026-06-15 | P2 | open | Struct ctor Type(field: var) fails unknown argument in a cross-module spec context | `src/lib/common/crypto/typed/ctypes.spl:0` |
 | struct_dict_field_mutation_engine_divergence_2026-08-10 | P1 | open | Dict-in-struct field mutation through a by-value receiver diverges by engine, silently losing writes | `src/lib/nogc_sync_mut/service/lease_manager.spl:126` |
-| struct_field_aliases_under_jit_2026-08-08 | P1 | open | A struct stored in a class field aliases under the JIT, violating value semantics | `src/compiler_rust/compiler/src/interpreter_method/mod.rs:0` |
 | struct_field_array_pop_no_shrink_2026-07-30 | P1 | open | .pop() on a struct-field array does not shrink the array on current main | `src/compiler_rust/compiler/src/interpreter_method/mod.rs:0` |
 | struct_shorthand_arg_order_binds_wrong_field_2026-07-20 | P1 | open | Struct-literal shorthand arg after an explicit named arg binds to nil/the wrong field slot | `src/compiler/10.frontend/core/parser_stmts.spl:0` |
 | svmg_a2_record_ring_head_counter_diverges_from_d2_ref_vm_2026-08-07 | P2 | open | A2 record-ring layout has no head-counter word, diverging from D2/ref_vm | `src/lib/common/svmg/ref_vm.spl:0` |
@@ -1105,12 +1075,10 @@
 | tautology_guarded_skip_specs_false_green_family_2026-08-04 | P2 | open | Tautology-guarded skip specs report green without executing; repo-wide family, census inco | `src/compiler/95.interp/interpreter/pattern.spl:65` |
 | test_daemon_client_deadline_not_forwarded_2026-07-19 | P3 | open | Light-daemon client stops waiting after 1s while daemon holds child to fixed 600s bound | `src/app/test_daemon/light_daemon.spl:0` |
 | test_daemon_freezes_env_binary_override_dead_2026-08-02 | P2 | open | Long-lived light daemon freezes env, so SIMPLE_* binary override is silently ignored | `src/app/test_daemon/light_daemon.spl:0` |
-| test_db_cold_start_never_created_2026-08-10 | P3 | open | Test DB cold-start fixed but residual gap remains: warning path still records nothing in o | `src/lib/nogc_sync_mut/database/test_extended/factory.spl:0` |
 | test_helpers_namespace_unresolved_deep_paths_2026-07-06 | P2 | open | test.helpers.* module namespace fails to resolve from spec paths at depth >= 5 below test/ | `src/app/test_runner_new/test_runner_main.spl:0` |
 | test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17 | P1 | open | bin/simple test pays ~310s fixed setup per invocation; directory targets rejected, capping | `src/app/test_daemon/light_daemon.spl:132` |
 | test_level_filters_never_match_numbered_trees_2026-07-27 | P2 | open | --unit/--integration/--system filters match only legacy test/unit mirror, never test/01_un | `src/app/test_runner_new/test_runner_main.spl:0` |
 | test_only_functions_family_census_2026-08-04 | P3 | open | 197 test-only functions shipped in production modules; census is a floor, items unfiled | `src/compiler/30.types/type_system/effects.spl:0` |
-| test_runner_emits_no_result_summary_silent_exit0_2026-08-17 | P1 | open | bin/simple test <spec> prints no pass/fail summary and exits 0 (silent green) on deployed | `src/compiler_rust/driver/src/main.rs:524` |
 | test_runner_env_passthrough_2026-07-29 | P2 | open | Custom env vars set before bin/simple test are stale inside it bodies (daemon-frozen env) | `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:250` |
 | test_runner_expect_failure_swallowed_u8_bytes_2026-07-03 | P2 | open | Sabotaged expect() in wav_encode_spec u8 byte-array case is swallowed; spec still reports | `test/01_unit/lib/common/audio/wav_encode_spec.spl:0` |
 | test_runner_interpreter_file_summary_greenwash_2026-07-03 | P1 | open | Interpreter-mode file summary reports 'Failed: 0' while individual it blocks fail | `src/app/test_runner_new/test_runner_main.spl:0` |
@@ -1124,7 +1092,6 @@
 | text_byte_len_vs_codepoint_index_family_2026-08-06 | P2 | open | char_at(i) fed byte-length loop bounds corrupts non-ASCII in ui/theme_package_wire and htm | `src/lib/common/ui/theme_package_wire.spl:121` |
 | text_find_native_exposure_audit_2026-07-31 | P3 | open | .find() byte-offset sites in src/**; audit retracted its BYTE/CHAR-RISK premise same day | `src/runtime/runtime_native.c:3067` |
 | text_index_of_on_substring_receiver_reported_bool_2026-08-09 | P2 | open | text.index_of on a substring receiver is typed as returning bool, so idx compares wrong | `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl:0` |
-| text_index_of_returns_nil_in_simpleos_freestanding_2026-07-28 | P2 | open | text.index_of yields the ?? default instead of index 3 on non-erased receivers | `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:0` |
 | text_index_of_start_arg_dropped_and_error_sentinel_leak_2026-07-28 | P1 | open | text.index_of(needle,start) drops start; run lane leaks the error sentinel as a data value | `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:0` |
 | text_len_bytes_vs_index_codepoints_2026-07-02 | P1 | open | text.len() returns bytes while text[i] indexes codepoints, so ASCII-safe loops panic on | `src/compiler/10.frontend/core/interpreter/eval_access.spl:0` |
 | text_starts_with_miscompiled_to_bytespan_name_collision_2026-07-27 | P1 | open | cranelift resolves methods by name only, so text.starts_with compiles to | `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:0` |
@@ -1143,7 +1110,6 @@
 | tls_signature_positive_verification_blockers_2026-06-06 | P2 | open | TLS signature verification has no positive test: ed25519/RSA-PSS/cert-chain specs cannot | `test/03_system/os/os_tls_cert_chain_spec.spl:0` |
 | todo_call_collapses_to_pass_todo_node_reqc003_unreachable_2026-08-07 | P3 | open | todo(...) parses to the same AST node as pass_todo(...), leaving REQC003's branch | `src/compiler/35.semantics/lint/required_comment.spl:0` |
 | to_int_optional_lies_and_some_i64_payload_shift_2026-07-27 | P1 | open | text.to_int() optional never signals failure and Some(<i64>) payload is shifted x8 under | `src/lib/common/convert.spl:0` |
-| top_level_return_falls_through_2026-08-01 | P2 | open | statement-level return does not terminate the function in the pure-Simple MIR lane | `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:0` |
 | trait_conformance_check_ignores_arity_2026-08-04 | P1 | open | trait conformance matches by method NAME only; parameter types are never compared | `src/compiler/25.traits/trait_impl.spl:0` |
 | trait_default_body_segfaults_via_trait_object_2026-08-06 | P1 | open | a trait method with a default body segfaults when invoked through a trait object | `src/os/compositor/input_backend.spl:0` |
 | trait_group_with_sugar_status_f5_2026-08-09 | P3 | open | trait-group `with` sugar status remeasured: parser-rejection claim superseded, wiring | `src/app/desugar/trait_desugar.spl:0` |
@@ -1285,10 +1251,61 @@
 | zstd_fresh_table_literal_decoder_and_contradictory_specs_2026-06-30 | P2 | open | Two specs demand different errors for the same 22-byte zstd frame; fresh-table literal | `src/lib/common/compress/zstd_literals.spl:0` |
 | zstd_fse_sequence_lsb_reader_blocks_host_frames_2026-06-30 | P2 | open | zstd FSE sequence decoder uses LSB-first backward reader, so any real host frame with | `src/lib/common/compress/zstd_seq.spl:0` |
 | zstd_sequence_rle_normal_offset_mismatch_2026-07-20 | P3 | open | zstd normal-offset sequence decodes as a back-reference copy, giving [97,98,99,97,98,99] | `src/lib/common/compress/zstd_seq.spl:0` |
+| dashboard_main_api_never_implemented_2026-07-28 | P2 | open | app.dashboard.main is a 14-line stub — both dashboard modules import an API that was never written | `src/app/dashboard/main.spl:0` |
+| engine2d_factory_returns_dict_under_test_runner_2026-08-19 | P1 | open | Engine2D factory returns a module-namespace dict under the test runner (match-arm binding shadowed by MODULE_G | `test/02_integration/rendering/vulkan_strict_spec.spl:0` |
+| jit_array_element_i64_storage_truncation_2026-08-17 | P1 | open | An i64 stored in an array is TRUNCATED under the JIT (data loss not a print defect) | `test/03_system/compiler/i64_interpolation_engine_parity_spec.spl:0` |
+| jit_does_not_enforce_val_block_scope_2026-08-17 | P1 | open | JIT does not enforce val block scope; the interpreter does | `NONE:0` |
+| jit_is_some_is_none_method_dispatch_gap_2026-08-17 | P1 | open | JIT: .is_some() / .is_none() method calls fail closed OR return a raw untagged bool | `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:0` |
+| jit_swallows_undeclared_extern_and_exits_zero_2026-08-17 | P1 | open | JIT logs an undeclared extern then continues and exits 0 with a wrong value | `NONE:0` |
+| narrow_int_result_unwrap_or_returns_boxed_shift_2026-08-17 | P1 | open | Result<u8>.unwrap_or returns 222<<3; (u8?) via ! returns the nil tag | `NONE:0` |
+| native_build_fabricates_weak_stub_for_unimplemented_extern_2026-08-18 | P1 | open | native-build fabricates a WEAK stub for an unimplemented extern fn which returns garbage at runtime — and th | `NONE:0` |
+| native_build_print_drops_newline_2026-08-17 | P2 | open | print drops its newline under native-build only | `NONE:0` |
+| native_build_static_method_trailing_default_unresolved_2026-08-17 | P1 | open | native-build cannot resolve a class static method with trailing default params | `test/fixtures/native_trailing_default_param/main.spl:0` |
+| prepush_hook_unpassable_native_build_oom_2026-08-17 | P1 | open | Pre-push hook is unpassable: check-native-extern-fabrication depends on native-build which is SIGKILLed at >24 | `scripts/check/check-native-extern-fabrication.shs:0` |
+| stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18 | P1 | open | Stage 3: lookup_or_invalid(name) returns the id of an UNRELATED symbol (2026-08-18) | `src/app/cli/bootstrap_main.spl:0` |
+| test_manifest_invalidation_is_size_only_mtime_never_read_2026-08-17 | P1 | open | Test manifest invalidation is size-ONLY — the mtime column is a second copy of the size | `src/lib/nogc_sync_mut/test_runner/test_manifest_scanner.spl:0` |
+| spkc_p2_authority_publication_journal_first_use_mkdir_race_2026-08-26 | P1 | open | SPKC P2 authority-publication journal first-use mkdir race | `examples/05_stdlib/spipe/src/storage/authority_publication_journal.js:0` |
+| macos_bootstrap_lane_platform_defect_cluster_2026-08-30 | P0 | open | macOS bootstrap lane: cluster of eight platform defects, none visible from Linux; all eight fixes landed, lane not yet green through Stage 2 | `scripts/bootstrap:0` |
+| stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30 | P0 | open | Stage-2 codegen uses inconsistent struct field offsets across module boundaries, producing out-of-bounds reads past the end of the allocation | `src/compiler/70.backend:0` |
+| char_to_text_yields_placeholder_not_character_2026-09-06 | P0 | open | (N as char).to_text() yields a placeholder string (<special:15>/<value:0x7d>), not the character -- 22 caret call sites patched; conversion itself unfixed | `src/app/llm_caret/server.spl:0` |
+| enum_variant_resolved_globally_by_bare_name_httpmethod_collision_2026-09-06 | P1 | open | Enum variants resolve globally by bare name: colliding HttpMethod definitions stop every HTTP server (worked around downstream; resolver unfixed) | `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ident.rs:31` |
+| module_name_shadows_function_parameter_2026-09-06 | P1 | open | An imported module name shadows a function's own parameter (four call sites renamed; resolver unfixed) | `src/lib/nogc_sync_mut/http_server/server.spl:0` |
+| parser_hangs_on_it_block_inside_function_body_2026-09-06 | P1 | open | Parser hangs forever on a spec it block nested inside a function body (hid 28 failing tests behind a 900s timeout) | `test/01_unit/app/llm_caret/config_spec.spl:49` |
+| bin_caret_dropped_native_only_launcher_policy_2026-09-06 | P3 | open | bin/caret dropped its native-only launcher policy (2 of 3 committed spec examples fail; deliberately not fixed) | `bin/caret:0` |
 
 ## Closed Bugs
 
 | ID | Severity | Status | Title | Updated |
 |----|----------|--------|-------|---------|
 | gpu_backend_layer_result_reason_clobber_2026_08_03 | P2 | fixed | GPU backend layer_result clobbers producer unavailability reason | 2026-08-03 |
+| aes_utilities_unseeded_key_iv_nonce_generators_are_lcg_constants_2026-08-08 | P2 | fixed | generate_aes_key/generate_iv/generate_nonce are constant-seeded LCGs | 2026-08-17 |
+| bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17 | P1 | fixed | Bootstrap admission v2 unconditionally fail-closed; no bootstrap can start | 2026-08-17 |
+| deployed_bin_simple_bootstrap_only_2026-07-31 | P2 | fixed | Deployed bin/simple is bootstrap-only: no test/run/lint, cannot parse @extern | 2026-08-17 |
+| dual_backend_generic_typed_seam_2026-06-15 | P2 | fixed | Generic fn with a trait bound fails with Unknown type: T in the interpreter | 2026-08-17 |
+| enum_field_in_nested_call_arg_join_not_found_2026-08-17 | P2 | fixed | Struct literal with enum-typed field inside a call arg fails with method join not found | 2026-08-17 |
+| excel_floor_ceiling_negative_significance_sign_2026-07-20 | P2 | fixed | excel_floor/excel_ceiling return the wrong value for negative significance (must use abs) | 2026-08-17 |
+| i8_array_literal_reads_back_wrong_value_2026-08-17 | P1 | fixed | [5i8, 6i8] reads element 0 back as 43 under the cranelift JIT with no diagnostic | 2026-08-17 |
+| if_expression_dead_branch_binds_empty_list_2026-08-06 | P1 | fixed | if-expr with constant-false condition binds the DEAD branch's [] not the live value | 2026-08-17 |
 | interp_u64_high_bit_option_unwrap_corruption_2026-07-11 | P1 | fixed | u64 struct field >= 2^63 corrupts if val Option unwrap after a JIT shared-pointer bail | 2026-08-17 |
+| jupyter_labextension_missing_federated_build_packaging_2026-08-07 | P3 | fixed | JupyterLab labextension has no installable federated-extension build pipeline | 2026-08-17 |
+| lint_req_comment_stmt_arena_oob_decorators_2026-08-07 | P2 | fixed | bin/simple lint crashes with stmt-arena OOB on src/lib/nogc_sync_mut/spec/decorators.spl | 2026-08-17 |
+| lint_stub001_false_positive_on_string_interpolation_param_2026-07-29 | P3 | fixed | lint STUB001 false-positives on a param used only inside a string interpolation | 2026-08-17 |
+| native_dict_get_miss_returns_zero_not_nil_2026-07-28 | P1 | fixed | Dict<K,text>.get() on a MISS returns a zero value rather than nil, silently taking the found branch | 2026-08-17 |
+| native_optional_tuple_payload_extraction_broken_2026-07-29 | P1 | fixed | Optional-tuple payload extraction is wrong in every consumption form on the native lane | 2026-08-17 |
+| pem_encode_bytes_method_not_found_on_array_2026-07-20 | P2 | fixed | os.crypto.pem pem_encode chain calls .bytes() on an array value that has no such method | 2026-08-17 |
+| poly1305_key_gen_missing_2026-07-20 | P2 | fixed | std.crypto.poly1305 does not export poly1305_key_gen (RFC 8439 2.6.2); 2 of 9 examples red | 2026-08-17 |
+| pure_simple_parser_missing_pipe_lambda_form_2026-08-08 | P3 | fixed | Pipe-lambda per-param types are parsed and validated then dropped: flat AST has no slot | 2026-08-17 |
+| riscv_jtag_stage1_idcode_check_is_self_referential_2026-07-28 | P3 | fixed | tb_jtag_dtm_dmi configures the DUT with its own expected IDCODE, so a wrong IDCODE cannot fail STAGE1 | 2026-08-17 |
+| seed_jit_unresolved_symbol_segfault_and_silent_pass_2026-08-10 | P1 | fixed | Seed JIT SIGSEGVs on `[i64]()` and silently passes a bare undefined-variable read the | 2026-08-17 |
+| seed_nested_tuple_index_float_munch_2026-08-06 | P2 | fixed | Seed lexer munches r.0.1 as Float(0.1) so nested tuple indexing fails to parse | 2026-08-17 |
+| smf_reader_bridge_silent_nil | P1 | fixed | rt_smf_reader_open has no implementation so SmfReaderFfi.open returns Ok for any path | 2026-08-17 |
+| spawn_call_expr_silently_becomes_nillit_2026-07-29 | P1 | fixed | spawn(...) call expressions lower to HirExprKind.NilLit, discarding callee and args with | 2026-08-17 |
+| struct_field_aliases_under_jit_2026-08-08 | P1 | fixed | A struct stored in a class field aliases under the JIT, violating value semantics | 2026-08-17 |
+| macos_seed_unbuildable_metal_module_ungated_2026-08-30 | P0 | fixed | macOS Rust seed unbuildable: Metal module gated on target_os only, not the metal cargo feature; 73 errors blocked every macOS bootstrap | 2026-08-30 |
+| macos_ctx_hook_gnu_sed_alternation_denies_all_bash_2026-08-30 | P1 | fixed | GNU-only sed backslash-pipe alternation in the ctx hook denied every Bash call on macOS (fail-closed hook) | 2026-08-30 |
+| macos_seed_variadic_open_mode_t_u16_e0617_2026-08-30 | P1 | fixed | u16 mode_t passed to variadic open(2) fails to compile on Apple targets (E0617) | 2026-08-30 |
+| macos_seed_st_mtimespec_absent_from_libc_e0609_2026-08-30 | P1 | fixed | st_mtimespec is absent from the libc stat struct on Apple targets (E0609) | 2026-08-30 |
+| bootstrap_preflight_hardcodes_linux_mnt_data_cargo_dir_2026-08-30 | P1 | fixed | The mandated pre-bootstrap preflight gate hardcoded a Linux-only /mnt/data cargo dir and was therefore always RED on macOS | 2026-08-30 |
+| capsule_immutability_check_fail_open_gnu_find_perm_2026-08-30 | P0 | fixed | Runtime-capsule and stage3-authority immutability checks used GNU-only find -perm /0222; on BSD find it errored to stderr and printed nothing, so the check was FAIL-OPEN | 2026-08-30 |
+| weak_symbol_detection_elf_only_nm_kinds_macho_2026-08-30 | P1 | fixed | Weak-symbol detection used ELF nm kind letters W and V; Mach-O prints weak definitions as T, so every weak fallback looked strong and the Stage-4 capsule guard rejected the build | 2026-08-30 |
+| process_group_setsid_absent_on_macos_2026-08-30 | P1 | fixed | setsid is util-linux and absent on macOS; used by two twin copies of io/process_ops.spl (src/lib and src/app) and by run-process-group-timeout.shs | 2026-08-30 |

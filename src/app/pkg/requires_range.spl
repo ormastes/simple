@@ -1,0 +1,253 @@
+# Package interface range resolution for kernel plugin migration Phase 8.
+
+use compiler.common.assurance.package_pins.{DepEdge, PackagePin, parse_package_pin, pin_doc_error_text}
+use std.package.types.{Version}
+use std.package.semver_old.{parse_version, parse_constraint, satisfies,
+    satisfies_caret, satisfies_tilde, version_greater, version_equal,
+    constraint_to_string}
+use std.common.sdn.parser.{parse}
+use app.io.mod.{env_get}
+
+class InterfaceProvide:
+    interface_name: text
+    version: Version
+    version_text: text
+    provider: text
+
+class InterfaceRequire:
+    interface_name: text
+    range_text: text
+    consumer: text
+
+class InterfaceResolution:
+    interface_name: text
+    range_text: text
+    consumer: text
+    provider: text
+    version_text: text
+
+class RequiresRangeResult:
+    resolutions: [InterfaceResolution]
+    errors: [text]
+
+impl RequiresRangeResult:
+    fn has_errors() -> bool:
+        self.errors.len() > 0
+
+class Phase8PolicyReceipt:
+    plugin_manifest_policy: text
+    plugin_manifest_location: text
+    simple_abi_policy: text
+
+fn phase8_policy_receipt(manifest_policy_raw: text,
+        abi_policy_raw: text) -> Result<Phase8PolicyReceipt, [text]>:
+    val manifest_policy = if manifest_policy_raw.trim() == "" then "simple-sdn" else manifest_policy_raw.trim()
+    val abi_policy = if abi_policy_raw.trim() == "" then "v1" else abi_policy_raw.trim()
+    var errors: [text] = []
+    if manifest_policy != "simple-sdn":
+        errors.push("selected plugin manifest policy is `simple-sdn`; rejected `" + manifest_policy + "`")
+    if abi_policy != "v1":
+        errors.push("selected Simple ABI policy is `v1`; rejected `" + abi_policy + "`")
+    if errors.len() > 0:
+        return Err(errors)
+    Ok(Phase8PolicyReceipt(plugin_manifest_policy: manifest_policy,
+        plugin_manifest_location: "simple.sdn",
+        simple_abi_policy: abi_policy))
+
+fn current_phase8_policy_receipt() -> Result<Phase8PolicyReceipt, [text]>:
+    phase8_policy_receipt(env_get("SIMPLE_PLUGIN_MANIFEST_POLICY"),
+        env_get("SIMPLE_ABI_POLICY"))
+
+fn _edge_identity(edge: DepEdge) -> text:
+    if edge.package_name != "":
+        return edge.package_name
+    edge.project_path
+
+fn _split_iface(raw: text) -> Result<(text, text), text>:
+    val trimmed = raw.trim()
+    val marker = trimmed.index_of("@")
+    if marker <= 0 or marker >= trimmed.len() - 1:
+        return Err("invalid interface identity `" + raw + "`: expected <name>@<version-or-range>")
+    val name = trimmed.substring(0, marker).trim()
+    val version = trimmed.substring(marker + 1, trimmed.len()).trim()
+    if name == "" or version == "":
+        return Err("invalid interface identity `" + raw + "`: name and version are required")
+    Ok((name, version))
+
+fn _parse_provide(raw: text, provider: text) -> Result<InterfaceProvide, text>:
+    val (name, version_text) = _split_iface(raw)?
+    val parsed = parse_version(version_text)
+    match parsed:
+        case Ok(version):
+            Ok(InterfaceProvide(interface_name: name, version: version,
+                version_text: version.to_string(), provider: provider))
+        case Err(message):
+            Err("invalid provided interface version `" + raw + "` from `" + provider + "`: " + message)
+
+fn _parse_require(raw: text, consumer: text) -> Result<InterfaceRequire, text>:
+    val (name, range_text) = _split_iface(raw)?
+    val parsed = parse_constraint(range_text)
+    match parsed:
+        case Ok(range):
+            Ok(InterfaceRequire(interface_name: name,
+                range_text: constraint_to_string(range), consumer: consumer))
+        case Err(message):
+            Err("invalid required interface range `" + raw + "` from `" + consumer + "`: " + message)
+
+fn _canonical_satisfies(version: Version, range_text: text) -> bool:
+    if range_text.starts_with("^"):
+        match parse_version(range_text.substring(1)):
+            case Ok(base): satisfies_caret(version, base)
+            case Err(_): false
+    elif range_text.starts_with("~"):
+        match parse_version(range_text.substring(1)):
+            case Ok(base): satisfies_tilde(version, base)
+            case Err(_): false
+    else:
+        match parse_constraint(range_text):
+            case Ok(constraint): satisfies(version, constraint)
+            case Err(_): false
+
+fn classify_manifest_interface_ranges(source: text, path: text) -> Result<bool, [text]>:
+    if path != "simple.sdn" and not path.ends_with("/simple.sdn") and
+            not path.ends_with("\\simple.sdn"):
+        return Err(["selected plugin manifest policy requires `simple.sdn`; rejected `" + path + "`"])
+    match parse(source):
+        case Err(message):
+            Err(["invalid manifest `" + path + "`: " + message])
+        case Ok(root):
+            if not root.is_dict():
+                return Err(["invalid manifest `" + path + "`: root must be a mapping"])
+            var project = root
+            match root.get("project"):
+                case None: return Ok(false)
+                case Some(project_value): project = project_value
+            if not project.is_dict():
+                return Err(["invalid manifest `" + path + "`: `project:` must be a mapping"])
+            var dependencies = root
+            match project.get("dependencies"):
+                case None: return Ok(false)
+                case Some(dependencies_value): dependencies = dependencies_value
+            match dependencies.as_array():
+                case None:
+                    match dependencies.as_dict():
+                        case Some(_): return Ok(false)
+                        case None:
+                            return Err(["invalid manifest `" + path + "`: `project.dependencies:` must be a mapping or sequence"])
+                case Some(items):
+                    var uses_ranges = true
+                    var errors: [text] = []
+                    for item in items:
+                        if not item.is_dict():
+                            errors.push("invalid dependency in `" + path + "`: every `project.dependencies` entry must be a mapping")
+                        else:
+                            for key in ["provides", "requires"]:
+                                match item.get(key):
+                                    case None: pass
+                                    case Some(values_node):
+                                        var interface_values = values_node
+                                        match interface_values.as_array():
+                                            case None:
+                                                errors.push("invalid interface declaration in `" + path + "`: `" + key + "` must be a sequence of strings")
+                                            case Some(values):
+                                                for value in values:
+                                                    match value.as_str():
+                                                        case Some(_): pass
+                                                        case None:
+                                                            errors.push("invalid interface declaration in `" + path + "`: every `" + key + "` entry must be a string")
+                    if errors.len() > 0:
+                        return Err(errors)
+                    Ok(uses_ranges)
+
+fn resolve_requires_ranges(edges: [DepEdge]) -> RequiresRangeResult:
+    var provides: [InterfaceProvide] = []
+    var requires: [InterfaceRequire] = []
+    var errors: [text] = []
+
+    for edge in edges:
+        val identity = _edge_identity(edge)
+        for raw in edge.provided_ifaces:
+            match _parse_provide(raw, identity):
+                case Ok(provide): provides.push(provide)
+                case Err(message): errors.push(message)
+        for raw in edge.required_ifaces:
+            match _parse_require(raw, identity):
+                case Ok(requirement): requires.push(requirement)
+                case Err(message): errors.push(message)
+
+    var resolutions: [InterfaceResolution] = []
+    for requirement in requires:
+        var selected: InterfaceProvide? = nil
+        for provide in provides:
+            if provide.interface_name == requirement.interface_name and _canonical_satisfies(provide.version, requirement.range_text):
+                match selected:
+                    case None: selected = Some(provide)
+                    case Some(current):
+                        if version_greater(provide.version, current.version) or
+                                (version_equal(provide.version, current.version) and provide.provider < current.provider):
+                            selected = Some(provide)
+        match selected:
+            case None:
+                errors.push("no provider satisfies `" + requirement.interface_name + "@" + requirement.range_text + "` required by `" + requirement.consumer + "`")
+            case Some(provide):
+                resolutions.push(InterfaceResolution(
+                    interface_name: requirement.interface_name,
+                    range_text: requirement.range_text,
+                    consumer: requirement.consumer,
+                    provider: provide.provider,
+                    version_text: provide.version_text
+                ))
+
+    RequiresRangeResult(resolutions: resolutions, errors: errors)
+
+fn _quoted(value: text) -> text:
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fn generate_requires_lock(pin: PackagePin, result: RequiresRangeResult,
+        policy: Phase8PolicyReceipt) -> text:
+    var lines: [text] = [
+        "# simple.lock - generated by simple lock",
+        "lockfile_version: 2",
+        "package: " + _quoted(pin.package),
+        "policy_receipt:",
+        "  plugin_manifest_policy: " + _quoted(policy.plugin_manifest_policy),
+        "  plugin_manifest_location: " + _quoted(policy.plugin_manifest_location),
+        "  simple_abi_policy: " + _quoted(policy.simple_abi_policy),
+        "provides_requires:"
+    ]
+    for edge in pin.dependencies:
+        val identity = _edge_identity(edge)
+        lines.push("  - dependency: " + _quoted(identity))
+        lines.push("    link: " + _quoted(edge.link))
+        lines.push("    provides:")
+        for provide in edge.provided_ifaces:
+            lines.push("      - " + _quoted(provide))
+        lines.push("    requires:")
+        for requirement in edge.required_ifaces:
+            lines.push("      - " + _quoted(requirement))
+    lines.push("resolutions:")
+    for resolution in result.resolutions:
+        lines.push("  - interface: " + _quoted(resolution.interface_name))
+        lines.push("    range: " + _quoted(resolution.range_text))
+        lines.push("    consumer: " + _quoted(resolution.consumer))
+        lines.push("    provider: " + _quoted(resolution.provider))
+        lines.push("    version: " + _quoted(resolution.version_text))
+    lines.join("\n") + "\n"
+
+fn resolve_manifest_requires(source: text, path: text, dir: text) -> Result<(PackagePin, RequiresRangeResult), [text]>:
+    match parse_package_pin(source, path, dir):
+        case Err(parse_errors):
+            var messages: [text] = []
+            for error in parse_errors:
+                messages.push(pin_doc_error_text(error))
+            Err(messages)
+        case Ok(pin):
+            val result = resolve_requires_ranges(pin.dependencies)
+            if result.has_errors():
+                return Err(result.errors)
+            Ok((pin, result))
+
+export InterfaceResolution, RequiresRangeResult, Phase8PolicyReceipt
+export resolve_requires_ranges, generate_requires_lock, resolve_manifest_requires
+export classify_manifest_interface_ranges
+export phase8_policy_receipt, current_phase8_policy_receipt

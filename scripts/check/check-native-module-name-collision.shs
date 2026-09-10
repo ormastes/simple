@@ -1,0 +1,272 @@
+#!/bin/sh
+# check-native-module-name-collision.shs — fail-closed guard that the sanitised
+# native module-name map over the source tree is INJECTIVE.
+#
+# WHY THIS EXISTS
+# ---------------
+# The native pipeline turns a source path into a C/LLVM-safe module prefix by
+# dropping the source root, stripping `.spl`, stripping numbered layer prefixes
+# (`10.frontend` -> `frontend`), and mapping every character outside
+# [A-Za-z0-9_.] to `_`, joining the surviving components with `__`. That map is
+# NOT injective: `commands/add-dir/add-dir.spl` and
+# `commands/add_dir/add_dir.spl` both become
+# `app__llm_caret__claude_full__commands__add_dir__add_dir`.
+#
+# On 2026-09-06 a whole-worktree snapshot commit resurrected an archived
+# duplicate tree and reintroduced 99 colliding names. The compiler fails hard:
+#
+#   Build failed: native module name collision after path sanitization:
+#   '.../add-dir/add-dir.spl' and '.../add_dir/add_dir.spl' both map to '...';
+#   rename one file or directory
+#
+# `native-build --entry <file>` WITHOUT `--source` takes the full-scan path
+# (`discover_files_full_scan`, discovery.rs:795) and the collision check at
+# native_project/mod.rs:757-783 runs over every discovered file — so ONE
+# collision anywhere under `src/` breaks EVERY whole-project build regardless of
+# what the entry file imports. It was found by a human running a build. No gate
+# saw it, because every existing guard checks tree STRUCTURE (conflict entries,
+# marker text, file counts, symbol sets) or compiles individual files; a tree in
+# which two paths sanitise to one name is well-formed by all of those and dead
+# to the build.
+#
+# WHERE THE SANITISATION RULE COMES FROM  (do not re-derive it from memory)
+# ------------------------------------------------------------------------
+# Mirrored line-for-line from `module_prefix_from_path`,
+# src/compiler_rust/compiler/src/codegen/common_backend.rs:2929-2982 — the exact
+# function the collision check at native_project/mod.rs:770 calls. Per path
+# component, relative to the source root:
+#   1. strip a `.spl` suffix                       (applied to EVERY component)
+#   2. if the text before the FIRST `.` is all ASCII digits, drop it and the dot
+#      (`10.frontend` -> `frontend`; an empty prefix counts as all-digits,
+#      because Rust's `.all()` on an empty iterator is true — mirrored, not
+#      "fixed")
+#   3. map every char that is not ASCII alphanumeric, `_`, or `.` to `_`
+#      — note `.` SURVIVES, so `ui.render` stays `ui.render`
+#   4. drop components that became empty
+# Join with `__`; if the result starts with an ASCII digit, prefix `m_`.
+# Step 3 is per CHARACTER, not per byte, so a multibyte UTF-8 char yields ONE
+# underscore (`naïve@entry` -> `na_ve_entry`); the scanner reproduces that by
+# emitting nothing for a UTF-8 continuation byte.
+#
+# The selftest pins the derivation against the compiler's OWN unit-test vectors,
+# copied from `test_module_prefix_from_path`
+# (src/compiler_rust/compiler/src/pipeline/native_project/tests.rs:1313-1370).
+# If the compiler's rule changes, those vectors change and this guard's selftest
+# goes red — which is the point: a guard encoding a guess is a lie.
+#
+# A Simple-side twin exists (`module_logical_name_from_path`,
+# src/compiler/00.common/module_path_naming.spl:61) but it joins components with
+# `.` instead of `__`, which is strictly LESS collision-prone (`a/b` and a single
+# directory literally named `a__b` collide only under the `__` join). This guard
+# follows the Rust rule because that is the one that emitted the incident error.
+#
+# DISCOVERY SCOPE — mirrored from `collect_spl_files_recursive`
+# (native_project/mod.rs:1804-1827) and `discover_files_full_scan`
+# (discovery.rs:795): recurse real directories; do NOT descend symlinked
+# directories (the collector's `ft.is_symlink()` arm requires `path.is_file()`,
+# so a symlinked dir is skipped); take `*.spl` regular files EXCEPT any whose
+# path contains the substring `check.spl`; take symlinked `*.spl` files (the
+# compiler does not apply the `check.spl` filter to those — quirk mirrored, not
+# corrected). Two paths that resolve to the SAME physical file are not a
+# collision: the compiler compares `safe_canonicalize`d paths
+# (native_project/mod.rs:771-777), so this guard resolves candidate groups with
+# `readlink -f` before reporting.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> module name(s) checked, 0 collision(s)          exit 0
+#   FAIL — <n> checked, <k> collision(s): <names>              exit 1
+#   ERROR — nothing was checked (<reason>)                     exit 2
+# Non-vacuity is absolute: a run that examined 0 files is ERROR, never a pass.
+# Never read this script's status from a pipeline: $? is the LAST command's.
+set -u
+
+ROOT="src"
+SELFTEST=0
+for a in "$@"; do
+    case "$a" in
+        --selftest) SELFTEST=1 ;;
+        --root=*) ROOT="${a#--root=}" ;;
+        *) echo "unknown argument: $a" >&2; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# The derivation, as ONE place the scan and the selftest both read.
+# Reads relative-to-source-root paths on stdin, prints "<module name>\t<path>".
+# LC_ALL=C is required: substr()/length() must be BYTE operations for the
+# UTF-8 continuation-byte rule below to reproduce Rust's per-char semantics.
+# ---------------------------------------------------------------------------
+AWK_MODULE_NAME='
+BEGIN { for (i = 0; i < 256; i++) ORD[sprintf("%c", i)] = i }
+{
+    path = $0
+    n = split(path, comp, "/")
+    out = ""
+    for (i = 1; i <= n; i++) {
+        s = comp[i]
+        if (s == "" || s == "." || s == "..") continue
+        # 1. strip .spl suffix (Rust applies this to every component)
+        if (length(s) >= 4 && substr(s, length(s) - 3) == ".spl")
+            s = substr(s, 1, length(s) - 4)
+        # 2. numbered layer prefix
+        p = index(s, ".")
+        if (p > 0) {
+            pre = substr(s, 1, p - 1)
+            if (pre ~ /^[0-9]*$/) s = substr(s, p + 1)
+        }
+        # 3. character map (per CHARACTER; continuation bytes emit nothing)
+        t = ""
+        m = length(s)
+        for (j = 1; j <= m; j++) {
+            c = substr(s, j, 1)
+            o = ORD[c]
+            if ((o >= 48 && o <= 57) || (o >= 65 && o <= 90) || (o >= 97 && o <= 122) || o == 95 || o == 46)
+                t = t c
+            else if (o >= 128 && o < 192)
+                continue
+            else
+                t = t "_"
+        }
+        s = t
+        # 4. drop empties
+        if (s == "") continue
+        out = (out == "") ? s : out "__" s
+    }
+    f = ORD[substr(out, 1, 1)]
+    if (f >= 48 && f <= 57) out = "m_" out
+    printf "%s\t%s\n", out, path
+}'
+
+module_names() {
+    # $1 = source root. Prints "<module name>\t<path-relative-to-root>" per file.
+    _r="${1%/}"
+    {
+        find "$_r" -name '*.spl' -type f ! -path '*check.spl*' -print 2>/dev/null
+        find "$_r" -name '*.spl' -type l -print 2>/dev/null
+    } | while IFS= read -r _p; do
+        [ -f "$_p" ] || continue
+        printf '%s\n' "${_p#"$_r"/}"
+    done | LC_ALL=C sort -u | LC_ALL=C awk "$AWK_MODULE_NAME"
+}
+
+# Groups of >1 path sharing a module name, as "<name>\t<path>" lines.
+candidate_groups() {
+    LC_ALL=C sort | LC_ALL=C awk -F '\t' '
+        { name[NR] = $1; path[NR] = $2; cnt[$1]++ }
+        END { for (i = 1; i <= NR; i++) if (cnt[name[i]] > 1) printf "%s\t%s\n", name[i], path[i] }'
+}
+
+if [ "$SELFTEST" = 1 ]; then
+    TD=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    trap 'rm -rf "$TD"' EXIT
+    st_fail() { echo "ERROR — nothing was checked (selftest: $1)"; exit 2; }
+
+    # --- fixture 0: derivation vectors lifted verbatim from the compiler's own
+    #     unit test, tests.rs:1313-1370. This is the "matches the compiler" proof.
+    check_vec() {
+        _got=$(printf '%s\n' "$1" | LC_ALL=C awk "$AWK_MODULE_NAME" | cut -f1)
+        [ "$_got" = "$2" ] || st_fail "derivation drift: '$1' -> '$_got', compiler says '$2'"
+    }
+    check_vec 'compiler/10.frontend/core/lexer.spl' 'compiler__frontend__core__lexer'
+    check_vec 'app/cli/main.spl'                    'app__cli__main'
+    check_vec 'lib/common/text.spl'                 'lib__common__text'
+    check_vec 'app/ui.render/ansi.spl'              'app__ui.render__ansi'
+    check_vec '01_unit/lib/nogc_async_mut/concurrent_wrappers_spec.spl' \
+              'm_01_unit__lib__nogc_async_mut__concurrent_wrappers_spec'
+    check_vec 'app/heap-global.spl'                 'app__heap_global'
+    check_vec 'examples/tool+kit/naïve@entry.spl'   'examples__tool_kit__na_ve_entry'
+    # the incident's own name, so a report can quote it
+    check_vec 'app/llm_caret/claude_full/commands/add-dir/add-dir.spl' \
+              'app__llm_caret__claude_full__commands__add_dir__add_dir'
+
+    # --- fixture 1: a clean tree must yield 0 collision groups and n > 0
+    mkdir -p "$TD/clean/a/b" "$TD/clean/c"
+    printf 'fn f():\n    0\n' > "$TD/clean/a/b/one.spl"
+    printf 'fn f():\n    0\n' > "$TD/clean/c/two.spl"
+    [ "$(module_names "$TD/clean" | grep -c .)" -eq 2 ] || st_fail "clean fixture did not yield 2 files"
+    [ "$(module_names "$TD/clean" | candidate_groups | grep -c .)" -eq 0 ] \
+        || st_fail "false positive on clean fixture"
+
+    # --- fixture 2: the incident shape — a hyphen/underscore twin pair must collide
+    mkdir -p "$TD/twin/commands/add-dir" "$TD/twin/commands/add_dir"
+    printf 'fn f():\n    0\n' > "$TD/twin/commands/add-dir/add-dir.spl"
+    printf 'fn f():\n    0\n' > "$TD/twin/commands/add_dir/add_dir.spl"
+    _tw=$(module_names "$TD/twin" | candidate_groups)
+    [ "$(printf '%s\n' "$_tw" | grep -c .)" -eq 2 ] \
+        || st_fail "hyphen/underscore twin pair not detected"
+    printf '%s\n' "$_tw" | grep -q 'add-dir/add-dir.spl' \
+        || st_fail "twin fixture does not name the hyphen path"
+    printf '%s\n' "$_tw" | grep -q 'add_dir/add_dir.spl' \
+        || st_fail "twin fixture does not name the underscore path"
+
+    # --- fixture 3: a numbered-layer twin. A naive `s|-|_|` textual dedup MISSES
+    #     this; only the real derivation (step 2) catches it. This is what proves
+    #     the guard mirrors the compiler rather than approximating it.
+    mkdir -p "$TD/layer/10.frontend" "$TD/layer/frontend"
+    printf 'fn f():\n    0\n' > "$TD/layer/10.frontend/x.spl"
+    printf 'fn f():\n    0\n' > "$TD/layer/frontend/x.spl"
+    [ "$(module_names "$TD/layer" | candidate_groups | grep -c .)" -eq 2 ] \
+        || st_fail "numbered-layer twin (10.frontend vs frontend) not detected"
+
+    # --- fixture 4: an empty tree must yield 0 checked, forcing the caller to ERROR
+    mkdir -p "$TD/empty"
+    [ "$(module_names "$TD/empty" | grep -c .)" -eq 0 ] || st_fail "empty fixture examined files"
+
+    # --- fixture 5: `check.spl` paths are excluded exactly as the compiler excludes them
+    mkdir -p "$TD/skip/p" "$TD/skip/q"
+    printf 'fn f():\n    0\n' > "$TD/skip/p/check.spl"
+    printf 'fn f():\n    0\n' > "$TD/skip/q/check.spl"
+    [ "$(module_names "$TD/skip" | grep -c .)" -eq 0 ] || st_fail "check.spl paths were scanned"
+
+    rm -rf "$TD"; trap - EXIT
+fi
+
+[ -d "$ROOT" ] || { echo "ERROR — nothing was checked (root '$ROOT' is not a directory)"; exit 2; }
+
+WD=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WD"' EXIT
+
+module_names "$ROOT" > "$WD/names"
+RC=$?
+[ "$RC" -eq 0 ] || { echo "ERROR — nothing was checked (scan of '$ROOT' failed rc=$RC)"; exit 2; }
+
+NFILES=$(grep -c . "$WD/names" 2>/dev/null || true)
+[ -n "$NFILES" ] && [ "$NFILES" -gt 0 ] 2>/dev/null \
+    || { echo "ERROR — nothing was checked (0 .spl files under '$ROOT')"; exit 2; }
+
+candidate_groups < "$WD/names" > "$WD/groups"
+
+COLLIDING_NAMES=""
+K=0
+if [ -s "$WD/groups" ]; then
+    cut -f1 "$WD/groups" | LC_ALL=C sort -u > "$WD/candidates"
+    while IFS= read -r NAME; do
+        [ -n "$NAME" ] || continue
+        # Distinct PHYSICAL files only — the compiler compares canonicalized
+        # paths, so symlink aliases of one file are not a collision.
+        : > "$WD/phys"
+        LC_ALL=C awk -F '\t' -v n="$NAME" '$1 == n { print $2 }' "$WD/groups" > "$WD/members"
+        while IFS= read -r REL; do
+            [ -n "$REL" ] || continue
+            RP=$(readlink -f "${ROOT%/}/$REL" 2>/dev/null) || RP=""
+            [ -n "$RP" ] || RP="${ROOT%/}/$REL"
+            printf '%s\n' "$RP" >> "$WD/phys"
+        done < "$WD/members"
+        NPHYS=$(LC_ALL=C sort -u "$WD/phys" | grep -c . || true)
+        [ "$NPHYS" -gt 1 ] 2>/dev/null || continue
+        K=$((K + 1))
+        echo "collision: $NAME"
+        while IFS= read -r REL; do
+            [ -n "$REL" ] || continue
+            echo "    ${ROOT%/}/$REL"
+        done < "$WD/members"
+        COLLIDING_NAMES="$COLLIDING_NAMES $NAME"
+    done < "$WD/candidates"
+fi
+
+if [ "$K" -gt 0 ]; then
+    echo "FAIL — $NFILES checked, $K collision(s):$COLLIDING_NAMES"
+    exit 1
+fi
+echo "PASS — $NFILES module name(s) checked, 0 collision(s)"
+exit 0

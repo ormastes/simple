@@ -1,0 +1,84 @@
+use std.nogc_sync_mut.io_runtime.{file_read, get_args, exit}
+use compiler.tools.lint.param_object_rules.{
+    ParamObjectSchema, param_object_schema_prefix_compatible,
+    param_object_schemas_from_source}
+
+fn version_parts(name: text) -> (text, i64):
+    val marker = name.rfind("V")
+    if marker < 1 or marker + 1 >= name.len():
+        return ("", -1)
+    val version = name.slice(marker + 1, name.len()).to_i64()
+    if version <= 0:
+        return ("", -1)
+    (name.slice(0, marker), version)
+
+fn schema_named(schemas: [ParamObjectSchema], name: text) -> ParamObjectSchema?:
+    for schema in schemas:
+        if schema.name == name:
+            return Some(schema)
+    nil
+
+fn manifest_arg() -> text:
+    for arg in get_args():
+        if arg.starts_with("--manifest="):
+            return arg.slice("--manifest=".len(), arg.len())
+    ""
+
+fn main():
+    val manifest = manifest_arg()
+    if manifest == "":
+        print "ERROR — typed pair manifest is required"
+        exit(2)
+        return
+    val rows = file_read(manifest)
+    if rows == "":
+        print "ERROR — typed pair manifest is empty"
+        exit(2)
+        return
+    var checked = 0
+    var failed = 0
+    for row in rows.split("\n"):
+        if row == "":
+            continue
+        val columns = row.split("|")
+        if columns.len() != 3:
+            print "FAIL — malformed pair manifest row"
+            exit(1)
+            return
+        val logical_path = columns[0]
+        val before = param_object_schemas_from_source(
+            file_read(columns[1]), logical_path + "@base")
+        val after = param_object_schemas_from_source(
+            file_read(columns[2]), logical_path + "@tip")
+        for previous in before:
+            val (base_name, version) = version_parts(previous.name)
+            if base_name == "":
+                continue
+            var compared = false
+            val same = schema_named(after, previous.name)
+            if same != nil:
+                compared = true
+                checked = checked + 1
+                if not param_object_schema_prefix_compatible(previous, same.unwrap()):
+                    print "FAIL — PARAM-002 {logical_path}:{previous.name} changed existing field ordinals"
+                    failed = failed + 1
+            val next_name = base_name + "V" + (version + 1).to_text()
+            val next = schema_named(after, next_name)
+            if next != nil:
+                compared = true
+                checked = checked + 1
+                if not param_object_schema_prefix_compatible(previous, next.unwrap()):
+                    print "FAIL — PARAM-002 {logical_path}:{next_name} is incompatible with {previous.name}"
+                    failed = failed + 1
+            if not compared:
+                print "FAIL — PARAM-002 {logical_path}:{previous.name} was removed"
+                failed = failed + 1
+    if failed > 0:
+        print "FAIL — {failed} parameter-object evolution violation(s)"
+        exit(1)
+        return
+    if checked == 0:
+        print "ERROR — nothing was checked"
+        exit(2)
+        return
+    print "PASS — {checked} checked"

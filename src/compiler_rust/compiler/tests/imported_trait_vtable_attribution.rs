@@ -9,8 +9,7 @@ fn flattened_import_retains_struct_trait_impl_for_mir_vtable_attribution() {
     let trait_module = dir.path().join("kinded.spl");
     let impl_module = dir.path().join("block.spl");
     let entry = dir.path().join("main.spl");
-    std::fs::write(&trait_module, "trait Kinded:\n    fn kind() -> i64:\n        pass\n")
-        .expect("trait fixture");
+    std::fs::write(&trait_module, "trait Kinded:\n    fn kind() -> i64:\n        pass\n").expect("trait fixture");
     std::fs::write(
         &impl_module,
         "use kinded.{Kinded}\nstruct ImportedBlock(Kinded):\n    fn kind() -> i64: 7\n",
@@ -23,13 +22,33 @@ fn flattened_import_retains_struct_trait_impl_for_mir_vtable_attribution() {
     .expect("entry fixture");
 
     let ast = load_module_with_imports(&entry, &mut HashSet::new()).expect("flattened imports");
-    let imported = ast.items.iter().find_map(|node| match node {
-        Node::Struct(definition) if definition.name == "ImportedBlock" => Some(definition),
-        _ => None,
-    }).expect("flattened imports retain the imported struct");
-    assert!(imported.attributes.iter().any(|attribute| attribute.name == "implements"), "flattened import lost synthetic implements(Trait) attribute");
+    let imported = ast
+        .items
+        .iter()
+        .find_map(|node| match node {
+            Node::Struct(definition) if definition.name == "ImportedBlock" => Some(definition),
+            _ => None,
+        })
+        .expect("flattened imports retain the imported struct");
+    assert!(
+        imported
+            .attributes
+            .iter()
+            .any(|attribute| attribute.name == "implements"),
+        "flattened import lost synthetic implements(Trait) attribute"
+    );
     let hir = hir::lower(&ast).expect("HIR lowering");
-    assert!(hir.impls.iter().any(|imp| imp.type_name == "ImportedBlock" && imp.trait_name.as_deref() == Some("Kinded")), "flattened import lost synthetic implements(Trait) before HIR");
+    assert!(
+        hir.impls
+            .iter()
+            .any(|imp| imp.type_name == "ImportedBlock" && imp.trait_name.as_deref() == Some("Kinded")),
+        "flattened import lost synthetic implements(Trait) before HIR"
+    );
     let mir = mir::lower_to_mir(&hir).expect("MIR lowering");
-    assert!(mir.vtable_impls.iter().any(|(_, owner, _, slots, _)| owner == "ImportedBlock" && !slots.is_empty()), "HIR impl disappeared before MIR vtable attribution");
+    assert!(
+        mir.vtable_impls
+            .iter()
+            .any(|(_, owner, _, slots, _)| owner == "ImportedBlock" && !slots.is_empty()),
+        "HIR impl disappeared before MIR vtable attribution"
+    );
 }

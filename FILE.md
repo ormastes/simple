@@ -29,6 +29,8 @@ FILE.md files) are allowed.
 | `.jscpd.json` | Copy-paste detector config |
 | `.dockerignore` | Docker ignore rules |
 | `bin` | Executables and wrappers |
+| `include` | Public native headers |
+| `sdk` | SDK packaging and integration assets |
 | `src` | Source code |
 | `test` | Test files |
 | `examples` | Example projects |

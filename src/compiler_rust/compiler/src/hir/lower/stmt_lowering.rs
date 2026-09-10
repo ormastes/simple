@@ -1326,6 +1326,7 @@ impl Lowerer {
             Node::Extern(e) => {
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
                 Ok(vec![])
             }
@@ -1679,6 +1680,19 @@ impl Lowerer {
                         // Use the binding's resolved type (from enum variant definition)
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+                        // The local slot is allocated while pattern bindings are
+                        // collected, before generic enum fields have necessarily
+                        // been resolved.  MIR treats the slot's declared type as
+                        // authoritative (not only HirStmt::Let.ty), so leaving it
+                        // as ANY re-boxes an already-unboxed Result<i64> payload:
+                        // `6` is stored as the tagged word `48` and later used as
+                        // an ordinary integer.  Keep the slot and initializer in
+                        // agreement, as the struct/optional binder paths do.
+                        if binding_ty != TypeId::ANY {
+                            if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                local.ty = binding_ty;
+                            }
+                        }
                         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                             eprintln!(
                                 "[HIR-PAT-BIND] {}({}) subject_ty={:?} ({:?}) binding_ty={:?} ({:?})",
@@ -3031,9 +3045,7 @@ impl Lowerer {
         let Expr::Call { callee, args } = expr else {
             return None;
         };
-        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
-            || args.len() != 1
-            || args[0].name.is_some()
+        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") || args.len() != 1 || args[0].name.is_some()
         {
             return None;
         }

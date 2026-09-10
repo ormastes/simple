@@ -470,9 +470,7 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
     if pixel_count <= 0 || offset < 0 {
         return -1;
     }
-    let Some(arr) =
-        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array)
-    else {
+    let Some(arr) = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array) else {
         return -1;
     };
     let (len, data_ptr) = unsafe { ((*arr).len, (*arr).data) };
@@ -568,25 +566,17 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
 /// the tail of the destination holding an earlier frame, which is exactly the
 /// silent-stale-pixels failure this whole path is written to avoid.
 #[no_mangle]
-pub extern "C" fn rt_vulkan_copy_u32_slots(
-    dst: RuntimeValue,
-    src: RuntimeValue,
-    count: i64,
-) -> i64 {
+pub extern "C" fn rt_vulkan_copy_u32_slots(dst: RuntimeValue, src: RuntimeValue, count: i64) -> i64 {
     if count < 0 {
         return -1;
     }
     if count == 0 {
         return 0;
     }
-    let Some(dst_arr) =
-        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(dst, HeapObjectType::Array)
-    else {
+    let Some(dst_arr) = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(dst, HeapObjectType::Array) else {
         return -1;
     };
-    let Some(src_arr) =
-        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(src, HeapObjectType::Array)
-    else {
+    let Some(src_arr) = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(src, HeapObjectType::Array) else {
         return -1;
     };
     let (dst_len, dst_ptr) = unsafe { ((*dst_arr).len, (*dst_arr).data) };

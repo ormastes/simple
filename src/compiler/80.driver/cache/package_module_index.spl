@@ -1,0 +1,639 @@
+# Persistent package/module index for explicit-closure compilation.
+#
+# This module owns immutable index generations only. It never discovers source
+# roots and never falls back to a recursive scan. Callers must rebuild the index
+# explicitly when admission returns a non-`ok` reason.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(
+    path: text, max_bytes: i64
+) -> text?
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_dir_create_all(path: text) -> bool
+
+val PACKAGE_MODULE_INDEX_SCHEMA_V1: i64 = 1
+val PACKAGE_MODULE_INDEX_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+
+struct PackageModuleIndexEntryV1:
+    package_identity: text
+    module_identity: text
+    source_identity: text
+    source_digest: text
+    smf_metadata_digest: text
+    export_digest: text
+    abi_digest: text
+    initializer_digest: text
+    provider_digest: text
+    action_digest: text
+    manifest_digest: text
+    scc_identity: text
+    direct_imports: [text]
+    reverse_dependents: [text]
+
+struct PackageModuleIndexGenerationV1:
+    schema_version: i64
+    producer_digest: text
+    root_generation: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    inventory_digest: text
+    entries: [PackageModuleIndexEntryV1]
+
+struct PackageModuleIndexReadV1:
+    valid: bool
+    reason: text
+    digest: text
+    generation: PackageModuleIndexGenerationV1?
+
+struct PackageModuleInvalidationV1:
+    valid: bool
+    reason: text
+    dirty_modules: [text]
+    dirty_packages: [text]
+    package_schedule: [text]
+
+struct PackageModuleChangeV1:
+    module_identity: text
+    content_changed: bool
+    export_changed: bool
+    abi_changed: bool
+    initializer_changed: bool
+    provider_changed: bool
+
+type PackageTldrHeaderV1 = PackageModuleIndexEntryV1
+type PersistentSmfPackageIndexV1 = PackageModuleIndexGenerationV1
+
+fn package_module_index_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn package_module_index_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn package_module_index_read_file_v1(path: text, max_bytes: i64) -> text?:
+    if max_bytes <= 0 or not rt_file_is_regular_no_follow(path):
+        return nil
+    val extent = rt_file_size(path)
+    if extent <= 0 or extent > max_bytes:
+        return nil
+    val content = rt_file_read_regular_no_follow_bounded(path, extent)
+    if content == nil or content!.len() != extent:
+        return nil
+    content
+
+fn package_module_index_sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var result: [text] = []
+    for value in sorted:
+        if not package_module_index_text_valid_v1(value):
+            return []
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn package_module_index_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn package_module_index_frame_read_v1(value: text, start: i64) -> (text, i64)?:
+    if start < 0 or start >= value.len():
+        return nil
+    val tail = value.substring(start, value.len())
+    val colon = tail.index_of(":")
+    if colon <= 0:
+        return nil
+    val digits = tail.substring(0, colon)
+    val extent = digits.to_i64()
+    if extent == nil or extent! < 0 or "{extent!}" != digits:
+        return nil
+    val body_start = start + colon + 1
+    val body_end = body_start + extent!
+    if body_end > value.len():
+        return nil
+    Some((value.substring(body_start, body_end), body_end))
+
+fn package_module_index_list_encode_v1(values: [text]) -> text:
+    val canonical = package_module_index_sorted_unique_v1(values)
+    if values.len() > 0 and canonical.len() == 0:
+        return ""
+    var body = "{canonical.len()};"
+    for value in canonical:
+        body = body + package_module_index_frame_v1(value)
+    body
+
+fn package_module_index_list_decode_v1(value: text) -> [text]?:
+    val semicolon = value.index_of(";")
+    if semicolon <= 0:
+        return nil
+    val count_text = value.substring(0, semicolon)
+    val count = count_text.to_i64()
+    if count == nil or count! < 0 or "{count!}" != count_text:
+        return nil
+    var result: [text] = []
+    var cursor = semicolon + 1
+    var index = 0
+    while index < count!:
+        val item = package_module_index_frame_read_v1(value, cursor)
+        if item == nil or not package_module_index_text_valid_v1(item!.0):
+            return nil
+        result = result.push(item!.0)
+        cursor = item!.1
+        index = index + 1
+    if cursor != value.len():
+        return nil
+    val canonical = package_module_index_sorted_unique_v1(result)
+    if canonical.len() != result.len():
+        return nil
+    var position = 0
+    while position < result.len():
+        if result[position] != canonical[position]:
+            return nil
+        position = position + 1
+    Some(result)
+
+fn package_module_index_entry_encode_v1(entry: PackageModuleIndexEntryV1) -> text:
+    val imports = package_module_index_list_encode_v1(entry.direct_imports)
+    val dependents = package_module_index_list_encode_v1(entry.reverse_dependents)
+    if imports == "" or dependents == "":
+        return ""
+    var fields: [text] = [
+        entry.package_identity,
+        entry.module_identity,
+        entry.source_identity,
+        entry.source_digest,
+        entry.smf_metadata_digest,
+        entry.export_digest,
+        entry.abi_digest,
+        entry.initializer_digest,
+        entry.provider_digest,
+        entry.action_digest,
+        entry.manifest_digest,
+        entry.scc_identity,
+        imports,
+        dependents
+    ]
+    var encoded = ""
+    for field in fields:
+        if not package_module_index_text_valid_v1(field):
+            return ""
+        encoded = encoded + package_module_index_frame_v1(field)
+    encoded
+
+fn package_module_index_entry_decode_v1(line: text) -> PackageModuleIndexEntryV1?:
+    var fields: [text] = []
+    var cursor = 0
+    var index = 0
+    while index < 14:
+        val field = package_module_index_frame_read_v1(line, cursor)
+        if field == nil:
+            return nil
+        fields = fields.push(field!.0)
+        cursor = field!.1
+        index = index + 1
+    if cursor != line.len():
+        return nil
+    val imports = package_module_index_list_decode_v1(fields[12])
+    val dependents = package_module_index_list_decode_v1(fields[13])
+    if imports == nil or dependents == nil:
+        return nil
+    Some(PackageModuleIndexEntryV1(
+        package_identity: fields[0],
+        module_identity: fields[1],
+        source_identity: fields[2],
+        source_digest: fields[3],
+        smf_metadata_digest: fields[4],
+        export_digest: fields[5],
+        abi_digest: fields[6],
+        initializer_digest: fields[7],
+        provider_digest: fields[8],
+        action_digest: fields[9],
+        manifest_digest: fields[10],
+        scc_identity: fields[11],
+        direct_imports: imports!,
+        reverse_dependents: dependents!
+    ))
+
+fn package_module_index_entry_valid_v1(entry: PackageModuleIndexEntryV1) -> bool:
+    if (not package_module_index_text_valid_v1(entry.package_identity) or
+            not package_module_index_text_valid_v1(entry.module_identity) or
+            not package_module_index_text_valid_v1(entry.source_identity) or
+            not package_module_index_text_valid_v1(entry.scc_identity)):
+        return false
+    if (not package_module_index_digest_valid_v1(entry.source_digest) or
+            not package_module_index_digest_valid_v1(entry.smf_metadata_digest) or
+            not package_module_index_digest_valid_v1(entry.export_digest) or
+            not package_module_index_digest_valid_v1(entry.abi_digest) or
+            not package_module_index_digest_valid_v1(entry.initializer_digest) or
+            not package_module_index_digest_valid_v1(entry.provider_digest) or
+            not package_module_index_digest_valid_v1(entry.action_digest) or
+            not package_module_index_digest_valid_v1(entry.manifest_digest)):
+        return false
+    val imports = package_module_index_sorted_unique_v1(entry.direct_imports)
+    val dependents = package_module_index_sorted_unique_v1(entry.reverse_dependents)
+    if imports.len() != entry.direct_imports.len() or dependents.len() != entry.reverse_dependents.len():
+        return false
+    var index = 0
+    while index < imports.len():
+        if imports[index] != entry.direct_imports[index] or imports[index] == entry.module_identity:
+            return false
+        index = index + 1
+    index = 0
+    while index < dependents.len():
+        if dependents[index] != entry.reverse_dependents[index] or dependents[index] == entry.module_identity:
+            return false
+        index = index + 1
+    true
+
+fn package_module_index_find_v1(
+    generation: PackageModuleIndexGenerationV1, module_identity: text
+) -> PackageModuleIndexEntryV1?:
+    # Valid generations are ordered by module identity.  Admission,
+    # invalidation, SCC scheduling, and dependency validation all perform
+    # repeated lookups, so a linear scan makes warm planning quadratic in the
+    # module count.  Keep persistent storage ordered and resolve in O(log n).
+    var low: i64 = 0
+    var high: i64 = generation.entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val entry = generation.entries[middle]
+        if entry.module_identity < module_identity:
+            low = middle + 1
+        elif entry.module_identity > module_identity:
+            high = middle
+        else:
+            return Some(entry)
+    nil
+
+fn package_module_index_entry_action_digest_v1(
+    generation: PackageModuleIndexGenerationV1,
+    entry: PackageModuleIndexEntryV1
+) -> text:
+    val imports = package_module_index_list_encode_v1(entry.direct_imports)
+    if imports == "":
+        return ""
+    val parts = [
+        "simple/package-module-action/v1",
+        generation.producer_digest,
+        generation.root_generation,
+        generation.scv_revision_id,
+        generation.scv_commit_id,
+        generation.scv_tree_id,
+        generation.inventory_digest,
+        entry.package_identity,
+        entry.module_identity,
+        entry.source_identity,
+        entry.source_digest,
+        entry.smf_metadata_digest,
+        entry.export_digest,
+        entry.abi_digest,
+        entry.initializer_digest,
+        entry.provider_digest,
+        entry.manifest_digest,
+        entry.scc_identity,
+        imports
+    ]
+    var encoded = ""
+    for part in parts:
+        encoded = encoded + package_module_index_frame_v1(part)
+    sha256_text(encoded)
+
+fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) -> text:
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V1:
+        return "unsupported-schema"
+    if not package_module_index_digest_valid_v1(generation.producer_digest):
+        return "producer-digest-invalid"
+    if not package_module_index_text_valid_v1(generation.root_generation):
+        return "root-generation-invalid"
+    if (not package_module_index_text_valid_v1(generation.scv_revision_id) or
+            not package_module_index_text_valid_v1(generation.scv_commit_id) or
+            not package_module_index_text_valid_v1(generation.scv_tree_id) or
+            not package_module_index_digest_valid_v1(generation.inventory_digest)):
+        return "scv-snapshot-binding-invalid"
+    var previous = ""
+    for entry in generation.entries:
+        if not package_module_index_entry_valid_v1(entry):
+            return "entry-invalid:{entry.module_identity}"
+        if entry.action_digest != package_module_index_entry_action_digest_v1(
+                generation, entry):
+            return "action-snapshot-binding-mismatch:{entry.module_identity}"
+        if previous != "" and entry.module_identity <= previous:
+            return "entry-order-or-duplicate"
+        previous = entry.module_identity
+    for entry in generation.entries:
+        for imported in entry.direct_imports:
+            val target = package_module_index_find_v1(generation, imported)
+            if target == nil:
+                return "direct-import-missing:{entry.module_identity}:{imported}"
+            if not target!.reverse_dependents.contains(entry.module_identity):
+                return "reverse-edge-missing:{entry.module_identity}:{imported}"
+        for dependent in entry.reverse_dependents:
+            val target = package_module_index_find_v1(generation, dependent)
+            if target == nil:
+                return "reverse-dependent-missing:{entry.module_identity}:{dependent}"
+            if not target!.direct_imports.contains(entry.module_identity):
+                return "direct-edge-missing:{entry.module_identity}:{dependent}"
+    "ok"
+
+fn package_module_index_encode_v1(generation: PackageModuleIndexGenerationV1) -> text:
+    if package_module_index_validate_v1(generation) != "ok":
+        return ""
+    var lines: [text] = [
+        "simple-package-module-index-v1",
+        "schema=1",
+        "producer={generation.producer_digest}",
+        "root={generation.root_generation}",
+        "scv-revision={generation.scv_revision_id}",
+        "scv-commit={generation.scv_commit_id}",
+        "scv-tree={generation.scv_tree_id}",
+        "inventory={generation.inventory_digest}",
+        "count={generation.entries.len()}"
+    ]
+    for entry in generation.entries:
+        val encoded = package_module_index_entry_encode_v1(entry)
+        if encoded == "":
+            return ""
+        lines = lines.push(encoded)
+    lines.join("\n")
+
+fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
+    val lines = content.split("\n")
+    if lines.len() < 9 or lines[0] != "simple-package-module-index-v1":
+        return PackageModuleIndexReadV1(false, "corrupt-header", "", nil)
+    if lines[1] != "schema=1":
+        return PackageModuleIndexReadV1(false, "unsupported-schema", "", nil)
+    if not lines[2].starts_with("producer=") or not lines[3].starts_with("root="):
+        return PackageModuleIndexReadV1(false, "corrupt-generation", "", nil)
+    val producer = lines[2].substring(9, lines[2].len())
+    val root = lines[3].substring(5, lines[3].len())
+    if (not lines[4].starts_with("scv-revision=") or
+            not lines[5].starts_with("scv-commit=") or
+            not lines[6].starts_with("scv-tree=") or
+            not lines[7].starts_with("inventory=")):
+        return PackageModuleIndexReadV1(false, "corrupt-scv-binding", "", nil)
+    val scv_revision = lines[4].substring(13, lines[4].len())
+    val scv_commit = lines[5].substring(11, lines[5].len())
+    val scv_tree = lines[6].substring(9, lines[6].len())
+    val inventory = lines[7].substring(10, lines[7].len())
+    if not lines[8].starts_with("count="):
+        return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
+    val count = lines[8].substring(6, lines[8].len()).to_i64()
+    if count == nil or count! < 0 or lines.len() != count! + 9:
+        return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
+    var entries: [PackageModuleIndexEntryV1] = []
+    var index = 9
+    while index < lines.len():
+        val entry = package_module_index_entry_decode_v1(lines[index])
+        if entry == nil:
+            return PackageModuleIndexReadV1(false, "corrupt-entry", "", nil)
+        entries = entries.push(entry!)
+        index = index + 1
+    val generation = PackageModuleIndexGenerationV1(
+        schema_version: 1,
+        producer_digest: producer,
+        root_generation: root,
+        scv_revision_id: scv_revision,
+        scv_commit_id: scv_commit,
+        scv_tree_id: scv_tree,
+        inventory_digest: inventory,
+        entries: entries
+    )
+    val validation = package_module_index_validate_v1(generation)
+    if validation != "ok":
+        return PackageModuleIndexReadV1(false, validation, "", nil)
+    if package_module_index_encode_v1(generation) != content:
+        return PackageModuleIndexReadV1(false, "noncanonical-index", "", nil)
+    PackageModuleIndexReadV1(true, "ok", sha256_text(content), Some(generation))
+
+fn package_module_index_digest_v1(generation: PackageModuleIndexGenerationV1) -> text:
+    val encoded = package_module_index_encode_v1(generation)
+    if encoded == "": "" else: sha256_text(encoded)
+
+fn package_module_index_storage_dir_v1(cache_root: text) -> text:
+    cache_root + "/package-module-index-v1"
+
+fn package_module_index_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1
+) -> bool:
+    val content = package_module_index_encode_v1(generation)
+    val digest = package_module_index_digest_v1(generation)
+    if content == "" or digest == "":
+        return false
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    if not rt_dir_create_all(dir):
+        return false
+    val immutable_path = "{dir}/{digest}.index"
+    if rt_file_exists(immutable_path):
+        val existing = package_module_index_read_file_v1(
+            immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
+        if existing == nil or existing! != content:
+            return false
+    else:
+        if not file_create_excl(immutable_path, content):
+            val raced = package_module_index_read_file_v1(
+                immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
+            if raced == nil or raced! != content:
+                return false
+    val pointer = "{dir}/CURRENT"
+    val pointer_tmp = "{pointer}.tmp.{digest}"
+    if not file_create_excl(pointer_tmp, digest):
+        val staged = package_module_index_read_file_v1(pointer_tmp, 64)
+        if staged == nil or staged! != digest:
+            return false
+    if not rt_file_rename(pointer_tmp, pointer):
+        rt_file_delete(pointer_tmp)
+        val published = package_module_index_read_file_v1(pointer, 64)
+        return published != nil and published! == digest
+    true
+
+fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    val pointer = package_module_index_read_file_v1("{dir}/CURRENT", 64)
+    if pointer == nil or not package_module_index_digest_valid_v1(pointer!):
+        return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", nil)
+    val content = package_module_index_read_file_v1(
+        "{dir}/{pointer!}.index", PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
+    if content == nil:
+        return PackageModuleIndexReadV1(false, "generation-unavailable", "", nil)
+    if sha256_text(content!) != pointer!:
+        return PackageModuleIndexReadV1(false, "generation-digest-mismatch", "", nil)
+    val decoded = package_module_index_decode_v1(content!)
+    if not decoded.valid:
+        return decoded
+    if decoded.digest != pointer!:
+        return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", nil)
+    decoded
+
+fn package_module_index_gc_v1(
+    cache_root: text, retained_digests: [text], max_remove: i64
+) -> i64:
+    if max_remove <= 0:
+        return 0
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    val current = package_module_index_read_file_v1("{dir}/CURRENT", 64)
+    if current == nil or not package_module_index_digest_valid_v1(current!):
+        return 0
+    val names = package_module_index_sorted_unique_v1(dir_list(dir))
+    var removed = 0
+    for name in names:
+        if removed >= max_remove:
+            break
+        if not name.ends_with(".index"):
+            continue
+        val digest = name.substring(0, name.len() - 6)
+        if (not package_module_index_digest_valid_v1(digest) or
+                digest == current! or retained_digests.contains(digest)):
+            continue
+        val path = "{dir}/{name}"
+        val content = package_module_index_read_file_v1(
+            path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
+        if (content != nil and sha256_text(content!) == digest and
+                package_module_index_decode_v1(content!).valid and
+                rt_file_delete(path)):
+            removed = removed + 1
+    removed
+
+fn package_module_index_dirty_packages_v1(
+    generation: PackageModuleIndexGenerationV1, dirty_modules: [text]
+) -> [text]:
+    var packages: [text] = []
+    for module_identity in dirty_modules:
+        val entry = package_module_index_find_v1(generation, module_identity)
+        if entry != nil:
+            packages = packages.push(entry!.package_identity)
+    package_module_index_sorted_unique_v1(packages)
+
+fn package_module_index_package_depends_v1(
+    generation: PackageModuleIndexGenerationV1, package_identity: text,
+    dependency_package: text
+) -> bool:
+    for entry in generation.entries:
+        if entry.package_identity != package_identity:
+            continue
+        for imported in entry.direct_imports:
+            val target = package_module_index_find_v1(generation, imported)
+            if target != nil and target!.package_identity == dependency_package:
+                return true
+    false
+
+fn package_module_index_schedule_packages_v1(
+    generation: PackageModuleIndexGenerationV1, dirty_packages: [text]
+) -> (bool, text, [text]):
+    val packages = package_module_index_sorted_unique_v1(dirty_packages)
+    var committed: [text] = []
+    while committed.len() < packages.len():
+        var ready: [text] = []
+        for package_identity in packages:
+            if committed.contains(package_identity):
+                continue
+            var blocked = false
+            for dependency in packages:
+                if dependency == package_identity or committed.contains(dependency):
+                    continue
+                if package_module_index_package_depends_v1(
+                        generation, package_identity, dependency):
+                    blocked = true
+            if not blocked:
+                ready = ready.push(package_identity)
+        ready = package_module_index_sorted_unique_v1(ready)
+        if ready.len() == 0:
+            return (false, "package-cycle-requires-scc-authority", [])
+        committed = committed.push(ready[0])
+    (true, "ok", committed)
+
+fn package_module_index_invalidate_v1(
+    generation: PackageModuleIndexGenerationV1,
+    changed_modules: [text],
+    public_interface_changed: bool
+) -> PackageModuleInvalidationV1:
+    val validation = package_module_index_validate_v1(generation)
+    if validation != "ok":
+        return PackageModuleInvalidationV1(false, validation, [], [], [])
+    val roots = package_module_index_sorted_unique_v1(changed_modules)
+    if changed_modules.len() > 0 and roots.len() == 0:
+        return PackageModuleInvalidationV1(false, "changed-module-invalid", [], [], [])
+    var dirty: [text] = []
+    for root in roots:
+        if package_module_index_find_v1(generation, root) == nil:
+            return PackageModuleInvalidationV1(
+                false, "changed-module-unknown:{root}", [], [], [])
+        dirty = dirty.push(root)
+    if public_interface_changed:
+        var cursor = 0
+        while cursor < dirty.len():
+            val entry = package_module_index_find_v1(generation, dirty[cursor])
+            if entry == nil:
+                return PackageModuleInvalidationV1(
+                    false, "dirty-module-missing", [], [], [])
+            for dependent in entry!.reverse_dependents:
+                if not dirty.contains(dependent):
+                    dirty = dirty.push(dependent)
+            cursor = cursor + 1
+    dirty = package_module_index_sorted_unique_v1(dirty)
+    val packages = package_module_index_dirty_packages_v1(generation, dirty)
+    val schedule = package_module_index_schedule_packages_v1(generation, packages)
+    if not schedule.0:
+        return PackageModuleInvalidationV1(false, schedule.1, dirty, packages, [])
+    PackageModuleInvalidationV1(true, "ok", dirty, packages, schedule.2)
+
+fn package_module_index_invalidate_changes_v1(
+    generation: PackageModuleIndexGenerationV1,
+    changes: [PackageModuleChangeV1]
+) -> PackageModuleInvalidationV1:
+    var roots: [text] = []
+    var semantic_roots: [text] = []
+    for change in changes:
+        if not package_module_index_text_valid_v1(change.module_identity):
+            return PackageModuleInvalidationV1(
+                false, "changed-module-invalid", [], [], [])
+        if (change.content_changed or change.export_changed or change.abi_changed or
+                change.initializer_changed or change.provider_changed):
+            roots = roots.push(change.module_identity)
+        if (change.export_changed or change.abi_changed or
+                change.initializer_changed or change.provider_changed):
+            semantic_roots = semantic_roots.push(change.module_identity)
+    # Content-only changes still reparse/recompile their owning package, but do
+    # not invalidate dependents when exported semantic metadata is unchanged.
+    val local = package_module_index_invalidate_v1(
+        generation, package_module_index_sorted_unique_v1(roots), false)
+    if not local.valid or semantic_roots.len() == 0:
+        return local
+    val propagated = package_module_index_invalidate_v1(
+        generation, package_module_index_sorted_unique_v1(semantic_roots), true)
+    if not propagated.valid:
+        return propagated
+    var dirty = local.dirty_modules
+    for module_identity in propagated.dirty_modules:
+        dirty = dirty.push(module_identity)
+    dirty = package_module_index_sorted_unique_v1(dirty)
+    val packages = package_module_index_dirty_packages_v1(generation, dirty)
+    val schedule = package_module_index_schedule_packages_v1(generation, packages)
+    if not schedule.0:
+        return PackageModuleInvalidationV1(
+            false, schedule.1, dirty, packages, [])
+    PackageModuleInvalidationV1(true, "ok", dirty, packages, schedule.2)
+
+export PACKAGE_MODULE_INDEX_SCHEMA_V1
+export PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+export PackageTldrHeaderV1, PersistentSmfPackageIndexV1
+export PackageModuleIndexReadV1, PackageModuleInvalidationV1
+export PackageModuleChangeV1
+export package_module_index_entry_encode_v1, package_module_index_entry_decode_v1
+export package_module_index_validate_v1, package_module_index_encode_v1
+export package_module_index_decode_v1, package_module_index_digest_v1
+export package_module_index_entry_action_digest_v1
+export package_module_index_publish_v1, package_module_index_read_current_v1
+export package_module_index_gc_v1
+export package_module_index_find_v1, package_module_index_invalidate_v1
+export package_module_index_invalidate_changes_v1

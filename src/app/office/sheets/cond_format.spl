@@ -53,6 +53,46 @@ fn cond_css_for_cell(sheet: Sheet, rules: [CondRule], cell_a1: text) -> text:
         i = i + 1
     ""
 
+fn cond_rule_matches_cell(sheet: Sheet, rule: CondRule, cell_a1: text) -> bool:
+    """Public single-rule match predicate covering every `CondRule.kind` this
+    engine understands, including the four kinds (`data_bar`,
+    `above_average`, `below_average`, `duplicate`, `unique`) whose evaluation
+    helpers (`_data_bar_percent`, `_cell_vs_average`,
+    `_cell_text_occurrence_match`) were already implemented below but never
+    wired into a dispatch anyone could call by name. The GUI layer
+    (`_sheet_gui_cf_marker` in app/office/gui.spl) has always imported and
+    called this function; it was undefined here, producing `_cond_rule_matches_cell`
+    at the Stage-4 macOS final link (2026-09-07). `cell_value`/`top_n` still
+    delegate to `_cell_matches_rule`; `color_scale` (whose match is entangled
+    with its own CSS computation) is a `cond_css_for_cell`-only kind and never
+    reaches this predicate in practice, but is included for completeness."""
+    if not _cell_in_range(cell_a1, rule.range):
+        return false
+    val cell = sheet.get_cell(cell_a1)
+    match rule.kind:
+        "cell_value" | "top_n":
+            return _cell_matches_rule(sheet, rule, cell_a1)
+        "color_scale":
+            return _color_scale_css(sheet, rule, cell_a1) != ""
+        "data_bar":
+            return _data_bar_percent(sheet, rule, cell_a1) >= 0
+        "above_average":
+            return _cell_vs_average(sheet, cell.value, rule.range, true)
+        "below_average":
+            return _cell_vs_average(sheet, cell.value, rule.range, false)
+        "duplicate":
+            return _cell_text_occurrence_match(sheet, cell.value, rule.range, false)
+        "unique":
+            return _cell_text_occurrence_match(sheet, cell.value, rule.range, true)
+        _:
+            return false
+
+fn cond_data_bar_percent(sheet: Sheet, rule: CondRule, cell_a1: text) -> i64:
+    """Public accessor for a `data_bar` rule's fill percent (0..100), or -1
+    when the cell is non-numeric or out of range. Same undefined-symbol gap
+    as `cond_rule_matches_cell` above; see that docstring."""
+    _data_bar_percent(sheet, rule, cell_a1)
+
 fn cond_format_range_css(sheet: Sheet, rules: [CondRule], range_a1: text) -> [text]:
     """Evaluate rules for all cells in a range and return non-empty CSS entries.
 
@@ -299,14 +339,16 @@ fn _color_scale_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
 
     _interpolate_color(lo, hi, cell_num)
 
-fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
-    """Computed data-bar css: a proportional left-to-right bar where
-    P = (value - min) / (max - min) * 100 over the rule range, rounded to
-    integer (half up). Degenerate single-value range (max == min) gets a
-    full bar (P = 100), mirroring the color_scale degenerate max-color rule.
-    Non-numeric or out-of-range cells get ""."""
+fn _data_bar_percent(sheet: Sheet, rule: CondRule, cell_a1: text) -> i64:
+    """Fill percent P = (value - min) / (max - min) * 100 over the rule range,
+    rounded to integer (half up). Degenerate single-value range (max == min)
+    gets a full bar (P = 100), mirroring the color_scale degenerate max-color
+    rule. Non-numeric or out-of-range cells get -1 (no match).
+
+    Extracted from `_data_bar_css` so the raw percent can also be reused by
+    the public `cond_data_bar_percent` wrapper (see its docstring)."""
     if not _cell_in_range(cell_a1, rule.range):
-        return ""
+        return -1
     val cell = sheet.get_cell(cell_a1)
     var cell_num = 0.0
     var is_number = false
@@ -317,7 +359,7 @@ fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
         _:
             pass
     if not is_number:
-        return ""
+        return -1
 
     val values = _collect_range_numbers(sheet, rule.range)
     var lo = cell_num
@@ -331,10 +373,17 @@ fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
             hi = v
         i = i + 1
 
-    var p = 100i64
     if hi != lo:
         val ratio = (cell_num - lo) / (hi - lo)
-        p = (ratio * 100.0 + 0.5).to_i64()
+        return (ratio * 100.0 + 0.5).to_i64()
+    100i64
+
+fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
+    """Computed data-bar css: a proportional left-to-right bar. Non-numeric
+    or out-of-range cells get ""."""
+    val p = _data_bar_percent(sheet, rule, cell_a1)
+    if p < 0:
+        return ""
     "background:linear-gradient(to right, #638ec6 {p}%, transparent {p}%)"
 
 fn _cell_vs_average(sheet: Sheet, cell: CellValue, range_str: text, above: bool) -> bool:

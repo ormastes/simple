@@ -272,3 +272,102 @@ spelling. This record covers only the CASELESS arrow arm.
 
 `case pattern -> body` (the `case` keyword with an arrow separator) is also not
 accepted; the seed was not verified to accept it either, so it was left alone.
+$ git log -1 --format='%h %ad %s' --date=short -S'Ok(()) -> ()' \
+$ src/compiler_rust/target/bootstrap/simple compile arrow.spl --format=smf -o arrow_seed.smf
+$ ./stage2-simple compile arrow.spl --format=smf -o arrow.smf
+    0
+0089ebdf32a 2026-09-06 fix(gpu): put simple-gpu in the workspace — it had never compiled on aarch64
+        0 -> 1
+  1 function(s) contain constructs that require the interpreter:
+1. Teach the pure-Simple parser the bare `pattern -> expr` match-arm form
+        _ -> 2
+24 bare-arrow match arms across 7 files (`Ok|Err|Some|None|_` heads only, so a
+2. As an interim unblock, rewrite the ~2 arrow arms in
+4,119s. Any iterate-and-retry loop on this should use a narrower `--source` or a
+`88cf297f2846d8b6635d797d96103b1cb05dd1c5da711e0bcddf424eeddbbb1f`):
+a grammar form the self-hosted parser cannot read should be caught before it
+  and Stage 2. Here the form has **no leading pipe** and the seed accepts it.
+- `arrow_match_arm_multi_field_pattern_parse_fail_2026-08-18.md` — arrow arms
+## Blast radius
+[BOOTSTRAP-PHASE] +4137ms phase1:load_sources:closure:unresolved module=ast
+`build/bootstrap/stage3/<triple>/stage3-tmp/native-build-stderr-*.log:882`):
+[build] parse unknown/1085 step 1/6 +4133352ms dt=4119725ms failed
+closure. The grammar fix, not a site-by-site rewrite, is the way out.
+   colon-block form the self-hosted parser accepts. This is a workaround; a
+compiler's own source uses a form its own parser rejects.
+compiler, which is why this reached main.
+compiling all Stage-2 files with 0 failures on 2026-08-09, so Stage 3's parse
+## Cost note
+direct `compile` probe with the Stage-2 binary rather than a full Stage 3.
+error: compile failed (arrow.spl): semantic: cannot compile to standalone SMF:
+error: native-build worker exited with code 1.
+error: --stop-after-stage3 requires a successful Stage 3 compiler
+## Fix directions
+fixing this one still leaves Stage 3 red.
+fn f(x: i64) -> i64:
+fn main() -> i64:
+  - f: [PatternMatch]
+frontend-offload lane. `.claude/rules/bootstrap.md` records a full bootstrap
+   grammar the compiler emits in its own source but cannot read is the defect.
+**Host:** aarch64-unknown-linux-gnu (20 cores, clang/ld.lld 23.1.0, LLVM 18 seed feature)
+- `inline_arrow_match_arm_fails_when_followed_by_another_arm_2026-09-05.md` —
+is `src/compiler/80.driver/driver_source_pipeline_parsing.spl`.)
+lands — nothing in the push tier parses `src/compiler/**` with the Stage-2
+  **leading-pipe** form `| pattern -> body`, and it says it affects BOTH seed
+likely just move the failure to the next of these files that is in the Stage-3
+(`load_sources` still completed 1085/1085), but flagged it as important:
+lower bound):
+    match x:
+## Minimal reproducer (8 lines)
+Not investigated in this run.
+   --output=build/bootstrap --bootstrap-receipt=build/bootstrap/receipt-stage3.env
+[parser_error] line 309:16: unexpected token in expression: -> '->'
+[parser_error] path arrow.spl line 3:11: expected :, got -> '->'
+[parser_error] path .../driver_source_pipeline_parsing.spl line 310:22: expected :, got -> '->'
+[parser_error] path .../driver_source_pipeline_parsing.spl line 311:1: expected Indent, got Dedent ''
+[parser_error] path src/compiler/driver/driver_source_pipeline_parsing.spl line 309:16: expected :, got -> '->'
+   parser), matching the seed's grammar. This is the real fix.
+    print "hi"
+## Probable next wall after the parser fix
+## Provenance — this is a same-day regression, not old debt
+rc=1
+## Relationship to the existing arrow-arm bugs
+Rust seed, same file, same command — **parses fine**, and fails later and for an
+Sanctioned lane, worktree-local, no deploy:
+seed builds the whole compiler (825 modules, 0 failed) from sources the
+self-hosted compiler cannot re-parse. Self-hosting is impossible while the
+self-hosted full-CLI `bin/simple` is unreachable on this tree.
+**Severity:** BLOCKER — Stage 3 cannot complete, so Stage 4 / a deployable
+sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage3 \
+So this is a **seed / self-host parser divergence**, not a bad source file: the
+   (`src/compiler/10.frontend/core/parser.spl` and the treesitter outline
+    -- src/compiler/80.driver/driver_source_pipeline_parsing.spl
+src/compiler/80.driver/driver_source_pipeline_parsing.spl
+   `src/compiler/80.driver/driver_source_pipeline_parsing.spl:309-310` into the
+(`src/compiler/driver` is a symlink to `src/compiler/80.driver`; the tracked file
+src/lib/common/structural/component/descriptor.spl
+src/lib/common/structural/parse/output_plan.spl
+src/lib/nogc_async_mut/driver/loader.spl
+src/lib/nogc_async_mut/structural/parse/runtime.spl
+src/lib/nogc_sync_mut/driver/loader.spl
+src/lib/nogc_sync_mut/sfm/manifest.spl
+Stage 2 is admitted. Stage 3 then runs for **~69 minutes** and dies in `parse`:
+Stage-2 pure-Simple compiler (`build/bootstrap/stage2/<triple>/simple`, sha256
+Stage 3 aborts on the FIRST parse error, so fixing only `:309-310` will very
+# Stage 3 self-host fails: the Stage-2 parser rejects `pattern -> expr` match arms that the seed accepts
+Stage 3 spent ~69 min to reach the parse failure, of which parse alone was
+**Status:** OPEN
+step was plausibly healthy until this landed. A compiler-source change that uses
+The diagnostic (full stderr 515,106 bytes, preserved at
+There is likely more than one such site — `:309` is only the FIRST parse error
+The source at `:308-310`:
+the Stage-3 build reported, and the run aborts on it. Expect to iterate.
+The truncation logic preserved a second diagnostic that was non-fatal here
+The two arrow arms that stop Stage 3 were introduced **today**, by the GPU
+They are plausibly the same underlying grammar area. Fixing either without
+Two arrow-arm parser bugs are already filed, and this is neither of them:
+unrelated reason (standalone-SMF restriction, i.e. it reached semantics):
+  used_in=src/compiler/driver/smf_serialization.spl dir=src/compiler/driver
+  warning: stage3 self-host failed (exit 1); Stage 4 unavailable
+## Where it stops
+  whose pattern binds 2+ fields. The reproducer above binds zero.

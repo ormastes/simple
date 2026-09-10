@@ -40,14 +40,59 @@ candidate_frontend_procfd_leaf() {
     expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*$' >/dev/null
 }
 
+# One host capture authority for both fresh bootstrap and admitted resume.
+# Windows native children require a Job Object; MSYS process groups alone do
+# not contain grandchildren created through Win32 CreateProcess.
+candidate_frontend_capture_setup() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+      MSYS*|MINGW*|CYGWIN*)
+        CANDIDATE_FRONTEND_CAPTURE_KIND=windows-job
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_PYTHON=$(command -v python3 || command -v python) || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR=$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log-windows.py
+        [ -f "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" ] &&
+            [ ! -L "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" ] || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR") || return 126
+        ;;
+      *)
+        CANDIDATE_FRONTEND_CAPTURE_KIND=procfd
+        frontend_owner_pid=$(perl -e 'print getppid') || return 126
+        exec 6<"$1" 7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" \
+            8<"$(command -v perl)" || return 126
+        BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=/proc/$frontend_owner_pid/fd/6
+        export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+        ;;
+    esac
+}
+
+candidate_frontend_capture_leaf() {
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        [ "${1%/*}" = "$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 1
+        case "${1##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+    else
+        candidate_frontend_procfd_leaf "$1"
+    fi
+}
+
+candidate_frontend_collect() {
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        "$BOOTSTRAP_STAGE3_WINDOWS_PYTHON" "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" \
+            --helper-sha256="$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" "$@"
+    else
+        candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
+        candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
+        "$BOOTSTRAP_STAGE3_PERL_DESCRIPTOR" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    fi
+}
+
 candidate_frontend_bounded_build() {
     bounded_probe=$1; shift
-    candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
-    candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
     bounded_parent=${build_log%/*}
     bounded_base=${build_log##*/}
     [ "$bounded_parent/$bounded_base" = "$build_log" ] || return 126
-    candidate_frontend_procfd "$bounded_parent" || return 126
+    candidate_frontend_capture_leaf "$build_log" || return 126
     case "$bounded_probe" in
       p2_add) bounded_leaf=$bounded_base ;;
       stage2_mir_retention) bounded_leaf=$bounded_base.stage2-mir-retention ;;
@@ -57,7 +102,7 @@ candidate_frontend_bounded_build() {
     esac
     bounded_log=$bounded_parent/$bounded_leaf
     bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
-    if "$BOOTSTRAP_STAGE3_PERL_DESCRIPTOR" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" \
+    if candidate_frontend_collect \
         --output-parent="$bounded_parent" --log-leaf="$bounded_leaf" \
         --receipt-leaf="$bounded_leaf.bounded.env" \
         --max-bytes="$CANDIDATE_FRONTEND_MAX_LOG_BYTES" \
@@ -74,8 +119,14 @@ candidate_frontend_bounded_build() {
     [ "$bounded_raw" = "$bounded_rc" ] || return 126
     [ "$(sed -n 's/^log_sha256=//p' "$bounded_receipt")" = \
         "$(candidate_frontend_hash_file "$bounded_log")" ] || return 126
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        [ "$(sed -n 's/^process_group=//p' "$bounded_receipt")" = windows-job ] || return 126
+        [ "$(sed -n 's/^helper_sha256=//p' "$bounded_receipt")" = \
+            "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" ] || return 126
+    fi
     case "$bounded_reason:$bounded_rc" in
       child-exit:*) ;;
+      child-native-exception:125|child-native-exception:132|child-native-exception:136|child-native-exception:139) ;;
       child-signal:1[2-9][89]|child-signal:1[3-9][0-9]|child-signal:2[0-5][0-9]) ;;
       timeout:124|overflow:125|setup-failure:126|exec-failure:127|supervisor-signal:1[2-9][89]|supervisor-signal:1[3-9][0-9]|supervisor-signal:2[0-5][0-9]) ;;
       *) return 126 ;;
@@ -98,6 +149,12 @@ candidate_frontend_smoke() (
     candidate=$1
     candidate_backend=${CANDIDATE_FRONTEND_BACKEND:-cranelift}
     candidate_bootstrap=${CANDIDATE_FRONTEND_BOOTSTRAP:-0}
+    # Each admission probe runs in a fresh isolated HOME/cache. The compiler's
+    # persistent package-index contract therefore has no admitted SCV yet;
+    # authorize that first, explicit initialization instead of accidentally
+    # depending on the developer's pre-existing user index.
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+    export SIMPLE_PACKAGE_INDEX_COLD_INIT
     timeout_bin=$(candidate_frontend_timeout_bin || true)
     [ -n "$timeout_bin" ] || exit 1
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
@@ -121,7 +178,7 @@ candidate_frontend_smoke() (
         probe=$2
         raw_status=$3
         [ -n "$status_path" ] || return 0
-        candidate_frontend_procfd_leaf "$status_path" || return 126
+        candidate_frontend_capture_leaf "$status_path" || return 126
         status_tmp="${status_path}.tmp.$$"
         {
             echo schema=simple-candidate-frontend-status-v2
@@ -178,7 +235,7 @@ candidate_frontend_smoke() (
         candidate_frontend_finish fail "$failed_probe" "$failed_status" || :
         exit "$failed_status"
     }
-    if ! candidate_frontend_procfd_leaf "$build_log"; then
+    if ! candidate_frontend_capture_leaf "$build_log"; then
         candidate_frontend_finish fail setup-failure 126 || :
         exit 126
     fi

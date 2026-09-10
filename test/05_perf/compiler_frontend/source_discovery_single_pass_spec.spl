@@ -1,0 +1,48 @@
+"""
+# Compiler source discovery performs one classification per walked candidate
+
+The directory collector used to classify every accepted `.spl` path in the
+directory loop and then recursively dispatch it through `_driver_collect_sources`,
+which repeated the complete exclusion chain. This fixture pins equivalent
+selection together with the operation count, so restoring recursive per-file
+dispatch changes five classifications to eight and fails the test.
+It also covers the final cache-preserving bulk-loader call form.
+"""
+
+use std.spec.*
+use compiler.driver.driver_source_loading.{
+    _driver_collect_sources,
+    driver_entry_scan_cache_reset,
+    driver_source_classification_count
+}
+
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn write_fixture(path: text, content: text):
+    val written = rt_file_write_text(path, content)
+    expect(written).to_equal(true)
+
+describe "compiler frontend source discovery fixed cost":
+    it "classifies each walked candidate once without changing selected modules":
+        val root = "build/test_tmp/source_discovery_single_pass"
+        val created = rt_dir_create(root, true)
+        expect(created).to_equal(true)
+        write_fixture(root + "/alpha.spl", "fn alpha() -> i64:\n    1\n")
+        write_fixture(root + "/beta.spl", "fn beta() -> i64:\n    2\n")
+        write_fixture(root + "/gamma.spl", "fn gamma() -> i64:\n    3\n")
+        write_fixture(root + "/check.spl", "fn excluded() -> i64:\n    4\n")
+        write_fixture(root + "/notes.txt", "not Simple source\n")
+
+        driver_entry_scan_cache_reset()
+        val sources = _driver_collect_sources(root)
+        var names: Dict<text, bool> = {}
+        for source in sources:
+            names[source.module_name] = true
+
+        expect(sources.len()).to_equal(3)
+        expect(names.contains_key("build.test_tmp.source_discovery_single_pass.alpha")).to_equal(true)
+        expect(names.contains_key("build.test_tmp.source_discovery_single_pass.beta")).to_equal(true)
+        expect(names.contains_key("build.test_tmp.source_discovery_single_pass.gamma")).to_equal(true)
+        expect(names.contains_key("build.test_tmp.source_discovery_single_pass.check")).to_equal(false)
+        expect(driver_source_classification_count()).to_equal(5)

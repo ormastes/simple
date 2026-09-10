@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/hosted-runtime-find-authority.XXXXXX")
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' \
+    EXIT INT TERM
+
+mkdir -p "$tmp/source/deps"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/source/simple"
+chmod 755 "$tmp/source/simple"
+printf native >"$tmp/source/libsimple_native_all.a"
+printf backfill >"$tmp/source/libsimple_compiler_backfill.a"
+printf runtime >"$tmp/source/deps/libsimple_runtime.a"
+printf hosted >\
+    "$tmp/source/deps/libspl_hosted_runtime-canonical.rlib"
+
+bootstrap_stage3_copy_seed_tuple \
+    "$tmp/source" "$tmp/frozen" simple \
+    libsimple_native_all.a libsimple_compiler_backfill.a
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+        echo 'PASS: hosted runtime authority uses the platform POSIX find'
+        exit 0
+        ;;
+esac
+
+mkdir "$tmp/poison"
+cat >"$tmp/poison/find" <<'EOF'
+#!/bin/sh
+: >"$POISON_FIND_MARKER"
+exit 91
+EOF
+chmod 755 "$tmp/poison/find"
+
+POISON_FIND_MARKER="$tmp/poison-find-ran"
+export POISON_FIND_MARKER
+(
+    PATH="$tmp/poison:$PATH"
+    export PATH
+    [ "$(command -v find)" = "$tmp/poison/find" ]
+    bootstrap_stage3_verify_hosted_runtime_authority "$tmp/frozen"
+)
+[ ! -e "$POISON_FIND_MARKER" ]
+
+echo 'PASS: Windows hosted runtime authority bypasses System32 find.exe'

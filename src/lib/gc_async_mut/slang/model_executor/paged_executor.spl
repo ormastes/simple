@@ -1,0 +1,770 @@
+# @gc — one serial owner for Slang's physical paged-KV provider.
+
+use std.gc_async_mut.slang.core.page_manager.{KvPageManager, KvPageId, KvRequestId, KvPrefixId, KvPageTelemetry, KvPageError}
+use std.gc_async_mut.slang.model_executor.backend.{BackendError, GgmlBackend, GgmlRequest, PhysicalPagePoolCreateRequest, PhysicalPageProviderStatus, parse_nonnegative_i64_text_exact, physical_page_provider_status, physical_lightweight_requests_ready, physical_page_execution_namespace, physical_page_pool_create_request, physical_page_pool_destroy, physical_page_reserve, physical_page_release, physical_page_copy_tail, physical_page_table_begin, physical_page_table_push, physical_page_prefill, physical_page_decode, physical_page_boundary_logits, physical_page_table_commit, physical_page_table_abort, physical_page_bytes, open_physical_request, prepare_request_tokens, request_token_at, request_sample, request_is_eog, request_piece, close_backend_request, cancel_backend_request}
+
+enum PagedExecutorError:
+    AlreadyActive
+    ProviderUnavailable
+    InvalidConfiguration
+    PoolCreateFailed
+    PoolContextCreateFailed
+    PoolCapacityOverflow
+    PoolConfigurationRejected
+    PoolBusy
+    LogicalManagerFailed
+    Busy
+    ProviderReleaseFailed
+    PoolDestroyFailed
+    RequestCreateFailed
+    TokenizeFailed
+    CapacityExceeded
+    ProviderOperationFailed
+    LogicalStateFailed
+    LogicalUpdateFailed
+    LogicalSealFailed
+    LogicalAttachFailed
+    CowPrepareFailed
+    CowCommitFailed
+    LogicalRequestInvalid
+    ProviderHandleMissing
+    ReclaimLedgerMismatch
+    ColdRequestInvalid
+    DecodeFailed
+    CleanupFailed
+
+struct PagedGeneration:
+    generated_tokens: text
+    output: text
+
+struct PagedGenerationRequest:
+    max_tokens: text
+    prompt: text
+
+fn paged_executor_error_text(error: PagedExecutorError) -> text:
+    match error:
+        PagedExecutorError.AlreadyActive: "physical paged executor is already active"
+        PagedExecutorError.ProviderUnavailable: "physical page provider is unavailable"
+        PagedExecutorError.InvalidConfiguration: "physical page configuration is invalid"
+        PagedExecutorError.PoolCreateFailed: "physical page pool creation failed"
+        PagedExecutorError.PoolContextCreateFailed: "physical page pool context creation failed"
+        PagedExecutorError.PoolCapacityOverflow: "physical page pool capacity overflowed"
+        PagedExecutorError.PoolConfigurationRejected: "physical page pool configuration was rejected"
+        PagedExecutorError.PoolBusy: "physical page pool is busy"
+        PagedExecutorError.LogicalManagerFailed: "logical page manager creation failed"
+        PagedExecutorError.Busy: "physical paged executor is busy"
+        PagedExecutorError.ProviderReleaseFailed: "physical page release failed"
+        PagedExecutorError.PoolDestroyFailed: "physical page pool destruction failed"
+        PagedExecutorError.RequestCreateFailed: "physical request creation failed"
+        PagedExecutorError.TokenizeFailed: "physical request tokenization failed"
+        PagedExecutorError.CapacityExceeded: "physical page capacity was exceeded"
+        PagedExecutorError.ProviderOperationFailed: "physical page operation failed"
+        PagedExecutorError.LogicalStateFailed: "logical page state transition failed"
+        PagedExecutorError.LogicalUpdateFailed: "logical page occupancy update failed"
+        PagedExecutorError.LogicalSealFailed: "logical page seal failed"
+        PagedExecutorError.LogicalAttachFailed: "logical page attachment failed"
+        PagedExecutorError.CowPrepareFailed: "logical copy-on-write preparation failed"
+        PagedExecutorError.CowCommitFailed: "logical copy-on-write commit failed"
+        PagedExecutorError.LogicalRequestInvalid: "logical request handle became invalid"
+        PagedExecutorError.ProviderHandleMissing: "logical page has no provider handle"
+        PagedExecutorError.ReclaimLedgerMismatch: "provider reclaim ledger acknowledgement failed"
+        PagedExecutorError.ColdRequestInvalid: "logical request is invalid before cold prefill returns"
+        PagedExecutorError.DecodeFailed: "physical decode failed"
+        PagedExecutorError.CleanupFailed: "physical request cleanup failed"
+
+var PAGED_BACKEND: GgmlBackend? = nil
+var PAGED_PENDING_BACKEND: GgmlBackend? = nil
+# A direct mutable receiver is required here. Calling `me` methods through an
+# optional unwrap mutates a temporary and loses the page/reference transition.
+var PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
+var PAGED_MANAGER_ACTIVE = false
+var PAGED_POOL = 0
+var PAGED_NAMESPACE = 0
+var PAGED_PAGE_TOKENS = 0
+var PAGED_CONTEXT_TOKENS = 0
+var PAGED_PAGE_CAPACITY = 0
+var PAGED_REQUEST_CAPACITY = 0
+var PAGED_PREFIX_CAPACITY = 0
+var PAGED_BYTE_LIMIT = 0
+fn _current_request_active() -> bool:
+    PAGED_MANAGER_ACTIVE and PAGED_MANAGER.sole_active_request().is_ok()
+
+fn paged_executor_bind_backend(backend: GgmlBackend) -> bool:
+    if PAGED_MANAGER_ACTIVE or PAGED_PENDING_BACKEND != nil:
+        return false
+    PAGED_PENDING_BACKEND = backend
+    true
+
+fn paged_executor_clear_pending_backend():
+    PAGED_PENDING_BACKEND = nil
+
+fn paged_executor_active() -> bool:
+    PAGED_BACKEND != nil and PAGED_MANAGER_ACTIVE and PAGED_POOL > 0 and
+    PAGED_NAMESPACE > 0
+
+fn paged_executor_pool() -> i64:
+    PAGED_POOL
+
+fn paged_executor_namespace() -> i64:
+    PAGED_NAMESPACE
+
+fn paged_executor_telemetry() -> KvPageTelemetry?:
+    if not paged_executor_active():
+        return nil
+    return PAGED_MANAGER.telemetry()
+
+fn _page_namespace() -> text:
+    PAGED_NAMESPACE.to_string()
+
+fn _hash_extend(hash: u64, token: i64) -> u64:
+    (hash ^ token.to_u64()) * 1099511628211u64
+
+fn _token_hash(tokens: [i64], start: i64, count: i64) -> u64:
+    var hash = 1469598103934665603u64
+    var index = 0
+    while index < count:
+        hash = _hash_extend(hash, tokens[start + index])
+        index = index + 1
+    if hash == 0u64:
+        return 1u64
+    hash
+
+fn _drain_reclaimed_pages() -> Result<(), PagedExecutorError>:
+    if not PAGED_MANAGER_ACTIVE or PAGED_BACKEND == nil or PAGED_POOL <= 0:
+        return Err(PagedExecutorError.ProviderUnavailable)
+    var handle = PAGED_MANAGER.peek_reclaimed_provider_handle()
+    while handle != 0u64:
+        match physical_page_release(PAGED_BACKEND!, PAGED_POOL, handle.to_i64()):
+            Err(_): return Err(PagedExecutorError.ProviderReleaseFailed)
+            Ok(_):
+                if not PAGED_MANAGER.acknowledge_reclaimed_provider_handle(handle):
+                    return Err(PagedExecutorError.ReclaimLedgerMismatch)
+        handle = PAGED_MANAGER.peek_reclaimed_provider_handle()
+    Ok(())
+
+fn _ensure_page_headroom(required_pages: i64) -> Result<(), PagedExecutorError>:
+    if not PAGED_MANAGER.admit_page_headroom(required_pages):
+        return Err(PagedExecutorError.CapacityExceeded)
+    _drain_reclaimed_pages()
+
+fn _provider_handle(page: KvPageId) -> Result<i64, PagedExecutorError>:
+    match PAGED_MANAGER.page_provider_handle(page):
+        Err(_): Err(PagedExecutorError.ProviderHandleMissing)
+        Ok(handle): Ok(handle.to_i64())
+
+fn _abort_unattached_pages(pages: [KvPageId]) -> Result<(), PagedExecutorError>:
+    for page in pages:
+        match PAGED_MANAGER.abort_page(page):
+            Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+            Ok(_): ()
+    _drain_reclaimed_pages()
+
+fn _read_tokens(request: GgmlRequest, count: i64) -> Result<[i64], PagedExecutorError>:
+    var tokens: [i64] = []
+    var index = 0
+    while index < count:
+        match request_token_at(PAGED_BACKEND!, request, index):
+            Err(_): return Err(PagedExecutorError.TokenizeFailed)
+            Ok(token): tokens.push(token)
+        index = index + 1
+    Ok(tokens)
+
+fn _cold_prefill(native_request: GgmlRequest,
+                 tokens: [i64]) -> Result<(), PagedExecutorError>:
+    if tokens.len() <= 0 or tokens.len() > PAGED_CONTEXT_TOKENS:
+        return Err(PagedExecutorError.CapacityExceeded)
+    val page_count = (tokens.len() + PAGED_PAGE_TOKENS - 1) / PAGED_PAGE_TOKENS
+    match _ensure_page_headroom(page_count):
+        Err(error): return Err(error)
+        Ok(_): ()
+    val logical_result = PAGED_MANAGER.create_request(_page_namespace())
+    val logical_request = match logical_result:
+        Err(_): return Err(PagedExecutorError.CapacityExceeded)
+        Ok(value): value
+    val transaction_result = physical_page_table_begin(
+        PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count)
+    val transaction = match transaction_result:
+        Err(_):
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        Ok(value): value
+    var staged: [KvPageId] = []
+    var index = 0
+    while index < page_count:
+        val provider_result = physical_page_reserve(PAGED_BACKEND!, PAGED_POOL)
+        val provider_handle = match provider_result:
+            Err(_):
+                physical_page_table_abort(PAGED_BACKEND!, transaction)
+                _abort_unattached_pages(staged)
+                PAGED_MANAGER.close_request(logical_request)
+                return Err(PagedExecutorError.CapacityExceeded)
+            Ok(value): value
+        val page_result = PAGED_MANAGER.reserve_page(
+            _page_namespace(), provider_handle.to_u64())
+        val page = match page_result:
+            Err(_):
+                physical_page_release(PAGED_BACKEND!, PAGED_POOL, provider_handle)
+                physical_page_table_abort(PAGED_BACKEND!, transaction)
+                _abort_unattached_pages(staged)
+                PAGED_MANAGER.close_request(logical_request)
+                return Err(PagedExecutorError.CapacityExceeded)
+            Ok(value): value
+        if PAGED_MANAGER.page_provider_handle(page).is_err():
+            # No page was pushed for this iteration; explicitly abort the live
+            # provider transaction and reclaim every prior staged page.
+            physical_page_table_abort(PAGED_BACKEND!, transaction)
+            PAGED_MANAGER.abort_page(page)
+            _abort_unattached_pages(staged)
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.ProviderHandleMissing)
+        staged.push(page)
+        var rows = tokens.len() - index * PAGED_PAGE_TOKENS
+        if rows > PAGED_PAGE_TOKENS:
+            rows = PAGED_PAGE_TOKENS
+        match physical_page_table_push(PAGED_BACKEND!, transaction,
+                                       provider_handle, 0, rows):
+            Err(_):
+                _abort_unattached_pages(staged)
+                PAGED_MANAGER.close_request(logical_request)
+                return Err(PagedExecutorError.ProviderOperationFailed)
+            Ok(_): ()
+        index = index + 1
+    match physical_page_prefill(PAGED_BACKEND!, transaction, 0, 0, tokens.len()):
+        Err(_):
+            _abort_unattached_pages(staged)
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        Ok(_): ()
+    match physical_page_table_commit(PAGED_BACKEND!, transaction):
+        Err(_):
+            _abort_unattached_pages(staged)
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        Ok(_): ()
+    index = 0
+    while index < staged.len():
+        var rows = tokens.len() - index * PAGED_PAGE_TOKENS
+        if rows > PAGED_PAGE_TOKENS:
+            rows = PAGED_PAGE_TOKENS
+        val checksum = _token_hash(tokens, index * PAGED_PAGE_TOKENS, rows)
+        if PAGED_MANAGER.update_writable(staged[index], rows, checksum).is_err():
+            return Err(PagedExecutorError.LogicalUpdateFailed)
+        if PAGED_MANAGER.seal_page(staged[index]).is_err():
+            return Err(PagedExecutorError.LogicalSealFailed)
+        if PAGED_MANAGER.attach_sealed(logical_request, staged[index]).is_err():
+            return Err(PagedExecutorError.LogicalAttachFailed)
+        index = index + 1
+    if PAGED_MANAGER.request_page_count(logical_request).is_err():
+        return Err(PagedExecutorError.ColdRequestInvalid)
+    if PAGED_MANAGER.record_committed_prefill(tokens.len()).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
+    Ok(())
+
+fn _restore_exact_prefix(native_request: GgmlRequest, prefix: KvPrefixId,
+                         tokens: [i64]) -> Result<(), PagedExecutorError>:
+    val prefix_tokens = match PAGED_MANAGER.prefix_token_count(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    if prefix_tokens != tokens.len() or prefix_tokens <= 0:
+        return Err(PagedExecutorError.LogicalStateFailed)
+    val logical_request = match PAGED_MANAGER.create_request_from_prefix(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    # Pin the selected prefix before pressure eviction. Other LRU records may
+    # be reclaimed, but the chosen pages remain request-owned until cleanup.
+    match _ensure_page_headroom(1):
+        Err(error):
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(error)
+        Ok(_): ()
+    val page_count = match PAGED_MANAGER.request_page_count(logical_request):
+        Err(_):
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    val tail = match PAGED_MANAGER.request_page_at(logical_request, page_count - 1):
+        Err(_):
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    val occupied = match PAGED_MANAGER.page_occupied(tail):
+        Err(_):
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    if occupied <= 0:
+        PAGED_MANAGER.close_request(logical_request)
+        return Err(PagedExecutorError.LogicalStateFailed)
+    val provider_result = physical_page_reserve(PAGED_BACKEND!, PAGED_POOL)
+    val provider_handle = match provider_result:
+        Err(_):
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.CapacityExceeded)
+        Ok(value): value
+    val retained = occupied - 1
+    val tail_start = tokens.len() - occupied
+    val retained_checksum = _token_hash(tokens, tail_start, retained)
+    val reservation_result = PAGED_MANAGER.prepare_cow_rows(
+        logical_request, provider_handle.to_u64(), retained, retained_checksum)
+    val reservation = match reservation_result:
+        Err(_):
+            physical_page_release(PAGED_BACKEND!, PAGED_POOL, provider_handle)
+            PAGED_MANAGER.close_request(logical_request)
+            return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    if retained > 0:
+        val source_handle = _provider_handle(reservation.source).unwrap()
+        if physical_page_copy_tail(PAGED_BACKEND!, PAGED_POOL, source_handle,
+                                   provider_handle, retained).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if PAGED_MANAGER.record_copied_tail_rows(retained).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.LogicalStateFailed)
+    val transaction = match physical_page_table_begin(
+        PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count):
+        Err(_):
+            PAGED_MANAGER.abort_cow(reservation)
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        Ok(value): value
+    var index = 0
+    while index + 1 < page_count:
+        val page = PAGED_MANAGER.request_page_at(logical_request, index).unwrap()
+        val handle = _provider_handle(page).unwrap()
+        val rows = PAGED_MANAGER.page_occupied(page).unwrap()
+        if physical_page_table_push(PAGED_BACKEND!, transaction, handle, rows, 0).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            PAGED_MANAGER.close_request(logical_request)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        index = index + 1
+    if physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle,
+                                retained, 1).is_err():
+        PAGED_MANAGER.abort_cow(reservation)
+        PAGED_MANAGER.close_request(logical_request)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_boundary_logits(PAGED_BACKEND!, transaction,
+                                     tokens.len() - 1, tokens.len() - 1).is_err():
+        PAGED_MANAGER.abort_cow(reservation)
+        PAGED_MANAGER.close_request(logical_request)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
+        PAGED_MANAGER.abort_cow(reservation)
+        PAGED_MANAGER.close_request(logical_request)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    val full_checksum = _token_hash(tokens, tail_start, occupied)
+    match PAGED_MANAGER.commit_cow_append_and_seal(
+        reservation, retained_checksum, 1, full_checksum):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(_): ()
+    if PAGED_MANAGER.record_committed_restore(tokens.len(), 0, 1, 0).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
+    _drain_reclaimed_pages()
+    Ok(())
+
+fn _restore_prefix_with_suffix(native_request: GgmlRequest, prefix: KvPrefixId,
+                                tokens: [i64]) -> Result<(), PagedExecutorError>:
+    val prefix_tokens = match PAGED_MANAGER.prefix_token_count(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    if prefix_tokens <= 0 or prefix_tokens >= tokens.len():
+        return Err(PagedExecutorError.LogicalStateFailed)
+    val logical_request = match PAGED_MANAGER.create_request_from_prefix(prefix):
+        Err(_): return Err(PagedExecutorError.LogicalStateFailed)
+        Ok(value): value
+    var index = prefix_tokens
+    while index < tokens.len():
+        match _decode_one(native_request, tokens[index], index):
+            Err(error):
+                PAGED_MANAGER.close_request(logical_request)
+                _drain_reclaimed_pages()
+                return Err(error)
+            Ok(_): ()
+        index = index + 1
+    if PAGED_MANAGER.record_committed_restore(
+        prefix_tokens, tokens.len() - prefix_tokens, 0, 0).is_err():
+        return Err(PagedExecutorError.LogicalStateFailed)
+    Ok(())
+
+fn _decode_one(native_request: GgmlRequest, token: i64,
+               position: i64) -> Result<(), PagedExecutorError>:
+    val logical_request = match PAGED_MANAGER.sole_active_request():
+        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    val count_result = PAGED_MANAGER.request_page_count(logical_request)
+    val page_count = match count_result:
+        Err(_): return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    if page_count <= 0 or position < 0 or position >= PAGED_CONTEXT_TOKENS:
+        return Err(PagedExecutorError.CapacityExceeded)
+    match _ensure_page_headroom(1):
+        Err(error): return Err(error)
+        Ok(_): ()
+    val tail = PAGED_MANAGER.request_page_at(logical_request, page_count - 1).unwrap()
+    val occupied = PAGED_MANAGER.page_occupied(tail).unwrap()
+    val provider_result = physical_page_reserve(PAGED_BACKEND!, PAGED_POOL)
+    val provider_handle = match provider_result:
+        Err(_): return Err(PagedExecutorError.CapacityExceeded)
+        Ok(value): value
+    if occupied < PAGED_PAGE_TOKENS:
+        val reservation_result = PAGED_MANAGER.prepare_cow(logical_request, provider_handle.to_u64())
+        val reservation = match reservation_result:
+            Err(_):
+                physical_page_release(PAGED_BACKEND!, PAGED_POOL, provider_handle)
+                return Err(PagedExecutorError.CowPrepareFailed)
+            Ok(value): value
+        val source_handle = _provider_handle(reservation.source).unwrap()
+        if physical_page_copy_tail(PAGED_BACKEND!, PAGED_POOL, source_handle,
+                                   provider_handle, occupied).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if PAGED_MANAGER.record_copied_tail_rows(occupied).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.LogicalStateFailed)
+        val transaction_result = physical_page_table_begin(
+            PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count)
+        val transaction = match transaction_result:
+            Err(_):
+                PAGED_MANAGER.abort_cow(reservation)
+                _drain_reclaimed_pages()
+                return Err(PagedExecutorError.ProviderOperationFailed)
+            Ok(value): value
+        var index = 0
+        while index + 1 < page_count:
+            val page = PAGED_MANAGER.request_page_at(logical_request, index).unwrap()
+            val handle = _provider_handle(page).unwrap()
+            val rows = PAGED_MANAGER.page_occupied(page).unwrap()
+            if physical_page_table_push(PAGED_BACKEND!, transaction, handle, rows, 0).is_err():
+                PAGED_MANAGER.abort_cow(reservation)
+                _drain_reclaimed_pages()
+                return Err(PagedExecutorError.ProviderOperationFailed)
+            index = index + 1
+        if physical_page_table_push(PAGED_BACKEND!, transaction, provider_handle, occupied, 1).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
+            PAGED_MANAGER.abort_cow(reservation)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        val checksum = _hash_extend(reservation.source_checksum, token)
+        match PAGED_MANAGER.commit_cow_append_and_seal(
+            reservation, reservation.source_checksum, 1, checksum):
+            Err(_): return Err(PagedExecutorError.CowCommitFailed)
+            Ok(_): ()
+        return _drain_reclaimed_pages()
+    val page_result = PAGED_MANAGER.reserve_page(_page_namespace(), provider_handle.to_u64())
+    val new_page = match page_result:
+        Err(_):
+            physical_page_release(PAGED_BACKEND!, PAGED_POOL, provider_handle)
+            return Err(PagedExecutorError.CapacityExceeded)
+        Ok(value): value
+    val new_handle = provider_handle
+    val transaction_result = physical_page_table_begin(
+        PAGED_BACKEND!, native_request, PAGED_POOL, 0, page_count + 1)
+    val transaction = match transaction_result:
+        Err(_):
+            PAGED_MANAGER.abort_page(new_page)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        Ok(value): value
+    var index = 0
+    while index < page_count:
+        val page = PAGED_MANAGER.request_page_at(logical_request, index).unwrap()
+        val handle = _provider_handle(page).unwrap()
+        val rows = PAGED_MANAGER.page_occupied(page).unwrap()
+        if physical_page_table_push(PAGED_BACKEND!, transaction, handle, rows, 0).is_err():
+            PAGED_MANAGER.abort_page(new_page)
+            _drain_reclaimed_pages()
+            return Err(PagedExecutorError.ProviderOperationFailed)
+        index = index + 1
+    if physical_page_table_push(PAGED_BACKEND!, transaction, new_handle, 0, 1).is_err():
+        PAGED_MANAGER.abort_page(new_page)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_decode(PAGED_BACKEND!, transaction, token, position).is_err():
+        PAGED_MANAGER.abort_page(new_page)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    if physical_page_table_commit(PAGED_BACKEND!, transaction).is_err():
+        PAGED_MANAGER.abort_page(new_page)
+        _drain_reclaimed_pages()
+        return Err(PagedExecutorError.ProviderOperationFailed)
+    val checksum = _token_hash([token], 0, 1)
+    if PAGED_MANAGER.update_writable(new_page, 1, checksum).is_err():
+        return Err(PagedExecutorError.LogicalUpdateFailed)
+    if PAGED_MANAGER.seal_page(new_page).is_err():
+        return Err(PagedExecutorError.LogicalSealFailed)
+    if PAGED_MANAGER.attach_sealed(logical_request, new_page).is_err():
+        return Err(PagedExecutorError.LogicalAttachFailed)
+    Ok(())
+
+fn _close_generation(native_request: GgmlRequest,
+                     has_logical_request: bool) -> Result<(), PagedExecutorError>:
+    # Native table mappings must drain before logical references enqueue their
+    # provider pages for release.
+    if close_backend_request(PAGED_BACKEND!, native_request).is_err():
+        return Err(PagedExecutorError.CleanupFailed)
+    if has_logical_request:
+        val current = match PAGED_MANAGER.sole_active_request():
+            Err(_): return Err(PagedExecutorError.CleanupFailed)
+            Ok(value): value
+        if PAGED_MANAGER.close_request(current).is_err():
+            return Err(PagedExecutorError.CleanupFailed)
+    if _drain_reclaimed_pages().is_err():
+        return Err(PagedExecutorError.CleanupFailed)
+    Ok(())
+
+fn _cancel_generation(native_request: GgmlRequest,
+                      has_logical_request: bool) -> Result<(), PagedExecutorError>:
+    if cancel_backend_request(PAGED_BACKEND!, native_request).is_err():
+        return Err(PagedExecutorError.CleanupFailed)
+    # cancel_backend_request consumes the native handle and drains its table mappings.
+    if has_logical_request:
+        val current = match PAGED_MANAGER.sole_active_request():
+            Err(_): return Err(PagedExecutorError.CleanupFailed)
+            Ok(value): value
+        if PAGED_MANAGER.close_request(current).is_err():
+            return Err(PagedExecutorError.CleanupFailed)
+    if _drain_reclaimed_pages().is_err():
+        return Err(PagedExecutorError.CleanupFailed)
+    Ok(())
+
+# Executes one request entirely through the external physical-page provider.
+# Once prefill starts, failures are returned from this mode; callers must not
+# replay the request through another context and risk duplicate output.
+fn _paged_executor_generate_impl(input: PagedGenerationRequest) -> Result<PagedGeneration, PagedExecutorError>:
+    val prompt = input.prompt
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens < 0:
+        return Err(PagedExecutorError.InvalidConfiguration)
+    if not paged_executor_active():
+        return Err(PagedExecutorError.ProviderUnavailable)
+    if _current_request_active():
+        return Err(PagedExecutorError.Busy)
+    val native_result = open_physical_request(
+        PAGED_BACKEND!, PAGED_POOL, PAGED_CONTEXT_TOKENS)
+    val native_request = match native_result:
+        Err(_): return Err(PagedExecutorError.RequestCreateFailed)
+        Ok(value): value
+    val count_result = prepare_request_tokens(PAGED_BACKEND!, native_request, prompt)
+    val prompt_tokens = match count_result:
+        Err(_):
+            _cancel_generation(native_request, false)
+            return Err(PagedExecutorError.TokenizeFailed)
+        Ok(value): value
+    if prompt_tokens <= 0 or prompt_tokens > PAGED_CONTEXT_TOKENS or
+       max_tokens > PAGED_CONTEXT_TOKENS - prompt_tokens:
+        _cancel_generation(native_request, false)
+        return Err(PagedExecutorError.CapacityExceeded)
+    val tokens_result = _read_tokens(native_request, prompt_tokens)
+    val tokens = match tokens_result:
+        Err(error):
+            _cancel_generation(native_request, false)
+            return Err(error)
+        Ok(value): value
+    val key_hash = _token_hash(tokens, 0, tokens.len())
+    val prefix_result = PAGED_MANAGER.find_longest_prefix(_page_namespace(), tokens)
+    val prefill_result = match prefix_result:
+        Err(_): _cold_prefill(native_request, tokens)
+        Ok(prefix):
+            val retained = match PAGED_MANAGER.prefix_token_count(prefix):
+                Err(_):
+                    _cancel_generation(native_request, false)
+                    return Err(PagedExecutorError.LogicalStateFailed)
+                Ok(value): value
+            if retained == tokens.len():
+                _restore_exact_prefix(native_request, prefix, tokens)
+            else:
+                _restore_prefix_with_suffix(native_request, prefix, tokens)
+    match prefill_result:
+        Err(error):
+            _cancel_generation(native_request, false)
+            return Err(error)
+        Ok(_): ()
+    val logical_request = match PAGED_MANAGER.sole_active_request():
+        Err(_):
+            _cancel_generation(native_request, true)
+            return Err(PagedExecutorError.LogicalRequestInvalid)
+        Ok(value): value
+    if PAGED_MANAGER.request_page_count(logical_request).is_err():
+            _cancel_generation(native_request, true)
+            return Err(PagedExecutorError.LogicalRequestInvalid)
+    # Cache admission is opportunistic. The active request remains the owner of
+    # every page, so a full prefix table cannot change generation correctness.
+    PAGED_MANAGER.publish_prefix(logical_request, key_hash, tokens)
+    var output = ""
+    var produced = 0
+    while produced < max_tokens:
+        val sample_result = request_sample(PAGED_BACKEND!, native_request)
+        val token = match sample_result:
+            Err(_):
+                _cancel_generation(native_request, true)
+                return Err(PagedExecutorError.DecodeFailed)
+            Ok(value): value
+        if request_is_eog(PAGED_BACKEND!, token):
+            break
+        val piece_result = request_piece(PAGED_BACKEND!, native_request, token)
+        match piece_result:
+            Err(_):
+                _cancel_generation(native_request, true)
+                return Err(PagedExecutorError.DecodeFailed)
+            Ok(piece): output = output + piece
+        match _decode_one(native_request, token,
+                          prompt_tokens + produced):
+            Err(error):
+                _cancel_generation(native_request, true)
+                return Err(error)
+            Ok(_): ()
+        produced = produced + 1
+    match _close_generation(native_request, true):
+        Err(error): Err(error)
+        Ok(_): Ok(PagedGeneration(output: output, generated_tokens: produced.to_text()))
+
+fn paged_executor_generate_observed(prompt: text,
+                                    max_tokens: i64) -> Result<PagedGeneration, PagedExecutorError>:
+    paged_executor_generate_observed_request(PagedGenerationRequest(
+        max_tokens: max_tokens.to_text(), prompt: prompt))
+
+fn paged_executor_generate_observed_request(input: PagedGenerationRequest) -> Result<PagedGeneration, PagedExecutorError>:
+    val result = _paged_executor_generate_impl(input)
+    match result:
+        Err(error):
+            if PAGED_MANAGER_ACTIVE:
+                PAGED_MANAGER.record_generation_failure()
+            Err(error)
+        Ok(observed): Ok(observed)
+
+fn paged_executor_generate(prompt: text,
+                           max_tokens: i64) -> Result<text, PagedExecutorError>:
+    match paged_executor_generate_observed(prompt, max_tokens):
+        Err(error): Err(error)
+        Ok(observed): Ok(observed.output)
+
+fn paged_executor_activate_config(config: text) -> Result<(), PagedExecutorError>:
+    if PAGED_PENDING_BACKEND == nil:
+        return Err(PagedExecutorError.ProviderUnavailable)
+    val backend = PAGED_PENDING_BACKEND!
+    # Consume the pending binding exactly once; every failure path is retryable.
+    PAGED_PENDING_BACKEND = nil
+    val fields = config.split("|")
+    if fields.len() != 6:
+        return Err(PagedExecutorError.InvalidConfiguration)
+    if paged_executor_active():
+        return Err(PagedExecutorError.AlreadyActive)
+    val context_tokens = parse_nonnegative_i64_text_exact(fields[0])
+    val page_tokens = parse_nonnegative_i64_text_exact(fields[1])
+    val page_capacity = parse_nonnegative_i64_text_exact(fields[2])
+    val request_capacity = parse_nonnegative_i64_text_exact(fields[3])
+    val prefix_capacity = parse_nonnegative_i64_text_exact(fields[4])
+    val byte_limit = parse_nonnegative_i64_text_exact(fields[5])
+    if (context_tokens <= 0 or page_tokens <= 0 or page_capacity <= 0 or
+        request_capacity <= 0 or prefix_capacity <= 0 or byte_limit <= 0 or
+        context_tokens > page_tokens * page_capacity):
+        return Err(PagedExecutorError.InvalidConfiguration)
+    if (physical_page_provider_status(backend) != PhysicalPageProviderStatus.Ready or
+        not physical_lightweight_requests_ready(backend)):
+        return Err(PagedExecutorError.ProviderUnavailable)
+    val namespace_result = physical_page_execution_namespace(backend)
+    val execution_namespace = match namespace_result:
+        Err(_): return Err(PagedExecutorError.PoolCreateFailed)
+        Ok(value): value
+    val pool_result = physical_page_pool_create_request(PhysicalPagePoolCreateRequest(
+        execution_namespace: execution_namespace.to_text(),
+        page_tokens: fields[1], page_capacity: fields[2],
+        byte_limit: fields[5], backend: backend))
+    val pool = match pool_result:
+        Err(BackendError.PhysicalPageNoContext): return Err(PagedExecutorError.PoolContextCreateFailed)
+        Err(BackendError.PhysicalPageOverflow): return Err(PagedExecutorError.PoolCapacityOverflow)
+        Err(BackendError.PhysicalPageInvalid): return Err(PagedExecutorError.PoolConfigurationRejected)
+        Err(BackendError.PhysicalPageBusy): return Err(PagedExecutorError.PoolBusy)
+        Err(_): return Err(PagedExecutorError.PoolCreateFailed)
+        Ok(value): value
+    val page_bytes_result = physical_page_bytes(backend, pool)
+    val page_byte_count = match page_bytes_result:
+        Err(_):
+            physical_page_pool_destroy(backend, pool)
+            return Err(PagedExecutorError.LogicalManagerFailed)
+        Ok(value): value
+    val manager_result = KvPageManager.create(
+        execution_namespace.to_u64(), page_tokens, page_byte_count,
+        page_capacity, request_capacity, prefix_capacity,
+        (context_tokens + page_tokens - 1) / page_tokens, byte_limit)
+    val manager = match manager_result:
+        Err(_):
+            physical_page_pool_destroy(backend, pool)
+            return Err(PagedExecutorError.LogicalManagerFailed)
+        Ok(value): value
+    PAGED_BACKEND = backend
+    PAGED_MANAGER = manager
+    PAGED_MANAGER_ACTIVE = true
+    PAGED_POOL = pool
+    PAGED_NAMESPACE = execution_namespace
+    PAGED_PAGE_TOKENS = page_tokens
+    PAGED_CONTEXT_TOKENS = context_tokens
+    PAGED_PAGE_CAPACITY = page_capacity
+    PAGED_REQUEST_CAPACITY = request_capacity
+    PAGED_PREFIX_CAPACITY = prefix_capacity
+    PAGED_BYTE_LIMIT = byte_limit
+    Ok(())
+
+fn paged_executor_configuration_text() -> text:
+    "effective_page_capacity=" + PAGED_PAGE_CAPACITY.to_text() +
+        " effective_request_capacity=" + PAGED_REQUEST_CAPACITY.to_text() +
+        " effective_prefix_capacity=" + PAGED_PREFIX_CAPACITY.to_text() +
+        " effective_byte_limit=" + PAGED_BYTE_LIMIT.to_text()
+
+fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
+    if not paged_executor_active():
+        # Binding transfers one pending reference here. Shutdown is also the
+        # recovery path when activation is abandoned.
+        PAGED_PENDING_BACKEND = nil
+        return Ok(())
+    if PAGED_MANAGER.telemetry().active_requests != 0:
+        return Err(PagedExecutorError.Busy)
+    match PAGED_MANAGER.evict_all_prefixes():
+        Err(_): return Err(PagedExecutorError.Busy)
+        Ok(_): ()
+    match _drain_reclaimed_pages():
+        Err(error): return Err(error)
+        Ok(_): ()
+    match physical_page_pool_destroy(PAGED_BACKEND!, PAGED_POOL):
+        Err(_): return Err(PagedExecutorError.PoolDestroyFailed)
+        Ok(_): ()
+    PAGED_BACKEND = nil
+    PAGED_PENDING_BACKEND = nil
+    PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
+    PAGED_MANAGER_ACTIVE = false
+    PAGED_POOL = 0
+    PAGED_NAMESPACE = 0
+    PAGED_PAGE_TOKENS = 0
+    PAGED_CONTEXT_TOKENS = 0
+    PAGED_PAGE_CAPACITY = 0
+    PAGED_REQUEST_CAPACITY = 0
+    PAGED_PREFIX_CAPACITY = 0
+    PAGED_BYTE_LIMIT = 0
+    Ok(())
+
+export PagedExecutorError, PagedGeneration, PagedGenerationRequest
+export paged_executor_error_text
+export paged_executor_active, paged_executor_pool, paged_executor_namespace
+export paged_executor_telemetry, paged_executor_activate_config, paged_executor_shutdown
+export paged_executor_bind_backend, paged_executor_clear_pending_backend
+export paged_executor_configuration_text
+export paged_executor_generate, paged_executor_generate_observed, paged_executor_generate_observed_request
