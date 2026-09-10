@@ -1,0 +1,512 @@
+# Owner-authoritative lifecycle for bounded environment-selected GPU tasks.
+#
+# This layer is deliberately device-inert. It retains exact provider-generation
+# pins, image/device/source leases and backend callback authorities. A routing
+# or completion receipt never claims a qualified GPU kernel or parser path.
+
+use common.gpu.environment_variant_task_contract_v1.*
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+
+pub enum GpuEnvironmentTaskErrorV1:
+    InvalidHostAuthority
+    AdmissionRejected
+    AdmissionMismatch
+    StaleProviderGeneration
+    ProviderPortUnknown
+    TaskContractMismatch
+    TaskCapacityExceeded
+    DuplicateInvocation
+    CounterOverflow
+    TaskUnknown
+    InvalidState
+    CompletionUnknown
+    CompletionMismatch
+    TerminalFenceRequired
+    SubmissionUncertain
+
+pub enum GpuEnvironmentProviderTerminalV1:
+    Completed
+    FailedDrained
+    CancelledDrained
+    Uncertain
+
+pub struct GpuEnvironmentAdmittedProviderV1:
+    admission_id: u64
+    owner_identity: u64
+    provider_handle: u64
+    provider_generation: u64
+
+pub struct GpuEnvironmentProviderPortV1:
+    port_id: u64
+    owner_identity: u64
+    admission_id: u64
+
+pub struct GpuEnvironmentTaskHandleV1:
+    task_id: u64
+    owner_identity: u64
+    invocation_id: u64
+
+pub struct GpuEnvironmentTaskSubmissionReceiptV1:
+    submission_id: u64
+    owner_identity: u64
+    task_id: u64
+    invocation_id: u64
+    provider_generation: u64
+    generation_pin_id: u64
+    state: GpuTaskStateV1
+    routing_evidence_only: bool
+    device_execution_proven: bool
+    native_call_pin_dependency: bool
+
+pub struct GpuEnvironmentRetainedCompletionV1:
+    completion_id: u64
+    owner_identity: u64
+    task_id: u64
+    submission_id: u64
+
+pub struct GpuEnvironmentTaskCompletionReceiptV1:
+    task_id: u64
+    submission_id: u64
+    invocation_id: u64
+    provider_generation: u64
+    lease_generation: u64
+    state: GpuTaskStateV1
+    terminal: GpuEnvironmentProviderTerminalV1
+    fence_identity: EnvironmentDigest256V1
+    completion_identity: EnvironmentDigest256V1
+    readback_identity: EnvironmentDigest256V1
+    readback_bytes: u64
+    provider_completion_retained: bool
+    routing_evidence_only: bool
+    device_execution_proven: bool
+
+struct _GpuEnvironmentAdmissionRecordV1:
+    handle: GpuEnvironmentAdmittedProviderV1
+    activation: ProviderGenerationActivationV2
+    evidence: ProviderActivationEvidenceV2
+    provider: GpuHostControlProviderV1
+    image: GpuDeviceProgramImageV1
+    device: GpuEnabledDeviceAuthorityV1
+
+struct _GpuEnvironmentPortRecordV1:
+    handle: GpuEnvironmentProviderPortV1
+    live: bool
+
+struct _GpuEnvironmentTaskRecordV1:
+    handle: GpuEnvironmentTaskHandleV1
+    admission: GpuEnvironmentAdmittedProviderV1
+    image: GpuDeviceProgramImageV1
+    device: GpuEnabledDeviceAuthorityV1
+    lease: GpuResourceLeaseV1
+    task: GpuBoundedTaskV1
+    pin: ProviderGenerationPinV2
+    state: GpuTaskStateV1
+    was_submitted: bool
+    cancellation_requested: bool
+    terminal_fence_observed: bool
+    failure_drained: bool
+    submission_uncertain: bool
+    committed: bool
+    submission: GpuEnvironmentTaskSubmissionReceiptV1?
+
+struct _GpuEnvironmentCompletionRecordV1:
+    handle: GpuEnvironmentRetainedCompletionV1
+    terminal: GpuEnvironmentProviderTerminalV1
+    fence_identity: EnvironmentDigest256V1
+    completion_identity: EnvironmentDigest256V1
+    readback_identity: EnvironmentDigest256V1
+    readback_bytes: u64
+    lease_generation: u64
+    commit_observed: bool
+
+var _next_gpu_environment_task_owner_identity_v1: u64 = 1u64
+
+pub class GpuEnvironmentTaskOwnerV1:
+    var owner_identity: u64
+    var generation_manager: ProviderGenerationManagerV2
+    var host: EnvironmentSnapshotV1
+    var host_feature_words: [u64]
+    var host_devices: [EnvironmentGpuDeviceV1]
+    var next_handle: u64
+    var admissions: [_GpuEnvironmentAdmissionRecordV1]
+    var ports: [_GpuEnvironmentPortRecordV1]
+    var tasks: [_GpuEnvironmentTaskRecordV1]
+    var completions: [_GpuEnvironmentCompletionRecordV1]
+
+    pub static fn create(manager: ProviderGenerationManagerV2,
+        host: EnvironmentSnapshotV1, feature_words: [u64],
+        devices: [EnvironmentGpuDeviceV1]
+    ) -> Result<GpuEnvironmentTaskOwnerV1, GpuEnvironmentTaskErrorV1>:
+        if environment_snapshot_validate_v1(host, feature_words, devices) != Ok(()) or
+           manager.manager_identity == 0u64:
+            return Err(GpuEnvironmentTaskErrorV1.InvalidHostAuthority)
+        val identity = _next_gpu_environment_task_owner_identity_v1
+        if identity == 0u64 or identity == 0xffffffffffffffffu64:
+            return Err(GpuEnvironmentTaskErrorV1.CounterOverflow)
+        _next_gpu_environment_task_owner_identity_v1 = identity + 1u64
+        Ok(GpuEnvironmentTaskOwnerV1(
+            owner_identity: identity, generation_manager: manager, host: host,
+            host_feature_words: feature_words, host_devices: devices,
+            next_handle: 1u64, admissions: [], ports: [], tasks: [], completions: []))
+
+fn _digest_declared(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _task_digest(value: EnvironmentDigest256V1) -> GpuTaskIdentityV1:
+    GpuTaskIdentityV1(w0: value.w0, w1: value.w1, w2: value.w2, w3: value.w3)
+
+fn _next_handle(owner: GpuEnvironmentTaskOwnerV1) -> Result<u64, GpuEnvironmentTaskErrorV1>:
+    if owner.next_handle == 0u64 or owner.next_handle == 0xffffffffffffffffu64:
+        return Err(GpuEnvironmentTaskErrorV1.CounterOverflow)
+    val value = owner.next_handle
+    owner.next_handle = value + 1u64
+    Ok(value)
+
+fn _host_device_exact(owner: GpuEnvironmentTaskOwnerV1,
+    authority: GpuEnabledDeviceAuthorityV1) -> bool:
+    if authority.registry_generation != owner.host.snapshot_generation:
+        return false
+    for candidate in owner.host_devices:
+        if _digest_same(candidate.device_identity, authority.device_identity):
+            if candidate.enabled_feature_words.count != 1u32 or
+               candidate.enabled_feature_words.offset >= owner.host_feature_words.len() as u32:
+                return false
+            val enabled = owner.host_feature_words[candidate.enabled_feature_words.offset as i64]
+            return candidate.api_id == authority.device_api_id and
+                candidate.api_version == authority.enabled_api_version and
+                enabled == authority.enabled_feature_bits and
+                candidate.max_buffer_bytes == authority.maximum_buffer_bytes and
+                candidate.max_workgroup_invocations == authority.maximum_workgroup_invocations and
+                candidate.queue_family_count == authority.queue_family_count
+    false
+
+fn _admission_index(owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentAdmittedProviderV1) -> i64:
+    if handle.owner_identity != owner.owner_identity: return -1
+    var i = 0
+    while i < owner.admissions.len():
+        if owner.admissions[i].handle == handle: return i
+        i = i + 1
+    -1
+
+fn _port_index(owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentProviderPortV1) -> i64:
+    if handle.owner_identity != owner.owner_identity: return -1
+    var i = 0
+    while i < owner.ports.len():
+        if owner.ports[i].handle == handle and owner.ports[i].live: return i
+        i = i + 1
+    -1
+
+fn _task_index(owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1) -> i64:
+    if handle.owner_identity != owner.owner_identity: return -1
+    var i = 0
+    while i < owner.tasks.len():
+        if owner.tasks[i].handle == handle: return i
+        i = i + 1
+    -1
+
+fn _completion_index(owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentRetainedCompletionV1) -> i64:
+    if handle.owner_identity != owner.owner_identity: return -1
+    var i = 0
+    while i < owner.completions.len():
+        if owner.completions[i].handle == handle: return i
+        i = i + 1
+    -1
+
+pub fn gpu_environment_task_provider_admit_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    activation: ProviderGenerationActivationV2,
+    evidence: ProviderActivationEvidenceV2,
+    provider: GpuHostControlProviderV1,
+    image: GpuDeviceProgramImageV1,
+    device: GpuEnabledDeviceAuthorityV1
+) -> Result<GpuEnvironmentAdmittedProviderV1, GpuEnvironmentTaskErrorV1>:
+    if owner.admissions.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
+        return Err(GpuEnvironmentTaskErrorV1.TaskCapacityExceeded)
+    if not provider_generation_active_matches_v2(owner.generation_manager, activation, evidence):
+        return Err(GpuEnvironmentTaskErrorV1.StaleProviderGeneration)
+    if not _digest_same(evidence.environment_identity, owner.host.snapshot_identity) or
+       evidence.environment_generation != owner.host.snapshot_generation or
+       not _digest_same(evidence.provider_identity, provider.provider_identity) or
+       not _digest_same(evidence.variant_identity, provider.variant_identity) or
+       activation.generation != provider.provider_generation or
+       not _digest_same(evidence.artifact_identity, image.image_digest) or
+       not _digest_same(evidence.program_identity, image.program_identity) or
+       not _digest_same(evidence.abi_identity, provider.abi_identity) or
+       not _digest_same(evidence.contract_identity, provider.api_contract_identity) or
+       not _digest_same(owner.host.resource_layout_digest, image.resource_layout_digest) or
+       image.required_effect_bits & owner.host.allowed_effect_bits != image.required_effect_bits or
+       image.numerical_contract_id != owner.host.numerical_contract_id or
+       not _host_device_exact(owner, device):
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    if gpu_environment_variant_admit_v1(provider, image, device) != Ok(()):
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionRejected)
+    val id = _next_handle(owner)?
+    val handle = GpuEnvironmentAdmittedProviderV1(
+        admission_id: id, owner_identity: owner.owner_identity,
+        provider_handle: activation.provider_handle,
+        provider_generation: activation.generation)
+    owner.admissions.push(_GpuEnvironmentAdmissionRecordV1(
+        handle: handle, activation: activation, evidence: evidence,
+        provider: provider, image: image, device: device))
+    Ok(handle)
+
+pub fn gpu_environment_task_provider_port_register_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    admitted: GpuEnvironmentAdmittedProviderV1
+) -> Result<GpuEnvironmentProviderPortV1, GpuEnvironmentTaskErrorV1>:
+    if _admission_index(owner, admitted) < 0 or
+       owner.ports.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    val id = _next_handle(owner)?
+    val port = GpuEnvironmentProviderPortV1(
+        port_id: id, owner_identity: owner.owner_identity,
+        admission_id: admitted.admission_id)
+    owner.ports.push(_GpuEnvironmentPortRecordV1(handle: port, live: true))
+    Ok(port)
+
+pub fn gpu_environment_task_prepare_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    admitted_provider: GpuEnvironmentAdmittedProviderV1,
+    image: GpuDeviceProgramImageV1,
+    enabled_device: GpuEnabledDeviceAuthorityV1,
+    lease: GpuResourceLeaseV1,
+    bounded_task: GpuBoundedTaskV1
+) -> Result<GpuEnvironmentTaskHandleV1, GpuEnvironmentTaskErrorV1>:
+    if owner.tasks.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
+        return Err(GpuEnvironmentTaskErrorV1.TaskCapacityExceeded)
+    if gpu_bounded_task_validate_v1(bounded_task) != Ok(()) or
+       bounded_task.arena_capacity_bytes > lease.leased_bytes:
+        return Err(GpuEnvironmentTaskErrorV1.TaskContractMismatch)
+    for current in owner.tasks:
+        if current.handle.invocation_id == bounded_task.invocation_id:
+            return Err(GpuEnvironmentTaskErrorV1.DuplicateInvocation)
+    val admission_index = _admission_index(owner, admitted_provider)
+    if admission_index < 0: return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    val admission = owner.admissions[admission_index]
+    if not provider_generation_active_matches_v2(owner.generation_manager,
+        admission.activation, admission.evidence):
+        return Err(GpuEnvironmentTaskErrorV1.StaleProviderGeneration)
+    if admission.image != image or admission.device != enabled_device:
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    if bounded_task.provider_generation != admission.provider.provider_generation or
+       bounded_task.lease_generation != lease.lease_generation or
+       not gpu_task_identity_equal_v1(bounded_task.resource_layout_identity,
+           _task_digest(image.resource_layout_digest)) or
+       bounded_task.required_effect_bits != image.required_effect_bits or
+       bounded_task.numerical_contract_id != image.numerical_contract_id:
+        return Err(GpuEnvironmentTaskErrorV1.TaskContractMismatch)
+    if gpu_environment_variant_lease_validate_v1(admission.provider, image,
+        enabled_device, lease) != Ok(()):
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    val pin_result = provider_generation_pin_v2(owner.generation_manager,
+        admission.activation)
+    if pin_result.is_err():
+        return Err(GpuEnvironmentTaskErrorV1.StaleProviderGeneration)
+    val id = _next_handle(owner)
+    if id.is_err():
+        _ = provider_generation_pin_release_v2(owner.generation_manager, pin_result.unwrap())
+        return Err(id.unwrap_err())
+    val handle = GpuEnvironmentTaskHandleV1(task_id: id.unwrap(),
+        owner_identity: owner.owner_identity, invocation_id: bounded_task.invocation_id)
+    owner.tasks.push(_GpuEnvironmentTaskRecordV1(
+        handle: handle, admission: admitted_provider, image: image,
+        device: enabled_device, lease: lease, task: bounded_task,
+        pin: pin_result.unwrap(), state: GpuTaskStateV1.Prepared,
+        was_submitted: false, cancellation_requested: false,
+        terminal_fence_observed: false, failure_drained: false,
+        submission_uncertain: false, committed: false, submission: nil))
+    Ok(handle)
+
+pub fn gpu_environment_task_submit_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1,
+    provider_port: GpuEnvironmentProviderPortV1
+) -> Result<GpuEnvironmentTaskSubmissionReceiptV1, GpuEnvironmentTaskErrorV1>:
+    val task_index = _task_index(owner, handle)
+    if task_index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val port_index = _port_index(owner, provider_port)
+    if port_index < 0 or provider_port.admission_id != owner.tasks[task_index].admission.admission_id:
+        return Err(GpuEnvironmentTaskErrorV1.ProviderPortUnknown)
+    if owner.tasks[task_index].state != GpuTaskStateV1.Prepared or
+       not provider_generation_pin_live_v2(owner.generation_manager, owner.tasks[task_index].pin):
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    val id = _next_handle(owner)?
+    val receipt = GpuEnvironmentTaskSubmissionReceiptV1(
+        submission_id: id, owner_identity: owner.owner_identity,
+        task_id: handle.task_id, invocation_id: handle.invocation_id,
+        provider_generation: owner.tasks[task_index].task.provider_generation,
+        generation_pin_id: owner.tasks[task_index].pin.pin_id,
+        state: GpuTaskStateV1.Submitted, routing_evidence_only: true,
+        device_execution_proven: false, native_call_pin_dependency: true)
+    var record = owner.tasks[task_index]
+    record.state = GpuTaskStateV1.Submitted
+    record.was_submitted = true
+    record.submission = receipt
+    owner.tasks[task_index] = record
+    Ok(receipt)
+
+pub fn gpu_environment_task_completion_record_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1,
+    provider_port: GpuEnvironmentProviderPortV1,
+    submission: GpuEnvironmentTaskSubmissionReceiptV1,
+    terminal: GpuEnvironmentProviderTerminalV1,
+    fence_identity: EnvironmentDigest256V1,
+    completion_identity: EnvironmentDigest256V1,
+    readback_identity: EnvironmentDigest256V1,
+    readback_bytes: u64,
+    lease_generation: u64,
+    commit_observed: bool
+) -> Result<GpuEnvironmentRetainedCompletionV1, GpuEnvironmentTaskErrorV1>:
+    val task_index = _task_index(owner, handle)
+    if task_index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val port_index = _port_index(owner, provider_port)
+    if port_index < 0 or provider_port.admission_id != owner.tasks[task_index].admission.admission_id:
+        return Err(GpuEnvironmentTaskErrorV1.ProviderPortUnknown)
+    val record = owner.tasks[task_index]
+    if not record.was_submitted or record.submission == nil or
+       (record.state != GpuTaskStateV1.Submitted and record.state != GpuTaskStateV1.Cancelled):
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    if record.submission.unwrap() != submission or submission.task_id != handle.task_id or
+       submission.owner_identity != owner.owner_identity or
+       submission.generation_pin_id != record.pin.pin_id or
+       lease_generation != record.lease.lease_generation:
+        return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+    if owner.completions.len() as u64 >= GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1:
+        return Err(GpuEnvironmentTaskErrorV1.TaskCapacityExceeded)
+    if terminal == GpuEnvironmentProviderTerminalV1.Uncertain:
+        if _digest_declared(fence_identity) or _digest_declared(completion_identity) or
+           _digest_declared(readback_identity) or readback_bytes != 0u64 or commit_observed:
+            return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+    else:
+        if not _digest_declared(fence_identity) or not _digest_declared(completion_identity):
+            return Err(GpuEnvironmentTaskErrorV1.TerminalFenceRequired)
+        if terminal == GpuEnvironmentProviderTerminalV1.Completed:
+            if not commit_observed or not _digest_declared(readback_identity) or
+               readback_bytes == 0u64 or readback_bytes > record.task.output_arena.length:
+                return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+        elif commit_observed or _digest_declared(readback_identity) or readback_bytes != 0u64:
+            return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+    val id = _next_handle(owner)?
+    val authority = GpuEnvironmentRetainedCompletionV1(
+        completion_id: id, owner_identity: owner.owner_identity,
+        task_id: handle.task_id, submission_id: submission.submission_id)
+    owner.completions.push(_GpuEnvironmentCompletionRecordV1(
+        handle: authority, terminal: terminal, fence_identity: fence_identity,
+        completion_identity: completion_identity, readback_identity: readback_identity,
+        readback_bytes: readback_bytes, lease_generation: lease_generation,
+        commit_observed: commit_observed))
+    Ok(authority)
+
+fn _completion_remove(owner: GpuEnvironmentTaskOwnerV1, index: i64):
+    var kept: [_GpuEnvironmentCompletionRecordV1] = []
+    var i = 0
+    while i < owner.completions.len():
+        if i != index: kept.push(owner.completions[i])
+        i = i + 1
+    owner.completions = kept
+
+pub fn gpu_environment_task_complete_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1,
+    retained_completion: GpuEnvironmentRetainedCompletionV1
+) -> Result<GpuEnvironmentTaskCompletionReceiptV1, GpuEnvironmentTaskErrorV1>:
+    val task_index = _task_index(owner, handle)
+    if task_index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val completion_index = _completion_index(owner, retained_completion)
+    if completion_index < 0: return Err(GpuEnvironmentTaskErrorV1.CompletionUnknown)
+    val completion = owner.completions[completion_index]
+    val task_record = owner.tasks[task_index]
+    if completion.handle.task_id != handle.task_id or task_record.submission == nil or
+       completion.handle.submission_id != task_record.submission.unwrap().submission_id:
+        return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+    _completion_remove(owner, completion_index)
+    if completion.terminal == GpuEnvironmentProviderTerminalV1.Uncertain:
+        var uncertain_record = owner.tasks[task_index]
+        uncertain_record.submission_uncertain = true
+        owner.tasks[task_index] = uncertain_record
+        return Err(GpuEnvironmentTaskErrorV1.SubmissionUncertain)
+    var updated = owner.tasks[task_index]
+    updated.terminal_fence_observed = true
+    updated.committed = completion.commit_observed
+    updated.failure_drained = completion.terminal != GpuEnvironmentProviderTerminalV1.Completed
+    updated.submission_uncertain = false
+    updated.state = if completion.terminal == GpuEnvironmentProviderTerminalV1.Completed:
+        GpuTaskStateV1.Completed
+    else:
+        GpuTaskStateV1.Cancelled
+    owner.tasks[task_index] = updated
+    Ok(GpuEnvironmentTaskCompletionReceiptV1(
+        task_id: handle.task_id,
+        submission_id: updated.submission.unwrap().submission_id,
+        invocation_id: handle.invocation_id,
+        provider_generation: updated.task.provider_generation,
+        lease_generation: updated.lease.lease_generation,
+        state: updated.state, terminal: completion.terminal,
+        fence_identity: completion.fence_identity,
+        completion_identity: completion.completion_identity,
+        readback_identity: completion.readback_identity,
+        readback_bytes: completion.readback_bytes,
+        provider_completion_retained: true, routing_evidence_only: true,
+        device_execution_proven: false))
+
+pub fn gpu_environment_task_cancel_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1
+) -> Result<GpuTaskStateV1, GpuEnvironmentTaskErrorV1>:
+    val index = _task_index(owner, handle)
+    if index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    if owner.tasks[index].state != GpuTaskStateV1.Prepared and
+       owner.tasks[index].state != GpuTaskStateV1.Submitted:
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    var record = owner.tasks[index]
+    record.cancellation_requested = true
+    record.terminal_fence_observed = not record.was_submitted
+    record.state = GpuTaskStateV1.Cancelled
+    owner.tasks[index] = record
+    Ok(GpuTaskStateV1.Cancelled)
+
+pub fn gpu_environment_task_fallback_decision_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1
+) -> Result<GpuTaskFallbackDecisionV1, GpuEnvironmentTaskErrorV1>:
+    val index = _task_index(owner, handle)
+    if index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val record = owner.tasks[index]
+    if record.committed or record.state == GpuTaskStateV1.Completed:
+        return Ok(GpuTaskFallbackDecisionV1.NotNeeded)
+    if record.was_submitted and (not record.terminal_fence_observed or record.submission_uncertain):
+        return Ok(GpuTaskFallbackDecisionV1.WaitForTerminalFence)
+    Ok(gpu_task_missing_provider_decision_v1(
+        record.task.fallback_policy, record.task.cpu_fallback_semantically_allowed))
+
+pub fn gpu_environment_task_retire_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1
+) -> Result<(), GpuEnvironmentTaskErrorV1>:
+    val index = _task_index(owner, handle)
+    if index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val record = owner.tasks[index]
+    if record.was_submitted and not record.terminal_fence_observed:
+        return Err(GpuEnvironmentTaskErrorV1.TerminalFenceRequired)
+    if record.state != GpuTaskStateV1.Completed and record.state != GpuTaskStateV1.Cancelled:
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    if provider_generation_pin_release_v2(owner.generation_manager, record.pin) != Ok(()):
+        return Err(GpuEnvironmentTaskErrorV1.StaleProviderGeneration)
+    var kept: [_GpuEnvironmentTaskRecordV1] = []
+    var i = 0
+    while i < owner.tasks.len():
+        if i != index: kept.push(owner.tasks[i])
+        i = i + 1
+    owner.tasks = kept
+    Ok(())

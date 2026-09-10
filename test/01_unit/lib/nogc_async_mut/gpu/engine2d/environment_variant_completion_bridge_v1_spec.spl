@@ -1,0 +1,71 @@
+use std.spec.*
+use common.gpu.engine2d.gpu_epoch.*
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_async_mut.gpu.engine2d.environment_variant_completion_bridge_v1.*
+use std.nogc_async_mut.gpu.engine2d.packed_completion_proof_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+fn d(v: u64) -> EnvironmentDigest256V1: EnvironmentDigest256V1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
+fn provider() -> GpuHostControlProviderV1: GpuHostControlProviderV1(provider_identity: d(1u64), variant_identity: d(2u64), provider_generation: 3u64, registry_backend_id: 1u32, device_program_identity: d(4u64), resource_layout_digest: d(5u64), abi_identity: d(13u64), api_contract_identity: d(14u64), allowed_effect_bits: 1u64, numerical_contract_id: 2u32)
+fn image() -> GpuDeviceProgramImageV1: GpuDeviceProgramImageV1(program_identity: d(4u64), image_digest: d(6u64), device_api_id: 1u32, minimum_api_version: 1u32, required_feature_bits: 1u64, minimum_buffer_bytes: 4u64, minimum_workgroup_invocations: 1u32, minimum_queue_family_count: 1u32, resource_layout_digest: d(5u64), abi_identity: d(13u64), api_contract_identity: d(14u64), required_effect_bits: 1u64, numerical_contract_id: 2u32)
+fn device() -> GpuEnabledDeviceAuthorityV1: GpuEnabledDeviceAuthorityV1(device_identity: d(7u64), registry_generation: 1u64, device_api_id: 1u32, enabled_api_version: 1u32, enabled_feature_bits: 1u64, maximum_buffer_bytes: 8u64, maximum_workgroup_invocations: 1u32, queue_family_count: 1u32)
+fn lease() -> GpuResourceLeaseV1: GpuResourceLeaseV1(lease_identity: d(8u64), device_identity: d(7u64), provider_generation: 3u64, resource_layout_digest: d(5u64), leased_bytes: 8u64, lease_generation: 1u64)
+fn device_evidence() -> Engine2dGpuDeviceEvidence: Engine2dGpuDeviceEvidence(binary_identity: "bin", device_name: "dev", device_type: "gpu", driver_identity: "drv", host_submit_ns: 1, host_complete_ns: 2, device_timestamp_available: true, device_begin_ticks: 3, device_end_ticks: 4, transfer_bytes: 4, negative_control_passed: true)
+fn receipt(phase: text, proven: bool) -> Engine2dGpuEpochReceipt:
+    Engine2dGpuEpochReceipt(profile: ENGINE2D_GPU_PROFILE_GPU_RENDER, queue_handle: 10, backend_handle: 11, queue_generation: 12u64, operation_generation: 13u64, scene_generation: 1u64, surface_generation: 1u64, arena_generation: 1u64, token: nil, phase: phase, terminal: phase == ENGINE2D_GPU_PHASE_RETIRED, reason_code: 0u32, missing_capabilities: 0u32, truth: engine2d_gpu_truth_none(), routing_evidence_only: not proven, device_execution_proven: proven, diagnostic: "fixture")
+fn authority(retired: bool = true) -> Engine2dProviderCompletionAuthorityV1:
+    Engine2dProviderCompletionAuthorityV1(queue_handle: 10, backend_handle: 11, queue_generation: 12u64, operation_generation: 13u64, submission_identity: d(20u64), fence_identity: d(21u64), completion_identity: d(22u64), retirement_identity: if retired: d(23u64) else: d(0u64))
+
+fn finished_authority() -> Engine2dProviderCompletionAuthorityV1:
+    Engine2dProviderCompletionAuthorityV1(queue_handle: 10, backend_handle: 11, queue_generation: 12u64, operation_generation: 13u64, submission_identity: d(20u64), fence_identity: d(21u64), completion_identity: d(0u64), retirement_identity: d(0u64))
+
+describe "Engine2D environment variant completion bridge V1":
+    it "bridges a proven retired epoch into fully validated provider evidence":
+        val bridged = engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_RETIRED, true), device_evidence(), authority(), provider(), image(), device(), lease()).unwrap()
+        expect(bridged.evidence_state).to_equal(GPU_ENV_EVIDENCE_RETIRED_V1)
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), bridged)).to_equal(Ok(()))
+    it "rejects routing-only epochs even when identities are supplied":
+        expect(engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_COMPLETED, false), device_evidence(), authority(false), provider(), image(), device(), lease())).to_equal(Err(Engine2dEnvironmentCompletionBridgeErrorV1.EpochNotDeviceProven))
+    it "preserves completed as non-retired intermediate evidence":
+        val bridged = engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_COMPLETED, true), device_evidence(), authority(false), provider(), image(), device(), lease()).unwrap()
+        expect(bridged.evidence_state).to_equal(GPU_ENV_EVIDENCE_COMPLETED_V1)
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), bridged)).to_equal(Err(GpuEnvironmentVariantErrorV1.MissingRetirementEvidence))
+    it "preserves gpu finished as fenced but not completed evidence":
+        val bridged = engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_GPU_FINISHED, true), device_evidence(), finished_authority(), provider(), image(), device(), lease()).unwrap()
+        expect(bridged.evidence_state).to_equal(GPU_ENV_EVIDENCE_FENCE_SIGNALED_V1)
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), bridged)).to_equal(Err(GpuEnvironmentVariantErrorV1.MissingCompletionEvidence))
+    it "rejects queue generation mismatch":
+        var wrong = authority(); wrong.queue_generation = 99u64
+        expect(engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_RETIRED, true), device_evidence(), wrong, provider(), image(), device(), lease())).to_equal(Err(Engine2dEnvironmentCompletionBridgeErrorV1.EpochAuthorityMismatch))
+    it "does not let completed phase hide an invalid resource lease":
+        var wrong = lease(); wrong.provider_generation = 99u64
+        expect(engine2d_environment_variant_completion_bridge_v1(receipt(ENGINE2D_GPU_PHASE_COMPLETED, true), device_evidence(), authority(false), provider(), image(), device(), wrong)).to_equal(Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected))
+
+    it "translates only an owner-issued retired backend callback assertion":
+        val callbacks = Engine2dBackendCompletionPortOwnerV1.create()
+        val port = engine2d_backend_completion_port_register_v1(callbacks, d(30u64)).unwrap()
+        val callback = engine2d_backend_completion_callback_record_v1(callbacks, port,
+            Engine2dBackendCallbackStateV1.CompletedAndLeaseRetired, 31u64, d(32u64),
+            33u64, d(34u64), false, d(0u64), 35u64).unwrap()
+        val proofs = Engine2dPackedProofOwnerV1.create()
+        val provider_auth = engine2d_packed_provider_register_v1(proofs, d(40u64), d(41u64),
+            d(42u64), d(30u64), 43u64, 44u64).unwrap()
+        val retired = engine2d_environment_packed_completion_bridge_v1(
+            callbacks, callback, proofs, provider_auth).unwrap()
+        expect(engine2d_packed_retirement_proof_valid_v1(retired)).to_equal(true)
+        expect(engine2d_environment_packed_completion_bridge_v1(
+            callbacks, callback, proofs, provider_auth)).to_equal(
+                Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected))
+
+    it "fails closed for unavailable and cross-owner callback authority":
+        val callbacks = Engine2dBackendCompletionPortOwnerV1.create()
+        val port = engine2d_backend_completion_port_register_v1(callbacks, d(50u64)).unwrap()
+        expect(engine2d_backend_completion_callback_record_v1(callbacks, port,
+            Engine2dBackendCallbackStateV1.Unavailable, 0u64, d(0u64), 0u64,
+            d(0u64), false, d(0u64), 0u64)).to_equal(
+                Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendCompletionUnavailable))
+        val other = Engine2dBackendCompletionPortOwnerV1.create()
+        expect(engine2d_backend_completion_callback_record_v1(other, port,
+            Engine2dBackendCallbackStateV1.CompletedAndLeaseRetired, 1u64, d(2u64), 3u64,
+            d(4u64), false, d(0u64), 5u64)).to_equal(
+                Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected))

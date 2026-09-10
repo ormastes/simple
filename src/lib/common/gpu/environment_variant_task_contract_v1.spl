@@ -1,0 +1,125 @@
+# Pure value contract for bounded environment-selected GPU work.
+#
+# This capsule describes immutable input, reserved output and fallback policy.
+# It owns no device, native callback, provider generation or executable target.
+# In particular, a generated output target is never a host/device authority.
+
+pub const GPU_ENVIRONMENT_TASK_SCHEMA_V1: u16 = 1u16
+pub const GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1: u32 = 128u32
+pub const GPU_ENVIRONMENT_TASK_MAX_ARENA_BYTES_V1: u64 = 1048576u64
+pub const GPU_ENVIRONMENT_TASK_MAX_INFLIGHT_V1: u64 = 256u64
+
+pub enum GpuTaskOperationKindV1:
+    FrontendParse
+    Engine2d
+    GeneralCompute
+
+pub enum GpuTaskFallbackPolicyV1:
+    AllowCpu
+    RequireRequested
+
+pub enum GpuTaskFallbackDecisionV1:
+    UseCpu
+    RequiredProviderUnavailable
+    SemanticsForbidFallback
+    WaitForTerminalFence
+    NotNeeded
+
+pub enum GpuTaskStateV1:
+    Prepared
+    Submitted
+    Completed
+    Cancelled
+    Retired
+
+pub enum GpuTaskContractErrorV1:
+    UnsupportedSchema
+    DescriptorTooShort
+    InvalidIdentity
+    InvalidGeneration
+    InvalidInvocation
+    InvalidContract
+    ArenaCapacityExceeded
+    ArenaRangeInvalid
+    ArenaRangesOverlap
+
+pub struct GpuTaskIdentityV1:
+    w0: u64
+    w1: u64
+    w2: u64
+    w3: u64
+
+pub struct GpuTaskArenaRangeV1:
+    offset: u64
+    length: u64
+
+pub struct GpuBoundedTaskV1:
+    descriptor_size: u32
+    schema_version: u16
+    operation_kind: GpuTaskOperationKindV1
+    fallback_policy: GpuTaskFallbackPolicyV1
+    invocation_id: u64
+    provider_generation: u64
+    lease_generation: u64
+    input_arena: GpuTaskArenaRangeV1
+    output_arena: GpuTaskArenaRangeV1
+    arena_capacity_bytes: u64
+    resource_layout_identity: GpuTaskIdentityV1
+    required_effect_bits: u64
+    numerical_contract_id: u32
+    cpu_fallback_semantically_allowed: bool
+
+pub fn gpu_task_identity_declared_v1(value: GpuTaskIdentityV1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+pub fn gpu_task_identity_equal_v1(left: GpuTaskIdentityV1, right: GpuTaskIdentityV1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _gpu_task_range_valid_v1(value: GpuTaskArenaRangeV1, capacity: u64) -> bool:
+    if value.length == 0u64 or value.offset > capacity:
+        return false
+    value.length <= capacity - value.offset
+
+fn _gpu_task_ranges_overlap_v1(left: GpuTaskArenaRangeV1,
+    right: GpuTaskArenaRangeV1) -> bool:
+    # Both ranges are validated before this helper, so subtraction-bounded
+    # additions cannot overflow.
+    val left_end = left.offset + left.length
+    val right_end = right.offset + right.length
+    left.offset < right_end and right.offset < left_end
+
+pub fn gpu_bounded_task_validate_v1(
+    task: GpuBoundedTaskV1
+) -> Result<(), GpuTaskContractErrorV1>:
+    if task.schema_version != GPU_ENVIRONMENT_TASK_SCHEMA_V1:
+        return Err(GpuTaskContractErrorV1.UnsupportedSchema)
+    if task.descriptor_size < GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1:
+        return Err(GpuTaskContractErrorV1.DescriptorTooShort)
+    if task.invocation_id == 0u64:
+        return Err(GpuTaskContractErrorV1.InvalidInvocation)
+    if task.provider_generation == 0u64 or task.lease_generation == 0u64:
+        return Err(GpuTaskContractErrorV1.InvalidGeneration)
+    if not gpu_task_identity_declared_v1(task.resource_layout_identity):
+        return Err(GpuTaskContractErrorV1.InvalidIdentity)
+    if task.numerical_contract_id == 0u32:
+        return Err(GpuTaskContractErrorV1.InvalidContract)
+    if task.arena_capacity_bytes == 0u64 or
+       task.arena_capacity_bytes > GPU_ENVIRONMENT_TASK_MAX_ARENA_BYTES_V1:
+        return Err(GpuTaskContractErrorV1.ArenaCapacityExceeded)
+    if not _gpu_task_range_valid_v1(task.input_arena, task.arena_capacity_bytes) or
+       not _gpu_task_range_valid_v1(task.output_arena, task.arena_capacity_bytes):
+        return Err(GpuTaskContractErrorV1.ArenaRangeInvalid)
+    if _gpu_task_ranges_overlap_v1(task.input_arena, task.output_arena):
+        return Err(GpuTaskContractErrorV1.ArenaRangesOverlap)
+    Ok(())
+
+pub fn gpu_task_missing_provider_decision_v1(
+    policy: GpuTaskFallbackPolicyV1,
+    cpu_fallback_semantically_allowed: bool
+) -> GpuTaskFallbackDecisionV1:
+    if policy == GpuTaskFallbackPolicyV1.RequireRequested:
+        return GpuTaskFallbackDecisionV1.RequiredProviderUnavailable
+    if not cpu_fallback_semantically_allowed:
+        return GpuTaskFallbackDecisionV1.SemanticsForbidFallback
+    GpuTaskFallbackDecisionV1.UseCpu

@@ -15,6 +15,10 @@ pub const GPU_ENV_EVIDENCE_RETIRED_V1: u16 = 5u16
 pub enum GpuEnvironmentVariantErrorV1:
     InvalidIdentity
     ProviderImageMismatch
+    ProviderAbiMismatch
+    ProviderApiContractMismatch
+    EffectContractMismatch
+    NumericalContractMismatch
     DeviceApiMismatch
     RequiredFeaturesNotEnabled
     DeviceLimitsInsufficient
@@ -33,6 +37,10 @@ pub struct GpuHostControlProviderV1:
     registry_backend_id: u32
     device_program_identity: EnvironmentDigest256V1
     resource_layout_digest: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    api_contract_identity: EnvironmentDigest256V1
+    allowed_effect_bits: u64
+    numerical_contract_id: u32
 
 pub struct GpuDeviceProgramImageV1:
     program_identity: EnvironmentDigest256V1
@@ -44,6 +52,10 @@ pub struct GpuDeviceProgramImageV1:
     minimum_workgroup_invocations: u32
     minimum_queue_family_count: u32
     resource_layout_digest: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    api_contract_identity: EnvironmentDigest256V1
+    required_effect_bits: u64
+    numerical_contract_id: u32
 
 pub struct GpuEnabledDeviceAuthorityV1:
     device_identity: EnvironmentDigest256V1
@@ -89,6 +101,8 @@ pub fn gpu_environment_variant_admit_v1(
     if not _declared(provider.provider_identity) or not _declared(provider.variant_identity) or
        provider.provider_generation == 0u64 or provider.registry_backend_id == 0u32 or
        not _declared(image.image_digest) or not _declared(device.device_identity) or
+       not _declared(provider.abi_identity) or not _declared(provider.api_contract_identity) or
+       provider.numerical_contract_id == 0u32 or
        device.registry_generation == 0u64:
         return Err(GpuEnvironmentVariantErrorV1.InvalidIdentity)
     if not _same(provider.device_program_identity, image.program_identity):
@@ -96,6 +110,16 @@ pub fn gpu_environment_variant_admit_v1(
     if image.device_api_id == 0u32 or device.device_api_id != image.device_api_id or
        device.enabled_api_version < image.minimum_api_version:
         return Err(GpuEnvironmentVariantErrorV1.DeviceApiMismatch)
+    if not _declared(image.abi_identity) or not _same(provider.abi_identity, image.abi_identity):
+        return Err(GpuEnvironmentVariantErrorV1.ProviderAbiMismatch)
+    if not _declared(image.api_contract_identity) or
+       not _same(provider.api_contract_identity, image.api_contract_identity):
+        return Err(GpuEnvironmentVariantErrorV1.ProviderApiContractMismatch)
+    if image.required_effect_bits & provider.allowed_effect_bits != image.required_effect_bits:
+        return Err(GpuEnvironmentVariantErrorV1.EffectContractMismatch)
+    if image.numerical_contract_id == 0u32 or
+       image.numerical_contract_id != provider.numerical_contract_id:
+        return Err(GpuEnvironmentVariantErrorV1.NumericalContractMismatch)
     if image.required_feature_bits & device.enabled_feature_bits != image.required_feature_bits:
         return Err(GpuEnvironmentVariantErrorV1.RequiredFeaturesNotEnabled)
     if device.maximum_buffer_bytes < image.minimum_buffer_bytes or
@@ -112,14 +136,9 @@ pub fn gpu_environment_variant_execution_validate_v1(
     device: GpuEnabledDeviceAuthorityV1, lease: GpuResourceLeaseV1,
     evidence: GpuSubmissionEvidenceV1
 ) -> Result<(), GpuEnvironmentVariantErrorV1>:
-    val admitted = gpu_environment_variant_admit_v1(provider, image, device)
-    if admitted != Ok(()): return Err(admitted.unwrap_err())
-    if not _declared(lease.lease_identity) or lease.lease_generation == 0u64 or
-       lease.provider_generation != provider.provider_generation or
-       not _same(lease.device_identity, device.device_identity) or
-       not _same(lease.resource_layout_digest, image.resource_layout_digest) or
-       lease.leased_bytes < image.minimum_buffer_bytes:
-        return Err(GpuEnvironmentVariantErrorV1.InvalidLease)
+    val lease_check = gpu_environment_variant_lease_validate_v1(
+        provider, image, device, lease)
+    if lease_check != Ok(()): return Err(lease_check.unwrap_err())
     if evidence.evidence_state == GPU_ENV_EVIDENCE_ROUTED_V1:
         return Err(GpuEnvironmentVariantErrorV1.RoutingOnlyNotExecution)
     if evidence.evidence_state < GPU_ENV_EVIDENCE_SUBMITTED_V1 or
@@ -137,4 +156,17 @@ pub fn gpu_environment_variant_execution_validate_v1(
         return Err(GpuEnvironmentVariantErrorV1.MissingCompletionEvidence)
     if evidence.evidence_state < GPU_ENV_EVIDENCE_RETIRED_V1 or not _declared(evidence.retirement_identity):
         return Err(GpuEnvironmentVariantErrorV1.MissingRetirementEvidence)
+    Ok(())
+pub fn gpu_environment_variant_lease_validate_v1(
+    provider: GpuHostControlProviderV1, image: GpuDeviceProgramImageV1,
+    device: GpuEnabledDeviceAuthorityV1, lease: GpuResourceLeaseV1
+) -> Result<(), GpuEnvironmentVariantErrorV1>:
+    val admitted = gpu_environment_variant_admit_v1(provider, image, device)
+    if admitted != Ok(()): return Err(admitted.unwrap_err())
+    if not _declared(lease.lease_identity) or lease.lease_generation == 0u64 or
+       lease.provider_generation != provider.provider_generation or
+       not _same(lease.device_identity, device.device_identity) or
+       not _same(lease.resource_layout_digest, image.resource_layout_digest) or
+       lease.leased_bytes < image.minimum_buffer_bytes:
+        return Err(GpuEnvironmentVariantErrorV1.InvalidLease)
     Ok(())
