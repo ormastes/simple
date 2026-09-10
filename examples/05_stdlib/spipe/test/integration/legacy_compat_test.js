@@ -72,6 +72,7 @@ try {
   runCli(cli.version);
   const info = runCli(cli.info)
     .replaceAll(moduleRoot, "<MODULE_ROOT>")
+    .replaceAll("\\", "/")
     .trimEnd()
     .split("\n");
   assert.deepEqual(info, cli.info.normalizedStdout);
