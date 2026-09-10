@@ -78,6 +78,7 @@ try {
   assert.deepEqual(info, cli.info.normalizedStdout);
 
   const mcp = loadFixture("legacy_mcp.json");
+  assert.equal(mcp.serverInfo.version, packageVersion, "legacy MCP fixture must track the package release version");
   const responses = await runMcp(mcp.requests);
   assert.equal(responses.length, mcp.responseCount, "notifications must remain silent");
 
