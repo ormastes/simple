@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { initializeResult } from "../../mcp/protocol/initialize.js";
 import { tools, callTool } from "../../mcp/protocol/tools.js";
 import {
@@ -15,7 +17,7 @@ import {
 } from "../../src/release/contract.js";
 import { createReleasePlan } from "../../src/release/planner.js";
 
-const root = new URL("../../", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../../", import.meta.url));
 const sha = "a".repeat(40);
 const sha2 = "c".repeat(40);
 const hash = "b".repeat(64);
@@ -84,6 +86,9 @@ test("CLI, MCP, manifest, and plugin descriptor expose the same release policy",
     assert.match(mcpCapabilities, new RegExp(`${capability}=true`));
   }
   assert.equal(descriptor.skills, "./skills/");
+  assert.deepEqual(descriptor.mcpServers.spipe.args, ["mcp/server.js"]);
+  assert.equal(existsSync(join(root, "plugin/mcp/server.js")), true);
+  assert.equal(JSON.parse(readFileSync(join(root, "plugin/package.json"), "utf8")).type, "module");
   assert.deepEqual(descriptor.interface.capabilities, ["Read", "Planning"]);
   assert.equal(Object.hasOwn(descriptor, "commands"), false);
   for (const path of [
@@ -91,6 +96,19 @@ test("CLI, MCP, manifest, and plugin descriptor expose the same release policy",
     "plugin/skills/release/SKILL.md",
     "plugin/skills/sync/SKILL.md"
   ]) assert.ok(readFileSync(join(root, path), "utf8").length > 0, `missing installed skill: ${path}`);
+});
+
+test("the shipped plugin MCP launcher starts from its plugin root", () => {
+  const launcher = join(root, "plugin/mcp/server.js");
+  const result = spawnSync(process.execPath, [launcher], {
+    cwd: join(root, "plugin"),
+    input: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const response = JSON.parse(result.stdout.trim());
+  assert.equal(response.result.serverInfo.name, "spipe");
+  assert.equal(response.result.serverInfo.version, "0.2.0");
 });
 
 test("guarded planners bind exact evidence and never perform mutation", () => {
