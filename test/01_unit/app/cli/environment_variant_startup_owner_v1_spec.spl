@@ -1,0 +1,49 @@
+use std.spec.*
+use app.cli.environment_variant_startup_owner_v1.*
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+
+fn evs_absent() -> EnvironmentVariantRawValueV1:
+    EnvironmentVariantRawValueV1(present: false, value: "")
+
+fn evs_layer() -> EnvironmentVariantRawPolicyLayerV1:
+    EnvironmentVariantRawPolicyLayerV1(parser_impl: evs_absent(),
+        parser_prefer: evs_absent(), parser_require: evs_absent(),
+        host_cpu_max: evs_absent(), frontend_offload: evs_absent(),
+        frontend_fallback: evs_absent(), target_cpu: evs_absent(),
+        target_cpu_features: evs_absent())
+
+fn evs_request(require_simd: bool) -> EnvironmentVariantStartupRequestV1:
+    var cli = evs_layer()
+    if require_simd:
+        cli.parser_require = EnvironmentVariantRawValueV1(present: true, value: "simd")
+    val collection = environment_variant_policy_collect_v1(cli, evs_layer(),
+        evs_layer(), evs_layer(), environment_variant_admin_restrictions_empty_v1()).unwrap()
+    EnvironmentVariantStartupRequestV1(collection: collection)
+
+describe "environment variant startup owner V1":
+    it "opens a deterministic non-authorizing reference session without an installer caller":
+        val owner = AppEnvironmentVariantStartupOwnerV1.create()
+        val receipt = app_environment_variant_startup_open_v1(owner, evs_request(false)).unwrap()
+        expect(receipt.status).to_equal(EnvironmentVariantStartupStatusV1.Reference)
+        expect(receipt.rejection_code).to_equal("selected_provider_unavailable")
+        expect(receipt.handle.owner_id).to_be_greater_than(0u64)
+        expect(receipt.provider_identity.w0).to_equal(0u64)
+        expect(app_environment_variant_startup_validate_v1(owner)).to_equal(true)
+        expect(app_environment_variant_startup_close_v1(owner)).to_equal(Ok(()))
+        expect(app_environment_variant_startup_close_v1(owner)).to_equal(
+            Err(EnvironmentVariantStartupErrorV1.AlreadyClosed))
+
+    it "rejects a required SIMD request when no admitted selected binding exists":
+        val owner = AppEnvironmentVariantStartupOwnerV1.create()
+        expect(app_environment_variant_startup_open_v1(owner, evs_request(true))).to_equal(
+            Err(EnvironmentVariantStartupErrorV1.SelectionRejected))
+        expect(app_environment_variant_startup_validate_v1(owner)).to_equal(false)
+
+    it "does not permit replacement while a startup session is live":
+        val owner = AppEnvironmentVariantStartupOwnerV1.create()
+        val _ = app_environment_variant_startup_open_v1(owner, evs_request(false)).unwrap()
+        expect(app_environment_variant_startup_open_v1(owner, evs_request(false))).to_equal(
+            Err(EnvironmentVariantStartupErrorV1.Busy))
+        expect(app_environment_variant_startup_close_v1(owner)).to_equal(Ok(()))
