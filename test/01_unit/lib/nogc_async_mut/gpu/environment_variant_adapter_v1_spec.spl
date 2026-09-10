@@ -1,11 +1,13 @@
 use std.spec.*
 use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
 
 fn d(v: u64) -> EnvironmentDigest256V1: EnvironmentDigest256V1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
 fn provider() -> GpuHostControlProviderV1:
     GpuHostControlProviderV1(provider_identity: d(1u64), variant_identity: d(2u64), provider_generation: 3u64,
         registry_backend_id: 1u32, device_program_identity: d(4u64), resource_layout_digest: d(5u64),
+        artifact_digest: d(60u64),
         abi_identity: d(13u64), api_contract_identity: d(14u64),
         allowed_effect_bits: 7u64, numerical_contract_id: 2u32)
 fn image() -> GpuDeviceProgramImageV1:
@@ -25,10 +27,27 @@ fn evidence(state: u16) -> GpuSubmissionEvidenceV1:
     GpuSubmissionEvidenceV1(evidence_state: state, submission_identity: d(9u64), provider_identity: d(1u64),
         provider_generation: 3u64, program_identity: d(4u64), image_digest: d(6u64), device_identity: d(7u64),
         lease_identity: d(8u64), fence_identity: d(10u64), completion_identity: d(11u64), retirement_identity: d(12u64))
+fn image_authority() -> GpuDeviceProgramImageAuthorityV1:
+    GpuDeviceProgramImageAuthorityV1(
+        observed_image_digest: d(6u64), required_trust_policy_digest: d(20u64),
+        required_verifier_identity: d(21u64), minimum_verifier_generation: 22u64,
+        trust_receipt: ArtifactTrustVerificationReceiptV1(
+            descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+            schema_version: 1u16, authentication_status: ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+            receipt_identity: d(23u64), artifact_digest: d(6u64),
+            trust_policy_digest: d(20u64), verifier_identity: d(21u64),
+            verifier_generation: 22u64, verification_evidence_digest: d(24u64)))
 
 describe "GPU environment variant adapter V1":
     it "admits a host control provider and compatible enabled device image":
         expect(gpu_environment_variant_admit_v1(provider(), image(), device())).to_equal(Ok(()))
+        expect(gpu_device_program_image_authority_validate_v1(
+            image(), image_authority())).to_equal(Ok(()))
+    it "rejects caller-shaped image digests without authenticated trust evidence":
+        var forged = image_authority()
+        forged.trust_receipt.authentication_status = ENV_ARTIFACT_TRUST_UNKNOWN_V1
+        expect(gpu_device_program_image_authority_validate_v1(image(), forged)).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.DeviceImageNotAuthenticated))
     it "rejects provider program and device identity mismatches":
         var mismatched_provider = provider(); mismatched_provider.device_program_identity = d(99u64)
         expect(gpu_environment_variant_admit_v1(mismatched_provider, image(), device())).to_equal(

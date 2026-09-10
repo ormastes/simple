@@ -4,6 +4,10 @@
 # routing as distinct from device execution and retirement.
 
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentDigest256V1}
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    ArtifactTrustVerificationReceiptV1, ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+    artifact_trust_receipt_valid_v1
+}
 
 pub const GPU_ENV_VARIANT_ADAPTER_SCHEMA_V1: u16 = 1u16
 pub const GPU_ENV_EVIDENCE_ROUTED_V1: u16 = 1u16
@@ -17,6 +21,7 @@ pub enum GpuEnvironmentVariantErrorV1:
     ProviderImageMismatch
     ProviderAbiMismatch
     ProviderApiContractMismatch
+    DeviceImageNotAuthenticated
     EffectContractMismatch
     NumericalContractMismatch
     DeviceApiMismatch
@@ -37,6 +42,7 @@ pub struct GpuHostControlProviderV1:
     registry_backend_id: u32
     device_program_identity: EnvironmentDigest256V1
     resource_layout_digest: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
     abi_identity: EnvironmentDigest256V1
     api_contract_identity: EnvironmentDigest256V1
     allowed_effect_bits: u64
@@ -56,6 +62,13 @@ pub struct GpuDeviceProgramImageV1:
     api_contract_identity: EnvironmentDigest256V1
     required_effect_bits: u64
     numerical_contract_id: u32
+
+pub struct GpuDeviceProgramImageAuthorityV1:
+    observed_image_digest: EnvironmentDigest256V1
+    required_trust_policy_digest: EnvironmentDigest256V1
+    required_verifier_identity: EnvironmentDigest256V1
+    minimum_verifier_generation: u64
+    trust_receipt: ArtifactTrustVerificationReceiptV1
 
 pub struct GpuEnabledDeviceAuthorityV1:
     device_identity: EnvironmentDigest256V1
@@ -94,13 +107,30 @@ fn _declared(value: EnvironmentDigest256V1) -> bool:
 fn _same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
     left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
 
+pub fn gpu_device_program_image_authority_validate_v1(
+    image: GpuDeviceProgramImageV1,
+    authority: GpuDeviceProgramImageAuthorityV1
+) -> Result<(), GpuEnvironmentVariantErrorV1>:
+    val receipt = authority.trust_receipt
+    if not artifact_trust_receipt_valid_v1(receipt) or
+       receipt.authentication_status != ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 or
+       authority.minimum_verifier_generation == 0u64 or
+       receipt.verifier_generation < authority.minimum_verifier_generation or
+       not _same(authority.observed_image_digest, image.image_digest) or
+       not _same(receipt.artifact_digest, image.image_digest) or
+       not _same(receipt.trust_policy_digest, authority.required_trust_policy_digest) or
+       not _same(receipt.verifier_identity, authority.required_verifier_identity):
+        return Err(GpuEnvironmentVariantErrorV1.DeviceImageNotAuthenticated)
+    Ok(())
+
 pub fn gpu_environment_variant_admit_v1(
     provider: GpuHostControlProviderV1, image: GpuDeviceProgramImageV1,
     device: GpuEnabledDeviceAuthorityV1
 ) -> Result<(), GpuEnvironmentVariantErrorV1>:
     if not _declared(provider.provider_identity) or not _declared(provider.variant_identity) or
        provider.provider_generation == 0u64 or provider.registry_backend_id == 0u32 or
-       not _declared(image.image_digest) or not _declared(device.device_identity) or
+       not _declared(provider.artifact_digest) or not _declared(image.image_digest) or
+       not _declared(device.device_identity) or
        not _declared(provider.abi_identity) or not _declared(provider.api_contract_identity) or
        provider.numerical_contract_id == 0u32 or
        device.registry_generation == 0u64:
