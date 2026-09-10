@@ -18,7 +18,13 @@ export class FileLifecycleOwner {
     const handle = await open(temporary, "wx", 0o600);
     try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
     await rename(temporary, this.file);
-    const directory = await open(this.directory, "r"); try { await directory.sync(); } finally { await directory.close(); }
+    const directory = await open(this.directory, "r");
+    try {
+      try { await directory.sync(); }
+      catch (error) {
+        if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
+      }
+    } finally { await directory.close(); }
   }
   async transaction(work) {
     await mkdir(this.directory, { recursive: true });

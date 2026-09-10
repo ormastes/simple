@@ -137,10 +137,11 @@ export function fuseRrfRawV1(request) {
     if (!names.includes('graph')) return failure('missing_required_source', { source: 'graph' });
 
     let previousSourceOrdinal = -1;
-    for (const name of names) {
+    for (let index = 0; index < names.length; index += 1) {
+      const name = names[index];
       const sourceOrdinal = SOURCE_ORDER.indexOf(name);
       if (sourceOrdinal < 0 || sourceOrdinal < previousSourceOrdinal) {
-        return failure('invalid_source_order', { source: name });
+        return failure('invalid_source_order', { source: sourceOrdinal < 0 ? name : names[index - 1] });
       }
       previousSourceOrdinal = sourceOrdinal;
     }
@@ -275,9 +276,10 @@ export function fuseRrfCompletePoolV2(request) {
     const names = request.sources.map((source) => isRecord(source) ? source.name : undefined);
     if (!names.includes('lexical')) return failure('missing_required_source', { source: 'lexical' });
     if (!names.includes('graph')) return failure('missing_required_source', { source: 'graph' });
-    for (const name of names) {
+    for (let index = 0; index < names.length; index += 1) {
+      const name = names[index];
       const ordinal = SOURCE_ORDER.indexOf(name);
-      if (ordinal < 0 || ordinal < previousOrdinal) return failure('invalid_source_order', { source: name });
+      if (ordinal < 0 || ordinal < previousOrdinal) return failure('invalid_source_order', { source: ordinal < 0 ? name : names[index - 1] });
       previousOrdinal = ordinal;
     }
     if (new Set(names).size !== names.length) return failure('duplicate_source');
