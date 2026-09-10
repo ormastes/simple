@@ -1,0 +1,154 @@
+#!/bin/sh
+# Exercise the real Cargo entry, collector receipts and ownership/cleanup paths
+# with tiny native Python children; no Cargo build or existing cache is touched.
+set -eu
+case "${1:-}" in ''|--cleanup-only) ;; *) exit 64 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) ;; *) exit 2 ;; esac
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/cargo-shared-lock.XXXXXX")
+fail() { printf 'FAIL: %s; evidence=%s\n' "$1" "$work" >&2; exit 1; }
+wait_file() {
+    wait_count=0
+    while [ ! -f "$1" ]; do
+        wait_count=$((wait_count + 1))
+        [ "$wait_count" -lt 300 ] || fail "missing marker $1"
+        sleep 0.1
+    done
+}
+for function_name in bootstrap_acquire_rust_authority bootstrap_release_rust_authority \
+    prepare_rust_authority_workspace run_rust_authority_cargo run_logged \
+    bootstrap_cleanup bootstrap_signal_exit; do
+    sed -n "/^${function_name}()/,/^}/p" "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >>"$work/functions.sh"
+done
+cat >"$work/child.py" <<'PY'
+import os
+from pathlib import Path
+import sys
+target = Path(os.environ['CARGO_TARGET_DIR'])
+(target / 'writer').write_text(sys.argv[1] + '\n', encoding='ascii')
+print('native writer=' + sys.argv[1], flush=True)
+sys.exit(int(sys.argv[2]))
+PY
+cat >"$work/worker.sh" <<'SH'
+#!/bin/sh
+set -eu
+repo_root=$1 work=$2 name=$3 mode=$4
+SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS=$5
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$repo_root/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$repo_root/scripts/check/lib/portable-process-lock.shs"
+. "$repo_root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+. "$repo_root/scripts/bootstrap/bootstrap-logged-process.shs"
+. "$work/functions.sh"
+absolute_path() { cygpath -am "$1"; }
+resume_stage4_release_continuation_lock() { :; }
+output_dir="$work/$name"
+log_dir="$output_dir/logs"
+mkdir -p "$log_dir"
+rust_target_lock_handle= bootstrap_lock_handle= deploy_lock_handle=
+bootstrap_progress_pid= bootstrap_progress_state= progress_log=
+bootstrap_deploy_tx_active=0
+rust_authority_lock_root="$work/shared-authority"
+case "$mode" in signal|signal-contender) rust_authority_lock_root="$work/signal-authority" ;; esac
+trap 'bootstrap_cleanup $?' EXIT
+trap 'bootstrap_signal_exit TERM 143' TERM
+portable_lock_acquire "$work/output-locks" "$name" 1
+bootstrap_lock_handle=$PORTABLE_LOCK_HANDLE
+if [ "$mode" = foreign ]; then rust_target_lock_handle=$(cat "$work/A.held"); fi
+rust_authority_target="$work/cache"
+rust_authority_home="$output_dir/home"
+rust_authority_cargo_home="$output_dir/cargo-home"
+rust_authority_tmp="$output_dir/tmp"
+rust_authority_workspace_prepared=0
+os=windows PLATFORM=x86_64-pc-windows-msvc rust_llvm_status=disabled
+cargo_abs=$(absolute_path "$(command -v python3 || command -v python)")
+rustc_abs=$cargo_abs cc_abs=$cargo_abs simple_abi_cflags= jobs=1
+mingw_linker=unused mingw_cc=unused mingw_ar=unused
+windows_include= windows_lib= windows_libpath=
+windows_system_root=${SystemRoot:-${SYSTEMROOT:-C:\WINDOWS}}
+windows_system_drive=${SystemDrive:-${SYSTEMDRIVE:-C:}}
+windows_program_data=${ProgramData:-${PROGRAMDATA:-C:\ProgramData}}
+windows_temp=${TEMP:-$rust_authority_tmp}
+child_status=0
+[ "$mode" != failure ] || child_status=9
+printf '%s\n' "$name" >"$work/$name.started"
+run_rust_authority_cargo rust-seed-build default "$work/child.py" "$name" "$child_status"
+# The later publication acquisition must reuse and revalidate the same owner.
+first_handle=$rust_target_lock_handle
+bootstrap_acquire_rust_authority
+[ "$first_handle" = "$rust_target_lock_handle" ]
+cp "$rust_authority_target/writer" "$output_dir/snapshot"
+case "$mode" in
+    hold|signal)
+        printf '%s\n' "$rust_target_lock_handle" >"$work/$name.held"
+        count=0
+        while [ ! -f "$work/release-$name" ]; do
+            count=$((count + 1))
+            [ "$count" -lt 300 ] || exit 98
+            sleep 0.1
+        done
+        ;;
+esac
+bootstrap_authority_require_owned_lock "$rust_target_lock_handle"
+cp "$output_dir/snapshot" "$output_dir/published"
+bootstrap_release_rust_authority
+SH
+
+if [ "${1:-}" != --cleanup-only ]; then
+sh "$work/worker.sh" "$root" "$work" A hold 5 >"$work/A.driver.log" 2>&1 & first=$!
+wait_file "$work/A.held"
+first_claim=$(cat "$work/A.held")
+# Claim age is not a lease. A live owner cannot be stolen even with ancient
+# timestamps and a contender whose acquisition wait has expired.
+touch -t 200001010000 "$work/shared-authority/.authority.lock"
+status=0
+sh "$work/worker.sh" "$root" "$work" blocked normal 0 >"$work/blocked.driver.log" 2>&1 || status=$?
+[ "$status" = 1 ] || fail 'second writer did not time out behind live owner'
+[ ! -d "$work/blocked/home" ] || fail 'blocked writer prepared shared workspace'
+grep -qx A "$work/cache/writer" || fail 'blocked writer changed cache'
+status=0
+sh "$work/worker.sh" "$root" "$work" foreign foreign 0 >"$work/foreign.driver.log" 2>&1 || status=$?
+[ "$status" = 1 ] || fail 'foreign cached handle admitted'
+[ -f "$first_claim" ] || fail 'foreign cleanup released original owner'
+[ ! -d "$work/foreign/home" ] || fail 'foreign owner reached workspace preparation'
+
+sh "$work/worker.sh" "$root" "$work" B normal 10 >"$work/B.driver.log" 2>&1 & second=$!
+wait_file "$work/B.started"
+[ ! -d "$work/B/home" ] || fail 'waiting second writer entered workspace'
+printf 'release\n' >"$work/release-A"
+wait "$first" || fail 'first writer failed'
+wait "$second" || fail 'second writer failed after handoff'
+grep -qx A "$work/A/published" || fail 'first frozen publication mixed with second writer'
+grep -qx B "$work/B/published" || fail 'second publication missing'
+for name in A B; do
+    receipt=$(sed -n 's/^process_receipt=//p' "$work/$name/logs/rust-seed-build.log")
+    [ -f "$receipt" ] || fail 'native process receipt missing under ownership'
+    grep -qx native_exit_status=0 "$receipt" || fail 'native receipt status changed'
+    grep -qx reason=child-exit "$receipt" || fail 'native receipt was not complete child exit'
+done
+[ ! -f "$work/shared-authority/.authority.lock" ] || fail 'success leaked authority lock'
+fi
+
+status=0
+sh "$work/worker.sh" "$root" "$work" failed failure 2 >"$work/failed.driver.log" 2>&1 || status=$?
+[ "$status" = 9 ] || fail 'native failure status changed'
+[ ! -f "$work/shared-authority/.authority.lock" ] || fail 'failure cleanup leaked authority lock'
+[ ! -f "$work/output-locks/.failed.lock" ] || fail 'failure cleanup leaked output lock'
+failure_receipt=$(sed -n 's/^process_receipt=//p' "$work/failed/logs/rust-seed-build.log")
+grep -qx native_exit_status=9 "$failure_receipt" || fail 'failure receipt lost'
+
+# Existing abnormal-exit policy retains claims until the complete recorded
+# group is dead, because signal delivery alone does not prove children stopped.
+sh "$work/worker.sh" "$root" "$work" signaled signal 2 >"$work/signaled.driver.log" 2>&1 & signaled=$!
+wait_file "$work/signaled.held"
+kill -TERM "$signaled"
+status=0
+wait "$signaled" || status=$?
+[ "$status" = 143 ] || fail 'signal status changed'
+[ -f "$work/signal-authority/.authority.lock" ] || fail 'signal released ownership before group death'
+status=0
+sh "$work/worker.sh" "$root" "$work" after-signal signal-contender 0 >"$work/after-signal.driver.log" 2>&1 || status=$?
+[ "$status" = 1 ] || fail 'surviving group claim was stolen'
+[ ! -d "$work/after-signal/home" ] || fail 'signal contender reached shared workspace'
+printf 'PASS: shared Cargo lock scope=%s; native failure cleanup and signaled-group retention; evidence=%s\n' "${1:-full-concurrency-and-receipts}" "$work"
