@@ -22,12 +22,13 @@ function run(args, expected = 0) {
 
 try {
   const cli = JSON.parse(readFileSync(join(testRoot, "fixture/legacy_cli.json"), "utf8"));
+  const packageVersion = JSON.parse(readFileSync(join(moduleRoot, "package.json"), "utf8")).version;
   const help = run(["--help"]).stdout;
   assert.equal(Buffer.byteLength(help), cli.help.stdoutBytes);
   assert.equal(createHash("sha256").update(help).digest("hex"), cli.help.stdoutSha256);
   assert.equal(run(["-h"]).stdout, help);
-  assert.equal(run(["--version"]).stdout, "0.1.0\n");
-  assert.equal(run(["-v"]).stdout, "0.1.0\n");
+  assert.equal(run(["--version"]).stdout, `${packageVersion}\n`);
+  assert.equal(run(["-v"]).stdout, `${packageVersion}\n`);
   assert.equal(run(["unknown-command"], 2).stderr, "spipe: unknown command: unknown-command\n");
   assert.equal(run(["fine-tune-new-attempt"], 2).stderr,
     "spipe fine-tune-new-attempt: attempt_id and goal are required\n");
