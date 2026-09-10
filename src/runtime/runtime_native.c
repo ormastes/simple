@@ -732,6 +732,22 @@ int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_o
    that definition in a link that does carry runtime.c. */
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
                     int64_t fd, int64_t offset) {
+#if defined(_WIN32)
+    (void)flags;
+    (void)offset;
+    if (length <= 0 || fd != -1) return -1;
+    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
+    DWORD protect;
+    if (prot == 0x0) protect = PAGE_NOACCESS;
+    else if (prot == 0x1) protect = PAGE_READONLY;
+    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
+    else if (prot == 0x4) protect = PAGE_EXECUTE;
+    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
+    else return -1;
+    void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length,
+                                MEM_COMMIT | MEM_RESERVE, protect);
+    return result ? (int64_t)(uintptr_t)result : -1;
+#else
     if (length <= 0 || offset < 0) return -1;
     /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
     if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
@@ -739,6 +755,7 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
                         (int)flags, (int)fd, (off_t)offset);
     if (result == MAP_FAILED) return -1;
     return (int64_t)(uintptr_t)result;
+#endif
 }
 #endif
 
