@@ -10,7 +10,7 @@ use simple_runtime::value::sffi::math::{
     rt_math_pow, rt_math_log, rt_math_log10, rt_math_log2, rt_math_exp, rt_math_sqrt, rt_math_cbrt, rt_math_sin,
     rt_math_cos, rt_math_tan, rt_math_asin, rt_math_acos, rt_math_atan, rt_math_atan2, rt_math_sinh, rt_math_cosh,
     rt_math_tanh, rt_math_floor, rt_math_ceil, rt_math_nan, rt_math_inf, rt_math_is_nan, rt_math_is_inf,
-    rt_math_is_finite,
+    rt_math_is_finite, rt_math_fma,
 };
 
 /// True when this value is floating point, so the numeric builtins below can
@@ -258,6 +258,23 @@ pub fn rt_math_sqrt_fn(args: &[Value]) -> Result<Value, CompileError> {
         })?
         .as_float()?;
     Ok(Value::Float(rt_math_sqrt(x)))
+}
+
+/// `rt_math_fma(x, y, z)` is the scalar primitive boundary used by the
+/// pure-Simple exact SIMD oracle. Keep the operation fused here so interpreter
+/// and AVX-512 FMA observe one rounding.
+pub fn rt_math_fma_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic_with_context(
+            "rt_math_fma expects 3 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    Ok(Value::Float(rt_math_fma(
+        as_f64(&args[0])?,
+        as_f64(&args[1])?,
+        as_f64(&args[2])?,
+    )))
 }
 
 /// rt_math_cbrt - Cube root for floats
@@ -546,5 +563,18 @@ mod tests {
     fn test_pow() {
         assert_eq!(pow(&[Value::Int(2), Value::Int(3)]).unwrap(), Value::Int(8));
         assert_eq!(pow(&[Value::Int(5), Value::Int(2)]).unwrap(), Value::Int(25));
+    }
+
+    #[test]
+    fn test_rt_math_fma_is_fused_and_validates_arity() {
+        let delta = 2.0f64.powi(-27);
+        let result = rt_math_fma_fn(&[
+            Value::Float(1.0 + delta),
+            Value::Float(1.0 - delta),
+            Value::Float(-1.0),
+        ])
+        .unwrap();
+        assert_eq!(result, Value::Float(-2.0f64.powi(-54)));
+        assert!(rt_math_fma_fn(&[Value::Float(1.0)]).is_err());
     }
 }

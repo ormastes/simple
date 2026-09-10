@@ -1,0 +1,238 @@
+# Instruction-local AVX-512 encoding. ZMM0..3 and k1..3 are scratch only;
+# the selector keeps every persistent vector in its own frame slot.
+use compiler.backend.native.x86_64_avx512.{evex_encode_3op_zmm, evex_encode_mem_zmm}
+
+# These are machine operations, not runtime intrinsics. Register operands stay
+# visible to the GPR allocator; encoders never borrow an undeclared GPR.
+val X86_OP_AVX512_LOADU: i64 = 416
+val X86_OP_AVX512_STOREU: i64 = 417
+val X86_OP_AVX512_BINARY: i64 = 418
+val X86_OP_AVX512_TERNARY: i64 = 419
+val X86_OP_AVX512_UNARY: i64 = 420
+val X86_OP_AVX512_COMPARE: i64 = 421
+val X86_OP_AVX512_KLOAD: i64 = 422
+val X86_OP_AVX512_KSTORE: i64 = 423
+val X86_OP_AVX512_MASK: i64 = 424
+val X86_OP_AVX512_SELECT: i64 = 425
+val X86_OP_AVX512_SPLAT: i64 = 426
+val X86_OP_AVX512_REDUCE: i64 = 427
+val X86_OP_AVX512_COPY_LANE: i64 = 428
+val X86_OP_AVX512_BOUNDS: i64 = 429
+val X86_OP_AVX512_INDEXED: i64 = 430
+val X86_OP_AVX512_BROADCAST_LANE: i64 = 431
+val X86_OP_AVX512_MASK_CANONICAL: i64 = 432
+val X86_OP_AVX512_PERMUTE: i64 = 433
+val X86_OP_AVX512_GATHER: i64 = 434
+val X86_OP_AVX512_SHUFFLE: i64 = 435
+val X86_OP_AVX512_EXTRACT_I32: i64 = 436
+
+fn avx512_shape_code(shape: text) -> i64:
+    if shape == "f32x16": 1
+    elif shape == "f64x8": 2
+    elif shape == "i32x16": 3
+    elif shape == "i32x8": 4
+    elif shape == "mask16": 5
+    elif shape == "mask8": 6
+    else: 0
+
+fn avx512_lanes(shape: i64) -> i64:
+    if shape == 2 or shape == 4 or shape == 6: 8 else: 16
+
+fn avx512_lane_bytes(shape: i64) -> i64:
+    if shape == 2: 8 else: 4
+
+fn avx512_binop_code(op: text) -> i64:
+    val names = ["Add", "Sub", "Mul", "Div", "Min", "Max", "And", "Or", "Xor", "Andnot", "Shl", "ShrLogical", "ShrArith"]
+    for i in 0..names.len():
+        if names[i] == op: return i + 1
+    0
+
+fn avx512_unop_code(op: text) -> i64:
+    val names = ["Neg", "Abs", "Not", "Recip", "Sqrt", "RecipSqrt"]
+    for i in 0..names.len():
+        if names[i] == op: return i + 1
+    0
+
+fn avx512_cmp_code(op: text) -> i64:
+    val names = ["Eq", "Ne", "Lt", "Le", "Gt", "Ge"]
+    for i in 0..names.len():
+        if names[i] == op: return i
+    -1
+
+fn avx512_reduce_code(op: text) -> i64:
+    if op == "Sum": avx512_binop_code("Add") else: avx512_binop_code(op)
+
+fn avx512_bytes32(value: i64) -> [i64]:
+    val bits = value & 0xFFFFFFFF
+    [bits & 255, (bits >> 8) & 255, (bits >> 16) & 255, (bits >> 24) & 255]
+
+fn avx512_rr(dest: i64, lhs: i64, rhs: i64, mm: i64, w: i64, pp: i64, opcode: i64) -> [i64]:
+    evex_encode_3op_zmm(dest, lhs, rhs, 0, false, mm, w, pp, opcode)
+
+fn avx512_binop_bytes(dest: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64]:
+    if shape == 1 or shape == 2:
+        val codes = [0x58, 0x5C, 0x59, 0x5E, 0x5D, 0x5F]
+        if op < 1 or op > 6: panic("invalid AVX-512 floating binary operation")
+        return avx512_rr(dest, lhs, rhs, 1, if shape == 2: 1 else: 0, if shape == 2: 1 else: 0, codes[op - 1])
+    if shape != 3: panic("AVX-512 integer binary operation requires i32x16")
+    if op == 1: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xFE)
+    if op == 2: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xFA)
+    if op == 3: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x40)
+    if op == 5: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x39)
+    if op == 6: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x3D)
+    if op == 7: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xDB)
+    if op == 8: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xEB)
+    if op == 9: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xEF)
+    if op == 10: return avx512_rr(dest, lhs, rhs, 1, 0, 1, 0xDF)
+    if op == 11: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x47)
+    if op == 12: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x45)
+    if op == 13: return avx512_rr(dest, lhs, rhs, 2, 0, 1, 0x46)
+    panic("invalid AVX-512 integer binary operation")
+
+fn avx512_shift_immediate(dest: i64, src: i64, wide: bool, left: bool, amount: i64) -> [i64]:
+    # Immediate packed shifts encode the destination in EVEX.vvvv.
+    if amount < 0 or amount > 255: panic("packed shift immediate must fit imm8")
+    avx512_rr(if left: 6 else: 2, dest, src, 1, if wide: 1 else: 0, 1, if wide: 0x73 else: 0x72) + [amount]
+
+fn avx512_ones(dest: i64) -> [i64]:
+    avx512_rr(dest, dest, dest, 3, 0, 1, 0x25) + [255]
+
+fn avx512_unop_bytes(dest: i64, src: i64, shape: i64, op: i64) -> [i64]:
+    if shape == 3:
+        if op == 3: return avx512_ones(3) + avx512_rr(dest, src, 3, 1, 0, 1, 0xEF)
+        if op == 1: return avx512_rr(3, 3, 3, 1, 0, 1, 0xEF) + avx512_rr(dest, 3, src, 1, 0, 1, 0xFA)
+        panic("invalid AVX-512 integer unary operation")
+    val wide = shape == 2
+    val w = if wide: 1 else: 0
+    val pp = if wide: 1 else: 0
+    if op == 1 or op == 2:
+        val shifted = avx512_ones(3) + avx512_shift_immediate(3, 3, wide, op == 1, if op == 1: (if wide: 63 else: 31) else: 1)
+        return shifted + avx512_rr(dest, src, 3, 1, 0, 1, if op == 1: 0xEF else: 0xDB)
+    if op == 5: return avx512_rr(dest, 0, src, 1, w, pp, 0x51)
+    if op == 4 or op == 6:
+        # Exact reciprocal uses division; this also preserves special values.
+        var bytes = avx512_ones(3)
+        bytes = bytes + avx512_shift_immediate(3, 3, wide, false, if wide: 54 else: 25)
+        bytes = bytes + avx512_shift_immediate(3, 3, wide, true, if wide: 52 else: 23)
+        if op == 6:
+            bytes = bytes + avx512_rr(dest, 0, src, 1, w, pp, 0x51)
+            return bytes + avx512_rr(dest, 3, dest, 1, w, pp, 0x5E)
+        return bytes + avx512_rr(dest, 3, src, 1, w, pp, 0x5E)
+    panic("invalid AVX-512 floating unary operation")
+
+fn avx512_fma_bytes(dest: i64, rhs: i64, addend: i64, shape: i64, negative: bool) -> [i64]:
+    # 213: dest = (+/- dest * rhs) + addend, with one final rounding.
+    avx512_rr(dest, rhs, addend, 2, if shape == 2: 1 else: 0, 1, if negative: 0xAC else: 0xA8)
+
+fn avx512_cmp_bytes(kdest: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64]:
+    if op < 0 or op > 5: panic("invalid AVX-512 comparison predicate")
+    if shape == 3:
+        val predicates = [0, 4, 1, 2, 6, 5]
+        return avx512_rr(kdest, lhs, rhs, 3, 0, 1, 0x1F) + [predicates[op]]
+    val predicates = [0, 4, 1, 2, 14, 13]
+    avx512_rr(kdest, lhs, rhs, 1, if shape == 2: 1 else: 0, if shape == 2: 1 else: 0, 0xC2) + [predicates[op]]
+
+fn avx512_mem_tail(reg: i64, base: i64, offset: i64) -> [i64]:
+    if reg < 0 or reg > 15 or base < 0 or base > 15 or offset < -2147483648 or offset > 2147483647:
+        panic("invalid AVX-512 scalar memory operand")
+    var bytes = [128 + (reg % 8) * 8 + base % 8]
+    if base % 8 == 4: bytes.push(0x24)
+    bytes + avx512_bytes32(offset)
+
+fn avx512_kmem_bytes(kreg: i64, base: i64, offset: i64, store: bool) -> [i64]:
+    if kreg < 1 or kreg > 7: panic("AVX-512 mask scratch must be k1..k7")
+    # KMOVW is in AVX-512F. K byte/dword forms require extra subsets.
+    [0xC4, if base >= 8: 0xC1 else: 0xE1, 0x78, if store: 0x91 else: 0x90] + avx512_mem_tail(kreg, base, offset)
+
+fn avx512_kop_bytes(dest: i64, lhs: i64, rhs: i64, op: i64) -> [i64]:
+    val code = if op == 7: 0x41 elif op == 8: 0x45 elif op == 9: 0x47 elif op == 10: 0x42 elif op == 14: 0x44 elif op == 15: 0x46 else: -1
+    if code < 0: panic("invalid AVX-512 mask operation")
+    val source = if op == 14: 0 else: lhs
+    [0xC5, if op == 14: 0xF8 else: 0x84 + (15 - source) * 8, code, 0xC0 + dest * 8 + (if op == 14: lhs else: rhs)]
+
+fn avx512_kall_bytes(kreg: i64) -> [i64]:
+    # KXNORW k,k,k creates an all-active mask without reading GPR state.
+    avx512_kop_bytes(kreg, kreg, kreg, 15)
+
+fn avx512_splat_bytes(dest: i64, base: i64, offset: i64, shape: i64) -> [i64]:
+    # Broadcast uses scalar tuple size, so always use an uncompressed disp32.
+    val p0 = if base >= 8: 0xD2 else: 0xF2
+    val opcode = if shape == 2: 0x19 elif shape == 3: 0x58 else: 0x18
+    [0x62, p0, if shape == 2: 0xFD else: 0x7D, 0x48, opcode] + avx512_mem_tail(dest, base, offset)
+
+fn avx512_scalar_mem(reg: i64, base: i64, offset: i64, width: i64, store: bool) -> [i64]:
+    val rex = 0x40 + (if width == 8: 8 else: 0) + (if reg >= 8: 4 else: 0) + (if base >= 8: 1 else: 0)
+    [rex, if store: 0x89 else: 0x8B] + avx512_mem_tail(reg, base, offset)
+
+fn avx512_extract_i32_bytes(dest: i64, zmm: i64) -> [i64]:
+    if zmm != 0: panic("AVX-512 scalar extraction currently owns ZMM0")
+    # VMOVD r32,xmm0 followed by MOVSXD r64,r32 preserves MIR i32 value.
+    [0x66, 0x40 + (if dest >= 8: 1 else: 0), 0x0F, 0x7E, 0xC0 + dest % 8,
+     0x48 + (if dest >= 8: 5 else: 0), 0x63, 0xC0 + (dest % 8) * 9]
+
+fn avx512_bound_bytes(scratch: i64, base: i64, offset: i64, count: i64, limit: i64) -> [i64]:
+    var bytes: [i64] = []
+    for i in 0..count:
+        bytes = bytes + avx512_scalar_mem(scratch, base, offset + i * 4, 4, false)
+        bytes = bytes + [if scratch >= 8: 0x41 else: 0x40, 0x83, 0xF8 + scratch % 8, limit, 0x72, 2, 0x0F, 0x0B]
+    bytes
+
+fn avx512_scalar_fp_mem(xmm: i64, base: i64, offset: i64, wide: bool, opcode: i64) -> [i64]:
+    [if wide: 0xF2 else: 0xF3, if base >= 8: 0x41 else: 0x40, 0x0F, opcode] + avx512_mem_tail(xmm, base, offset)
+
+fn avx512_reduce_bytes(dest: i64, scratch: i64, base: i64, offset: i64, shape: i64, op: i64) -> [i64]:
+    val count = avx512_lanes(shape)
+    if shape == 1 or shape == 2:
+        val opcode = if op == 1: 0x58 elif op == 5: 0x5D elif op == 6: 0x5F else: -1
+        if opcode < 0: panic("invalid floating reduction")
+        var bytes = avx512_scalar_fp_mem(0, base, offset, shape == 2, 0x10)
+        for i in 1..count:
+            bytes = bytes + avx512_scalar_fp_mem(0, base, offset + i * avx512_lane_bytes(shape), shape == 2, opcode)
+        # MOVD/Q returns the raw scalar bits in the normal MIR scalar register.
+        return bytes + [0x66, 0x40 + (if shape == 2: 8 else: 0) + (if dest >= 8: 1 else: 0), 0x0F, 0x7E, 0xC0 + dest % 8]
+    if shape != 3: panic("integer reduction requires i32x16")
+    var bytes = avx512_scalar_mem(dest, base, offset, 4, false)
+    for i in 1..count:
+        bytes = bytes + avx512_scalar_mem(scratch, base, offset + i * 4, 4, false)
+        val rex = 0x40 + (if scratch >= 8: 4 else: 0) + (if dest >= 8: 1 else: 0)
+        val rm = 0xC0 + (scratch % 8) * 8 + dest % 8
+        if op == 5 or op == 6:
+            bytes = bytes + [rex, 0x39, rm]
+            val cmov_rex = 0x40 + (if dest >= 8: 4 else: 0) + (if scratch >= 8: 1 else: 0)
+            bytes = bytes + [cmov_rex, 0x0F, if op == 5: 0x4F else: 0x4C, 0xC0 + (dest % 8) * 8 + scratch % 8]
+        else:
+            val opcode = if op == 1: 0x01 elif op == 7: 0x21 elif op == 8: 0x09 elif op == 9: 0x31 else: -1
+            if opcode < 0: panic("invalid integer reduction")
+            bytes = bytes + [rex, opcode, rm]
+    bytes + [0x48 + (if dest >= 8: 5 else: 0), 0x63, 0xC0 + (dest % 8) * 9]
+
+fn avx512_address_bytes(dest: i64, base: i64, index: i64, width: i64, offset: i64) -> [i64]:
+    if index == 4: panic("RSP cannot be an indexed SIMD scalar scratch")
+    val rex = 0x48 + (if dest >= 8: 4 else: 0) + (if index >= 8: 2 else: 0) + (if base >= 8: 1 else: 0)
+    [rex, 0x8D, 0x84 + (dest % 8) * 8, (if width == 8: 0xC0 else: 0x80) + (index % 8) * 8 + base % 8] + avx512_bytes32(offset)
+
+fn avx512_indexed_bytes(value_offset: i64, index_offset: i64, base: i64, base_offset: i64, shape: i64, index_reg: i64, data_reg: i64, store: bool) -> [i64]:
+    # Ordered lane accesses preserve duplicate-index scatter last-writer order.
+    # Both the data and index vectors have already been snapshotted by ISel.
+    # External memory is the unsafe MIR pointer boundary; the source span owner
+    # must establish allocation bounds before issuing this instruction.
+    var bytes: [i64] = []
+    val width = avx512_lane_bytes(shape)
+    for i in 0..avx512_lanes(shape):
+        bytes = bytes + [0x48 + (if index_reg >= 8: 4 else: 0), 0x63] + avx512_mem_tail(index_reg, 5, index_offset + i * 4)
+        bytes = bytes + avx512_address_bytes(index_reg, base, index_reg, width, base_offset)
+        if store:
+            bytes = bytes + avx512_scalar_mem(data_reg, 5, value_offset + i * width, width, false)
+            bytes = bytes + avx512_scalar_mem(data_reg, index_reg, 0, width, true)
+        else:
+            bytes = bytes + avx512_scalar_mem(data_reg, index_reg, 0, width, false)
+            bytes = bytes + avx512_scalar_mem(data_reg, 5, value_offset + i * width, width, true)
+    bytes
+
+fn avx512_broadcast_lane_bytes(dest_offset: i64, source_offset: i64, shape: i64, index_reg: i64, data_reg: i64) -> [i64]:
+    # Unsigned comparison rejects negative i64 indices as well as N and larger.
+    var bytes = [0x48 + (if index_reg >= 8: 1 else: 0), 0x83, 0xF8 + index_reg % 8, avx512_lanes(shape), 0x72, 2, 0x0F, 0x0B]
+    bytes = bytes + avx512_address_bytes(index_reg, 5, index_reg, avx512_lane_bytes(shape), source_offset)
+    bytes = bytes + avx512_scalar_mem(data_reg, index_reg, 0, avx512_lane_bytes(shape), false)
+    bytes = bytes + avx512_scalar_mem(data_reg, 5, dest_offset, avx512_lane_bytes(shape), true)
+    bytes + avx512_splat_bytes(0, 5, dest_offset, shape)

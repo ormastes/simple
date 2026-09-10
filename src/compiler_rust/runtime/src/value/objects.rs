@@ -307,6 +307,19 @@ pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64)
         .is_some_and(|p| unsafe { (*p).discriminant as i64 == expected })
 }
 
+/// Check an enum's runtime identity and discriminant.
+///
+/// Runtime ID zero is the legacy untyped lane, so either a legacy value or a
+/// legacy expected ID retains the historical discriminant-only behavior.
+#[no_mangle]
+pub extern "C" fn rt_enum_check_variant(value: RuntimeValue, expected_enum_id: i64, expected_discriminant: i64) -> bool {
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        let actual_enum_id = (*p).enum_id as i64;
+        (*p).discriminant as i64 == expected_discriminant
+            && (expected_enum_id == 0 || actual_enum_id == 0 || actual_enum_id == expected_enum_id)
+    })
+}
+
 /// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.
 /// Used by the `??` operator's then-branch to unwrap Option values.
 #[no_mangle]

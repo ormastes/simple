@@ -2068,17 +2068,16 @@ impl MirLowering:
                     self.emit_enum_payload_deep(value_local, nested_payload, "rt_unwrap_or_self", next_block, false, pat.span)
                     return
                 val nested_disc = self.enum_variant_discriminant(nested_ename, nested_variant)
+                val nested_enum_id = self.enum_runtime_id(nested_ename)
                 var bt = self.builder
                 val ndf = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_enum_discriminant"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    MirConstValue.Str("rt_enum_check_variant"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
                 ))
-                val ndr = bt.emit_call(ndf, [mir_operand_copy(value_local)], MirType.i64())
-                var nd_local = LocalId(id: 0)
-                if val ndl = ndr:
-                    nd_local = ndl
+                val nid = bt.emit_const_int(nested_enum_id)
                 val nkey = bt.emit_const_int(nested_disc)
-                val ncmp = bt.emit_binop(MirBinOp.Eq, mir_operand_copy(nd_local), mir_operand_copy(nkey), MirType.bool())
+                val ndr = bt.emit_call(ndf, [mir_operand_copy(value_local), mir_operand_copy(nid), mir_operand_copy(nkey)], MirType.bool())
+                val ncmp = ndr ?? LocalId(id: 0)
                 val enum_ok_block = bt.new_block(Some("ematch_deep_ok"))
                 bt.terminate_if(mir_operand_copy(ncmp), enum_ok_block, next_block)
                 bt.switch_to_block(enum_ok_block)
@@ -2450,6 +2449,13 @@ impl MirLowering:
         if option_flat_lane:
             payload_symbol = "rt_unwrap_or_self"
 
+        # Every typed boxed enum match validates both the stable enum runtime
+        # identity and its discriminant. Option retains its dual boxed/flat
+        # normalization above; Result's legacy ID zero intentionally keeps the
+        # compatibility behavior in rt_enum_check_variant.
+        val enum_runtime_key = if enum_key != "": enum_key else: enum_name
+        val expected_enum_id = self.enum_runtime_id(enum_runtime_key)
+
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
@@ -2491,7 +2497,23 @@ impl MirLowering:
         while ci < enum_discs.len():
             var b_cmp = self.builder
             val key_local = b_cmp.emit_const_int(enum_discs[ci])
-            val cmp_local = b_cmp.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(key_local), MirType.bool())
+            var cmp_local = LocalId(id: 0)
+            if option_flat_lane:
+                cmp_local = b_cmp.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(key_local), MirType.bool())
+            else:
+                val enum_id_local = b_cmp.emit_const_int(expected_enum_id)
+                val check_variant = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_check_variant"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                val checked = b_cmp.emit_call(
+                    check_variant,
+                    [mir_operand_copy(scrut_local), mir_operand_copy(enum_id_local), mir_operand_copy(key_local)],
+                    MirType.bool()
+                )
+                cmp_local = checked ?? LocalId(id: 0)
             val arm_block = b_cmp.new_block(Some("ematch_arm"))
             val next_block = b_cmp.new_block(Some("ematch_next"))
             if result_match_candidate:

@@ -56,6 +56,12 @@ typedef SSIZE_T ssize_t;
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
@@ -8496,6 +8502,13 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     return e && (int64_t)e->discriminant == expected;
 }
 
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e || (int64_t)e->discriminant != expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
+
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();
@@ -14335,6 +14348,22 @@ RtCpuidResult rt_cpuid(int32_t leaf, int32_t subleaf) {
     return r;
 }
 
+int64_t rt_xgetbv(int32_t index) {
+#if defined(__x86_64__) || defined(_M_X64)
+#  if defined(_MSC_VER)
+    return (int64_t)_xgetbv((unsigned int)index);
+#  else
+    uint32_t eax = 0;
+    uint32_t edx = 0;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"((uint32_t)index));
+    return (int64_t)(((uint64_t)edx << 32) | eax);
+#  endif
+#else
+    (void)index;
+    return 0;
+#endif
+}
+
 int32_t rt_cpu_is_x86_64(void) {
 #if defined(__x86_64__) || defined(_M_X64)
     return 1;
@@ -14357,6 +14386,65 @@ int32_t rt_cpu_is_riscv64(void) {
 #else
     return 0;
 #endif
+}
+
+int64_t rt_getauxval(int64_t key) {
+#if defined(__linux__)
+    return (int64_t)getauxval((unsigned long)key);
+#else
+    (void)key;
+    return 0;
+#endif
+}
+
+bool rt_is_darwin_arm64(void) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+int32_t rt_sysctlbyname_i32(int64_t name) {
+#if defined(__APPLE__)
+    const uint8_t* bytes = rt_string_data(name);
+    int64_t len = rt_string_len(name);
+    int32_t value = 0;
+    size_t value_len = sizeof(value);
+    char stack_name[128];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(stack_name)) return 0;
+    memcpy(stack_name, bytes, (size_t)len);
+    stack_name[len] = '\0';
+    if (sysctlbyname(stack_name, &value, &value_len, NULL, 0) != 0 ||
+        value_len != sizeof(value)) return 0;
+    return value;
+#else
+    (void)name;
+    return 0;
+#endif
+}
+
+int32_t rt_riscv_read_vlenb(void) {
+#if defined(__riscv) && defined(__riscv_vector)
+    uintptr_t value = 0;
+    __asm__ volatile("csrr %0, vlenb" : "=r"(value));
+    return value <= INT32_MAX ? (int32_t)value : 0;
+#else
+    return 0;
+#endif
+}
+
+bool rt_riscv_has_v_ext(void) {
+#if defined(__linux__) && defined(__riscv)
+    return (getauxval(16) & (1UL << ('V' - 'A'))) != 0;
+#else
+    return false;
+#endif
+}
+
+int32_t rt_cuda_sm_version(int32_t device) {
+    (void)device;
+    return 0;
 }
 
 /* ================================================================
