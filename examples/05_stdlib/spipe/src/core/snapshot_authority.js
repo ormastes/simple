@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { canonicalJson, freezeDeep } from "../storage/canonical.js";
 import { isWorkspaceRegistryV1 } from "../workspace/registry.js";
 import { isSnapshotStoreV1 } from "../storage/snapshot_store.js";
+import { fsyncDirectory } from "../storage/directory_fsync.js";
 
 const PORTS = new WeakSet();
 const PERMITS = new WeakSet();
@@ -37,12 +38,7 @@ function atomicWrite(path, bytes) {
   try { fd = openSync(temporary, "wx", 0o600); writeFileSync(fd, bytes, "utf8"); fsyncSync(fd); }
   finally { if (fd !== undefined) closeSync(fd); }
   renameSync(temporary, path);
-  const parent = openSync(dirname(path), "r");
-  try {
-    try { fsyncSync(parent); } catch (error) {
-      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
-    }
-  } finally { closeSync(parent); }
+  fsyncDirectory(dirname(path));
 }
 function readCanonical(path) {
   const raw = readFileSync(path, "utf8"); const parsed = JSON.parse(raw);

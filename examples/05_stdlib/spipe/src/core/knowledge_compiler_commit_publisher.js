@@ -9,6 +9,7 @@ import { canonicalJson, freezeDeep, sha256Hex } from "../storage/canonical.js";
 import { isImmutableSnapshotStoreV1 } from "../storage/snapshot_store.js";
 import { isAuthorityPublicationJournalV1 } from "../storage/authority_publication_journal.js";
 import { isWorkspaceRegistryV1 } from "../workspace/registry.js";
+import { fsyncDirectory } from "../storage/directory_fsync.js";
 
 const STORE_STATE = new WeakMap();
 const PERMIT_STATE = new WeakMap();
@@ -22,15 +23,6 @@ const AUTHORITY_INPUT_FIELDS = Object.freeze([
 ]);
 const REPLAY_SCHEMA_VERSION = 1;
 const REPLAY_RESULT_FIELDS = Object.freeze(["canonical_input", "replay_envelope_digest"]);
-
-function fsyncDirectory(path) {
-  const descriptor = openSync(path, "r");
-  try {
-    try { fsyncSync(descriptor); } catch (error) {
-      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
-    }
-  } finally { closeSync(descriptor); }
-}
 
 /**
  * Create one path component at a time. EEXIST is an expected concurrent
