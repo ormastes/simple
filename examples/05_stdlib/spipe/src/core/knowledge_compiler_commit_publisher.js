@@ -268,7 +268,17 @@ class ReplayLedgerV1 {
         try { unlinkSync(staging); } catch (cleanup) { if (cleanup?.code !== "ENOENT") throw cleanup; }
         if (error?.code !== "EEXIST") throw error;
         const owner = this._readLock(path);
-        if (!owner) throw new Error("replay ledger lock owner receipt is corrupt");
+        if (!owner) {
+          // The owner may have released this exact lock after our failed link
+          // observed EEXIST but before the receipt read.  A vanished lock is a
+          // lost race and must be retried; an unreadable lock that still exists
+          // remains fail-closed as corruption.
+          try { lstatSync(path); } catch (missing) {
+            if (missing?.code === "ENOENT") continue;
+            throw missing;
+          }
+          throw new Error("replay ledger lock owner receipt is corrupt");
+        }
         if (!processIsAlive(owner.value.pid)) {
           const claim = this._reclaimPath(selected);
           try {
