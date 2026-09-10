@@ -1,0 +1,191 @@
+# codex-impl
+# Exact x86 baseline/v3/v4 validation in front of the shared composite selector.
+# This module admits metadata only.  Mapping and execution still require the
+# sealed publication owner to bind trusted exact artifact bytes.
+
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.{
+    EnvironmentVariantCatalogPolicyProjectionV1
+}
+use compiler.common.structural_contracts.environment_variant_composite_selector_v1.{
+    EnvironmentVariantCompositeSelectionV1,
+    environment_variant_catalog_select_composite_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_ARCH_X86_64_V1, ENV_VECTOR_NONE_V1, ENV_VECTOR_FIXED_V1,
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1, EnvironmentSnapshotV1,
+    VariantDescriptorV1,
+    environment_snapshot_validate_v1, variant_descriptor_validate_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.catalog_v1.{
+    EnvironmentVariantCatalogV1, environment_variant_catalog_create_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.{
+    ENV_FEATURE_X86_64_BASELINE_V2, ENV_FEATURE_X86_64_LEVEL3_V2,
+    ENV_FEATURE_X86_64_LEVEL4_V2, ENV_FEATURE_X86_64_LEVEL4_VBMI_V2,
+    ENV_FEATURE_X86_64_LEVEL4_VBMI2_V2,
+    ENV_FEATURE_X86_64_LEVEL4_VBMI_VBMI2_V2,
+    environment_feature_registry_lookup_v2,
+    environment_feature_registry_x86_validate_v2
+}
+
+pub enum X86VariantAdmissionErrorV1:
+    InvalidEnvironment
+    InvalidProjection
+    InvalidCatalog
+    ForeignTarget
+    IncompleteLevelRequirements
+    ReferenceParityMismatch
+    RequiredVariantMissing
+    NoAdmittedVariant
+
+fn _declared_x86_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _same_x86_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _registered_mask_x86_v1(feature_id: u32) -> u64:
+    match environment_feature_registry_lookup_v2(feature_id):
+        case Ok(entry): entry.feature_mask
+        case Err(_): 0u64
+
+fn _range_word_x86_v1(offset: u32, count: u32, words: [u64]) -> Result<u64, X86VariantAdmissionErrorV1>:
+    if count != 1u32 or offset >= words.len() as u32:
+        return Err(X86VariantAdmissionErrorV1.IncompleteLevelRequirements)
+    Ok(words[offset as i64])
+
+fn _feature_set_exact_x86_v2(value: EnvironmentFeatureSetV1, words: [u64]) -> bool:
+    if value.architecture != ENV_ARCH_X86_64_V1:
+        return false
+    val word = match _range_word_x86_v1(value.words.offset, value.words.count, words):
+        case Ok(found): found
+        case Err(_): return false
+    environment_feature_registry_x86_validate_v2(word)
+
+fn _descriptor_level_valid_x86_v1(
+    descriptor: VariantDescriptorV1, words: [u64]
+) -> bool:
+    if descriptor.required_cpu_features.architecture != ENV_ARCH_X86_64_V1:
+        return false
+    val cpu = match _range_word_x86_v1(
+        descriptor.required_cpu_features.words.offset,
+        descriptor.required_cpu_features.words.count, words):
+        case Ok(value): value
+        case Err(_): return false
+    val baseline = _registered_mask_x86_v1(ENV_FEATURE_X86_64_BASELINE_V2)
+    val v3 = _registered_mask_x86_v1(ENV_FEATURE_X86_64_LEVEL3_V2)
+    val v4 = _registered_mask_x86_v1(ENV_FEATURE_X86_64_LEVEL4_V2)
+    val v4_vbmi = _registered_mask_x86_v1(ENV_FEATURE_X86_64_LEVEL4_VBMI_V2)
+    val v4_vbmi2 = _registered_mask_x86_v1(ENV_FEATURE_X86_64_LEVEL4_VBMI2_V2)
+    val v4_both = _registered_mask_x86_v1(ENV_FEATURE_X86_64_LEVEL4_VBMI_VBMI2_V2)
+    if cpu == baseline:
+        return descriptor.required_os_state_words.count == 0u32 and
+            descriptor.required_vector_state_mode == ENV_VECTOR_NONE_V1 and
+            descriptor.required_vector_length_bits == 0u32
+    if cpu == v3:
+        val state = match _range_word_x86_v1(
+            descriptor.required_os_state_words.offset,
+            descriptor.required_os_state_words.count, words):
+            case Ok(value): value
+            case Err(_): return false
+        return state == v3 and descriptor.required_vector_state_mode == ENV_VECTOR_FIXED_V1 and
+            descriptor.required_vector_length_bits == 256u32
+    if cpu == v4 or cpu == v4_vbmi or cpu == v4_vbmi2 or cpu == v4_both:
+        val state = match _range_word_x86_v1(
+            descriptor.required_os_state_words.offset,
+            descriptor.required_os_state_words.count, words):
+            case Ok(value): value
+            case Err(_): return false
+        return state == v4 and descriptor.required_vector_state_mode == ENV_VECTOR_FIXED_V1 and
+            descriptor.required_vector_length_bits == 512u32
+    false
+
+fn _catalog_header_valid_x86_v1(catalog: EnvironmentVariantCatalogV1) -> bool:
+    _declared_x86_v1(catalog.catalog_digest) and catalog.catalog_generation > 0u64 and
+        _declared_x86_v1(catalog.dependency_lock_digest) and
+        catalog.descriptors.len() > 0 and catalog.descriptors.len() <= 256 and
+        catalog.dependencies.len() <= 64 and catalog.arena_byte_count <= 1048576u32 and
+        catalog.feature_word_count <= 192u32
+
+fn _reference_parity_x86_v1(
+    left: VariantDescriptorV1, right: VariantDescriptorV1
+) -> bool:
+    _same_x86_v1(left.contract_identity, right.contract_identity) and
+        left.contract_major == right.contract_major and
+        left.contract_minor == right.contract_minor and
+        _same_x86_v1(left.abi_digest, right.abi_digest) and
+        _same_x86_v1(left.semantic_identity, right.semantic_identity) and
+        _same_x86_v1(left.grammar_identity, right.grammar_identity) and
+        _same_x86_v1(left.program_identity, right.program_identity) and
+        left.numerical_contract_id == right.numerical_contract_id and
+        _same_x86_v1(left.resource_layout_digest, right.resource_layout_digest)
+
+pub fn x86_variant_select_admitted_v1(
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1,
+    catalog: EnvironmentVariantCatalogV1
+) -> Result<EnvironmentVariantCompositeSelectionV1, X86VariantAdmissionErrorV1>:
+    if snapshot.execution_architecture != ENV_ARCH_X86_64_V1 or
+       environment_snapshot_validate_v1(snapshot, feature_words, []) != Ok(()) or
+       not _feature_set_exact_x86_v2(snapshot.hardware_features, feature_words) or
+       not _feature_set_exact_x86_v2(snapshot.os_usable_features, feature_words) or
+       not _feature_set_exact_x86_v2(snapshot.policy_allowed_features, feature_words):
+        return Err(X86VariantAdmissionErrorV1.InvalidEnvironment)
+    if not _catalog_header_valid_x86_v1(catalog) or
+       catalog.feature_word_count != feature_words.len() as u32:
+        return Err(X86VariantAdmissionErrorV1.InvalidCatalog)
+    val requested_provider = projection.cap_request.requested_provider
+    if not _declared_x86_v1(requested_provider) or
+       not _same_x86_v1(requested_provider,
+           projection.selection_request.requested_provider):
+        return Err(X86VariantAdmissionErrorV1.InvalidProjection)
+    if projection.cap_request.max_architecture != ENV_ARCH_X86_64_V1 or
+       projection.selection_request.max_architecture != ENV_ARCH_X86_64_V1 or
+       not _feature_set_exact_x86_v2(
+           projection.cap_request.max_feature_ceiling, feature_words) or
+       not _feature_set_exact_x86_v2(
+           projection.selection_request.max_feature_ceiling, feature_words):
+        return Err(X86VariantAdmissionErrorV1.InvalidProjection)
+    for raw_descriptor in catalog.descriptors:
+        if _same_x86_v1(raw_descriptor.provider_identity, requested_provider) and
+           raw_descriptor.target_architecture != ENV_ARCH_X86_64_V1:
+            return Err(X86VariantAdmissionErrorV1.ForeignTarget)
+    # Reconstruct through the catalog owner so forged duplicate identities and
+    # invalid non-requested rows cannot bypass canonical validation.
+    val validated_catalog = match environment_variant_catalog_create_v1(catalog.catalog_digest,
+        catalog.catalog_generation, catalog.dependency_lock_digest,
+        catalog.arena_byte_count, catalog.feature_word_count,
+        catalog.descriptors, catalog.dependencies):
+        case Ok(value): value
+        case Err(_): return Err(X86VariantAdmissionErrorV1.InvalidCatalog)
+    var requested_rows = 0
+    var reference_index = -1
+    for descriptor_index in 0..validated_catalog.descriptors.len():
+        val descriptor = validated_catalog.descriptors[descriptor_index]
+        if _same_x86_v1(descriptor.provider_identity, requested_provider):
+            requested_rows = requested_rows + 1
+            if descriptor.target_architecture != ENV_ARCH_X86_64_V1:
+                return Err(X86VariantAdmissionErrorV1.ForeignTarget)
+            if variant_descriptor_validate_v1(descriptor, validated_catalog.arena_byte_count,
+                validated_catalog.feature_word_count, validated_catalog.dependencies.len() as u32,
+                validated_catalog.dependencies) != Ok(()):
+                return Err(X86VariantAdmissionErrorV1.InvalidCatalog)
+            if not _descriptor_level_valid_x86_v1(descriptor, feature_words):
+                return Err(X86VariantAdmissionErrorV1.IncompleteLevelRequirements)
+            if reference_index < 0:
+                reference_index = descriptor_index
+            elif not _reference_parity_x86_v1(
+                validated_catalog.descriptors[reference_index], descriptor):
+                return Err(X86VariantAdmissionErrorV1.ReferenceParityMismatch)
+    if requested_rows == 0:
+        return Err(X86VariantAdmissionErrorV1.NoAdmittedVariant)
+    val selected = match environment_variant_catalog_select_composite_v1(
+        validated_catalog, snapshot, feature_words, [], projection):
+        case Ok(value): value
+        case Err(_): return Err(X86VariantAdmissionErrorV1.InvalidProjection)
+    if selected.required_missing:
+        return Err(X86VariantAdmissionErrorV1.RequiredVariantMissing)
+    if selected.selection.selected_index < 0:
+        return Err(X86VariantAdmissionErrorV1.NoAdmittedVariant)
+    Ok(selected)
