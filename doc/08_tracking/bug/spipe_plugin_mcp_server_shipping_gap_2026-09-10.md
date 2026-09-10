@@ -1,7 +1,6 @@
 # SPipe plugin MCP launcher missing from the shipped plugin artifact
 
-Status: fixed in the plugin shipping lane; verification is pending the parent
-integration gate.
+Status: verified on the integrated candidate `6aaaa9f784270180076afc6fc57537112f37f095`.
 
 The npm package contains the shared `mcp/server.js` at its package root, but
 the Codex plugin is installed from the `plugin/` subtree. That subtree had no
@@ -26,6 +25,12 @@ plugin/mcp/server.js: absent
 node: MODULE_NOT_FOUND
 ```
 
-Required evidence: npm package inventory includes the plugin launcher and a
-clean package-root install starts both `spipe-mcp` and the plugin launcher on
-Linux and Windows without path-specific assumptions.
+Verification evidence:
+
+- Windows Node clean `npm pack` + install: root and plugin initialize returned
+  `spipe/0.2.0`.
+- Linux WSL Ubuntu 22.04, Node `v18.20.5`, npm `10.8.2`, offline clean
+  `npm pack` + install: root and plugin initialize both returned `spipe/0.2.0`.
+- The packed inventory contains `plugin/mcp/server.js`; both launchers were
+  started from their installed package locations without a caller working
+  directory dependency.
