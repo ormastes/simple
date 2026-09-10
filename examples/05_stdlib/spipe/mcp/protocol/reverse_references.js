@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { createFolderReverseReferenceIndex } from "../../src/graph/index.js";
@@ -28,7 +28,18 @@ function assertRegularInventory(stat) {
 
 function openNoFollow(path) {
   if (typeof constants.O_NOFOLLOW !== "number") {
-    throw new Error("secure no-follow inventory opening is unavailable on this host");
+    // Windows does not expose O_NOFOLLOW.  Reject a link before opening and
+    // bind the descriptor to the pre-open regular-file identity; any rename
+    // or replacement during the open is detected before bytes are consumed.
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink()) throw new TypeError("inventory_path must name a regular file, not a symbolic link");
+    const fd = openSync(path, constants.O_RDONLY);
+    const opened = fstatSync(fd);
+    if (inventoryByteIdentity(opened) !== inventoryByteIdentity(before) || opened.isSymbolicLink()) {
+      closeSync(fd);
+      throw new TypeError("inventory_path must name a regular file, not a symbolic link");
+    }
+    return fd;
   }
   try { return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
   catch (error) {

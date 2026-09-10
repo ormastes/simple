@@ -68,6 +68,7 @@ export class WorkspaceRegistry {
     this._projects = new Map();
     this._relations = new Map();
     this._worktrees = new Map();
+    this._authoritySnapshots = new Map();
     WORKSPACE_REGISTRY_V1_BRAND.add(this);
   }
 

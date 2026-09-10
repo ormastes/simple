@@ -17,7 +17,15 @@ function digest(value, name) {
   if (!/^sha256:[0-9a-f]{64}$/.test(text)) throw new TypeError(`${name} must be sha256-prefixed`);
   return text;
 }
-function syncDirectory(path) { let fd; try { fd = openSync(path, "r"); fsyncSync(fd); } finally { if (fd !== undefined) closeSync(fd); } }
+function syncDirectory(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    try { fsyncSync(fd); } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EINVAL", "EBADF"].includes(error?.code)) throw error;
+    }
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
 function writeDurable(path, bytes, checkpoint = () => {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
