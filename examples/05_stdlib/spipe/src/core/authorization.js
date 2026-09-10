@@ -20,6 +20,21 @@ const READ_RECEIPT_V1_FIELDS = Object.freeze([
   "effectiveScopeDigest", "orderingVersion", "pageLimitOrNull", "policyVersion",
   "decision", "issuedAtMs", "expiresAtMs", "receiptUid", "issuerKeyId", "revocationEpoch"
 ]);
+// The admitted V1 wire ABI is shared by both receipt producers and consumers:
+// string "v1" plus unpadded RFC 4648 base64url signatures.  An older,
+// unadmitted draft used numeric 1 and standard base64; do not accept both
+// spellings because that would make one named schema have two signing domains.
+const CANONICAL_READ_RECEIPT_V1 = "v1";
+const BASE64URL_SIGNATURE = /^[A-Za-z0-9_-]+$/;
+
+function isCanonicalBase64Url(value) {
+  if (typeof value !== "string" || !BASE64URL_SIGNATURE.test(value)) return false;
+  try {
+    return Buffer.from(value, "base64url").toString("base64url") === value;
+  } catch {
+    return false;
+  }
+}
 
 function readReceiptV1Payload(input, { cursor = false } = {}) {
   const value = {};
@@ -185,7 +200,7 @@ export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], n
       const key = cursorKey(policy, receipt.cursorAuthorityKeyId);
       if (!key || (key.status !== "current" && !(key.status === "grace" && Number.isSafeInteger(key.graceUntilMs) && clockNowMs < key.graceUntilMs)) || key.authorityKeyEpoch !== receipt.cursorAuthorityKeyEpoch) return null;
       const publicKey = key.publicVerificationKey ? createPublicKey({ key: Buffer.from(key.publicVerificationKey, "base64"), format: "der", type: "spki" }) : null;
-      if (!publicKey || typeof receipt.signature !== "string" || !verify(null, cursorSigningBytes({ cursorVersion: receipt.cursorVersion, binding: receipt.binding, pagePosition: receipt.pagePosition, issuedAtMs: receipt.issuedAtMs, expiresAtMs: receipt.expiresAtMs, cursorAuthorityKeyId: receipt.cursorAuthorityKeyId, cursorAuthorityKeyEpoch: receipt.cursorAuthorityKeyEpoch, cursorRevocationEpoch: receipt.cursorRevocationEpoch }), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
+      if (!publicKey || !isCanonicalBase64Url(receipt.signature) || !verify(null, cursorSigningBytes({ cursorVersion: receipt.cursorVersion, binding: receipt.binding, pagePosition: receipt.pagePosition, issuedAtMs: receipt.issuedAtMs, expiresAtMs: receipt.expiresAtMs, cursorAuthorityKeyId: receipt.cursorAuthorityKeyId, cursorAuthorityKeyEpoch: receipt.cursorAuthorityKeyEpoch, cursorRevocationEpoch: receipt.cursorRevocationEpoch }), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
       return receipt;
     } catch { return null; }
   }
@@ -280,7 +295,7 @@ export function createAuthorizationPort({ publicKeys, revokedReceiptUids = [], n
               key.status !== "current" || payload.revocationEpoch !== activePolicy.revocationEpoch) return null;
         }
         const publicKey = keys.get(payload.issuerKeyId);
-        if (!publicKey || !verify(null, readSigningBytes(payload), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
+        if (!publicKey || !isCanonicalBase64Url(receipt.signature) || !verify(null, readSigningBytes(payload), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
         if (!Number.isSafeInteger(clockNowMs) || payload.issuedAtMs > clockNowMs || payload.expiresAtMs <= clockNowMs) return null;
         for (const field of Object.keys(expected)) {
           if (field === "worktreeUid" || field === "authorityInstanceUid" || field === "authorityManifestDigest") continue;
@@ -332,7 +347,7 @@ export function createCanonicalReadAuthorizationPort({
       const permitted = new Set([...READ_RECEIPT_V1_FIELDS, ...(cursor ? ["lastSortKey"] : []), "signature"]);
       if (Object.keys(receipt).some((field) => !permitted.has(field))) return null;
       const payload = readReceiptV1Payload(receipt, { cursor });
-      if (payload.receiptVersion !== 1 || payload.decision !== "allow" ||
+      if (payload.receiptVersion !== CANONICAL_READ_RECEIPT_V1 || payload.decision !== "allow" ||
           !Number.isSafeInteger(clockNowMs) || !Number.isSafeInteger(payload.issuedAtMs) || !Number.isSafeInteger(payload.expiresAtMs) ||
           payload.issuedAtMs > clockNowMs || payload.expiresAtMs <= clockNowMs ||
           !Number.isSafeInteger(payload.authorityKeyEpoch) ||
@@ -343,7 +358,8 @@ export function createCanonicalReadAuthorizationPort({
           !exactBinding(payload, expectedBinding)) return null;
       const publicKey = keys.get(payload.authorityKeyId);
       if (!publicKey || !algorithms.has(publicKey.asymmetricKeyType) || typeof receipt.signature !== "string" ||
-          !verify(null, readReceiptV1Bytes(payload, cursor), publicKey, Buffer.from(receipt.signature, "base64"))) return null;
+          !isCanonicalBase64Url(receipt.signature) ||
+          !verify(null, readReceiptV1Bytes(payload, cursor), publicKey, Buffer.from(receipt.signature, "base64url"))) return null;
       const grant = freezeDeep({ type: cursor ? "verified_cursor_grant_v1" : "verified_read_grant_v1", binding: payload });
       (cursor ? VERIFIED_CURSOR_GRANTS : VERIFIED_READ_GRANTS).add(grant);
       return grant;
@@ -352,9 +368,9 @@ export function createCanonicalReadAuthorizationPort({
 
   function signReceipt(binding, privateKey, cursor = false) {
     const payload = readReceiptV1Payload(binding, { cursor });
-    if (payload.receiptVersion !== 1 || !privateKey || !algorithms.has(privateKey.asymmetricKeyType)) throw new TypeError("invalid canonical read receipt v1");
+    if (payload.receiptVersion !== CANONICAL_READ_RECEIPT_V1 || !privateKey || !algorithms.has(privateKey.asymmetricKeyType)) throw new TypeError("invalid canonical read receipt v1");
     const signedPayload = { ...payload, receiptUid: readReceiptUid(payload, cursor) };
-    return freezeDeep({ ...signedPayload, ...(cursor ? { lastSortKey: payload.lastSortKey } : {}), signature: sign(null, readReceiptV1Bytes(signedPayload, cursor), privateKey).toString("base64") });
+    return freezeDeep({ ...signedPayload, ...(cursor ? { lastSortKey: payload.lastSortKey } : {}), signature: sign(null, readReceiptV1Bytes(signedPayload, cursor), privateKey).toString("base64url") });
   }
 
   const port = Object.freeze({
