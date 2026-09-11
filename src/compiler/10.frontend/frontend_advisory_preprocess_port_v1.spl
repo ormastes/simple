@@ -1,0 +1,268 @@
+# Frontend-owned advisory preprocessing boundary. V1 publishes only the lazy
+# reference provider; it neither loads providers nor initializes GPU/runtime
+# services and cannot replace parsing, AST, or HIR semantics.
+use std.common.crypto.sha256.sha256_bytes
+use std.common.string_core.text_to_bytes
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    EnvironmentVariantParserProviderV1, EnvironmentVariantParserRequirementV1,
+    EnvironmentVariantPolicyDecisionInputV1}
+
+pub enum FrontendAdvisoryPreprocessPolicyV1:
+    Reference
+    PreferSimd
+    RequireSimd
+pub enum FrontendAdvisoryPreprocessStatusV1:
+    ReferenceNoOp
+    AdvisoryUnavailable
+    AdvisoryExecuted
+    ScalarFallback
+pub enum FrontendAdvisoryPreprocessIssueErrorV1:
+    InvalidStatus
+pub enum FrontendAdvisoryPreprocessDispatchErrorV1:
+    RequiredProviderUnavailable
+    InvalidProviderEvidence
+pub struct FrontendAdvisoryPreprocessRequestV1:
+    transformed_source_identity: EnvironmentDigest256V1
+    transformed_source_length: u64
+    policy: FrontendAdvisoryPreprocessPolicyV1
+pub struct FrontendAdvisoryPreprocessReceiptV1:
+    request_identity: EnvironmentDigest256V1
+    transformed_source_identity: EnvironmentDigest256V1
+    transformed_source_length: u64
+    policy: FrontendAdvisoryPreprocessPolicyV1
+    status: FrontendAdvisoryPreprocessStatusV1
+    provider_loaded: bool
+    provider_executed: bool
+    gpu_registry_initialized: bool
+    gpu_device_initialization_count: u32
+    reference_frontend_required: bool
+    receipt_identity: EnvironmentDigest256V1
+pub struct FrontendAdvisoryPreprocessResultV1:
+    parse_source: text
+    receipt: FrontendAdvisoryPreprocessReceiptV1
+
+pub fn frontend_advisory_policy_from_environment_decision_v1(
+    decision: EnvironmentVariantPolicyDecisionInputV1
+) -> FrontendAdvisoryPreprocessPolicyV1:
+    if decision.parser_require == EnvironmentVariantParserRequirementV1.Simd:
+        return FrontendAdvisoryPreprocessPolicyV1.RequireSimd
+    if decision.parser_prefer == EnvironmentVariantParserProviderV1.Simd:
+        return FrontendAdvisoryPreprocessPolicyV1.PreferSimd
+    FrontendAdvisoryPreprocessPolicyV1.Reference
+
+fn _read64_fap(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+fn _digest_fap(raw: [i64]) -> EnvironmentDigest256V1:
+    val hashed = sha256_bytes(raw)
+    EnvironmentDigest256V1(w0: _read64_fap(hashed, 0), w1: _read64_fap(hashed, 8),
+        w2: _read64_fap(hashed, 16), w3: _read64_fap(hashed, 24))
+fn _push64_fap(out: [i64], value: u64):
+    for i in 0..8: out.push(((value >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_fap(out: [i64], value: EnvironmentDigest256V1):
+    _push64_fap(out, value.w0); _push64_fap(out, value.w1)
+    _push64_fap(out, value.w2); _push64_fap(out, value.w3)
+fn _policy_code_fap(policy: FrontendAdvisoryPreprocessPolicyV1) -> u64:
+    if policy == FrontendAdvisoryPreprocessPolicyV1.Reference: return 1u64
+    if policy == FrontendAdvisoryPreprocessPolicyV1.PreferSimd: return 2u64
+    3u64
+fn _status_code_fap(status: FrontendAdvisoryPreprocessStatusV1) -> u64:
+    if status == FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp: return 1u64
+    if status == FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable: return 2u64
+    if status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted: return 3u64
+    4u64
+fn _receipt_identity_fap(request_material: [i64], request_id: EnvironmentDigest256V1,
+    status_code: u64, provider_loaded: bool, provider_executed: bool,
+    gpu_initialized: bool, gpu_initialization_count: u32,
+    reference_required: bool
+) -> EnvironmentDigest256V1:
+    var material = request_material; _pushd_fap(material, request_id)
+    for value in [status_code, if provider_loaded: 1u64 else: 0u64,
+                  if provider_executed: 1u64 else: 0u64,
+                  if gpu_initialized: 1u64 else: 0u64,
+                  gpu_initialization_count as u64,
+                  if reference_required: 1u64 else: 0u64]: _push64_fap(material, value)
+    _digest_fap(material)
+
+pub fn frontend_transformed_source_identity_v1(source: text) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes([value as i64 for value in text_to_bytes(source)])
+    EnvironmentDigest256V1(w0: _read64_fap(raw, 0), w1: _read64_fap(raw, 8),
+        w2: _read64_fap(raw, 16), w3: _read64_fap(raw, 24))
+
+pub fn frontend_advisory_preprocess_reference_v1(source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1
+) -> FrontendAdvisoryPreprocessResultV1:
+    val source_id = frontend_transformed_source_identity_v1(source)
+    val source_bytes = text_to_bytes(source)
+    val status = if policy == FrontendAdvisoryPreprocessPolicyV1.Reference:
+        FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp
+    else:
+        FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable
+    val status_code = _status_code_fap(status)
+    var request_material: [i64] = []; _push64_fap(request_material, 1u64)
+    _pushd_fap(request_material, source_id); _push64_fap(request_material, source_bytes.len() as u64)
+    _push64_fap(request_material, _policy_code_fap(policy))
+    val request_id = _digest_fap(request_material)
+    # The default is intentionally lazy even for prefer/require. Policy
+    # enforcement belongs to the future driver-owned binding adapter; this
+    # frontend reference port cannot manufacture admission authority.
+    FrontendAdvisoryPreprocessResultV1(parse_source: source,
+        receipt: FrontendAdvisoryPreprocessReceiptV1(request_identity: request_id,
+            transformed_source_identity: source_id, transformed_source_length: source_bytes.len() as u64,
+            policy: policy, status: status,
+            provider_loaded: false, provider_executed: false, gpu_registry_initialized: false,
+            gpu_device_initialization_count: 0u32, reference_frontend_required: true,
+            receipt_identity: _receipt_identity_fap(request_material, request_id, status_code,
+                false, false, false, 0u32, true)))
+
+pub fn frontend_advisory_preprocess_result_issue_v1(source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1,
+    status: FrontendAdvisoryPreprocessStatusV1,
+    provider_loaded: bool, provider_executed: bool
+) -> Result<FrontendAdvisoryPreprocessResultV1, FrontendAdvisoryPreprocessIssueErrorV1>:
+    if status == FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp:
+        if policy != FrontendAdvisoryPreprocessPolicyV1.Reference or provider_loaded or provider_executed:
+            return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
+    elif status == FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable:
+        if policy == FrontendAdvisoryPreprocessPolicyV1.Reference or provider_executed:
+            return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
+    elif status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted:
+        if policy == FrontendAdvisoryPreprocessPolicyV1.Reference or not provider_loaded or not provider_executed:
+            return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
+    elif policy == FrontendAdvisoryPreprocessPolicyV1.Reference or not provider_loaded:
+        return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
+    val source_id = frontend_transformed_source_identity_v1(source)
+    val source_length = text_to_bytes(source).len() as u64
+    var request_material: [i64] = []; _push64_fap(request_material, 1u64)
+    _pushd_fap(request_material, source_id); _push64_fap(request_material, source_length)
+    _push64_fap(request_material, _policy_code_fap(policy))
+    val request_id = _digest_fap(request_material); val status_code = _status_code_fap(status)
+    Ok(FrontendAdvisoryPreprocessResultV1(parse_source: source,
+        receipt: FrontendAdvisoryPreprocessReceiptV1(request_identity: request_id,
+            transformed_source_identity: source_id, transformed_source_length: source_length,
+            policy: policy, status: status, provider_loaded: provider_loaded,
+            provider_executed: provider_executed, gpu_registry_initialized: false,
+            gpu_device_initialization_count: 0u32, reference_frontend_required: true,
+            receipt_identity: _receipt_identity_fap(request_material, request_id, status_code,
+                provider_loaded, provider_executed, false, 0u32, true))))
+
+pub fn frontend_advisory_preprocess_result_valid_v1(
+    result: FrontendAdvisoryPreprocessResultV1
+) -> bool:
+    val receipt = result.receipt
+    val bytes = text_to_bytes(result.parse_source)
+    val source_id = frontend_transformed_source_identity_v1(result.parse_source)
+    if source_id != receipt.transformed_source_identity or
+       bytes.len() as u64 != receipt.transformed_source_length or
+       not receipt.reference_frontend_required or receipt.gpu_registry_initialized !=
+           (receipt.gpu_device_initialization_count > 0u32):
+        return false
+    var request_material: [i64] = []; _push64_fap(request_material, 1u64)
+    _pushd_fap(request_material, source_id); _push64_fap(request_material, bytes.len() as u64)
+    _push64_fap(request_material, _policy_code_fap(receipt.policy))
+    val request_id = _digest_fap(request_material)
+    if request_id != receipt.request_identity: return false
+    val status_code = _status_code_fap(receipt.status)
+    if _receipt_identity_fap(request_material, request_id, status_code,
+            receipt.provider_loaded, receipt.provider_executed,
+            receipt.gpu_registry_initialized, receipt.gpu_device_initialization_count,
+            receipt.reference_frontend_required) != receipt.receipt_identity: return false
+    if receipt.status == FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp:
+        receipt.policy == FrontendAdvisoryPreprocessPolicyV1.Reference and
+            not receipt.provider_loaded and not receipt.provider_executed and
+            not receipt.gpu_registry_initialized
+    elif receipt.status == FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable:
+        receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and
+            not receipt.provider_executed
+    elif receipt.status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted:
+        receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and
+            receipt.provider_loaded and receipt.provider_executed
+    else:
+        receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and receipt.provider_loaded
+
+pub fn frontend_advisory_preprocess_result_matches_request_v1(
+    result: FrontendAdvisoryPreprocessResultV1,
+    request: FrontendAdvisoryPreprocessRequestV1
+) -> bool:
+    frontend_advisory_preprocess_result_valid_v1(result) and
+        result.receipt.transformed_source_identity == request.transformed_source_identity and
+        result.receipt.transformed_source_length == request.transformed_source_length and
+        result.receipt.policy == request.policy
+
+class _FrontendAdvisoryProviderSlotV1:
+    provider: fn(text, FrontendAdvisoryPreprocessPolicyV1) -> FrontendAdvisoryPreprocessResultV1
+    generation: u64
+    owner_id: u64
+    session_id: u64
+
+var _frontend_advisory_slot_v1 = _FrontendAdvisoryProviderSlotV1(
+    provider: frontend_advisory_preprocess_reference_v1, generation: 1u64,
+    owner_id: 0u64, session_id: 0u64)
+
+pub fn frontend_advisory_preprocess_generation_v1() -> u64:
+    _frontend_advisory_slot_v1.generation
+
+pub fn frontend_advisory_preprocess_bind_scoped_v1(
+    provider: fn(text, FrontendAdvisoryPreprocessPolicyV1) -> FrontendAdvisoryPreprocessResultV1,
+    owner_id: u64, session_id: u64, generation: u64
+) -> bool:
+    if owner_id == 0u64 or session_id == 0u64 or
+       _frontend_advisory_slot_v1.owner_id != 0u64 or
+       generation == 0u64 or generation <= _frontend_advisory_slot_v1.generation:
+        return false
+    _frontend_advisory_slot_v1.provider = provider
+    _frontend_advisory_slot_v1.generation = generation
+    _frontend_advisory_slot_v1.owner_id = owner_id
+    _frontend_advisory_slot_v1.session_id = session_id
+    true
+
+pub fn frontend_advisory_preprocess_binding_matches_v1(owner_id: u64,
+    session_id: u64, generation: u64) -> bool:
+    owner_id != 0u64 and owner_id == _frontend_advisory_slot_v1.owner_id and
+        session_id != 0u64 and session_id == _frontend_advisory_slot_v1.session_id and
+        generation == _frontend_advisory_slot_v1.generation
+
+pub fn frontend_advisory_preprocess_reset_scoped_v1(owner_id: u64,
+    session_id: u64, generation: u64) -> bool:
+    if not frontend_advisory_preprocess_binding_matches_v1(owner_id, session_id,
+            _frontend_advisory_slot_v1.generation) or generation == 0u64 or
+       generation <= _frontend_advisory_slot_v1.generation:
+        return false
+    _frontend_advisory_slot_v1.provider = frontend_advisory_preprocess_reference_v1
+    _frontend_advisory_slot_v1.generation = generation
+    _frontend_advisory_slot_v1.owner_id = 0u64
+    _frontend_advisory_slot_v1.session_id = 0u64
+    true
+
+pub fn frontend_advisory_preprocess_dispatch_checked_v1(source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1
+) -> Result<FrontendAdvisoryPreprocessResultV1, FrontendAdvisoryPreprocessDispatchErrorV1>:
+    frontend_advisory_preprocess_dispatch_checked_scoped_v1(
+        source, policy, 0u64, 0u64, 0u64)
+
+pub fn frontend_advisory_preprocess_dispatch_checked_scoped_v1(source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1, owner_id: u64, session_id: u64,
+    generation: u64
+) -> Result<FrontendAdvisoryPreprocessResultV1, FrontendAdvisoryPreprocessDispatchErrorV1>:
+    val scoped = if owner_id == 0u64:
+        _frontend_advisory_slot_v1.owner_id == 0u64
+    else:
+        frontend_advisory_preprocess_binding_matches_v1(owner_id, session_id, generation)
+    val selected = if scoped:
+        _frontend_advisory_slot_v1.provider(source, policy)
+    else:
+        frontend_advisory_preprocess_reference_v1(source, policy)
+    val request = FrontendAdvisoryPreprocessRequestV1(
+        transformed_source_identity: frontend_transformed_source_identity_v1(source),
+        transformed_source_length: text_to_bytes(source).len() as u64,
+        policy: policy)
+    if not frontend_advisory_preprocess_result_matches_request_v1(selected, request):
+        if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd:
+            return Err(FrontendAdvisoryPreprocessDispatchErrorV1.InvalidProviderEvidence)
+        return Ok(frontend_advisory_preprocess_reference_v1(source, policy))
+    if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd and
+       selected.receipt.status != FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted:
+        return Err(FrontendAdvisoryPreprocessDispatchErrorV1.RequiredProviderUnavailable)
+    Ok(selected)

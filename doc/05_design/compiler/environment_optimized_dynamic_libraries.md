@@ -893,29 +893,44 @@ historical advisory evidence; it still does not establish parser, AST, or HIR
 equivalence.
 
 Layer 10 owns the actual dependency-inversion seam: one typed function-valued
-advisory slot, initialized to the lazy reference provider. Only a strictly newer
-driver generation may bind a provider; reset cannot roll the generation back.
-The dispatcher validates the common receipt and falls back to the reference
-implementation if a bound provider returns inconsistent evidence. The shared
-frontend invokes this dispatcher after conditional/domain transformations and
-before cache lookup and full parsing. Driver and loader modules may bind down
-through this port, while layer 10 imports neither of them.
+advisory slot, initialized to the lazy reference provider. Only an exact
+owner/session and strictly newer generation may bind or reset it; a driver that
+does not hold all three coordinates cannot invoke the selected provider. The
+checked dispatcher validates the complete result against the exact transformed
+source identity, byte length, and resolved policy request. The shared frontend
+invokes it after conditional/domain transformations and before cache lookup and
+full parsing. The exact startup policy/provider/variant/artifact/environment
+identity is folded into the frontend cache key. Driver and loader modules may
+bind down through this port, while layer 10 imports neither of them.
 
-The loader binding adapter owns the configured sealed activation, package
-session, execution snapshot, feature arena, and initial lexical state. Its
-function-valued projection invokes and validates the rich lexical result, then
-issues the smaller canonical frontend receipt. The common receipt distinguishes
+The loader binding adapter owns the configured sealed activation and a typed
+per-source activation factory. The fixed package-session draft was rejected:
+one startup session serves many immutable source snapshots, so a package
+session cannot be captured once and reused across them. For each transformed
+source, the loader acquires and projects a sealed build-use, invokes the
+factory synchronously, returns its exact evidence for request validation, and
+releases the use before returning. The factory identity and artifact identity
+must equal the authenticated sealed pin authority, and the selected sealed
+binding-policy digest must equal the exact startup request digest. The factory
+owns creation and terminal cleanup of its
+source-specific package session, execution snapshot, feature arena, and initial
+lexical state; the build-use authority itself never crosses the callback
+boundary. Its function-valued projection issues the smaller canonical frontend
+receipt. The common receipt distinguishes
 reference no-op, unavailable advisory execution, completed advisory execution,
 and scalar fallback; its digest binds provider and GPU execution flags and
 counts as well as status. Uninstall first restores the layer-10 reference slot,
-then discards loader context. Startup composition must still supply and retire
-this context, and required-policy failure needs an explicit compiler error path
-before automatic selection is enabled.
+then discards loader context. The startup receipt transports only copied
+owner/session/generation coordinates and canonical identities into the driver;
+the sealed owner and build-use remain loader-private. Startup composition must
+still supply and retire this context, and required-policy failure closes any
+active transient parser scope before it travels through every driver phase-2
+parse route.
 
-Callers that enforce `RequireSimd` use checked dispatch. It returns typed
-unavailable unless the validated common status is completed advisory execution,
-and distinguishes malformed provider evidence. The compatibility dispatcher
-may still fall back for reference/prefer callers. Automatic selection is gated
+Callers use checked dispatch. `RequireSimd` returns typed unavailable unless the
+validated common status is completed advisory execution, and distinguishes
+malformed or request-substituted provider evidence; reference/prefer may consume
+the checked reference result. Automatic selection is gated
 on proving that function-slot replacement changes the actual indirect target;
 the slot is therefore stored in a stable reference-semantics object rather than
 as a bare mutable global function value. A focused interpreter regression proves

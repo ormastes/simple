@@ -6,18 +6,20 @@ use compiler.common.structural_contracts.environment_variant_startup_port_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_v1.{
     EnvironmentVariantParserRequirementV1, environment_variant_policy_resolve_v1
 }
-use compiler.loader.frontend_lexical_advisory_binding_v1.*
-use compiler.frontend.frontend_advisory_preprocess_port_v1.{
-    frontend_advisory_preprocess_generation_v1
-}
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.{
+    environment_variant_policy_digest256_v1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.*
 use compiler.driver.environment_variant_sealed_activation_owner_v1.{
+    EnvironmentVariantSealedActivationOwnerV1,
+    EnvironmentVariantSealedActivationOwnerTokenV1,
     environment_variant_sealed_activation_owner_live_v1,
     environment_variant_sealed_activation_owner_project_v1,
     environment_variant_sealed_build_use_acquire_v1,
     environment_variant_sealed_build_use_project_v1,
     environment_variant_sealed_build_use_release_v1
 }
-use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    ENV_ARTIFACT_TRUST_AUTHENTICATED_V1}
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     EnvironmentDigest256V1
 }
@@ -34,6 +36,98 @@ struct _EnvironmentVariantStartupCandidateProjectionV1:
     artifact_identity: EnvironmentDigest256V1
     environment_identity: EnvironmentDigest256V1
     environment_generation: u64
+    binding_policy_digest: EnvironmentDigest256V1
+
+# A candidate supplies one immutable source factory. The loader validates and
+# pins the sealed generation around every invocation. The build-use authority
+# never crosses this boundary; only the selected trusted factory is invoked.
+pub class FrontendLexicalAdvisoryBindingContextV1:
+    sealed_owner: EnvironmentVariantSealedActivationOwnerV1
+    activation: EnvironmentVariantSealedActivationOwnerTokenV1
+    source_factory_provider_identity: EnvironmentDigest256V1
+    source_factory_artifact_identity: EnvironmentDigest256V1
+    source_factory: fn(text, FrontendAdvisoryPreprocessPolicyV1
+    ) -> Result<FrontendAdvisoryPreprocessResultV1, text>
+
+var _environment_variant_frontend_context_v1:
+    FrontendLexicalAdvisoryBindingContextV1? = nil
+var _environment_variant_frontend_owner_v1: u64 = 0u64
+var _environment_variant_frontend_generation_v1: u64 = 0u64
+var _environment_variant_frontend_session_v1: u64 = 0u64
+var _environment_variant_frontend_policy_v1 = FrontendAdvisoryPreprocessPolicyV1.Reference
+
+fn _environment_variant_frontend_source_v1(source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1
+) -> FrontendAdvisoryPreprocessResultV1:
+    val context = match _environment_variant_frontend_context_v1:
+        case Some(value): value
+        case nil: return frontend_advisory_preprocess_reference_v1(source, policy)
+    if policy != _environment_variant_frontend_policy_v1:
+        return frontend_advisory_preprocess_reference_v1(source, policy)
+    val authority = _evs_candidate_projection_v1(context)
+    if authority.is_err():
+        return frontend_advisory_preprocess_reference_v1(source, policy)
+    val use_token = environment_variant_sealed_build_use_acquire_v1(
+        context.sealed_owner, context.activation)
+    if use_token.is_err():
+        return frontend_advisory_preprocess_reference_v1(source, policy)
+    val use = use_token.unwrap()
+    val projected = environment_variant_sealed_build_use_project_v1(
+        context.sealed_owner, context.activation, use)
+    if projected.is_err():
+        val _released = environment_variant_sealed_build_use_release_v1(
+            context.sealed_owner, context.activation, use)
+        return frontend_advisory_preprocess_reference_v1(source, policy)
+    val produced = context.source_factory(source, policy)
+    val released = environment_variant_sealed_build_use_release_v1(
+        context.sealed_owner, context.activation, use)
+    if released.is_err() or produced.is_err():
+        return frontend_advisory_preprocess_reference_v1(source, policy)
+    # Return the provider's exact receipt. The frontend request validator must
+    # observe malformed or substituted evidence instead of this authority
+    # boundary laundering it into a reference success.
+    produced.unwrap()
+
+fn _environment_variant_frontend_install_v1(
+    owner_id: u64, context: FrontendLexicalAdvisoryBindingContextV1,
+    session_id: u64, generation: u64, policy: FrontendAdvisoryPreprocessPolicyV1
+) -> bool:
+    if owner_id == 0u64 or session_id == 0u64 or
+       _environment_variant_frontend_owner_v1 != 0u64:
+        return false
+    if not frontend_advisory_preprocess_bind_scoped_v1(
+            _environment_variant_frontend_source_v1, owner_id, session_id, generation):
+        return false
+    _environment_variant_frontend_context_v1 = Some(context)
+    _environment_variant_frontend_owner_v1 = owner_id
+    _environment_variant_frontend_generation_v1 = generation
+    _environment_variant_frontend_session_v1 = session_id
+    _environment_variant_frontend_policy_v1 = policy
+    true
+
+fn _environment_variant_frontend_binding_live_v1(owner_id: u64,
+    session_id: u64, generation: u64) -> bool:
+    owner_id != 0u64 and owner_id == _environment_variant_frontend_owner_v1 and
+        generation == _environment_variant_frontend_generation_v1 and
+        session_id == _environment_variant_frontend_session_v1 and
+        generation == frontend_advisory_preprocess_generation_v1() and
+        frontend_advisory_preprocess_binding_matches_v1(
+            owner_id, session_id, generation) and
+        _environment_variant_frontend_context_v1.?
+
+fn _environment_variant_frontend_remove_v1(owner_id: u64, session_id: u64,
+    generation: u64) -> bool:
+    if not _environment_variant_frontend_binding_live_v1(owner_id, session_id,
+            _environment_variant_frontend_generation_v1):
+        return false
+    if not frontend_advisory_preprocess_reset_scoped_v1(
+            owner_id, session_id, generation): return false
+    _environment_variant_frontend_context_v1 = nil
+    _environment_variant_frontend_owner_v1 = 0u64
+    _environment_variant_frontend_generation_v1 = 0u64
+    _environment_variant_frontend_session_v1 = 0u64
+    _environment_variant_frontend_policy_v1 = FrontendAdvisoryPreprocessPolicyV1.Reference
+    true
 
 var _next_environment_variant_startup_owner_v1: u64 = 1u64
 
@@ -56,20 +150,14 @@ pub class EnvironmentVariantStartupOwnerV1:
 fn _evs_zero_v1() -> EnvironmentDigest256V1:
     EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
 
-fn _evs_read64_v1(raw: [i64], at: i64) -> u64:
-    var value = 0u64
-    for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
-    value
-
 fn _evs_policy_digest_v1(request: EnvironmentVariantStartupRequestV1
 ) -> Result<EnvironmentDigest256V1, EnvironmentVariantStartupErrorV1>:
     val decision = environment_variant_policy_resolve_v1(request.collection.policy_inputs)
     if decision.is_err(): return Err(EnvironmentVariantStartupErrorV1.InvalidRequest)
-    val raw = sha256_text("simple/environment-variant-startup/v1|" +
+    val decoded = environment_variant_policy_digest256_v1(
         decision.unwrap().policy_digest)
-    Ok(EnvironmentDigest256V1(w0: _evs_read64_v1(raw, 0),
-        w1: _evs_read64_v1(raw, 8), w2: _evs_read64_v1(raw, 16),
-        w3: _evs_read64_v1(raw, 24)))
+    if decoded.is_err(): return Err(EnvironmentVariantStartupErrorV1.InvalidRequest)
+    Ok(decoded.unwrap())
 
 fn _evs_next_handle_v1(owner: EnvironmentVariantStartupOwnerV1
 ) -> Result<EnvironmentVariantStartupHandleV1, EnvironmentVariantStartupErrorV1>:
@@ -116,14 +204,21 @@ fn _evs_candidate_projection_v1(context: FrontendLexicalAdvisoryBindingContextV1
         return Err(EnvironmentVariantStartupErrorV1.CleanupFailed)
     if not _evs_same_digest_v1(projection.selected_variant_identities[0],
             live.pin_authority.variant_identity) or
-       projection.publication_generation != live.publication_generation:
+       projection.publication_generation != live.publication_generation or
+       not live.root_artifact_authenticated or
+       live.root_authentication_status != ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 or
+       not _evs_same_digest_v1(context.source_factory_provider_identity,
+           live.pin_authority.provider_identity) or
+       not _evs_same_digest_v1(context.source_factory_artifact_identity,
+           live.pin_authority.artifact_identity):
         return Err(EnvironmentVariantStartupErrorV1.SelectionRejected)
     Ok(_EnvironmentVariantStartupCandidateProjectionV1(
         provider_identity: live.pin_authority.provider_identity,
         variant_identity: live.pin_authority.variant_identity,
         artifact_identity: live.pin_authority.artifact_identity,
         environment_identity: live.pin_authority.environment_identity,
-        environment_generation: live.pin_authority.environment_generation))
+        environment_generation: live.pin_authority.environment_generation,
+        binding_policy_digest: live.binding_policy_digest))
 
 pub fn environment_variant_startup_set_candidate_v1(
     owner: EnvironmentVariantStartupOwnerV1,
@@ -154,24 +249,32 @@ pub fn environment_variant_startup_open_v1(
                 if require_simd: return Err(EnvironmentVariantStartupErrorV1.SelectionRejected)
             else:
                 val source = candidate.unwrap()
-                val binding_generation = frontend_advisory_preprocess_generation_v1() + 1u64
-                if binding_generation == 0u64 or not frontend_lexical_advisory_binding_install_v1(
-                        context, binding_generation):
-                    if require_simd: return Err(EnvironmentVariantStartupErrorV1.BindingRejected)
+                if not _evs_same_digest_v1(policy_digest, source.binding_policy_digest):
+                    if require_simd:
+                        return Err(EnvironmentVariantStartupErrorV1.SelectionRejected)
                 else:
-                    val receipt = EnvironmentVariantStartupReceiptV1(handle: handle,
-                        policy_digest: policy_digest,
-                        provider_identity: source.provider_identity,
-                        variant_identity: source.variant_identity,
-                        artifact_identity: source.artifact_identity,
-                        environment_identity: source.environment_identity,
-                        environment_generation: source.environment_generation,
-                        status: EnvironmentVariantStartupStatusV1.Selected,
-                        rejection_code: "")
-                    owner.records.push(_EnvironmentVariantStartupRecordV1(handle: handle,
-                        receipt: receipt, selected: true,
-                        binding_generation: binding_generation))
-                    return Ok((handle, receipt))
+                    val binding_generation = frontend_advisory_preprocess_generation_v1() + 1u64
+                    if binding_generation == 0u64 or not _environment_variant_frontend_install_v1(
+                            owner.owner_id, context, handle.session_id, binding_generation,
+                            frontend_advisory_policy_from_environment_decision_v1(decision.unwrap())):
+                        if require_simd: return Err(EnvironmentVariantStartupErrorV1.BindingRejected)
+                    else:
+                        val selected_handle = EnvironmentVariantStartupHandleV1(
+                            owner_id: handle.owner_id, session_id: handle.session_id,
+                            generation: binding_generation)
+                        val receipt = EnvironmentVariantStartupReceiptV1(handle: selected_handle,
+                            policy_digest: policy_digest,
+                            provider_identity: source.provider_identity,
+                            variant_identity: source.variant_identity,
+                            artifact_identity: source.artifact_identity,
+                            environment_identity: source.environment_identity,
+                            environment_generation: source.environment_generation,
+                            status: EnvironmentVariantStartupStatusV1.Selected,
+                            rejection_code: "")
+                        owner.records.push(_EnvironmentVariantStartupRecordV1(handle: selected_handle,
+                            receipt: receipt, selected: true,
+                            binding_generation: binding_generation))
+                        return Ok((selected_handle, receipt))
         nil: ()
     if require_simd: return Err(EnvironmentVariantStartupErrorV1.SelectionRejected)
     val zero = _evs_zero_v1()
@@ -191,7 +294,9 @@ pub fn environment_variant_startup_validate_v1(owner: EnvironmentVariantStartupO
         if record.handle == handle:
             if not record.selected: return true
             if not owner.candidate.?: return false
-            _evs_candidate_projection_v1(owner.candidate!).is_ok()
+            _environment_variant_frontend_binding_live_v1(owner.owner_id,
+                handle.session_id, record.binding_generation) and
+                _evs_candidate_projection_v1(owner.candidate!).is_ok()
     false
 
 pub fn environment_variant_startup_close_v1(owner: EnvironmentVariantStartupOwnerV1,
@@ -206,7 +311,8 @@ pub fn environment_variant_startup_close_v1(owner: EnvironmentVariantStartupOwne
     val record = owner.records[index]
     if record.selected:
         val reset_generation = frontend_advisory_preprocess_generation_v1() + 1u64
-        if reset_generation == 0u64 or not frontend_lexical_advisory_binding_remove_v1(reset_generation):
+        if reset_generation == 0u64 or not _environment_variant_frontend_remove_v1(
+                owner.owner_id, handle.session_id, reset_generation):
             return Err(EnvironmentVariantStartupErrorV1.CleanupFailed)
     owner.records.remove(index)
     if owner.records.len() == 0: owner.candidate = nil
