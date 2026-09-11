@@ -4,7 +4,7 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffe
 use std::sync::Arc;
 use crate::value::{
     byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
-    HeapObjectType, RuntimeArray, RuntimeValue,
+    word_array_le_bytes, HeapObjectType, RuntimeArray, RuntimeValue,
 };
 
 // Raw-ABI transfer ceiling. Sized from the two DEFAULT render targets, not
@@ -135,6 +135,29 @@ pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Upload a WORD array (`[u32]`/`[i64]`) into a Vulkan buffer, four
+/// little-endian bytes per element.
+///
+/// Typed twin of `rt_vulkan_copy_to_buffer`. That entry point marshals through
+/// `byte_array_bytes`, which masks every element to one byte, so a `u32`
+/// payload has to be exploded into four array stores per word on the Simple
+/// side before it can be uploaded. Here the widening happens over the whole
+/// array at once.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_to_buffer_u32(handle: i64, words: RuntimeValue, offset: i64) -> i64 {
+    let Some(data) = word_array_le_bytes(words) else {
+        return 0;
+    };
+    copy_to_buffer_bytes(handle, &data, offset)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_to_buffer_u32(_handle: i64, _words: i64, _offset: i64) -> i64 {
+    0
+}
 
 /// Upload raw bytes from `data_ptr` (host memory) into a Vulkan buffer.
 #[no_mangle]

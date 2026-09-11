@@ -317,3 +317,145 @@ This one deliberately shows the two guards are COMPLEMENTARY, not redundant:
    4281558732`. The spec is what catches it.
 5. `.comp` restored + regenerated — pin `PASS — 5848 byte(s) compared ...
    (sha256 6292ffa5...)`, edges spec `4 examples, 0 failures`.
+
+## R2 update (2026-09-11) — gap 0 is WRONG for this lane; gap 1 is closed
+
+### Gap 0 does not describe the lane the bench measures
+
+"`rt_vulkan_copy_to_buffer` -> `Buffer::upload_at` (vulkan/buffer.rs:338) always
+stages and calls `submit_transfer_command`, i.e. its own queue submit plus fence
+wait" is true of the **ash `simple-runtime`** Vulkan implementation. The
+interpreter does not use it. The interpreter's Vulkan is `vulkan_dlopen` inside
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`; it allocates every
+buffer `HOST_VISIBLE | HOST_COHERENT` and keeps it persistently mapped
+(`:4388-4392`), and `rt_vulkan_copy_to_buffer_fn` is a `copy_from_slice` into
+that mapping plus `vkFlushMappedMemoryRanges` (`:4490-4505`). There are exactly
+three `queue_submit` call sites in that file (`:5206`, `:5265`, `:5335`), all of
+them compute-command submissions. **The batched frame was always one submit.**
+
+So the `submits_per_frame=1` the bench printed was correct — but it was not
+*evidence*, because it was derived from `vulkan_submission_generation()`, a
+fence-completion counter that advances once per proven wait and reads 1 for a
+two-submit frame as readily as for a one-submit frame. It is now measured:
+`Engine2D.vulkan_accepted_compute_submit_count()` exposes the accepted-submission
+count, the bench prints `accepted_submits_per_frame` (in thousandths: `1000`),
+and the new spec asserts a delta of exactly 1 across a frame, upload included.
+
+An SFFI recording `vkCmdCopyBuffer` + a transfer->compute `VkBufferMemoryBarrier`
+into the open compute command buffer was written for the ash lane and then
+REVERTED: it is correct there, but nothing runnable on this host reaches that
+lane, so shipping it would have been unused code backing an unmeasured claim.
+The ash `upload_at` blocking submit remains open and unmeasured for native
+builds.
+
+### Gap 1 (host packing) is closed
+
+`rt_vulkan_copy_to_buffer_u32` takes the payload as WORDS and widens each
+element to four little-endian bytes on the Rust side (interpreter impl in
+`interpreter_extern/gpu.rs`; native twin in
+`runtime/src/vulkan_graphics_runtime_buffer.rs` over the new
+`value/collections.rs::word_array_le_bytes`). `_enqueue_rect_batch_gpu` now
+packs `[u32]` at 5 stores per rect instead of 20 — 320 interpreter stores per
+64-rect frame instead of 1280. The byte payload is kept verbatim as the fallback
+for the AOT/native array ABI and under `SIMPLE_VK_RECT_UPLOAD=bytes`.
+
+### Measured (one binary, one tree)
+
+`build/cargo-r2/release/simple`, 39298584 bytes, mtime 1789113090, built
+`--features vulkan,vulkan-graphics`. 900x760, 64 rects, 300 frames, `--batch`,
+3 runs each, median. The ONLY thing toggled is `SIMPLE_VK_RECT_UPLOAD`.
+
+| payload | ms/frame | draw_us/frame | submits/frame | dispatches/frame |
+|---|---|---|---|---|
+| `[u8]` | 3.80 | 1.35 ms | 1.000 | 1 |
+| `[u32]` | 3.20 | 0.92 ms | 1.000 | 1 |
+
+**The load-bearing number is `draw_us`: 1.35 -> 0.92 ms/frame, -32%, and it
+held to within 1% across all three runs of each payload.** That is the host
+packing term and nothing else.
+
+**Wall time on this host is noise-dominated and settles nothing.** The
+UNCHANGED byte path measured 2.78, then 3.52 / 3.80 / 3.80, then 4.16 / 4.27
+ms/frame across the session — a 55% spread on identical code — while its
+`draw_us` never moved from 1.35-1.36 ms. The variance is entirely in
+`finalize_us` (the GPU fence wait, 1.4-2.9 ms/frame), on a shared box with a
+sibling cargo lane building. So **the <=3 ms/frame target is NOT resolved
+either way here**: both payloads have runs above and below 3.0 ms. Do not read
+a wall-clock delta out of the table above; re-measure on a quiet host if that
+target needs a verdict. What is settled is that the remaining cost is
+`finalize_us`, i.e. gap 2's O(bbox_pixels x N) per-pixel rect walk, which is
+untouched here and dominates the frame.
+
+### Premise correction: 6.69 ms was a stale BINARY, not this tree
+
+R2 was opened on "6.66 -> 6.69 ms/frame, flat". Re-measured today with identical
+arguments:
+
+- `bin/release/aarch64-apple-darwin-macho/simple` (deployed Sep 7): **6.06
+  ms/frame** batch.
+- a seed built from this tree at `origin/main` bb1b9cab706: **2.78 ms/frame**
+  batch, before any change in this lane.
+
+The deployed binary was three days stale. (Given the wall-clock variance
+documented above, the 2.78 figure is one sample and should not be read as "the
+tree is at 2.78"; the 2x gap against the deployed binary is far larger than the
+observed spread and is the part that holds.)
+Corollary for anyone repeating this: `cargo build --release --bin simple` with
+no `--features` produces a binary with **no Vulkan** (`compiler/Cargo.toml`
+`default = []`), which reports `backend-unavailable`. Use
+`--features vulkan,vulkan-graphics`.
+
+### Evidence
+
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_typed_upload_spec.spl`
+  — NEW, **7 examples, 0 failures** on device, and 0 failures again under
+  `SIMPLE_VK_RECT_UPLOAD=bytes` (the typed upload is a cost change, not a
+  behaviour change, so both payloads must satisfy every expectation).
+  Device-identity precondition, the 64-rect pixel oracle (rect k in colour k),
+  the one-submission assertion, then generalizations: N = 2 (the real lower
+  boundary — `RECT_BATCH_MIN_RECTS` is 2, so this is the smallest list that
+  reaches the word packer at all), N = 1 (which by design does NOT batch and is
+  present only so the boundary cannot move without notice), two batches in one
+  frame in painter order (still one submission), and N = 4096.
+
+#### Sabotage — marshaller writes big-endian words
+
+Run against the 6-example version of the file; the N = 2 example was added
+afterwards and is not in these counts.
+
+1. green: `6 examples, 0 failures`.
+2. `widened.to_le_bytes()` -> `to_be_bytes()` in
+   `interpreter_extern/gpu.rs:4499`, seed rebuilt:
+   **`6 examples, 3 failures`** — the 64-rect oracle, the two-batch painter-order
+   case and the 4096-rect case all report 64 wrong pixels.
+3. restored + rebuilt: `6 examples, 0 failures`.
+
+The submission count stays green under the sabotage, correctly: a byte-order
+defect changes PIXELS, not submissions. The N = 1 example also stays green, and
+that is NOT evidence about the marshaller — N = 1 is below
+`RECT_BATCH_MIN_RECTS` and never packs a word payload at all.
+
+### Gate results on this commit (run, not assumed)
+
+- `check-rt-dual-implementation-ratchet.shs`: **FAIL — 2517 symbol(s) checked
+  against 2516 baselined, 1 new, 0 stale**, naming `rt_vulkan_copy_to_buffer_u32`.
+  This is a real, blocking push gate and it is red *because of this change*.
+  The baseline was deliberately NOT regenerated (the gate's own output says not
+  to). The honest shape of the problem: the directive the ratchet enforces is
+  that every `rt_*` have both a C and a Simple implementation bound by an alias,
+  and the **entire** `rt_vulkan_*` family is already baselined `rust-only` —
+  including this symbol's direct siblings `rt_vulkan_copy_to_buffer`,
+  `_raw` and `_array` (baseline lines 2462-2464). There is no C Vulkan lane to
+  write a twin against, so the gate is structurally red for any addition to this
+  family. That is an owner decision (admit the family as exempt, or refuse
+  additions to it), not something this change should resolve by editing the
+  frozen list.
+- `check-interpreter-extern-registry-gap.shs`: **FAIL — 221 checked, 11 new,
+  3 stale**. Pre-existing and unrelated: every named symbol is a `rt_file_*` /
+  `rt_pinned_archive_*` / `rt_process_*` / `rt_simple_abi_*` one, and
+  `rt_vulkan_copy_to_buffer_u32` does not appear in either list — the new
+  extern is registered in all four tables its sibling uses.
+
+The barrier-no-op sabotage the task asked for is moot: there is no barrier and
+no recorded copy in this lane, because there is no staging buffer — the upload
+is a host write into coherent mapped memory.

@@ -38,7 +38,7 @@ use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
-use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_accepted_compute_submits, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
@@ -1342,6 +1342,19 @@ class Engine2D with DrawIrRenderTarget:
         if val Some(vulkan) = self._vulkan_primitive_target():
             return vulkan.rect_batch_error
         "no-vulkan-target"
+
+    fn vulkan_accepted_compute_submit_count() -> i64:
+        """Queue submissions the Vulkan lane has had ACCEPTED so far.
+
+        `vulkan_submission_generation` only advances, so a frame that opened two
+        queue submissions is indistinguishable from one that opened a single
+        submission when the generation is the only thing sampled. This counts
+        the submissions themselves, which is what "one submit per frame"
+        actually claims -- read it before and after a frame and take the delta.
+        """
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_accepted_compute_submits(vulkan)
+        0
 
     fn vulkan_submission_generation() -> i64:
         if val Some(vulkan) = self._vulkan_primitive_target():
@@ -3025,6 +3038,20 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = vulkan
         else:
             self.backend.present()
+
+    me vulkan_discard_stale_pending_compute() -> bool:
+        """Drop a previous frame's ghost compute batch before reusing this engine.
+
+        Pooled engines resume from a value that can predate the flush which
+        cleared the batch, so the first dispatch of the next frame binds an
+        already-submitted (dead) command buffer and the whole frame is demoted
+        to the CPU fallback. See `discard_stale_pending_compute`."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val dropped = vulkan.discard_stale_pending_compute()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return dropped
+        false
 
     me submit_batch() -> bool:
         """Flush any backend-buffered draw calls for this frame into one

@@ -2444,6 +2444,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
     insert_simple!("rt_vulkan_copy_to_buffer", gpu::rt_vulkan_copy_to_buffer_fn);
+    insert_simple!("rt_vulkan_copy_to_buffer_u32", gpu::rt_vulkan_copy_to_buffer_u32_fn);
     insert_simple!("rt_vulkan_copy_to_buffer_array", gpu::rt_vulkan_copy_to_buffer_array_fn);
     // Vulkan readback mutates its destination array. The interpreter extern
     // ABI receives cloned Values and cannot write that mutation back to the

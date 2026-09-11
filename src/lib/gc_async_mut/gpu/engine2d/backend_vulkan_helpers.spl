@@ -19,12 +19,13 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
     vulkan_sffi_alloc_buffer,
-    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
     vulkan_sffi_dispatch_buffer_compute_checked,
     vulkan_sffi_quarantine_dependencies,
     vulkan_sffi_quarantine_unsubmitted_command,
-    vulkan_sffi_reap_dependency_quarantine
+    vulkan_sffi_reap_dependency_quarantine,
+    vulkan_sffi_last_error
 }
 
 # ============================================================================
@@ -66,6 +67,13 @@ val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864
 
 val _VULKAN_ORDER_TRACE_ENABLED =
     (env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
+
+# `SIMPLE_VK_RECT_UPLOAD=bytes` forces the rect batch back onto the `[u8]`
+# payload. It exists so a before/after measurement of the typed upload runs on
+# ONE binary and one tree -- swapping binaries to compare was how a stale
+# deployed build was mistaken for a code regression on this very lane.
+val _VULKAN_RECT_UPLOAD_BYTES_FORCED =
+    (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "bytes"
 
 fn vulkan_order_trace_enabled() -> bool:
     """True when SIMPLE_VK_ORDER_TRACE=1 armed the `[vk-order]` probe.
@@ -379,6 +387,30 @@ impl VulkanBackend:
         self.pending_compute_sources = []
         self.pending_compute_count = 0
 
+    me discard_stale_pending_compute() -> bool:
+        """Drop a pending compute batch left over from a PREVIOUS frame.
+
+        A command-buffer handle is valid only until it is submitted. Every
+        readback/present path flushes first (`engine.spl` read_pixels arm), and
+        the flush clears the pending batch on every return path -- so pending
+        state that is still present when a NEW frame starts on a reused engine
+        is provably a ghost of a batch that was already submitted, fenced and
+        whose descriptors were already released. The handle it names is dead:
+        on the interpreter Vulkan runtime the command-buffer slot has been set
+        to `None` (`interpreter_extern/gpu.rs`), so the next
+        `rt_vulkan_bind_pipeline` on it returns 0 and poisons the frame.
+
+        Nothing is released here on purpose -- releasing again would be a
+        double free of handles the flush already reclaimed. Only the ghost
+        bookkeeping is zeroed. Returns true when a ghost was actually dropped.
+        """
+        if self.pending_compute_command <= 0 and self.pending_compute_count <= 0:
+            return false
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("stale-pending-dropped cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
+        self._clear_pending_compute_state()
+        true
+
     me _release_pending_compute_descriptors() -> bool:
         var released = true
         var i: i64 = 0
@@ -457,7 +489,7 @@ impl VulkanBackend:
         val has_font_work = self.pending_font_descriptors.len() > 0
         if not vulkan_sffi_end_compute(cmd):
             if vulkan_order_trace_enabled():
-                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
+                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()} err={vulkan_sffi_last_error()}")
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
                 val first_desc = if self.pending_compute_count > 0:
@@ -517,6 +549,8 @@ impl VulkanBackend:
         if (self.d_framebuffer <= 0 or pipe <= 0 or push_data.len() == 0 or
             gx <= 0 or gy <= 0 or gz <= 0):
             return 0
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("enqueue-entry pipe={pipe} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
         if self.pending_compute_command <= 0:
             if not vulkan_sffi_reap_dependency_quarantine():
                 if vulkan_order_trace_enabled():
@@ -561,7 +595,7 @@ impl VulkanBackend:
         val ready = pushed and vulkan_sffi_dispatch(cmd, gx, gy, gz)
         if not ready:
             if vulkan_order_trace_enabled():
-                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed}")
+                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed} err={vulkan_sffi_last_error()}")
             # Measured on Apple M4/MoltenVK, and NOT recoverable at this layer:
             # `bind_pipeline` -- the FIRST link, so nothing downstream is even
             # attempted -- fails on the frame's SECOND dispatch through an
@@ -863,54 +897,78 @@ impl VulkanBackend:
         if not self._rect_batch_slot_ready(slot, payload_bytes, self.pipe_rect_batch):
             return 0
 
-        # Pack the frozen 5-word-per-rect payload. This is the one remaining
-        # O(N) interpreter cost in the lane; it is 20 array stores per rect with
-        # no call transit, against the 20 stores PLUS two SFFI calls per rect
-        # the host batch lane pays. There is no typed (`[u32]`) buffer upload in
-        # the Vulkan SFFI, so the bytes have to be built here.
-        var payload: [u8] = [0u8; payload_bytes]
-        var off: i64 = 0
-        k = 0
-        while k < count:
-            val base = k * 4
-            val vx = (rects[base] as u32) as i64
-            payload[off] = (vx & 255) as u8
-            payload[off + 1] = ((vx >> 8) & 255) as u8
-            payload[off + 2] = ((vx >> 16) & 255) as u8
-            payload[off + 3] = ((vx >> 24) & 255) as u8
-            val vy = (rects[base + 1] as u32) as i64
-            payload[off + 4] = (vy & 255) as u8
-            payload[off + 5] = ((vy >> 8) & 255) as u8
-            payload[off + 6] = ((vy >> 16) & 255) as u8
-            payload[off + 7] = ((vy >> 24) & 255) as u8
-            val vw = (rects[base + 2] as u32) as i64
-            payload[off + 8] = (vw & 255) as u8
-            payload[off + 9] = ((vw >> 8) & 255) as u8
-            payload[off + 10] = ((vw >> 16) & 255) as u8
-            payload[off + 11] = ((vw >> 24) & 255) as u8
-            val vh = (rects[base + 3] as u32) as i64
-            payload[off + 12] = (vh & 255) as u8
-            payload[off + 13] = ((vh >> 8) & 255) as u8
-            payload[off + 14] = ((vh >> 16) & 255) as u8
-            payload[off + 15] = ((vh >> 24) & 255) as u8
-            val vc = colors[k] as i64
-            payload[off + 16] = (vc & 255) as u8
-            payload[off + 17] = ((vc >> 8) & 255) as u8
-            payload[off + 18] = ((vc >> 16) & 255) as u8
-            payload[off + 19] = ((vc >> 24) & 255) as u8
-            off = off + 20
-            k = k + 1
+        # Pack the frozen 5-word-per-rect payload.
+        #
+        # PREFERRED: pack it as WORDS and hand the words over as words. The
+        # typed upload (`vulkan_sffi_copy_to_buffer_u32`) widens each element to
+        # four little-endian bytes on the runtime side, so this loop costs 5
+        # interpreter array stores per rect instead of 20 -- for a 64-rect batch,
+        # 320 stores instead of 1280. The byte payload below is kept verbatim as
+        # the fallback: its bytes are identical, only its host cost is four
+        # times as high, and it is what runs whenever the typed lane declines
+        # (AOT/native array ABI) or `SIMPLE_VK_RECT_UPLOAD=bytes` forces it.
+        #
+        # CORRECTION to the earlier caveat here (re-measured 2026-09-11): the
+        # upload is NOT a second queue submit in the interpreter lane. That lane
+        # is `vulkan_dlopen` (interpreter_extern/gpu.rs), whose buffers are
+        # HOST_VISIBLE|HOST_COHERENT and persistently mapped, so
+        # `rt_vulkan_copy_to_buffer` is a memcpy plus a flush -- zero submits.
+        # The blocking `submit_transfer_command` the old comment described is
+        # the ash `simple-runtime` lane, which the interpreter never calls. Host
+        # packing, not a transfer submit, was the real cost.
+        val target_buffer = self.rect_batch_buffers[slot]
+        var uploaded = false
+        if not _VULKAN_RECT_UPLOAD_BYTES_FORCED:
+            var words: [u32] = [0u32; count * RECT_BATCH_WORDS_PER_RECT]
+            var w: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                words[w] = rects[base] as u32
+                words[w + 1] = rects[base + 1] as u32
+                words[w + 2] = rects[base + 2] as u32
+                words[w + 3] = rects[base + 3] as u32
+                words[w + 4] = colors[k]
+                w = w + RECT_BATCH_WORDS_PER_RECT
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer_u32(target_buffer, words, 0)
 
-        # CAVEAT, measured 2026-09-11 and stated rather than assumed: this is
-        # NOT a free record-time write. `rt_vulkan_copy_to_buffer` ->
-        # `Buffer::upload_at` (vulkan/buffer.rs:338) always stages and calls
-        # `submit_transfer_command`, i.e. its own queue submit plus fence wait.
-        # A batched frame is therefore one COMPUTE submit plus one TRANSFER
-        # submit per batch, and that round-trip is a large part of why the lane
-        # did not beat the per-rect loop on wall clock. Fixing it needs an SFFI
-        # that records `vkCmdCopyBuffer` into the already-open command buffer;
-        # none exists. See the bug record's gap 0.
-        if not vulkan_sffi_copy_to_buffer(self.rect_batch_buffers[slot], payload, 0):
+        if not uploaded:
+            var payload: [u8] = [0u8; payload_bytes]
+            var off: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                val vx = (rects[base] as u32) as i64
+                payload[off] = (vx & 255) as u8
+                payload[off + 1] = ((vx >> 8) & 255) as u8
+                payload[off + 2] = ((vx >> 16) & 255) as u8
+                payload[off + 3] = ((vx >> 24) & 255) as u8
+                val vy = (rects[base + 1] as u32) as i64
+                payload[off + 4] = (vy & 255) as u8
+                payload[off + 5] = ((vy >> 8) & 255) as u8
+                payload[off + 6] = ((vy >> 16) & 255) as u8
+                payload[off + 7] = ((vy >> 24) & 255) as u8
+                val vw = (rects[base + 2] as u32) as i64
+                payload[off + 8] = (vw & 255) as u8
+                payload[off + 9] = ((vw >> 8) & 255) as u8
+                payload[off + 10] = ((vw >> 16) & 255) as u8
+                payload[off + 11] = ((vw >> 24) & 255) as u8
+                val vh = (rects[base + 3] as u32) as i64
+                payload[off + 12] = (vh & 255) as u8
+                payload[off + 13] = ((vh >> 8) & 255) as u8
+                payload[off + 14] = ((vh >> 16) & 255) as u8
+                payload[off + 15] = ((vh >> 24) & 255) as u8
+                val vc = colors[k] as i64
+                payload[off + 16] = (vc & 255) as u8
+                payload[off + 17] = ((vc >> 8) & 255) as u8
+                payload[off + 18] = ((vc >> 16) & 255) as u8
+                payload[off + 19] = ((vc >> 24) & 255) as u8
+                off = off + 20
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer(target_buffer, payload, 0)
+
+        if not uploaded:
             return 0
 
         val pc = _pack_rect_batch_pc(

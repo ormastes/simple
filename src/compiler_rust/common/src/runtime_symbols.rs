@@ -2228,6 +2228,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_last_present_copy_bytes",
     "rt_vulkan_last_present_copy_rects",
     "rt_vulkan_copy_to_buffer",
+    "rt_vulkan_copy_to_buffer_u32",
     "rt_vulkan_copy_to_buffer_raw",
     "rt_vulkan_copy_to_buffer_array",
     "rt_vulkan_copy_u32_slots",
