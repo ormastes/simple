@@ -1,0 +1,93 @@
+"""Frame plumbing: Chrome BGRA -> Engine2D ARGB, the stub test pattern, and PPM bytes.
+
+Pure and device-free, so the spec pins the swizzle and the pattern without a GPU.
+
+The stub pattern exists because this host has no CEF drop. It is DELIBERATELY not a
+plausible web page: it is a deterministic arithmetic ramp, and every run that composites it
+stamps `frame_source=stub-pattern` into the receipt, so it can never be mistaken for a real
+Chrome frame.
+"""
+
+"""Packs one opaque ARGB pixel from 8-bit components."""
+pub fn chrome_frame_argb(r: i64, g: i64, b: i64) -> i64:
+    4278190080 + ((r % 256) * 65536) + ((g % 256) * 256) + (b % 256)
+
+"""Converts the shim's BGRA byte readback into Engine2D's ARGB `[u32]` image words.
+
+The shim writes B,G,R,A in memory order; Engine2D's `pixels: [u32]` scaled-image path
+reads A<<24|R<<16|G<<8|B. Getting this backwards produces a picture that looks fine and is
+colour-swapped, which is exactly the class of defect a pinned spec catches.
+"""
+pub fn chrome_frame_bgra_to_argb(bytes: [u8], pixel_count: i64) -> [u32]:
+    var out: [u32] = []
+    var index: i64 = 0
+    while index < pixel_count:
+        val base = index * 4
+        if base + 3 >= bytes.len():
+            return out
+        val b = bytes[base].to_i64()
+        val g = bytes[base + 1].to_i64()
+        val r = bytes[base + 2].to_i64()
+        out.push(chrome_frame_argb(r, g, b).to_u32())
+        index = index + 1
+    out
+
+"""The deterministic stub pixel for one coordinate and tab index."""
+pub fn chrome_frame_stub_pixel(x: i64, y: i64, tab_index: i64) -> i64:
+    val r = (x * 7 + tab_index * 29) % 256
+    val g = (y * 5 + tab_index * 13) % 256
+    val b = ((x ^ y) + tab_index * 61) % 256
+    chrome_frame_argb(r, g, b)
+
+"""A full stub frame as Engine2D ARGB words, row-major."""
+pub fn chrome_frame_stub_image(width: i64, height: i64, tab_index: i64) -> [u32]:
+    var out: [u32] = []
+    var y: i64 = 0
+    while y < height:
+        var x: i64 = 0
+        while x < width:
+            out.push(chrome_frame_stub_pixel(x, y, tab_index).to_u32())
+            x = x + 1
+        y = y + 1
+    out
+
+"""True when the image carries more than one distinct pixel value.
+
+A single-valued image is what a dead backend, a cleared framebuffer, or a hidden panel all
+produce, so `nonblank` is the receipt's only evidence that something was actually painted.
+"""
+pub fn chrome_frame_nonblank(pixels: [u32]) -> bool:
+    if pixels.len() <= 1:
+        return false
+    val first = pixels[0]
+    var index: i64 = 1
+    while index < pixels.len():
+        if pixels[index] != first:
+            return true
+        index = index + 1
+    false
+
+"""Order-independent checksum of an ARGB image, recorded next to `nonblank`."""
+pub fn chrome_frame_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var index: i64 = 0
+    while index < pixels.len():
+        sum = (sum * 31 + pixels[index].to_i64() + index) % 2147483647
+        index = index + 1
+    sum
+
+"""Binary P6 PPM bytes for an ARGB image. Alpha is dropped; PPM has no alpha channel."""
+pub fn chrome_frame_ppm_bytes(pixels: [u32], width: i64, height: i64) -> [u8]:
+    var out: [u8] = []
+    val header = "P6\n" + width.to_text() + " " + height.to_text() + "\n255\n"
+    for code in header.bytes():
+        out.push(code)
+    var index: i64 = 0
+    val limit = width * height
+    while index < limit and index < pixels.len():
+        val word = pixels[index].to_i64()
+        out.push(((word / 65536) % 256).to_u8())
+        out.push(((word / 256) % 256).to_u8())
+        out.push((word % 256).to_u8())
+        index = index + 1
+    out
