@@ -16,7 +16,7 @@
 # carried in `_reason` and `_frame_source=stub-pattern` — it is never silently a pass of
 # Chrome rendering, because `_frame_source` says what was actually composited.
 #
-# --selftest runs first and is fatal (6 fixtures).
+# --selftest runs first and is fatal (7 fixtures).
 # --renderdoc attempts a RenderDoc capture through scripts/tool/renderdoc-evidence.shs and
 # records renderdoc_status; a missing renderdoccmd is recorded, never silently skipped.
 set -u
@@ -80,6 +80,13 @@ classify_receipt() {
         return
     fi
     _cr_verdict=$(receipt_field "$_cr_file" verdict)
+    # A stub-pattern run can never be `passed`, whatever its own verdict line says.
+    # Otherwise hand-editing one key turns a synthetic test pattern into a claimed
+    # Chrome pass — the exact laundering frame_source exists to prevent.
+    if [ "$_cr_source" = "stub-pattern" ] && [ "$_cr_verdict" = "passed" ]; then
+        echo "fail stub-pattern-claims-passed"
+        return
+    fi
     case "$_cr_verdict" in
         passed) echo "ok passed" ;;
         environment-blocked) echo "blocked $(receipt_field "$_cr_file" reason)" ;;
@@ -165,6 +172,15 @@ selftest() {
         *) echo "selftest FAIL fixture=environment-blocked"; _st_fail=1 ;;
     esac
 
+    # 7. a stub-pattern run claiming verdict=passed -> fail, never ok. Fixture 1 uses
+    #    frame_source=chrome, so only this fixture exercises the laundering path.
+    write_fixture_receipt "$_st_dir/g.env" passed stub-pattern 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/g.env")" in
+        fail*) : ;;
+        *) echo "selftest FAIL fixture=stub-claims-passed got=$(classify_receipt "$_st_dir/g.env")"; _st_fail=1 ;;
+    esac
+
     rm -rf "$_st_dir"
     if [ "$_st_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest-failed, $_st_n fixture(s) run)"
@@ -175,7 +191,7 @@ selftest() {
 
 selftest
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 6 selftest fixture(s) checked, 0 failures"
+    echo "PASS — 7 selftest fixture(s) checked, 0 failures"
     exit 0
 fi
 
@@ -266,7 +282,15 @@ if [ -d "$ROOT/$SIMPLE_PPM_DIR" ]; then
         peer="$ROOT/$SIMPLE_PPM_DIR/$(basename "$ppm")"
         [ -f "$peer" ] || continue
         pairs=$((pairs + 1))
-        cmp -s "$ppm" "$peer" || mismatches=$((mismatches + 1))
+        # Count differing PIXELS, not differing files. `cmp -l` lists one line per
+        # differing BYTE; P6 carries 3 bytes per pixel, so a pixel whose R, G and B all
+        # differ would otherwise be counted three times. Dividing by 3 rounds toward a
+        # pixel count; it over-counts only when two differing bytes fall in one pixel,
+        # which is why the row is labelled `_mismatch_count` (pixels) and not `bytes`.
+        difbytes=$(cmp -l "$ppm" "$peer" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${difbytes:-0}" -gt 0 ]; then
+            mismatches=$((mismatches + (difbytes + 2) / 3))
+        fi
     done
     if [ "$pairs" -eq 0 ]; then
         DIFF_STATUS=unavailable

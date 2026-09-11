@@ -223,3 +223,38 @@ catalog it consumes.)
 - **filed:** `doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md` —
   `receipt.rows[3].nonblank = false` is refused with "complex indexed field receiver is not
   supported", forcing a full struct rebuild in a test fixture.
+
+## Review pass (same session, 2026-09-11) — three real holes closed
+
+- **A stub receipt claiming `verdict=passed` was accepted as a pass.** Both classifiers
+  checked `frame_source` validity and `verdict` validity independently, so hand-editing one
+  key in a blocked receipt laundered a synthetic test pattern into a claimed Chrome pass —
+  the exact invariant `frame_source` exists to protect. Now `frame_source=stub-pattern` +
+  `verdict=passed` is `failed` in `chrome_showcase_verdict_of_body` and
+  `stub-pattern-claims-passed` in the shell classifier. The existing fixtures all used
+  `frame_source=chrome`, which is why none of them caught it. Perf selftest 6 -> 7 fixtures;
+  receipt spec 17 -> 18 examples.
+- **The showcase never invoked the binding.** It only did `file_exists` on the library path
+  and HARDCODED `backend_stage`, leaving `chrome_lib_sha256=` empty. It now builds nothing
+  by itself but, when `build/chrome-render/libsimple_chrome_render.dylib` is present, runs
+  the real `chrome_render_load` (sha256 -> `DynLib.load` -> exact 10-symbol resolution ->
+  sha256 again) and the real `chrome_render_create`, and records the MEASURED
+  `chrome_render_backend_stage(created)` plus the real digest. Against the stub shim built
+  by `scripts/check/build-chrome-render-shim.shs` this reports
+  `chrome_lib_sha256=6a9ad5f5324a947a318d1accfdb0293ec6c0db962b93f2196019b1a6a786b112`,
+  `backend_stage=blocked:backend-unavailable`,
+  `reason=no-cef-drop:blocked:backend-unavailable` — the shim honestly refusing, not a
+  string this program chose. Correction to the note above: `read_pixels_into` is not the
+  only unreached symbol; `load_html` / `resize` / `render_frame` / `event` are also not yet
+  driven (they are expressible today — only the readback needs the new facade).
+- **`catalog_sha256` claimed to bind the pages and hashed only `catalog.sdn`.** Each page's
+  own sha256 is now recorded as a `sha256:` row in `catalog.sdn`, so a digest of that one
+  file transitively covers every page byte; an index row with an empty digest is rejected by
+  `chrome_catalog_index_consistent`.
+- Also: `chrome_vs_simple_pixel_mismatch_count` now counts differing PIXELS (`cmp -l` byte
+  lines / 3 for P6) rather than differing files; the unused `chrome_frame_checksum` helper
+  was deleted (no-unused-code rule).
+
+Seed run, as requested (`src/compiler_rust/target/bootstrap/simple`, size 130402384, mtime
+1788606093): `cpu_simd` -> `engine2d_backend_reported=cpu_simd`, 8 tabs, 14365 ms,
+`verdict=environment-blocked`.

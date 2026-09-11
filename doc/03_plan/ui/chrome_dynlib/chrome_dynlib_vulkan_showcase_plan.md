@@ -85,12 +85,18 @@ Catalog provenance: the pages are SLICED out of the 4K lane's own composed docum
 Measured on this Mac (deployed binary size 26264696, mtime 1788766698, interpreter):
 `cpu_simd` reported `cpu_simd`, 8 tabs, 14691 ms; `vulkan` reported `vulkan` (real Vulkan
 on Apple M4), 8 tabs, 22613 ms. Both: `frame_source=stub-pattern reason=no-cef-drop
-verdict=environment-blocked`, 8 non-blank PPMs each.
+verdict=environment-blocked`, 8 non-blank PPMs each. After the binding was wired the reason
+reads `no-cef-drop:blocked:backend-unavailable` — the stub shim's own measured refusal.
+Seed run too (`src/compiler_rust/target/bootstrap/simple`, size 130402384, mtime 1788606093):
+`cpu_simd` -> `cpu_simd`, 8 tabs, 14365 ms, same verdict.
 
 **Two honest gaps, recorded not worked around.** (1) Tab selection is by per-tab catalog
 PAGE, not by a dispatched `simple_chrome_render_event` click — AC-3's "real dispatched
 input" is unmet and stays open, because no backend exists on this host to dispatch into.
-(2) `simple_chrome_render_read_pixels_into` writes into a caller-owned OUT buffer and the
+(2) the binding IS driven through `chrome_render_load` + `chrome_render_create` (real digest,
+real 10-symbol resolution, measured `backend_stage`), but `load_html` / `resize` /
+`render_frame` / `event` are not yet called, and `read_pixels_into` cannot be: it writes
+into a caller-owned OUT buffer and the
 host dynlib facade has no bounded out-byte-buffer call (`spl_wffi_call_i64_with_bytes`
 passes bytes IN only), so a real Chrome frame cannot be pulled yet; that needs a facade
 addition (`spl_wffi_call_i64_into_bytes`), not a new `rt_*`. Both are in the lane state.
@@ -128,8 +134,9 @@ Shipped as ONE script, `scripts/check/check-chrome-web-showcase-perf.shs` (the b
 name), which subsumes both planned scripts: it runs the showcase for `cpu_simd` and
 `vulkan`, reads each receipt, and prints `chrome_web_showcase_{status,_reason,
 _frame_source,_backend_reported,_tabs,_wall_ms_total,_ms_per_px}` plus
-`chrome_vs_simple_pixel_diff_status` / `_mismatch_count` in the `gui_web_2d_vulkan_*`
-naming discipline of `check-electron-vulkan-web-parity.shs`. Fatal `--selftest`: 6 fixtures
+`chrome_vs_simple_pixel_diff_status` / `_mismatch_count` (differing PIXELS: `cmp -l` byte
+lines / 3 for P6) in the `gui_web_2d_vulkan_*`
+naming discipline of `check-electron-vulkan-web-parity.shs`. Fatal `--selftest`: 7 fixtures
 (good receipt PASS, missing receipt ERROR, `verdict=failed` FAIL, 0 tabs ERROR, receipt
 with no `frame_source` FAIL, `environment-blocked` classified blocked with its reason).
 

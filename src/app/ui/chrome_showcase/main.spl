@@ -21,11 +21,14 @@ therefore needs a facade addition (`spl_wffi_call_i64_into_bytes`), filed in the
 state. No new `rt_*` is introduced here.
 """
 
-use std.io_runtime.{dir_create_all, env_get, file_exists, file_hash_sha256_or_empty,
+use std.io_runtime.{cwd_process, dir_create_all, env_get, file_exists, file_hash_sha256_or_empty,
     file_read, file_write, file_write_bytes, time_now_unix_micros}
 use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
     web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
 use std.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
+    chrome_render_symbol_names, chrome_render_load, chrome_render_create,
+    chrome_render_backend_stage, chrome_render_release}
 use app.ui.chrome_showcase.catalog.{CHROME_CATALOG_DIR, CHROME_CATALOG_INDEX,
     CHROME_CATALOG_SOURCE, chrome_catalog_tabs, chrome_catalog_file_for,
     chrome_catalog_page, chrome_catalog_index_text}
@@ -53,6 +56,12 @@ fn _env_i64(key: text, fallback: i64) -> i64:
         return fallback
     parsed
 
+"""The binding requires an absolute library path (`chrome_render_request_valid`)."""
+fn _absolute(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    cwd_process() + "/" + path
+
 """The built shim, or "" when this host has none. Never fabricates a path."""
 fn _chrome_library_path() -> text:
     if file_exists(CHROME_SHOWCASE_LIB):
@@ -61,27 +70,28 @@ fn _chrome_library_path() -> text:
         return CHROME_SHOWCASE_LIB_SO
     ""
 
-"""Writes the shared catalog and returns a digest of everything it wrote.
+"""Writes the shared catalog: one page per tab, then the index that binds their digests.
 
-The digest goes into the receipt as `catalog_sha256`: it is what lets S3 assert the Chrome
-and Simple showcases consumed the SAME catalog rather than two similar ones.
+Each page is hashed and its digest recorded in `catalog.sdn`, so the receipt's
+`catalog_sha256` (a digest of that one index file) transitively covers every page byte —
+which is what lets S3 claim the Chrome and Simple showcases consumed the SAME catalog and
+not merely the same file names.
 """
-fn _write_catalog(tabs: [text]) -> text:
+fn _write_catalog(tabs: [text]):
     val inventory = web_renderable_feature_inventory()
     val composed = web_renderable_feature_inventory_apply_to_showcase(
         file_read(CHROME_CATALOG_SOURCE), inventory)
     val _made = dir_create_all(CHROME_CATALOG_DIR)
-    var joined = ""
+    var digests: [text] = []
     for tab in tabs:
         val page = chrome_catalog_page(composed, tab)
         if page == "":
             print "[chrome-showcase] catalog page missing for tab " + tab
         val path = CHROME_CATALOG_DIR + "/" + chrome_catalog_file_for(tab)
         val _written = file_write(path, page)
-        joined = joined + path + ":" + page.len().to_text() + ";"
+        digests.push(file_hash_sha256_or_empty(path))
     val _index = file_write(CHROME_CATALOG_INDEX,
-        chrome_catalog_index_text(inventory.version, tabs))
-    joined
+        chrome_catalog_index_text(inventory.version, tabs, digests))
 
 fn _catalog_digest() -> text:
     file_hash_sha256_or_empty(CHROME_CATALOG_INDEX)
@@ -94,21 +104,45 @@ fn main() -> i64:
 
     val out_dir = _env_or("SIMPLE_CHROME_SHOWCASE_OUT", CHROME_SHOWCASE_OUT_DIR)
 
-    val _catalog = _write_catalog(tabs)
+    _write_catalog(tabs)
     val _made = dir_create_all(out_dir)
 
+    # Drive the REAL binding as far as it goes: sha256 -> DynLib.load -> exact 10-symbol
+    # resolution -> sha256 again -> `create()`. `backend_stage` is the MEASURED return of
+    # that call mapped through the twin, never a hardcoded string — that distinction is the
+    # whole point of the field. With a stub shim (no CEF) `create()` answers
+    # CHROME_RENDER_E_BACKEND_UNAVAILABLE and the stage reads `blocked:backend-unavailable`.
     val library_path = _chrome_library_path()
-    var backend_stage = "blocked:no-cef-drop"
+    var backend_stage = "blocked:no-shim-built"
     var frame_source = CHROME_SHOWCASE_FRAME_STUB
-    var reason = "no-cef-drop"
+    var reason = "no-chrome-render-shim"
     var lib_sha256 = ""
     if library_path != "":
         lib_sha256 = file_hash_sha256_or_empty(library_path)
-        # The shim is present but CEF is not: `create()` answers
-        # CHROME_RENDER_E_BACKEND_UNAVAILABLE, and the readback out-buffer facade is
-        # missing besides. Both are recorded, neither is simulated as success.
-        backend_stage = "blocked:backend-unavailable"
-        reason = "no-cef-drop:shim-present-cef-absent"
+        val request = ChromeRenderLoadRequest(
+            library_path: _absolute(library_path), manifest_sha256: lib_sha256,
+            expected_abi_version: 1, required_symbols: chrome_render_symbol_names(),
+            max_request_bytes: 1048576, max_response_bytes: 268435456)
+        val loaded = chrome_render_load(request)
+        if not loaded.ok:
+            backend_stage = "blocked:load-" + loaded.status
+            reason = "shim-load-refused:" + loaded.error
+            if loaded.missing_symbol != "":
+                reason = reason + ":" + loaded.missing_symbol
+        else:
+            if val handle = loaded.handle:
+                val created = chrome_render_create(handle,
+                    "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + "}")
+                backend_stage = chrome_render_backend_stage(created)
+                if backend_stage == "ok":
+                    # A real backend exists. The frame still cannot be pulled: the host
+                    # dynlib facade has no bounded OUT-byte-buffer call, so
+                    # `read_pixels_into` is unreachable from Simple today. Say exactly that
+                    # rather than letting a live backend imply a live frame.
+                    reason = "readback-facade-missing:spl_wffi_call_i64_into_bytes"
+                else:
+                    reason = "no-cef-drop:" + backend_stage
+                val _released = chrome_render_release(handle, created)
 
     var engine = Engine2D.create_with_backend_fast(width.to_i32(), height.to_i32(), requested)
     val reported = engine.backend_name()
