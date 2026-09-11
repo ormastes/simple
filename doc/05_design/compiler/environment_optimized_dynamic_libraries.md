@@ -439,8 +439,9 @@ new feature-specific user source `~/.config/simple/config.sdn`. The latter is
 not an alias for `~/.config/itf/config.sdn` and is not reconstructed from a
 merged `CompilerConfig`. Both files use bounded regular no-follow reads.
 
-The parent resolves the collected layers, serializes the raw normalized layers
-plus generated target CPU/features into a fixed-order bounded V1 wire, and
+The parent resolves the collected layers, serializes the complete typed
+collection (normalized layers, source-presence receipt, source selection, and
+separate generated target CPU/features) into a fixed-order bounded V1 wire, and
 appends exactly one internal base64url argv value. Parse shards, HIR shards, and
 the real worker receive the same value. The worker rejects a missing,
 duplicate, corrupt, noncanonical, or oversized value and removes only that
@@ -454,11 +455,15 @@ the production application owner supplies empty administrator restrictions.
 The warm artifact key includes the handoff cache identity, which binds resolved
 policy digest and the separate generated target CPU/feature inputs.
 
-This E1 slice is transport-only. Both full and parse-shard worker entrypoints
-validate/remove the handoff, and legacy argv parsing accepts the preserved
-public policy spellings without applying them. E3 must consume the typed
-handoff in every relevant driver path before this transport candidate can be
-admitted; standalone E1 integration is not production-safe.
+Both full and parse-shard worker entrypoints validate/remove the handoff and
+pass its exact `EnvironmentVariantPolicyCollectionV1` to a typed driver entry
+before source loading. The full worker uses
+`compiler_driver_create_with_environment_variant_policy_v1`; the slim shard
+uses an adjacent lightweight projector so it does not import the full driver.
+Selected callable sessions are process-local and are deliberately not
+serialized: a parse shard applies only the reference policy and keeps
+owner/session/generation at zero. Legacy in-process callers retain their
+existing driver constructors.
 
 ## Prepare/commit coordinator for composite publication
 
