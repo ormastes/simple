@@ -48,8 +48,6 @@ use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
-use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
-use std.common.crypto.sha256.{sha256_text}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
@@ -125,6 +123,12 @@ class _WebDrawIrRouteState:
     # and parked owner token authorize reuse; no hash authorizes it.
     validated_pixels: [u32]
     validated_device_token: text
+    # Checksum of `validated_pixels` under the DEVICE fold (see
+    # `_web_draw_ir_device_checksum`). Retained once at validation so a steady
+    # re-validation frame compares one i64 instead of scanning 8.3M pixels.
+    # 0 means "no compatible checksum was available" and the exact pixel
+    # compare is used for that route instead.
+    validated_checksum: i64
 
 class _WebDrawIrTimedRoute:
     readback: Engine2DReadback
@@ -371,6 +375,7 @@ pub fn web_draw_ir_gpu_route_policy_reset():
     _web_fast_engine_reuses = 0
     _web_fast_engine_discards = 0
     _web_draw_ir_fingerprint_pixels_scanned = 0
+    _web_draw_ir_pixels_equal_calls = 0
     _web_draw_ir_route_states = []
     _web_draw_ir_route_consults = 0
     _web_draw_ir_route_canonical_submissions = 0
@@ -397,27 +402,55 @@ pub fn web_draw_ir_gpu_route_last_evidence() -> WebGpuPaintTimingEvidence:
 fn _web_draw_ir_key_text(value: text) -> text:
     value.len().to_text() + ":" + value
 
-fn _web_draw_ir_key(composition: DrawIrComposition, width: i32, height: i32, backend_name: text) -> text:
-    # A non-zero producer generation is exact within this serial route owner
-    # and avoids serializing the whole scene on every steady frame. Unassigned
-    # compositions retain the old diagnostic key, but are never authorized for
-    # retained-frame reuse below.
-    var scene_identity = ""
-    if composition.generation > 0:
-        scene_identity = "draw-ir-generation=" + composition.generation.to_text()
-    else:
-        val serialized = draw_ir_to_sdn(composition)
-        scene_identity = "draw-ir-sha256=" + sha256_text(serialized) +
-            ";draw-ir-bytes=" + serialized.len().to_text()
+fn _web_draw_ir_document_identity(composition: DrawIrComposition) -> text:
+    """Identity of the DOCUMENT being painted, not of this frame's revision.
+
+    Stable across a scroll, an animation tick and a repaint of the same page;
+    changes when a different producer/document/backend target is painted.
+    """
+    composition.composition_id + ";" + composition.scene_key + ";" +
+        composition.backend_target
+
+pub fn web_draw_ir_route_key(
+    document_identity: text, width: i32, height: i32, backend_name: text,
+    device_token: text
+) -> text:
+    """Route-cache identity: device + surface + extent + document.
+
+    It deliberately contains NO per-mutation counter and NO content hash.
+    Keying on `composition.generation` (or on a SHA-256 of the serialized
+    scene) gave every scroll, animation tick and tab switch a brand-new key,
+    so the route sampler re-armed and re-ran the software oracle on a device
+    it had already proven. Retained PIXEL reuse is still gated exactly, by
+    `_web_draw_ir_cached_frame_reusable` (producer generation + parked owner
+    token + extent) — that gate, not this key, is what keeps a stale frame off
+    the screen.
+    """
     (
-        scene_identity + ";" +
+        _web_draw_ir_key_text(document_identity) + ";" +
         width.to_text() + ";" + height.to_text() + ";" +
+        _web_draw_ir_key_text(device_token) +
         _web_draw_ir_key_text(backend_name) +
         _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_ONE_CALL_UPLOAD")) +
         _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_BULK_UPLOAD")) +
         _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_SPL_GPU_TRANSFER_PATH")) +
         _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_ONE_CALL_READBACK"))
     )
+
+fn _web_draw_ir_key(composition: DrawIrComposition, width: i32, height: i32, backend_name: text) -> text:
+    web_draw_ir_route_key(
+        _web_draw_ir_document_identity(composition), width, height, backend_name,
+        _web_fast_engine_cached_device_token(width, height, backend_name))
+
+pub fn web_draw_ir_composition_route_key(
+    composition: DrawIrComposition, width: i32, height: i32, backend_name: text
+) -> text:
+    """The key the route cache actually uses for this composition.
+
+    Exposed so a spec can assert that two compositions differing ONLY in
+    `generation` land on the same route state.
+    """
+    _web_draw_ir_key(composition, width, height, backend_name)
 
 fn _web_draw_ir_env(key: text) -> text:
     env_get(key) ?? ""
@@ -595,7 +628,17 @@ fn _simple_web_layout_render_html_engine2d_execution(
         print "[web-phase] phase=paint elapsed_ms={(_fast_clock.now_micros() - _phase_paint_start_us) / 1000}"
     _phase_execution
 
+# Every exact whole-surface compare is one interpreted loop iteration per
+# pixel — 8,294,400 at 3840x2160. This counter is how a spec proves, on a host
+# with no GPU device, that a steady frame avoided the scan rather than merely
+# moving it. Reset with the rest of the route policy.
+var _web_draw_ir_pixels_equal_calls: i32 = 0
+
+pub fn web_draw_ir_pixels_equal_call_count() -> i32:
+    _web_draw_ir_pixels_equal_calls
+
 fn _web_draw_ir_pixels_equal(left: [u32], right: [u32]) -> bool:
+    _web_draw_ir_pixels_equal_calls = _web_draw_ir_pixels_equal_calls + 1
     if left.len() != right.len():
         return false
     var index = 0
@@ -633,6 +676,24 @@ fn _web_draw_ir_pixel_fingerprint(pixels: [u32]) -> i64:
         second = (second * 1000003 + pixel + index.to_i64()) % 2147483629
         index = index + 1
     first * 2147483629 + second
+
+pub fn web_draw_ir_device_checksum(pixels: [u32]) -> i64:
+    """CPU twin of the DEVICE readback checksum fold.
+
+    Mirrors `vulkan_sffi_readback_u32_into` (src/lib/nogc_sync_mut/gpu/engine2d/
+    sffi_vulkan.spl:1015) and `rt_vulkan_readback_u32_checksum`
+    (src/compiler_rust/runtime/src/vulkan_graphics_runtime_buffer.rs:464),
+    both of which are defined as the sequential fold
+    `acc = (acc + px) % 2147483647` starting from 0 over unsigned pixels.
+
+    Computed at most ONCE per validation, never per steady frame.
+    """
+    var checksum: i64 = 0
+    var index = 0
+    while index < pixels.len():
+        checksum = (checksum + (pixels[index] as i64)) % 2147483647
+        index = index + 1
+    checksum
 
 fn _web_draw_ir_proven(readback: Engine2DReadback, pixel_count: i64, identity: i64) -> bool:
     readback.source == "device_readback" and
@@ -678,7 +739,8 @@ fn _web_draw_ir_state(
         device_identity: 0, complete: false,
         evidence: web_gpu_paint_timing_evidence(
             backend_name, 0, 0, 0, 0, 0, false, false, false),
-        validated_pixels: [], validated_device_token: ""
+        validated_pixels: [], validated_device_token: "",
+        validated_checksum: 0
     )
     _web_draw_ir_route_states.push(state)
     state
@@ -775,6 +837,24 @@ pub fn web_draw_ir_gpu_route_cache_generation_match(
         cached_device_token, current_device_token,
         cached_pixel_count, current_pixel_count)
 
+fn _web_draw_ir_device_authorized(state: _WebDrawIrRouteState) -> bool:
+    """The device is PROVEN and CORRECT for this route key.
+
+    This — not the timing margin — is what authorizes the GPU route on a
+    steady frame. `evidence.should_offload` additionally requires the GPU to
+    have beaten the upload path by a strict margin; a lost margin test used to
+    divert every later frame of a proven, pixel-exact device onto the SOFTWARE
+    oracle, which is both slower and pointless. The margin verdict is still
+    recorded in the published evidence, as evidence only.
+    """
+    state.pixels_match and state.gpu_device_proven and state.commands_complete
+
+pub fn web_draw_ir_route_device_authorized(
+    pixels_match: bool, gpu_device_proven: bool, commands_complete: bool
+) -> bool:
+    """Pure contract seam for the steady-frame GPU authorization test."""
+    pixels_match and gpu_device_proven and commands_complete
+
 fn _web_draw_ir_choose_route(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text
@@ -788,7 +868,7 @@ fn _web_draw_ir_choose_route(
         if not state.commands_complete:
             _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
             return []
-        if state.evidence.should_offload:
+        if state.evidence.should_offload or _web_draw_ir_device_authorized(state):
             val current_device_token = _web_fast_engine_cached_device_token(
                 width, height, backend_name)
             if _web_draw_ir_cached_frame_reusable(
@@ -803,15 +883,38 @@ fn _web_draw_ir_choose_route(
                 composition, width, height, backend_name)
             val gpu_proven = _web_draw_ir_proven(
                 gpu.readback, exact_pixel_count, state.device_identity)
-            # The retained value is the canonical software oracle from the
-            # exact third sampling comparison. Revalidation after a device or
-            # surface-owner change is therefore exact, never hash-authorized.
-            val gpu_match = _web_draw_ir_pixels_equal(
-                gpu.readback.pixels, state.validated_pixels)
+            # Two distinct steady cases, and neither renders a software oracle.
+            #
+            # SAME scene revision: this is a re-validation of a frame we
+            # already hold. Compare the DEVICE-side readback checksum against
+            # the one retained at validation — one i64, not 8.3M interpreted
+            # pixel compares. The exact whole-surface compare remains the
+            # fallback for a readback that carries no compatible checksum
+            # (checksum 0), so correctness never depends on the checksum
+            # merely being present.
+            #
+            # NEW scene revision: no oracle for this content exists and none
+            # should be rendered. A device already proven pixel-exact for this
+            # key, still returning a proven readback with zero skipped
+            # commands, IS the authority; re-anchor the retained frame to it.
+            val same_scene = (
+                state.scene_generation > 0 and
+                state.scene_generation == composition.generation)
+            var gpu_match = true
+            if same_scene:
+                if state.validated_checksum > 0 and gpu.readback.checksum > 0:
+                    gpu_match = gpu.readback.checksum == state.validated_checksum
+                else:
+                    gpu_match = _web_draw_ir_pixels_equal(
+                        gpu.readback.pixels, state.validated_pixels)
             if gpu.skipped_command_count == 0 and gpu_proven and gpu_match:
                 state.validated_device_token =
                     _web_fast_engine_validated_device_token(
                         gpu.readback, width, height, backend_name)
+                if not same_scene and composition.generation > 0:
+                    state.scene_generation = composition.generation
+                    state.validated_pixels = gpu.readback.pixels
+                    state.validated_checksum = gpu.readback.checksum
                 val validated_index = _web_draw_ir_state_index(key)
                 if validated_index >= 0:
                     _web_draw_ir_route_states[validated_index] = state
@@ -852,6 +955,13 @@ fn _web_draw_ir_choose_route(
         # false`), which still run the full upload + gpu A/B and still latch
         # `pixels_match` / `*_device_proven`; only an already-decided steady
         # frame skips the device.
+        #
+        # Reached only when the device is NOT authorized for this key
+        # (`_web_draw_ir_device_authorized` false: a pixel mismatch, an
+        # unproven readback, or skipped commands). A merely LOST TIMING MARGIN
+        # no longer lands here — that diverted a proven, pixel-exact device
+        # onto the software raster for every steady frame. The margin verdict
+        # is published in `state.evidence.should_offload` as evidence only.
         val oracle = _web_draw_ir_oracle_route(composition, width, height)
         if oracle.skipped_command_count != 0:
             return []
@@ -915,10 +1025,21 @@ fn _web_draw_ir_choose_route(
     # parked engine owner while all proof fields are still available. This
     # makes the first steady frame eligible for reuse and removes the former
     # probabilistic fingerprint authorization entirely.
-    if state.complete and evidence.should_offload:
+    if state.complete and (
+        evidence.should_offload or _web_draw_ir_device_authorized(state)
+    ):
         state.validated_pixels = upload.oracle_pixels
         state.validated_device_token = _web_fast_engine_validated_device_token(
             gpu.readback, width, height, backend_name)
+        # Retain the checksum ONCE, here, while both sides are still known
+        # pixel-exact. Prefer the device's own value (free — the readback
+        # already computed it); the CPU oracle route's readback carries none,
+        # so fall back to the CPU twin of the identical fold. Never per frame.
+        if gpu.readback.checksum > 0:
+            state.validated_checksum = gpu.readback.checksum
+        else:
+            state.validated_checksum = web_draw_ir_device_checksum(
+                upload.oracle_pixels)
     val state_index = _web_draw_ir_state_index(key)
     if state_index >= 0:
         _web_draw_ir_route_states[state_index] = state

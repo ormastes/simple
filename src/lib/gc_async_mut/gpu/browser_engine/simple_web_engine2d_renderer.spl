@@ -1232,6 +1232,14 @@ pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: 
     engine2d_readback(pixels, "cpu_mirror")
 
 pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
+    val (resolved, _reason) = simple_web_engine2d_resolved_backend_name_with_reason(width, height, backend_name)
+    resolved
+
+# Same resolution as simple_web_engine2d_resolved_backend_name, but also
+# returns the probe-failure reason (empty when no fallback occurred) so
+# callers can surface WHY a requested backend was downgraded to "software"
+# instead of silently swallowing the probe result.
+pub fn simple_web_engine2d_resolved_backend_name_with_reason(width: i32, height: i32, backend_name: text) -> (text, text):
     val canonical = backend_canonical_name(backend_name)
     # An empty/unset backend_name (e.g. a struct field that was never
     # populated, or SIMPLE_2D_BACKEND read as "" on baremetal where there is
@@ -1244,13 +1252,14 @@ pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backen
         # render (e.g. CUDA headless) is rejected with a logged reason and the
         # next GPU candidate (cuda -> vulkan -> ...) is tried before CPU lanes.
         # Memoized in Engine2D, so this costs one probe pass per process.
-        return Engine2D.detect_best_backend_viable()
+        return (Engine2D.detect_best_backend_viable(), "")
     if canonical == "cpu" or canonical == "software":
-        return canonical
+        return (canonical, "")
     val probe = Engine2D.probe_backend(width, height, canonical)
     if probe.status == BackendStatus.Initialized:
-        return canonical
-    "software"
+        return (canonical, "")
+    val reason = if probe.reason != "": probe.reason else: "backend '" + canonical + "' probe did not initialize"
+    ("software", reason)
 
 pub fn simple_web_render_html_to_pixels_with_engine2d_backend(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
