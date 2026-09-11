@@ -427,6 +427,28 @@ census: `doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md`.
   a paraphrase here: `doc/08_tracking/bug/engine2d_vulkan_pixels_upload_slower_than_cpu_2026-09-11.md`
   and `doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md`.
 
+## R1 round 2 — root cause, opt-in typed upload, wall clock (2026-09-11)
+
+- **R1 root cause found**: a pooled `Engine2D` resumed the next frame with
+  `pending_compute_command` still naming the PREVIOUS frame's already-freed
+  command buffer, so `rt_vulkan_bind_pipeline` refused it and the backend
+  latched `cpu_fallback`. Fix: `slot.engine.vulkan_discard_stale_pending_compute()`
+  at the pool acquire site. Same family as
+  `doc/08_tracking/bug/class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md`
+  (class-field write-back dropped on bind) — the fix only clears the
+  pending-compute fields it knows about, so any OTHER `VulkanBackend` field can
+  rewind the same way and would not be caught.
+- Route authorization is now proven correct by `probe_authorize.spl`, but the
+  real page-render path still reports `timing-unavailable` — proof and use
+  diverge, do not conflate them.
+- New typed-upload lane is opt-in: `SIMPLE_VK_RECT_UPLOAD=u32`. WHY opt-in, not
+  default: an unknown extern is an uncatchable interpreter abort, so the fast
+  path must not run unless explicitly requested.
+- A fresh seed for this lane needs `--features vulkan,vulkan-graphics`.
+- Honest wall clock: 900x760 steady-state 7.2s GPU vs 7.9s CPU; 4K cold start
+  87.7s. The bottleneck is interpreter-bound Draw IR/layout, not raster —
+  do not read the GPU win as proof the raster path is fast end-to-end.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

@@ -122,3 +122,15 @@ that the equivalent indexed write (**R**) performs.
 
 **Do not "fix" the mock specs by rewriting them to avoid `for`.** The specs are
 correct against the documented reference-type contract; the runtime is not.
+
+## Related
+
+- `doc/08_tracking/bug/vulkan_bind_pipeline_refused_after_readback_2026-09-11.md`
+  (R1) — a likely instance of this same class-instance copy-on-bind defect,
+  observed in the Engine2D Vulkan backend: a mutation of `VulkanBackend`'s
+  pending-compute state was dropped instead of written back, reviving a freed
+  command-buffer handle across frames. R1's guard
+  (`vulkan_discard_stale_pending_compute()`) covers only the pending-compute
+  fields it explicitly resets — it is a targeted workaround for one field, not
+  a fix for the underlying copy-on-bind/for-loop mutation-drop defect
+  documented here.

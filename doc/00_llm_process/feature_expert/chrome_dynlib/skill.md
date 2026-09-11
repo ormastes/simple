@@ -13,13 +13,10 @@ renderer's own.
 
 - Requirements/goal: `.spipe/chrome_dynlib_vulkan_render/state.md`
 - Research (authoritative): `doc/01_research/ui/chrome_dynlib/chrome_dynlib_vulkan_render_module_2026-09-11.md`
-  (TL;DR: `..._tldr.md`)
 - Plan: `doc/03_plan/ui/chrome_dynlib/chrome_dynlib_vulkan_showcase_plan.md`
 - Related campaign: `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md`
-  § "CPU<->GPU boundary fix campaign" (owns the Simple-side Vulkan path this
-  module composites onto)
-- Landed: PR #530 `land/chrome-dynlib-showcase-2026-09-11` — "Chrome (CEF)
-  dynlib render module, showcase + perf-check infra; honest vk2d bench verdict"
+  § "CPU<->GPU boundary fix campaign" (Simple-side Vulkan path this composites onto)
+- Landed: PR #530 `land/chrome-dynlib-showcase-2026-09-11`
 
 ## Key facts
 
@@ -42,23 +39,21 @@ renderer's own.
   `pixels: [u32]` (`engine2d/backend_vulkan.spl:176`) — no external-memory
   import yet, same zero-copy gap as the gpu_offload_check campaign.
 - **Catalog reuse**: drives the 4K lane's `web_renderable_feature_inventory.spl`
-  (7 tabs, shared composer); ownership stays with
-  `.spipe/web_renderer_vulkan_4k_showcase_hardening`.
+  (7 tabs, shared composer); owner: `.spipe/web_renderer_vulkan_4k_showcase_hardening`.
 - **Sabotage discipline**: green/red/green proven by renaming
-  `simple_chrome_render_event` out of a built copy (call fails, exit 1); the
-  unmodified library passes both sides.
+  `simple_chrome_render_event` out of a built copy (call fails, exit 1).
+- **`spl_wffi_call_i64_into_bytes` facade (2026-09-11)**: wraps the real
+  `read_pixels_into` out-param call; on a stub library `call_rcs=-4,2,2,2,2,2,2,2`
+  is the stub signature, not a Vulkan failure.
 
 ## Blocked/deferred rows (never claim passed)
 
-`renderdoccmd` absent on this host -> RenderDoc rows `blocked`; Chrome ANGLE
-Vulkan unavailable on macOS -> `vulkan-angle-unavailable` (resume on Linux);
-zero-copy GPU handover deferred to a separate lane. Verdicts are exactly
-`passed`/`failed`/`environment-blocked`/`could-not-complete-in-time`; Chrome
-availability alone is never Vulkan proof, and a missing
-field/binary/library/zero-tab run is never `passed`.
+`renderdoccmd` absent -> RenderDoc rows `blocked`; Chrome ANGLE Vulkan
+unavailable on macOS -> `vulkan-angle-unavailable` (resume on Linux); zero-copy
+GPU handover deferred. Verdicts: `passed`/`failed`/`environment-blocked`/
+`could-not-complete-in-time`; Chrome availability alone is never Vulkan proof.
 
 ## Update Rule
 
-When research, plan, design, tests, implementation, verification, or release
-artifacts for this feature change, update this skill with the new links,
-current ABI/symbol inventory, and handoff notes BEFORE committing.
+Update this skill with new links, current ABI/symbol inventory, and handoff
+notes BEFORE committing feature work.
