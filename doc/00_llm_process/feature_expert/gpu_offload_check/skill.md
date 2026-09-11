@@ -372,6 +372,26 @@ attribution question first.
   Auto mode is **opt-in via `SIMPLE_AUTO_CLEAN=1`** (runs at `simple build`
   start; `SIMPLE_CACHE_MAX_GB` default 20).
 
+## Vulkan rect batch + pinned-shader workflow (2026-09-11)
+
+- Batch API: `Engine2D.draw_rect_list_filled(rects: [i32], colors: [u32])` —
+  frozen host layout `rects[4k..4k+4]`, `colors[k]`. At `n >= 2` it becomes ONE
+  compute dispatch reading a GPU storage buffer; below that, and on any decline,
+  the F4 per-rect host loop runs with identical pixels.
+  Observables: `vulkan_last_frame_dispatch_count()` (rect/framebuffer lanes only,
+  read AFTER finalize) and `vulkan_rect_batch_fallback_reason()` (`""` = installed).
+- Pinned shader: edit `shaders/rect_batch.comp`, then ALWAYS
+  `sh scripts/tool/gen-rect-batch-spirv.shs`, then
+  `sh scripts/check/check-rect-batch-spirv-pinned.shs` (fail-closed; no
+  glslangValidator = ERROR). The `.spv` is never committed. The pin catches a
+  stale blob, NOT a semantic change — the painter-order example in
+  `backend_vulkan_rect_batch_edges_spec.spl` is what catches that.
+- Open, wall clock is FLAT at 900x760/64 (6.663 -> 6.686 ms): `copy_to_buffer`
+  is its OWN blocking queue submit (`vulkan/buffer.rs:338`), so the lane is not
+  one submit per frame; host `[u8]` packing has no typed-upload alternative; the
+  per-pixel walk is O(bbox x N). All three in
+  `doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

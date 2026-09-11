@@ -37,6 +37,17 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
 val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
+# Batched-rect lane. FROZEN, mirrors shaders/rect_batch.comp binding 1:
+# 5 u32 words per rect -- x, y, w, h, colour.
+val RECT_BATCH_WORDS_PER_RECT: i64 = 5
+# VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, as backend_vulkan_font.spl:36.
+val RECT_BATCH_STORAGE_USAGE: i64 = 0x80
+# Smallest rect-list buffer, 256 rects. Sized so a typical UI frame never grows
+# the slot at all; growth doubles from here.
+val RECT_BATCH_MIN_BYTES: i64 = 5120
+# Below this the single-rect lane is cheaper: one dispatch costs a buffer
+# upload and a whole-bounding-box grid, which a lone rect does not amortise.
+val RECT_BATCH_MIN_RECTS: i64 = 2
 # Retained image-source staging buffers kept warm across frames. This is a
 # HOST-MEMORY bound, not a command-buffer bound: `rt_vulkan_create_descriptor_set`
 # (src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs:19-70) creates
@@ -354,6 +365,14 @@ impl VulkanBackend:
         self.image_source_pool_surface_identity = 0
 
     me _clear_pending_compute_state():
+        # Snapshot before zeroing: the count is only observable AFTER the frame
+        # has been flushed, which is exactly when this runs.
+        if self.frame_dispatch_count > 0:
+            self.last_frame_dispatch_count = self.frame_dispatch_count
+        self.frame_dispatch_count = 0
+        # Every rect-list slot is now behind the fence and may be reclaimed by
+        # the next frame's first batch.
+        self.rect_batch_slot = 0
         self.pending_compute_command = 0
         self.pending_compute_pipelines = []
         self.pending_compute_descriptors = []
@@ -529,6 +548,7 @@ impl VulkanBackend:
         if not ready:
             val flushed = self._flush_pending_compute()
             return if flushed < 0: -1 else: 0
+        self.frame_dispatch_count = self.frame_dispatch_count + 1
         1
 
     me _resolve_framebuffer_descriptor(pipe: i64) -> i64:
@@ -655,6 +675,7 @@ impl VulkanBackend:
                     not vulkan_sffi_dispatch(cmd, gx, gy, 1)):
                     val flushed = self._flush_pending_compute()
                     return if flushed < 0: -1 else: k
+                self.frame_dispatch_count = self.frame_dispatch_count + 1
             k = k + 1
         # One trace line for the whole batch. The single-rect path emits one per
         # dispatch; without this the batch lane is INVISIBLE to
@@ -662,6 +683,228 @@ impl VulkanBackend:
         # mutation ordering was misdiagnosed twice.
         if vulkan_order_trace_enabled():
             vulkan_order_trace("rect-batch pipe={pipe} n={count} desc={desc} cmd={cmd} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
+        count
+
+    me _free_rect_batch_pool():
+        """Release every rect-list buffer and descriptor this surface owns.
+
+        Only safe once no command referencing them can still be pending, which
+        is why the only caller is the surface teardown path.
+        """
+        var i: i64 = 0
+        while i < self.rect_batch_descriptors.len().to_i64():
+            val d = self.rect_batch_descriptors[i]
+            if d > 0 and not vulkan_sffi_destroy_descriptor_set(d):
+                vulkan_sffi_quarantine_dependencies(d, 0, 0, 0)
+            i = i + 1
+        i = 0
+        while i < self.rect_batch_buffers.len().to_i64():
+            val b = self.rect_batch_buffers[i]
+            if b > 0: vulkan_sffi_free_buffer(b)
+            i = i + 1
+        self.rect_batch_buffers = []
+        self.rect_batch_capacities = []
+        self.rect_batch_descriptors = []
+        self.rect_batch_slot = 0
+
+    me _rect_batch_slot_ready(slot: i64, byte_count: i64, pipe: i64) -> bool:
+        """Ensure pool slot `slot` owns a buffer of at least `byte_count` bytes.
+
+        Grows by REPLACING the slot's buffer, which is safe only because a slot
+        is claimed at most once per frame and every earlier frame that used it
+        was fence-waited by `_flush_pending_compute` before the slot was reset.
+        A buffer that is still referenced by an unsubmitted command is never
+        reached here.
+        """
+        while self.rect_batch_buffers.len().to_i64() <= slot:
+            self.rect_batch_buffers.push(0)
+            self.rect_batch_capacities.push(0)
+            self.rect_batch_descriptors.push(0)
+        if self.rect_batch_capacities[slot] < byte_count:
+            val old = self.rect_batch_buffers[slot]
+            if old > 0: vulkan_sffi_free_buffer(old)
+            # Round up so a frame whose rect count creeps upward does not
+            # reallocate every frame; this is the "grow, never per-frame alloc"
+            # rule the lane exists for.
+            var want = RECT_BATCH_MIN_BYTES
+            while want < byte_count: want = want * 2
+            val fresh = vulkan_sffi_alloc_buffer(want, RECT_BATCH_STORAGE_USAGE)
+            if fresh <= 0:
+                self.rect_batch_buffers[slot] = 0
+                self.rect_batch_capacities[slot] = 0
+                return false
+            self.rect_batch_buffers[slot] = fresh
+            self.rect_batch_capacities[slot] = want
+            # The descriptor names the OLD buffer; it must be rebuilt.
+            val stale = self.rect_batch_descriptors[slot]
+            if stale > 0 and not vulkan_sffi_destroy_descriptor_set(stale):
+                vulkan_sffi_quarantine_dependencies(stale, 0, 0, 0)
+            self.rect_batch_descriptors[slot] = 0
+        if self.rect_batch_descriptors[slot] <= 0:
+            val desc = vulkan_sffi_create_descriptor_set(pipe)
+            if desc <= 0: return false
+            self.rect_batch_descriptors[slot] = desc
+        # Binding 0 is the framebuffer, binding 1 the rect list. Both are
+        # re-bound every frame because a resize replaces d_framebuffer.
+        if (not vulkan_sffi_bind_buffer(self.rect_batch_descriptors[slot], 0, self.d_framebuffer) or
+            not vulkan_sffi_bind_buffer(self.rect_batch_descriptors[slot], 1,
+                                        self.rect_batch_buffers[slot])):
+            return false
+        true
+
+    me _enqueue_rect_batch_gpu(rects: [i32], colors: [u32]) -> i64:
+        """Record ONE compute dispatch that paints every rect in the list.
+
+        The rect list is uploaded to a GPU storage buffer (binding 1) and the
+        shader walks it per pixel, so the interpreter pays for one
+        push_constants + one dispatch for the WHOLE batch instead of two SFFI
+        calls per rect. See `shaders/rect_batch.comp` for the frozen layout.
+
+        Returns the number of rects recorded (== count) on success, 0 when the
+        lane declined (caller falls back to the per-rect loop, painter order
+        intact because nothing was recorded), or -1 when the frame is
+        unrecoverable.
+        """
+        val count = colors.len().to_i64()
+        if self.pipe_rect_batch <= 0 or self.d_framebuffer <= 0 or count <= 0:
+            return 0
+        if rects.len().to_i64() != count * 4:
+            return 0
+
+        # Bounding box over the rects that actually paint. A degenerate rect is
+        # skipped exactly as the host batch lane skips it, and the shader skips
+        # it again, so the two agree.
+        var bx0: i64 = 2147483647
+        var by0: i64 = 2147483647
+        var bx1: i64 = -2147483648
+        var by1: i64 = -2147483648
+        var live: i64 = 0
+        var k: i64 = 0
+        while k < count:
+            val base = k * 4
+            val rw = rects[base + 2] as i64
+            val rh = rects[base + 3] as i64
+            if rw > 0 and rh > 0:
+                val rx = rects[base] as i64
+                val ry = rects[base + 1] as i64
+                if rx < bx0: bx0 = rx
+                if ry < by0: by0 = ry
+                if rx + rw > bx1: bx1 = rx + rw
+                if ry + rh > by1: by1 = ry + rh
+                live = live + 1
+            k = k + 1
+        if live == 0:
+            # Nothing paints. Report the whole list as handled: the single-rect
+            # path would paint nothing either, and replaying it would only
+            # re-derive that.
+            return count
+        # Clamp the bounding box to the framebuffer, and to the clip when one is
+        # active, so the dispatch grid is the smallest that can still paint every
+        # pixel the N singles would. The shader re-applies both tests per pixel;
+        # this only sizes the grid.
+        if bx0 < 0: bx0 = 0
+        if by0 < 0: by0 = 0
+        if bx1 > self.w as i64: bx1 = self.w as i64
+        if by1 > self.h as i64: by1 = self.h as i64
+        if self.clip_enabled:
+            val cx0 = self.clip_x as i64
+            val cy0 = self.clip_y as i64
+            val cx1 = cx0 + (self.clip_w as i64)
+            val cy1 = cy0 + (self.clip_h as i64)
+            if bx0 < cx0: bx0 = cx0
+            if by0 < cy0: by0 = cy0
+            if bx1 > cx1: bx1 = cx1
+            if by1 > cy1: by1 = cy1
+        val bw = bx1 - bx0
+        val bh = by1 - by0
+        if bw <= 0 or bh <= 0:
+            # Every rect is fully outside the framebuffer or the clip. Same
+            # reasoning as `live == 0`.
+            return count
+
+        if self.pending_compute_command <= 0:
+            if (not vulkan_sffi_reap_dependency_quarantine() or
+                not vulkan_sffi_fence_submission_supported()):
+                return 0
+            self.pending_compute_command = vulkan_sffi_begin_compute()
+            if self.pending_compute_command <= 0:
+                return 0
+
+        val slot = self.rect_batch_slot
+        val payload_bytes = count * RECT_BATCH_WORDS_PER_RECT * 4
+        if not self._rect_batch_slot_ready(slot, payload_bytes, self.pipe_rect_batch):
+            return 0
+
+        # Pack the frozen 5-word-per-rect payload. This is the one remaining
+        # O(N) interpreter cost in the lane; it is 20 array stores per rect with
+        # no call transit, against the 20 stores PLUS two SFFI calls per rect
+        # the host batch lane pays. There is no typed (`[u32]`) buffer upload in
+        # the Vulkan SFFI, so the bytes have to be built here.
+        var payload: [u8] = [0u8; payload_bytes]
+        var off: i64 = 0
+        k = 0
+        while k < count:
+            val base = k * 4
+            val vx = (rects[base] as u32) as i64
+            payload[off] = (vx & 255) as u8
+            payload[off + 1] = ((vx >> 8) & 255) as u8
+            payload[off + 2] = ((vx >> 16) & 255) as u8
+            payload[off + 3] = ((vx >> 24) & 255) as u8
+            val vy = (rects[base + 1] as u32) as i64
+            payload[off + 4] = (vy & 255) as u8
+            payload[off + 5] = ((vy >> 8) & 255) as u8
+            payload[off + 6] = ((vy >> 16) & 255) as u8
+            payload[off + 7] = ((vy >> 24) & 255) as u8
+            val vw = (rects[base + 2] as u32) as i64
+            payload[off + 8] = (vw & 255) as u8
+            payload[off + 9] = ((vw >> 8) & 255) as u8
+            payload[off + 10] = ((vw >> 16) & 255) as u8
+            payload[off + 11] = ((vw >> 24) & 255) as u8
+            val vh = (rects[base + 3] as u32) as i64
+            payload[off + 12] = (vh & 255) as u8
+            payload[off + 13] = ((vh >> 8) & 255) as u8
+            payload[off + 14] = ((vh >> 16) & 255) as u8
+            payload[off + 15] = ((vh >> 24) & 255) as u8
+            val vc = colors[k] as i64
+            payload[off + 16] = (vc & 255) as u8
+            payload[off + 17] = ((vc >> 8) & 255) as u8
+            payload[off + 18] = ((vc >> 16) & 255) as u8
+            payload[off + 19] = ((vc >> 24) & 255) as u8
+            off = off + 20
+            k = k + 1
+
+        # CAVEAT, measured 2026-09-11 and stated rather than assumed: this is
+        # NOT a free record-time write. `rt_vulkan_copy_to_buffer` ->
+        # `Buffer::upload_at` (vulkan/buffer.rs:338) always stages and calls
+        # `submit_transfer_command`, i.e. its own queue submit plus fence wait.
+        # A batched frame is therefore one COMPUTE submit plus one TRANSFER
+        # submit per batch, and that round-trip is a large part of why the lane
+        # did not beat the per-rect loop on wall clock. Fixing it needs an SFFI
+        # that records `vkCmdCopyBuffer` into the already-open command buffer;
+        # none exists. See the bug record's gap 0.
+        if not vulkan_sffi_copy_to_buffer(self.rect_batch_buffers[slot], payload, 0):
+            return 0
+
+        val pc = _pack_rect_batch_pc(
+            bx0.to_i32(), by0.to_i32(), bw.to_i32(), bh.to_i32(), count.to_i32(),
+            self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h,
+            self.clip_enabled)
+        val cmd = self.pending_compute_command
+        val desc = self.rect_batch_descriptors[slot]
+        if (not vulkan_sffi_bind_pipeline(cmd, self.pipe_rect_batch) or
+            not vulkan_sffi_bind_descriptors(cmd, desc) or
+            not vulkan_sffi_push_constants(cmd, self.pipe_rect_batch, pc) or
+            not vulkan_sffi_dispatch(cmd, (bw + 15) / 16, (bh + 15) / 16, 1)):
+            val flushed = self._flush_pending_compute()
+            return if flushed < 0: -1 else: 0
+        # The slot is now referenced by an unsubmitted dispatch: burn it for the
+        # rest of the frame.
+        self.rect_batch_slot = slot + 1
+        self.frame_dispatch_count = self.frame_dispatch_count + 1
+        # A later `_enqueue_framebuffer_compute` on another pipeline rebinds the
+        # pipeline and descriptors itself, so leaving them bound here is safe.
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("rect-batch-gpu pipe={self.pipe_rect_batch} n={count} slot={slot} bbox={bx0},{by0},{bw},{bh} desc={desc} cmd={cmd} clip_on={self.clip_enabled}")
         count
 
     me _enqueue_image_composite(pipe: i64, d_src: i64, push_data: [u8],
@@ -873,6 +1116,34 @@ fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i3
     """
     var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
     _write_rect_pc_into(buf, 0, x, y, w, h, color, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h, clip_enabled)
+    buf
+
+fn _pack_rect_batch_pc(bx: i32, by: i32, bw: i32, bh: i32, n: i32,
+                       fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32,
+                       clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Pack the frozen 48-byte batched-rect push-constant block.
+
+    Word order is FROZEN and must match `shaders/rect_batch.comp`:
+      bx, by, bw, bh, n, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h,
+      clip_enabled.
+    Unlike the per-rect block this is built ONCE per batch, not once per rect,
+    so it uses the shared `_pack_i32_le` helper rather than inline stores --
+    twelve helper calls per BATCH is noise, where twelve per RECT was 67% of
+    the single-rect call (see `_pack_rect_pc`).
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, bx)
+    buf = _pack_i32_le(buf, 4, by)
+    buf = _pack_i32_le(buf, 8, bw)
+    buf = _pack_i32_le(buf, 12, bh)
+    buf = _pack_i32_le(buf, 16, n)
+    buf = _pack_i32_le(buf, 20, fb_w)
+    buf = _pack_i32_le(buf, 24, fb_h)
+    buf = _pack_i32_le(buf, 28, clip_x)
+    buf = _pack_i32_le(buf, 32, clip_y)
+    buf = _pack_i32_le(buf, 36, clip_w)
+    buf = _pack_i32_le(buf, 40, clip_h)
+    buf = _pack_i32_le(buf, 44, _bool_to_i32(clip_enabled))
     buf
 
 fn _write_rect_pc_into(mut buf: [u8], base: i64, x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool):

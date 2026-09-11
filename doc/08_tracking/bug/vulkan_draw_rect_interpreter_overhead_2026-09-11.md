@@ -173,3 +173,147 @@ Sabotage (painter order), on the edges spec:
    one winning`, `expected 4291572531 to equal 4281558732` (RED found where BLUE
    must win)
 3. restored — `4 examples, 0 failures`
+
+---
+
+# Shader-side follow-up (2026-09-11): N rects, ONE compute dispatch
+
+The host-side batch above removed the per-rect interpreter TRANSIT but still
+recorded N `vkCmdPushConstants` + N `vkCmdDispatch` — two SFFI calls per rect.
+This follow-up moves the rect list into a GPU storage buffer and paints the whole
+batch with a single dispatch.
+
+## What landed
+
+- `src/lib/gc_async_mut/gpu/engine2d/shaders/rect_batch.comp` — GLSL compute
+  kernel. Binding 0 framebuffer, binding 1 rect list (5 u32 per rect:
+  x, y, w, h, colour), 48 bytes of push constants (bbox x/y/w/h, n, fb w/h,
+  clip x/y/w/h, clip_enabled). One invocation per bounding-box pixel; each walks
+  the rect list in ASCENDING index order and keeps the LAST covering rect, which
+  is exactly what N sequential single-rect dispatches produce. The frame-bounds
+  and clip guards are transcribed from `_glsl_rect_filled` so the batch is
+  pixel-exact against N singles.
+- `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_spirv.spl` —
+  GENERATED word array + pinned sha256. The `.spv` is a build intermediate and is
+  deliberately NOT checked in.
+- `scripts/tool/spirv-to-spl-words.shs` (od-based transcriber, emits the sha256
+  pin line) and `scripts/tool/gen-rect-batch-spirv.shs` (compile + rewrite the
+  module). Reproducible: `glslangValidator -V --target-env vulkan1.1`.
+- `scripts/check/check-rect-batch-spirv-pinned.shs` — recompiles the `.comp` and
+  compares bytes AND the pinned sha against the committed module. Fail-closed;
+  a host with no `glslangValidator` is `ERROR — nothing was checked`, never a
+  pass. `--selftest` (4 fixtures, fatal, runs before every scan) uses a
+  self-contained fixture GLSL rather than the real `.comp`, because coupling it
+  to the tree made it abort exactly when the guard was most needed.
+- Wiring: `vulkan_session.spl` compiles the SPIR-V and creates
+  `pipe_rect_batch` as an OPTIONAL pipeline — a failure records
+  `rect_batch_error` and leaves the host loop running rather than failing
+  session init. `_enqueue_rect_batch_gpu` (backend_vulkan_helpers.spl) uploads
+  the packed list, sets push constants once, and records one dispatch.
+  `draw_rect_list_filled` prefers it at `n >= RECT_BATCH_MIN_RECTS` (2) and
+  falls back to the F4 host loop on any decline.
+
+### Mid-frame buffer reuse (the bug this design invites)
+
+`copy_to_buffer` writes at RECORD time; the dispatch reads at SUBMIT time. One
+reused rect-list buffer would therefore let a SECOND batch in the same frame
+silently repaint the FIRST batch's dispatch. The lane uses a per-frame SLOT POOL
+(mirroring `font_params_pool`/`image_descriptor_pool`): a slot is claimed at most
+once per frame and `rect_batch_slot` resets only in
+`_clear_pending_compute_state`, i.e. after the fence. Pinned by the
+"keeps two batches in one frame on two separate slots" example.
+
+## Measurement — 900x760, 64 rects, 300 frames
+
+Same tree, same binary (`bin/release/aarch64-apple-darwin-macho/simple`,
+`26264696 1788766698` before and after each run), interpreter lane, toggled ONLY
+by `RECT_BATCH_MIN_RECTS` (2 = GPU lane; 1000000 = forced F4 host lane).
+
+| lane | dispatches/frame | ms/frame | draw (host) | finalize (submit+GPU) |
+|---|---|---|---|---|
+| F4 host batch | 64 | 6.663 | 4.28 ms | 2.34 ms |
+| GPU rect batch | **1** | 6.686 | 3.71 ms | 2.94 ms |
+
+(single-rect lane, for scale: 17.37 ms/frame.)
+
+**Honest finding: wall clock is flat.** The deliverable — one dispatch, rect list
+resident on the GPU — is achieved and proven, but it did not buy time at this
+size. The 0.57 ms of per-dispatch SFFI cost that disappeared was replaced by
+0.60 ms of extra GPU work. Both halves are named below rather than averaged away.
+
+## Three named gaps (none closed here)
+
+0. **The rect-list upload is its OWN blocking queue submit — the lane is NOT one
+   submit per frame.** `vulkan_sffi_copy_to_buffer` -> `rt_vulkan_copy_to_buffer`
+   -> `Buffer::upload_at` (`src/compiler_rust/runtime/src/vulkan/buffer.rs:338`)
+   unconditionally builds a staging buffer and calls `copy_from_staging`, which
+   ends in `device.submit_transfer_command(cmd)` (`:537`) — a real
+   `queue_submit` plus fence wait (`device.rs:902,940`). So a batched frame is
+   one COMPUTE submit plus one TRANSFER submit per batch, and part of the
+   draw-side 3.71 ms is that blocking GPU round-trip rather than interpreter
+   work. This was NOT caught by the pixel oracle's "one device submission"
+   example, because `vulkan_submission_generation()` counts only the compute
+   submits `_flush_pending_compute` makes. It is very likely the single biggest
+   reason the wall clock came out flat: N cheap record-only dispatches were
+   traded for one dispatch plus one synchronous device round-trip. Fixing it
+   needs an SFFI that RECORDS `vkCmdCopyBuffer` into the already-open compute
+   command buffer instead of submitting its own; no such entry point exists
+   today (`vulkan_sffi_copy_to_buffer` is the only upload).
+1. **Host packing is the dominant O(N) interpreter term in the 3.71 ms
+   draw-side residual — by construction, not separately timed.** (`draw_us`
+   also contains the clear, the bounding-box loop, the upload above, and four
+   record-time SFFI calls; only their sum was measured.)
+   The rect list must be built as `[u8]`: the interpreter's array marshaller
+   `strict_owned_bytes` (`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs:633`,
+   and its twin in `dynamic_sffi.rs:769`) truncates EVERY element to one byte and
+   errors above 255, so a `[u32]`/`[i32]` upload is rejected outright — there is
+   no typed buffer upload in the Vulkan SFFI. 64 rects x 20 stores = 1280
+   interpreter array stores per frame. Closing this needs a width-aware upload
+   facade (then bindings could take `[i32]` rects and `[u32]` colours directly
+   with zero host repacking), which is a seed change.
+2. **The per-pixel rect walk is O(bbox_pixels x N) — a real regression on the GPU
+   axis, 2.34 ms -> 2.94 ms.** At 900x760 with 64 rects that is ~43.8M loop
+   iterations, most of them misses. Candidate fix, not built here: a per-workgroup
+   tile cull (skip a 16x16 tile's whole rect walk when the tile intersects no
+   rect), or a coarse tile-to-rect bucket list uploaded alongside the rects.
+
+## Evidence
+
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_one_dispatch_spec.spl`
+  — NEW, **7 examples, 0 failures** on device. Device identity and a
+  no-fallback-reason precondition (both RED without a real ICD), then
+  `rect_dispatches_for_batch(64) == 1`, the `n == 2` boundary, `n == 1` staying
+  on the single-rect lane, `n == 0` recording nothing, and the two-batch slot
+  guard above (3 dispatches, all four probe pixels correct).
+- `backend_vulkan_rect_batch_pixel_oracle_spec.spl` — **4 examples, 0 failures**
+  re-run against the GPU lane (verified live via
+  `SIMPLE_VK_ORDER_TRACE=1`, which emits `rect-batch-gpu pipe=23 n=64 slot=0
+  bbox=0,0,256,256`). The 64-rect batch is still byte-identical to 64 singles.
+- `backend_vulkan_rect_batch_edges_spec.spl` — **4 examples, 0 failures**.
+- Bench: `vk2d_bench.spl --batch` now prints `dispatches_per_frame=1` and
+  `rect_batch_fallback=none`.
+
+### Sabotage 1 — the pinned-blob guard (tampered word)
+
+1. `PASS — 5848 byte(s) compared ... (sha256 6292ffa5...)`
+2. one word changed `0x11u8 -> 0x12u8` in the committed module —
+   `FAIL — 5848 byte(s) compared: committed words differ from freshly compiled
+   GLSL (... differ: char 62, line 21 ...)`, exit 1
+3. restored — `PASS — 5848 byte(s) compared ...`
+
+### Sabotage 2 — the shader (reversed per-pixel rect walk)
+
+This one deliberately shows the two guards are COMPLEMENTARY, not redundant:
+
+1. green: pin `PASS`, edges spec `4 examples, 0 failures`
+2. `.comp` loop reversed to `for (k = pc.n - 1; k >= 0; --k)`, blob NOT
+   regenerated — pin `FAIL — 5868 byte(s) compared: byte count differs:
+   committed 5848, freshly compiled 5868` (catches the stale blob)
+3. blob regenerated from the reversed GLSL — pin `PASS — 5868 byte(s) compared
+   ... (sha256 0ad41001...)`. **The pin cannot catch a semantic change**, which
+   is the honest limit of a byte pin.
+4. edges spec on that build — `4 examples, 1 failure`, `resolves overlapping
+   rects in painter order, last one winning`, `expected 4291572531 to equal
+   4281558732`. The spec is what catches it.
+5. `.comp` restored + regenerated — pin `PASS — 5848 byte(s) compared ...
+   (sha256 6292ffa5...)`, edges spec `4 examples, 0 failures`.
