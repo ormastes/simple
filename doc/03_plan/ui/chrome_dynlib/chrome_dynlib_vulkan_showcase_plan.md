@@ -63,9 +63,39 @@ Evidence line: `CHROME_DYNLIB PROBE: ALL PASS — 10/10 symbols, abi=1, lib_sha2
 
 ## S2 — Chrome-backed Vulkan showcase (catalog, tabs, PPM + receipt)
 
-**Status:** ready for the CPU-BGRA path; Vulkan **proof** rows are host-blocked on macOS.
+**Status:** DONE 2026-09-11 (macOS arm64), `environment-blocked` as the honest verdict.
+Vulkan **proof** rows remain host-blocked (row B3); the Engine2D Vulkan *path* is real.
 
-Depends on S1. Files to create:
+**Filenames differ from the list below — the user's S2/S3 brief renamed them, and those
+names are what shipped.** The entry kept the plan's name; the rest follow the brief:
+`src/app/ui/chrome_showcase/main.spl` (entry, as planned) plus three pure siblings
+`catalog.spl` / `frame.spl` / `receipt.spl`; the catalog lands at
+`examples/06_io/ui/web_catalog/*.html` + `catalog.sdn`; the receipt is
+`build/chrome-showcase/receipt.env`. The separate
+`check-chrome-dynlib-showcase-receipt.shs` was NOT written — its receipt-reading duty is
+performed by S3's single script, which reads the same receipt and would otherwise be a
+second copy of the same classifier.
+
+Catalog provenance: the pages are SLICED out of the 4K lane's own composed document
+(`web_renderable_feature_inventory_apply_to_showcase` over
+`examples/06_io/ui/browser_common_elements_showcase.html`), one page per canonical panel
+(7: overview, html, css-layout, css-paint, forms-media, animation, evidence) plus a
+`tab-bar` page = 8. No second inventory and no second generator was authored.
+
+Measured on this Mac (deployed binary size 26264696, mtime 1788766698, interpreter):
+`cpu_simd` reported `cpu_simd`, 8 tabs, 14691 ms; `vulkan` reported `vulkan` (real Vulkan
+on Apple M4), 8 tabs, 22613 ms. Both: `frame_source=stub-pattern reason=no-cef-drop
+verdict=environment-blocked`, 8 non-blank PPMs each.
+
+**Two honest gaps, recorded not worked around.** (1) Tab selection is by per-tab catalog
+PAGE, not by a dispatched `simple_chrome_render_event` click — AC-3's "real dispatched
+input" is unmet and stays open, because no backend exists on this host to dispatch into.
+(2) `simple_chrome_render_read_pixels_into` writes into a caller-owned OUT buffer and the
+host dynlib facade has no bounded out-byte-buffer call (`spl_wffi_call_i64_with_bytes`
+passes bytes IN only), so a real Chrome frame cannot be pulled yet; that needs a facade
+addition (`spl_wffi_call_i64_into_bytes`), not a new `rt_*`. Both are in the lane state.
+
+Original file list (superseded by the names above, retained for provenance):
 - `src/app/ui/chrome_showcase/main.spl` — loads the shared catalog via the 4K lane's
   `src/lib/gc_async_mut/gpu/browser_engine/web_renderable_feature_inventory.spl` and its
   shared fixture composer (present in this worktree; reuse — do **not** author a second
@@ -91,9 +121,32 @@ Evidence line: `CHROME_DYNLIB SHOWCASE: chrome_dynlib_status=<verdict> tabs=7/7 
 
 ## S3 — Perf check + Simple↔Chrome comparison contract
 
-**Status:** ready. Comparison admission stays fail-closed until both sides produce receipts.
+**Status:** DONE 2026-09-11. Comparison admission is fail-closed and currently
+`unavailable` — the Simple side has produced no PPMs for this catalog yet.
 
-Depends on S2. Files to create:
+Shipped as ONE script, `scripts/check/check-chrome-web-showcase-perf.shs` (the brief's
+name), which subsumes both planned scripts: it runs the showcase for `cpu_simd` and
+`vulkan`, reads each receipt, and prints `chrome_web_showcase_{status,_reason,
+_frame_source,_backend_reported,_tabs,_wall_ms_total,_ms_per_px}` plus
+`chrome_vs_simple_pixel_diff_status` / `_mismatch_count` in the `gui_web_2d_vulkan_*`
+naming discipline of `check-electron-vulkan-web-parity.shs`. Fatal `--selftest`: 6 fixtures
+(good receipt PASS, missing receipt ERROR, `verdict=failed` FAIL, 0 tabs ERROR, receipt
+with no `frame_source` FAIL, `environment-blocked` classified blocked with its reason).
+
+Verdict on this Mac: `PASS — 16 tab(s) checked across 2 backend(s), status=blocked
+frame_source=stub-pattern reason=no-cef-drop`, with
+`chrome_vs_simple_pixel_diff_status=unavailable` (documented peer path
+`build/web_renderer_vulkan_4k_showcase_hardening/simple/ppm`, overridable with
+`SIMPLE_WEB_SHOWCASE_PPM_DIR`, does not exist here) and
+`renderdoc_status=blocked:renderdoccmd-missing` under `--renderdoc` (row B4 — recorded,
+never a silent skip).
+
+**Not shipped:** `perf_compare_admit_env` reuse and the cold/warm p50/p95 + max-RSS rows.
+The current script measures per-tab wall time only, because with `frame_source=stub-pattern`
+a frame-time percentile would be a percentile of the test pattern, not of Chrome. Those
+rows belong with the first real backend and stay open.
+
+Original file list (superseded, retained for provenance):
 - `scripts/check/check-chrome-dynlib-perf.shs` — cold first-complete-frame and warm
   p50/p95 per tab, max RSS, wall seconds; emits every `chrome_dynlib_*` field. Reuses the
   `perf_compare_admit_env` admission helper (defined in

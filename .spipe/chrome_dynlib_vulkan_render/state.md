@@ -102,7 +102,10 @@ own receipts — without re-implementing the Simple showcase, the catalog, or GP
 - Host state verified 2026-09-11: `renderdoccmd` absent.
 
 ## Phase
-s1-complete (shim + twin + binding + probe + CEF setup landed; S2/S3 not started)
+s3-complete (S1 shim/twin/binding/probe + S2 catalog/composite/receipt + S3 perf check
+landed; every Chrome-backed row is honestly `environment-blocked` — no CEF drop on this
+host. Boundary respected: the Simple-side showcase is untouched beyond writing the SHARED
+catalog it consumes.)
 
 ## Log
 - research: Audited the closed chrome-class lane, the chromium primitive oracle dylib and
@@ -155,3 +158,68 @@ s1-complete (shim + twin + binding + probe + CEF setup landed; S2/S3 not started
 - blocked (S1 stage B, unchanged): no CEF drop on this host and no network to stage one, so
   `create()` was never called against a real backend. Every pin value in
   `config/cef/cef_pin.sdn` is a placeholder and is UNVERIFIED.
+
+- s2-landed (2026-09-11): `src/app/ui/chrome_showcase/{catalog,frame,receipt,main}.spl`.
+  The shared catalog is SLICED from the 4K lane's own composed fixture — 7 canonical panel
+  pages (overview, html, css-layout, css-paint, forms-media, animation, evidence) plus a
+  `tab-bar` page — into `examples/06_io/ui/web_catalog/*.html` with a `catalog.sdn` index,
+  so the Simple web renderer showcase consumes byte-identical input. No second inventory or
+  generator was authored. Frames composite through Engine2D
+  (`create_with_backend_fast` -> `draw_image` -> `read_pixels`) and are written as binary P6
+  PPMs alongside `build/chrome-showcase/receipt.env`. Measured (deployed binary size
+  26264696, mtime 1788766698, interpreter): `cpu_simd`->`cpu_simd` 8 tabs 14691 ms;
+  `vulkan`->`vulkan` (real Vulkan, Apple M4) 8 tabs 22613 ms; both
+  `frame_source=stub-pattern reason=no-cef-drop verdict=environment-blocked`.
+- s3-landed (2026-09-11): `scripts/check/check-chrome-web-showcase-perf.shs`. Runs both
+  backends, classifies both receipts, prints the `chrome_web_showcase_*` aggregates.
+  Verdict here: `PASS — 16 tab(s) checked across 2 backend(s), status=blocked
+  frame_source=stub-pattern reason=no-cef-drop`. `--selftest` 6/6 fatal fixtures.
+  `chrome_vs_simple_pixel_diff_status=unavailable` (peer PPM dir
+  `build/web_renderer_vulkan_4k_showcase_hardening/simple/ppm` absent);
+  `renderdoc_status=blocked:renderdoccmd-missing` under `--renderdoc`.
+- specs: `test/01_unit/app/ui/chrome_web_showcase_receipt_spec.spl` 17 examples 0 failures;
+  `..._catalog_spec.spl` 10 examples 0 failures. Sabotage triple: making
+  `chrome_showcase_verdict_of_body` trust the body's own `verdict=` line instead of
+  re-deriving it gives 16/17 (the "receipt that lost frame_source" example goes red);
+  restored -> 17/17.
+
+## RUNTIME NEED (recorded, per the no-new-rt_* rule)
+
+- **Bounded OUT-byte-buffer dynlib call.** `simple_chrome_render_read_pixels_into(h, buf,
+  cap, out_len)` writes into a caller-owned buffer. The host facade
+  (`src/lib/nogc_sync_mut/sffi/dynamic.spl`) exposes only `spl_wffi_call_i64`,
+  `spl_wffi_call_i64_checked`, `spl_wffi_try_call_i64_out` (one `*mut i64`) and, in the
+  chrome binding, `spl_wffi_call_i64_with_bytes` — which passes bytes **IN** only. There is
+  no way to hand the provider a byte buffer to fill. A real Chrome frame therefore cannot
+  be pulled until a `spl_wffi_call_i64_into_bytes(fptr, prefix_args, out_bytes, offset,
+  capacity, suffix_args) -> i64` facade exists. **This is a facade addition, not a new
+  `rt_*`**, and S2 introduced no new `rt_*` anywhere. Until it lands, the composited frame
+  is the twin's deterministic test pattern, stamped `frame_source=stub-pattern`.
+
+## OPEN AGAINST THE ACs
+
+- **AC-3 (real dispatched input) is UNMET.** Tabs are selected by per-tab catalog PAGE, not
+  by dispatching a click through `simple_chrome_render_event`. Honest reason: there is no
+  backend on this host to dispatch into. The event symbol is resolved and frozen in the
+  ABI; wiring the dispatch belongs with the first real CEF drop.
+- **AC-4 perf rows are partial.** Wall time per tab is recorded; cold first-frame, warm
+  p50/p95 and max RSS are not, and `perf_compare_admit_env` is not yet reused. With
+  `frame_source=stub-pattern` those would be percentiles of a test pattern, so they were
+  deliberately left out rather than filled with meaningless numbers.
+- **CEF pin reworked (2026-09-11).** `config/cef/cef_pin.sdn` no longer carries a
+  hand-maintained per-platform sha256 table (all six rows were `UNSET`, so every install
+  needed `--allow-unpinned` and nothing was verified). The pin is now the VERSION LINE
+  (`143.0.13`, matched as a prefix on the index's `cef_version`); `--install` resolves the
+  archive and its `sha1` from `https://cef-builds.spotifycdn.com/index.json`, admits the
+  download against that publisher digest (printed as `cef_index_sha1=`), then records the
+  measured sha256 at `build/cef/<version>/<platform>/admitted.sha256`, which is what
+  `--check` verifies against. A drop with no such record is `unadmitted` and reports
+  `missing`, never `present`. `--allow-unpinned` now means "a version NOT in the index"
+  (a locally built drop). `.ps1` twin updated identically via `ConvertFrom-Json`.
+  `--selftest` is 9/9 (4 new fixtures prove the index parser offline: correct resolve, the
+  platform axis really discriminates, an absent version resolves to NOTHING, sha1
+  verification discriminates). **UNVERIFIED:** the version string `143.0.13` and the index
+  shape were not read from the network — this sandbox has none. `--install` was NOT run.
+- **filed:** `doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md` —
+  `receipt.rows[3].nonblank = false` is refused with "complex indexed field receiver is not
+  supported", forcing a full struct rebuild in a test fixture.
