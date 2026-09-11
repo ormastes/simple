@@ -4458,6 +4458,86 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
 
+/// `rt_vulkan_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool`
+///
+/// Typed sibling of `rt_vulkan_copy_to_buffer`: the payload is a WORD array and
+/// each element becomes four little-endian bytes. The byte entry point marshals
+/// through `strict_owned_bytes`/`arg_bytes_ptr`, which truncate every element to
+/// one byte, so a caller with `u32` data has to explode each word into four
+/// host array stores before it can upload -- 20 interpreter stores per rect for
+/// the Engine2D rect batch, which is the single largest O(N) interpreter term
+/// left in that lane. With this entry point the same batch is 5 stores per rect
+/// and the widening happens here, in Rust, over the whole array at once.
+///
+/// Element range is `-2^31 ..= u32::MAX`: a signed value is taken as its
+/// two's-complement `u32`, so a packed rect can carry a negative x/y without
+/// the caller casting. Anything outside that range is an error rather than a
+/// silent truncation -- silent truncation is exactly the defect this replaces.
+pub fn rt_vulkan_copy_to_buffer_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_copy_to_buffer_u32", 3)? as usize;
+    let words = strict_i64_values(args, 1, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    if handle == 0 || offset < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in &words {
+        let widened = if *word < 0 {
+            if *word < i64::from(i32::MIN) {
+                return Err(CompileError::semantic(format!(
+                    "rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"
+                )));
+            }
+            (*word as i32) as u32
+        } else {
+            u32::try_from(*word).map_err(|_| {
+                CompileError::semantic(format!("rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"))
+            })?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Bool(false));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Bool(false)),
+    };
+    let offset_u = offset as u64;
+    let count_u = bytes.len() as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Bool(false));
+    }
+    if bytes.is_empty() {
+        return Ok(Value::Bool(true));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Bool(false));
+        }
+        let dst = std::slice::from_raw_parts_mut((buffer.mapped as *mut u8).add(offset_u as usize), bytes.len());
+        dst.copy_from_slice(&bytes);
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.flush_mapped_memory_ranges)(s.device, 1, &range);
+    }
+    Ok(Value::Bool(true))
+}
+
 /// `rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool`
 pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;

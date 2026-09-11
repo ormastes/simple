@@ -67,6 +67,8 @@ extern fn rt_vulkan_free_buffer(handle: i64) -> bool
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
+extern fn rt_vulkan_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool
+@unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_copy_to_buffer_array(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
@@ -185,6 +187,18 @@ fn _vulkan_copy_to_buffer_abi(handle: i64, data: [u8], offset: i64) -> bool:
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_copy_to_buffer(handle, data, offset)
     rt_vulkan_copy_to_buffer_array(handle, data, data.len().to_i64(), offset)
+
+@unsafe(reason: "raw Vulkan typed word-upload ABI selector", capabilities: [ffi])
+fn _vulkan_copy_to_buffer_u32_abi(handle: i64, words: [u32], offset: i64) -> bool:
+    # Interpreter ABI only. The AOT/native array ABI passes arrays as a raw
+    # pointer plus an element count, and no `_array` twin of this entry point
+    # exists, so rather than hand a native pointer to a marshaller expecting a
+    # boxed array this declines and the caller keeps its byte-payload path --
+    # whose pixels are identical, only its host packing is four times the
+    # stores. Stated rather than silently half-wired.
+    if not gpu_sffi_uses_interpreter_array_abi():
+        return false
+    rt_vulkan_copy_to_buffer_u32(handle, words, offset)
 
 @unsafe(reason: "raw Vulkan shader ABI selector", capabilities: [ffi])
 fn _vulkan_compile_spirv_abi(spirv_bytes: [u8]) -> i64:
@@ -1156,6 +1170,19 @@ fn vulkan_sffi_read_buffer_regions_bytes(handle: i64, regions: [i64]) -> [u8]:
 @unsafe(reason: "raw Vulkan buffer-upload facade", capabilities: [ffi])
 fn vulkan_sffi_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
     _vulkan_copy_to_buffer_abi(handle, data, offset)
+
+@unsafe(reason: "raw Vulkan typed word-upload facade", capabilities: [ffi])
+fn vulkan_sffi_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool:
+    """Upload a WORD payload: 4 little-endian bytes per element.
+
+    `vulkan_sffi_copy_to_buffer` takes `[u8]`, and its marshaller masks every
+    element to a byte, so a caller holding `u32` data must explode each word
+    into four host array stores first. This entry point takes the words as they
+    already are and widens them on the runtime side, which is where the cost
+    belongs. Returns false (never a partial upload) when the typed lane is
+    unavailable, so every caller keeps a byte-payload fallback.
+    """
+    _vulkan_copy_to_buffer_u32_abi(handle, words, offset)
 
 @unsafe(reason: "raw Vulkan bounded-prefix buffer upload facade", capabilities: [ffi])
 fn vulkan_sffi_copy_to_buffer_prefix(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool:

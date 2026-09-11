@@ -19,7 +19,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
     vulkan_sffi_alloc_buffer,
-    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
     vulkan_sffi_dispatch_buffer_compute_checked,
     vulkan_sffi_quarantine_dependencies,
@@ -67,6 +67,13 @@ val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864
 
 val _VULKAN_ORDER_TRACE_ENABLED =
     (env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
+
+# `SIMPLE_VK_RECT_UPLOAD=bytes` forces the rect batch back onto the `[u8]`
+# payload. It exists so a before/after measurement of the typed upload runs on
+# ONE binary and one tree -- swapping binaries to compare was how a stale
+# deployed build was mistaken for a code regression on this very lane.
+val _VULKAN_RECT_UPLOAD_BYTES_FORCED =
+    (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "bytes"
 
 fn vulkan_order_trace_enabled() -> bool:
     """True when SIMPLE_VK_ORDER_TRACE=1 armed the `[vk-order]` probe.
@@ -890,54 +897,78 @@ impl VulkanBackend:
         if not self._rect_batch_slot_ready(slot, payload_bytes, self.pipe_rect_batch):
             return 0
 
-        # Pack the frozen 5-word-per-rect payload. This is the one remaining
-        # O(N) interpreter cost in the lane; it is 20 array stores per rect with
-        # no call transit, against the 20 stores PLUS two SFFI calls per rect
-        # the host batch lane pays. There is no typed (`[u32]`) buffer upload in
-        # the Vulkan SFFI, so the bytes have to be built here.
-        var payload: [u8] = [0u8; payload_bytes]
-        var off: i64 = 0
-        k = 0
-        while k < count:
-            val base = k * 4
-            val vx = (rects[base] as u32) as i64
-            payload[off] = (vx & 255) as u8
-            payload[off + 1] = ((vx >> 8) & 255) as u8
-            payload[off + 2] = ((vx >> 16) & 255) as u8
-            payload[off + 3] = ((vx >> 24) & 255) as u8
-            val vy = (rects[base + 1] as u32) as i64
-            payload[off + 4] = (vy & 255) as u8
-            payload[off + 5] = ((vy >> 8) & 255) as u8
-            payload[off + 6] = ((vy >> 16) & 255) as u8
-            payload[off + 7] = ((vy >> 24) & 255) as u8
-            val vw = (rects[base + 2] as u32) as i64
-            payload[off + 8] = (vw & 255) as u8
-            payload[off + 9] = ((vw >> 8) & 255) as u8
-            payload[off + 10] = ((vw >> 16) & 255) as u8
-            payload[off + 11] = ((vw >> 24) & 255) as u8
-            val vh = (rects[base + 3] as u32) as i64
-            payload[off + 12] = (vh & 255) as u8
-            payload[off + 13] = ((vh >> 8) & 255) as u8
-            payload[off + 14] = ((vh >> 16) & 255) as u8
-            payload[off + 15] = ((vh >> 24) & 255) as u8
-            val vc = colors[k] as i64
-            payload[off + 16] = (vc & 255) as u8
-            payload[off + 17] = ((vc >> 8) & 255) as u8
-            payload[off + 18] = ((vc >> 16) & 255) as u8
-            payload[off + 19] = ((vc >> 24) & 255) as u8
-            off = off + 20
-            k = k + 1
+        # Pack the frozen 5-word-per-rect payload.
+        #
+        # PREFERRED: pack it as WORDS and hand the words over as words. The
+        # typed upload (`vulkan_sffi_copy_to_buffer_u32`) widens each element to
+        # four little-endian bytes on the runtime side, so this loop costs 5
+        # interpreter array stores per rect instead of 20 -- for a 64-rect batch,
+        # 320 stores instead of 1280. The byte payload below is kept verbatim as
+        # the fallback: its bytes are identical, only its host cost is four
+        # times as high, and it is what runs whenever the typed lane declines
+        # (AOT/native array ABI) or `SIMPLE_VK_RECT_UPLOAD=bytes` forces it.
+        #
+        # CORRECTION to the earlier caveat here (re-measured 2026-09-11): the
+        # upload is NOT a second queue submit in the interpreter lane. That lane
+        # is `vulkan_dlopen` (interpreter_extern/gpu.rs), whose buffers are
+        # HOST_VISIBLE|HOST_COHERENT and persistently mapped, so
+        # `rt_vulkan_copy_to_buffer` is a memcpy plus a flush -- zero submits.
+        # The blocking `submit_transfer_command` the old comment described is
+        # the ash `simple-runtime` lane, which the interpreter never calls. Host
+        # packing, not a transfer submit, was the real cost.
+        val target_buffer = self.rect_batch_buffers[slot]
+        var uploaded = false
+        if not _VULKAN_RECT_UPLOAD_BYTES_FORCED:
+            var words: [u32] = [0u32; count * RECT_BATCH_WORDS_PER_RECT]
+            var w: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                words[w] = rects[base] as u32
+                words[w + 1] = rects[base + 1] as u32
+                words[w + 2] = rects[base + 2] as u32
+                words[w + 3] = rects[base + 3] as u32
+                words[w + 4] = colors[k]
+                w = w + RECT_BATCH_WORDS_PER_RECT
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer_u32(target_buffer, words, 0)
 
-        # CAVEAT, measured 2026-09-11 and stated rather than assumed: this is
-        # NOT a free record-time write. `rt_vulkan_copy_to_buffer` ->
-        # `Buffer::upload_at` (vulkan/buffer.rs:338) always stages and calls
-        # `submit_transfer_command`, i.e. its own queue submit plus fence wait.
-        # A batched frame is therefore one COMPUTE submit plus one TRANSFER
-        # submit per batch, and that round-trip is a large part of why the lane
-        # did not beat the per-rect loop on wall clock. Fixing it needs an SFFI
-        # that records `vkCmdCopyBuffer` into the already-open command buffer;
-        # none exists. See the bug record's gap 0.
-        if not vulkan_sffi_copy_to_buffer(self.rect_batch_buffers[slot], payload, 0):
+        if not uploaded:
+            var payload: [u8] = [0u8; payload_bytes]
+            var off: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                val vx = (rects[base] as u32) as i64
+                payload[off] = (vx & 255) as u8
+                payload[off + 1] = ((vx >> 8) & 255) as u8
+                payload[off + 2] = ((vx >> 16) & 255) as u8
+                payload[off + 3] = ((vx >> 24) & 255) as u8
+                val vy = (rects[base + 1] as u32) as i64
+                payload[off + 4] = (vy & 255) as u8
+                payload[off + 5] = ((vy >> 8) & 255) as u8
+                payload[off + 6] = ((vy >> 16) & 255) as u8
+                payload[off + 7] = ((vy >> 24) & 255) as u8
+                val vw = (rects[base + 2] as u32) as i64
+                payload[off + 8] = (vw & 255) as u8
+                payload[off + 9] = ((vw >> 8) & 255) as u8
+                payload[off + 10] = ((vw >> 16) & 255) as u8
+                payload[off + 11] = ((vw >> 24) & 255) as u8
+                val vh = (rects[base + 3] as u32) as i64
+                payload[off + 12] = (vh & 255) as u8
+                payload[off + 13] = ((vh >> 8) & 255) as u8
+                payload[off + 14] = ((vh >> 16) & 255) as u8
+                payload[off + 15] = ((vh >> 24) & 255) as u8
+                val vc = colors[k] as i64
+                payload[off + 16] = (vc & 255) as u8
+                payload[off + 17] = ((vc >> 8) & 255) as u8
+                payload[off + 18] = ((vc >> 16) & 255) as u8
+                payload[off + 19] = ((vc >> 24) & 255) as u8
+                off = off + 20
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer(target_buffer, payload, 0)
+
+        if not uploaded:
             return 0
 
         val pc = _pack_rect_batch_pc(

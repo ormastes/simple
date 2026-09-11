@@ -1,0 +1,225 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the TYPED rect-batch upload
+(`vulkan_sffi_copy_to_buffer_u32` ->
+`rt_vulkan_copy_to_buffer_u32`), the host-packing half of
+`doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
+F6 reduced a 64-rect batch to one dispatch, but the batch still had to be
+handed over as `[u8]`: the byte marshaller masks every element to one byte, so
+the caller exploded each of the 5 words per rect into 4 host array stores --
+1280 interpreter stores per frame. This file answers the question that change
+could not: does uploading the batch as WORDS paint exactly the same pixels, and
+does the frame still open exactly one queue submission?
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <vulkan-capable simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_typed_upload_spec.spl`
+`SIMPLE_VK_RECT_UPLOAD=bytes` forces the byte payload back on, which is the
+A/B control: every expectation here must hold under BOTH settings, because the
+typed upload is a cost change and not a behaviour change.
+
+## Compatibility and limitations
+This file REQUIRES a real Vulkan device and says so by FAILING, never skipping:
+the first expectation asserts `backend_name() == "vulkan"`. A CPU fallback
+would paint correct-looking pixels and prove nothing about either the upload
+path or the submission count.
+
+The submission assertion uses `vulkan_accepted_compute_submit_count()`, the
+count of submissions the device ACCEPTED, not `vulkan_submission_generation()`,
+which advances once per proven completion and therefore reads the same for a
+one-submit frame and a two-submit frame. That distinction is the whole point of
+the counter: the earlier `submits_per_frame=1` reading could not have detected a
+second submit.
+
+## Verification guidance and troubleshooting
+If the pixels are wrong but the submit count is 1, the fault is in the widening
+(endianness or element range), not the wiring -- the sabotage that proves this
+oracle discriminates is to make the marshaller write one byte per element, or
+big-endian, and watch every rect colour go wrong. If the submit delta is 2 the
+upload left the mapped-memory path and opened a queue submission of its own.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md
+# @manual_section: vulkan_rect_batch_typed_upload
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 6%
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl 4%
+# @tag: unit, gpu, engine2d, vulkan, batching, perf
+
+use std.spec.*
+use gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 256
+val CELL: i32 = 32
+
+fn color_for(k: i64) -> u32:
+    """Oracle colour for rect k, computed without touching the renderer.
+
+    The RGB part is taken modulo 2^24 deliberately. The sibling oracle spec
+    uses `k * 4096 + k * 7 + 3` unmasked, which is fine at its fixed N = 64 but
+    exceeds `u32` around k = 4090 -- at the 4096-rect size exercised below that
+    would make the ORACLE wrong (it reported 6 mismatches before the mask was
+    added) and would have been easy to read as a renderer defect. Opaque alpha
+    is kept: the batch lane falls back to the single-rect loop for any
+    non-opaque colour, which would quietly stop testing the batch path.
+    """
+    (4278190080 + (k * 7919) % 16777216).to_i32().to_u32()
+
+fn cell_x(k: i64) -> i32: ((k % 8) * 32).to_i32()
+fn cell_y(k: i64) -> i32: ((k / 8) * 32).to_i32()
+
+fn packed_rects(n: i64) -> [i32]:
+    var out: [i32] = [0i32; n * 4]
+    var k: i64 = 0
+    while k < n:
+        out[k * 4] = cell_x(k % 64)
+        out[k * 4 + 1] = cell_y(k % 64)
+        out[k * 4 + 2] = CELL
+        out[k * 4 + 3] = CELL
+        k = k + 1
+    out
+
+fn packed_colors(n: i64) -> [u32]:
+    var out: [u32] = [0u32; n]
+    var k: i64 = 0
+    while k < n:
+        out[k] = color_for(k)
+        k = k + 1
+    out
+
+fn centre_index(k: i64) -> i64:
+    val cx = cell_x(k).to_i64() + 16
+    val cy = cell_y(k).to_i64() + 16
+    cy * FB.to_i64() + cx
+
+describe "A rect batch uploaded as WORDS paints the known pixel oracle in one submit":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # PRECONDITION. Every claim below is about DEVICE pixels and DEVICE
+        # submissions; a CPU fallback would paint plausible pixels and report a
+        # zero submit count, which must read as RED, not as a pass.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "paints rect k in colour k for a 64-rect batch":
+        # REPRODUCING. The colour of rect k is computed by `color_for` with no
+        # renderer involvement, so a widening that dropped, reordered or
+        # byte-swapped a word shows up as a wrong colour at a known pixel.
+        val n: i64 = 64
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        e.draw_rect_list_filled(packed_rects(n), packed_colors(n))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < n:
+            if px[centre_index(k)] != color_for(k):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "opens exactly one queue submission for the whole frame, upload included":
+        # This is the counter the bug record asked for. The upload is inside the
+        # measured window: if it had opened a submission of its own the delta
+        # would be 2. Reading zero means the device never accepted anything,
+        # which is a failure, not a vacuous pass -- hence the equality.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        val before = e.vulkan_accepted_compute_submit_count()
+        e.draw_rect_list_filled(packed_rects(64), packed_colors(64))
+        e.finalize_compute_frame_no_readback()
+        val after = e.vulkan_accepted_compute_submit_count()
+        e.shutdown()
+        expect(after - before).to_equal(1)
+
+    it "paints a two-rect batch, the smallest payload the typed lane sees":
+        # GENERALIZATION at the real lower boundary. `RECT_BATCH_MIN_RECTS` is 2
+        # (backend_vulkan_helpers.spl:50), so N = 2 is the SMALLEST list that
+        # reaches the word packer at all -- a 10-element payload exercising the
+        # loop's first and last iteration with nothing in between.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        e.draw_rect_list_filled(packed_rects(2), packed_colors(2))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        expect(px[centre_index(0)]).to_equal(color_for(0))
+        expect(px[centre_index(1)]).to_equal(color_for(1))
+
+    it "paints a single-rect list correctly, which by design never batches":
+        # BOUNDARY, and deliberately NOT a test of the typed upload: N = 1 is
+        # below `RECT_BATCH_MIN_RECTS`, so `draw_rect_list_filled` routes it to
+        # the single-rect dispatch loop and no word payload is packed. It is
+        # here so that the batch lane's lower boundary cannot be moved down to 1
+        # without someone noticing that this example changed meaning.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        e.draw_rect_list_filled(packed_rects(1), packed_colors(1))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        expect(px[centre_index(0)]).to_equal(color_for(0))
+
+    it "paints two batches in one frame in painter order":
+        # GENERALIZATION. Two uploads into the same frame must land in distinct
+        # slots: if the second overwrote the first's buffer before the first
+        # dispatch ran, the earlier rects would carry the later colours.
+        val n: i64 = 64
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        val before = e.vulkan_accepted_compute_submit_count()
+        e.draw_rect_list_filled(packed_rects(n), packed_colors(n))
+        # Second batch repaints the first 8 cells with a distinct colour, so
+        # painter order is observable: those cells must carry the LAST value.
+        var over_rects: [i32] = [0i32; 8 * 4]
+        var over_colors: [u32] = [0u32; 8]
+        var j: i64 = 0
+        while j < 8:
+            over_rects[j * 4] = cell_x(j)
+            over_rects[j * 4 + 1] = cell_y(j)
+            over_rects[j * 4 + 2] = CELL
+            over_rects[j * 4 + 3] = CELL
+            over_colors[j] = 0xFF00FF00u32
+            j = j + 1
+        e.draw_rect_list_filled(over_rects, over_colors)
+        e.finalize_compute_frame_no_readback()
+        val after = e.vulkan_accepted_compute_submit_count()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < n:
+            val expected = if k < 8: 0xFF00FF00u32 else: color_for(k)
+            if px[centre_index(k)] != expected:
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+        # Two batches, still ONE submission: both were recorded into the same
+        # command buffer.
+        expect(after - before).to_equal(1)
+
+    it "paints a 4096-rect batch without exceeding one submission":
+        # GENERALIZATION at the documented cap. Cells repeat modulo 64, so the
+        # LAST writer of each cell is rect 4096-64+k; painter order makes that
+        # colour the oracle, which also proves the large payload was not
+        # truncated part way through the widening.
+        val n: i64 = 4096
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        val before = e.vulkan_accepted_compute_submit_count()
+        e.draw_rect_list_filled(packed_rects(n), packed_colors(n))
+        e.finalize_compute_frame_no_readback()
+        val after = e.vulkan_accepted_compute_submit_count()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < 64:
+            if px[centre_index(k)] != color_for(n - 64 + k):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+        expect(after - before).to_equal(1)

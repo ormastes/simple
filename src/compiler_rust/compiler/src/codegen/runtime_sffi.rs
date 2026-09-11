@@ -1852,6 +1852,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_alloc_buffer", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_free_buffer", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer_u32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer_raw", &[I64, I64, I64, I64], &[I64]),
     // Packed-array adapters keep the RuntimeValue owner live for the complete
     // consuming call.  The runtime validates packed storage and projects the

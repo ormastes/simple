@@ -493,6 +493,45 @@ impl RuntimeArray {
     }
 }
 
+/// Widen a Simple `[u32]`/`[i64]` word array into little-endian bytes, four per
+/// element.
+///
+/// The counterpart of `byte_array_bytes` for payloads that are words rather
+/// than bytes. `byte_array_bytes` masks every element with `0xff`, so a caller
+/// holding `u32` data has to explode each word into four array stores on the
+/// Simple side before it can hand the payload over; this reads the words
+/// directly. A byte-packed array is rejected (`None`) rather than reinterpreted
+/// -- its elements are bytes, and silently regrouping them four at a time would
+/// be a different payload, not a widening.
+///
+/// Signed elements are taken as their two's-complement `u32`; anything outside
+/// `-2^31 ..= u32::MAX` is rejected rather than truncated.
+pub(crate) fn word_array_le_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    let mut bytes = Vec::with_capacity(len * 4);
+    for element in unsafe { array.as_slice() } {
+        if !element.is_int() {
+            return None;
+        }
+        let raw = element.as_int();
+        let widened = if raw < 0 {
+            if raw < i64::from(i32::MIN) {
+                return None;
+            }
+            (raw as i32) as u32
+        } else {
+            u32::try_from(raw).ok()?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+    Some(bytes)
+}
+
 /// Copy bytes from either native representation of Simple `[u8]`.
 pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
