@@ -232,6 +232,88 @@ fn chrome_render_create(handle: ChromeRenderHandle, config_json: text) -> i64:
     val payload: [u8] = text_to_bytes(config_json)
     spl_wffi_call_i64_with_bytes(handle.symbols.create, [], payload, 0, payload.len(), [])
 
+"""The frozen per-tab call sequence, in ABI order. Recorded in showcase receipts."""
+fn chrome_render_sequence_steps() -> [text]:
+    ["create", "load_html", "resize", "render_frame", "read_pixels_into",
+     "event_pointer", "event_key", "destroy"]
+
+"""Calls `load_html` with a bounded HTML payload."""
+@unsafe(reason: "invokes the admitted bounded Chrome render load_html ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_load_html(handle: ChromeRenderHandle, session_handle: i64, html: text) -> i64:
+    if handle.released or handle.symbols.load_html <= 0:
+        return 2
+    if html == "" or html.len() > 1048576:
+        return 1
+    val payload: [u8] = text_to_bytes(html)
+    spl_wffi_call_i64_with_bytes(handle.symbols.load_html, [session_handle], payload, 0,
+        payload.len(), [])
+
+"""Calls `resize`. `scale` is milli-units here because the facade carries only i64 args.
+
+The C entry takes a `double` scale; a device-scale other than 1.0 therefore cannot be
+expressed through the all-i64 transport and is recorded as a separate limitation rather
+than silently rounded. 1.0 is passed as the integer 1, which is exact.
+"""
+@unsafe(reason: "invokes the admitted Chrome render resize ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_resize(handle: ChromeRenderHandle, session_handle: i64,
+                        width: i64, height: i64) -> i64:
+    if handle.released or handle.symbols.resize <= 0:
+        return 2
+    if width <= 0 or height <= 0 or width > 8192 or height > 8192:
+        return 1
+    spl_wffi_call_i64(handle.symbols.resize, [session_handle, width, height, 1], 4)
+
+"""Calls `render_frame` with a bounded timeout. A zero timeout is refused by the ABI."""
+@unsafe(reason: "invokes the admitted Chrome render frame ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_frame(handle: ChromeRenderHandle, session_handle: i64, timeout_ms: i64) -> i64:
+    if handle.released or handle.symbols.render_frame <= 0:
+        return 2
+    if timeout_ms <= 0:
+        return 1
+    spl_wffi_call_i64(handle.symbols.render_frame, [session_handle, timeout_ms], 2)
+
+"""Probes `read_pixels_into` with NULL buffer and NULL out_len.
+
+This is NOT a readback and must never be read as one. The host dynlib facade has no
+bounded OUT-byte-buffer call (see `chrome_render_readback_facade_missing`), so the only
+thing Simple can do with this entry point today is call it with null pointers and record
+the provider's real refusal — which proves the symbol is callable and the argument
+marshalling is right, and is strictly better than not calling it at all. A real frame pull
+waits on the facade.
+"""
+@unsafe(reason: "null-probes the admitted Chrome render readback ABI; pulls no pixels", capabilities: [ffi, raw_ptr])
+fn chrome_render_read_pixels_probe(handle: ChromeRenderHandle, session_handle: i64) -> i64:
+    if handle.released or handle.symbols.read_pixels_into <= 0:
+        return 2
+    spl_wffi_call_i64(handle.symbols.read_pixels_into, [session_handle, 0, 0, 0], 4)
+
+"""True while no bounded OUT-byte-buffer facade exists, so no real frame can be pulled.
+
+Named rather than commented so a receipt, a check script and a spec can all agree on the
+one condition that gates a real Chrome frame, instead of each carrying its own prose.
+"""
+fn chrome_render_readback_facade_missing() -> bool:
+    true
+
+"""Dispatches one bounded JSON input event (`event`)."""
+@unsafe(reason: "invokes the admitted bounded Chrome render event ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_event(handle: ChromeRenderHandle, session_handle: i64, event_json: text) -> i64:
+    if handle.released or handle.symbols.event <= 0:
+        return 2
+    if event_json == "" or event_json.len() > 1048576:
+        return 1
+    val payload: [u8] = text_to_bytes(event_json)
+    spl_wffi_call_i64_with_bytes(handle.symbols.event, [session_handle], payload, 0,
+        payload.len(), [])
+
+"""A synthetic pointer-down event at (x, y), as the ABI's bounded JSON payload."""
+fn chrome_render_pointer_event_json(x: i64, y: i64) -> text:
+    "{\"kind\":\"pointer\",\"type\":\"down\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + "}"
+
+"""A synthetic key event for one key name."""
+fn chrome_render_key_event_json(key: text) -> text:
+    "{\"kind\":\"key\",\"type\":\"down\",\"key\":\"" + key + "\"}"
+
 """Calls the provider's `destroy`. Session 0 is legal and must answer `invalid-handle`.
 
 Stage A of the probe calls this with 0: it proves the resolved `destroy` pointer is

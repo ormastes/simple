@@ -27,8 +27,11 @@ use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
     web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
-    chrome_render_symbol_names, chrome_render_load, chrome_render_create,
-    chrome_render_backend_stage, chrome_render_release}
+    ChromeRenderHandle, chrome_render_symbol_names, chrome_render_load, chrome_render_create,
+    chrome_render_backend_stage, chrome_render_release, chrome_render_load_html,
+    chrome_render_resize, chrome_render_frame, chrome_render_read_pixels_probe,
+    chrome_render_event, chrome_render_pointer_event_json, chrome_render_key_event_json,
+    chrome_render_sequence_steps, chrome_render_destroy}
 use app.ui.chrome_showcase.catalog.{CHROME_CATALOG_DIR, CHROME_CATALOG_INDEX,
     CHROME_CATALOG_SOURCE, chrome_catalog_tabs, chrome_catalog_file_for,
     chrome_catalog_page, chrome_catalog_index_text}
@@ -93,6 +96,51 @@ fn _write_catalog(tabs: [text]):
     val _index = file_write(CHROME_CATALOG_INDEX,
         chrome_catalog_index_text(inventory.version, tabs, digests))
 
+"""Drives the FULL frozen per-tab ABI sequence and returns one rc per step, in order.
+
+`create` -> `load_html` -> `resize` -> `render_frame` -> `read_pixels_into` ->
+`event`(pointer) -> `event`(key) -> `destroy`. Every rc is the provider's real return
+value; nothing here substitutes a value when a call is refused, and the sequence is NOT
+short-circuited on the first refusal — a later step's rc is evidence in its own right, and
+stopping early would hide which steps are reachable at all.
+
+Step count and order are frozen by `chrome_render_sequence_steps()`, so a receipt's
+`call_rcs` can never silently drift out of step with its labels.
+"""
+fn _drive_tab_sequence(handle: ChromeRenderHandle, page_html: text,
+                       width: i64, height: i64) -> [i64]:
+    var rcs: [i64] = []
+    val session = chrome_render_create(handle,
+        "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + "}")
+    rcs.push(session)
+    rcs.push(chrome_render_load_html(handle, session, page_html))
+    rcs.push(chrome_render_resize(handle, session, width, height))
+    rcs.push(chrome_render_frame(handle, session, 5000))
+    rcs.push(chrome_render_read_pixels_probe(handle, session))
+    rcs.push(chrome_render_event(handle, session,
+        chrome_render_pointer_event_json(width / 2, height / 2)))
+    rcs.push(chrome_render_event(handle, session, chrome_render_key_event_json("Tab")))
+    rcs.push(chrome_render_destroy(handle, session))
+    rcs
+
+fn _rcs_text(rcs: [i64]) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < rcs.len():
+        if index > 0:
+            out = out + ","
+        out = out + rcs[index].to_text()
+        index = index + 1
+    out
+
+fn _steps_text() -> text:
+    var out = ""
+    for step in chrome_render_sequence_steps():
+        if out != "":
+            out = out + ","
+        out = out + step
+    out
+
 fn _catalog_digest() -> text:
     file_hash_sha256_or_empty(CHROME_CATALOG_INDEX)
 
@@ -117,6 +165,7 @@ fn main() -> i64:
     var frame_source = CHROME_SHOWCASE_FRAME_STUB
     var reason = "no-chrome-render-shim"
     var lib_sha256 = ""
+    var provider: ChromeRenderHandle? = nil
     if library_path != "":
         lib_sha256 = file_hash_sha256_or_empty(library_path)
         val request = ChromeRenderLoadRequest(
@@ -130,19 +179,7 @@ fn main() -> i64:
             if loaded.missing_symbol != "":
                 reason = reason + ":" + loaded.missing_symbol
         else:
-            if val handle = loaded.handle:
-                val created = chrome_render_create(handle,
-                    "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + "}")
-                backend_stage = chrome_render_backend_stage(created)
-                if backend_stage == "ok":
-                    # A real backend exists. The frame still cannot be pulled: the host
-                    # dynlib facade has no bounded OUT-byte-buffer call, so
-                    # `read_pixels_into` is unreachable from Simple today. Say exactly that
-                    # rather than letting a live backend imply a live frame.
-                    reason = "readback-facade-missing:spl_wffi_call_i64_into_bytes"
-                else:
-                    reason = "no-cef-drop:" + backend_stage
-                val _released = chrome_render_release(handle, created)
+            provider = loaded.handle
 
     var engine = Engine2D.create_with_backend_fast(width.to_i32(), height.to_i32(), requested)
     val reported = engine.backend_name()
@@ -152,6 +189,24 @@ fn main() -> i64:
     var tab_index: i64 = 0
     for tab in tabs:
         val started = time_now_unix_micros()
+        # Drive the real ABI sequence for THIS tab's catalog page before compositing.
+        # Its rcs go into the receipt whatever they are; the composited frame is still the
+        # stub pattern, because no rc here can produce pixels while the readback facade is
+        # missing. The two facts live in different receipt fields on purpose.
+        var call_rcs = ""
+        if val handle = provider:
+            val page = file_read(CHROME_CATALOG_DIR + "/" + chrome_catalog_file_for(tab))
+            val rcs = _drive_tab_sequence(handle, page, width, height)
+            call_rcs = _rcs_text(rcs)
+            if tab_index == 0:
+                backend_stage = chrome_render_backend_stage(rcs[0])
+                if backend_stage == "ok":
+                    # A real backend answered `create`. A real FRAME still cannot be pulled:
+                    # the host facade has no bounded OUT-byte-buffer call. Say exactly that
+                    # rather than letting a live session imply a live frame.
+                    reason = "readback-facade-missing:spl_wffi_call_i64_into_bytes"
+                else:
+                    reason = "no-cef-drop:" + backend_stage
         val source_image = chrome_frame_stub_image(width, height, tab_index)
         engine.clear(4278190080u32)
         engine.draw_image(0i32, 0i32, width.to_i32(), height.to_i32(), source_image)
@@ -165,7 +220,7 @@ fn main() -> i64:
             recorded_path = ""
         rows.push(ChromeShowcaseTabRow(tab: tab, wall_ms: elapsed_ms,
             pixels: composited.len(), nonblank: chrome_frame_nonblank(composited),
-            ppm_path: recorded_path))
+            ppm_path: recorded_path, call_rcs: call_rcs))
         tab_index = tab_index + 1
     engine.shutdown()
 
@@ -180,6 +235,7 @@ fn main() -> i64:
         engine2d_backend_reported: reported,
         inventory_version: web_renderable_feature_inventory().version,
         catalog_sha256: _catalog_digest(),
+        sequence_steps: _steps_text(),
         viewport_width: width, viewport_height: height,
         frame_source: frame_source, reason: reason, timed_out: false, rows: rows)
     val body = chrome_showcase_receipt_text(receipt)

@@ -258,3 +258,76 @@ catalog it consumes.)
 Seed run, as requested (`src/compiler_rust/target/bootstrap/simple`, size 130402384, mtime
 1788606093): `cpu_simd` -> `engine2d_backend_reported=cpu_simd`, 8 tabs, 14365 ms,
 `verdict=environment-blocked`.
+
+## Coordinator follow-up (2026-09-11): full sequence wired; the facade is STOPPED, with reasons
+
+### Done — the full per-tab ABI sequence now runs, with rcs recorded
+
+Eight frozen steps per tab, `chrome_render_sequence_steps()`:
+`create, load_html, resize, render_frame, read_pixels_into, event_pointer, event_key,
+destroy`. Each is a real call through the admitted handle; the sequence is NOT
+short-circuited on the first refusal, because a later step's rc is evidence in its own
+right. Receipts gain `sequence_steps=` (the labels) and per-tab `tab_<name>_call_rcs=`.
+
+**Measured stub rc list, and a correction to the brief's expectation.** The instruction
+said "the stub returning UNAVAILABLE at each step". It does not, and cannot: the stub's
+`create()` returns **-4** (negated `E_BACKEND_UNAVAILABLE`) and opens **no session**
+(`chrome_render_shim.c:185-205`), so every later step looks up a null session and returns
+**2** (`E_INVALID_HANDLE`) — see `chrome_render_lookup` + `chrome_render_fail(NULL, ...)`
+at each entry point. Only the step that can reach a backend can report the backend. The
+real, measured list is therefore `-4,2,2,2,2,2,2,2`, and that is what is pinned as the
+absolute oracle in `chrome_showcase_stub_sequence_rcs()` and in the spec. Verdict stays
+`environment-blocked`.
+
+Sabotage (deleting the `resize` push from `_drive_tab_sequence`) yields
+`tab_overview_call_rcs=-4,2,2,2,2,2,2` — 7 rcs against 8 labels — and
+`chrome_showcase_call_rcs_valid` rejects it, so the run reports **`verdict=failed`**.
+Restored: `-4,2,2,2,2,2,2,2`, `verdict=environment-blocked`. Spec 18 -> 22 examples.
+
+### STOPPED — the OUT-byte-buffer facade needs a new SEED RUNTIME symbol
+
+Per the instruction's escape clause, recorded rather than attempted:
+
+- **runtime_need:** hand a provider function a caller-owned, bounded, WRITABLE byte buffer
+  plus a `*mut u64` out-length, so `simple_chrome_render_read_pixels_into(h, buf, cap,
+  out_len)` can deposit a BGRA frame into Simple-owned memory.
+- **facade_checked:** every extern in `src/lib/nogc_sync_mut/sffi/dynamic.spl` — `spl_dlopen`
+  / `_checked`, `spl_dlsym` / `_checked` / `_process_checked`, `spl_dlclose`,
+  `spl_dynlib_snapshot_linux`, `spl_wffi_call_i64`, `spl_wffi_call_i64_checked`,
+  `spl_wffi_try_call_i64_out` — plus `spl_wffi_call_i64_with_bytes` declared in the chrome
+  binding. The only out-parameters in the whole surface are **single `*mut i64`** values
+  (`spl_wffi_try_call_i64_out`, `spl_dlsym_checked`); `spl_wffi_call_i64_with_bytes` passes
+  bytes strictly **IN**. There is no byte-buffer out anywhere.
+- **chosen_path:** none taken. `spl_wffi_call_i64_into_bytes` is NOT an `rt_*`, but it is a
+  SEED runtime symbol: its sibling lives in `src/compiler_rust/runtime/src/value/
+  wsffi_native.rs:551`, is re-exported at `value/mod.rs:406`, registered in
+  `common/src/runtime_symbols.rs:2366`, and separately implemented for the interpreter at
+  `compiler/src/interpreter_extern/dynamic_sffi.rs:805`. Adding one therefore requires a
+  **seed rebuild**, which is blocked on this macOS host (Stage 2 admission failure, PR
+  #455). Writing the `extern fn` declaration WITHOUT that backing is the worst option
+  available: an unbacked extern silently returns nil
+  (`doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`), so the showcase
+  would report a "successful" readback of nothing.
+- **rejected_shortcuts:** (1) declaring the extern unbacked — silent-nil, above; (2) taking
+  an array data pointer via `rt_array_data_ptr_*` — a new `rt_*`, and the binding's own
+  header already records that `rt_array_data_ptr_text` is not backed by the deployed seed;
+  (3) faking the readback from the stub pattern — that is precisely what `frame_source`
+  exists to prevent; (4) calling `read_pixels_into` with a fabricated pointer value — memory
+  corruption, not a facade.
+
+**What was done instead, and why it is not nothing:** `read_pixels_into` IS called, with
+NULL buffer and NULL out_len, and its real refusal is recorded as step 5's rc. That proves
+the symbol is callable and the argument marshalling is correct — strictly more than the
+previous state, and clearly labelled `chrome_render_read_pixels_probe` so it can never be
+read as a readback. `chrome_render_readback_facade_missing()` is the single named condition
+the receipt, the check script and the spec all agree on.
+
+### Filed
+
+`doc/08_tracking/bug/engine2d_vulkan_pixels_upload_slower_than_cpu_2026-09-11.md` —
+Vulkan composites 8 stub frames in 22851 ms vs cpu_simd's 14691 ms (**1.56x slower**, same
+tree, same binary, only `SIMPLE_2D_BACKEND` toggled; `engine2d_backend_reported=vulkan`,
+not a software fallback). The v1 CPU round trip is the whole cost model and does not get
+cheaper at 4K, which makes deferred row B5 (external-memory import: dma_buf / MoltenVK
+IOSurface) a performance requirement, not only an elegance one. Receipts cited in the
+record; not yet split into upload / blit / readback / submit.
