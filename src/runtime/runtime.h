@@ -424,7 +424,8 @@ int64_t  rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session,
 int64_t  rt_gpu_provider_resource_release(int64_t backend_bit, int64_t session,
         int64_t resource);
 int64_t  rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session,
-        int64_t format, int64_t data, int64_t length, int64_t correlation_id);
+        int64_t resource, int64_t format, int64_t data, int64_t length,
+        int64_t correlation_id);
 int64_t  rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session,
         int64_t completion, int64_t timeout_ns, int64_t receipt_ptr);
 int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,

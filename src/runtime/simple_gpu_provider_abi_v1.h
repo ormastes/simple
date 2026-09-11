@@ -47,10 +47,12 @@ typedef struct SimpleGpuSubmitV1 {
     const uint8_t *data;
     uint64_t length;
     uint64_t correlation_id;
+    SimpleGpuHandleV1 output_resource;
 } SimpleGpuSubmitV1;
 /* `data` is immutable and valid only for the duration of submit(). A provider
  * returning OK has copied/consumed it into provider-owned storage; retaining
- * the host pointer is an ABI violation. */
+ * the host pointer is an ABI violation. `output_resource` is retained by the
+ * host owner until the associated completion is released. */
 
 typedef struct SimpleGpuResourceDescV1 {
     uint32_t struct_size;
@@ -110,7 +112,7 @@ typedef struct SimpleGpuProviderAbiV1 {
 typedef const SimpleGpuProviderAbiV1 *(*SimpleGpuProviderQueryV1)(void);
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(SimpleGpuSubmitV1) == 32, "SimpleGpuSubmitV1 ABI drift");
+_Static_assert(sizeof(SimpleGpuSubmitV1) == 40, "SimpleGpuSubmitV1 ABI drift");
 _Static_assert(sizeof(SimpleGpuResourceDescV1) == 24, "SimpleGpuResourceDescV1 ABI drift");
 _Static_assert(sizeof(SimpleGpuReceiptV1) == 56, "SimpleGpuReceiptV1 ABI drift");
 _Static_assert(sizeof(SimpleGpuBytesV1) == 24, "SimpleGpuBytesV1 ABI drift");

@@ -5,17 +5,17 @@
 #include <string.h>
 #include "simple_gpu_provider_abi_v1.h"
 
+static uint64_t checksum_v1(const uint8_t *bytes, uint64_t length) {
+    uint64_t value = UINT64_C(14695981039346656037), i;
+    for (i = 0; i < length; i++) { value ^= bytes[i]; value *= UINT64_C(1099511628211); }
+    return value;
+}
+
 #ifdef SIMPLE_GPU_ABI_PROVIDER
 static SimpleGpuOperationV1 operations[SIMPLE_GPU_OP_COUNT];
 static SimpleGpuProviderAbiV1 table;
 static uint8_t resource_bytes[64];
 static uint64_t resource_size;
-static uint64_t checksum_v1(const uint8_t *bytes, uint64_t length) {
-    uint64_t value = UINT64_C(1469598103934665603), i;
-    for (i = 0; i < length; i++) { value ^= bytes[i]; value *= UINT64_C(1099511628211); }
-    return value;
-}
-
 static int64_t operation_stub(void) { return 1; }
 static SimpleGpuStatusV1 shutdown_v1(void) { return SIMPLE_GPU_STATUS_OK; }
 static SimpleGpuStatusV1 session_open_v1(uint64_t backend, uint64_t device,
@@ -47,6 +47,7 @@ static SimpleGpuStatusV1 submit_v1(SimpleGpuHandleV1 session,
     if (session != 101 || !request || !out || request->struct_size != sizeof(*request) ||
             !request->data || request->length != 4 || request->correlation_id != 909)
         return SIMPLE_GPU_STATUS_INVALID;
+    if (request->output_resource != 202) return SIMPLE_GPU_STATUS_INVALID;
     *out = 303; return SIMPLE_GPU_STATUS_OK;
 }
 static SimpleGpuStatusV1 wait_v1(SimpleGpuHandleV1 session,
@@ -95,7 +96,8 @@ int64_t rt_gpu_provider_session_open(int64_t, int64_t);
 int64_t rt_gpu_provider_session_close(int64_t, int64_t);
 int64_t rt_gpu_provider_resource_alloc(int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_resource_release(int64_t, int64_t, int64_t);
-int64_t rt_gpu_provider_submit_raw(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t rt_gpu_provider_submit_raw(int64_t, int64_t, int64_t, int64_t, int64_t,
+        int64_t, int64_t);
 int64_t rt_gpu_provider_wait_raw(int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_readback_raw(int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_completion_release(int64_t, int64_t, int64_t);
@@ -103,9 +105,11 @@ int64_t rt_gpu_provider_unload(int64_t);
 
 int main(int argc, char **argv) {
     int64_t session, resource, completion;
-    uint8_t input[4] = {9, 8, 7, 6}, output[16] = {0};
-    SimpleGpuReceiptV1 receipt = {sizeof(receipt)};
-    SimpleGpuBytesV1 bytes = {sizeof(bytes), 0, output, sizeof(output)};
+    uint8_t input[4] = {9, 8, 7, 6}, output[16] = {0}, expected[16];
+    uint64_t i;
+    SimpleGpuReceiptV1 receipt = {.struct_size = sizeof(receipt)};
+    SimpleGpuBytesV1 bytes = {.struct_size = sizeof(bytes), .data = output,
+        .length = sizeof(output)};
     if (argc != 3 || setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) ||
             setenv("SIMPLE_VULKAN_PROVIDER_SHA256", argv[2], 1)) return 2;
     if (!rt_gpu_provider_loaded(SIMPLE_GPU_BACKEND_VULKAN) ||
@@ -115,13 +119,18 @@ int main(int argc, char **argv) {
     session = rt_gpu_provider_session_open(SIMPLE_GPU_BACKEND_VULKAN, 3);
     resource = rt_gpu_provider_resource_alloc(SIMPLE_GPU_BACKEND_VULKAN,
         session, sizeof(output), 0, 1);
+    for (i = 0; i < sizeof(expected); i++) expected[i] = (uint8_t)(i + 1);
     completion = rt_gpu_provider_submit_raw(SIMPLE_GPU_BACKEND_VULKAN,
-        session, 1, (int64_t)(uintptr_t)input, sizeof(input), 909);
+        session, resource, 1, (int64_t)(uintptr_t)input, sizeof(input), 909);
     if (!session || !resource || !completion ||
+            rt_gpu_provider_submit_raw(SIMPLE_GPU_BACKEND_VULKAN, session,
+                resource, 1, (int64_t)(uintptr_t)input, sizeof(input), 910) != 0 ||
+            rt_gpu_provider_resource_release(SIMPLE_GPU_BACKEND_VULKAN,
+                session, resource) != SIMPLE_GPU_STATUS_BUSY ||
             rt_gpu_provider_unload(SIMPLE_GPU_BACKEND_VULKAN) != 0) return 4;
     if (rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
             1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_OK ||
-            receipt.checksum != checksum_v1(resource_bytes, resource_size) ||
+            receipt.checksum != checksum_v1(expected, sizeof(expected)) ||
             receipt.device_elapsed_ns != 77 ||
             rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
                 1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_INVALID) return 5;

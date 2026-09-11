@@ -30,7 +30,8 @@ extern fn rt_gpu_provider_resource_release(backend: i64, session: i64,
     resource: i64) -> i64
 @unsafe(reason: "native GPU immutable submission boundary", capabilities: [ffi])
 extern fn rt_gpu_provider_submit_raw(backend: i64, session: i64,
-    format: i64, data: i64, length: i64, correlation: i64) -> i64
+    resource: i64, format: i64, data: i64, length: i64,
+    correlation: i64) -> i64
 @unsafe(reason: "native GPU completion fence boundary", capabilities: [ffi])
 extern fn rt_gpu_provider_wait_raw(backend: i64, session: i64,
     completion: i64, timeout_ns: i64, receipt: i64) -> i64
@@ -193,17 +194,21 @@ fn gpu_provider_resource_alloc(session: GpuProviderSession,
     GpuProviderResource(backend: session.backend, session: session.handle,
         handle: handle, size_bytes: if handle > 0: size_bytes else: 0)
 
-fn gpu_provider_submit_raw(session: GpuProviderSession, format: i64,
+fn gpu_provider_submit_raw(session: GpuProviderSession,
+                           resource: GpuProviderResource, format: i64,
                            data: i64, length: i64,
                            correlation_id: i64) -> GpuProviderCompletion:
-    if not session.is_open() or format < 0 or data == 0 or length <= 0 or \
+    if not session.is_open() or not resource.is_live() or \
+            resource.backend != session.backend or \
+            resource.session != session.handle or format < 0 or \
+            data == 0 or length <= 0 or \
             correlation_id <= 0:
         return GpuProviderCompletion(backend: session.backend,
             session: session.handle, handle: 0,
             correlation_id: correlation_id)
     val handle = unsafe(capabilities: [ffi]):
         rt_gpu_provider_submit_raw(session.backend, session.handle,
-            format, data, length, correlation_id)
+            resource.handle, format, data, length, correlation_id)
     GpuProviderCompletion(backend: session.backend, session: session.handle,
         handle: handle, correlation_id: correlation_id)
 
@@ -245,8 +250,8 @@ fn gpu_provider_wait(session: GpuProviderSession,
     raw_free(receipt, GPU_PROVIDER_RECEIPT_BYTES)
     val valid = call_status == GPU_PROVIDER_STATUS_OK and \
         receipt_status == GPU_PROVIDER_STATUS_OK and \
-        correlation == completion.correlation_id and provider > 0 and \
-        device > 0 and checksum > 0 and elapsed > 0
+        correlation == completion.correlation_id and provider != 0 and \
+        device >= 0 and checksum != 0 and elapsed != 0
     GpuProviderReceipt(valid: valid,
         status: if call_status == GPU_PROVIDER_STATUS_OK:
             receipt_status else: call_status,
