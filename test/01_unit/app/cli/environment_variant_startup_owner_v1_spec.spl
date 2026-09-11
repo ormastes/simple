@@ -4,6 +4,10 @@ use compiler.common.structural_contracts.environment_variant_startup_port_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_v1.*
 use std.io_runtime.file_read
+use compiler.loader.environment_variant_startup_binding_v1.{
+    environment_variant_startup_project_receipt_v1}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1}
 
 fn evs_absent() -> EnvironmentVariantRawValueV1:
     EnvironmentVariantRawValueV1(present: false, value: "")
@@ -49,13 +53,13 @@ describe "environment variant startup owner V1":
             Err(EnvironmentVariantStartupErrorV1.Busy))
         expect(app_environment_variant_startup_close_v1(owner)).to_equal(Ok(()))
 
-    it "applies the same collected policy to the driver and rolls back on failure":
+    it "projects the retained startup receipt before driver mutation and rolls back on failure":
         val source = file_read(
             "src/app/cli/environment_variant_startup_owner_v1.spl")
         val open_at = source.index_of(
             "val receipt = app_environment_variant_startup_open_v1(owner, request)?")
         val apply_at = source.index_of(
-            "compiler_driver_apply_environment_variant_startup_v1(", open_at)
+            "environment_variant_startup_project_receipt_v1(", open_at)
         val rollback_at = source.index_of(
             "app_environment_variant_startup_close_v1(owner)", apply_at)
         expect(open_at).to_be_greater_than(0)
@@ -67,8 +71,8 @@ describe "environment variant startup owner V1":
             "src/compiler/99.loader/environment_variant_startup_binding_v1.spl")
         expect(source).to_contain("environment_variant_policy_digest256_v1(")
         expect(source).not.to_contain("sha256_text(\"simple/environment-variant-startup")
-        expect(source).to_contain("source_factory_provider_identity")
-        expect(source).to_contain("source_factory_artifact_identity")
+        expect(source).to_contain("FrontendLexicalAdvisoryFactoryTokenV1")
+        expect(source).to_contain("environment_variant_frontend_factory_register_v1(")
         expect(source).to_contain("ENV_ARTIFACT_TRUST_AUTHENTICATED_V1")
         expect(source).to_contain("source.binding_policy_digest")
 
@@ -85,3 +89,35 @@ describe "environment variant startup owner V1":
         expect(cleanup_at).to_be_greater_than(error_at)
         expect(return_at).to_be_greater_than(cleanup_at)
         expect(source).not.to_contain("return parse_full_frontend(source.content")
+
+    it "projects only the exact receipt retained by the live startup owner":
+        val owner = AppEnvironmentVariantStartupOwnerV1.create()
+        val request = evs_request(false)
+        val receipt = app_environment_variant_startup_open_v1(owner, request).unwrap()
+        expect(environment_variant_startup_project_receipt_v1(
+            owner.loader, request, receipt)).to_equal(Ok(receipt))
+        val forged = EnvironmentVariantStartupReceiptV1(handle: receipt.handle,
+            policy_digest: receipt.policy_digest,
+            provider_identity: EnvironmentDigest256V1(w0: 1u64, w1: 0u64, w2: 0u64, w3: 0u64),
+            variant_identity: receipt.variant_identity,
+            artifact_identity: receipt.artifact_identity,
+            environment_identity: receipt.environment_identity,
+            environment_generation: receipt.environment_generation,
+            status: receipt.status, rejection_code: receipt.rejection_code)
+        expect(environment_variant_startup_project_receipt_v1(
+            owner.loader, request, forged)).to_equal(
+                Err(EnvironmentVariantStartupErrorV1.UnknownOrStale))
+        expect(app_environment_variant_startup_close_v1(owner)).to_equal(Ok(()))
+
+    it "uses an owner-issued factory token and returns selected validation":
+        val loader = file_read(
+            "src/compiler/99.loader/environment_variant_startup_binding_v1.spl")
+        expect(loader).to_contain("FrontendLexicalAdvisoryFactoryTokenV1")
+        expect(loader).to_contain("environment_variant_frontend_factory_invoke_v1(")
+        expect(loader).not.to_contain("source_factory_provider_identity:")
+        expect(loader).not.to_contain("source_factory_artifact_identity:")
+        val validate_at = loader.index_of(
+            "pub fn environment_variant_startup_validate_v1")
+        val return_at = loader.index_of(
+            "return _environment_variant_frontend_binding_live_v1(", validate_at)
+        expect(return_at).to_be_greater_than(validate_at)

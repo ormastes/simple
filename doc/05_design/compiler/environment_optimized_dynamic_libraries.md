@@ -914,9 +914,13 @@ one startup session serves many immutable source snapshots, so a package
 session cannot be captured once and reused across them. For each transformed
 source, the loader acquires and projects a sealed build-use, invokes the
 factory synchronously, returns its exact evidence for request validation, and
-releases the use before returning. The factory identity and artifact identity
-must equal the authenticated sealed pin authority, and the selected sealed
-binding-policy digest must equal the exact startup request digest. The factory
+releases the use before returning. A dedicated factory owner registers the
+callable only while the authenticated sealed activation is live and issues an
+opaque token derived from the provider, variant, artifact, environment, policy,
+interface-handle, and provider-context projection. Startup contexts carry that
+owner/token pair rather than a callback plus caller-authored identity labels;
+invocation reprojects the exact sealed build use while the callback is active.
+The selected sealed binding-policy digest must equal the exact startup request digest. The factory
 owns creation and terminal cleanup of its
 source-specific package session, execution snapshot, feature arena, and initial
 lexical state; the build-use authority itself never crosses the callback
@@ -927,7 +931,10 @@ and scalar fallback; its digest binds provider and GPU execution flags and
 counts as well as status. Uninstall first restores the layer-10 reference slot,
 then discards loader context. The startup receipt transports only copied
 owner/session/generation coordinates and canonical identities into the driver;
-the sealed owner and build-use remain loader-private. Startup composition must
+the sealed owner and build-use remain loader-private. Before driver mutation,
+the application asks the startup owner to project the exact receipt retained
+for the live handle and request; copied or modified receipts are rejected.
+Startup composition must
 still supply and retire this context, and required-policy failure closes any
 active transient parser scope before it travels through every driver phase-2
 parse route.
