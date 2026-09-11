@@ -41,6 +41,11 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   § "2026-09-11 — CPU<->GPU boundary fix campaign (rect batch, F1/F2)".
 - CEF-backed Chrome dynlib render module (Vulkan-composited offscreen
   Chromium): `doc/00_llm_process/feature_expert/chrome_dynlib/skill.md`.
+- R1 root cause + typed-upload opt-in (Vulkan bind-after-readback):
+  `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` § "R1 round 2".
+- Interpreter `&mut` extern out-slot writeback fix: no interpreter layer_expert
+  page exists yet — see `doc/08_tracking/bug/interpreter_refmut_extern_out_slots_never_written_back_2026-09-11.md`
+  directly.
 
 ## Session update 2026-09-06 — silent-rewind merges
 

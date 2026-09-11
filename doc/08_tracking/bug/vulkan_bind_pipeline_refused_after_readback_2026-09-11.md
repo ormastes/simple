@@ -148,7 +148,7 @@ path as well as the sampler path; that is measured, not assumed.
 
 ## Specs
 
-`test/05_perf/web_render_chrome/vulkan_bind_pipeline_after_readback_spec.spl` —
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_bind_pipeline_after_readback_spec.spl` —
 device spec, **2 examples, 0 failures**, run with
 `simple run` (the `test` runner is load-only on macos-arm64).
 
@@ -194,3 +194,12 @@ what cost the previous two investigations their time.
   `runtime/src/vulkan_graphics_runtime_compute.rs`, whose `bind_pipeline`
   (`:236`) rejects an unknown `cmd` the same way, so the same ghost would fail
   the same way there — but that has not been measured on device.
+
+## Related
+
+- `doc/08_tracking/bug/class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md`
+  — likely the same interpreter defect: a `class` instance mutation dropped on
+  bind/copy instead of writing back to the original. This record's guard
+  (`vulkan_discard_stale_pending_compute()`) only clears the pending-compute
+  fields it knows about; any other `VulkanBackend` field can rewind the same
+  way and would not be caught by it.
