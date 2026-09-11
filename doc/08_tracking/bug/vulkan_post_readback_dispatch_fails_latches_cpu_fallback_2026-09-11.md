@@ -1,6 +1,6 @@
 # One failed `bind_pipeline` poisons the whole process: an unreapable dependency quarantine latches every Vulkan Engine2D onto the CPU fallback (Apple M4, 2026-09-11)
 
-Status: ROOT-CAUSED on device, mitigation in progress.
+Status: ROOT-CAUSED and FIXED on device (three pure-Simple changes). The trigger itself — a refused `bind_pipeline` — remains open below the runtime boundary.
 
 Supersedes the "framebuffer #2+ is dead on arrival" reading in
 `web_draw_ir_gpu_route_pixel_mismatch_apple_m4_2026-09-11.md`. The framebuffers
@@ -101,8 +101,8 @@ why the quarantine can never be reaped afterwards, are both **below** the
 pure-Simple boundary. See the `runtime_need` block recorded in
 `.spipe/simple_2d_web_renderer_gpu_optimization/state.md`.
 
-The pure-Simple side nonetheless owns three real defects. **Two are fixed here;
-the third is not** — see "Fix" and "Still open" below.
+The pure-Simple side nonetheless owns three real defects, **all three fixed here**
+(see "Fix"); the TRIGGER below the boundary is what remains open.
 
 1. **A housekeeping failure is treated as a dispatch failure, permanently.**
    `_enqueue_framebuffer_compute:496` refuses to record ANY new work while the
@@ -177,7 +177,65 @@ alone restores recovery (no permanent demotion) but not the zero-length readback
 and the return-value downgrade alone would not drain the quarantine. Each fix is
 load-bearing for a different symptom.
 
+**4. The evidence label — `simple_web_layout_engine2d_fast.spl` /
+`simple_web_html_engine2d_presenter.spl`.** A readback carrying no device pixels
+is now CLASSIFIED before it is compared, by
+`web_draw_ir_readback_absence(readback) -> text`: `"device-lost"` when the source
+is not a device source (`cpu_fallback`, `completion_unknown`, `readback_failed`),
+`"zero-length-readback"` when a backend still claims device provenance while
+returning an empty buffer, `""` otherwise. Source is checked BEFORE length on
+purpose — a backend that gave up usually also returns nothing, and calling that
+`zero-length-readback` names the symptom instead of the cause.
+
+The absence is threaded through `_WebDrawIrRouteState.readback_absence` (sticky,
+first-wins, deliberately separate from `pixels_match`) into
+`web_gpu_paint_timing_evidence`'s new trailing `readback_absence: text = ""`
+parameter, which reports it as the reason ahead of `pixel-mismatch` and forces
+`available` false. Both comparison sites are covered: the sampling path
+(`:989-993`, which no longer calls `_web_draw_ir_pixels_equal` on an absent
+sample) and the steady-frame path (`:927-933`).
+
+**This is a classifier, not a tolerance.** Every non-empty absence refuses the
+route exactly as a mismatch would; only the NAME changes. A zero-length readback
+is still never a pass.
+
+## Specs
+
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_draw_ir_readback_absence_label_spec.spl`
+  — device-free, **12 examples, 0 failures** (seed
+  `src/compiler_rust/target/bootstrap/simple run`). Pins the classifier on all
+  six source/length combinations and the reason string, including the two cases
+  that keep it discriminating: a genuine mismatch with a present readback still
+  reports `pixel-mismatch`, and a clean faster sample still offloads. Writing it
+  found a real ordering bug in the first draft of the classifier — a
+  `cpu_fallback` with zero pixels was reported `zero-length-readback` instead of
+  `device-lost` — which is now fixed and pinned.
+- `test/05_perf/web_render_chrome/web_draw_ir_post_readback_dispatch_spec.spl`
+  — device, **6 examples, 0 failures** on Apple M4. Six repeated page renders
+  plus readback→dispatch cycles across rect / clipped-rect / text and an
+  engine-teardown-with-surviving-successor case. **Read its "KNOWN WEAKNESS"
+  section before trusting a green run** — see below.
+
+### Sabotage
+
+Reverting the single `dispatched = 0` downgrade line to a no-op and re-running:
+
+| artifact | sabotaged | restored |
+|---|---|---|
+| `probe_frames8.spl` (`simple run`) | **RED** — 684000, **0**, 684000, **0**, ... | GREEN — 684000 x8 |
+| the device spec above | **GREEN (did not discriminate)** | GREEN |
+
+The probe gives a genuine green→red→green triple. The spec does **not**: under
+the identical sabotage, binary, env, page and render call it still rendered six
+full 684000-pixel frames, and a diagnostic print ruled out a vacuous guard (it
+really rendered them). Something about the spec-runner process keeps the failing
+path from being reached. This is recorded rather than hidden, and the spec
+carries the same warning in its docstring.
+
 ## Still open
+
+- **The device spec does not yet discriminate this fix** (above). Until the
+  spec-runner/`run` divergence is understood, the probe is the evidence.
 
 - **The trigger itself is unfixed and below the boundary.**
   `vulkan_sffi_bind_pipeline` still returns false on the first bind of each newly
@@ -186,14 +244,6 @@ load-bearing for a different symptom.
   and returns a full-length buffer instead of nothing, but it is still not
   rendered on the GPU. Why MoltenVK refuses that bind is a `rt_vulkan_*`
   question.
-- **Defect 3 from the list above — the evidence LABEL — is NOT fixed.** A
-  zero-length or non-`device_readback` sample is still fed to
-  `_web_draw_ir_pixels_equal` at
-  `simple_web_layout_engine2d_fast.spl:989-993` and still latches
-  `pixels_match` false, so such a failure would still be reported
-  `reason=pixel-mismatch` rather than `zero-length-readback` / `device-lost`.
-  The zero-length readback that motivated it no longer occurs on this workload,
-  but the mislabelling path is untouched.
 - **Route authorization was not measured.** `probe_frames8.spl` drives
   `simple_web_render_html_to_pixels_with_engine2d_backend`, which never enters
   the Draw IR sampler at `simple_web_layout_engine2d_fast.spl:971-1022` —
@@ -202,8 +252,9 @@ load-bearing for a different symptom.
   AUTHORIZED / `pixels_match=true`" is **not** demonstrated here; only the
   pixel-count oracle is. The gate that selects the sampling entry point has not
   been found.
-- **No specs were written.** The pixel-count oracle above is a probe result, not
-  a regression test.
+- **The retry arm of fix 2 has never fired on device.** Every observed `-1`
+  carried `pending_before=1`, so only the resync + downgrade were exercised;
+  the `pending_before == 0` re-enqueue is unproven in the field.
 
 ## Artifacts
 

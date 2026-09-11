@@ -110,6 +110,10 @@ class _WebDrawIrRouteState:
     upload_samples: [i64]
     gpu_samples: [i64]
     pixels_match: bool
+    # Sticky, first-wins name for a sample that carried no device evidence
+    # ("" while every sample did). Kept SEPARATE from `pixels_match` on purpose:
+    # an absent readback refuses the route without claiming the pixels differed.
+    readback_absence: text
     upload_device_proven: bool
     gpu_device_proven: bool
     commands_complete: bool
@@ -734,7 +738,8 @@ fn _web_draw_ir_state(
     val state = _WebDrawIrRouteState(
         key: key, scene_generation: scene_generation,
         upload_samples: [], gpu_samples: [],
-        pixels_match: true, upload_device_proven: true,
+        pixels_match: true, readback_absence: "",
+        upload_device_proven: true,
         gpu_device_proven: true, commands_complete: true,
         device_identity: 0, complete: false,
         evidence: web_gpu_paint_timing_evidence(
@@ -779,6 +784,29 @@ fn _web_draw_ir_oracle_route(
         readback: engine2d_readback([], "not_requested"),
         oracle_pixels: oracle.pixels, elapsed_us: 0,
         skipped_command_count: oracle.skipped_command_count)
+
+pub fn web_draw_ir_readback_absence(readback: Engine2DReadback) -> text:
+    """Name why a readback carries no device evidence, or "" when it does.
+
+    This is a CLASSIFIER, never a tolerance: every non-empty result refuses the
+    route exactly as a mismatch would. It exists only so the failure is reported
+    by its real cause. `device-lost` and `zero-length-readback` are distinct
+    because they need different repairs -- the first is a backend that gave up
+    (and says so in `source`), the second is a backend that claims success and
+    returns nothing.
+    """
+    # SOURCE is checked before LENGTH, deliberately. A backend that has given up
+    # reports `cpu_fallback` / `completion_unknown` / `readback_failed` AND
+    # usually returns nothing; labelling that `zero-length-readback` would name
+    # the symptom instead of the cause. `zero-length-readback` is reserved for
+    # the stranger and more alarming case: a backend still claiming device
+    # provenance while handing back an empty buffer.
+    if readback.source != "device_readback" and
+        readback.source != "host_cache_after_device_copy":
+        return "device-lost"
+    if readback.pixels.len() == 0:
+        return "zero-length-readback"
+    ""
 
 fn _web_draw_ir_gpu_route(
     composition: DrawIrComposition, width: i32, height: i32,
@@ -900,8 +928,13 @@ fn _web_draw_ir_choose_route(
             val same_scene = (
                 state.scene_generation > 0 and
                 state.scene_generation == composition.generation)
+            # Same rule as the sampling path: an absent readback is classified,
+            # never compared. Without this a steady frame whose device gave up
+            # reports `pixel-mismatch` against a retained frame it never had the
+            # pixels to disagree with.
+            val steady_absence = web_draw_ir_readback_absence(gpu.readback)
             var gpu_match = true
-            if same_scene:
+            if same_scene and steady_absence == "":
                 if state.validated_checksum > 0 and gpu.readback.checksum > 0:
                     gpu_match = gpu.readback.checksum == state.validated_checksum
                 else:
@@ -930,7 +963,9 @@ fn _web_draw_ir_choose_route(
                 state.pixels_match and gpu_match,
                 state.upload_device_proven,
                 state.gpu_device_proven and gpu_proven,
-                gpu.skipped_command_count == 0)
+                gpu.skipped_command_count == 0,
+                if state.readback_absence != "": state.readback_absence
+                else: steady_absence)
             val invalidated = _web_draw_ir_state_index(key)
             if invalidated >= 0:
                 _web_draw_ir_route_states.remove(invalidated)
@@ -986,11 +1021,26 @@ fn _web_draw_ir_choose_route(
 
     state.upload_samples.push(upload.elapsed_us)
     state.gpu_samples.push(gpu.elapsed_us)
-    state.pixels_match = (
-        state.pixels_match and
-        _web_draw_ir_pixels_equal(upload.readback.pixels, upload.oracle_pixels) and
-        _web_draw_ir_pixels_equal(gpu.readback.pixels, upload.oracle_pixels)
-    )
+    # Classify BEFORE comparing. A readback that carries no device pixels cannot
+    # be compared with anything, and feeding it to `_web_draw_ir_pixels_equal`
+    # -- which rejects on length before examining a pixel -- latched
+    # `pixels_match` false and mislabelled the whole failure `pixel-mismatch`.
+    # The route is still refused (the absence is recorded and kills
+    # `available`), it is just named correctly now.
+    val gpu_absence = web_draw_ir_readback_absence(gpu.readback)
+    val upload_absence = web_draw_ir_readback_absence(upload.readback)
+    state.readback_absence = if state.readback_absence != "":
+        state.readback_absence
+    elif gpu_absence != "":
+        gpu_absence
+    else:
+        upload_absence
+    if state.readback_absence == "":
+        state.pixels_match = (
+            state.pixels_match and
+            _web_draw_ir_pixels_equal(upload.readback.pixels, upload.oracle_pixels) and
+            _web_draw_ir_pixels_equal(gpu.readback.pixels, upload.oracle_pixels)
+        )
     state.commands_complete = (
         state.commands_complete and upload.skipped_command_count == 0 and
         gpu.skipped_command_count == 0)
@@ -1017,7 +1067,7 @@ fn _web_draw_ir_choose_route(
         _web_draw_ir_p95(state.gpu_samples),
         state.upload_samples.len(), state.pixels_match,
         state.upload_device_proven, state.gpu_device_proven,
-        state.commands_complete)
+        state.commands_complete, state.readback_absence)
     state.evidence = evidence
     state.complete = evidence.sample_count >= 3
     # The third sample has already compared both device paths with this oracle

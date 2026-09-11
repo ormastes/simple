@@ -562,6 +562,18 @@ impl VulkanBackend:
         if not ready:
             if vulkan_order_trace_enabled():
                 vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed}")
+            # Measured on Apple M4/MoltenVK, and NOT recoverable at this layer:
+            # `bind_pipeline` -- the FIRST link, so nothing downstream is even
+            # attempted -- fails on the frame's SECOND dispatch through an
+            # already-open command buffer (`began_here` is false; the clear
+            # already recorded into it). Re-opening the buffer was implemented
+            # and measured: it never fires, because the failure is never on a
+            # buffer this call opened. Re-recording the frame is impossible here
+            # since the backend does not retain the primitives it already
+            # enqueued, so the frame's earlier dispatches are lost either way
+            # and an honest CPU fallback for THIS frame is the best available
+            # outcome. What must not happen -- and no longer does -- is the
+            # failure outliving the frame.
             val flushed = self._flush_pending_compute()
             return if flushed < 0: -1 else: 0
         self.frame_dispatch_count = self.frame_dispatch_count + 1
