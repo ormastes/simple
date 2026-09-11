@@ -53,31 +53,46 @@ Run: `bin/simple run test/05_perf/bench/vulkan_2d_c/vk2d_bench_verdict_spec.spl`
 ## Real-device run (macOS, aarch64-apple-darwin-macho)
 
 Binary: `/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple`
-— `stat -f 'size=%z mtime=%m'` before and after: `size=26264696 mtime=1788766698`
-(unchanged, confirms the binary that ran is the one that was inspected).
+— `stat -f 'size=%z mtime=%m'` unchanged across every run below:
+`size=26264696 mtime=1788766698`.
 
-Command:
+**First attempt (misleading — corrected below).** Without
+`SIMPLE_EXECUTION_MODE=interpreter`, the default JIT-lane invocation reported
+`status=blocked reason=backend-unavailable requested=vulkan got=cpu` — MoltenVK
+initialization did not survive the JIT execution path on this host, causing
+`Engine2D.create_with_backend_fast` to fall back to `cpu` before
+`Vk2dBench.run()` was ever reached. This is not a defect in `vk2d_verdict` (it
+never ran), but it was the wrong invocation for this host: two other agents
+had already reached `device=Apple M4` today with the same binary via the
+interpreter execution mode.
+
+**Corrected run**, exactly matching the working invocation used elsewhere
+today:
 ```
 SIMPLE_LIB=src VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
-VK2D_W=900 VK2D_H=760 VK2D_FRAMES=300 \
+SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+VK2D_W=900 VK2D_H=760 \
 /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple run \
   test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
 ```
 
-Output:
+Full output line:
 ```
-simple-vulkan-2d status=blocked reason=backend-unavailable requested=vulkan got=cpu
+scene_source=table rects=64
+simple-vulkan-2d status=pass w=900 h=760 rects=64 warmups=5 samples=300 ring=1 max_frames_in_flight=1 unconditional_submit_wait=true submits_per_frame=1 timed_buffer_allocation_count=-1 retained_buffer_bytes=-1 teardown_released_bytes=-1 timed_full_frame_upload_count=-1 upload_bytes=-1 timed_readback_bytes=0 capture_count=0 capture_readback_bytes=0 capture_source=none fence_completions=300 completion_polls=0 cpu_completion_wait_count=300 event_generations=300 damage_area_pixels=205200000 p50_ns=39830000 p95_ns=50213000 ms=12589 fps~=23 draw_us=11949759 finalize_us=620568 device=Apple M4 driver=Apple M4|vendor=0000106b|device=1a040209|driver=000028a1|api=0040014e checksum=0
 ```
 
-This host's deployed Vulkan (MoltenVK) backend is unavailable to
-`Engine2D.create_with_backend_fast` in this environment (falls back to
-`cpu`), so `main()`'s existing pre-flight check
-(`vk2d_bench.spl` around the `engine.backend_name() != backend` guard) returns
-before `Vk2dBench.run()` is ever called. This is an honest, non-fabricated
-`status=blocked reason=backend-unavailable` line — consistent with, and
-produced by the same reason taxonomy as, the new `vk2d_verdict` logic (the
-pre-flight check in `main()` predates this fix and already used this reason
-name; `vk2d_verdict` reuses it for the case where the backend is discovered
-mid-`run()`). No pass/blocked-multi-submit evidence could be captured on this
-host because the Vulkan backend itself is unavailable here — that is a
-separate, pre-existing environment gap, not a defect in this fix.
+Verdict fields: `status=pass reason=<empty> submits_per_frame=1 ms=12589`
+(`fence_completions=300 == samples=300`, so `vk2d_verdict("vulkan", 300, 300)`
+computes `status=pass`, matching the spec's first oracle exactly). `device=Apple
+M4` confirms the real Vulkan/MoltenVK backend ran, not `cpu`.
+
+No code change was needed to reach this result — `vk2d_verdict` and the
+pre-flight `engine.backend_name() != backend` guard in `main()` are unchanged
+from the earlier commit; the only difference was
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0` in the invocation,
+which this repo's JIT/interpreter split apparently requires for this backend
+on this host. Root-caused the JIT-vs-interpreter Vulkan-init discrepancy only
+to this env-var workaround; the underlying "MoltenVK does not survive the JIT
+execution path" gap is separate from this bench's status-literal defect and is
+not further investigated here.
