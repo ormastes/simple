@@ -6,7 +6,7 @@
 //! between the Simple extern fn declarations and the C ABI.
 
 use super::core::RuntimeValue;
-use super::collections::{byte_array_bytes, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
+use super::collections::{byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 
 const WFFI_OK: i64 = 0;
 const WFFI_INVALID_ARGUMENT: i64 = 1;
@@ -603,6 +603,84 @@ pub extern "C" fn spl_wffi_call_i64_with_bytes_checked(
     args.push(length as i64);
     args.extend_from_slice(&suffix);
     checked_i64_result(WFFI_OK, unsafe { call_i64_raw(fptr, &args) })
+}
+
+/// One-call dynamic dispatch with a caller-allocated OUT byte buffer.
+///
+/// The sibling `spl_wffi_call_i64_with_bytes` passes bytes **IN** only: it
+/// hands the callee a pointer to a copy that dies with this frame, so anything
+/// the callee writes there is lost. Providers that follow the
+/// `(buf, cap, out_len)` idiom -- the only shape that lets Simple own the
+/// allocation instead of holding C memory -- therefore had no facade at all.
+///
+/// Arg marshalling mirrors `_with_bytes` exactly, with one extra foreign
+/// argument: the callee receives `prefix..., buf_ptr, cap, out_len_ptr,
+/// suffix...`. `out_bytes[offset .. offset + cap]` is the writable window; at
+/// most `cap` bytes are copied back into the Simple array, whose length is
+/// never changed. The callee's `i64` return is returned verbatim, so a
+/// provider status (`UNAVAILABLE`, `INVALID_HANDLE`, ...) reaches Simple
+/// unaltered. `out_len` receives whatever the callee reported, clamped to a
+/// non-negative value; a facade-level rejection returns the same
+/// `WFFI_*` negatives the checked transports use and writes `0`.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i64_into_bytes(
+    fptr: i64,
+    prefix_args: RuntimeValue,
+    out_bytes: RuntimeValue,
+    offset: i64,
+    capacity: i64,
+    out_len: *mut i64,
+    suffix_args: RuntimeValue,
+) -> i64 {
+    if out_len.is_null() {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_len.write(0) };
+    if fptr == 0 {
+        return -WFFI_NULL_FUNCTION;
+    }
+    let Some(mut owner) = byte_array_bytes(out_bytes) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    let (Ok(offset), Ok(capacity)) = (usize::try_from(offset), usize::try_from(capacity)) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    let Some(end) = offset.checked_add(capacity) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    if end > owner.len() {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    let (Some(mut args), Some(suffix)) = (runtime_i64_values(prefix_args), runtime_i64_values(suffix_args)) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    if args.len() + 3 + suffix.len() > 8 {
+        return -WFFI_UNSUPPORTED_SIGNATURE;
+    }
+    let mut reported: i64 = 0;
+    // A zero CAPACITY is not a null buffer. The `(buf, cap, out_len)` idiom lets
+    // a caller ask "how much would you need?" by offering room for nothing, and
+    // a provider answers that by filling `out_len` -- but only if `buf` is a
+    // real address, since a NULL buffer is an invalid request to most of them.
+    // (The IN-only sibling passes 0 for an empty payload, which is right there:
+    // there is no data to point at. Here there is an allocation, just no room.)
+    let ptr = if owner.is_empty() {
+        0
+    } else {
+        owner[offset..end].as_mut_ptr() as i64
+    };
+    args.push(ptr);
+    args.push(capacity as i64);
+    args.push(&mut reported as *mut i64 as i64);
+    args.extend_from_slice(&suffix);
+    let rc = unsafe { call_i64_raw(fptr, &args) };
+    // The callee wrote into `owner`, which is this frame's copy of the Simple
+    // array; publish it back before anything else can observe the array.
+    if !byte_array_write(out_bytes, &owner) {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_len.write(reported.max(0)) };
+    rc
 }
 
 #[no_mangle]

@@ -35,7 +35,7 @@
 use std::sync::{Arc, LazyLock};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
 use std::collections::HashMap;
 
 /// Function pointer type for extern dispatches.
@@ -2724,6 +2724,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_wffi_call_i64_checked", wsffi::spl_wffi_call_i64_checked);
     insert_simple!("spl_wffi_try_call_i64_out", wsffi::spl_wffi_try_call_i64_out);
     insert_simple!(
+        "spl_wffi_call_i64_into_bytes",
+        dynamic_sffi::spl_wffi_call_i64_into_bytes_fn
+    );
+    insert_simple!(
         "spl_wffi_call_i64_with_bytes",
         dynamic_sffi::spl_wffi_call_i64_with_bytes_fn
     );
@@ -3097,7 +3101,38 @@ pub(crate) fn call_extern_function(
         .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
         .collect::<Result<Vec<_>, _>>()?;
 
-    call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods)
+    let result = call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods);
+    // `&mut x` on an extern argument must actually write back to `x`.
+    //
+    // `UnaryOp::RefMut` evaluates its operand to a COPY and wraps that copy
+    // (`interpreter/expr/ops.rs:1575,1660`), so an extern that fills a
+    // caller-owned out slot -- `spl_wffi_try_call_i64_out`'s `*mut i64`, and
+    // the bounded out-byte-buffer call -- wrote into a value nothing could
+    // observe, and the caller silently saw its variable unchanged. The native
+    // lane has no such gap: there `&mut` is a real pointer and `[u8]` is a
+    // heap object mutated in place, so leaving this unwired made the two lanes
+    // disagree on the same source.
+    //
+    // The borrow is shared through an `Arc`, so the callee's writes are already
+    // in `evaluated`; all that is missing is publishing them back to the named
+    // variable. Only `&mut <identifier>` is written back -- a borrow of a
+    // temporary has no slot to write to, and nothing else is touched.
+    for (argument, value) in args.iter().zip(evaluated.iter()) {
+        let Expr::Unary { op: UnaryOp::RefMut, operand } = &argument.value else {
+            continue;
+        };
+        let Value::BorrowMut(borrow) = value else {
+            continue;
+        };
+        let Expr::Identifier(target) = operand.as_ref() else {
+            continue;
+        };
+        let updated = borrow.inner().clone();
+        if let Some(slot) = env.get_mut(target) {
+            *slot = updated;
+        }
+    }
+    result
 }
 
 /// Dispatch an extern function with pre-evaluated argument values.

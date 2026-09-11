@@ -1,0 +1,188 @@
+"""
+## Purpose and audience
+
+Covers `spl_wffi_call_i64_into_bytes`, the dynamic-SFFI facade's bounded
+OUT-byte-buffer call, against a REAL loaded provider: the stub build of
+`libsimple_chrome_render` (`scripts/check/build-chrome-render-shim.shs`).
+
+The facade exists because its sibling `spl_wffi_call_i64_with_bytes` passes
+bytes IN only -- the pointer the callee receives is a frame-local copy, so
+anything the callee writes there is discarded. That is what pinned the Chrome
+dynlib showcase to `frame_source=stub-pattern`. These examples prove the
+opposite property directly: bytes the provider writes through the supplied
+pointer arrive back in the caller's `[u8]`, bounded by `capacity` and never
+past it.
+
+The subject symbol is `simple_chrome_render_last_error_into(h, buf, cap,
+out_len)`, chosen because it is already inside the frozen 10-symbol ABI v1 --
+proving the facade required no ABI growth. Its contract REFUSES rather than
+truncates (`chrome_render_copy_out` returns `buffer-too-small` and writes no
+bytes when `cap < need`), so the "truncation" oracle here is that refusal plus
+an intact sentinel, not a short copy.
+
+Intended audience: engineers maintaining the dynamic-SFFI facade or any
+provider binding that follows the `(buf, cap, out_len)` idiom.
+"""
+use std.spec
+use std.sffi.dynamic.{DynLib, spl_dlclose, spl_wffi_call_i64,
+    spl_wffi_call_i64_into_bytes}
+use std.nogc_sync_mut.fs.{file_exists}
+
+val SHIM_PATH: text = "build/chrome-render/libsimple_chrome_render.dylib"
+val SHIM_PATH_SO: text = "build/chrome-render/libsimple_chrome_render.so"
+
+fn shim_path() -> text:
+    if file_exists(SHIM_PATH):
+        return SHIM_PATH
+    if file_exists(SHIM_PATH_SO):
+        return SHIM_PATH_SO
+    ""
+
+struct Readback:
+    rc: i64
+    out_len: i64
+    bytes: [u8]
+
+"""Calls `last_error_into(handle, buf, cap, out_len)` through the new facade.
+
+`buf` is allocated here, on the Simple side, and stays `cap_alloc` bytes long
+whatever the provider does -- the whole point of the idiom. The bytes beyond
+`capacity` are the sentinel: the provider is told it may write `capacity`, so
+anything it changes past that is an overrun and this spec goes red.
+"""
+@unsafe(reason: "drives the bounded out-byte-buffer facade against a real loaded provider", capabilities: [ffi, raw_ptr])
+fn read_last_error(fptr: i64, handle: i64, cap_alloc: i64, capacity: i64) -> Readback:
+    var buf: [u8] = []
+    var k = 0
+    while k < cap_alloc:
+        buf.push(0xAA)
+        k = k + 1
+    var out_len: i64 = -1
+    val rc = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(fptr, [handle], &mut buf, 0, capacity,
+            &mut out_len, [])
+    Readback(rc: rc, out_len: out_len, bytes: buf)
+
+fn sentinel_intact(bytes: [u8], from: i64) -> bool:
+    var k = from
+    while k < bytes.len():
+        if bytes[k] != 0xAA:
+            return false
+        k = k + 1
+    true
+
+"""True when the first `want.len()` bytes are exactly `want`.
+
+Compared as raw byte codes rather than decoded text: the oracle is what the
+provider wrote through the pointer, and re-encoding it through a text
+conversion would put a second mechanism between the assertion and the bytes.
+"""
+fn prefix_is(bytes: [u8], want: [i64]) -> bool:
+    if bytes.len() < want.len():
+        return false
+    var k = 0
+    while k < want.len():
+        if bytes[k].to_i64() != want[k]:
+            return false
+        k = k + 1
+    true
+
+# "backend-unavailable" -- the shim seeds its process-global last-error slot to
+# CHROME_RENDER_E_BACKEND_UNAVAILABLE (chrome_render_shim.c:143), so a freshly
+# loaded stub reports exactly this and nothing else.
+fn want_backend_unavailable() -> [i64]:
+    [0x62, 0x61, 0x63, 0x6B, 0x65, 0x6E, 0x64, 0x2D, 0x75, 0x6E, 0x61, 0x76,
+     0x61, 0x69, 0x6C, 0x61, 0x62, 0x6C, 0x65]
+
+# "invalid-request"
+fn want_invalid_request() -> [i64]:
+    [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x2D, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74]
+
+# @manual_section: wffi_bounded_out_byte_buffer
+describe "Bounded OUT-byte-buffer dynamic SFFI facade":
+    it "returns the provider's bytes in the caller's own allocation":
+        # @req REQ-WFFIINTOBYTES-001
+        # @capture(protocol_json): rc, out_len and decoded bytes for a full-capacity readback
+        step("Load the stub chrome render shim, resolve last_error_into, and read the global status text into a 32-byte caller allocation")
+        val path = shim_path()
+        expect(path).to_not_equal("")
+        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
+        expect(fptr > 0).to_equal(true)
+        val got = read_last_error(fptr, 0, 32, 32)
+        # The stub seeds its global last-error slot to BACKEND_UNAVAILABLE, so
+        # the 19 bytes "backend-unavailable" are an absolute oracle, not a shape
+        # check -- and the 13 bytes after them must still be the sentinel.
+        expect(got.rc).to_equal(0)
+        expect(got.out_len).to_equal(19)
+        expect(prefix_is(got.bytes, want_backend_unavailable())).to_equal(true)
+        expect(got.bytes.len()).to_equal(32)
+        expect(sentinel_intact(got.bytes, 19)).to_equal(true)
+        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+
+    it "writes nothing at all when the capacity is zero":
+        # @req REQ-WFFIINTOBYTES-002
+        # @capture(bit_table): rc, out_len and full sentinel state for a cap=0 call
+        step("Call the same symbol with capacity 0 over a 32-byte allocation and check every sentinel byte")
+        val path = shim_path()
+        expect(path).to_not_equal("")
+        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
+        val got = read_last_error(fptr, 0, 32, 0)
+        # cap=0 cannot hold the status text, so the provider refuses with
+        # CHROME_RENDER_E_BUFFER_TOO_SMALL (3) and reports the length it WOULD
+        # have needed. Not one byte of the allocation may change.
+        expect(got.rc).to_equal(3)
+        expect(got.out_len).to_equal(19)
+        expect(sentinel_intact(got.bytes, 0)).to_equal(true)
+        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+
+    it "never writes past the declared capacity":
+        # @req REQ-WFFIINTOBYTES-003
+        # @capture(bit_table): rc and the untouched tail for a capacity smaller than the allocation
+        step("Declare a capacity of 1 inside a 32-byte allocation, far too small for the 19-byte status text, and check the whole allocation")
+        val path = shim_path()
+        expect(path).to_not_equal("")
+        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
+        val got = read_last_error(fptr, 0, 32, 1)
+        expect(got.rc).to_equal(3)
+        expect(got.out_len).to_equal(19)
+        expect(sentinel_intact(got.bytes, 0)).to_equal(true)
+        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+
+    it "returns a longer provider string once the global error is set":
+        # @req REQ-WFFIINTOBYTES-004
+        # @capture(protocol_json): rc, out_len and decoded text after a refused create()
+        step("Force a create() refusal with an empty config payload, then read the recorded global status text back through the facade")
+        val path = shim_path()
+        expect(path).to_not_equal("")
+        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        val create = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_create")
+        val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
+        # A null/zero-length config is an invalid request, which the shim records
+        # in its process-global last-error slot.
+        val created = unsafe(capabilities: [ffi, raw_ptr]): spl_wffi_call_i64(create, [0, 0], 2)
+        expect(created < 0).to_equal(true)
+        val got = read_last_error(fptr, 0, 64, 64)
+        expect(got.rc).to_equal(0)
+        expect(got.out_len).to_equal(15)
+        expect(prefix_is(got.bytes, want_invalid_request())).to_equal(true)
+        expect(sentinel_intact(got.bytes, 15)).to_equal(true)
+        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+
+    it "refuses a window that runs past the caller's allocation":
+        # @req REQ-WFFIINTOBYTES-005
+        # @capture(protocol_json): facade verdict for a capacity larger than the allocation
+        step("Ask for a 64-byte window inside an 8-byte allocation and confirm the facade refuses without calling the provider")
+        val path = shim_path()
+        expect(path).to_not_equal("")
+        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
+        val got = read_last_error(fptr, 0, 8, 64)
+        # Fail closed: a negative facade status, an untouched allocation, and an
+        # out_len of 0 -- never a partial write into memory the caller did not own.
+        expect(got.rc < 0).to_equal(true)
+        expect(got.out_len).to_equal(0)
+        expect(sentinel_intact(got.bytes, 0)).to_equal(true)
+        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
