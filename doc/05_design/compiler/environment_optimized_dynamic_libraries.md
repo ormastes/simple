@@ -908,24 +908,25 @@ full parsing. The exact startup policy/provider/variant/artifact/environment
 identity is folded into the frontend cache key. Driver and loader modules may
 bind down through this port, while layer 10 imports neither of them.
 
-The loader binding adapter owns the configured sealed activation and a typed
-per-source activation factory. The fixed package-session draft was rejected:
+The loader binding adapter owns the configured sealed activation. The fixed
+package-session draft was rejected:
 one startup session serves many immutable source snapshots, so a package
 session cannot be captured once and reused across them. For each transformed
-source, the loader acquires and projects a sealed build-use, invokes the
-factory synchronously, returns its exact evidence for request validation, and
-releases the use before returning. A dedicated factory owner registers the
-callable only while the authenticated sealed activation is live and issues an
-opaque token derived from the provider, variant, artifact, environment, policy,
-interface-handle, and provider-context projection. Startup contexts carry that
-owner/token pair rather than a callback plus caller-authored identity labels;
-invocation reprojects the exact sealed build use while the callback is active.
+source, the loader acquires and projects a sealed build-use and invokes only an
+owner-internal typed provider adapter while that use is live. A generic facet
+interface handle is not itself typed lexical callable authority. Until the
+sealed provider-execution owner issues that authority, the internal adapter
+fails closed; callers cannot register a function or manufacture successful
+advisory evidence. The factory owner issues an opaque token derived from the
+provider, variant, artifact, environment, policy, interface-handle, and
+provider-context projection. Startup contexts carry that owner/token pair, and
+invocation reprojects the exact sealed build use before attempting provider
+execution.
 The selected sealed binding-policy digest must equal the exact startup request digest. The factory
-owns creation and terminal cleanup of its
-source-specific package session, execution snapshot, feature arena, and initial
-lexical state; the build-use authority itself never crosses the callback
-boundary. Its function-valued projection issues the smaller canonical frontend
-receipt. The common receipt distinguishes
+will own creation and terminal cleanup of its source-specific package session,
+execution snapshot, feature arena, and initial lexical state; the build-use
+authority itself never crosses that owner boundary. Its future typed projection
+will issue the smaller canonical frontend receipt. The common receipt distinguishes
 reference no-op, unavailable advisory execution, completed advisory execution,
 and scalar fallback; its digest binds provider and GPU execution flags and
 counts as well as status. Uninstall first restores the layer-10 reference slot,

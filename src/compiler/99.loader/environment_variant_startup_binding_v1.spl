@@ -57,9 +57,18 @@ struct _FrontendLexicalAdvisoryFactoryRecordV1:
     token: FrontendLexicalAdvisoryFactoryTokenV1
     sealed_owner: EnvironmentVariantSealedActivationOwnerV1
     activation: EnvironmentVariantSealedActivationOwnerTokenV1
-    source_factory: fn(text, FrontendAdvisoryPreprocessPolicyV1
-    ) -> Result<FrontendAdvisoryPreprocessResultV1, text>
     live: bool
+
+struct _FrontendLexicalAdvisoryProviderAdapterV1:
+    interface_handle: u64
+    provider_context: u64
+    invoke: fn(text, FrontendAdvisoryPreprocessPolicyV1
+    ) -> Result<FrontendAdvisoryPreprocessResultV1, text>
+
+# This registry is loader-private. Provider implementations must be admitted by
+# this module; startup callers cannot add or substitute executable functions.
+var _environment_variant_frontend_provider_adapters_v1:
+    [_FrontendLexicalAdvisoryProviderAdapterV1] = []
 
 var _next_frontend_lexical_factory_owner_v1: u64 = 1u64
 
@@ -79,9 +88,11 @@ pub class FrontendLexicalAdvisoryFactoryOwnerV1:
         FrontendLexicalAdvisoryFactoryOwnerV1(owner_identity: identity,
             next_token_id: 1u64, records: [])
 
-# A candidate supplies one immutable source factory. The loader validates and
-# pins the sealed generation around every invocation. The build-use authority
-# never crosses this boundary; only the selected trusted factory is invoked.
+# A candidate supplies only sealed activation authority. The loader validates
+# and pins that generation around every provider attempt. Generic facet handles
+# are not callable authority: until the sealed owner exposes the typed lexical
+# ABI, the owner-internal adapter below fails closed and RequireSimd propagates
+# the unavailability instead of accepting a caller-supplied function.
 pub class FrontendLexicalAdvisoryBindingContextV1:
     factory_owner: FrontendLexicalAdvisoryFactoryOwnerV1
     factory_token: FrontendLexicalAdvisoryFactoryTokenV1
@@ -285,12 +296,26 @@ fn _evs_factory_index_v1(owner: FrontendLexicalAdvisoryFactoryOwnerV1,
         index = index + 1
     -1
 
+fn _environment_variant_frontend_invoke_authenticated_provider_v1(
+    build: EnvironmentVariantSealedBuildUseProjectionV1,
+    source: text, policy: FrontendAdvisoryPreprocessPolicyV1
+) -> Result<FrontendAdvisoryPreprocessResultV1, text>:
+    # The generic environment facet publishes identity-bearing handles but no
+    # raw callable ABI. Select only a loader-owned typed adapter by the exact
+    # authenticated projected interface/context pair. The registry is empty
+    # until such an adapter is implemented, so the path fails closed.
+    if build.interface_handle == 0u64 or build.provider_context == 0u64:
+        return Err("frontend-provider-projected-interface-invalid")
+    for adapter in _environment_variant_frontend_provider_adapters_v1:
+        if adapter.interface_handle == build.interface_handle and
+           adapter.provider_context == build.provider_context:
+            return adapter.invoke(source, policy)
+    Err("frontend-provider-callable-authority-unavailable")
+
 pub fn environment_variant_frontend_factory_register_v1(
     owner: FrontendLexicalAdvisoryFactoryOwnerV1,
     sealed_owner: EnvironmentVariantSealedActivationOwnerV1,
-    activation: EnvironmentVariantSealedActivationOwnerTokenV1,
-    source_factory: fn(text, FrontendAdvisoryPreprocessPolicyV1
-    ) -> Result<FrontendAdvisoryPreprocessResultV1, text>
+    activation: EnvironmentVariantSealedActivationOwnerTokenV1
 ) -> Result<FrontendLexicalAdvisoryFactoryTokenV1,
             EnvironmentVariantStartupErrorV1>:
     if owner.owner_identity == 0u64:
@@ -312,8 +337,7 @@ pub fn environment_variant_frontend_factory_register_v1(
         provider_context: authority.provider_context)
     owner.next_token_id = owner.next_token_id + 1u64
     owner.records.push(_FrontendLexicalAdvisoryFactoryRecordV1(token: token,
-        sealed_owner: sealed_owner, activation: activation,
-        source_factory: source_factory, live: true))
+        sealed_owner: sealed_owner, activation: activation, live: true))
     Ok(token)
 
 fn environment_variant_frontend_factory_project_v1(
@@ -362,7 +386,8 @@ pub fn environment_variant_frontend_factory_invoke_v1(
         val _released = environment_variant_sealed_build_use_release_v1(
             record.sealed_owner, record.activation, use)
         return Err("frontend-factory-build-use-substituted")
-    val produced = record.source_factory(source, policy)
+    val produced = _environment_variant_frontend_invoke_authenticated_provider_v1(
+        projected.unwrap(), source, policy)
     val released = environment_variant_sealed_build_use_release_v1(
         record.sealed_owner, record.activation, use)
     if released.is_err(): return Err("frontend-factory-build-use-release-failed")
