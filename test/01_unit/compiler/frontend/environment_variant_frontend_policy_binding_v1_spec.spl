@@ -17,16 +17,6 @@ fn evfb_decision(prefer: text = "", require_value: text = ""
         env: empty, project: empty, user: empty,
         admin: environment_variant_admin_restrictions_empty_v1())).unwrap()
 
-fn evfb_success(source: text, policy: FrontendAdvisoryPreprocessPolicyV1
-) -> FrontendAdvisoryPreprocessResultV1:
-    frontend_advisory_preprocess_result_issue_v1(source, policy,
-        FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted, true, true).unwrap()
-
-fn evfb_wrong_policy(source: text, policy: FrontendAdvisoryPreprocessPolicyV1
-) -> FrontendAdvisoryPreprocessResultV1:
-    frontend_advisory_preprocess_reference_v1(
-        source, FrontendAdvisoryPreprocessPolicyV1.Reference)
-
 describe "environment variant frontend policy binding V1":
     it "maps the typed resolved policy without reconstructing source precedence":
         expect(frontend_advisory_policy_from_environment_decision_v1(
@@ -76,32 +66,40 @@ describe "environment variant frontend policy binding V1":
         expect(source).to_contain("binding_policy_digest")
         expect(source).not.to_contain("session: ParserStructuralPackageV2SessionV1")
 
-    it "isolates provider dispatch by exact owner session and generation":
+    it "treats numeric scope coordinates as correlation only":
         val generation = frontend_advisory_preprocess_generation_v1() + 1u64
-        expect(frontend_advisory_preprocess_bind_scoped_v1(
-            evfb_success, 101u64, 201u64, generation)).to_equal(true)
+        expect(frontend_advisory_preprocess_correlation_open_v1(
+            101u64, 201u64, generation)).to_equal(true)
         expect(frontend_advisory_preprocess_dispatch_checked_scoped_v1(
             "fn main(): pass", FrontendAdvisoryPreprocessPolicyV1.RequireSimd,
             101u64, 202u64, generation)).to_equal(
                 Err(FrontendAdvisoryPreprocessDispatchErrorV1.RequiredProviderUnavailable))
-        val admitted = frontend_advisory_preprocess_dispatch_checked_scoped_v1(
-            "fn main(): pass", FrontendAdvisoryPreprocessPolicyV1.RequireSimd,
-            101u64, 201u64, generation).unwrap()
-        expect(admitted.receipt.status).to_equal(
-            FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted)
-        expect(frontend_advisory_preprocess_reset_scoped_v1(
-            101u64, 201u64, generation + 1u64)).to_equal(true)
-
-    it "rejects a valid receipt issued for a different exact request":
-        val generation = frontend_advisory_preprocess_generation_v1() + 1u64
-        expect(frontend_advisory_preprocess_bind_scoped_v1(
-            evfb_wrong_policy, 102u64, 203u64, generation)).to_equal(true)
         expect(frontend_advisory_preprocess_dispatch_checked_scoped_v1(
             "fn main(): pass", FrontendAdvisoryPreprocessPolicyV1.RequireSimd,
-            102u64, 203u64, generation)).to_equal(
-                Err(FrontendAdvisoryPreprocessDispatchErrorV1.InvalidProviderEvidence))
-        expect(frontend_advisory_preprocess_reset_scoped_v1(
-            102u64, 203u64, generation + 1u64)).to_equal(true)
+            101u64, 201u64, generation)).to_equal(
+                Err(FrontendAdvisoryPreprocessDispatchErrorV1.RequiredProviderUnavailable))
+        expect(frontend_advisory_preprocess_correlation_close_v1(
+            101u64, 201u64, generation + 1u64)).to_equal(true)
+
+    it "rejects self-issued execution status until typed authority exists":
+        expect(frontend_advisory_preprocess_result_issue_v1(
+            "fn main(): pass", FrontendAdvisoryPreprocessPolicyV1.RequireSimd,
+            FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted,
+            true, true)).to_equal(
+                Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus))
+        val source = file_read(
+            "src/compiler/10.frontend/frontend_advisory_preprocess_port_v1.spl")
+        expect(source).not.to_contain(
+            "pub fn frontend_advisory_preprocess_bind_scoped_v1(")
+        expect(source).not.to_contain(
+            "provider: fn(text, FrontendAdvisoryPreprocessPolicyV1)")
+        val valid_at = source.index_of(
+            "pub fn frontend_advisory_preprocess_result_valid_v1")
+        val reject_at = source.index_of(
+            "status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted", valid_at)
+        val digest_at = source.index_of("_receipt_identity_fap(", valid_at)
+        expect(reject_at).to_be_greater_than(valid_at)
+        expect(digest_at).to_be_greater_than(reject_at)
 
     it "threads scoped authority and startup cache identity through every parse":
         val source = file_read(

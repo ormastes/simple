@@ -897,16 +897,19 @@ canonical authority digest. Passing this gate establishes internally consistent
 historical advisory evidence; it still does not establish parser, AST, or HIR
 equivalence.
 
-Layer 10 owns the actual dependency-inversion seam: one typed function-valued
-advisory slot, initialized to the lazy reference provider. Only an exact
-owner/session and strictly newer generation may bind or reset it; a driver that
-does not hold all three coordinates cannot invoke the selected provider. The
-checked dispatcher validates the complete result against the exact transformed
-source identity, byte length, and resolved policy request. The shared frontend
-invokes it after conditional/domain transformations and before cache lookup and
-full parsing. The exact startup policy/provider/variant/artifact/environment
-identity is folded into the frontend cache key. Driver and loader modules may
-bind down through this port, while layer 10 imports neither of them.
+Layer 10 owns the dependency-inversion seam but does not yet own authenticated
+typed provider-execution authority. Its numeric owner/session/generation slot
+therefore records startup correlation only and never stores or selects a
+function. The checked dispatcher always emits truthful reference/unavailable
+evidence; it rejects `AdvisoryExecuted`, loaded, or executed claims before
+receipt-digest validation, so even a correctly hashed caller-built receipt is
+not authority. `RequireSimd` fails before cache lookup or full parsing. The
+shared frontend invokes this gate after conditional/domain transformations.
+The exact startup policy/provider/variant/artifact/environment identity remains
+folded into the frontend cache key. A future executable seam must consume an
+authenticated owner-issued typed capability or a downward-facing contract
+implemented by the provider-execution owner; numeric coordinates cannot gain
+that meaning.
 
 `environment_variant_startup_cache_identity_v1` is the canonical pure cache
 projection. It hashes the binary policy digest, exact provider, variant,
@@ -930,8 +933,9 @@ advisory evidence. The factory owner issues an opaque token derived from the
 provider, variant, artifact, environment, policy, interface-handle, and
 provider-context projection. Startup contexts carry that owner/token pair, and
 invocation reprojects the exact sealed build use before attempting provider
-execution.
-The selected sealed binding-policy digest must equal the exact startup request digest. The factory
+execution. The selected sealed binding-policy digest must equal the exact
+startup request digest. A selected startup receipt proves candidate selection
+and lifetime only, not provider execution. The factory
 will own creation and terminal cleanup of its source-specific package session,
 execution snapshot, feature arena, and initial lexical state; the build-use
 authority itself never crosses that owner boundary. Its future typed projection

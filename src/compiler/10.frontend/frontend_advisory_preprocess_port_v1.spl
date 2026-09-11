@@ -122,16 +122,20 @@ pub fn frontend_advisory_preprocess_result_issue_v1(source: text,
     status: FrontendAdvisoryPreprocessStatusV1,
     provider_loaded: bool, provider_executed: bool
 ) -> Result<FrontendAdvisoryPreprocessResultV1, FrontendAdvisoryPreprocessIssueErrorV1>:
+    # No typed provider-execution owner is connected yet. Public callers may
+    # issue truthful reference/unavailable evidence only; execution authority
+    # cannot be synthesized from status flags.
+    if provider_loaded or provider_executed or
+       status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted or
+       status == FrontendAdvisoryPreprocessStatusV1.ScalarFallback:
+        return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
     if status == FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp:
-        if policy != FrontendAdvisoryPreprocessPolicyV1.Reference or provider_loaded or provider_executed:
+        if policy != FrontendAdvisoryPreprocessPolicyV1.Reference:
             return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
     elif status == FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable:
-        if policy == FrontendAdvisoryPreprocessPolicyV1.Reference or provider_executed:
+        if policy == FrontendAdvisoryPreprocessPolicyV1.Reference:
             return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
-    elif status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted:
-        if policy == FrontendAdvisoryPreprocessPolicyV1.Reference or not provider_loaded or not provider_executed:
-            return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
-    elif policy == FrontendAdvisoryPreprocessPolicyV1.Reference or not provider_loaded:
+    else:
         return Err(FrontendAdvisoryPreprocessIssueErrorV1.InvalidStatus)
     val source_id = frontend_transformed_source_identity_v1(source)
     val source_length = text_to_bytes(source).len() as u64
@@ -159,6 +163,12 @@ pub fn frontend_advisory_preprocess_result_valid_v1(
        not receipt.reference_frontend_required or receipt.gpu_registry_initialized !=
            (receipt.gpu_device_initialization_count > 0u32):
         return false
+    # Reject execution claims before digest validation. Even a manually built,
+    # correctly hashed receipt is not provider authority.
+    if receipt.status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted or
+       receipt.status == FrontendAdvisoryPreprocessStatusV1.ScalarFallback or
+       receipt.provider_loaded or receipt.provider_executed:
+        return false
     var request_material: [i64] = []; _push64_fap(request_material, 1u64)
     _pushd_fap(request_material, source_id); _push64_fap(request_material, bytes.len() as u64)
     _push64_fap(request_material, _policy_code_fap(receipt.policy))
@@ -176,11 +186,8 @@ pub fn frontend_advisory_preprocess_result_valid_v1(
     elif receipt.status == FrontendAdvisoryPreprocessStatusV1.AdvisoryUnavailable:
         receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and
             not receipt.provider_executed
-    elif receipt.status == FrontendAdvisoryPreprocessStatusV1.AdvisoryExecuted:
-        receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and
-            receipt.provider_loaded and receipt.provider_executed
     else:
-        receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference and receipt.provider_loaded
+        false
 
 pub fn frontend_advisory_preprocess_result_matches_request_v1(
     result: FrontendAdvisoryPreprocessResultV1,
@@ -191,46 +198,41 @@ pub fn frontend_advisory_preprocess_result_matches_request_v1(
         result.receipt.transformed_source_length == request.transformed_source_length and
         result.receipt.policy == request.policy
 
-class _FrontendAdvisoryProviderSlotV1:
-    provider: fn(text, FrontendAdvisoryPreprocessPolicyV1) -> FrontendAdvisoryPreprocessResultV1
+class _FrontendAdvisoryCorrelationSlotV1:
     generation: u64
     owner_id: u64
     session_id: u64
 
-var _frontend_advisory_slot_v1 = _FrontendAdvisoryProviderSlotV1(
-    provider: frontend_advisory_preprocess_reference_v1, generation: 1u64,
-    owner_id: 0u64, session_id: 0u64)
+var _frontend_advisory_slot_v1 = _FrontendAdvisoryCorrelationSlotV1(
+    generation: 1u64, owner_id: 0u64, session_id: 0u64)
 
 pub fn frontend_advisory_preprocess_generation_v1() -> u64:
     _frontend_advisory_slot_v1.generation
 
-pub fn frontend_advisory_preprocess_bind_scoped_v1(
-    provider: fn(text, FrontendAdvisoryPreprocessPolicyV1) -> FrontendAdvisoryPreprocessResultV1,
+pub fn frontend_advisory_preprocess_correlation_open_v1(
     owner_id: u64, session_id: u64, generation: u64
 ) -> bool:
     if owner_id == 0u64 or session_id == 0u64 or
        _frontend_advisory_slot_v1.owner_id != 0u64 or
        generation == 0u64 or generation <= _frontend_advisory_slot_v1.generation:
         return false
-    _frontend_advisory_slot_v1.provider = provider
     _frontend_advisory_slot_v1.generation = generation
     _frontend_advisory_slot_v1.owner_id = owner_id
     _frontend_advisory_slot_v1.session_id = session_id
     true
 
-pub fn frontend_advisory_preprocess_binding_matches_v1(owner_id: u64,
+pub fn frontend_advisory_preprocess_correlation_matches_v1(owner_id: u64,
     session_id: u64, generation: u64) -> bool:
     owner_id != 0u64 and owner_id == _frontend_advisory_slot_v1.owner_id and
         session_id != 0u64 and session_id == _frontend_advisory_slot_v1.session_id and
         generation == _frontend_advisory_slot_v1.generation
 
-pub fn frontend_advisory_preprocess_reset_scoped_v1(owner_id: u64,
+pub fn frontend_advisory_preprocess_correlation_close_v1(owner_id: u64,
     session_id: u64, generation: u64) -> bool:
-    if not frontend_advisory_preprocess_binding_matches_v1(owner_id, session_id,
+    if not frontend_advisory_preprocess_correlation_matches_v1(owner_id, session_id,
             _frontend_advisory_slot_v1.generation) or generation == 0u64 or
        generation <= _frontend_advisory_slot_v1.generation:
         return false
-    _frontend_advisory_slot_v1.provider = frontend_advisory_preprocess_reference_v1
     _frontend_advisory_slot_v1.generation = generation
     _frontend_advisory_slot_v1.owner_id = 0u64
     _frontend_advisory_slot_v1.session_id = 0u64
@@ -246,14 +248,10 @@ pub fn frontend_advisory_preprocess_dispatch_checked_scoped_v1(source: text,
     policy: FrontendAdvisoryPreprocessPolicyV1, owner_id: u64, session_id: u64,
     generation: u64
 ) -> Result<FrontendAdvisoryPreprocessResultV1, FrontendAdvisoryPreprocessDispatchErrorV1>:
-    val scoped = if owner_id == 0u64:
-        _frontend_advisory_slot_v1.owner_id == 0u64
-    else:
-        frontend_advisory_preprocess_binding_matches_v1(owner_id, session_id, generation)
-    val selected = if scoped:
-        _frontend_advisory_slot_v1.provider(source, policy)
-    else:
-        frontend_advisory_preprocess_reference_v1(source, policy)
+    # Numeric coordinates correlate a startup lifetime only. They never select
+    # executable code. Until a sealed typed adapter capability is added, every
+    # request takes the truthful reference/unavailable path.
+    val selected = frontend_advisory_preprocess_reference_v1(source, policy)
     val request = FrontendAdvisoryPreprocessRequestV1(
         transformed_source_identity: frontend_transformed_source_identity_v1(source),
         transformed_source_length: text_to_bytes(source).len() as u64,
