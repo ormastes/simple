@@ -13105,14 +13105,11 @@ int rt_file_link_create_excl_no_follow(
 #endif
 }
 
-/* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
- * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
- * through the same compressor rt_tls13_sha256 uses. */
-int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+/* Raw owner-facing form used by authenticated native artifact loaders. */
+int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]) {
+    if (!path || !path[0] || !out) return 0;
     FILE* in = fopen(path, "rb");
-    if (!in) return rt_core_nil();
+    if (!in) return 0;
     uint32_t state[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
@@ -13129,7 +13126,7 @@ int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
             pending = 0;
         }
     }
-    if (ferror(in)) { fclose(in); return rt_core_nil(); }
+    if (ferror(in)) { fclose(in); return 0; }
     fclose(in);
     memset(block + pending, 0, sizeof(block) - pending);
     block[pending] = 0x80u;
@@ -13140,10 +13137,30 @@ int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
     }
     rt_sha256_compress(state, block);
     if (final_bytes == 128u) rt_sha256_compress(state, block + 64);
-    char hex[65];
     for (int i = 0; i < 8; i++) {
-        snprintf(hex + i * 8, 9, "%08x", state[i]);
+        out[i * 4] = (uint8_t)(state[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(state[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(state[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)state[i];
     }
+    return 1;
+}
+
+/* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
+ * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
+ * through the same compressor rt_tls13_sha256 uses. */
+int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    uint8_t digest[32];
+    char hex[65];
+    static const char alphabet[] = "0123456789abcdef";
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+            !rt_sha256_file_raw_v1(path, digest)) return rt_core_nil();
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2] = alphabet[digest[i] >> 4];
+        hex[i * 2 + 1] = alphabet[digest[i] & 15u];
+    }
+    hex[64] = '\0';
     return rt_string_new((const uint8_t*)hex, 64u);
 }
 
