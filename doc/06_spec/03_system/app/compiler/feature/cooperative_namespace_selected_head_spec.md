@@ -12,8 +12,9 @@ All thirteen primary scenarios are deliberately `MissingEvidence`. The current c
 Five supplementary diagnostic controls now call the real frozen components:
 the host-prerequisite inventory/name, selected-prefix comparator, writer/head
 revalidation, durability-order classifier, and GC issuer refusal. They provide
-component-level regression coverage only. They do not mint authority, execute
-a crash, prove independent-process exclusion, or earn L08 acceptance credit.
+component-level regression coverage only. They do not validate journal framing
+or a typed closure, mint authority, execute a crash, prove independent-process
+exclusion, or earn L08 acceptance credit.
 
 Run once the physical host exists, using the qualified self-hosted runtime:
 
@@ -53,7 +54,7 @@ bin/simple spipe-docgen test/03_system/app/compiler/feature/cooperative_namespac
 | Scenario | Real component assertion | Non-claim |
 |---|---|---|
 | L08-NAMESPACE-D01 | The canonical `.simple-cache-selected-head-v1` name is exposed and the physical host prerequisite is closed. | A closed API inventory is not host qualification. |
-| L08-NAMESPACE-D02 | A matching selected prefix is returned while complete trailing bytes remain outside it. | Prefix comparison does not replay or authorize a journal. |
+| L08-NAMESPACE-D02 | A matching selected prefix is returned while arbitrary unselected suffix bytes remain outside it. | Prefix comparison does not validate journal frames, replay, or authorize a journal. |
 | L08-NAMESPACE-D03 | Writer-incarnation and whole-head changes return stale diagnostic states. | Diagnostics do not hold a cross-process lock. |
 | L08-NAMESPACE-D04 | Pre-replacement, indeterminate, and complete trace states remain distinguishable. | Trace classification does not prove fsync, rename, or power-loss behavior. |
 | L08-NAMESPACE-D05 | Incomplete union and complete copied contribution requests both refuse GC authority. | No object is marked, trashed, or deleted by this control. |
