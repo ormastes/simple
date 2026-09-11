@@ -456,6 +456,8 @@ impl VulkanBackend:
             return 1
         val has_font_work = self.pending_font_descriptors.len() > 0
         if not vulkan_sffi_end_compute(cmd):
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
                 val first_desc = if self.pending_compute_count > 0:
@@ -473,6 +475,8 @@ impl VulkanBackend:
             return 0
 
         val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        if fence <= 0 and vulkan_order_trace_enabled():
+            vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
             if not vulkan_sffi_wait_idle():
                 self._quarantine_pending_compute_descriptors()
@@ -493,6 +497,8 @@ impl VulkanBackend:
             self.font_frame_fence_count = self.font_frame_fence_count + 1
 
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+        if not completion_waited and vulkan_order_trace_enabled():
+            vulkan_order_trace("flush-fail stage=wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count}")
         if not completion_waited and not vulkan_sffi_wait_idle():
             self._quarantine_pending_compute_descriptors()
             self._clear_pending_compute_state()
@@ -512,11 +518,18 @@ impl VulkanBackend:
             gx <= 0 or gy <= 0 or gz <= 0):
             return 0
         if self.pending_compute_command <= 0:
-            if (not vulkan_sffi_reap_dependency_quarantine() or
-                not vulkan_sffi_fence_submission_supported()):
+            if not vulkan_sffi_reap_dependency_quarantine():
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=reap_dependency_quarantine pipe={pipe}")
+                return 0
+            if not vulkan_sffi_fence_submission_supported():
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=fence_submission_supported pipe={pipe}")
                 return 0
             self.pending_compute_command = vulkan_sffi_begin_compute()
             if self.pending_compute_command <= 0:
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=begin_compute pipe={pipe} rc={self.pending_compute_command}")
                 return 0
 
         var desc: i64 = 0
@@ -529,6 +542,8 @@ impl VulkanBackend:
             desc = vulkan_sffi_create_descriptor_set(pipe)
             if desc <= 0 or not vulkan_sffi_bind_buffer(
                     desc, 0, self.d_framebuffer):
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=descriptor pipe={pipe} desc={desc} fb={self.d_framebuffer}")
                 if desc > 0:
                     if not vulkan_sffi_destroy_descriptor_set(desc):
                         vulkan_sffi_quarantine_dependencies(
@@ -540,12 +555,13 @@ impl VulkanBackend:
             self.pending_compute_sources.push(0)
             self.pending_compute_count = self.pending_compute_count + 1
         val cmd = self.pending_compute_command
-        val ready = (
-            vulkan_sffi_bind_pipeline(cmd, pipe) and
-            vulkan_sffi_bind_descriptors(cmd, desc) and
-            vulkan_sffi_push_constants(cmd, pipe, push_data) and
-            vulkan_sffi_dispatch(cmd, gx, gy, gz))
+        val bound_pipeline = vulkan_sffi_bind_pipeline(cmd, pipe)
+        val bound_descriptors = bound_pipeline and vulkan_sffi_bind_descriptors(cmd, desc)
+        val pushed = bound_descriptors and vulkan_sffi_push_constants(cmd, pipe, push_data)
+        val ready = pushed and vulkan_sffi_dispatch(cmd, gx, gy, gz)
         if not ready:
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed}")
             val flushed = self._flush_pending_compute()
             return if flushed < 0: -1 else: 0
         self.frame_dispatch_count = self.frame_dispatch_count + 1
@@ -974,11 +990,52 @@ impl VulkanBackend:
         status == VK_DISPATCH_COMPLETED_INELIGIBLE
 
     me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+        # Captured BEFORE the enqueue: a retry is only safe when this dispatch
+        # had no already-recorded siblings to lose. Post-readback that is
+        # always the case (the readback's own flush cleared the batch).
+        val pending_before = self.pending_compute_count
         var dispatched = if self.frame_batching_enabled:
             self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
         else:
             vulkan_dispatch_framebuffer_compute_checked(
                 self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        var resync_recovered = false
+        val resync_eligible = dispatched < 0 and
+            self.frame_batching_enabled and self.initialized and self.d_framebuffer > 0
+        if resync_eligible:
+            # A -1 means the enqueue's own recovery flush could not even discard
+            # the command buffer it had just begun. That used to latch the CPU
+            # fallback for the backend's whole lifetime on the FIRST occurrence,
+            # with no retry -- the `== 0` arm below never applied. On a healthy
+            # device this is recoverable: prove idle, drain what the quarantine
+            # will give up, drop the wedged batch state, and record the dispatch
+            # again. Only a device that will not even go idle is genuinely lost.
+            if vulkan_sffi_wait_idle():
+                val reaped = vulkan_sffi_reap_dependency_quarantine()
+                self._clear_pending_compute_state()
+                resync_recovered = true
+                # Only retry when this dispatch had no already-recorded siblings.
+                # With siblings, the recovery flush already destroyed the batch,
+                # so re-recording THIS primitive alone would produce a frame
+                # missing the others while reporting success -- strictly worse
+                # than the fallback. In that case the resync above still runs
+                # (it is what unwedges the session for the NEXT frame) but this
+                # frame is left to fail over honestly.
+                if pending_before == 0:
+                    val retried = self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
+                    if vulkan_order_trace_enabled():
+                        vulkan_order_trace("dispatch-resync pipe={pipe} reaped={reaped} rc={retried}")
+                    if retried > 0:
+                        # The retry recorded cleanly, so completion is NOT
+                        # unknown: the wedged command was discarded, never
+                        # submitted. Leaving completion_unknown set here is what
+                        # made the next readback return zero pixels.
+                        self.completion_unknown = false
+                    dispatched = retried
+                elif vulkan_order_trace_enabled():
+                    vulkan_order_trace("dispatch-resync pipe={pipe} reaped={reaped} siblings_lost={pending_before} no-retry")
+            elif vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-resync pipe={pipe} wait_idle=false device-lost")
         if dispatched == 0 and self.frame_batching_enabled and self.initialized and self.d_framebuffer > 0:
             # Hardening (2026-08-10 full-page-render sweep): long batched
             # sessions occasionally fail one dispatch in the bind chain after
@@ -999,18 +1056,51 @@ impl VulkanBackend:
         # healthy frame in every other receipt -- see the run-lane truncation
         # bug's "What is still open".
         if vulkan_order_trace_enabled():
-            vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
+            vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} resynced={resync_recovered} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
         if dispatched > 0:
             self.dirty = true
             self.mark_device_content_changed()
         else:
             self.mark_cpu_fallback("framebuffer-dispatch-failed")
-            if dispatched < 0:
+            if dispatched < 0 and not resync_recovered:
                 self.completion_unknown = true
+            elif dispatched < 0:
+                # Resynced: device-idle was PROVEN and the wedged command was
+                # discarded without ever being submitted, so completion is known
+                # -- it did not happen. `completion_unknown` would make
+                # `read_pixels_with_source` bail at entry and hand back a
+                # ZERO-LENGTH readback, which is what got mislabelled
+                # `pixel-mismatch`. The frame is still demoted to the CPU
+                # fallback above; it just returns its pixels instead of nothing.
+                self.dirty = true
             elif self.initialized and self.d_framebuffer > 0:
                 # Status 0 may follow a completed mutation whose cleanup
                 # evidence failed. Refresh device bytes, but never promote it.
                 self.dirty = true
+        # Order-independent, and deliberately the LAST word on the flag: any
+        # path above (including `_flush_for_host_fallback`, which sets it from
+        # its own status) may have raised `completion_unknown` after the resync
+        # already proved device-idle and discarded the unsubmitted command.
+        # Completion is then KNOWN -- it did not happen -- and leaving the flag
+        # raised makes `read_pixels_with_source` bail at entry and return a
+        # ZERO-LENGTH readback. The CPU-fallback demotion above still stands.
+        if resync_recovered and self.completion_unknown:
+            self.completion_unknown = false
+        if resync_recovered and dispatched < 0:
+            # DOWNGRADE -1 -> 0 for the caller. The two codes differ only in
+            # whether completion is KNOWN: -1 means "a command may have been
+            # submitted and we cannot say whether it ran", 0 means "it did not
+            # run". After a resync we have proven device-idle and discarded the
+            # command unsubmitted, so 0 is the truthful code. This must be done
+            # to the RETURN VALUE, not just to `self`: every caller
+            # (`clear`, `draw_rect`, `draw_rect_filled`, the rounded-rect and
+            # gradient lanes -- backend_vulkan.spl:877-1043) independently
+            # re-applies `if dispatched < 0: self.completion_unknown = true`,
+            # so clearing the field here alone is undone a few lines later in
+            # the caller and the readback still comes back zero-length.
+            dispatched = 0
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-resync-downgraded pipe={pipe} -1->0")
         dispatched
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
