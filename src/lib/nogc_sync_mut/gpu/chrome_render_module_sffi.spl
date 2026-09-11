@@ -1,0 +1,335 @@
+"""Frozen Chrome (CEF) offscreen render dynlib ABI v1 records and admission seam.
+
+Load discipline copied verbatim from `chromium_oracle_load`
+(`src/lib/nogc_sync_mut/gpu/chromium_reference_oracle_sffi.spl:236-287`):
+sha256 before -> `DynLib.load` -> resolve the EXACT declared symbol set -> sha256 after ->
+`spl_wffi_call_i64` -> `spl_dlclose`. No symbol outside the declared set is ever resolved.
+
+This ABI is a sibling of, not a replacement for, the frozen 5-symbol
+`simple_chromium_oracle_*` broker ABI: disjoint prefix, same exact-set discipline.
+"""
+
+use std.sffi.dynamic.{DynLib, spl_dlclose, spl_wffi_call_i64}
+use std.io_runtime.{file_hash_sha256}
+use std.common.string_core.{text_to_bytes}
+use std.common.browser.chrome_render_shim_twin.{chrome_render_create_status,
+    chrome_render_status_text}
+
+# Bounded byte-payload call. Using this rather than projecting a raw data pointer means
+# this binding introduces NO new `rt_*` call site at all: the facade owns the buffer
+# lifetime and the length, so Simple never holds C memory. The oracle binding's
+# `rt_array_data_ptr_text` path was tried first and is not backed by the deployed seed
+# (`unknown extern function: rt_array_data_ptr_text`), which is a second reason to prefer
+# the facade here.
+@unsafe(reason: "passes a bounded caller-owned byte payload to the frozen Chrome render C ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8],
+    offset: i64, length: i64, suffix_args: [i64]) -> i64
+
+struct ChromeRenderAbi:
+    version: i64
+    module_id: text
+    cef_version: text
+
+struct ChromeRenderLoadRequest:
+    library_path: text
+    manifest_sha256: text
+    expected_abi_version: i64
+    required_symbols: [text]
+    max_request_bytes: i64
+    max_response_bytes: i64
+
+struct ChromeRenderResolvedSymbols:
+    abi_version: i64
+    create: i64
+    load_html: i64
+    load_url: i64
+    resize: i64
+    render_frame: i64
+    read_pixels_into: i64
+    event: i64
+    last_error_into: i64
+    destroy: i64
+
+struct ChromeRenderLibraryProbe:
+    library_handle: i64
+    manifest_sha256: text
+    abi: ChromeRenderAbi
+    symbols: ChromeRenderResolvedSymbols
+
+struct ChromeRenderHandle:
+    library_handle: i64
+    session_handle: i64
+    library_path: text
+    abi_version: i64
+    symbols: ChromeRenderResolvedSymbols
+    released: bool
+
+struct ChromeRenderLoadResult:
+    ok: bool
+    status: text
+    library_path: text
+    abi: ChromeRenderAbi
+    handle: ChromeRenderHandle?
+    error: text
+    missing_symbol: text
+
+"""The frozen ABI v1 symbol names, in resolution order."""
+fn chrome_render_symbol_names() -> [text]:
+    ["simple_chrome_render_abi_version",
+     "simple_chrome_render_create",
+     "simple_chrome_render_load_html",
+     "simple_chrome_render_load_url",
+     "simple_chrome_render_resize",
+     "simple_chrome_render_frame",
+     "simple_chrome_render_read_pixels_into",
+     "simple_chrome_render_event",
+     "simple_chrome_render_last_error_into",
+     "simple_chrome_render_destroy"]
+
+"""True only for the exact frozen set, in order — extra or missing names are rejected."""
+fn chrome_render_symbols_exact(names: [text]) -> bool:
+    val expected = chrome_render_symbol_names()
+    if names.len() != expected.len():
+        return false
+    var index: i64 = 0
+    while index < expected.len():
+        if names[index] != expected[index]:
+            return false
+        index = index + 1
+    true
+
+fn _chrome_render_empty_abi() -> ChromeRenderAbi:
+    ChromeRenderAbi(version: 0, module_id: "", cef_version: "")
+
+fn _chrome_render_symbol_slots(symbols: ChromeRenderResolvedSymbols) -> [i64]:
+    [symbols.abi_version, symbols.create, symbols.load_html, symbols.load_url,
+     symbols.resize, symbols.render_frame, symbols.read_pixels_into, symbols.event,
+     symbols.last_error_into, symbols.destroy]
+
+"""Name of the first symbol that failed to resolve, or "" when all 10 resolved.
+
+The oracle binding reports only `symbol-missing`; naming the symbol is what lets the
+probe's sabotage fixture prove WHICH export was removed.
+"""
+fn chrome_render_missing_symbol(symbols: ChromeRenderResolvedSymbols) -> text:
+    val slots = _chrome_render_symbol_slots(symbols)
+    val names = chrome_render_symbol_names()
+    var index: i64 = 0
+    while index < slots.len():
+        if slots[index] <= 0:
+            return names[index]
+        index = index + 1
+    ""
+
+fn _chrome_render_result(request: ChromeRenderLoadRequest, ok: bool, status: text,
+                         abi: ChromeRenderAbi, error: text,
+                         missing_symbol: text) -> ChromeRenderLoadResult:
+    ChromeRenderLoadResult(ok: ok, status: status, library_path: request.library_path,
+        abi: abi, handle: nil, error: error, missing_symbol: missing_symbol)
+
+"""Request-shape admission, independent of any filesystem or dynamic loader."""
+fn chrome_render_request_valid(request: ChromeRenderLoadRequest) -> bool:
+    if not request.library_path.starts_with("/") or request.manifest_sha256 == "":
+        return false
+    if request.expected_abi_version != 1:
+        return false
+    if request.max_request_bytes <= 0 or request.max_request_bytes > 1048576:
+        return false
+    if request.max_response_bytes <= 0 or request.max_response_bytes > 268435456:
+        return false
+    chrome_render_symbols_exact(request.required_symbols)
+
+"""Fail-closed admission of a resolved library probe. Never admits a partial symbol set."""
+fn chrome_render_validate_library_probe(request: ChromeRenderLoadRequest,
+                                        probe: ChromeRenderLibraryProbe) -> ChromeRenderLoadResult:
+    if not chrome_render_request_valid(request):
+        return _chrome_render_result(request, false, "invalid-request",
+            _chrome_render_empty_abi(), "request-rejected-before-load", "")
+    if probe.library_handle <= 0:
+        return _chrome_render_result(request, false, "library-not-found",
+            _chrome_render_empty_abi(), "provider-load-failed", "")
+    if probe.manifest_sha256 != request.manifest_sha256:
+        return _chrome_render_result(request, false, "manifest-mismatch",
+            _chrome_render_empty_abi(), "provider-artifact-digest-mismatch", "")
+    val missing = chrome_render_missing_symbol(probe.symbols)
+    if missing != "":
+        return _chrome_render_result(request, false, "symbol-missing",
+            _chrome_render_empty_abi(), "required-abi-v1-symbol-missing", missing)
+    if probe.abi.version != request.expected_abi_version:
+        return _chrome_render_result(request, false, "abi-mismatch", probe.abi,
+            "provider-abi-version-mismatch", "")
+    ChromeRenderLoadResult(ok: true, status: "ok", library_path: request.library_path,
+        abi: probe.abi, handle: nil, error: "", missing_symbol: "")
+
+"""Stage-B backend field: a real `create()` return code mapped to a receipt token.
+
+`create()` returning a positive handle is the ONLY thing that yields `ok`; every other
+outcome is a `blocked:<reason>` string carrying the shim's own status text, so the field
+can never be a silent skip.
+"""
+fn chrome_render_backend_stage(create_result: i64) -> text:
+    if create_result > 0:
+        return "ok"
+    "blocked:" + chrome_render_status_text(chrome_render_create_status(create_result))
+
+@unsafe(reason: "loads and admits the pinned Chrome render provider through the host dynlib facade", capabilities: [ffi, raw_ptr])
+fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResult:
+    if not chrome_render_request_valid(request):
+        return _chrome_render_result(request, false, "invalid-request",
+            _chrome_render_empty_abi(), "request-rejected-before-load", "")
+    val digest = file_hash_sha256(request.library_path)
+    if digest != request.manifest_sha256:
+        return _chrome_render_result(request, false, "manifest-mismatch",
+            _chrome_render_empty_abi(), "provider-artifact-digest-mismatch", "")
+    val loaded = DynLib.load(request.library_path)
+    if loaded == nil:
+        return _chrome_render_result(request, false, "library-not-found",
+            _chrome_render_empty_abi(), "provider-load-failed", "")
+    var lib = loaded.?
+    val symbols = ChromeRenderResolvedSymbols(
+        abi_version: lib.sym(request.required_symbols[0]),
+        create: lib.sym(request.required_symbols[1]),
+        load_html: lib.sym(request.required_symbols[2]),
+        load_url: lib.sym(request.required_symbols[3]),
+        resize: lib.sym(request.required_symbols[4]),
+        render_frame: lib.sym(request.required_symbols[5]),
+        read_pixels_into: lib.sym(request.required_symbols[6]),
+        event: lib.sym(request.required_symbols[7]),
+        last_error_into: lib.sym(request.required_symbols[8]),
+        destroy: lib.sym(request.required_symbols[9]))
+    val missing = chrome_render_missing_symbol(symbols)
+    if missing != "":
+        spl_dlclose(lib.handle)
+        return _chrome_render_result(request, false, "symbol-missing",
+            _chrome_render_empty_abi(), "required-abi-v1-symbol-missing", missing)
+    val digest_after_load = file_hash_sha256(request.library_path)
+    if digest_after_load != digest:
+        spl_dlclose(lib.handle)
+        return _chrome_render_result(request, false, "manifest-mismatch",
+            _chrome_render_empty_abi(), "provider-artifact-changed-during-load", "")
+    val abi_version = spl_wffi_call_i64(symbols.abi_version, [], 0)
+    val abi = ChromeRenderAbi(version: abi_version,
+        module_id: "libsimple_chrome_render", cef_version: "manifest-pinned")
+    val probe = ChromeRenderLibraryProbe(library_handle: lib.handle,
+        manifest_sha256: digest, abi: abi, symbols: symbols)
+    val admitted = chrome_render_validate_library_probe(request, probe)
+    if not admitted.ok:
+        spl_dlclose(lib.handle)
+        return admitted
+    ChromeRenderLoadResult(ok: true, status: "ok", library_path: request.library_path,
+        abi: abi, handle: Some(ChromeRenderHandle(library_handle: lib.handle,
+            session_handle: 0, library_path: request.library_path,
+            abi_version: abi_version, symbols: symbols, released: false)),
+        error: "", missing_symbol: "")
+
+"""Stage B: call the real `create()` with a bounded config payload. No fake success path."""
+@unsafe(reason: "invokes the admitted bounded Chrome render create ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_create(handle: ChromeRenderHandle, config_json: text) -> i64:
+    if handle.released or handle.library_handle <= 0 or handle.symbols.create <= 0:
+        return 0 - 2
+    if config_json == "" or config_json.len() > 1048576:
+        return 0 - 1
+    val payload: [u8] = text_to_bytes(config_json)
+    spl_wffi_call_i64_with_bytes(handle.symbols.create, [], payload, 0, payload.len(), [])
+
+"""The frozen per-tab call sequence, in ABI order. Recorded in showcase receipts."""
+fn chrome_render_sequence_steps() -> [text]:
+    ["create", "load_html", "resize", "render_frame", "read_pixels_into",
+     "event_pointer", "event_key", "destroy"]
+
+"""Calls `load_html` with a bounded HTML payload."""
+@unsafe(reason: "invokes the admitted bounded Chrome render load_html ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_load_html(handle: ChromeRenderHandle, session_handle: i64, html: text) -> i64:
+    if handle.released or handle.symbols.load_html <= 0:
+        return 2
+    if html == "" or html.len() > 1048576:
+        return 1
+    val payload: [u8] = text_to_bytes(html)
+    spl_wffi_call_i64_with_bytes(handle.symbols.load_html, [session_handle], payload, 0,
+        payload.len(), [])
+
+"""Calls `resize`. `scale` is milli-units here because the facade carries only i64 args.
+
+The C entry takes a `double` scale; a device-scale other than 1.0 therefore cannot be
+expressed through the all-i64 transport and is recorded as a separate limitation rather
+than silently rounded. 1.0 is passed as the integer 1, which is exact.
+"""
+@unsafe(reason: "invokes the admitted Chrome render resize ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_resize(handle: ChromeRenderHandle, session_handle: i64,
+                        width: i64, height: i64) -> i64:
+    if handle.released or handle.symbols.resize <= 0:
+        return 2
+    if width <= 0 or height <= 0 or width > 8192 or height > 8192:
+        return 1
+    spl_wffi_call_i64(handle.symbols.resize, [session_handle, width, height, 1], 4)
+
+"""Calls `render_frame` with a bounded timeout. A zero timeout is refused by the ABI."""
+@unsafe(reason: "invokes the admitted Chrome render frame ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_frame(handle: ChromeRenderHandle, session_handle: i64, timeout_ms: i64) -> i64:
+    if handle.released or handle.symbols.render_frame <= 0:
+        return 2
+    if timeout_ms <= 0:
+        return 1
+    spl_wffi_call_i64(handle.symbols.render_frame, [session_handle, timeout_ms], 2)
+
+"""Probes `read_pixels_into` with NULL buffer and NULL out_len.
+
+This is NOT a readback and must never be read as one. The host dynlib facade has no
+bounded OUT-byte-buffer call (see `chrome_render_readback_facade_missing`), so the only
+thing Simple can do with this entry point today is call it with null pointers and record
+the provider's real refusal — which proves the symbol is callable and the argument
+marshalling is right, and is strictly better than not calling it at all. A real frame pull
+waits on the facade.
+"""
+@unsafe(reason: "null-probes the admitted Chrome render readback ABI; pulls no pixels", capabilities: [ffi, raw_ptr])
+fn chrome_render_read_pixels_probe(handle: ChromeRenderHandle, session_handle: i64) -> i64:
+    if handle.released or handle.symbols.read_pixels_into <= 0:
+        return 2
+    spl_wffi_call_i64(handle.symbols.read_pixels_into, [session_handle, 0, 0, 0], 4)
+
+"""True while no bounded OUT-byte-buffer facade exists, so no real frame can be pulled.
+
+Named rather than commented so a receipt, a check script and a spec can all agree on the
+one condition that gates a real Chrome frame, instead of each carrying its own prose.
+"""
+fn chrome_render_readback_facade_missing() -> bool:
+    true
+
+"""Dispatches one bounded JSON input event (`event`)."""
+@unsafe(reason: "invokes the admitted bounded Chrome render event ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_event(handle: ChromeRenderHandle, session_handle: i64, event_json: text) -> i64:
+    if handle.released or handle.symbols.event <= 0:
+        return 2
+    if event_json == "" or event_json.len() > 1048576:
+        return 1
+    val payload: [u8] = text_to_bytes(event_json)
+    spl_wffi_call_i64_with_bytes(handle.symbols.event, [session_handle], payload, 0,
+        payload.len(), [])
+
+"""A synthetic pointer-down event at (x, y), as the ABI's bounded JSON payload."""
+fn chrome_render_pointer_event_json(x: i64, y: i64) -> text:
+    "{\"kind\":\"pointer\",\"type\":\"down\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + "}"
+
+"""A synthetic key event for one key name."""
+fn chrome_render_key_event_json(key: text) -> text:
+    "{\"kind\":\"key\",\"type\":\"down\",\"key\":\"" + key + "\"}"
+
+"""Calls the provider's `destroy`. Session 0 is legal and must answer `invalid-handle`.
+
+Stage A of the probe calls this with 0: it proves the resolved `destroy` pointer is
+actually CALLABLE, which merely resolving a symbol address does not.
+"""
+@unsafe(reason: "invokes the admitted Chrome render destroy ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_destroy(handle: ChromeRenderHandle, session_handle: i64) -> i64:
+    if handle.released or handle.symbols.destroy <= 0:
+        return 2
+    spl_wffi_call_i64(handle.symbols.destroy, [session_handle], 1)
+
+"""Destroys any session and closes the library. Always releases the dynlib handle."""
+@unsafe(reason: "releases the admitted Chrome render provider session and library", capabilities: [ffi, raw_ptr])
+fn chrome_render_release(handle: ChromeRenderHandle, session_handle: i64) -> bool:
+    if handle.released or handle.library_handle <= 0:
+        return false
+    chrome_render_destroy(handle, session_handle)
+    spl_dlclose(handle.library_handle)
+    true

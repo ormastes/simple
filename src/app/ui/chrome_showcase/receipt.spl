@@ -1,0 +1,201 @@
+"""Chrome-backed showcase receipt: writer, parser and fail-closed classifier.
+
+Pure: no filesystem, no dynlib, no Engine2D. `chrome_showcase_receipt_text` renders the
+`key=value` body that `build/chrome-showcase/receipt.env` carries;
+`chrome_showcase_classify` decides the verdict from a receipt record, so the spec can prove
+classification without a CEF drop, a GPU, or a deployed binary.
+
+The four verdicts are frozen and exhaustive: `passed` / `failed` / `environment-blocked` /
+`could-not-complete-in-time`. A receipt whose `frame_source` is neither `chrome` nor
+`stub-pattern` is `failed`, never `passed` — that field is what keeps a synthetic test
+pattern from ever being read as Chrome output.
+"""
+
+pub val CHROME_SHOWCASE_FRAME_CHROME: text = "chrome"
+pub val CHROME_SHOWCASE_FRAME_STUB: text = "stub-pattern"
+
+pub val CHROME_SHOWCASE_PASSED: text = "passed"
+pub val CHROME_SHOWCASE_FAILED: text = "failed"
+pub val CHROME_SHOWCASE_BLOCKED: text = "environment-blocked"
+pub val CHROME_SHOWCASE_TIMEOUT: text = "could-not-complete-in-time"
+
+"""One tab row of the receipt. `nonblank` is a measured property of the composited frame."""
+pub struct ChromeShowcaseTabRow:
+    tab: text
+    wall_ms: i64
+    pixels: i64
+    nonblank: bool
+    ppm_path: text
+    # Comma-separated provider return codes, one per frozen ABI sequence step, in the order
+    # named by `sequence_steps=` in the receipt header. Empty when the provider was never
+    # loaded — which is itself a recorded state, not a missing field.
+    call_rcs: text
+
+"""Everything the receipt records about one showcase run."""
+pub struct ChromeShowcaseReceipt:
+    binary_path: text
+    binary_size: i64
+    binary_mtime: i64
+    chrome_lib_sha256: text
+    backend_stage: text
+    engine2d_backend_requested: text
+    engine2d_backend_reported: text
+    inventory_version: text
+    catalog_sha256: text
+    # The frozen ABI sequence step names, comma-separated. Every row's `call_rcs` has
+    # exactly this many entries.
+    sequence_steps: text
+    viewport_width: i64
+    viewport_height: i64
+    frame_source: text
+    reason: text
+    timed_out: bool
+    rows: [ChromeShowcaseTabRow]
+
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "1"
+    "0"
+
+"""The documented stub-shim rc list for the frozen 8-step sequence, as an absolute oracle.
+
+Measured against the real stub built by `scripts/check/build-chrome-render-shim.shs`:
+`create` returns **-4** (the negated `CHROME_RENDER_E_BACKEND_UNAVAILABLE`) and opens NO
+session, so every later step looks up a null session and returns **2**
+(`CHROME_RENDER_E_INVALID_HANDLE`) — NOT `-4`/`4`. Anyone expecting UNAVAILABLE at every
+step is reading the ABI wrong: only the step that can reach the backend can report the
+backend. This list is the contract that pins that.
+"""
+pub fn chrome_showcase_stub_sequence_rcs() -> [i64]:
+    [0 - 4, 2, 2, 2, 2, 2, 2, 2]
+
+fn _count_fields(csv: text) -> i64:
+    if csv == "":
+        return 0
+    csv.split(",").len()
+
+"""True when a row's `call_rcs` has exactly one entry per frozen sequence step.
+
+A row that skipped a step, or gained one, has a list that no longer lines up with the
+`sequence_steps=` labels, which makes every rc in it unattributable. That is a corrupt
+receipt, not a partial one, so it fails rather than being read leniently.
+"""
+pub fn chrome_showcase_call_rcs_valid(call_rcs: text, sequence_steps: text) -> bool:
+    val steps = _count_fields(sequence_steps)
+    if steps <= 0:
+        return false
+    _count_fields(call_rcs) == steps
+
+"""Fail-closed verdict. Ordered so no later rule can launder an earlier refusal."""
+pub fn chrome_showcase_classify(receipt: ChromeShowcaseReceipt) -> text:
+    if receipt.frame_source != CHROME_SHOWCASE_FRAME_CHROME and receipt.frame_source != CHROME_SHOWCASE_FRAME_STUB:
+        return CHROME_SHOWCASE_FAILED
+    if receipt.rows.len() <= 0:
+        return CHROME_SHOWCASE_FAILED
+    if receipt.timed_out:
+        return CHROME_SHOWCASE_TIMEOUT
+    if receipt.engine2d_backend_reported == "":
+        return CHROME_SHOWCASE_FAILED
+    var blank: i64 = 0
+    for row in receipt.rows:
+        if not row.nonblank or row.pixels <= 0 or row.ppm_path == "":
+            blank = blank + 1
+        # A row that recorded rcs at all must record one per frozen step. An empty list is
+        # the legitimate "provider never loaded" state and is not checked here; a list of
+        # the wrong LENGTH means a step was skipped or added, which desynchronises every
+        # rc from its label.
+        if row.call_rcs != "" and not chrome_showcase_call_rcs_valid(row.call_rcs, receipt.sequence_steps):
+            blank = blank + 1
+    if blank > 0:
+        return CHROME_SHOWCASE_FAILED
+    if receipt.frame_source == CHROME_SHOWCASE_FRAME_STUB:
+        if receipt.reason == "":
+            return CHROME_SHOWCASE_FAILED
+        return CHROME_SHOWCASE_BLOCKED
+    if receipt.backend_stage != "ok":
+        return CHROME_SHOWCASE_FAILED
+    CHROME_SHOWCASE_PASSED
+
+"""Renders the receipt body. Every key is always emitted; a blank value is still a key."""
+pub fn chrome_showcase_receipt_text(receipt: ChromeShowcaseReceipt) -> text:
+    var out = "binary_path=" + receipt.binary_path + "\n"
+    out = out + "binary_size=" + receipt.binary_size.to_text() + "\n"
+    out = out + "binary_mtime=" + receipt.binary_mtime.to_text() + "\n"
+    out = out + "chrome_lib_sha256=" + receipt.chrome_lib_sha256 + "\n"
+    out = out + "backend_stage=" + receipt.backend_stage + "\n"
+    out = out + "engine2d_backend_requested=" + receipt.engine2d_backend_requested + "\n"
+    out = out + "engine2d_backend_reported=" + receipt.engine2d_backend_reported + "\n"
+    out = out + "inventory_version=" + receipt.inventory_version + "\n"
+    out = out + "catalog_sha256=" + receipt.catalog_sha256 + "\n"
+    out = out + "sequence_steps=" + receipt.sequence_steps + "\n"
+    out = out + "viewport=" + receipt.viewport_width.to_text() + "x" + receipt.viewport_height.to_text() + "\n"
+    out = out + "frame_source=" + receipt.frame_source + "\n"
+    out = out + "reason=" + receipt.reason + "\n"
+    out = out + "tabs=" + receipt.rows.len().to_text() + "\n"
+    var total_ms: i64 = 0
+    var total_px: i64 = 0
+    for row in receipt.rows:
+        out = out + "tab_" + row.tab + "_wall_ms=" + row.wall_ms.to_text() + "\n"
+        out = out + "tab_" + row.tab + "_pixels=" + row.pixels.to_text() + "\n"
+        out = out + "tab_" + row.tab + "_nonblank=" + _bool_text(row.nonblank) + "\n"
+        out = out + "tab_" + row.tab + "_ppm=" + row.ppm_path + "\n"
+        out = out + "tab_" + row.tab + "_call_rcs=" + row.call_rcs + "\n"
+        total_ms = total_ms + row.wall_ms
+        total_px = total_px + row.pixels
+    out = out + "wall_ms_total=" + total_ms.to_text() + "\n"
+    out = out + "pixels_total=" + total_px.to_text() + "\n"
+    out = out + "verdict=" + chrome_showcase_classify(receipt) + "\n"
+    out
+
+"""Reads one key from a rendered receipt body. Empty text when the key is absent."""
+pub fn chrome_showcase_receipt_field(body: text, key: text) -> text:
+    val prefix = key + "="
+    for line in body.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+    ""
+
+"""Keys the perf check and the classifier both depend on. Missing one is never a pass."""
+pub fn chrome_showcase_receipt_required_keys() -> [text]:
+    ["binary_path", "binary_size", "binary_mtime", "chrome_lib_sha256",
+     "backend_stage", "engine2d_backend_requested", "engine2d_backend_reported",
+     "inventory_version", "catalog_sha256", "sequence_steps", "viewport", "frame_source", "reason",
+     "tabs", "wall_ms_total", "pixels_total", "verdict"]
+
+"""True only when every key the classifier reads is present in the body."""
+pub fn chrome_showcase_receipt_complete(body: text) -> bool:
+    for key in chrome_showcase_receipt_required_keys():
+        var seen = false
+        val prefix = key + "="
+        for line in body.split("\n"):
+            if line.starts_with(prefix):
+                seen = true
+        if not seen:
+            return false
+    true
+
+"""Verdict recovered from a rendered body, refusing an incomplete one.
+
+A body that lost a required key — the sabotage fixture drops `frame_source` — reports
+`failed` here even if it still carries a `verdict=passed` line, so a hand-edited receipt
+cannot talk its way past the check script.
+"""
+pub fn chrome_showcase_verdict_of_body(body: text) -> text:
+    if not chrome_showcase_receipt_complete(body):
+        return CHROME_SHOWCASE_FAILED
+    val source = chrome_showcase_receipt_field(body, "frame_source")
+    if source != CHROME_SHOWCASE_FRAME_CHROME and source != CHROME_SHOWCASE_FRAME_STUB:
+        return CHROME_SHOWCASE_FAILED
+    if chrome_showcase_receipt_field(body, "tabs") == "0":
+        return CHROME_SHOWCASE_FAILED
+    val verdict = chrome_showcase_receipt_field(body, "verdict")
+    if verdict != CHROME_SHOWCASE_PASSED and verdict != CHROME_SHOWCASE_FAILED and
+       verdict != CHROME_SHOWCASE_BLOCKED and verdict != CHROME_SHOWCASE_TIMEOUT:
+        return CHROME_SHOWCASE_FAILED
+    # A stub-pattern run can never be `passed`, whatever the body's own verdict line says.
+    # Without this, hand-editing `verdict=` in a blocked receipt turns a synthetic test
+    # pattern into a claimed Chrome pass — the exact laundering `frame_source` exists to
+    # prevent. `chrome_showcase_classify` already refuses it; this is the body-side twin.
+    if source == CHROME_SHOWCASE_FRAME_STUB and verdict == CHROME_SHOWCASE_PASSED:
+        return CHROME_SHOWCASE_FAILED
+    verdict

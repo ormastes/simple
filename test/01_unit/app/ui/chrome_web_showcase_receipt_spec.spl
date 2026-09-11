@@ -1,0 +1,190 @@
+use std.spec
+use app.ui.chrome_showcase.receipt.{ChromeShowcaseReceipt, ChromeShowcaseTabRow,
+    chrome_showcase_classify, chrome_showcase_receipt_text, chrome_showcase_receipt_field,
+    chrome_showcase_receipt_complete, chrome_showcase_verdict_of_body,
+    chrome_showcase_receipt_required_keys, chrome_showcase_stub_sequence_rcs,
+    chrome_showcase_call_rcs_valid,
+    CHROME_SHOWCASE_FRAME_CHROME, CHROME_SHOWCASE_FRAME_STUB, CHROME_SHOWCASE_PASSED,
+    CHROME_SHOWCASE_FAILED, CHROME_SHOWCASE_BLOCKED, CHROME_SHOWCASE_TIMEOUT}
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{chrome_render_sequence_steps,
+    chrome_render_backend_stage}
+use app.ui.chrome_showcase.frame.{chrome_frame_argb, chrome_frame_stub_pixel,
+    chrome_frame_stub_image, chrome_frame_bgra_to_argb, chrome_frame_nonblank,
+    chrome_frame_ppm_bytes}
+
+fn rows(count: i64) -> [ChromeShowcaseTabRow]:
+    var out: [ChromeShowcaseTabRow] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(ChromeShowcaseTabRow(tab: "t" + index.to_text(), wall_ms: 12,
+            pixels: 57600, nonblank: true, ppm_path: "build/chrome-showcase/t.ppm",
+            call_rcs: "-4,2,2,2,2,2,2,2"))
+        index = index + 1
+    out
+
+fn base(frame_source: text, reason: text) -> ChromeShowcaseReceipt:
+    ChromeShowcaseReceipt(
+        binary_path: "/bin/release/simple", binary_size: 1234, binary_mtime: 99,
+        chrome_lib_sha256: "fe87", backend_stage: "ok",
+        engine2d_backend_requested: "vulkan", engine2d_backend_reported: "vulkan",
+        inventory_version: "web-renderable-feature-inventory-v1", catalog_sha256: "abcd",
+        sequence_steps: "create,load_html,resize,render_frame,read_pixels_into,event_pointer,event_key,destroy",
+        viewport_width: 320, viewport_height: 180, frame_source: frame_source,
+        reason: reason, timed_out: false, rows: rows(7))
+
+describe "Chrome web showcase receipt":
+    it "passes only a chrome-sourced run whose backend stage is ok and every tab painted":
+        expect(chrome_showcase_classify(base(CHROME_SHOWCASE_FRAME_CHROME, ""))).to_equal(CHROME_SHOWCASE_PASSED)
+
+    it "reports environment-blocked for a stub-pattern run that states a reason":
+        val blocked = base(CHROME_SHOWCASE_FRAME_STUB, "no-cef-drop")
+        expect(chrome_showcase_classify(blocked)).to_equal(CHROME_SHOWCASE_BLOCKED)
+
+    it "refuses a stub-pattern run with no reason rather than calling it blocked":
+        expect(chrome_showcase_classify(base(CHROME_SHOWCASE_FRAME_STUB, ""))).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "fails an unknown or missing frame_source, so a stub can never read as chrome":
+        expect(chrome_showcase_classify(base("", "no-cef-drop"))).to_equal(CHROME_SHOWCASE_FAILED)
+        expect(chrome_showcase_classify(base("real", "no-cef-drop"))).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "never passes a zero-tab run":
+        var empty = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        empty.rows = []
+        expect(chrome_showcase_classify(empty)).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "fails when any tab produced a blank frame or no PPM":
+        # `receipt.rows[3].nonblank = false` is refused by the deployed compiler with
+        # "invalid assignment: complex indexed field receiver is not supported"; filed as
+        # doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md.
+        var blank = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        var blank_rows = blank.rows
+        blank_rows[3] = ChromeShowcaseTabRow(tab: "t3", wall_ms: 12, pixels: 57600,
+            nonblank: false, ppm_path: "build/chrome-showcase/t.ppm", call_rcs: "-4,2,2,2,2,2,2,2")
+        blank.rows = blank_rows
+        expect(chrome_showcase_classify(blank)).to_equal(CHROME_SHOWCASE_FAILED)
+        var nofile = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        var nofile_rows = nofile.rows
+        nofile_rows[0] = ChromeShowcaseTabRow(tab: "t0", wall_ms: 12, pixels: 57600,
+            nonblank: true, ppm_path: "", call_rcs: "-4,2,2,2,2,2,2,2")
+        nofile.rows = nofile_rows
+        expect(chrome_showcase_classify(nofile)).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "reports could-not-complete-in-time ahead of any later admission rule":
+        var slow = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        slow.timed_out = true
+        expect(chrome_showcase_classify(slow)).to_equal(CHROME_SHOWCASE_TIMEOUT)
+
+    it "fails a chrome-sourced run whose backend stage is blocked":
+        var stage = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        stage.backend_stage = "blocked:backend-unavailable"
+        expect(chrome_showcase_classify(stage)).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "fails when Engine2D reported no backend at all":
+        var nobackend = base(CHROME_SHOWCASE_FRAME_CHROME, "")
+        nobackend.engine2d_backend_reported = ""
+        expect(chrome_showcase_classify(nobackend)).to_equal(CHROME_SHOWCASE_FAILED)
+
+describe "Chrome web showcase receipt body":
+    it "renders every required key and round-trips through the field reader":
+        val body = chrome_showcase_receipt_text(base(CHROME_SHOWCASE_FRAME_STUB, "no-cef-drop"))
+        expect(chrome_showcase_receipt_complete(body)).to_equal(true)
+        expect(chrome_showcase_receipt_field(body, "frame_source")).to_equal(CHROME_SHOWCASE_FRAME_STUB)
+        expect(chrome_showcase_receipt_field(body, "tabs")).to_equal("7")
+        expect(chrome_showcase_receipt_field(body, "verdict")).to_equal(CHROME_SHOWCASE_BLOCKED)
+        expect(chrome_showcase_receipt_field(body, "viewport")).to_equal("320x180")
+        expect(chrome_showcase_receipt_field(body, "wall_ms_total")).to_equal("84")
+        expect(chrome_showcase_receipt_required_keys().len()).to_equal(17)
+
+    it "records per-tab wall_ms, pixels and nonblank rows":
+        val body = chrome_showcase_receipt_text(base(CHROME_SHOWCASE_FRAME_CHROME, ""))
+        expect(chrome_showcase_receipt_field(body, "tab_t0_wall_ms")).to_equal("12")
+        expect(chrome_showcase_receipt_field(body, "tab_t0_pixels")).to_equal("57600")
+        expect(chrome_showcase_receipt_field(body, "tab_t0_nonblank")).to_equal("1")
+
+    it "refuses a body that lost frame_source even when it still claims verdict=passed":
+        val body = chrome_showcase_receipt_text(base(CHROME_SHOWCASE_FRAME_CHROME, ""))
+        expect(chrome_showcase_verdict_of_body(body)).to_equal(CHROME_SHOWCASE_PASSED)
+        var sabotaged = ""
+        for line in body.split("\n"):
+            if not line.starts_with("frame_source="):
+                sabotaged = sabotaged + line + "\n"
+        expect(chrome_showcase_receipt_complete(sabotaged)).to_equal(false)
+        expect(chrome_showcase_verdict_of_body(sabotaged)).to_equal(CHROME_SHOWCASE_FAILED)
+
+    it "refuses a stub-pattern body whose verdict line was hand-edited to passed":
+        val blocked = chrome_showcase_receipt_text(base(CHROME_SHOWCASE_FRAME_STUB, "no-cef-drop"))
+        val laundered = blocked.replace("verdict=" + CHROME_SHOWCASE_BLOCKED,
+            "verdict=" + CHROME_SHOWCASE_PASSED)
+        expect(chrome_showcase_receipt_field(laundered, "verdict")).to_equal(CHROME_SHOWCASE_PASSED)
+        expect(chrome_showcase_receipt_complete(laundered)).to_equal(true)
+        expect(chrome_showcase_verdict_of_body(laundered)).to_equal(CHROME_SHOWCASE_FAILED)
+
+describe "Chrome dynlib per-tab call sequence":
+    it "freezes the eight ABI steps in order":
+        val steps = chrome_render_sequence_steps()
+        expect(steps.len()).to_equal(8)
+        expect(steps[0]).to_equal("create")
+        expect(steps[1]).to_equal("load_html")
+        expect(steps[2]).to_equal("resize")
+        expect(steps[3]).to_equal("render_frame")
+        expect(steps[4]).to_equal("read_pixels_into")
+        expect(steps[5]).to_equal("event_pointer")
+        expect(steps[6]).to_equal("event_key")
+        expect(steps[7]).to_equal("destroy")
+
+    it "pins the stub shim's rc per step as an absolute oracle":
+        # Measured against the real stub dylib: create answers -4
+        # (negated CHROME_RENDER_E_BACKEND_UNAVAILABLE) and opens NO session, so every
+        # later step looks up a null session and answers 2 (E_INVALID_HANDLE). Only the
+        # step that can reach a backend can report the backend.
+        val rcs = chrome_showcase_stub_sequence_rcs()
+        expect(rcs.len()).to_equal(chrome_render_sequence_steps().len())
+        expect(rcs[0]).to_equal(0 - 4)
+        expect(rcs[1]).to_equal(2)
+        expect(rcs[7]).to_equal(2)
+        expect(chrome_render_backend_stage(rcs[0])).to_equal("blocked:backend-unavailable")
+
+    it "requires exactly one recorded rc per frozen step":
+        val steps = "create,load_html,resize,render_frame,read_pixels_into,event_pointer,event_key,destroy"
+        expect(chrome_showcase_call_rcs_valid("-4,2,2,2,2,2,2,2", steps)).to_equal(true)
+        # Sabotage shape: `resize` skipped -> 7 rcs against 8 labels.
+        expect(chrome_showcase_call_rcs_valid("-4,2,2,2,2,2,2", steps)).to_equal(false)
+        expect(chrome_showcase_call_rcs_valid("-4,2,2,2,2,2,2,2,2", steps)).to_equal(false)
+        expect(chrome_showcase_call_rcs_valid("-4,2,2,2,2,2,2,2", "")).to_equal(false)
+
+    it "fails a receipt whose rows skipped a sequence step":
+        var skipped = base(CHROME_SHOWCASE_FRAME_STUB, "no-cef-drop")
+        var skipped_rows = skipped.rows
+        skipped_rows[2] = ChromeShowcaseTabRow(tab: "t2", wall_ms: 12, pixels: 57600,
+            nonblank: true, ppm_path: "build/chrome-showcase/t.ppm",
+            call_rcs: "-4,2,2,2,2,2,2")
+        skipped.rows = skipped_rows
+        expect(chrome_showcase_classify(skipped)).to_equal(CHROME_SHOWCASE_FAILED)
+
+describe "Chrome showcase frame plumbing":
+    it "pins the stub test pattern to an absolute pixel value":
+        expect(chrome_frame_stub_pixel(3, 5, 2)).to_equal(4283380608)
+        expect(chrome_frame_argb(255, 255, 255)).to_equal(4294967295)
+
+    it "builds a stub image of the requested size that is never blank":
+        val image = chrome_frame_stub_image(8, 4, 1)
+        expect(image.len()).to_equal(32)
+        expect(image[0].to_i64()).to_equal(chrome_frame_stub_pixel(0, 0, 1))
+        expect(chrome_frame_nonblank(image)).to_equal(true)
+
+    it "calls a single-valued image blank":
+        expect(chrome_frame_nonblank([4278190080, 4278190080, 4278190080])).to_equal(false)
+        expect(chrome_frame_nonblank([])).to_equal(false)
+
+    it "swizzles BGRA readback bytes into ARGB words, not the other way round":
+        val bytes: [u8] = [10, 20, 30, 255, 1, 2, 3, 255]
+        val argb = chrome_frame_bgra_to_argb(bytes, 2)
+        expect(argb.len()).to_equal(2)
+        expect(argb[0].to_i64()).to_equal(chrome_frame_argb(30, 20, 10))
+        expect(argb[1].to_i64()).to_equal(chrome_frame_argb(3, 2, 1))
+
+    it "writes a P6 PPM header and three bytes per pixel":
+        val ppm = chrome_frame_ppm_bytes(chrome_frame_stub_image(4, 2, 0), 4, 2)
+        expect(ppm[0].to_i64()).to_equal(80)
+        expect(ppm[1].to_i64()).to_equal(54)
+        expect(ppm.len()).to_equal("P6\n4 2\n255\n".len() + 24)
