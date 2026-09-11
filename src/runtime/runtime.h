@@ -431,6 +431,13 @@ int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,
         int64_t resource, int64_t bytes_ptr);
 int64_t  rt_gpu_provider_completion_release(int64_t backend_bit, int64_t session,
         int64_t completion);
+int64_t  rt_gpu_provider_quarantine_drain(int64_t backend_bit);
+int64_t  rt_gpu_provider_session_authority_word(int64_t backend_bit,
+        int64_t session, int64_t word);
+int64_t  rt_gpu_provider_resource_authority_word(int64_t backend_bit,
+        int64_t session, int64_t resource, int64_t word);
+int64_t  rt_gpu_provider_completion_authority_word(int64_t backend_bit,
+        int64_t session, int64_t completion, int64_t word);
 int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);

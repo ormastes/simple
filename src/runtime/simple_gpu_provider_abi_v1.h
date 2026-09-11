@@ -32,7 +32,11 @@ enum {
     SIMPLE_GPU_STATUS_INVALID = -3,
     SIMPLE_GPU_STATUS_BUSY = -4,
     SIMPLE_GPU_STATUS_TIMEOUT = -5,
-    SIMPLE_GPU_STATUS_FAILED = -6
+    SIMPLE_GPU_STATUS_FAILED = -6,
+    /* Submit did not reach a queue and created no completion. */
+    SIMPLE_GPU_STATUS_REJECTED = -7,
+    /* Submission may have reached a queue; host must retain/quarantine. */
+    SIMPLE_GPU_STATUS_UNCERTAIN = -8
 };
 
 enum { SIMPLE_GPU_OP_COUNT = 1 };
@@ -44,6 +48,9 @@ typedef struct SimpleGpuSubmitV1 {
     uint64_t length;
     uint64_t correlation_id;
 } SimpleGpuSubmitV1;
+/* `data` is immutable and valid only for the duration of submit(). A provider
+ * returning OK has copied/consumed it into provider-owned storage; retaining
+ * the host pointer is an ABI violation. */
 
 typedef struct SimpleGpuResourceDescV1 {
     uint32_t struct_size;
@@ -62,6 +69,10 @@ typedef struct SimpleGpuReceiptV1 {
     uint64_t checksum;
     uint64_t device_elapsed_ns;
 } SimpleGpuReceiptV1;
+/* wait() may return OK only after the backend fence is terminal and all
+ * receipt fields are final. completion_release() must synchronously drain or
+ * cancel terminal work before returning OK. `checksum` is FNV-1a-64 over the
+ * exact readback bytes; the host stages and verifies before committing output. */
 
 typedef struct SimpleGpuBytesV1 {
     uint32_t struct_size;
@@ -90,6 +101,11 @@ typedef struct SimpleGpuProviderAbiV1 {
     SimpleGpuStatusV1 (*resource_release)(SimpleGpuHandleV1, SimpleGpuHandleV1);
     SimpleGpuStatusV1 (*completion_release)(SimpleGpuHandleV1, SimpleGpuHandleV1);
 } SimpleGpuProviderAbiV1;
+/* session_close() is the final retirement fence: it must drain/cancel every
+ * resource and completion belonging to the session before returning OK. */
+/* Creation callbacks return REJECTED only when no native object/work exists.
+ * Any other failure without a successfully drained handle is uncertain and
+ * the host retains a quarantine that prevents provider unload. */
 
 typedef const SimpleGpuProviderAbiV1 *(*SimpleGpuProviderQueryV1)(void);
 

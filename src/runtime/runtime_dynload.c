@@ -295,19 +295,11 @@ static void *simple_gpu_open_with_authentication_v1(
         return handle;
     }
 #else
-    {
-        uint8_t after[32];
-        if (!rt_sha256_file_raw_v1(path, digest) ||
-                !simple_gpu_digest_matches_expected(expected, digest)) return NULL;
-        handle = simple_gpu_open(path);
-        if (!handle || !rt_sha256_file_raw_v1(path, after) ||
-                memcmp(digest, after, 32) != 0) {
-            if (handle) simple_gpu_close(handle);
-            return NULL;
-        }
-        *authenticated = 1;
-        return handle;
-    }
+    /* No non-Linux platform currently offers this owner an immutable mapped
+     * snapshot primitive. Never upgrade a before/after pathname hash into
+     * exact-byte authority; generic ABI admission stays unavailable. */
+    (void)path; (void)digest; (void)handle;
+    return NULL;
 #endif
 }
 
@@ -317,7 +309,8 @@ static const SimpleGpuProviderAbiV1 *simple_gpu_validate_api(
     const SimpleGpuProviderAbiV1 *api;
     size_t required_size = offsetof(SimpleGpuProviderAbiV1, completion_release) +
         sizeof(((SimpleGpuProviderAbiV1 *)0)->completion_release);
-    if (!authenticated) return NULL;
+    if (!authenticated || sizeof(void *) != 8 || sizeof(uintptr_t) != 8)
+        return NULL;
     query = (SimpleGpuProviderQueryV1)simple_gpu_symbol(
         handle, "simple_gpu_provider_query_v1");
     if (!query || !(api = query()) || api->struct_size < required_size ||
@@ -518,6 +511,18 @@ static void simple_gpu_call_release_v1(SimpleGpuCallPinV1 *pin) {
 }
 
 enum { SIMPLE_GPU_OWNER_CAPACITY_V1 = 256 };
+enum { SIMPLE_GPU_RESOURCE_MAX_BYTES_V1 = 1073741824 };
+
+static uint64_t simple_gpu_readback_checksum_v1(
+        const uint8_t *bytes, uint64_t length) {
+    uint64_t value = UINT64_C(1469598103934665603);
+    uint64_t i;
+    for (i = 0; i < length; i++) {
+        value ^= bytes[i];
+        value *= UINT64_C(1099511628211);
+    }
+    return value;
+}
 
 typedef struct SimpleGpuOwnedSessionV1 {
     uint64_t token;
@@ -526,6 +531,7 @@ typedef struct SimpleGpuOwnedSessionV1 {
     uint64_t device;
     uint32_t resources;
     uint32_t completions;
+    int quarantined;
     int busy;
     SimpleGpuProviderState *state;
 } SimpleGpuOwnedSessionV1;
@@ -536,6 +542,7 @@ typedef struct SimpleGpuOwnedResourceV1 {
     uint64_t provider_handle;
     uint64_t size_bytes;
     uint64_t generation;
+    int quarantined;
     int busy;
     SimpleGpuProviderState *state;
 } SimpleGpuOwnedResourceV1;
@@ -546,7 +553,12 @@ typedef struct SimpleGpuOwnedCompletionV1 {
     uint64_t provider_handle;
     uint64_t correlation_id;
     uint64_t generation;
+    uint64_t terminal_resource_token;
+    uint64_t checksum;
+    uint64_t readback_length;
     int terminal;
+    int readback_observed;
+    int quarantined;
     int busy;
     SimpleGpuProviderState *state;
 } SimpleGpuOwnedCompletionV1;
@@ -554,13 +566,46 @@ typedef struct SimpleGpuOwnedCompletionV1 {
 static SimpleGpuOwnedSessionV1 simple_gpu_sessions[SIMPLE_GPU_OWNER_CAPACITY_V1];
 static SimpleGpuOwnedResourceV1 simple_gpu_resources[SIMPLE_GPU_OWNER_CAPACITY_V1];
 static SimpleGpuOwnedCompletionV1 simple_gpu_completions[SIMPLE_GPU_OWNER_CAPACITY_V1];
-static uint64_t simple_gpu_owner_token_v1 = 1;
+static int simple_gpu_token_exists_locked_v1(uint64_t token) {
+    size_t i;
+    for (i = 0; i < SIMPLE_GPU_OWNER_CAPACITY_V1; i++)
+        if (simple_gpu_sessions[i].token == token ||
+                simple_gpu_resources[i].token == token ||
+                simple_gpu_completions[i].token == token) return 1;
+    return 0;
+}
 
 static uint64_t simple_gpu_next_token_locked_v1(void) {
-    uint64_t value = simple_gpu_owner_token_v1;
-    if (value == 0 || value == UINT64_MAX) return 0;
-    simple_gpu_owner_token_v1++;
-    return value;
+    int attempt;
+    for (attempt = 0; attempt < 16; attempt++) {
+        uint64_t value = 0;
+#ifdef _WIN32
+        typedef BOOLEAN (WINAPI *RandomFn)(PVOID, ULONG);
+        HMODULE library = LoadLibraryA("advapi32.dll");
+        RandomFn fill = library ? (RandomFn)GetProcAddress(library, "SystemFunction036") : NULL;
+        if (!fill || !fill(&value, (ULONG)sizeof(value))) {
+            if (library) FreeLibrary(library);
+            return 0;
+        }
+        FreeLibrary(library);
+#else
+        int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        size_t offset = 0;
+        if (fd < 0) return 0;
+        while (offset < sizeof(value)) {
+            ssize_t got = read(fd, (uint8_t *)&value + offset,
+                sizeof(value) - offset);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) { close(fd); return 0; }
+            offset += (size_t)got;
+        }
+        close(fd);
+#endif
+        value &= UINT64_C(0x7fffffffffffffff);
+        if (value != 0 && value != UINT64_MAX &&
+                !simple_gpu_token_exists_locked_v1(value)) return value;
+    }
+    return 0;
 }
 
 static int simple_gpu_api_acquire_v1(
@@ -614,6 +659,20 @@ static SimpleGpuOwnedResourceV1 *simple_gpu_resource_locked_v1(
     return NULL;
 }
 
+static SimpleGpuOwnedResourceV1 *simple_gpu_provider_resource_locked_v1(
+        SimpleGpuOwnedSessionV1 *session, uint64_t provider_handle) {
+    size_t i;
+    for (i = 0; i < SIMPLE_GPU_OWNER_CAPACITY_V1; i++) {
+        SimpleGpuOwnedResourceV1 *entry = &simple_gpu_resources[i];
+        if (entry->token && entry->token != UINT64_MAX &&
+                entry->state == session->state &&
+                entry->session_token == session->token &&
+                entry->generation == session->generation &&
+                entry->provider_handle == provider_handle) return entry;
+    }
+    return NULL;
+}
+
 static SimpleGpuOwnedCompletionV1 *simple_gpu_completion_locked_v1(
         SimpleGpuOwnedSessionV1 *session, uint64_t token) {
     size_t i;
@@ -627,13 +686,51 @@ static SimpleGpuOwnedCompletionV1 *simple_gpu_completion_locked_v1(
     return NULL;
 }
 
+static int simple_gpu_session_children_quarantined_locked_v1(
+        SimpleGpuOwnedSessionV1 *session) {
+    size_t i;
+    uint32_t resources = 0, completions = 0;
+    for (i = 0; i < SIMPLE_GPU_OWNER_CAPACITY_V1; i++) {
+        if (simple_gpu_resources[i].state == session->state &&
+                simple_gpu_resources[i].session_token == session->token) {
+            if (!simple_gpu_resources[i].quarantined) return 0;
+            resources++;
+        }
+        if (simple_gpu_completions[i].state == session->state &&
+                simple_gpu_completions[i].session_token == session->token) {
+            if (!simple_gpu_completions[i].quarantined) return 0;
+            completions++;
+        }
+    }
+    return resources == session->resources && completions == session->completions;
+}
+
+static void simple_gpu_session_children_clear_locked_v1(
+        SimpleGpuOwnedSessionV1 *session) {
+    size_t i;
+    for (i = 0; i < SIMPLE_GPU_OWNER_CAPACITY_V1; i++) {
+        if (simple_gpu_resources[i].state == session->state &&
+                simple_gpu_resources[i].session_token == session->token) {
+            memset(&simple_gpu_resources[i], 0, sizeof(simple_gpu_resources[i]));
+            if (session->state->retained) session->state->retained--;
+        }
+        if (simple_gpu_completions[i].state == session->state &&
+                simple_gpu_completions[i].session_token == session->token) {
+            memset(&simple_gpu_completions[i], 0, sizeof(simple_gpu_completions[i]));
+            if (session->state->retained) session->state->retained--;
+        }
+    }
+    session->resources = 0;
+    session->completions = 0;
+}
+
 int64_t rt_gpu_provider_session_open(int64_t backend_bit, int64_t device) {
     SimpleGpuCallPinV1 pin;
     const SimpleGpuProviderAbiV1 *api;
     SimpleGpuHandleV1 provider_handle = 0;
     size_t slot;
-    uint64_t token;
-    SimpleGpuStatusV1 status;
+    uint64_t token, result_token = 0;
+    SimpleGpuStatusV1 status, cleanup_status = SIMPLE_GPU_STATUS_OK;
     if (device < 0 || !simple_gpu_api_acquire_v1(backend_bit, &pin, &api)) return 0;
     simple_gpu_lock();
     for (slot = 0; slot < SIMPLE_GPU_OWNER_CAPACITY_V1; slot++)
@@ -646,19 +743,37 @@ int64_t rt_gpu_provider_session_open(int64_t backend_bit, int64_t device) {
     simple_gpu_lock();
     if (status == SIMPLE_GPU_STATUS_OK && provider_handle &&
             pin.state->generation == pin.generation &&
+            pin.state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1 &&
             pin.state->retained != UINT64_MAX) {
         simple_gpu_sessions[slot] = (SimpleGpuOwnedSessionV1){
             token, pin.generation, provider_handle, (uint64_t)device,
-            0, 0, 0, pin.state};
+            0, 0, 0, 0, pin.state};
         pin.state->retained++;
+        result_token = token;
     } else {
-        memset(&simple_gpu_sessions[slot], 0, sizeof(simple_gpu_sessions[slot]));
-        token = 0;
+        simple_gpu_sessions[slot].token = UINT64_MAX;
     }
     simple_gpu_unlock();
-    if (!token && provider_handle) (void)api->session_close(provider_handle);
+    if (!result_token && provider_handle)
+        cleanup_status = api->session_close(provider_handle);
+    if (!result_token) {
+        int uncertain = status != SIMPLE_GPU_STATUS_REJECTED || provider_handle != 0;
+        if (provider_handle && cleanup_status == SIMPLE_GPU_STATUS_OK) uncertain = 0;
+        simple_gpu_lock();
+        if (uncertain &&
+                pin.state->retained != UINT64_MAX) {
+            simple_gpu_sessions[slot] = (SimpleGpuOwnedSessionV1){
+                token, pin.generation, provider_handle, (uint64_t)device,
+                0, 0, 1, 0, pin.state};
+            pin.state->retained++;
+            if (pin.state->phase == SIMPLE_GPU_PROVIDER_RETIRING_V1)
+                pin.state->phase = SIMPLE_GPU_PROVIDER_ACTIVE_V1;
+        } else memset(&simple_gpu_sessions[slot], 0,
+            sizeof(simple_gpu_sessions[slot]));
+        simple_gpu_unlock();
+    }
     simple_gpu_call_release_v1(&pin);
-    return token <= INT64_MAX ? (int64_t)token : 0;
+    return (int64_t)result_token;
 }
 
 int64_t rt_gpu_provider_session_close(
@@ -672,7 +787,9 @@ int64_t rt_gpu_provider_session_close(
         return SIMPLE_GPU_STATUS_UNAVAILABLE;
     simple_gpu_lock();
     session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
-    if (!session || session->resources || session->completions || session->busy) {
+    if (!session || session->busy ||
+            ((session->resources || session->completions) &&
+                !simple_gpu_session_children_quarantined_locked_v1(session))) {
         simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
         return session ? SIMPLE_GPU_STATUS_BUSY : SIMPLE_GPU_STATUS_INVALID;
     }
@@ -683,7 +800,9 @@ int64_t rt_gpu_provider_session_close(
     if (status == SIMPLE_GPU_STATUS_OK) {
         simple_gpu_lock();
         session = simple_gpu_session_locked_v1(backend_bit, snapshot.token);
-        if (session && session->resources == 0 && session->completions == 0) {
+        if (session && ((session->resources == 0 && session->completions == 0) ||
+                simple_gpu_session_children_quarantined_locked_v1(session))) {
+            simple_gpu_session_children_clear_locked_v1(session);
             memset(session, 0, sizeof(*session));
             if (pin.state->retained) pin.state->retained--;
         } else status = SIMPLE_GPU_STATUS_BUSY;
@@ -698,6 +817,88 @@ int64_t rt_gpu_provider_session_close(
     return status;
 }
 
+int64_t rt_gpu_provider_quarantine_drain(int64_t backend_bit) {
+    uint64_t token = 0;
+    size_t i;
+    simple_gpu_lock();
+    for (i = 0; i < SIMPLE_GPU_OWNER_CAPACITY_V1; i++) {
+        if (simple_gpu_sessions[i].state && simple_gpu_sessions[i].quarantined &&
+                simple_gpu_sessions[i].state->backend_bit == backend_bit) {
+            token = simple_gpu_sessions[i].token;
+            break;
+        }
+    }
+    simple_gpu_unlock();
+    if (!token) return SIMPLE_GPU_STATUS_OK;
+    return rt_gpu_provider_session_close(backend_bit, (int64_t)token);
+}
+
+int64_t rt_gpu_provider_session_authority_word(
+        int64_t backend_bit, int64_t session_token, int64_t word) {
+    SimpleGpuOwnedSessionV1 *session;
+    uint64_t value = 0;
+    if (session_token <= 0 || word < 0 || word > 6) return 0;
+    simple_gpu_lock();
+    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+    if (session && !session->quarantined) {
+        if (word == 0) value = session->state->provider_identity;
+        else if (word == 1) value = session->generation;
+        else if (word == 2) value = session->device;
+        else {
+            int i;
+            for (i = 0; i < 8; i++)
+                value = (value << 8) |
+                    session->state->artifact_digest[(word - 3) * 8 + i];
+        }
+    }
+    simple_gpu_unlock();
+    return (int64_t)value;
+}
+
+int64_t rt_gpu_provider_resource_authority_word(int64_t backend_bit,
+        int64_t session_token, int64_t resource_token, int64_t word) {
+    SimpleGpuOwnedSessionV1 *session;
+    SimpleGpuOwnedResourceV1 *resource;
+    uint64_t value = 0;
+    if (session_token <= 0 || resource_token <= 0 || word < 0 || word > 2) return 0;
+    simple_gpu_lock();
+    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+    resource = session ? simple_gpu_resource_locked_v1(
+        session, (uint64_t)resource_token) : NULL;
+    if (resource && !resource->quarantined) {
+        if (word == 0) value = resource->size_bytes;
+        else if (word == 1) value = resource->generation;
+        else value = resource->session_token;
+    }
+    simple_gpu_unlock();
+    return (int64_t)value;
+}
+
+int64_t rt_gpu_provider_completion_authority_word(int64_t backend_bit,
+        int64_t session_token, int64_t completion_token, int64_t word) {
+    SimpleGpuOwnedSessionV1 *session;
+    SimpleGpuOwnedCompletionV1 *completion;
+    uint64_t value = 0;
+    if (session_token <= 0 || completion_token <= 0 || word < 0 || word > 6)
+        return 0;
+    simple_gpu_lock();
+    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+    completion = session ? simple_gpu_completion_locked_v1(
+        session, (uint64_t)completion_token) : NULL;
+    if (completion && !completion->quarantined && completion->terminal &&
+            completion->readback_observed) {
+        if (word == 0) value = completion->correlation_id;
+        else if (word == 1) value = completion->generation;
+        else if (word == 2) value = completion->terminal_resource_token;
+        else if (word == 3) value = completion->checksum;
+        else if (word == 4) value = completion->readback_length;
+        else if (word == 5) value = 1;
+        else value = session->device;
+    }
+    simple_gpu_unlock();
+    return (int64_t)value;
+}
+
 int64_t rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session_token,
         int64_t size_bytes, int64_t flags, int64_t usage_bits) {
     SimpleGpuCallPinV1 pin;
@@ -705,10 +906,12 @@ int64_t rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session_toke
     SimpleGpuOwnedSessionV1 *session;
     SimpleGpuResourceDescV1 desc;
     SimpleGpuHandleV1 provider_handle = 0;
-    uint64_t provider_session = 0, token = 0;
+    uint64_t provider_session = 0, token = 0, result_token = 0;
     size_t slot;
-    SimpleGpuStatusV1 status;
-    if (session_token <= 0 || size_bytes <= 0 || flags < 0 || usage_bits < 0 ||
+    SimpleGpuStatusV1 status, cleanup_status = SIMPLE_GPU_STATUS_OK;
+    if (session_token <= 0 || size_bytes <= 0 ||
+            size_bytes > SIMPLE_GPU_RESOURCE_MAX_BYTES_V1 || flags < 0 ||
+            (uint64_t)flags > UINT32_MAX || usage_bits < 0 ||
             !simple_gpu_api_acquire_v1(backend_bit, &pin, &api)) return 0;
     simple_gpu_lock();
     session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
@@ -732,18 +935,33 @@ int64_t rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session_toke
     if (status == SIMPLE_GPU_STATUS_OK && provider_handle && session) {
         simple_gpu_resources[slot] = (SimpleGpuOwnedResourceV1){token,
             (uint64_t)session_token, provider_handle, (uint64_t)size_bytes,
-            pin.generation, 0, pin.state};
+            pin.generation, 0, 0, pin.state};
         session->resources++; session->busy = 0; pin.state->retained++;
+        result_token = token;
     } else {
-        memset(&simple_gpu_resources[slot], 0, sizeof(simple_gpu_resources[slot]));
-        if (session) session->busy = 0;
-        token = 0;
+        simple_gpu_resources[slot].token = UINT64_MAX;
     }
     simple_gpu_unlock();
-    if (!token && provider_handle)
-        (void)api->resource_release(provider_session, provider_handle);
+    if (!result_token && provider_handle)
+        cleanup_status = api->resource_release(provider_session, provider_handle);
+    if (!result_token) {
+        int uncertain = status != SIMPLE_GPU_STATUS_REJECTED || provider_handle != 0;
+        if (provider_handle && cleanup_status == SIMPLE_GPU_STATUS_OK) uncertain = 0;
+        simple_gpu_lock();
+        session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+        if (session && uncertain &&
+                session->resources != UINT32_MAX && pin.state->retained != UINT64_MAX) {
+            simple_gpu_resources[slot] = (SimpleGpuOwnedResourceV1){token,
+                (uint64_t)session_token, provider_handle, (uint64_t)size_bytes,
+                pin.generation, 1, 0, pin.state};
+            session->resources++; pin.state->retained++;
+        } else memset(&simple_gpu_resources[slot], 0,
+            sizeof(simple_gpu_resources[slot]));
+        if (session) session->busy = 0;
+        simple_gpu_unlock();
+    }
     simple_gpu_call_release_v1(&pin);
-    return token <= INT64_MAX ? (int64_t)token : 0;
+    return (int64_t)result_token;
 }
 
 int64_t rt_gpu_provider_resource_release(int64_t backend_bit, int64_t session_token,
@@ -795,10 +1013,11 @@ int64_t rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session_token,
     SimpleGpuOwnedSessionV1 *session;
     SimpleGpuSubmitV1 request;
     SimpleGpuHandleV1 provider_handle = 0;
-    uint64_t provider_session = 0, token = 0;
+    uint64_t provider_session = 0, token = 0, result_token = 0;
     size_t slot;
-    SimpleGpuStatusV1 status;
-    if (session_token <= 0 || format < 0 || data == 0 || length <= 0 ||
+    SimpleGpuStatusV1 status, cleanup_status = SIMPLE_GPU_STATUS_OK;
+    if (session_token <= 0 || format < 0 || (uint64_t)format > UINT32_MAX ||
+            data == 0 || length <= 0 ||
             correlation_id <= 0 || !simple_gpu_api_acquire_v1(backend_bit, &pin, &api))
         return 0;
     simple_gpu_lock();
@@ -824,18 +1043,33 @@ int64_t rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session_token,
     if (status == SIMPLE_GPU_STATUS_OK && provider_handle && session) {
         simple_gpu_completions[slot] = (SimpleGpuOwnedCompletionV1){token,
             (uint64_t)session_token, provider_handle, (uint64_t)correlation_id,
-            pin.generation, 0, 0, pin.state};
+            pin.generation, 0, 0, 0, 0, 0, 0, 0, pin.state};
         session->completions++; session->busy = 0; pin.state->retained++;
+        result_token = token;
     } else {
-        memset(&simple_gpu_completions[slot], 0, sizeof(simple_gpu_completions[slot]));
-        if (session) session->busy = 0;
-        token = 0;
+        simple_gpu_completions[slot].token = UINT64_MAX;
     }
     simple_gpu_unlock();
-    if (!token && provider_handle)
-        (void)api->completion_release(provider_session, provider_handle);
+    if (!result_token && provider_handle)
+        cleanup_status = api->completion_release(provider_session, provider_handle);
+    if (!result_token) {
+        int uncertain = (status != SIMPLE_GPU_STATUS_REJECTED) || provider_handle != 0;
+        if (provider_handle && cleanup_status == SIMPLE_GPU_STATUS_OK) uncertain = 0;
+        simple_gpu_lock();
+        session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+        if (session && uncertain && session->completions != UINT32_MAX &&
+                pin.state->retained != UINT64_MAX) {
+            simple_gpu_completions[slot] = (SimpleGpuOwnedCompletionV1){token,
+                (uint64_t)session_token, provider_handle, (uint64_t)correlation_id,
+                pin.generation, 0, 0, 0, 0, 0, 1, 0, pin.state};
+            session->completions++; pin.state->retained++;
+        } else memset(&simple_gpu_completions[slot], 0,
+            sizeof(simple_gpu_completions[slot]));
+        if (session) session->busy = 0;
+        simple_gpu_unlock();
+    }
     simple_gpu_call_release_v1(&pin);
-    return token <= INT64_MAX ? (int64_t)token : 0;
+    return (int64_t)result_token;
 }
 
 int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
@@ -844,8 +1078,9 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
     const SimpleGpuProviderAbiV1 *api;
     SimpleGpuOwnedSessionV1 *session;
     SimpleGpuOwnedCompletionV1 *completion;
+    SimpleGpuOwnedResourceV1 *resource;
     SimpleGpuReceiptV1 receipt;
-    uint64_t provider_session, provider_completion, correlation, identity;
+    uint64_t provider_session, provider_completion, correlation, identity, device;
     SimpleGpuStatusV1 status;
     if (session_token <= 0 || completion_token <= 0 || timeout_ns <= 0 ||
             receipt_ptr == 0 || !simple_gpu_api_acquire_v1(backend_bit, &pin, &api))
@@ -863,6 +1098,7 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
     provider_completion = completion->provider_handle;
     correlation = completion->correlation_id;
     identity = pin.state->provider_identity;
+    device = session->device;
     simple_gpu_unlock();
     memset(&receipt, 0, sizeof(receipt));
     receipt.struct_size = sizeof(receipt);
@@ -873,7 +1109,8 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
                 receipt.status != SIMPLE_GPU_STATUS_OK ||
                 receipt.correlation_id != correlation ||
                 receipt.provider_identity != identity ||
-                receipt.device_identity == 0 || receipt.checksum == 0 ||
+                receipt.device_identity != device || receipt.resource == 0 ||
+                receipt.checksum == 0 ||
                 receipt.device_elapsed_ns == 0)
             status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
         else {
@@ -881,8 +1118,17 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
             session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
             completion = session ? simple_gpu_completion_locked_v1(
                 session, (uint64_t)completion_token) : NULL;
-            if (!completion || completion->terminal) status = SIMPLE_GPU_STATUS_INVALID;
-            else { completion->terminal = 1; completion->busy = 0; }
+            resource = session ? simple_gpu_provider_resource_locked_v1(
+                session, receipt.resource) : NULL;
+            if (!completion || completion->terminal || !resource)
+                status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
+            else {
+                completion->terminal = 1;
+                completion->terminal_resource_token = resource->token;
+                completion->checksum = receipt.checksum;
+                completion->busy = 0;
+                receipt.resource = resource->token;
+            }
             simple_gpu_unlock();
         }
     }
@@ -906,8 +1152,13 @@ int64_t rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session_token,
     const SimpleGpuProviderAbiV1 *api;
     SimpleGpuOwnedSessionV1 *session;
     SimpleGpuOwnedResourceV1 *resource;
+    SimpleGpuOwnedCompletionV1 *completion = NULL;
     SimpleGpuBytesV1 request;
+    uint8_t *staging = NULL;
+    uint8_t *destination;
     uint64_t provider_session, provider_resource, capacity;
+    uint64_t owner_completion_token = 0;
+    size_t completion_index;
     SimpleGpuStatusV1 status;
     if (session_token <= 0 || resource_token <= 0 || bytes_ptr == 0 ||
             !simple_gpu_api_acquire_v1(backend_bit, &pin, &api))
@@ -917,27 +1168,58 @@ int64_t rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session_token,
         simple_gpu_call_release_v1(&pin); return SIMPLE_GPU_STATUS_INVALID;
     }
     capacity = request.length;
+    destination = request.data;
+    if (capacity > SIMPLE_GPU_RESOURCE_MAX_BYTES_V1 ||
+            !(staging = (uint8_t *)malloc((size_t)capacity))) {
+        simple_gpu_call_release_v1(&pin); return SIMPLE_GPU_STATUS_FAILED;
+    }
+    request.data = staging;
     simple_gpu_lock();
     session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
     resource = session ? simple_gpu_resource_locked_v1(session, (uint64_t)resource_token) : NULL;
-    if (!resource || resource->busy || capacity > resource->size_bytes) {
-        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
+    for (completion_index = 0; resource && completion_index < SIMPLE_GPU_OWNER_CAPACITY_V1;
+            completion_index++) {
+        SimpleGpuOwnedCompletionV1 *candidate = &simple_gpu_completions[completion_index];
+        if (candidate->state == session->state &&
+                candidate->session_token == session->token && candidate->terminal &&
+                !candidate->readback_observed && !candidate->busy &&
+                candidate->terminal_resource_token == resource->token) {
+            completion = candidate; break;
+        }
+    }
+    if (!resource || !completion || resource->busy || capacity > resource->size_bytes) {
+        simple_gpu_unlock(); free(staging); simple_gpu_call_release_v1(&pin);
         return SIMPLE_GPU_STATUS_INVALID;
     }
     resource->busy = 1;
+    completion->busy = 1;
+    owner_completion_token = completion->token;
     provider_session = session->provider_handle;
     provider_resource = resource->provider_handle;
     simple_gpu_unlock();
     status = api->readback(provider_session, provider_resource, &request);
-    if (status == SIMPLE_GPU_STATUS_OK && request.length <= capacity)
+    if (status == SIMPLE_GPU_STATUS_OK && request.length <= capacity &&
+            simple_gpu_readback_checksum_v1(staging, request.length) == completion->checksum) {
+        memcpy(destination, staging, (size_t)request.length);
+        request.data = destination;
         memcpy((void *)(uintptr_t)bytes_ptr, &request, sizeof(request));
-    else if (status == SIMPLE_GPU_STATUS_OK)
+    } else if (status == SIMPLE_GPU_STATUS_OK)
         status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
     simple_gpu_lock();
     session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
     resource = session ? simple_gpu_resource_locked_v1(session, (uint64_t)resource_token) : NULL;
     if (resource) resource->busy = 0;
+    completion = session ? simple_gpu_completion_locked_v1(
+        session, owner_completion_token) : NULL;
+    if (completion) {
+        completion->busy = 0;
+        if (status == SIMPLE_GPU_STATUS_OK) {
+            completion->readback_observed = 1;
+            completion->readback_length = request.length;
+        }
+    }
     simple_gpu_unlock();
+    free(staging);
     simple_gpu_call_release_v1(&pin);
     return status;
 }
@@ -957,7 +1239,10 @@ int64_t rt_gpu_provider_completion_release(int64_t backend_bit,
     session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
     completion = session ? simple_gpu_completion_locked_v1(
         session, (uint64_t)completion_token) : NULL;
-    if (!completion || completion->busy) { simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
+    if (!completion || completion->busy ||
+            (completion->terminal && completion->terminal_resource_token != 0 &&
+                !completion->readback_observed)) {
+        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
         return SIMPLE_GPU_STATUS_INVALID; }
     completion->busy = 1;
     provider_session = session->provider_handle;
@@ -1134,7 +1419,8 @@ int64_t rt_gpu_provider_unload(int64_t backend_bit) {
     /* Retirement rejects new calls. A busy result deliberately requires the
      * owner to retry after all synchronous call pins have drained. */
     if (state->phase == SIMPLE_GPU_PROVIDER_RETIRING_V1 &&
-            state->in_flight != 0) {
+            (state->in_flight != 0 || state->retained != 0)) {
+        if (state->retained != 0) state->phase = SIMPLE_GPU_PROVIDER_ACTIVE_V1;
         simple_gpu_unlock();
         return 0;
     }

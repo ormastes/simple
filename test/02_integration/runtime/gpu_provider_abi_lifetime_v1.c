@@ -10,6 +10,11 @@ static SimpleGpuOperationV1 operations[SIMPLE_GPU_OP_COUNT];
 static SimpleGpuProviderAbiV1 table;
 static uint8_t resource_bytes[64];
 static uint64_t resource_size;
+static uint64_t checksum_v1(const uint8_t *bytes, uint64_t length) {
+    uint64_t value = UINT64_C(1469598103934665603), i;
+    for (i = 0; i < length; i++) { value ^= bytes[i]; value *= UINT64_C(1099511628211); }
+    return value;
+}
 
 static int64_t operation_stub(void) { return 1; }
 static SimpleGpuStatusV1 shutdown_v1(void) { return SIMPLE_GPU_STATUS_OK; }
@@ -49,7 +54,7 @@ static SimpleGpuStatusV1 wait_v1(SimpleGpuHandleV1 session,
     if (session != 101 || completion != 303 || !timeout_ns || !receipt)
         return SIMPLE_GPU_STATUS_INVALID;
     *receipt = (SimpleGpuReceiptV1){sizeof(*receipt), SIMPLE_GPU_STATUS_OK,
-        909, 7001, 3003, 202, 0x1234, 77};
+        909, 7001, 3, 202, checksum_v1(resource_bytes, resource_size), 77};
     return SIMPLE_GPU_STATUS_OK;
 }
 static SimpleGpuStatusV1 readback_v1(SimpleGpuHandleV1 session,
@@ -116,7 +121,8 @@ int main(int argc, char **argv) {
             rt_gpu_provider_unload(SIMPLE_GPU_BACKEND_VULKAN) != 0) return 4;
     if (rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
             1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_OK ||
-            receipt.checksum != 0x1234 || receipt.device_elapsed_ns != 77 ||
+            receipt.checksum != checksum_v1(resource_bytes, resource_size) ||
+            receipt.device_elapsed_ns != 77 ||
             rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
                 1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_INVALID) return 5;
     if (rt_gpu_provider_readback_raw(SIMPLE_GPU_BACKEND_VULKAN, session, resource,
