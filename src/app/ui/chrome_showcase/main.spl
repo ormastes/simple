@@ -14,11 +14,13 @@ composited frame is the twin's deterministic test pattern. Every such run record
 `frame_source=stub-pattern`, a non-empty `reason`, and verdict `environment-blocked`.
 Engine2D, the PPM writer and the receipt still run end to end, which is what S3 measures.
 
-RUNTIME GAP (recorded, not worked around): `simple_chrome_render_read_pixels_into` writes
-into a caller-owned OUT buffer, and the host dynlib facade has no bounded out-byte-buffer
-call — `spl_wffi_call_i64_with_bytes` passes bytes IN only. Wiring a real Chrome frame
-therefore needs a facade addition (`spl_wffi_call_i64_into_bytes`), filed in the lane
-state. No new `rt_*` is introduced here.
+READBACK (was a recorded runtime gap, now wired): `simple_chrome_render_read_pixels_into`
+writes into a caller-owned OUT buffer, which the host dynlib facade could not express until
+`spl_wffi_call_i64_into_bytes` landed beside the IN-only `..._with_bytes`. The readback is
+now a REAL bounded pull into a Simple-owned `[u8]` of `width * height * 4`. What has NOT
+changed is the verdict: with no CEF drop the provider still answers
+BACKEND_UNAVAILABLE/NO_FRAME, so `frame_source` stays `stub-pattern` and the run stays
+`environment-blocked`. No new `rt_*` is introduced here.
 """
 
 use std.io_runtime.{cwd_process, dir_create_all, env_get, file_exists, file_hash_sha256_or_empty,
@@ -29,16 +31,18 @@ use std.gpu.engine2d.engine.{Engine2D}
 use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
     ChromeRenderHandle, chrome_render_symbol_names, chrome_render_load, chrome_render_create,
     chrome_render_backend_stage, chrome_render_release, chrome_render_load_html,
-    chrome_render_resize, chrome_render_frame, chrome_render_read_pixels_probe,
+    chrome_render_resize, chrome_render_frame, chrome_render_read_pixels_into,
+    ChromeRenderReadback,
     chrome_render_event, chrome_render_pointer_event_json, chrome_render_key_event_json,
     chrome_render_sequence_steps, chrome_render_destroy}
 use app.ui.chrome_showcase.catalog.{CHROME_CATALOG_DIR, CHROME_CATALOG_INDEX,
     CHROME_CATALOG_SOURCE, chrome_catalog_tabs, chrome_catalog_file_for,
     chrome_catalog_page, chrome_catalog_index_text}
 use app.ui.chrome_showcase.frame.{chrome_frame_stub_image, chrome_frame_nonblank,
+    chrome_frame_bgra_to_argb,
     chrome_frame_ppm_bytes}
 use app.ui.chrome_showcase.receipt.{ChromeShowcaseReceipt, ChromeShowcaseTabRow,
-    chrome_showcase_receipt_text, CHROME_SHOWCASE_FRAME_STUB}
+    chrome_showcase_receipt_text, CHROME_SHOWCASE_FRAME_STUB, CHROME_SHOWCASE_FRAME_CHROME}
 
 val CHROME_SHOWCASE_OUT_DIR: text = "build/chrome-showcase"
 val CHROME_SHOWCASE_LIB: text = "build/chrome-render/libsimple_chrome_render.dylib"
@@ -107,21 +111,30 @@ stopping early would hide which steps are reachable at all.
 Step count and order are frozen by `chrome_render_sequence_steps()`, so a receipt's
 `call_rcs` can never silently drift out of step with its labels.
 """
+struct ChromeTabDrive:
+    rcs: [i64]
+    readback: ChromeRenderReadback
+
 fn _drive_tab_sequence(handle: ChromeRenderHandle, page_html: text,
-                       width: i64, height: i64) -> [i64]:
+                       width: i64, height: i64) -> ChromeTabDrive:
     var rcs: [i64] = []
     val session = chrome_render_create(handle,
         "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + "}")
     rcs.push(session)
     rcs.push(chrome_render_load_html(handle, session, page_html))
     rcs.push(chrome_render_resize(handle, session, width, height))
-    rcs.push(chrome_render_frame(handle, session, 5000))
-    rcs.push(chrome_render_read_pixels_probe(handle, session))
+    val frame_rc = chrome_render_frame(handle, session, 5000)
+    rcs.push(frame_rc)
+    # A REAL bounded readback now, not a null probe. Its rc occupies the same step slot as
+    # before, so `chrome_render_sequence_steps()` and the receipt labels are unchanged.
+    val readback = chrome_render_read_pixels_into(handle, session, width, height,
+        frame_rc == 0)
+    rcs.push(readback.rc)
     rcs.push(chrome_render_event(handle, session,
         chrome_render_pointer_event_json(width / 2, height / 2)))
     rcs.push(chrome_render_event(handle, session, chrome_render_key_event_json("Tab")))
     rcs.push(chrome_render_destroy(handle, session))
-    rcs
+    ChromeTabDrive(rcs: rcs, readback: readback)
 
 fn _rcs_text(rcs: [i64]) -> text:
     var out = ""
@@ -190,24 +203,31 @@ fn main() -> i64:
     for tab in tabs:
         val started = time_now_unix_micros()
         # Drive the real ABI sequence for THIS tab's catalog page before compositing.
-        # Its rcs go into the receipt whatever they are; the composited frame is still the
-        # stub pattern, because no rc here can produce pixels while the readback facade is
-        # missing. The two facts live in different receipt fields on purpose.
+        # Its rcs go into the receipt whatever they are, and the readback's own pixels are
+        # composited when — and only when — the provider actually delivered a full frame.
+        # Whether pixels arrived and what the calls returned stay separate receipt fields.
         var call_rcs = ""
+        var chrome_pixels: [u32] = []
         if val handle = provider:
             val page = file_read(CHROME_CATALOG_DIR + "/" + chrome_catalog_file_for(tab))
-            val rcs = _drive_tab_sequence(handle, page, width, height)
-            call_rcs = _rcs_text(rcs)
+            val drive = _drive_tab_sequence(handle, page, width, height)
+            call_rcs = _rcs_text(drive.rcs)
+            if drive.readback.pulled:
+                chrome_pixels = chrome_frame_bgra_to_argb(drive.readback.pixels,
+                    width * height)
             if tab_index == 0:
-                backend_stage = chrome_render_backend_stage(rcs[0])
-                if backend_stage == "ok":
-                    # A real backend answered `create`. A real FRAME still cannot be pulled:
-                    # the host facade has no bounded OUT-byte-buffer call. Say exactly that
-                    # rather than letting a live session imply a live frame.
-                    reason = "readback-facade-missing:spl_wffi_call_i64_into_bytes"
-                else:
+                backend_stage = chrome_render_backend_stage(drive.rcs[0])
+                if backend_stage == "ok" and not drive.readback.pulled:
+                    # A real backend answered `create` but no frame came back. Say which of
+                    # the two it was, rather than letting a live session imply live pixels.
+                    reason = "readback-refused:rc=" + drive.readback.rc.to_text()
+                elif backend_stage != "ok":
                     reason = "no-cef-drop:" + backend_stage
-        val source_image = chrome_frame_stub_image(width, height, tab_index)
+        var source_image = chrome_frame_stub_image(width, height, tab_index)
+        if chrome_pixels.len() == width * height:
+            source_image = chrome_pixels
+            frame_source = CHROME_SHOWCASE_FRAME_CHROME
+            reason = ""
         engine.clear(4278190080u32)
         engine.draw_image(0i32, 0i32, width.to_i32(), height.to_i32(), source_image)
         engine.present()

@@ -2245,6 +2245,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_wffi_try_call_i64_out", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_bool0_checked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_bool1_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "spl_wffi_call_i64_into_bytes",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("spl_wffi_call_i64_with_bytes", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
         "spl_wffi_call_i64_with_bytes_checked",
@@ -2635,6 +2640,7 @@ mod tests {
             ("spl_fonts_call_init_blob", &[I64, I64, I64]),
             ("spl_fonts_call_init_path", &[I64, I64]),
             ("spl_fonts_call_layout_text", &[I64, I64, I64, I64]),
+            ("spl_wffi_call_i64_into_bytes", &[I64, I64, I64, I64, I64, I64, I64]),
             ("spl_wffi_call_i64_with_bytes", &[I64, I64, I64, I64, I64, I64]),
         ];
 

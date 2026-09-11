@@ -25,6 +25,14 @@ use std.common.browser.chrome_render_shim_twin.{chrome_render_create_status,
 extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8],
     offset: i64, length: i64, suffix_args: [i64]) -> i64
 
+# Bounded OUT-byte-buffer call, the counterpart of the IN-only one above. It is what makes
+# `simple_chrome_render_read_pixels_into(h, buf, cap, out_len)` callable at all: the buffer
+# is allocated and owned on the Simple side, the provider only fills it, and Simple never
+# holds C memory. Same reasoning as above, so this binding still adds NO new `rt_*`.
+@unsafe(reason: "hands the frozen Chrome render C ABI a bounded caller-owned out buffer", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8],
+    offset: i64, capacity: i64, out_len: *mut i64, suffix_args: [i64]) -> i64
+
 struct ChromeRenderAbi:
     version: i64
     module_id: text
@@ -272,28 +280,63 @@ fn chrome_render_frame(handle: ChromeRenderHandle, session_handle: i64, timeout_
         return 1
     spl_wffi_call_i64(handle.symbols.render_frame, [session_handle, timeout_ms], 2)
 
-"""Probes `read_pixels_into` with NULL buffer and NULL out_len.
+"""One real bounded readback attempt: what the provider returned, and what it wrote.
 
-This is NOT a readback and must never be read as one. The host dynlib facade has no
-bounded OUT-byte-buffer call (see `chrome_render_readback_facade_missing`), so the only
-thing Simple can do with this entry point today is call it with null pointers and record
-the provider's real refusal — which proves the symbol is callable and the argument
-marshalling is right, and is strictly better than not calling it at all. A real frame pull
-waits on the facade.
+`rc` is the provider's own return for the sizing call, `frame_bytes_needed` the length it
+reported it would need, and `pixels` the bytes it actually wrote — empty when it wrote
+none. `pulled` is the single question a caller should branch on: true only when a full
+frame of exactly `width * height * 4` bytes came back.
 """
-@unsafe(reason: "null-probes the admitted Chrome render readback ABI; pulls no pixels", capabilities: [ffi, raw_ptr])
-fn chrome_render_read_pixels_probe(handle: ChromeRenderHandle, session_handle: i64) -> i64:
+struct ChromeRenderReadback:
+    rc: i64
+    frame_bytes_needed: i64
+    pixels: [u8]
+    pulled: bool
+
+"""Pulls one frame through `read_pixels_into(h, buf, cap, out_len)`.
+
+This is a REAL readback, not a null probe: the buffer is allocated here, on the Simple
+side, and the provider fills it through the bounded out-byte-buffer facade.
+
+It is deliberately two calls, which is the `(buf, cap, out_len)` idiom's own shape rather
+than a workaround. The first offers capacity 0 and asks the provider how much it needs;
+only if a frame is actually available (`frame_ready`) and the reported need matches this
+viewport's `width * height * 4` is the full buffer allocated and the second call made.
+Allocating 4K * 4 bytes speculatively, per tab, for a provider that has already refused
+would cost more than the whole showcase run and prove nothing.
+
+`rc` is always the provider's real return value — nothing here substitutes one.
+"""
+@unsafe(reason: "pulls a bounded frame from the admitted Chrome render readback ABI", capabilities: [ffi, raw_ptr])
+fn chrome_render_read_pixels_into(handle: ChromeRenderHandle, session_handle: i64,
+                                  width: i64, height: i64,
+                                  frame_ready: bool) -> ChromeRenderReadback:
     if handle.released or handle.symbols.read_pixels_into <= 0:
-        return 2
-    spl_wffi_call_i64(handle.symbols.read_pixels_into, [session_handle, 0, 0, 0], 4)
-
-"""True while no bounded OUT-byte-buffer facade exists, so no real frame can be pulled.
-
-Named rather than commented so a receipt, a check script and a spec can all agree on the
-one condition that gates a real Chrome frame, instead of each carrying its own prose.
-"""
-fn chrome_render_readback_facade_missing() -> bool:
-    true
+        return ChromeRenderReadback(rc: 2, frame_bytes_needed: 0, pixels: [], pulled: false)
+    # A zero-capacity window still needs a real buffer address, so the sizing call offers a
+    # one-byte allocation with no room in it.
+    var sizer: [u8] = [0]
+    var needed: i64 = 0
+    val size_rc = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(handle.symbols.read_pixels_into, [session_handle],
+            &mut sizer, 0, 0, &mut needed, [])
+    val want = width * height * 4
+    if not frame_ready or needed <= 0 or needed != want:
+        return ChromeRenderReadback(rc: size_rc, frame_bytes_needed: needed,
+            pixels: [], pulled: false)
+    var frame: [u8] = []
+    var index: i64 = 0
+    while index < want:
+        frame.push(0)
+        index = index + 1
+    var written: i64 = 0
+    val read_rc = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(handle.symbols.read_pixels_into, [session_handle],
+            &mut frame, 0, want, &mut written, [])
+    if read_rc != 0 or written != want:
+        return ChromeRenderReadback(rc: read_rc, frame_bytes_needed: needed,
+            pixels: [], pulled: false)
+    ChromeRenderReadback(rc: read_rc, frame_bytes_needed: needed, pixels: frame, pulled: true)
 
 """Dispatches one bounded JSON input event (`event`)."""
 @unsafe(reason: "invokes the admitted bounded Chrome render event ABI", capabilities: [ffi, raw_ptr])

@@ -49,6 +49,23 @@ extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
 @unsafe(reason: "allocation-free checked integer status/out ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
+# Bounded OUT-byte-buffer dispatch.
+#
+# Its sibling `spl_wffi_call_i64_with_bytes` passes bytes IN only: the pointer
+# the callee receives is a frame-local copy, so anything written through it is
+# discarded. Providers that follow the `(buf, cap, out_len)` idiom -- the only
+# shape that keeps the allocation on the Simple side instead of handing Simple a
+# block of C memory to own -- therefore had no facade at all, which is what
+# pinned the chrome dynlib showcase to `frame_source=stub-pattern`.
+#
+# The callee is handed `prefix..., buf_ptr, cap, out_len_ptr, suffix...`;
+# `out_bytes[offset .. offset + cap]` is the writable window, `out_bytes.len()`
+# never changes, and the callee's own `i64` return is returned verbatim so a
+# provider status reaches Simple unaltered.
+@unsafe(reason: "bounded caller-allocated out-byte-buffer foreign call ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8],
+                                       offset: i64, capacity: i64, out_len: *mut i64,
+                                       suffix_args: [i64]) -> i64
 
 @unsafe(reason: "minimal raw dynamic FFI scope; caller validates status and result shape", capabilities: [ffi])
 fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
@@ -61,11 +78,16 @@ fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
 # the C provider and the Rust provider zero the out slot and only then reject
 # the pointer, and neither enters foreign code, so the probe has no side
 # effects and costs no allocation. A lane that cannot carry the out parameter
-# rejects the argument shape first and answers SPL_WFFI_INVALID_ARGUMENT (1) —
-# which is exactly what the seed interpreter lane does today, the same
-# writeback loss `_sffi_dlopen_checked` already works around. Measured
-# 2026-09-06 on the aarch64 seed: `spl_dlsym_checked` reports status 1 with the
-# out slot untouched, and so does `spl_wffi_try_call_i64_out`.
+# rejects the argument shape first and answers SPL_WFFI_INVALID_ARGUMENT (1).
+#
+# Updated 2026-09-11: the interpreter lane no longer loses the writeback. `&mut x`
+# on an extern argument used to evaluate to a COPY that was never published back
+# to `x`, so every extern out slot was silently dead there while the native lane
+# wrote through a real pointer; `call_extern_function` now publishes the borrow
+# back. The older measurement recorded here (out slot untouched on the aarch64
+# seed) described exactly that defect and no longer holds on a seed built after
+# this date. See
+# `doc/08_tracking/bug/interpreter_refmut_extern_out_slots_never_written_back_2026-09-11.md`.
 @unsafe(reason: "probes the raw status/out ABI without entering foreign code", capabilities: [ffi, raw_ptr])
 fn _sffi_i64_out_transport_honoured() -> bool:
     var probe: i64 = 0

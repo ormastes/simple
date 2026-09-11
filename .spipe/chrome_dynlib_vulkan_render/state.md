@@ -183,18 +183,47 @@ catalog it consumes.)
   re-deriving it gives 16/17 (the "receipt that lost frame_source" example goes red);
   restored -> 17/17.
 
-## RUNTIME NEED (recorded, per the no-new-rt_* rule)
+## RUNTIME NEED — RESOLVED 2026-09-11
 
-- **Bounded OUT-byte-buffer dynlib call.** `simple_chrome_render_read_pixels_into(h, buf,
-  cap, out_len)` writes into a caller-owned buffer. The host facade
-  (`src/lib/nogc_sync_mut/sffi/dynamic.spl`) exposes only `spl_wffi_call_i64`,
-  `spl_wffi_call_i64_checked`, `spl_wffi_try_call_i64_out` (one `*mut i64`) and, in the
-  chrome binding, `spl_wffi_call_i64_with_bytes` — which passes bytes **IN** only. There is
-  no way to hand the provider a byte buffer to fill. A real Chrome frame therefore cannot
-  be pulled until a `spl_wffi_call_i64_into_bytes(fptr, prefix_args, out_bytes, offset,
-  capacity, suffix_args) -> i64` facade exists. **This is a facade addition, not a new
-  `rt_*`**, and S2 introduced no new `rt_*` anywhere. Until it lands, the composited frame
-  is the twin's deterministic test pattern, stamped `frame_source=stub-pattern`.
+- **Bounded OUT-byte-buffer dynlib call. RESOLVED.**
+  `spl_wffi_call_i64_into_bytes(fptr, prefix_args, out_bytes, offset, capacity, out_len,
+  suffix_args) -> i64` now exists beside the IN-only `spl_wffi_call_i64_with_bytes`, with
+  the same arg marshalling plus one extra foreign argument (the callee receives
+  `prefix..., buf_ptr, cap, out_len_ptr, suffix...`). Implemented in both lanes —
+  `runtime/src/value/wsffi_native.rs` (native, `byte_array_write` publishes the callee's
+  bytes back into the Simple array) and `interpreter_extern/dynamic_sffi.rs` (interpreter)
+  — and registered in every table the sibling appears in: `runtime_symbols.rs` (x2),
+  `value/mod.rs`, `elf_utils.rs` (x2), `codegen/runtime_sffi.rs` (x2),
+  `interpreter_extern/mod.rs`. Simple facade in `src/lib/nogc_sync_mut/sffi/dynamic.spl`
+  with the sibling's `@unsafe(capabilities: [ffi, raw_ptr])`, re-exported from the
+  `nogc_async_mut` compatibility facade.
+  **No new `rt_*` symbol** — this is an `spl_*` facade addition, so
+  `check-rt-dual-implementation-ratchet.shs` is untouched by it.
+  `simple_chrome_render_read_pixels_into` is now called for real:
+  `chrome_render_read_pixels_into` (binding) allocates a Simple-owned `[u8]` of
+  `width * height * 4` and pulls into it, and the showcase composites those pixels when a
+  frame actually arrives. With no CEF drop the provider still answers
+  BACKEND_UNAVAILABLE / INVALID_HANDLE, so `frame_source=stub-pattern`,
+  `reason`, and `verdict=environment-blocked` are unchanged — measured
+  `call_rcs=-4,2,2,2,2,2,2,2`, `verdict=environment-blocked`, 8 tabs, 5556 ms.
+  Evidence: `test/01_unit/lib/sffi/wffi_into_bytes_spec.spl` 5 examples 0 failures under
+  `SIMPLE_EXECUTION_MODE=interpreter`; 6 Rust unit tests in `dynamic_sffi.rs`;
+  `CHROME_DYNLIB PROBE: ALL PASS — 10/10 symbols` (the ABI stayed at ten — the spec uses
+  the already-frozen `simple_chrome_render_last_error_into` as its subject, so no growth
+  to eleven was needed).
+  **Scope deviation, stated rather than buried:** landing this required a fix in the
+  INTERPRETER, not only the runtime. `&mut x` on an extern argument evaluated to a copy
+  and was never written back to `x`, so every extern out slot — `spl_wffi_try_call_i64_out`
+  included — was silently dead in interpreter mode. Filed and fixed:
+  `doc/08_tracking/bug/interpreter_refmut_extern_out_slots_never_written_back_2026-09-11.md`.
+- **todo (perf, recorded not fixed — the path is unexercised on this host):** the readback
+  frame is allocated with a `push` loop, which builds a BOXED array (measured
+  `packed=false` in the interpreter), so a real 4K frame would cost ~8x memory plus a
+  per-element widen in `strict_owned_bytes`. A packed constructor already exists
+  (`rt_byte_array_new_len`, used by `chromium_reference_oracle_sffi.spl` and
+  `engine2d/sffi_vulkan.spl`, both allowlisted provider dirs). Swapping to it is a one-line
+  change and is deliberately NOT made here: with no CEF drop the allocation never runs, so
+  the change could not be verified, and an unexercised edit is worse than a recorded one.
 
 ## OPEN AGAINST THE ACs
 
