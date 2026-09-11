@@ -17,10 +17,9 @@ verified-result handles.
 3. The owner publishes its fixed limits: five issuer dimensions, 64 attempts,
    1,024 retained body objects, 65,536 dependency edges, and 128 MiB retained
    bytes.
-4. The source boundary retains one `SemanticScopeIssuerReceiptV2` and opaque
-   `SemanticScopeIssuedHandleV2` per fixed dimension. The public installation
-   operation derives an attempt context from the live scope, revalidates the
-   receipt, and has no candidate/digest registration shortcut.
+4. The source boundary provides a prospective receipt/handle installation seam,
+   but explicitly rejects projections whose gateway availability is false. The
+   current issuer probes always return false, so no row can yet be installed.
 
 ## Deliberate exclusions
 
@@ -29,5 +28,7 @@ prepared-payload, and host authority receipts plus the complete sorted source
 universe. `seal_scope_v2` additionally requires five installed live issuer
 receipts. This focused owner spec does not fabricate those prerequisites; the
 issuer adapter spec exercises owner mutation and receipt revocation, while the
-worker integration owner supplies the canonical admitted fixture. No copied DTO
-or test-created aggregate substitutes for those authorities.
+worker integration owner must eventually supply the canonical admitted fixture
+and authentic owner-completion leases. No copied DTO or test-created aggregate
+substitutes for those authorities. This manual is handwritten and ungenerated;
+runtime, docgen, and coverage remain unqualified.

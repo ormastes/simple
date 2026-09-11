@@ -1,9 +1,9 @@
 # L7 semantic scope issuer adapters V2
 
-This executable contract covers the five retained semantic-result issuers used
-by the canonical live scope owner. A projection is diagnostic data. Authority
-requires the retained receipt, its module-private handle, the exact live
-attempt context, and an unchanged underlying semantic owner.
+This source-level contract covers five diagnostic semantic-result probes. A
+projection is data, not authority. The current semantic owners do not expose
+source-universe completion leases or exact conditional-dependency receipts, so
+every projection is `Unknown`, incomplete, and unavailable for gateway install.
 
 ## Issue all five semantic dimensions
 
@@ -14,8 +14,8 @@ attempt context, and an unchanged underlying semantic owner.
    against the exact generation, manifest, pin, cancellation, rules, query,
    source-universe, process, boot, and namespace context.
 
-Expected result: dimensions remain in declaration, trait, aspect, macro, and
-body order. The declaration member set contains the real source. Empty optional
+Expected result: diagnostic dimensions remain in declaration, trait, aspect, macro, and
+body order. The declaration member set contains the sampled source. Empty optional
 trait, aspect, macro, and body owners emit dimension-specific absence witnesses
 instead of unconditional dependencies. Body dependency enumeration is exactly
 empty and canonical for the empty owner.
@@ -23,24 +23,25 @@ empty and canonical for the empty owner.
 ## Preserve conditional dependencies
 
 The executable activates real trait state and a real introduced macro symbol.
-Their member sets then contain the complete source universe and their empty-
-universe witnesses disappear. Empty aspect and body owners remain absent. This
-is conditional scope evidence, not permission to read a fourth payload or
-execute an unsupported macro/default/advice body.
+Their diagnostic member sets then contain the supplied source universe and
+their empty-universe witnesses disappear. This observes local owner state; it
+does not prove complete source enumeration or conditional dependency closure.
 
 ## Reject stale or foreign authority
 
-Foreign handles, changed pin epochs, generations, attempt seals, declaration
-signatures, aliases, trait registrations, aspect seals, macro lookup order, and
-body-ledger state invalidate the receipt. Closing a receipt revokes its prior
-handle; repeated close cannot revive it.
+The executable samples foreign handles and mutations of pin epochs,
+generations, attempt seals, selected declaration fields, aliases, trait state,
+aspect lines, macro lookup order, and body-ledger state. Closing a diagnostic
+receipt revokes its prior handle; repeated close cannot revive it. This is not
+an exhaustive owner-revision schema proof.
 
 ## Live gateway boundary
 
-`semantic_scope_issuer_gateway_install_available_v2()` reports that a retained
-receipt can now be installed by `SemanticScopeLiveOwnerV2`. It does not make a
-copied projection authoritative. The live owner retains the receipt and handle,
-revalidates them at seal and later worker/publication transitions, and rejects
-missing, duplicate, foreign, closed, or revision-changed rows.
+`semantic_scope_issuer_gateway_install_available_v2()` remains false. The live
+owner's prospective installer rejects every current projection before retaining
+it because `gateway_install_available` is false. A future positive path requires
+real owner-produced source completion/dependency leases, exact retained-size
+accounting, and admitted portable-body verifier authority.
 
-Runtime execution and production admission remain separate qualified evidence.
+This manual is handwritten and ungenerated. Runtime execution, docgen,
+coverage, and production admission remain unqualified.
