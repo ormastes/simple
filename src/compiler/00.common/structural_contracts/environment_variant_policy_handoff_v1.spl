@@ -12,6 +12,7 @@ use std.common.base_encoding.utilities.{
 use std.common.crypto.sha256.{sha256_text}
 use std.common.string_builder.{StringBuilder}
 use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
 
 pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1: i64 = 1
 pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_FIELD_BYTES_V1: i64 = 1024
@@ -29,9 +30,7 @@ pub enum EnvironmentVariantPolicyHandoffErrorV1:
 
 pub struct EnvironmentVariantPolicyHandoffV1:
     schema_version: i64
-    policy_inputs: EnvironmentVariantPolicyInputsV1
-    target_cpu: text
-    target_cpu_features: text
+    collection: EnvironmentVariantPolicyCollectionV1
     policy_digest: text
     cache_identity: text
     integrity_digest: text
@@ -42,6 +41,53 @@ fn _handoff_digest_valid(value: text) -> bool:
         if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
             return false
     true
+
+fn _handoff_source_valid(value: text) -> bool:
+    value == "cli" or value == "env" or value == "project" or
+        value == "user" or value == "absent"
+
+fn _handoff_source_present(
+    value: text, presence: EnvironmentVariantPolicyPresenceV1
+) -> bool:
+    if value == "cli": return presence.cli_target_present
+    if value == "env": return presence.env_target_present
+    if value == "project": return presence.project_target_present
+    if value == "user": return presence.user_target_present
+    value == "absent"
+
+fn _handoff_layer_host_present(layer: EnvironmentVariantPolicyLayerV1) -> bool:
+    layer.parser_prefer != "" or layer.parser_require != "" or
+        layer.host_cpu_max != "" or layer.frontend_offload != "" or
+        layer.frontend_fallback != ""
+
+fn _handoff_collection_valid(collection: EnvironmentVariantPolicyCollectionV1) -> bool:
+    val receipt = collection.receipt
+    val presence = receipt.presence
+    if receipt.schema_version != ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1 or
+            receipt.host_source_order != "cli>env>project>user>default":
+        return false
+    if not _handoff_source_valid(receipt.target_cpu_source) or
+            not _handoff_source_valid(receipt.target_cpu_features_source):
+        return false
+    if receipt.target_cpu_present != (collection.target_cpu != "") or
+            receipt.target_cpu_features_present != (collection.target_cpu_features != ""):
+        return false
+    if (collection.target_cpu == "") != (receipt.target_cpu_source == "absent") or
+            (collection.target_cpu_features == "") !=
+                (receipt.target_cpu_features_source == "absent"):
+        return false
+    if not _handoff_source_present(receipt.target_cpu_source, presence) or
+            not _handoff_source_present(receipt.target_cpu_features_source, presence):
+        return false
+    if presence.cli_host_present != _handoff_layer_host_present(collection.policy_inputs.cli) or
+            presence.env_host_present != _handoff_layer_host_present(collection.policy_inputs.env) or
+            presence.project_host_present != _handoff_layer_host_present(collection.policy_inputs.project) or
+            presence.user_host_present != _handoff_layer_host_present(collection.policy_inputs.user):
+        return false
+    val admin = collection.policy_inputs.admin
+    val admin_present = admin.parser_provider != "" or admin.host_cpu_max != "" or
+        admin.frontend_offload_max != "" or admin.frontend_fallback != ""
+    presence.admin_present == admin_present
 
 fn _handoff_hex_digit(value: i64) -> text:
     "0123456789abcdef".char_at(value)
@@ -91,10 +137,17 @@ fn _handoff_hex_decode(value: text) -> Result<text, EnvironmentVariantPolicyHand
 fn _handoff_row(name: text, value: text) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
     Ok("{name}={_handoff_hex_encode(value)?}\n")
 
+fn _handoff_bool_row(name: text, value: bool) -> text:
+    val encoded = if value: "1" else: "0"
+    "{name}={encoded}\n"
+
 fn _handoff_material(
-    inputs: EnvironmentVariantPolicyInputsV1, target_cpu: text,
-    target_cpu_features: text, policy_digest: text, cache_identity: text
+    collection: EnvironmentVariantPolicyCollectionV1,
+    policy_digest: text, cache_identity: text
 ) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    val inputs = collection.policy_inputs
+    val receipt = collection.receipt
+    val presence = receipt.presence
     var out = _HANDOFF_MAGIC_V1 + "\n"
     for named in [
         ("cli.parser_prefer", inputs.cli.parser_prefer),
@@ -121,35 +174,53 @@ fn _handoff_material(
         ("admin.host_cpu_max", inputs.admin.host_cpu_max),
         ("admin.frontend_offload_max", inputs.admin.frontend_offload_max),
         ("admin.frontend_fallback", inputs.admin.frontend_fallback),
-        ("target_cpu", target_cpu),
-        ("target_cpu_features", target_cpu_features)
+        ("target_cpu", collection.target_cpu),
+        ("target_cpu_features", collection.target_cpu_features)
     ]:
         out = out + _handoff_row(named.0, named.1)?
+    out = out + "collection.schema_version={receipt.schema_version}\n"
+    out = out + _handoff_bool_row("collection.cli_host_present", presence.cli_host_present)
+    out = out + _handoff_bool_row("collection.env_host_present", presence.env_host_present)
+    out = out + _handoff_bool_row("collection.project_host_present", presence.project_host_present)
+    out = out + _handoff_bool_row("collection.user_host_present", presence.user_host_present)
+    out = out + _handoff_bool_row("collection.admin_present", presence.admin_present)
+    out = out + _handoff_bool_row("collection.cli_target_present", presence.cli_target_present)
+    out = out + _handoff_bool_row("collection.env_target_present", presence.env_target_present)
+    out = out + _handoff_bool_row("collection.project_target_present", presence.project_target_present)
+    out = out + _handoff_bool_row("collection.user_target_present", presence.user_target_present)
+    out = out + _handoff_row("collection.host_source_order", receipt.host_source_order)?
+    out = out + _handoff_row("collection.target_cpu_source", receipt.target_cpu_source)?
+    out = out + _handoff_row("collection.target_cpu_features_source", receipt.target_cpu_features_source)?
+    out = out + _handoff_bool_row("collection.target_cpu_present", receipt.target_cpu_present)
+    out = out + _handoff_bool_row(
+        "collection.target_cpu_features_present", receipt.target_cpu_features_present)
     out = out + "policy_digest={policy_digest}\n"
     out = out + "cache_identity={cache_identity}\n"
     if text_to_bytes_linear(out).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
         return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
     Ok(out)
 
-fn _handoff_cache_identity(policy_digest: text, target_cpu: text, target_features: text) -> text:
+fn _handoff_cache_identity(
+    policy_digest: text, target_cpu: text, target_features: text
+) -> text:
     sha256_text("simple/environment-variant-policy-cache/v1|{policy_digest}|" +
         "{target_cpu.len()}:{target_cpu}|{target_features.len()}:{target_features}")
 
 pub fn environment_variant_policy_handoff_v1(
-    inputs: EnvironmentVariantPolicyInputsV1, target_cpu: text,
-    target_cpu_features: text
+    collection: EnvironmentVariantPolicyCollectionV1
 ) -> Result<EnvironmentVariantPolicyHandoffV1, EnvironmentVariantPolicyHandoffErrorV1>:
-    val decision = match environment_variant_policy_resolve_v1(inputs):
+    if not _handoff_collection_valid(collection):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidPolicy)
+    val decision = match environment_variant_policy_resolve_v1(collection.policy_inputs):
         case Ok(value): value
         case Err(_): return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidPolicy)
     val cache_identity = _handoff_cache_identity(
-        decision.policy_digest, target_cpu, target_cpu_features)
+        decision.policy_digest, collection.target_cpu, collection.target_cpu_features)
     val material = _handoff_material(
-        inputs, target_cpu, target_cpu_features, decision.policy_digest, cache_identity)?
+        collection, decision.policy_digest, cache_identity)?
     Ok(EnvironmentVariantPolicyHandoffV1(
         schema_version: ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1,
-        policy_inputs: inputs, target_cpu: target_cpu,
-        target_cpu_features: target_cpu_features,
+        collection: collection,
         policy_digest: decision.policy_digest, cache_identity: cache_identity,
         integrity_digest: sha256_text(material)))
 
@@ -158,14 +229,13 @@ pub fn environment_variant_policy_handoff_encode_v1(
 ) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
     if value.schema_version != ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1:
         return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
-    val canonical = environment_variant_policy_handoff_v1(
-        value.policy_inputs, value.target_cpu, value.target_cpu_features)?
+    val canonical = environment_variant_policy_handoff_v1(value.collection)?
     if (canonical.policy_digest != value.policy_digest or
             canonical.cache_identity != value.cache_identity or
             canonical.integrity_digest != value.integrity_digest):
         return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
-    val material = _handoff_material(value.policy_inputs, value.target_cpu,
-        value.target_cpu_features, value.policy_digest, value.cache_identity)?
+    val material = _handoff_material(
+        value.collection, value.policy_digest, value.cache_identity)?
     val wire = material + "integrity_digest={value.integrity_digest}\n"
     if text_to_bytes_linear(wire).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
         return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
@@ -182,6 +252,18 @@ fn _handoff_field(
     if not lines[index].starts_with(prefix):
         return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
     _handoff_hex_decode(lines[index].substring(prefix.len()))
+
+fn _handoff_bool_field(
+    lines: [text], index: i64, name: text
+) -> Result<bool, EnvironmentVariantPolicyHandoffErrorV1>:
+    if index >= lines.len(): return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
+    val prefix = name + "="
+    if not lines[index].starts_with(prefix):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    val encoded = lines[index].substring(prefix.len())
+    if encoded == "0": return Ok(false)
+    if encoded == "1": return Ok(true)
+    Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
 
 fn _handoff_layer(lines: [text], index: i64, prefix: text) -> Result<EnvironmentVariantPolicyLayerV1, EnvironmentVariantPolicyHandoffErrorV1>:
     Ok(EnvironmentVariantPolicyLayerV1(
@@ -204,7 +286,7 @@ pub fn environment_variant_policy_handoff_decode_v1(
     if text_to_bytes_linear(wire).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
         return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
     val lines = wire.split("\n")
-    if lines.len() != 31 or lines[0] != _HANDOFF_MAGIC_V1 or lines[30] != "":
+    if lines.len() != 46 or lines[0] != _HANDOFF_MAGIC_V1 or lines[45] != "":
         return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
     val inputs = EnvironmentVariantPolicyInputsV1(
         cli: _handoff_layer(lines, 1, "cli")?,
@@ -218,19 +300,52 @@ pub fn environment_variant_policy_handoff_decode_v1(
             frontend_fallback: _handoff_field(lines, 24, "admin.frontend_fallback")?))
     val target_cpu = _handoff_field(lines, 25, "target_cpu")?
     val target_features = _handoff_field(lines, 26, "target_cpu_features")?
-    if not lines[27].starts_with("policy_digest=") or
-            not lines[28].starts_with("cache_identity=") or
-            not lines[29].starts_with("integrity_digest="):
+    if lines[27] != "collection.schema_version=1":
         return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
-    val policy_digest = lines[27].substring(14)
-    val cache_identity = lines[28].substring(15)
-    val integrity_digest = lines[29].substring(17)
+    val receipt = EnvironmentVariantPolicyCollectionReceiptV1(
+        schema_version: ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1,
+        presence: EnvironmentVariantPolicyPresenceV1(
+            cli_host_present: _handoff_bool_field(
+                lines, 28, "collection.cli_host_present")?,
+            env_host_present: _handoff_bool_field(
+                lines, 29, "collection.env_host_present")?,
+            project_host_present: _handoff_bool_field(
+                lines, 30, "collection.project_host_present")?,
+            user_host_present: _handoff_bool_field(
+                lines, 31, "collection.user_host_present")?,
+            admin_present: _handoff_bool_field(
+                lines, 32, "collection.admin_present")?,
+            cli_target_present: _handoff_bool_field(
+                lines, 33, "collection.cli_target_present")?,
+            env_target_present: _handoff_bool_field(
+                lines, 34, "collection.env_target_present")?,
+            project_target_present: _handoff_bool_field(
+                lines, 35, "collection.project_target_present")?,
+            user_target_present: _handoff_bool_field(
+                lines, 36, "collection.user_target_present")?),
+        host_source_order: _handoff_field(lines, 37, "collection.host_source_order")?,
+        target_cpu_source: _handoff_field(lines, 38, "collection.target_cpu_source")?,
+        target_cpu_features_source: _handoff_field(
+            lines, 39, "collection.target_cpu_features_source")?,
+        target_cpu_present: _handoff_bool_field(
+            lines, 40, "collection.target_cpu_present")?,
+        target_cpu_features_present: _handoff_bool_field(
+            lines, 41, "collection.target_cpu_features_present")?)
+    if not lines[42].starts_with("policy_digest=") or
+            not lines[43].starts_with("cache_identity=") or
+            not lines[44].starts_with("integrity_digest="):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    val policy_digest = lines[42].substring(14)
+    val cache_identity = lines[43].substring(15)
+    val integrity_digest = lines[44].substring(17)
     if not _handoff_digest_valid(policy_digest) or
             not _handoff_digest_valid(cache_identity) or
             not _handoff_digest_valid(integrity_digest):
         return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
     val canonical = environment_variant_policy_handoff_v1(
-        inputs, target_cpu, target_features)?
+        EnvironmentVariantPolicyCollectionV1(
+            policy_inputs: inputs, target_cpu: target_cpu,
+            target_cpu_features: target_features, receipt: receipt))?
     if (canonical.policy_digest != policy_digest or
             canonical.cache_identity != cache_identity or
             canonical.integrity_digest != integrity_digest):

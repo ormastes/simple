@@ -2,6 +2,7 @@ use std.spec.*
 use std.common.string_builder.{StringBuilder}
 use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
 
 fn layer(
     prefer: text = "", require: text = "", cpu: text = "",
@@ -11,6 +12,27 @@ fn layer(
         parser_prefer: prefer, parser_require: require, host_cpu_max: cpu,
         frontend_offload: offload, frontend_fallback: fallback)
 
+fn collection(
+    inputs: EnvironmentVariantPolicyInputsV1,
+    target_cpu: text = "znver4",
+    target_features: text = "+avx2,-avx512f"
+) -> EnvironmentVariantPolicyCollectionV1:
+    EnvironmentVariantPolicyCollectionV1(
+        policy_inputs: inputs, target_cpu: target_cpu,
+        target_cpu_features: target_features,
+        receipt: EnvironmentVariantPolicyCollectionReceiptV1(
+            schema_version: ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1,
+            presence: EnvironmentVariantPolicyPresenceV1(
+                cli_host_present: true, env_host_present: true,
+                project_host_present: false, user_host_present: false,
+                admin_present: true, cli_target_present: true,
+                env_target_present: true, project_target_present: false,
+                user_target_present: false),
+            host_source_order: "cli>env>project>user>default",
+            target_cpu_source: "cli", target_cpu_features_source: "env",
+            target_cpu_present: target_cpu != "",
+            target_cpu_features_present: target_features != ""))
+
 fn fixture() -> EnvironmentVariantPolicyHandoffV1:
     val inputs = EnvironmentVariantPolicyInputsV1(
         cli: layer(prefer: "simd", cpu: "x86-64-v3"),
@@ -18,7 +40,7 @@ fn fixture() -> EnvironmentVariantPolicyHandoffV1:
         admin: EnvironmentVariantAdminRestrictionsV1(
             parser_provider: "", host_cpu_max: "x86-64-v4",
             frontend_offload_max: "", frontend_fallback: ""))
-    environment_variant_policy_handoff_v1(inputs, "znver4", "+avx2,-avx512f").unwrap()
+    environment_variant_policy_handoff_v1(collection(inputs)).unwrap()
 
 fn repeated(ch: text, count: i64) -> text:
     val out = StringBuilder.new()
@@ -35,10 +57,14 @@ describe "environment variant policy handoff V1":
         val decoded = environment_variant_policy_handoff_decode_v1(encoded).unwrap()
         expect(decoded.policy_digest).to_equal(original.policy_digest)
         expect(decoded.integrity_digest).to_equal(original.integrity_digest)
-        expect(decoded.target_cpu).to_equal("znver4")
-        expect(decoded.target_cpu_features).to_equal("+avx2,-avx512f")
-        expect(decoded.policy_inputs.cli.parser_prefer).to_equal("simd")
-        expect(decoded.policy_inputs.admin.host_cpu_max).to_equal("x86-64-v4")
+        expect(decoded.collection.target_cpu).to_equal("znver4")
+        expect(decoded.collection.target_cpu_features).to_equal("+avx2,-avx512f")
+        expect(decoded.collection.policy_inputs.cli.parser_prefer).to_equal("simd")
+        expect(decoded.collection.policy_inputs.admin.host_cpu_max).to_equal("x86-64-v4")
+        expect(decoded.collection.receipt.target_cpu_source).to_equal("cli")
+        expect(decoded.collection.receipt.target_cpu_features_source).to_equal("env")
+        expect(decoded.collection.receipt.presence.cli_target_present).to_equal(true)
+        expect(decoded.collection.receipt.presence.env_target_present).to_equal(true)
         expect(environment_variant_policy_handoff_encode_v1(decoded).unwrap()).to_equal(encoded)
 
     it "rejects corrupt noncanonical and oversized payloads":
@@ -52,15 +78,21 @@ describe "environment variant policy handoff V1":
 
     it "binds warm identity to policy and generated target inputs":
         val first = fixture()
-        val changed_policy = environment_variant_policy_handoff_v1(
+        val changed_policy = environment_variant_policy_handoff_v1(collection(
             EnvironmentVariantPolicyInputsV1(
                 cli: layer(prefer: "scalar", cpu: "x86-64-v3"),
                 env: layer(offload: "on"), project: layer(), user: layer(),
                 admin: EnvironmentVariantAdminRestrictionsV1(
                     parser_provider: "", host_cpu_max: "x86-64-v4",
-                    frontend_offload_max: "", frontend_fallback: "")),
-            "znver4", "+avx2,-avx512f").unwrap()
+                    frontend_offload_max: "", frontend_fallback: ""))).unwrap()
         val changed_target = environment_variant_policy_handoff_v1(
-            first.policy_inputs, "znver4", "+avx2").unwrap()
+            collection(first.collection.policy_inputs,
+                target_features: "+avx2")).unwrap()
         expect(first.cache_identity == changed_policy.cache_identity).to_equal(false)
         expect(first.cache_identity == changed_target.cache_identity).to_equal(false)
+
+    it "rejects substituted collection provenance even with valid policy values":
+        val original = fixture()
+        var changed = original
+        changed.collection.receipt.target_cpu_source = "user"
+        expect(environment_variant_policy_handoff_encode_v1(changed).is_err()).to_equal(true)
