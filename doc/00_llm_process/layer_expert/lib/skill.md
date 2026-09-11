@@ -34,6 +34,14 @@ for layer ownership, wrapper-boundary rules, and scenario evidence.
 
 Template: [layer_skill.md](../../template/layer_skill.md)
 
+## Session update 2026-09-11 — one-liners
+
+- CPU<->GPU boundary fix campaign (Engine2D Vulkan rect batching, route-key
+  re-arm, mid-frame fences): `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md`
+  § "2026-09-11 — CPU<->GPU boundary fix campaign (rect batch, F1/F2)".
+- CEF-backed Chrome dynlib render module (Vulkan-composited offscreen
+  Chromium): `doc/00_llm_process/feature_expert/chrome_dynlib/skill.md`.
+
 ## Session update 2026-09-06 — silent-rewind merges
 
 `src/lib` shares append-only registry/manifest files with several parallel

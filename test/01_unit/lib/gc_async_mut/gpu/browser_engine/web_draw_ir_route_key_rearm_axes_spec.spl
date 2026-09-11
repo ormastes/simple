@@ -28,6 +28,7 @@ plan: doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11
 
 # @tag: web, draw-ir, gpu, route-cache
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl
+# @manual_section: draw_ir_route_key_rearm_axes
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -60,34 +61,38 @@ describe "Draw IR route key re-arm axes":
 
     context "the key changes on exactly the invalidating axes":
         it "re-arms when the parked device/owner token changes":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-001
             step("Vary only the device token")
+            # @capture(statistics): route key inequality when only the device token differs
             expect(key_for(DOC_A, 16, 16, TOKEN_A)).to_not_equal(
                 key_for(DOC_A, 16, 16, TOKEN_B))
 
         it "re-arms when the surface extent changes":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-002
             step("Vary only the width, then only the height")
+            # @capture(statistics): route key inequality when only width, then only height, differs
             expect(key_for(DOC_A, 16, 16, TOKEN_A)).to_not_equal(
                 key_for(DOC_A, 32, 16, TOKEN_A))
             expect(key_for(DOC_A, 16, 16, TOKEN_A)).to_not_equal(
                 key_for(DOC_A, 16, 32, TOKEN_A))
 
         it "re-arms when the document identity changes":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-003
             step("Vary only the document identity")
+            # @capture(statistics): route key inequality when only the document identity differs
             expect(key_for(DOC_A, 16, 16, TOKEN_A)).to_not_equal(
                 key_for(DOC_B, 16, 16, TOKEN_A))
 
         it "holds the key steady when nothing invalidating changed":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-004
             step("Repeat the identical axes")
+            # @capture(statistics): route key equality when all axes repeat identically
             expect(key_for(DOC_A, 16, 16, TOKEN_A)).to_equal(
                 key_for(DOC_A, 16, 16, TOKEN_A))
 
     context "the sampler re-arms on exactly those axes, behaviourally":
         it "re-samples on a new extent and a new document, not on a new frame":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-005
             # Each paired sampling frame spends exactly two exact compares, so
             # the compare counter is a direct readout of how many sampling
             # phases ran.
@@ -101,33 +106,38 @@ describe "Draw IR route key re-arm axes":
                 composition.generation = base.generation + frame.to_i64()
                 web_draw_ir_gpu_route_sample(composition, 16, 16, "software")
                 frame = frame + 1
+            # @capture(statistics): pixel-compare call count after three same-extent sampling frames
             expect(web_draw_ir_pixels_equal_call_count()).to_equal(6)
 
             step("A fourth frame at the same extent adds no sampling")
             var steady = base
             steady.generation = base.generation + 3
             web_draw_ir_gpu_route_sample(steady, 16, 16, "software")
+            # @capture(statistics): pixel-compare call count unchanged by a steady frame
             expect(web_draw_ir_pixels_equal_call_count()).to_equal(6)
 
             step("Changing the surface extent re-arms exactly once")
             val wider = simple_web_layout_render_html_draw_ir(
                 FIXTURE_HTML, 32, 16)
             web_draw_ir_gpu_route_sample(wider, 32, 16, "software")
+            # @capture(statistics): pixel-compare call count after an extent change re-arms sampling
             expect(web_draw_ir_pixels_equal_call_count()).to_equal(8)
 
             step("Changing the document identity re-arms exactly once")
             var other_document = base
             other_document.composition_id = "some-other-document"
             web_draw_ir_gpu_route_sample(other_document, 16, 16, "software")
+            # @capture(statistics): pixel-compare call count after a document-identity change re-arms sampling
             expect(web_draw_ir_pixels_equal_call_count()).to_equal(10)
 
     context "steady-frame GPU authorization":
         it "is granted by proof and correctness, never by a timing margin":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-006
             step("Exercise the authorization predicate on every axis")
             # A proven, pixel-exact, complete device stays on the GPU route
             # whether or not it won the margin test -- the margin verdict is
             # published as evidence only.
+            # @capture(statistics): authorization verdict for each proof/correctness/margin combination
             expect(web_draw_ir_route_device_authorized(true, true, true))
                 .to_equal(true)
             expect(web_draw_ir_route_device_authorized(false, true, true))
@@ -139,19 +149,22 @@ describe "Draw IR route key re-arm axes":
 
     context "the CPU twin of the device readback checksum":
         it "folds a rendered surface the way the device does":
-            # @req: REQ-SSPEC-LOCAL-001
+            # @req REQ-DRAWIRREARM-007
             step("Render the fixture and fold it")
             web_draw_ir_gpu_route_policy_reset()
             val composition = simple_web_layout_render_html_draw_ir(
                 FIXTURE_HTML, 16, 16)
             val pixels = web_draw_ir_gpu_route_sample(
                 composition, 16, 16, "software")
+            # @capture(statistics): rendered surface pixel count and known-pixel colour
             expect(pixels.len()).to_equal(256)
             expect(pixels[2 * 16 + 2]).to_equal(FIXTURE_RED)
 
             step("Absolute checksum oracle for this exact surface")
             # `acc = (acc + px) % 2147483647` over 256 pixels of this fixture.
+            # @capture(statistics): CPU-side checksum fold of the rendered surface
             expect(web_draw_ir_device_checksum(pixels)).to_equal(2143289663)
 
             step("An empty surface folds to the identity element")
+            # @capture(statistics): checksum fold of an empty pixel surface
             expect(web_draw_ir_device_checksum([])).to_equal(0)

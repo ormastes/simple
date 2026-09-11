@@ -1,3 +1,15 @@
+"""
+## Purpose and audience
+
+Covers the Chrome render dynlib SFFI boundary: the frozen ABI v1 symbol set,
+library-probe validation (digest/ABI/request-shape/loadability mismatches,
+missing-symbol naming), backend_stage derivation from create() return codes,
+and the pure-Simple shim twin that mirrors the C boundary's state machine,
+frame-geometry bounds, and readback/request status classification. Intended
+audience: engineers maintaining the chrome_render_module_sffi boundary or its
+C-side twin, and reviewers of the generated scenario manual tracing ABI
+guarantees back to concrete assertions.
+"""
 use std.spec
 use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{
     ChromeRenderAbi, ChromeRenderLoadRequest, ChromeRenderResolvedSymbols,
@@ -31,8 +43,12 @@ fn probe() -> ChromeRenderLibraryProbe:
             last_error_into: 9, destroy: 10),
     )
 
+# @manual_section: chrome_render_sffi_boundary
 describe "Chrome render dynlib SFFI boundary":
     it "freezes the ABI v1 symbol set at exactly ten ordered names":
+        # @req REQ-CHROMERENDERSFFI-001
+        # @capture(bit_table): frozen ABI v1 symbol name list and exact-match verdicts for altered lists
+        step("Read the frozen ABI v1 symbol list and check exact-match verdicts for a truncated and a reordered variant")
         expect(chrome_render_symbol_names().len()).to_equal(10)
         expect(chrome_render_symbols_exact(chrome_render_symbol_names())).to_equal(true)
         expect(chrome_render_symbols_exact(["simple_chrome_render_abi_version"])).to_equal(false)
@@ -41,12 +57,18 @@ describe "Chrome render dynlib SFFI boundary":
         expect(chrome_render_symbols_exact(reordered)).to_equal(false)
 
     it "accepts only the complete pinned ABI v1 probe":
+        # @req REQ-CHROMERENDERSFFI-002
+        # @capture(protocol_json): validation result (ok flag, status, missing_symbol) for a complete probe
+        step("Validate a complete pinned ABI v1 library probe against its load request")
         val result = chrome_render_validate_library_probe(request(), probe())
         expect(result.ok).to_equal(true)
         expect(result.status).to_equal("ok")
         expect(result.missing_symbol).to_equal("")
 
     it "names the unresolved symbol instead of reporting a bare failure":
+        # @req REQ-CHROMERENDERSFFI-003
+        # @capture(protocol_json): validation status and named missing symbol for a probe with one unresolved symbol
+        step("Validate a probe with one unresolved symbol and confirm the missing symbol is named")
         var missing = probe()
         missing.symbols.read_pixels_into = 0
         val result = chrome_render_validate_library_probe(request(), missing)
@@ -56,6 +78,9 @@ describe "Chrome render dynlib SFFI boundary":
         expect(chrome_render_missing_symbol(missing.symbols)).to_equal("simple_chrome_render_read_pixels_into")
 
     it "rejects digest, ABI version, and request-shape mismatches":
+        # @req REQ-CHROMERENDERSFFI-004
+        # @capture(protocol_json): validation statuses for digest mismatch, ABI mismatch, relative path and unbounded request
+        step("Validate probes and requests with a wrong digest, wrong ABI version, relative path and unbounded size")
         var wrong_digest = probe()
         wrong_digest.manifest_sha256 = "other"
         expect(chrome_render_validate_library_probe(request(), wrong_digest).status).to_equal("manifest-mismatch")
@@ -70,23 +95,36 @@ describe "Chrome render dynlib SFFI boundary":
         expect(chrome_render_request_valid(unbounded)).to_equal(false)
 
     it "never admits an unloadable library":
+        # @req REQ-CHROMERENDERSFFI-005
+        # @capture(protocol_json): validation status for a probe with a zero library handle
+        step("Validate a probe whose library handle indicates the library failed to load")
         var absent = probe()
         absent.library_handle = 0
         expect(chrome_render_validate_library_probe(request(), absent).status).to_equal("library-not-found")
 
     it "derives backend_stage from a real create() return code":
+        # @req REQ-CHROMERENDERSFFI-006
+        # @capture(protocol_json): backend_stage tokens derived from ok and blocked create() return codes
+        step("Derive the backend_stage token from an ok and from two blocked create() return codes")
         expect(chrome_render_backend_stage(1)).to_equal("ok")
         expect(chrome_render_backend_stage(-4)).to_equal("blocked:backend-unavailable")
         expect(chrome_render_backend_stage(-1)).to_equal("blocked:invalid-request")
 
+# @manual_section: chrome_render_shim_twin
 describe "Chrome render shim twin — pure logic mirrored from the C boundary":
     it "requires a sized viewport before a document may be loaded":
+        # @req REQ-CHROMERENDERSFFI-007
+        # @capture(bit_table): state-machine transitions from new through sized/loaded/frame states
+        step("Drive the shim state machine through resize, load and frame events from the new state")
         expect(chrome_render_state_next(chrome_render_state_new(), chrome_render_ev_load())).to_equal(-1)
         expect(chrome_render_state_next(chrome_render_state_new(), chrome_render_ev_resize())).to_equal(chrome_render_state_sized())
         expect(chrome_render_state_next(chrome_render_state_sized(), chrome_render_ev_load())).to_equal(chrome_render_state_loaded())
         expect(chrome_render_state_next(chrome_render_state_loaded(), chrome_render_ev_frame())).to_equal(chrome_render_state_frame())
 
     it "refuses a pixel read before a complete frame and after release":
+        # @req REQ-CHROMERENDERSFFI-008
+        # @capture(bit_table): state-machine transitions for a read event before a frame and after destroy
+        step("Attempt a read event before a completed frame and drive the state machine through destroy and release")
         expect(chrome_render_state_next(chrome_render_state_loaded(), chrome_render_ev_read())).to_equal(-1)
         expect(chrome_render_state_next(chrome_render_state_frame(), chrome_render_ev_read())).to_equal(chrome_render_state_frame())
         expect(chrome_render_state_next(chrome_render_state_frame(), chrome_render_ev_destroy())).to_equal(chrome_render_state_released())
@@ -94,12 +132,18 @@ describe "Chrome render shim twin — pure logic mirrored from the C boundary":
         expect(chrome_render_state_next(chrome_render_state_released(), chrome_render_ev_destroy())).to_equal(-1)
 
     it "bounds frame geometry at the 8192 dimension and 256 MiB ceiling":
+        # @req REQ-CHROMERENDERSFFI-009
+        # @capture(bit_table): computed frame byte sizes at a normal size, a zero dimension and the dimension/byte ceilings
+        step("Compute frame byte sizes at a normal size, a zero width, an over-limit dimension and the max ceiling")
         expect(chrome_render_frame_bytes(3840, 2160)).to_equal(33177600)
         expect(chrome_render_frame_bytes(0, 2160)).to_equal(0)
         expect(chrome_render_frame_bytes(8193, 16)).to_equal(0)
         expect(chrome_render_frame_bytes(8192, 8192)).to_equal(268435456)
 
     it "classifies readback capacity and request payload bounds":
+        # @req REQ-CHROMERENDERSFFI-010
+        # @capture(bit_table): status codes for readback buffer sizing and request payload bounds
+        step("Classify readback buffer capacity and request payload size against their status codes")
         expect(chrome_render_readback_status(64, 64, 16384)).to_equal(chrome_render_ok())
         expect(chrome_render_readback_status(64, 64, 16383)).to_equal(chrome_render_e_buffer_too_small())
         expect(chrome_render_readback_status(0, 64, 1048576)).to_equal(chrome_render_e_invalid_request())
@@ -109,6 +153,9 @@ describe "Chrome render shim twin — pure logic mirrored from the C boundary":
         expect(chrome_render_request_status(true, 1048577)).to_equal(chrome_render_e_invalid_request())
 
     it "maps every status code to its stable receipt token":
+        # @req REQ-CHROMERENDERSFFI-011
+        # @capture(bit_table): status-code to receipt-token mapping including the unknown-status fallback
+        step("Map known status codes and an unrecognized code to their stable receipt tokens")
         expect(chrome_render_status_text(0)).to_equal("ok")
         expect(chrome_render_status_text(3)).to_equal("buffer-too-small")
         expect(chrome_render_status_text(4)).to_equal("backend-unavailable")

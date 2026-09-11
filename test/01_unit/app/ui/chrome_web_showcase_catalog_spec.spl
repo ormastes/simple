@@ -1,3 +1,16 @@
+"""
+## Purpose and audience
+
+Covers the Chrome web-showcase shared HTML catalog: how the fixed set of
+tabs/panels is enumerated, how a composed fixture document is split into a
+shared stylesheet, tablist markup and per-tab panel markup, how standalone
+per-tab pages are assembled from those pieces, and how the generated
+`catalog.sdn` index (tab/file/digest rows) is built and validated for
+consistency against the live tab set. Intended audience: engineers working on
+the chrome-showcase catalog generator or the index-consistency contract, and
+reviewers of the generated scenario manual who need to trace each assertion
+back to catalog behavior.
+"""
 use std.spec
 use app.ui.chrome_showcase.catalog.{chrome_catalog_tabs, chrome_catalog_panel_tabs,
     chrome_catalog_file_for, chrome_catalog_page, chrome_catalog_shared_style,
@@ -24,8 +37,12 @@ fn fixture() -> text:
     "  <section id=\"panel-html\" role=\"tabpanel\" hidden>\n    <p>HTML panel</p>\n  </section>\n" +
     "</main>\n</body>\n</html>\n"
 
+# @manual_section: chrome_showcase_catalog
 describe "Chrome showcase shared HTML catalog":
     it "covers the fixture's seven canonical panels plus a tab-bar page":
+        # @req REQ-CHROMESHOWCASE-001
+        # @capture(statistics): panel-tab and tab count, plus the tab-bar tab's position and name
+        step("Enumerate the canonical panel tabs and the full tab list including the tab-bar entry")
         expect(chrome_catalog_panel_tabs().len()).to_equal(7)
         expect(chrome_catalog_tabs().len()).to_equal(8)
         expect(chrome_catalog_tabs()[7]).to_equal("tab-bar")
@@ -33,25 +50,40 @@ describe "Chrome showcase shared HTML catalog":
         expect(chrome_catalog_panel_tabs()[6]).to_equal("evidence")
 
     it "names each page file after its tab":
+        # @req REQ-CHROMESHOWCASE-002
+        # @capture(protocol_json): tab-to-filename mapping for a regular tab and the tab-bar tab
+        step("Derive the generated page filename for a regular tab and for the tab-bar tab")
         expect(chrome_catalog_file_for("css-paint")).to_equal("css-paint.html")
         expect(chrome_catalog_file_for("tab-bar")).to_equal("tab-bar.html")
 
     it "lifts the shared style and the tablist out of the composed document":
+        # @req REQ-CHROMESHOWCASE-003
+        # @capture(protocol_json): extracted shared <style> body and tablist markup boundaries
+        step("Extract the shared stylesheet and the tablist markup from the composed fixture document")
         expect(chrome_catalog_shared_style(fixture())).to_equal("body { margin: 0; }")
         expect(chrome_catalog_tablist_markup(fixture()).starts_with("<nav class=\"tabs\"")).to_equal(true)
         expect(chrome_catalog_tablist_markup(fixture()).ends_with("</nav>")).to_equal(true)
 
     it "extracts a panel and strips hidden so the page actually paints":
+        # @req REQ-CHROMESHOWCASE-004
+        # @capture(protocol_json): extracted panel markup with the hidden attribute removed
+        step("Extract the html panel from the fixture and confirm the hidden attribute is stripped")
         val panel = chrome_catalog_panel_markup(fixture(), "html")
         expect(panel.starts_with("<section id=\"panel-html\"")).to_equal(true)
         expect(panel.contains("HTML panel")).to_equal(true)
         expect(panel.contains(" hidden>")).to_equal(false)
 
     it "returns empty markup for a tab the source does not carry":
+        # @req REQ-CHROMESHOWCASE-005
+        # @capture(protocol_json): empty-string results for panel markup and page generation on a missing tab
+        step("Request panel markup and a standalone page for a tab absent from the fixture")
         expect(chrome_catalog_panel_markup(fixture(), "animation")).to_equal("")
         expect(chrome_catalog_page(fixture(), "animation")).to_equal("")
 
     it "emits a standalone page carrying the shared style and its tab marker":
+        # @req REQ-CHROMESHOWCASE-006
+        # @capture(protocol_json): generated standalone page's doctype, tab marker attribute, style and panel content
+        step("Generate a standalone page for the overview tab and inspect its assembled content")
         val page = chrome_catalog_page(fixture(), "overview")
         expect(page.starts_with("<!doctype html>")).to_equal(true)
         expect(page.contains("data-catalog-tab=\"overview\"")).to_equal(true)
@@ -59,12 +91,19 @@ describe "Chrome showcase shared HTML catalog":
         expect(page.contains("<h1>Overview</h1>")).to_equal(true)
 
     it "builds a tab-bar page from the tablist markup":
+        # @req REQ-CHROMESHOWCASE-007
+        # @capture(protocol_json): tab-bar page content including the embedded tablist markup and tab marker
+        step("Generate the tab-bar standalone page and confirm it embeds the tablist markup")
         val page = chrome_catalog_page(fixture(), "tab-bar")
         expect(page.contains("tab-overview")).to_equal(true)
         expect(page.contains("data-catalog-tab=\"tab-bar\"")).to_equal(true)
 
+# @manual_section: chrome_showcase_catalog_index
 describe "Chrome showcase catalog.sdn index":
     it "lists every generated page as a tab -> file row, in order":
+        # @req REQ-CHROMESHOWCASE-008
+        # @capture(protocol_json): generated index body's tab/file row ordering and inventory_version header
+        step("Build the catalog index text and inspect its ordered tab/file rows")
         val body = chrome_catalog_index_text("web-renderable-feature-inventory-v1", chrome_catalog_tabs(), _digests(8))
         expect(chrome_catalog_index_tabs(body).len()).to_equal(8)
         expect(chrome_catalog_index_files(body).len()).to_equal(8)
@@ -73,10 +112,16 @@ describe "Chrome showcase catalog.sdn index":
         expect(body.contains("inventory_version: web-renderable-feature-inventory-v1")).to_equal(true)
 
     it "admits an index that matches the generated page set exactly":
+        # @req REQ-CHROMESHOWCASE-009
+        # @capture(statistics): consistency verdict for an index matching the live tab set
+        step("Check that an index built from the live tab set is reported consistent")
         val body = chrome_catalog_index_text("v1", chrome_catalog_tabs(), _digests(8))
         expect(chrome_catalog_index_consistent(body, chrome_catalog_tabs())).to_equal(true)
 
     it "refuses an index with a missing, extra, reordered or misnamed row":
+        # @req REQ-CHROMESHOWCASE-010
+        # @capture(statistics): consistency verdicts across mismatched, reordered and renamed-row index variants
+        step("Check that a mismatched tab set, a reordered tab set, and a renamed file row are all rejected")
         val body = chrome_catalog_index_text("v1", chrome_catalog_tabs(), _digests(8))
         expect(chrome_catalog_index_consistent(body, chrome_catalog_panel_tabs())).to_equal(false)
         var reordered = chrome_catalog_tabs()
@@ -87,12 +132,18 @@ describe "Chrome showcase catalog.sdn index":
         expect(chrome_catalog_index_consistent(mismatched, chrome_catalog_tabs())).to_equal(false)
 
     it "binds each page's own sha256 so the index digest covers the page bytes":
+        # @req REQ-CHROMESHOWCASE-011
+        # @capture(protocol_json): per-row page digests recorded in the generated index
+        step("Build the index with per-page digests and read back the digest for each row")
         val body = chrome_catalog_index_text("v1", chrome_catalog_tabs(), _digests(8))
         expect(chrome_catalog_index_digests(body).len()).to_equal(8)
         expect(chrome_catalog_index_digests(body)[0]).to_equal("d0")
         expect(chrome_catalog_index_digests(body)[7]).to_equal("d7")
 
     it "refuses an index whose rows carry no page digest — it binds no bytes":
+        # @req REQ-CHROMESHOWCASE-012
+        # @capture(statistics): consistency verdict for an index built with an empty digest list
+        step("Build an index with no digests supplied and check it is reported inconsistent")
         val unbound = chrome_catalog_index_text("v1", chrome_catalog_tabs(), [])
         expect(chrome_catalog_index_tabs(unbound).len()).to_equal(8)
         expect(chrome_catalog_index_consistent(unbound, chrome_catalog_tabs())).to_equal(false)
