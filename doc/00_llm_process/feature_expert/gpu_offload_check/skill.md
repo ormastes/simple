@@ -392,6 +392,41 @@ attribution question first.
   per-pixel walk is O(bbox x N). All three in
   `doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
 
+## CPU<->GPU boundary fix campaign (F1/F2, same day)
+
+Plan: `doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md`;
+census: `doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md`.
+
+- **Device verification pattern**: `SIMPLE_EXECUTION_MODE=interpreter
+  SIMPLE_TIMEOUT_SECONDS=0 bin/release/aarch64-apple-darwin-macho/simple run
+  <spec>` (resolved triple for the host), reading
+  `observed_device_submit_count` / `observed_device_fence_count` after
+  `finalize_compute_frame_no_readback()` — never a static/no-op count.
+- **Zero-length-readback vs pixel-mismatch lesson**: `vk2d_bench.spl` used to
+  print a hardcoded `status=blocked reason=unconditional-submit-wait` string
+  regardless of backend behaviour (fixed:
+  `doc/08_tracking/bug/vk2d_bench_hardcoded_block_reason_2026-09-11.md`; now
+  `vk2d_verdict()` computes the verdict from real fence-completion counts). A
+  run with 0 frames or a fence/frame mismatch is `status=blocked
+  reason=zero-frames`/`multi-submit-per-frame:N` — never silently reported as
+  a passing pixel comparison. That is distinct from a genuine pixel MISMATCH
+  (comparator ran, values disagree): a zero-length readback is an evidence
+  gap, not a correctness verdict, and must never be laundered into `passed`.
+- **F1** (route-key re-arm): `_web_draw_ir_key` was keyed on a per-mutation
+  counter so the sampler route re-armed on every composition generation even
+  when geometry didn't change — fixed, see
+  `doc/08_tracking/bug/web_draw_ir_sampler_rearms_on_generation_2026-09-11.md`.
+- **F2** (mid-frame fences): `draw_text_bg` used to fence-wait before every
+  background band on a mistaken pipeline-barrier premise (21 submits/21
+  fences for 300 rects + 20 bands); `rt_vulkan_dispatch` already inserts a
+  `VkMemoryBarrier` on every dispatch, so the extra fence was redundant and is
+  now deleted (1 submit/1 fence) — see
+  `doc/08_tracking/bug/vulkan_backend_midframe_fence_and_clip_text_fallback_2026-09-11.md`.
+- **Runtime-owned blockers still open** (not fixable in pure Simple without a
+  runtime/SFFI change) — read these two bug docs directly rather than trusting
+  a paraphrase here: `doc/08_tracking/bug/engine2d_vulkan_pixels_upload_slower_than_cpu_2026-09-11.md`
+  and `doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md`.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

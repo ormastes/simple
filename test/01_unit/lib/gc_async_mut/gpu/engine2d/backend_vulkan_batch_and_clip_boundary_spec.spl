@@ -87,36 +87,45 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
 
     # ---- R6: the pending dispatch table no longer has a fixed ceiling ----
     it "starts a frame with no preallocated dispatch ceiling":
+        # @req REQ-VKBATCHCLIP-001
         # REPRODUCING. Before the fix these three arrays were literally
         # `[0i64; 256]`, so `pending_compute_count >= len()` tripped at the 256th
         # image composite and forced `_flush_pending_compute` -> submit + fence
         # wait in the MIDDLE of a frame. An empty, push-grown table cannot trip.
+        step("Create a fresh Vulkan backend and inspect its pending dispatch tables")
         val backend = VulkanBackend.create()
+        # @capture(statistics): pending compute descriptor/pipeline/source table lengths start at zero
         expect(backend.pending_compute_descriptors.len()).to_equal(0)
         expect(backend.pending_compute_pipelines.len()).to_equal(0)
         expect(backend.pending_compute_sources.len()).to_equal(0)
         expect(backend.pending_compute_count).to_equal(0)
 
     it "records zero mid-frame flushes before any primitive is enqueued":
+        # @req REQ-VKBATCHCLIP-002
         # GENERALIZING. `midframe_flush_count` is the counter the device lane
         # reads to prove one-submit-per-frame; on a fresh backend it must be 0,
         # and the image-composite descriptor pool must start empty so pooling is
         # observed growing rather than presumed.
+        step("Create a fresh Vulkan backend and inspect its mid-frame flush counter")
         val backend = VulkanBackend.create()
+        # @capture(statistics): mid-frame flush count and image descriptor pool length start at zero
         expect(backend.midframe_flush_count).to_equal(0)
         expect(backend.image_descriptor_pool.len()).to_equal(0)
 
     # ---- R8: the host coverage atlas is built once per identity ----
     it "rasterises the host coverage atlas once for a repeated draw size":
+        # @req REQ-VKBATCHCLIP-003
         # REPRODUCING. `vulkan_bitmap_font_atlas_pixels` was called
         # UNCONDITIONALLY per `draw_text` (backend_vulkan_font.spl:641) and then
         # discarded by the generation cache, i.e. ~2000 wasted 95-cell rasters on
         # a 4K page. The memo keys on the same identity the device cache does.
+        step("Request the host coverage atlas three times for the same glyph identity")
         val backend = VulkanBackend.create()
         val metrics = text_metrics(SAMPLE, 16)
         val first = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
         val second = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
         val third = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+        # @capture(statistics): host atlas CPU build count stays 1 across three requests of the same identity
         expect(backend.font_atlas_cpu_build_count).to_equal(1)
         expect(second.len()).to_equal(first.len())
         expect(third.len()).to_equal(first.len())
@@ -125,14 +134,17 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
         expect(second.len()).to_equal(direct.len())
 
     it "rebuilds the host atlas when the glyph identity actually changes":
+        # @req REQ-VKBATCHCLIP-004
         # GENERALIZING. A memo that never invalidates would be a correctness bug,
         # not an optimisation: a second size must raster again, and returning to
         # the first size must raster a third time (single-slot memo, stated).
+        step("Request the host atlas at two different glyph sizes, then back at the first size")
         val backend = VulkanBackend.create()
         val small = text_metrics(SAMPLE, 16)
         val large = text_metrics(SAMPLE, 48)
         backend._bitmap_font_atlas_pixels(small.scale, small.glyph_height_px)
         backend._bitmap_font_atlas_pixels(large.scale, large.glyph_height_px)
+        # @capture(statistics): CPU build count increments once per distinct glyph identity
         expect(backend.font_atlas_cpu_build_count).to_equal(2)
         val back_to_small = backend._bitmap_font_atlas_pixels(small.scale, small.glyph_height_px)
         expect(backend.font_atlas_cpu_build_count).to_equal(3)
@@ -141,11 +153,14 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
 
     # ---- R4: a clipped text run stays on the atlas lane ----
     it "no longer blocks the glyph lane merely because a scissor is set":
+        # @req REQ-VKBATCHCLIP-005
         # REPRODUCING. `clip-unsupported-by-font-composite` used to be returned
         # for EVERY clipped run, which on a clipped 4K page is essentially all
         # ~5000 glyphs taking `text_blit_buffer` + `draw_image_blend`. The clip is
         # now baked into the quads on the host, so the gate admits the run; the
         # mask and non-opaque reasons are deliberately UNCHANGED.
+        step("Evaluate the atlas-eligibility gate for a plain clipped run")
+        # @capture(statistics): gate block reason for each clip/mask/color combination
         expect(gate(false, 0, OPAQUE_BLUE, SAMPLE)).to_equal("")
         expect(gate(false, 64, OPAQUE_BLUE, SAMPLE)).to_equal("mask-unsupported-by-font-composite")
         expect(gate(false, 0, 0x80FFFFFFu32, SAMPLE)).to_equal("non-opaque-text-color")
@@ -153,16 +168,19 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
         expect(gate(true, 0, OPAQUE_BLUE, SAMPLE)).to_equal("clip-unsupported-by-font-composite")
 
     it "clips a glyph run to the scissor with a known pixel at a fixed point":
+        # @req REQ-VKBATCHCLIP-006
         # REPRODUCING, with an ABSOLUTE oracle. Cut 2 columns off the left of the
         # first glyph. The surviving quad must advance `atlas_x` by exactly 2 and
         # shrink `width` by exactly 2, so the composited colour at local (0,0) of
         # the clipped quad equals the UNCLIPPED quad's colour at (2,0) — the same
         # pixel the CPU raster would have kept.
+        step("Clip the first sample glyph quad 2 columns in from the left edge")
         val quads = sample_quads(SAMPLE)
         expect(quads.len() > 0).to_equal(true)
         val first = quads[0]
         val clipped = vulkan_bitmap_text_clip_quads(
             quads, 0i32, 0i32, 2i32, 0i32, first.width - 2i32, 1000i32)
+        # @capture(bit_table): clipped quad geometry and its composited pixel colours
         expect(clipped.len()).to_equal(1)
         val kept = clipped[0]
         expect(kept.width).to_equal(first.width - 2i32)
@@ -176,13 +194,16 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
             quad_alpha_at(first, SAMPLE, 3, 0))
 
     it "keeps, drops and trims adjacent glyphs consistently across the scissor":
+        # @req REQ-VKBATCHCLIP-007
         # GENERALIZING. Adjacent primitives on every edge of the same scissor:
         # a scissor that contains everything is the identity, one that excludes
         # everything keeps nothing, a top cut moves `atlas_y` not `atlas_x`, and
         # a right cut shrinks `width` while leaving `atlas_x` alone.
+        step("Apply an all-inclusive scissor to the sample glyph quads")
         val quads = sample_quads(SAMPLE)
         val first = quads[0]
         val all_in = vulkan_bitmap_text_clip_quads(quads, 0i32, 0i32, -9999i32, -9999i32, 99999i32, 99999i32)
+        # @capture(bit_table): quad count and geometry across all-in, all-out, top-cut and right-cut scissors
         expect(all_in.len()).to_equal(quads.len())
         expect(all_in[0].width).to_equal(first.width)
         expect(all_in[0].atlas_x).to_equal(first.atlas_x)
