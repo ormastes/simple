@@ -24,7 +24,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_dispatch_buffer_compute_checked,
     vulkan_sffi_quarantine_dependencies,
     vulkan_sffi_quarantine_unsubmitted_command,
-    vulkan_sffi_reap_dependency_quarantine
+    vulkan_sffi_reap_dependency_quarantine,
+    vulkan_sffi_last_error
 }
 
 # ============================================================================
@@ -379,6 +380,30 @@ impl VulkanBackend:
         self.pending_compute_sources = []
         self.pending_compute_count = 0
 
+    me discard_stale_pending_compute() -> bool:
+        """Drop a pending compute batch left over from a PREVIOUS frame.
+
+        A command-buffer handle is valid only until it is submitted. Every
+        readback/present path flushes first (`engine.spl` read_pixels arm), and
+        the flush clears the pending batch on every return path -- so pending
+        state that is still present when a NEW frame starts on a reused engine
+        is provably a ghost of a batch that was already submitted, fenced and
+        whose descriptors were already released. The handle it names is dead:
+        on the interpreter Vulkan runtime the command-buffer slot has been set
+        to `None` (`interpreter_extern/gpu.rs`), so the next
+        `rt_vulkan_bind_pipeline` on it returns 0 and poisons the frame.
+
+        Nothing is released here on purpose -- releasing again would be a
+        double free of handles the flush already reclaimed. Only the ghost
+        bookkeeping is zeroed. Returns true when a ghost was actually dropped.
+        """
+        if self.pending_compute_command <= 0 and self.pending_compute_count <= 0:
+            return false
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("stale-pending-dropped cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
+        self._clear_pending_compute_state()
+        true
+
     me _release_pending_compute_descriptors() -> bool:
         var released = true
         var i: i64 = 0
@@ -457,7 +482,7 @@ impl VulkanBackend:
         val has_font_work = self.pending_font_descriptors.len() > 0
         if not vulkan_sffi_end_compute(cmd):
             if vulkan_order_trace_enabled():
-                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
+                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()} err={vulkan_sffi_last_error()}")
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
                 val first_desc = if self.pending_compute_count > 0:
@@ -517,6 +542,8 @@ impl VulkanBackend:
         if (self.d_framebuffer <= 0 or pipe <= 0 or push_data.len() == 0 or
             gx <= 0 or gy <= 0 or gz <= 0):
             return 0
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("enqueue-entry pipe={pipe} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
         if self.pending_compute_command <= 0:
             if not vulkan_sffi_reap_dependency_quarantine():
                 if vulkan_order_trace_enabled():
@@ -561,7 +588,7 @@ impl VulkanBackend:
         val ready = pushed and vulkan_sffi_dispatch(cmd, gx, gy, gz)
         if not ready:
             if vulkan_order_trace_enabled():
-                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed}")
+                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed} err={vulkan_sffi_last_error()}")
             # Measured on Apple M4/MoltenVK, and NOT recoverable at this layer:
             # `bind_pipeline` -- the FIRST link, so nothing downstream is even
             # attempted -- fails on the frame's SECOND dispatch through an
