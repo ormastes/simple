@@ -280,8 +280,8 @@ class VulkanBackend:
     frame_device_present: bool
     frame_batching_enabled: bool
     pending_compute_command: i64
-    pending_compute_pipelines: [i64]   # preallocated, 256 damage/dependency slots
-    pending_compute_descriptors: [i64] # preallocated, parallel to pipelines
+    pending_compute_pipelines: [i64]   # grown by push; one entry per distinct pipeline / image source
+    pending_compute_descriptors: [i64] # parallel to pipelines
     pending_compute_sources: [i64]     # image source buffer per slot; zero for framebuffer-only work
     pending_compute_count: i64         # live entries in the two arrays above
     # Batched image composites retain their source buffers until the frame
@@ -306,6 +306,16 @@ class VulkanBackend:
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
     pending_font_glyph_count: i64
+    image_descriptor_pool: [i64] # warm frame-reusable image-composite descriptors
+    # Host-side coverage atlas for the built-in face, memoised on the SAME
+    # identity the device-side generation cache keys on (scale + glyph height).
+    font_atlas_cpu_scale: i64
+    font_atlas_cpu_glyph_height: i64
+    font_atlas_cpu_pixels: [u32]
+    font_atlas_cpu_build_count: i64   # host coverage-atlas rasters actually performed
+    midframe_flush_count: i64         # CUMULATIVE `_flush_pending_compute` calls since
+                                      # create/shutdown — NOT reset per frame. One frame that
+                                      # ends in a single finalize contributes exactly 1.
     font_descriptor_pool: [i64] # warm frame-reusable glyph descriptors
     font_params_pool: [i64]     # parallel 52-byte parameter buffers
     font_params_pool_capacity: [i64]
@@ -409,9 +419,9 @@ class VulkanBackend:
             frame_device_present: false,
             frame_batching_enabled: false,
             pending_compute_command: 0,
-            pending_compute_pipelines: [0i64; 256],
-            pending_compute_descriptors: [0i64; 256],
-            pending_compute_sources: [0i64; 256],
+            pending_compute_pipelines: [],
+            pending_compute_descriptors: [],
+            pending_compute_sources: [],
             pending_compute_count: 0,
             image_source_pool: [],
             image_source_pool_capacity: [],
@@ -430,6 +440,12 @@ class VulkanBackend:
             pending_font_descriptors: [],
             pending_font_params: [],
             pending_font_glyph_count: 0,
+            image_descriptor_pool: [],
+            font_atlas_cpu_scale: -1,
+            font_atlas_cpu_glyph_height: -1,
+            font_atlas_cpu_pixels: [],
+            font_atlas_cpu_build_count: 0,
+            midframe_flush_count: 0,
             font_descriptor_pool: [],
             font_params_pool: [],
             font_params_pool_capacity: [],
@@ -693,9 +709,9 @@ impl RenderBackend for VulkanBackend:
         self.frame_fallback_reason = ""
         self.frame_device_present = false
         self.pending_compute_command = 0
-        self.pending_compute_pipelines = [0i64; 256]
-        self.pending_compute_descriptors = [0i64; 256]
-        self.pending_compute_sources = [0i64; 256]
+        self.pending_compute_pipelines = []
+        self.pending_compute_descriptors = []
+        self.pending_compute_sources = []
         self.pending_compute_count = 0
         self.image_source_pool = []
         self.image_source_pool_capacity = []
@@ -760,10 +776,20 @@ impl RenderBackend for VulkanBackend:
         if self.d_font_params != 0:
             vulkan_sffi_free_buffer(self.d_font_params)
             self.d_font_params = 0
+        for descriptor in self.image_descriptor_pool:
+            if not vulkan_sffi_destroy_descriptor_set(descriptor):
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+        self.image_descriptor_pool = []
+        self.font_atlas_cpu_scale = -1
+        self.font_atlas_cpu_glyph_height = -1
+        self.font_atlas_cpu_pixels = []
+        self.font_atlas_cpu_build_count = 0
+        self.midframe_flush_count = 0
         for descriptor in self.font_descriptor_pool:
             vulkan_sffi_destroy_descriptor_set(descriptor)
         for params in self.font_params_pool:
             vulkan_sffi_free_buffer(params)
+        self.image_descriptor_pool = []
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
