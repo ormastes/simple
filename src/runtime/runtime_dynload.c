@@ -27,12 +27,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define SIMPLE_GPU_THREAD_LOCAL __declspec(thread)
+#else
+#define SIMPLE_GPU_THREAD_LOCAL _Thread_local
+#endif
+
+enum { SIMPLE_GPU_PATH_COPY_CAPACITY_V1 = 4096 };
+static SIMPLE_GPU_THREAD_LOCAL char
+    simple_gpu_path_copy_v1[SIMPLE_GPU_PATH_COPY_CAPACITY_V1];
+
 enum {
     SIMPLE_GPU_PROVIDER_ABI_V1 = 1,
     SIMPLE_GPU_BACKEND_CUDA = 1,
     SIMPLE_GPU_BACKEND_VULKAN = 2,
     SIMPLE_GPU_BACKEND_METAL = 4
 };
+
+typedef enum SimpleGpuProviderPhaseV1 {
+    SIMPLE_GPU_PROVIDER_EMPTY_V1 = 0,
+    SIMPLE_GPU_PROVIDER_LOADING_V1 = 1,
+    SIMPLE_GPU_PROVIDER_ACTIVE_V1 = 2,
+    SIMPLE_GPU_PROVIDER_RETIRING_V1 = 3,
+    SIMPLE_GPU_PROVIDER_CLOSING_V1 = 4,
+    SIMPLE_GPU_PROVIDER_FAILED_V1 = 5
+} SimpleGpuProviderPhaseV1;
 
 typedef struct SimpleGpuProviderState {
     int64_t backend_bit;
@@ -41,13 +60,25 @@ typedef struct SimpleGpuProviderState {
     int64_t abi_version;
     int64_t backend_bits;
     char *path;
-    int attempted;
+    uint64_t generation;
+    uint64_t in_flight;
+    SimpleGpuProviderPhaseV1 phase;
 } SimpleGpuProviderState;
 
+typedef struct SimpleGpuCallPinV1 {
+    SimpleGpuProviderState *state;
+    void *symbol;
+    uint64_t generation;
+    int active;
+} SimpleGpuCallPinV1;
+
 static SimpleGpuProviderState simple_gpu_providers[] = {
-    {SIMPLE_GPU_BACKEND_CUDA, "SIMPLE_CUDA_PROVIDER_PATH", NULL, 0, 0, NULL, 0},
-    {SIMPLE_GPU_BACKEND_VULKAN, "SIMPLE_VULKAN_PROVIDER_PATH", NULL, 0, 0, NULL, 0},
-    {SIMPLE_GPU_BACKEND_METAL, "SIMPLE_METAL_PROVIDER_PATH", NULL, 0, 0, NULL, 0}
+    {SIMPLE_GPU_BACKEND_CUDA, "SIMPLE_CUDA_PROVIDER_PATH", NULL, 0, 0,
+        NULL, 0, 0, SIMPLE_GPU_PROVIDER_EMPTY_V1},
+    {SIMPLE_GPU_BACKEND_VULKAN, "SIMPLE_VULKAN_PROVIDER_PATH", NULL, 0, 0,
+        NULL, 0, 0, SIMPLE_GPU_PROVIDER_EMPTY_V1},
+    {SIMPLE_GPU_BACKEND_METAL, "SIMPLE_METAL_PROVIDER_PATH", NULL, 0, 0,
+        NULL, 0, 0, SIMPLE_GPU_PROVIDER_EMPTY_V1}
 };
 static atomic_flag simple_gpu_provider_lock = ATOMIC_FLAG_INIT;
 
@@ -86,12 +117,12 @@ static void *simple_gpu_symbol(void *handle, const char *name) {
 #endif
 }
 
-static void simple_gpu_close(void *handle) {
-    if (!handle) return;
+static int simple_gpu_close(void *handle) {
+    if (!handle) return 1;
 #ifdef _WIN32
-    FreeLibrary((HMODULE)handle);
+    return FreeLibrary((HMODULE)handle) != 0;
 #else
-    dlclose(handle);
+    return dlclose(handle) == 0;
 #endif
 }
 
@@ -166,78 +197,175 @@ static int simple_gpu_has_required(void *handle, const char *const *names, size_
     return 1;
 }
 
-static int simple_gpu_validate_surface(SimpleGpuProviderState *state, void *handle) {
+static int simple_gpu_validate_surface(
+        int64_t backend_bit, void *handle,
+        int64_t *abi_version, int64_t *backend_bits) {
     typedef int64_t (*QueryFn)(void);
     QueryFn abi = (QueryFn)simple_gpu_symbol(handle, "rt_simple_gpu_provider_abi_version");
     QueryFn bits = (QueryFn)simple_gpu_symbol(handle, "rt_simple_gpu_provider_backend_bits");
     const char *const *required = NULL;
     size_t count = 0;
     if (!abi || !bits || abi() != SIMPLE_GPU_PROVIDER_ABI_V1) return 0;
-    state->abi_version = SIMPLE_GPU_PROVIDER_ABI_V1;
-    state->backend_bits = bits();
-    if ((state->backend_bits & state->backend_bit) == 0) return 0;
-    if (state->backend_bit == SIMPLE_GPU_BACKEND_CUDA) {
+    *abi_version = SIMPLE_GPU_PROVIDER_ABI_V1;
+    *backend_bits = bits();
+    if ((*backend_bits & backend_bit) == 0) return 0;
+    if (backend_bit == SIMPLE_GPU_BACKEND_CUDA) {
         required = simple_cuda_required;
         count = sizeof(simple_cuda_required) / sizeof(simple_cuda_required[0]);
-    } else if (state->backend_bit == SIMPLE_GPU_BACKEND_VULKAN) {
+    } else if (backend_bit == SIMPLE_GPU_BACKEND_VULKAN) {
         required = simple_vulkan_required;
         count = sizeof(simple_vulkan_required) / sizeof(simple_vulkan_required[0]);
-    } else if (state->backend_bit == SIMPLE_GPU_BACKEND_METAL) {
+    } else if (backend_bit == SIMPLE_GPU_BACKEND_METAL) {
         required = simple_metal_required;
         count = sizeof(simple_metal_required) / sizeof(simple_metal_required[0]);
     }
     return required && simple_gpu_has_required(handle, required, count);
 }
 
-static void simple_gpu_clear_state(SimpleGpuProviderState *state) {
-    simple_gpu_close(state->handle);
+static void simple_gpu_clear_state_locked(SimpleGpuProviderState *state) {
     state->handle = NULL;
     state->abi_version = 0;
     state->backend_bits = 0;
-    free(state->path);
     state->path = NULL;
+    state->in_flight = 0;
+    state->phase = SIMPLE_GPU_PROVIDER_EMPTY_V1;
 }
 
-static int simple_gpu_load_locked(SimpleGpuProviderState *state) {
+static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
     const char *path;
+    char *path_copy = NULL;
     void *handle;
-    if (state->attempted) return state->handle != NULL;
-    state->attempted = 1;
+    int64_t abi_version = 0;
+    int64_t backend_bits = 0;
+    int valid = 0;
+    int close_ok;
+
+    simple_gpu_lock();
+    if (state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1) {
+        simple_gpu_unlock();
+        return 1;
+    }
+    if (state->phase != SIMPLE_GPU_PROVIDER_EMPTY_V1) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    state->phase = SIMPLE_GPU_PROVIDER_LOADING_V1;
+    simple_gpu_unlock();
+
     path = getenv(state->path_env);
-    if (!path || !path[0]) return 0;
-    handle = simple_gpu_open(path);
-    if (!handle) return 0;
-    if (!simple_gpu_validate_surface(state, handle)) {
-        simple_gpu_close(handle);
-        state->abi_version = 0;
-        state->backend_bits = 0;
+    if (path && path[0]) {
+        path_copy = (char *)malloc(strlen(path) + 1);
+        if (path_copy) memcpy(path_copy, path, strlen(path) + 1);
+    }
+    handle = path_copy ? simple_gpu_open(path_copy) : NULL;
+    if (handle) valid = simple_gpu_validate_surface(
+        state->backend_bit, handle, &abi_version, &backend_bits);
+
+    simple_gpu_lock();
+    if (state->phase != SIMPLE_GPU_PROVIDER_LOADING_V1) {
+        simple_gpu_unlock();
+        if (handle) simple_gpu_close(handle);
+        free(path_copy);
         return 0;
     }
-    state->path = (char *)malloc(strlen(path) + 1);
-    if (!state->path) {
-        simple_gpu_close(handle);
-        state->abi_version = 0;
-        state->backend_bits = 0;
+    if (valid && state->generation != UINT64_MAX) {
+        state->handle = handle;
+        state->abi_version = abi_version;
+        state->backend_bits = backend_bits;
+        state->path = path_copy;
+        state->generation++;
+        state->phase = SIMPLE_GPU_PROVIDER_ACTIVE_V1;
+        simple_gpu_unlock();
+        return 1;
+    }
+    if (!handle) {
+        state->phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+        simple_gpu_unlock();
+        free(path_copy);
         return 0;
     }
-    memcpy(state->path, path, strlen(path) + 1);
     state->handle = handle;
+    state->path = path_copy;
+    state->phase = SIMPLE_GPU_PROVIDER_CLOSING_V1;
+    simple_gpu_unlock();
+    close_ok = simple_gpu_close(handle);
+    simple_gpu_lock();
+    if (close_ok) {
+        simple_gpu_clear_state_locked(state);
+        state->phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+    } else {
+        state->phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+    }
+    simple_gpu_unlock();
+    if (close_ok) free(path_copy);
+    return 0;
+}
+
+static int simple_gpu_ensure_active_v1(int64_t backend_bit) {
+    SimpleGpuProviderState *state = simple_gpu_state(backend_bit);
+    int active;
+    if (!state) return 0;
+    simple_gpu_lock();
+    active = state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1;
+    simple_gpu_unlock();
+    return active || simple_gpu_load_v1(state);
+}
+
+static int simple_gpu_call_acquire_v1(
+        int64_t backend_bit, const char *name, SimpleGpuCallPinV1 *out) {
+    SimpleGpuProviderState *state;
+    void *symbol;
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!simple_gpu_ensure_active_v1(backend_bit)) return 0;
+    simple_gpu_lock();
+    state = simple_gpu_state(backend_bit);
+    if (!state || state->phase != SIMPLE_GPU_PROVIDER_ACTIVE_V1 ||
+            state->generation == 0 || state->in_flight == UINT64_MAX) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    symbol = simple_gpu_symbol(state->handle, name);
+    if (!symbol) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    state->in_flight++;
+    out->state = state;
+    out->symbol = symbol;
+    out->generation = state->generation;
+    out->active = 1;
+    simple_gpu_unlock();
     return 1;
 }
 
-static void *simple_gpu_provider_symbol(int64_t backend_bit, const char *name) {
-    SimpleGpuProviderState *state;
-    void *symbol = NULL;
+static void simple_gpu_call_release_v1(SimpleGpuCallPinV1 *pin) {
+    /* This pin covers synchronous host execution only. Device resources and
+     * asynchronous completions need their own fence-backed lifetime owner. */
+    if (!pin || !pin->active || !pin->state) return;
     simple_gpu_lock();
-    state = simple_gpu_state(backend_bit);
-    if (state && simple_gpu_load_locked(state)) symbol = simple_gpu_symbol(state->handle, name);
+    if (pin->state->generation == pin->generation &&
+            pin->state->in_flight > 0)
+        pin->state->in_flight--;
     simple_gpu_unlock();
-    return symbol;
+    pin->active = 0;
 }
 
+#ifdef SIMPLE_GPU_PROVIDER_TEST_HOOKS
+uint64_t simple_gpu_test_generation_v1(int64_t backend_bit) {
+    SimpleGpuProviderState *state;
+    uint64_t generation = 0;
+    simple_gpu_lock();
+    state = simple_gpu_state(backend_bit);
+    if (state && state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1)
+        generation = state->generation;
+    simple_gpu_unlock();
+    return generation;
+}
+#endif
+
 int64_t rt_gpu_provider_loaded(int64_t backend_bit) {
-    return simple_gpu_provider_symbol(backend_bit,
-        "rt_simple_gpu_provider_abi_version") != NULL;
+    return simple_gpu_ensure_active_v1(backend_bit);
 }
 
 int64_t rt_gpu_provider_abi_version(int64_t backend_bit) {
@@ -246,7 +374,8 @@ int64_t rt_gpu_provider_abi_version(int64_t backend_bit) {
     (void)rt_gpu_provider_loaded(backend_bit);
     simple_gpu_lock();
     state = simple_gpu_state(backend_bit);
-    if (state && state->handle) value = state->abi_version;
+    if (state && state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1)
+        value = state->abi_version;
     simple_gpu_unlock();
     return value;
 }
@@ -257,46 +386,111 @@ int64_t rt_gpu_provider_backend_bits(int64_t backend_bit) {
     (void)rt_gpu_provider_loaded(backend_bit);
     simple_gpu_lock();
     state = simple_gpu_state(backend_bit);
-    if (state && state->handle) value = state->backend_bits;
+    if (state && state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1)
+        value = state->backend_bits;
     simple_gpu_unlock();
     return value;
 }
 
 const char *rt_gpu_provider_path(int64_t backend_bit) {
     SimpleGpuProviderState *state;
-    const char *value = "";
+    size_t length;
+    simple_gpu_path_copy_v1[0] = '\0';
     (void)rt_gpu_provider_loaded(backend_bit);
     simple_gpu_lock();
     state = simple_gpu_state(backend_bit);
-    if (state && state->handle && state->path) value = state->path;
+    if (state && state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1 && state->path) {
+        length = strlen(state->path);
+        if (length < sizeof(simple_gpu_path_copy_v1))
+            memcpy(simple_gpu_path_copy_v1, state->path, length + 1);
+    }
     simple_gpu_unlock();
-    return value;
+    return simple_gpu_path_copy_v1;
 }
 
 int64_t rt_gpu_provider_unload(int64_t backend_bit) {
     SimpleGpuProviderState *state;
+    void *handle;
+    char *path;
+    uint64_t generation;
+    int close_ok;
     simple_gpu_lock();
     state = simple_gpu_state(backend_bit);
     if (!state) {
         simple_gpu_unlock();
         return 0;
     }
-    simple_gpu_clear_state(state);
-    state->attempted = 0;
+    if (state->phase == SIMPLE_GPU_PROVIDER_EMPTY_V1) {
+        simple_gpu_unlock();
+        return 1;
+    }
+    if (state->phase == SIMPLE_GPU_PROVIDER_LOADING_V1 ||
+            state->phase == SIMPLE_GPU_PROVIDER_CLOSING_V1) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    if (state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1)
+        state->phase = SIMPLE_GPU_PROVIDER_RETIRING_V1;
+    /* Retirement rejects new calls. A busy result deliberately requires the
+     * owner to retry after all synchronous call pins have drained. */
+    if (state->phase == SIMPLE_GPU_PROVIDER_RETIRING_V1 &&
+            state->in_flight != 0) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    if (state->phase == SIMPLE_GPU_PROVIDER_FAILED_V1 && !state->handle) {
+        simple_gpu_clear_state_locked(state);
+        simple_gpu_unlock();
+        return 1;
+    }
+    if ((state->phase != SIMPLE_GPU_PROVIDER_RETIRING_V1 &&
+            state->phase != SIMPLE_GPU_PROVIDER_FAILED_V1) || !state->handle) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    handle = state->handle;
+    path = state->path;
+    generation = state->generation;
+    state->phase = SIMPLE_GPU_PROVIDER_CLOSING_V1;
     simple_gpu_unlock();
+    close_ok = simple_gpu_close(handle);
+    simple_gpu_lock();
+    if (state->phase != SIMPLE_GPU_PROVIDER_CLOSING_V1 ||
+            state->generation != generation || state->handle != handle) {
+        simple_gpu_unlock();
+        return 0;
+    }
+    if (!close_ok) {
+        state->phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+        simple_gpu_unlock();
+        return 0;
+    }
+    simple_gpu_clear_state_locked(state);
+    simple_gpu_unlock();
+    free(path);
     return 1;
 }
 
 #define GPU_CALL0(ret, name, bit, provider_name, unavailable) \
-    ret name(void) { typedef ret (*Fn)(void); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn() : unavailable; }
+    ret name(void) { typedef ret (*Fn)(void); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(); simple_gpu_call_release_v1(&pin); return result; }
 #define GPU_CALL1(ret, name, bit, provider_name, unavailable, t1) \
-    ret name(t1 a1) { typedef ret (*Fn)(t1); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1) : unavailable; }
+    ret name(t1 a1) { typedef ret (*Fn)(t1); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1); simple_gpu_call_release_v1(&pin); return result; }
 #define GPU_CALL2(ret, name, bit, provider_name, unavailable, t1, t2) \
-    ret name(t1 a1, t2 a2) { typedef ret (*Fn)(t1,t2); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2) : unavailable; }
+    ret name(t1 a1, t2 a2) { typedef ret (*Fn)(t1,t2); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1,a2); simple_gpu_call_release_v1(&pin); return result; }
 #define GPU_CALL3(ret, name, bit, provider_name, unavailable, t1, t2, t3) \
-    ret name(t1 a1, t2 a2, t3 a3) { typedef ret (*Fn)(t1,t2,t3); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2,a3) : unavailable; }
+    ret name(t1 a1, t2 a2, t3 a3) { typedef ret (*Fn)(t1,t2,t3); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1,a2,a3); simple_gpu_call_release_v1(&pin); return result; }
 #define GPU_CALL4(ret, name, bit, provider_name, unavailable, t1, t2, t3, t4) \
-    ret name(t1 a1, t2 a2, t3 a3, t4 a4) { typedef ret (*Fn)(t1,t2,t3,t4); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2,a3,a4) : unavailable; }
+    ret name(t1 a1, t2 a2, t3 a3, t4 a4) { typedef ret (*Fn)(t1,t2,t3,t4); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1,a2,a3,a4); simple_gpu_call_release_v1(&pin); return result; }
 
 GPU_CALL0(int64_t, rt_cuda_available, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_provider_available", 0)
 GPU_CALL0(int64_t, rt_cuda_device_count, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_provider_device_count", 0)
@@ -334,10 +528,16 @@ int64_t rt_cuda_launch_kernel_ex(int64_t module, const uint8_t *func_name_ptr, u
                                   int64_t shared_bytes, int64_t stream, int64_t args_ptr) {
     typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t, int64_t,
                            int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_ex");
-    return fn ? fn(module, func_name_ptr, func_name_len, grid_x, grid_y, grid_z,
-                   block_x, block_y, block_z, shared_bytes, stream, args_ptr)
-              : -3;
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_ex", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+        grid_x, grid_y, grid_z, block_x, block_y, block_z,
+        shared_bytes, stream, args_ptr);
+    simple_gpu_call_release_v1(&pin);
+    return result;
 }
 
 GPU_CALL0(int64_t, rt_vulkan_is_available, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_provider_is_available", 0)
@@ -502,56 +702,106 @@ static int simple_gpu_array_to_bytes(int64_t array_value, uint8_t **bytes, int64
 
 int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_compile_shader_raw");
+    SimpleGpuCallPinV1 pin;
     const uint8_t *data = rt_string_data(source);
     int64_t len = rt_string_len(source);
-    return fn && data && len >= 0 ? fn(device, (int64_t)(intptr_t)data, len) : 0;
+    int64_t result;
+    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_compile_shader_raw", &pin))
+        return 0;
+    result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)data, len);
+    simple_gpu_call_release_v1(&pin);
+    return result;
 }
 
 int64_t rt_metal_create_compute_pipeline(int64_t device, int64_t shader, int64_t entry) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_create_compute_pipeline_raw");
+    SimpleGpuCallPinV1 pin;
     const uint8_t *data = rt_string_data(entry);
     int64_t len = rt_string_len(entry);
-    return fn && data && len >= 0 ? fn(device, shader, (int64_t)(intptr_t)data, len) : 0;
+    int64_t result;
+    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_create_compute_pipeline_raw", &pin))
+        return 0;
+    result = ((Fn)pin.symbol)(device, shader, (int64_t)(intptr_t)data, len);
+    simple_gpu_call_release_v1(&pin);
+    return result;
 }
 
 int64_t rt_metal_load_library_array(int64_t device, int64_t array_value) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_load_library_raw");
-    uint8_t *bytes = NULL; int64_t len = 0; int64_t result = 0;
-    if (fn && simple_gpu_array_to_bytes(array_value, &bytes, &len)) result = fn(device, (int64_t)(intptr_t)bytes, len);
-    free(bytes); return result;
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len)) return 0;
+    if (!simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_load_library_raw", &pin)) {
+        free(bytes);
+        return 0;
+    }
+    result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)bytes, len);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes);
+    return result;
 }
 
 int64_t rt_metal_buffer_upload(int64_t buffer, int64_t array_value, int64_t requested_len) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_upload_raw");
-    uint8_t *bytes = NULL; int64_t len = 0; int64_t result = 0;
-    if (fn && simple_gpu_array_to_bytes(array_value, &bytes, &len) && requested_len == len) result = fn(buffer, (int64_t)(intptr_t)bytes, len);
-    free(bytes); return result;
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
+            requested_len != len) {
+        free(bytes);
+        return 0;
+    }
+    if (!simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_upload_raw", &pin)) {
+        free(bytes);
+        return 0;
+    }
+    result = ((Fn)pin.symbol)(buffer, (int64_t)(intptr_t)bytes, len);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes);
+    return result;
 }
 
 int64_t rt_metal_buffer_download(int64_t array_value, int64_t buffer, int64_t requested_len) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_download_raw");
+    SimpleGpuCallPinV1 pin;
     SplArray *array = (SplArray *)(intptr_t)array_value;
-    int64_t len = rt_array_len(array); int64_t i; int64_t result = 0;
+    int64_t len = rt_array_len(array); int64_t i; int64_t result;
     uint8_t *bytes;
-    if (!fn || !array || len < 0 || requested_len != len) return 0;
+    if (!array || len < 0 || requested_len != len) return 0;
     bytes = len == 0 ? NULL : (uint8_t *)malloc((size_t)len);
     if (len != 0 && !bytes) return 0;
-    result = fn((int64_t)(intptr_t)bytes, buffer, len);
+    if (!simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_download_raw", &pin)) {
+        free(bytes);
+        return 0;
+    }
+    result = ((Fn)pin.symbol)((int64_t)(intptr_t)bytes, buffer, len);
+    simple_gpu_call_release_v1(&pin);
     if (result) for (i = 0; i < len; i++) rt_array_set(array, i, rt_value_int(bytes[i]));
     free(bytes); return result;
 }
 
 int64_t rt_metal_set_bytes(int64_t encoder, int64_t array_value, int64_t requested_len, int64_t index) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
-    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_METAL, "rt_metal_set_bytes_raw");
-    uint8_t *bytes = NULL; int64_t len = 0; int64_t result = 0;
-    if (fn && simple_gpu_array_to_bytes(array_value, &bytes, &len) && requested_len == len) result = fn(encoder, (int64_t)(intptr_t)bytes, len, index);
-    free(bytes); return result;
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
+            requested_len != len) {
+        free(bytes);
+        return 0;
+    }
+    if (!simple_gpu_call_acquire_v1(
+            SIMPLE_GPU_BACKEND_METAL, "rt_metal_set_bytes_raw", &pin)) {
+        free(bytes);
+        return 0;
+    }
+    result = ((Fn)pin.symbol)(encoder, (int64_t)(intptr_t)bytes, len, index);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes);
+    return result;
 }
 
 #ifdef _WIN32

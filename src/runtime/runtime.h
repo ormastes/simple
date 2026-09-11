@@ -409,7 +409,10 @@ int64_t  rt_host_dynlib_close(int64_t handle);
 int64_t  rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t  rt_gpu_provider_abi_version(int64_t backend_bit);
 int64_t  rt_gpu_provider_backend_bits(int64_t backend_bit);
+/* Bounded thread-local copy; valid until the next path query on this thread. */
 const char* rt_gpu_provider_path(int64_t backend_bit);
+/* Returns 0 while pinned calls are draining; retry to perform the close. */
+int64_t  rt_gpu_provider_unload(int64_t backend_bit);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
