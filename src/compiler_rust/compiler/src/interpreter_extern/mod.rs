@@ -2494,6 +2494,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
     insert_simple!("rt_vulkan_compile_spirv_array", gpu::rt_vulkan_compile_spirv_array_fn);
     insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
+    insert_simple!("rt_vulkan_readback_u32_array", gpu::rt_vulkan_readback_u32_array_fn);
+    insert_simple!(
+        "rt_vulkan_readback_u32_array_checksum",
+        gpu::rt_vulkan_readback_u32_array_checksum_fn
+    );
     insert_simple!(
         "rt_vulkan_fence_submission_supported",
         gpu::rt_vulkan_fence_submission_supported_fn
