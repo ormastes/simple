@@ -1,0 +1,138 @@
+# codex-impl
+# Product source owner and argv boundary for one native-build worker handoff.
+# Reads each ambient source only in the parent. The worker receives one bounded
+# immutable argument and never reconstructs policy by rewriting its environment.
+
+use app.io.env_ops.{cwd, env_vars}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use app.cli.environment_variant_policy_sources_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    environment_variant_admin_restrictions_empty_v1
+}
+
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_NAME_V1: text =
+    "--internal-environment-variant-policy-v1"
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1: text =
+    "--internal-environment-variant-policy-v1="
+pub const ENVIRONMENT_VARIANT_POLICY_CONFIG_MAX_BYTES_V1: i64 = 65536
+
+pub enum EnvironmentVariantPolicyHandoffOwnerErrorV1:
+    EnvironmentSnapshotFailed
+    ConfigurationReadFailed
+    PolicyCollectionFailed
+    PolicyEncodingFailed
+    MissingInternalArgument
+    DuplicateInternalArgument
+    CallerSuppliedInternalArgument
+    InvalidInternalArgument
+
+pub struct EnvironmentVariantPolicyPreparedHandoffV1:
+    handoff: EnvironmentVariantPolicyHandoffV1
+    encoded_payload: text
+
+pub struct EnvironmentVariantPolicyOpenedHandoffV1:
+    handoff: EnvironmentVariantPolicyHandoffV1
+    user_args: [text]
+
+fn _handoff_absent_source() -> EnvironmentVariantConfigSourceV1:
+    EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+
+fn _handoff_config_source(
+    path: text, identity: text
+) -> Result<EnvironmentVariantConfigSourceV1, EnvironmentVariantPolicyHandoffOwnerErrorV1>:
+    if path == "" or not file_exists(path): return Ok(_handoff_absent_source())
+    match file_read_regular_no_follow_bounded(
+        path, ENVIRONMENT_VARIANT_POLICY_CONFIG_MAX_BYTES_V1):
+        case Ok(content): Ok(EnvironmentVariantConfigSourceV1(
+            present: true, source_identity: identity, content: content))
+        case Err(_): Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.ConfigurationReadFailed)
+
+fn _handoff_snapshot_value(snapshot: [(text, text)], key: text) -> text:
+    for entry in snapshot:
+        if entry.0 == key: return entry.1
+    ""
+
+pub fn environment_variant_policy_handoff_prepare_from_snapshot_v1(
+    args: [text], environment: [(text, text)],
+    project: EnvironmentVariantConfigSourceV1,
+    user: EnvironmentVariantConfigSourceV1
+) -> Result<EnvironmentVariantPolicyPreparedHandoffV1, EnvironmentVariantPolicyHandoffOwnerErrorV1>:
+    for arg in args:
+        if arg == ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_NAME_V1 or
+                arg.starts_with(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1):
+            return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.CallerSuppliedInternalArgument)
+    # No authenticated administrator source is defined in this slice. Empty
+    # restrictions are deliberate: a self-authenticating digest must never be
+    # promoted into administrator authority.
+    val collected = match environment_variant_policy_sources_collect_from_snapshot_v1(
+        args, environment, project, user,
+        environment_variant_admin_restrictions_empty_v1()):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyCollectionFailed)
+    val handoff = match environment_variant_policy_handoff_v1(
+        collected.policy_inputs, collected.target_cpu, collected.target_cpu_features):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed)
+    val encoded = match environment_variant_policy_handoff_encode_v1(handoff):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed)
+    Ok(EnvironmentVariantPolicyPreparedHandoffV1(
+        handoff: handoff, encoded_payload: encoded))
+
+pub fn environment_variant_policy_handoff_prepare_v1(
+    args: [text]
+) -> Result<EnvironmentVariantPolicyPreparedHandoffV1, EnvironmentVariantPolicyHandoffOwnerErrorV1>:
+    val snapshot = match env_vars():
+        case Some(value): value
+        case None: return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.EnvironmentSnapshotFailed)
+    val here = cwd()
+    val project_path = if here == "" or here == ".": "simple.sdn" else: here + "/simple.sdn"
+    val home = _handoff_snapshot_value(snapshot, "HOME")
+    val windows_home = _handoff_snapshot_value(snapshot, "USERPROFILE")
+    val user_root = if home != "": home else: windows_home
+    # This is a new, feature-specific user policy source. It is not an alias
+    # for ~/.config/itf/config.sdn or any merged CompilerConfig.
+    val user_path = if user_root == "": "" else: user_root + "/.config/simple/config.sdn"
+    val project = _handoff_config_source(project_path, "project:simple.sdn")?
+    val user = _handoff_config_source(user_path, "user:~/.config/simple/config.sdn")?
+    environment_variant_policy_handoff_prepare_from_snapshot_v1(
+        args, snapshot, project, user)
+
+pub fn environment_variant_policy_handoff_attach_v1(
+    user_args: [text], encoded_payload: text
+) -> Result<[text], EnvironmentVariantPolicyHandoffOwnerErrorV1>:
+    for arg in user_args:
+        if arg == ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_NAME_V1 or
+                arg.starts_with(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1):
+            return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.CallerSuppliedInternalArgument)
+    val _validated = match environment_variant_policy_handoff_decode_v1(encoded_payload):
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument)
+        case Ok(value): value
+    var out = user_args
+    out.push(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + encoded_payload)
+    Ok(out)
+
+pub fn environment_variant_policy_handoff_extract_v1(
+    args: [text]
+) -> Result<EnvironmentVariantPolicyOpenedHandoffV1, EnvironmentVariantPolicyHandoffOwnerErrorV1>:
+    var encoded = ""
+    var count = 0
+    var user_args: [text] = []
+    for arg in args:
+        if arg == ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_NAME_V1:
+            count = count + 1
+        elif arg.starts_with(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1):
+            count = count + 1
+            encoded = arg.substring(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1.len())
+        else:
+            user_args.push(arg)
+    if count == 0:
+        return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.MissingInternalArgument)
+    if count != 1:
+        return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.DuplicateInternalArgument)
+    val handoff = match environment_variant_policy_handoff_decode_v1(encoded):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument)
+    Ok(EnvironmentVariantPolicyOpenedHandoffV1(
+        handoff: handoff, user_args: user_args))

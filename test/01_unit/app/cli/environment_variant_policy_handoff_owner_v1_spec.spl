@@ -1,0 +1,48 @@
+use std.spec.*
+use app.cli.environment_variant_policy_handoff_owner_v1.*
+use app.cli.environment_variant_policy_sources_v1.{EnvironmentVariantConfigSourceV1}
+
+fn source(content: text, identity: text) -> EnvironmentVariantConfigSourceV1:
+    EnvironmentVariantConfigSourceV1(present: true, source_identity: identity, content: content)
+
+fn absent() -> EnvironmentVariantConfigSourceV1:
+    EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+
+describe "environment variant policy handoff app owner V1":
+    it "appends and extracts exactly one internal argument without rewriting user flags":
+        val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(
+            ["--cpu", "znver4", "--frontend-offload=on", "--source", "src"],
+            [("SIMPLE_CPU_FEATURES", "+avx2")], absent(), absent()).unwrap()
+        val attached = environment_variant_policy_handoff_attach_v1(
+            ["--cpu", "znver4", "--frontend-offload=on", "--source", "src"],
+            prepared.encoded_payload).unwrap()
+        expect(attached.len()).to_equal(6)
+        val opened = environment_variant_policy_handoff_extract_v1(attached).unwrap()
+        expect(opened.user_args).to_equal(
+            ["--cpu", "znver4", "--frontend-offload=on", "--source", "src"])
+        expect(opened.handoff.target_cpu).to_equal("znver4")
+        expect(opened.handoff.target_cpu_features).to_equal("+avx2")
+
+    it "rejects missing duplicate corrupt and caller-supplied internal arguments":
+        val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(
+            [], [], absent(), absent()).unwrap()
+        val internal = ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + prepared.encoded_payload
+        expect(environment_variant_policy_handoff_extract_v1([]).is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_extract_v1([internal, internal]).is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_extract_v1(
+            [ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + "corrupt"]).is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_attach_v1([internal], prepared.encoded_payload).is_err()).to_equal(true)
+
+    it "uses project then explicit new user policy while retaining CLI precedence":
+        val project = source(
+            "environment_variants:\n  parser_prefer: scalar\n  host_cpu_max: x86-64-v2\n",
+            "project/simple.sdn")
+        val user = source(
+            "environment_variants:\n  parser_prefer: simd\n  frontend_offload: resident\n",
+            "~/.config/simple/config.sdn")
+        val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(
+            ["--host-cpu-max=x86-64-v3"], [], project, user).unwrap()
+        expect(prepared.handoff.policy_inputs.cli.host_cpu_max).to_equal("x86-64-v3")
+        expect(prepared.handoff.policy_inputs.project.parser_prefer).to_equal("scalar")
+        expect(prepared.handoff.policy_inputs.user.parser_prefer).to_equal("simd")
+

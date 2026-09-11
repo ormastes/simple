@@ -1,0 +1,238 @@
+# codex-impl
+# Canonical bounded parent-to-worker transport for environment variant policy.
+#
+# The digest detects accidental or hostile payload mutation. It is not an
+# administrator-authority token: only a source owner may decide which admin
+# restrictions are eligible to enter this value.
+
+use std.common.base_encoding.base64.{base64url_decode_strict, base64url_encode}
+use std.common.base_encoding.utilities.{
+    text_to_bytes_linear, validated_utf8_bytes_to_text_linear
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_builder.{StringBuilder}
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1: i64 = 1
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_FIELD_BYTES_V1: i64 = 1024
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1: i64 = 16384
+pub const ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_ARG_BYTES_V1: i64 = 22000
+
+val _HANDOFF_MAGIC_V1: text = "simple-environment-variant-policy-handoff-v1"
+
+pub enum EnvironmentVariantPolicyHandoffErrorV1:
+    InvalidPolicy
+    InvalidValue
+    Oversized
+    Corrupt
+    NonCanonical
+
+pub struct EnvironmentVariantPolicyHandoffV1:
+    schema_version: i64
+    policy_inputs: EnvironmentVariantPolicyInputsV1
+    target_cpu: text
+    target_cpu_features: text
+    policy_digest: text
+    cache_identity: text
+    integrity_digest: text
+
+fn _handoff_digest_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _handoff_hex_digit(value: i64) -> text:
+    "0123456789abcdef".char_at(value)
+
+fn _handoff_hex_encode(value: text) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    val bytes = text_to_bytes_linear(value)
+    if bytes.len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_FIELD_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    val restored = match validated_utf8_bytes_to_text_linear(bytes):
+        case Ok(text_value): text_value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
+    if restored != value:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
+    val out = StringBuilder.new()
+    for byte in bytes:
+        val n = byte.to_i64()
+        out.push(_handoff_hex_digit((n >> 4) & 15))
+        out.push(_handoff_hex_digit(n & 15))
+    Ok(out.to_text())
+
+fn _handoff_hex_value(ch: text) -> i64:
+    if ch.len() != 1: return -1
+    val code = ch.char_code_at(0)
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 97 and code <= 102: return code - 97 + 10
+    -1
+
+fn _handoff_hex_decode(value: text) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    if value.len() % 2 != 0 or value.len() / 2 > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_FIELD_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    var bytes: [u8] = [0u8; value.len() / 2]
+    var i = 0
+    while i < value.len():
+        val high = _handoff_hex_value(value.char_at(i))
+        val low = _handoff_hex_value(value.char_at(i + 1))
+        if high < 0 or low < 0:
+            return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+        bytes[i / 2] = ((high << 4) | low).to_u8()
+        i = i + 2
+    match validated_utf8_bytes_to_text_linear(bytes):
+        case Ok(text_value):
+            if _handoff_hex_encode(text_value)? != value:
+                return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+            Ok(text_value)
+        case Err(_): Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
+
+fn _handoff_row(name: text, value: text) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    Ok("{name}={_handoff_hex_encode(value)?}\n")
+
+fn _handoff_material(
+    inputs: EnvironmentVariantPolicyInputsV1, target_cpu: text,
+    target_cpu_features: text, policy_digest: text, cache_identity: text
+) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    var out = _HANDOFF_MAGIC_V1 + "\n"
+    for named in [
+        ("cli.parser_prefer", inputs.cli.parser_prefer),
+        ("cli.parser_require", inputs.cli.parser_require),
+        ("cli.host_cpu_max", inputs.cli.host_cpu_max),
+        ("cli.frontend_offload", inputs.cli.frontend_offload),
+        ("cli.frontend_fallback", inputs.cli.frontend_fallback),
+        ("env.parser_prefer", inputs.env.parser_prefer),
+        ("env.parser_require", inputs.env.parser_require),
+        ("env.host_cpu_max", inputs.env.host_cpu_max),
+        ("env.frontend_offload", inputs.env.frontend_offload),
+        ("env.frontend_fallback", inputs.env.frontend_fallback),
+        ("project.parser_prefer", inputs.project.parser_prefer),
+        ("project.parser_require", inputs.project.parser_require),
+        ("project.host_cpu_max", inputs.project.host_cpu_max),
+        ("project.frontend_offload", inputs.project.frontend_offload),
+        ("project.frontend_fallback", inputs.project.frontend_fallback),
+        ("user.parser_prefer", inputs.user.parser_prefer),
+        ("user.parser_require", inputs.user.parser_require),
+        ("user.host_cpu_max", inputs.user.host_cpu_max),
+        ("user.frontend_offload", inputs.user.frontend_offload),
+        ("user.frontend_fallback", inputs.user.frontend_fallback),
+        ("admin.parser_provider", inputs.admin.parser_provider),
+        ("admin.host_cpu_max", inputs.admin.host_cpu_max),
+        ("admin.frontend_offload_max", inputs.admin.frontend_offload_max),
+        ("admin.frontend_fallback", inputs.admin.frontend_fallback),
+        ("target_cpu", target_cpu),
+        ("target_cpu_features", target_cpu_features)
+    ]:
+        out = out + _handoff_row(named.0, named.1)?
+    out = out + "policy_digest={policy_digest}\n"
+    out = out + "cache_identity={cache_identity}\n"
+    if text_to_bytes_linear(out).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    Ok(out)
+
+fn _handoff_cache_identity(policy_digest: text, target_cpu: text, target_features: text) -> text:
+    sha256_text("simple/environment-variant-policy-cache/v1|{policy_digest}|" +
+        "{target_cpu.len()}:{target_cpu}|{target_features.len()}:{target_features}")
+
+pub fn environment_variant_policy_handoff_v1(
+    inputs: EnvironmentVariantPolicyInputsV1, target_cpu: text,
+    target_cpu_features: text
+) -> Result<EnvironmentVariantPolicyHandoffV1, EnvironmentVariantPolicyHandoffErrorV1>:
+    val decision = match environment_variant_policy_resolve_v1(inputs):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidPolicy)
+    val cache_identity = _handoff_cache_identity(
+        decision.policy_digest, target_cpu, target_cpu_features)
+    val material = _handoff_material(
+        inputs, target_cpu, target_cpu_features, decision.policy_digest, cache_identity)?
+    Ok(EnvironmentVariantPolicyHandoffV1(
+        schema_version: ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1,
+        policy_inputs: inputs, target_cpu: target_cpu,
+        target_cpu_features: target_cpu_features,
+        policy_digest: decision.policy_digest, cache_identity: cache_identity,
+        integrity_digest: sha256_text(material)))
+
+pub fn environment_variant_policy_handoff_encode_v1(
+    value: EnvironmentVariantPolicyHandoffV1
+) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    if value.schema_version != ENVIRONMENT_VARIANT_POLICY_HANDOFF_SCHEMA_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
+    val canonical = environment_variant_policy_handoff_v1(
+        value.policy_inputs, value.target_cpu, value.target_cpu_features)?
+    if (canonical.policy_digest != value.policy_digest or
+            canonical.cache_identity != value.cache_identity or
+            canonical.integrity_digest != value.integrity_digest):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    val material = _handoff_material(value.policy_inputs, value.target_cpu,
+        value.target_cpu_features, value.policy_digest, value.cache_identity)?
+    val wire = material + "integrity_digest={value.integrity_digest}\n"
+    if text_to_bytes_linear(wire).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    val encoded = base64url_encode(wire)
+    if encoded.len() == 0 or encoded.len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_ARG_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    Ok(encoded)
+
+fn _handoff_field(
+    lines: [text], index: i64, name: text
+) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
+    if index >= lines.len(): return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
+    val prefix = name + "="
+    if not lines[index].starts_with(prefix):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    _handoff_hex_decode(lines[index].substring(prefix.len()))
+
+fn _handoff_layer(lines: [text], index: i64, prefix: text) -> Result<EnvironmentVariantPolicyLayerV1, EnvironmentVariantPolicyHandoffErrorV1>:
+    Ok(EnvironmentVariantPolicyLayerV1(
+        parser_prefer: _handoff_field(lines, index, prefix + ".parser_prefer")?,
+        parser_require: _handoff_field(lines, index + 1, prefix + ".parser_require")?,
+        host_cpu_max: _handoff_field(lines, index + 2, prefix + ".host_cpu_max")?,
+        frontend_offload: _handoff_field(lines, index + 3, prefix + ".frontend_offload")?,
+        frontend_fallback: _handoff_field(lines, index + 4, prefix + ".frontend_fallback")?))
+
+pub fn environment_variant_policy_handoff_decode_v1(
+    encoded: text
+) -> Result<EnvironmentVariantPolicyHandoffV1, EnvironmentVariantPolicyHandoffErrorV1>:
+    if encoded.len() == 0 or encoded.len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_ARG_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    val wire = match base64url_decode_strict(encoded):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
+    if base64url_encode(wire) != encoded:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    if text_to_bytes_linear(wire).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
+    val lines = wire.split("\n")
+    if lines.len() != 31 or lines[0] != _HANDOFF_MAGIC_V1 or lines[30] != "":
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    val inputs = EnvironmentVariantPolicyInputsV1(
+        cli: _handoff_layer(lines, 1, "cli")?,
+        env: _handoff_layer(lines, 6, "env")?,
+        project: _handoff_layer(lines, 11, "project")?,
+        user: _handoff_layer(lines, 16, "user")?,
+        admin: EnvironmentVariantAdminRestrictionsV1(
+            parser_provider: _handoff_field(lines, 21, "admin.parser_provider")?,
+            host_cpu_max: _handoff_field(lines, 22, "admin.host_cpu_max")?,
+            frontend_offload_max: _handoff_field(lines, 23, "admin.frontend_offload_max")?,
+            frontend_fallback: _handoff_field(lines, 24, "admin.frontend_fallback")?))
+    val target_cpu = _handoff_field(lines, 25, "target_cpu")?
+    val target_features = _handoff_field(lines, 26, "target_cpu_features")?
+    if not lines[27].starts_with("policy_digest=") or
+            not lines[28].starts_with("cache_identity=") or
+            not lines[29].starts_with("integrity_digest="):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
+    val policy_digest = lines[27].substring(14)
+    val cache_identity = lines[28].substring(15)
+    val integrity_digest = lines[29].substring(17)
+    if not _handoff_digest_valid(policy_digest) or
+            not _handoff_digest_valid(cache_identity) or
+            not _handoff_digest_valid(integrity_digest):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
+    val canonical = environment_variant_policy_handoff_v1(
+        inputs, target_cpu, target_features)?
+    if (canonical.policy_digest != policy_digest or
+            canonical.cache_identity != cache_identity or
+            canonical.integrity_digest != integrity_digest):
+        return Err(EnvironmentVariantPolicyHandoffErrorV1.Corrupt)
+    Ok(canonical)

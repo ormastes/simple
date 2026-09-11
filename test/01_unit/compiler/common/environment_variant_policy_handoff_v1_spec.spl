@@ -1,0 +1,66 @@
+use std.spec.*
+use std.common.string_builder.{StringBuilder}
+use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+
+fn layer(
+    prefer: text = "", require: text = "", cpu: text = "",
+    offload: text = "", fallback: text = ""
+) -> EnvironmentVariantPolicyLayerV1:
+    EnvironmentVariantPolicyLayerV1(
+        parser_prefer: prefer, parser_require: require, host_cpu_max: cpu,
+        frontend_offload: offload, frontend_fallback: fallback)
+
+fn fixture() -> EnvironmentVariantPolicyHandoffV1:
+    val inputs = EnvironmentVariantPolicyInputsV1(
+        cli: layer(prefer: "simd", cpu: "x86-64-v3"),
+        env: layer(offload: "on"), project: layer(), user: layer(),
+        admin: EnvironmentVariantAdminRestrictionsV1(
+            parser_provider: "", host_cpu_max: "x86-64-v4",
+            frontend_offload_max: "", frontend_fallback: ""))
+    environment_variant_policy_handoff_v1(inputs, "znver4", "+avx2,-avx512f").unwrap()
+
+fn repeated(ch: text, count: i64) -> text:
+    val out = StringBuilder.new()
+    var i = 0
+    while i < count:
+        out.push(ch)
+        i = i + 1
+    out.to_text()
+
+describe "environment variant policy handoff V1":
+    it "roundtrips one canonical fixed-order bounded payload":
+        val original = fixture()
+        val encoded = environment_variant_policy_handoff_encode_v1(original).unwrap()
+        val decoded = environment_variant_policy_handoff_decode_v1(encoded).unwrap()
+        expect(decoded.policy_digest).to_equal(original.policy_digest)
+        expect(decoded.integrity_digest).to_equal(original.integrity_digest)
+        expect(decoded.target_cpu).to_equal("znver4")
+        expect(decoded.target_cpu_features).to_equal("+avx2,-avx512f")
+        expect(decoded.policy_inputs.cli.parser_prefer).to_equal("simd")
+        expect(decoded.policy_inputs.admin.host_cpu_max).to_equal("x86-64-v4")
+        expect(environment_variant_policy_handoff_encode_v1(decoded).unwrap()).to_equal(encoded)
+
+    it "rejects corrupt noncanonical and oversized payloads":
+        val encoded = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        val corrupt = encoded.substring(0, encoded.len() - 1) +
+            (if encoded.ends_with("A"): "B" else: "A")
+        expect(environment_variant_policy_handoff_decode_v1(corrupt).is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_decode_v1(encoded + "=").is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_decode_v1(
+            repeated("a", ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_ARG_BYTES_V1 + 1)).is_err()).to_equal(true)
+
+    it "binds warm identity to policy and generated target inputs":
+        val first = fixture()
+        val changed_policy = environment_variant_policy_handoff_v1(
+            EnvironmentVariantPolicyInputsV1(
+                cli: layer(prefer: "scalar", cpu: "x86-64-v3"),
+                env: layer(offload: "on"), project: layer(), user: layer(),
+                admin: EnvironmentVariantAdminRestrictionsV1(
+                    parser_provider: "", host_cpu_max: "x86-64-v4",
+                    frontend_offload_max: "", frontend_fallback: "")),
+            "znver4", "+avx2,-avx512f").unwrap()
+        val changed_target = environment_variant_policy_handoff_v1(
+            first.policy_inputs, "znver4", "+avx2").unwrap()
+        expect(first.cache_identity == changed_policy.cache_identity).to_equal(false)
+        expect(first.cache_identity == changed_target.cache_identity).to_equal(false)

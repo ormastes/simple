@@ -283,6 +283,18 @@ fn cli_native_build_log_value_error(value: text) -> text:
         return "--log requires 'on' or 'off'"
     ""
 
+fn cli_native_build_policy_value_flag(arg: text) -> bool:
+    arg == "--parser-impl" or arg == "--parser-prefer" or
+        arg == "--parser-require" or arg == "--host-cpu-max" or
+        arg == "--frontend-offload" or
+        arg == "--frontend-offload-fallback"
+
+fn cli_native_build_inline_policy_flag(arg: text) -> bool:
+    arg.starts_with("--parser-impl=") or arg.starts_with("--parser-prefer=") or
+        arg.starts_with("--parser-require=") or arg.starts_with("--host-cpu-max=") or
+        arg.starts_with("--frontend-offload=") or
+        arg.starts_with("--frontend-offload-fallback=")
+
 # Reject malformed build invocations before they can reach the compiler or
 # publish an output. The compile loop below intentionally stays focused on
 # decoding already-valid options.
@@ -308,7 +320,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level":
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -376,6 +388,10 @@ fn cli_native_build_option_error(args: [text]) -> text:
         elif arg.starts_with("--opt-level="):
             val error = cli_native_build_inline_value_error(arg, "--opt-level=", "--opt-level", false)
             if error != "": return error
+        elif cli_native_build_inline_policy_flag(arg):
+            val at = arg.index_of("=")
+            if at < 0 or at + 1 >= arg.len():
+                return "policy option requires a value: {arg}"
         elif arg.starts_with("--parse-shard="):
             # Internal flag, emitted only by the parse-shard orchestrator
             # (src/app/cli/native_build_main.spl). Validated like any other
@@ -953,6 +969,12 @@ fn cli_native_build(args: [text]) -> i64:
                 # The public wrapper consumes these values; consume them here
                 # too so compatibility options cannot reinterpret one as entry.
                 j = j + 1
+            elif cli_native_build_policy_value_flag(a):
+                # The parent-to-worker handoff already validated and retained
+                # these values. E3 consumes the typed handoff; this legacy argv
+                # parser only consumes the public spelling so it cannot become
+                # an entry pathname or an unknown-option failure.
+                j = j + 1
             elif a == "--runtime-path":
                 if j + 1 < args.len():
                     j = j + 1
@@ -961,6 +983,8 @@ fn cli_native_build(args: [text]) -> i64:
                 pass
             elif a.starts_with("--runtime-path="):
                 runtime_path = a.substring(15)
+            elif cli_native_build_inline_policy_flag(a):
+                pass
             elif a == "--clean":
                 # Ask the driver to wipe this build's cache scope before
                 # compiling. The driver consumes (clears) the flag, so it

@@ -11,6 +11,9 @@
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get, env_set}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1
+}
 use compiler.driver.driver_parse_shard_entry.{driver_run_parse_shard}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
 
@@ -36,13 +39,28 @@ fn parse_shard_value_flag(a: text) -> bool:
     a == "--backend" or a == "--runtime-bundle" or a == "--runtime-path" or
         a == "--linker-script" or a == "-o" or a == "--output" or a == "--mode" or
         a == "--build-mode" or a == "--cache-dir" or a == "--target" or a == "--cpu" or
-        a == "--opt-level" or a == "--threads" or a == "--jobs" or a == "-j" or a == "--timeout"
+        a == "--opt-level" or a == "--threads" or a == "--jobs" or a == "-j" or a == "--timeout" or
+        a == "--parser-impl" or a == "--parser-prefer" or a == "--parser-require" or
+        a == "--host-cpu-max" or a == "--frontend-offload" or
+        a == "--frontend-offload-fallback"
+
+fn parse_shard_inline_policy_flag(a: text) -> bool:
+    a.starts_with("--parser-impl=") or a.starts_with("--parser-prefer=") or
+        a.starts_with("--parser-require=") or a.starts_with("--host-cpu-max=") or
+        a.starts_with("--frontend-offload=") or
+        a.starts_with("--frontend-offload-fallback=")
 
 fn main() -> i64:
     if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
         print "error: parse_shard_main.spl is an internal entrypoint"
         return 1
-    val args = parse_shard_entry_args()
+    val opened = match environment_variant_policy_handoff_extract_v1(
+        parse_shard_entry_args()):
+        case Ok(value): value
+        case Err(_):
+            print "error: parse shard rejected its internal policy handoff"
+            return 1
+    val args = opened.user_args
     var entry_point = ""
     var source_dirs: [text] = []
     var entry_closure = false
@@ -73,6 +91,11 @@ fn main() -> i64:
             source_dirs = source_dirs.push(a.substring(9))
         elif parse_shard_value_flag(a):
             j = j + 1
+        elif parse_shard_inline_policy_flag(a):
+            # Validated by the parent collector and the decoded handoff. E3
+            # owns typed parser-policy activation; this slim entrypoint must
+            # not reconstruct it through process environment variables.
+            pass
         elif not a.starts_with("-") and entry_point == "":
             entry_point = a
         j = j + 1

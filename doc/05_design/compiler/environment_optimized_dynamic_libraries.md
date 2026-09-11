@@ -431,6 +431,35 @@ mode drops preference, while applying only PREFER/REQUIRE drops the ceiling.
 The next composition change is a composite selector that filters all candidates
 through hard caps before ranking the retained set.
 
+### Native-build parent-to-worker policy handoff
+
+The native-build parent is the sole ambient source owner. It snapshots CLI and
+environment inputs once, reads project `simple.sdn`, and reads the explicitly
+new feature-specific user source `~/.config/simple/config.sdn`. The latter is
+not an alias for `~/.config/itf/config.sdn` and is not reconstructed from a
+merged `CompilerConfig`. Both files use bounded regular no-follow reads.
+
+The parent resolves the collected layers, serializes the raw normalized layers
+plus generated target CPU/features into a fixed-order bounded V1 wire, and
+appends exactly one internal base64url argv value. Parse shards, HIR shards, and
+the real worker receive the same value. The worker rejects a missing,
+duplicate, corrupt, noncanonical, or oversized value and removes only that
+internal argument before invoking native-build; public target flags retain
+their exact bytes and order. Policy is not transported by rewriting process
+environment variables.
+
+The wire integrity digest detects mutation but conveys no administrator
+authority. Until an authenticated administrator source owner is introduced,
+the production application owner supplies empty administrator restrictions.
+The warm artifact key includes the handoff cache identity, which binds resolved
+policy digest and the separate generated target CPU/feature inputs.
+
+This E1 slice is transport-only. Both full and parse-shard worker entrypoints
+validate/remove the handoff, and legacy argv parsing accepts the preserved
+public policy spellings without applying them. E3 must consume the typed
+handoff in every relevant driver path before this transport candidate can be
+admitted; standalone E1 integration is not production-safe.
+
 ## Prepare/commit coordinator for composite publication
 
 The first production-consumer seam after composite selection is a new adjacent

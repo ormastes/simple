@@ -14,6 +14,10 @@ use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
     native_build_warm_artifact_restore, native_build_warm_receipt_finish
 }
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_v1,
+    environment_variant_policy_handoff_attach_v1
+}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
@@ -262,12 +266,6 @@ fn output_path_arg(args: [text]) -> text:
         elif a.starts_with("-o") and a.len() > 2:
             return a.substring(2)
         i = i + 1
-    ""
-
-fn native_build_prefixed_arg(args: [text], prefix: text) -> text:
-    for a in args:
-        if a.starts_with(prefix):
-            return a.substring(prefix.len())
     ""
 
 pub fn native_build_strict_stub_evidence(output: text) -> bool:
@@ -707,6 +705,17 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
 pub fn run_native_build_worker(args: [text]) -> i64:
+    val policy = match environment_variant_policy_handoff_prepare_v1(args):
+        case Ok(value): value
+        case Err(_):
+            eprint "error: native-build could not collect a valid environment variant policy"
+            return 1
+    val forwarded_args = match environment_variant_policy_handoff_attach_v1(
+        args, policy.encoded_payload):
+        case Ok(value): value
+        case Err(_):
+            eprint "error: native-build could not create its internal policy handoff"
+            return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
     # A compiled bootstrap capsule can route the two internal `run` targets
@@ -717,12 +726,10 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
-    for arg in args:
-        # Already folded into SIMPLE_FRONTEND_OFFLOAD* below; forwarding the flag
-        # text as well only risks a `run` path reading it as a file (see
-        # src/app/run/main.spl).
-        if not (arg.starts_with("--frontend-offload=") or arg.starts_with("--frontend-offload-fallback=")):
-            worker_args = worker_args.push(arg)
+    for arg in forwarded_args:
+        # Preserve every public argument byte and its order. Only the worker
+        # removes the one internal handoff argument before cli_native_build.
+        worker_args = worker_args.push(arg)
     val simple_bin = resolve_simple_binary()
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
@@ -731,17 +738,10 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     val frontend_cache_dir = native_build_frontend_cache_dir_arg(args)
     if frontend_cache_dir != "":
         env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
-    # CLI beats env: the driver reads only SIMPLE_FRONTEND_OFFLOAD*, so the
-    # flag wins by overwriting the variable the worker inherits.
-    val frontend_offload = native_build_prefixed_arg(args, "--frontend-offload=")
-    if frontend_offload != "":
-        env_set("SIMPLE_FRONTEND_OFFLOAD", frontend_offload)
-    val frontend_offload_fallback = native_build_prefixed_arg(args, "--frontend-offload-fallback=")
-    if frontend_offload_fallback != "":
-        env_set("SIMPLE_FRONTEND_OFFLOAD_FALLBACK", frontend_offload_fallback)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
-    val warm_receipt = native_build_warm_receipt_prepare(args, simple_bin)
+    val warm_receipt = native_build_warm_receipt_prepare(
+        args, simple_bin, policy.handoff.cache_identity)
     if warm_receipt.hit:
         if native_build_warm_artifact_restore(warm_receipt):
             print "[native-build-warm] exact final artifact restored; worker skipped"
@@ -764,13 +764,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
     if shard_count > 0:
-        run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
+        run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
     if hir_shard_count > 1:
-        run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+        run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
     # Publish the candidate path only for the real worker. Parse-shard_main
     # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
     # env into warm-up children would let a partial child author the candidate.
