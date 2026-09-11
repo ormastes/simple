@@ -309,18 +309,30 @@ pub fn web_gpu_paint_timing_evidence(
     pixels_match: bool,
     upload_device_proven: bool,
     gpu_device_proven: bool,
-    commands_complete: bool = true
+    commands_complete: bool = true,
+    readback_absence: text = ""
 ) -> WebGpuPaintTimingEvidence:
     val timings_valid = (
         sample_count >= 3 and upload_bound_p50_us > 0 and upload_bound_p95_us >= upload_bound_p50_us and
         gpu_paint_p50_us > 0 and gpu_paint_p95_us >= gpu_paint_p50_us
     )
+    # An absent readback is absence of EVIDENCE, not evidence of a mismatch, so
+    # it can never make the route available -- but it must not be REPORTED as a
+    # pixel mismatch either. A zero-length buffer compared against a full one
+    # fails on length before a single pixel is examined, and calling that
+    # `pixel-mismatch` sent two investigations after blend rounding and alpha
+    # handling when the real fault was a wedged Vulkan command buffer. See
+    # doc/08_tracking/bug/
+    # vulkan_post_readback_dispatch_fails_latches_cpu_fallback_2026-09-11.md.
+    val readback_present = readback_absence == ""
     val available = (
-        timings_valid and pixels_match and upload_device_proven and
+        timings_valid and readback_present and pixels_match and upload_device_proven and
         gpu_device_proven and commands_complete)
     val should = available and gpu_paint_p95_us + WEB_GPU_PAINT_MIN_MARGIN_US < upload_bound_p95_us
     val reason = if not timings_valid:
         "timing-unavailable"
+    elif not readback_present:
+        readback_absence
     elif not pixels_match:
         "pixel-mismatch"
     elif not commands_complete:

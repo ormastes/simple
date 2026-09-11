@@ -777,9 +777,51 @@ struct VulkanSffiOrphanCommand:
     command: i64
     descriptor: i64
     buffer: i64
+    # Reap attempts already spent on this orphan. A command buffer the driver
+    # refuses to discard is refused for a REASON that a later retry does not
+    # change (it was quarantined precisely because `discard_command` already
+    # failed once), so retrying it forever is futile -- and, because the reap's
+    # verdict is `orphan_remaining.len() == 0`, one such handle used to pin
+    # `vulkan_sffi_reap_dependency_quarantine()` at false for the rest of the
+    # process. Every `_enqueue_framebuffer_compute` gates on that verdict, so a
+    # single undiscardable command silently demoted EVERY Vulkan Engine2D in
+    # the process -- including freshly created ones -- to the CPU fallback for
+    # good. See doc/08_tracking/bug/
+    # vulkan_post_readback_dispatch_fails_latches_cpu_fallback_2026-09-11.md.
+    reap_attempts: i64
+
+# A retired orphan is a LEAKED handle, not a released one. The leak is bounded
+# (one entry per genuinely undiscardable command) and, critically, it is
+# COUNTED rather than hidden: a lane that wants to fail closed on driver
+# breakage reads `vulkan_sffi_retired_orphan_command_count()`. Retiring is
+# strictly better than the previous behaviour, which leaked the same handle AND
+# stopped all rendering.
+val VULKAN_SFFI_ORPHAN_REAP_ATTEMPT_LIMIT: i64 = 3
+
+# The dependency-quarantine list carries the identical hazard as the orphan list
+# and measured the same way on device: after the orphan retired, `deps=1`
+# persisted for every remaining frame, so the reap verdict stayed false and the
+# enqueue gate stayed shut. These entries hold descriptor/pipeline/shader/buffer
+# handles whose destroy calls the driver refuses; unlike the orphan list they
+# are rebuilt by `vulkan_sffi_dependency_after_release`, so the attempt count is
+# kept for the LIST rather than threaded through the struct. Once the budget is
+# spent the whole remaining list is abandoned at once (device-idle is proven, so
+# nothing in flight refers to it) and counted.
+val VULKAN_SFFI_DEPENDENCY_REAP_ATTEMPT_LIMIT: i64 = 3
 
 var _vulkan_sffi_dependency_quarantine: [VulkanSffiDependencyQuarantine] = []
 var _vulkan_sffi_orphan_commands: [VulkanSffiOrphanCommand] = []
+var _vulkan_sffi_retired_orphan_commands: i64 = 0
+var _vulkan_sffi_retired_dependencies: i64 = 0
+var _vulkan_sffi_dependency_reap_attempts: i64 = 0
+
+pub fn vulkan_sffi_retired_orphan_command_count() -> i64:
+    """Command buffers the driver never let go of, abandoned to unblock reaping."""
+    _vulkan_sffi_retired_orphan_commands
+
+pub fn vulkan_sffi_retired_dependency_count() -> i64:
+    """Quarantined dependency records abandoned after the reap budget was spent."""
+    _vulkan_sffi_retired_dependencies
 
 @unsafe(reason: "raw Vulkan quarantine lock acquisition", capabilities: [ffi])
 fn _vulkan_sffi_dependency_lock_acquire():
@@ -846,7 +888,8 @@ fn vulkan_sffi_quarantine_unsubmitted_command(command: i64, descriptor: i64, buf
         i = i + 1
     if not duplicate:
         _vulkan_sffi_orphan_commands.push(VulkanSffiOrphanCommand(
-            command: command, descriptor: descriptor, buffer: buffer))
+            command: command, descriptor: descriptor, buffer: buffer,
+            reap_attempts: 0))
     _vulkan_sffi_dependency_lock_release()
 
 @unsafe(reason: "raw Vulkan dependency release after proven idle", capabilities: [ffi])
@@ -855,6 +898,7 @@ fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
     var orphan_index: i64 = 0
     while orphan_index < _vulkan_sffi_orphan_commands.len():
         var orphan = _vulkan_sffi_orphan_commands[orphan_index]
+        orphan.reap_attempts = orphan.reap_attempts + 1
         if orphan.command > 0 and vulkan_sffi_discard_command(orphan.command):
             orphan.command = 0
         if orphan.command <= 0:
@@ -862,7 +906,14 @@ fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
                 orphan.descriptor = 0
             if orphan.buffer > 0 and vulkan_sffi_free_buffer(orphan.buffer):
                 orphan.buffer = 0
-        if orphan.command > 0 or orphan.descriptor > 0 or orphan.buffer > 0:
+        val still_held = orphan.command > 0 or orphan.descriptor > 0 or orphan.buffer > 0
+        if still_held and orphan.reap_attempts >= VULKAN_SFFI_ORPHAN_REAP_ATTEMPT_LIMIT:
+            # Give up on this handle rather than let it block the reap verdict
+            # forever. Device-idle is already proven by the caller, so nothing
+            # in flight can still be referencing it; abandoning it leaks the
+            # handle and nothing else.
+            _vulkan_sffi_retired_orphan_commands = _vulkan_sffi_retired_orphan_commands + 1
+        elif still_held:
             orphan_remaining.push(orphan)
         orphan_index = orphan_index + 1
     _vulkan_sffi_orphan_commands = orphan_remaining
@@ -880,6 +931,15 @@ fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
         if not vulkan_sffi_dependency_quarantine_empty(next):
             remaining.push(next)
         i = i + 1
+    if remaining.len() == 0:
+        _vulkan_sffi_dependency_reap_attempts = 0
+    else:
+        _vulkan_sffi_dependency_reap_attempts = _vulkan_sffi_dependency_reap_attempts + 1
+        if _vulkan_sffi_dependency_reap_attempts >= VULKAN_SFFI_DEPENDENCY_REAP_ATTEMPT_LIMIT:
+            _vulkan_sffi_retired_dependencies = (
+                _vulkan_sffi_retired_dependencies + remaining.len())
+            remaining = []
+            _vulkan_sffi_dependency_reap_attempts = 0
     _vulkan_sffi_dependency_quarantine = remaining
     remaining.len() == 0 and orphan_remaining.len() == 0
 

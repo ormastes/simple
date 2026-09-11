@@ -1,0 +1,162 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing `draw_rect_list_filled`, the packed
+rect-batch lane of
+`doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
+It answers one question and refuses to answer it by proxy: does a 64-rect BATCH
+put exactly the same pixels on the device as 64 separate `draw_rect_filled`
+calls? The batch exists only to remove interpreter cost, so any pixel difference
+is a defect, not a trade-off.
+## Operator workflow
+`SIMPLE_LIB=src VK_ICD_FILENAMES=<icd>.json SIMPLE_EXECUTION_MODE=interpreter \
+ SIMPLE_TIMEOUT_SECONDS=0 src/compiler_rust/target/bootstrap/simple run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_pixel_oracle_spec.spl`
+## Compatibility and limitations
+This file REQUIRES a real Vulkan device and says so by failing, never skipping:
+the first expectation is `backend_name() == "vulkan"`. A host without an admitted
+Vulkan ICD reports that failure rather than a green run that proved nothing —
+the whole point of the oracle is that pixels were read back off a device.
+## Verification guidance and troubleshooting
+The absolute oracle is `color_for(k)`: rect k is painted into its own cell of an
+8x8 grid, so the pixel at that cell's centre must equal a colour computed
+independently of the renderer. A failure naming a cell whose colour belongs to a
+DIFFERENT k means painter order or the packed index mapping broke — that is the
+regression sabotage-tested in the bug record (swapping the batch loop to descend
+turns the overlap scenario red). A failure where single and batch disagree while
+each is internally consistent means the batch lane diverged from the single-rect
+push-constant layout.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md ;
+# doc/10_metrics/ui/vk2d_bench_frame_time_attribution_macos_2026-09-11.md
+# @manual_section: vulkan_rect_batch_pixel_oracle
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 15%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 10%
+# @tag: unit, gpu, engine2d, vulkan, batching, perf
+
+use std.spec.*
+use gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 256
+val CELL: i32 = 32
+val COUNT: i64 = 64
+
+fn color_for(k: i64) -> u32:
+    """Oracle colour for rect k, computed without touching the renderer."""
+    (4278190080 + k * 4096 + k * 7 + 3).to_i32().to_u32()
+
+fn cell_x(k: i64) -> i32:
+    ((k % 8) * 32).to_i32()
+
+fn cell_y(k: i64) -> i32:
+    ((k / 8) * 32).to_i32()
+
+fn packed_rects() -> [i32]:
+    var out: [i32] = [0i32; COUNT * 4]
+    var k: i64 = 0
+    while k < COUNT:
+        out[k * 4] = cell_x(k)
+        out[k * 4 + 1] = cell_y(k)
+        out[k * 4 + 2] = CELL
+        out[k * 4 + 3] = CELL
+        k = k + 1
+    out
+
+fn packed_colors() -> [u32]:
+    var out: [u32] = [0u32; COUNT]
+    var k: i64 = 0
+    while k < COUNT:
+        out[k] = color_for(k)
+        k = k + 1
+    out
+
+fn centre_index(k: i64) -> i64:
+    val cx = cell_x(k).to_i64() + 16
+    val cy = cell_y(k).to_i64() + 16
+    cy * FB.to_i64() + cx
+
+fn render_single() -> [u32]:
+    val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+    e.clear(0xFF101010u32)
+    val r = packed_rects()
+    val c = packed_colors()
+    var k: i64 = 0
+    while k < COUNT:
+        e.draw_rect_filled(r[k * 4], r[k * 4 + 1], r[k * 4 + 2], r[k * 4 + 3], c[k])
+        k = k + 1
+    e.finalize_compute_frame_no_readback()
+    val px = e.read_pixels_with_source().pixels
+    e.shutdown()
+    px
+
+fn render_batch() -> [u32]:
+    val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+    e.clear(0xFF101010u32)
+    e.draw_rect_list_filled(packed_rects(), packed_colors())
+    e.finalize_compute_frame_no_readback()
+    val px = e.read_pixels_with_source().pixels
+    e.shutdown()
+    px
+
+fn differing_pixels(a: [u32], b: [u32]) -> i64:
+    if a.len() != b.len():
+        return -1
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "A 64-rect Vulkan batch paints exactly what 64 single calls paint":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # REPRODUCING (precondition). Every other expectation in this file is a
+        # claim about DEVICE pixels. If the lane silently fell back to the CPU
+        # backend those pixels would still look right and prove nothing, so the
+        # backend identity is asserted first and a missing device is RED.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "puts the oracle colour at the centre of every batched rect":
+        # REPRODUCING. The absolute oracle: rect k owns cell k of an 8x8 grid
+        # and `color_for(k)` is computed from k alone. A centre pixel carrying
+        # another cell's colour means the packed index mapping is wrong; one
+        # carrying the clear colour means that rect never dispatched.
+        val px = render_batch()
+        expect(px.len()).to_equal(FB.to_i64() * FB.to_i64())
+        var mismatches: i64 = 0
+        var first_bad: i64 = -1
+        var k: i64 = 0
+        while k < COUNT:
+            if px[centre_index(k)] != color_for(k):
+                mismatches = mismatches + 1
+                if first_bad < 0:
+                    first_bad = k
+            k = k + 1
+        expect(first_bad).to_equal(-1)
+        expect(mismatches).to_equal(0)
+
+    it "produces a byte-identical framebuffer to 64 separate draw_rect_filled calls":
+        # REPRODUCING. The batch is a throughput lane, not a second renderer:
+        # every one of the 65536 pixels must match, not merely the rect centres.
+        val single = render_single()
+        val batch = render_batch()
+        expect(single.len()).to_equal(batch.len())
+        expect(differing_pixels(single, batch)).to_equal(0)
+
+    it "keeps one device submission for the whole batched frame":
+        # REPRODUCING. The batch must not buy interpreter time by paying in
+        # fences. One frame, one submission-generation advance -- the same
+        # `submits_per_frame=1` the bench reports.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val before = e.vulkan_submission_generation()
+        e.clear(0xFF101010u32)
+        e.draw_rect_list_filled(packed_rects(), packed_colors())
+        val finalized = e.finalize_compute_frame_no_readback()
+        val after = e.vulkan_submission_generation()
+        e.shutdown()
+        expect(finalized).to_equal(true)
+        expect(after - before).to_equal(1)

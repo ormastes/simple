@@ -33,7 +33,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
     vulkan_dispatch_image_composite_checked,
     vulkan_order_trace, vulkan_order_trace_enabled,
-    VK_DISPATCH_COMPLETED_INELIGIBLE,
+    VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
     VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER
 }
 use std.gpu.engine2d.backend_emu.{
@@ -229,6 +229,32 @@ class VulkanBackend:
     pipe_triangle: i64
     pipe_gradient: i64
     pipe_blit: i64
+    # Batched-rect lane: ONE dispatch for N rects, rect list in a GPU buffer.
+    # The session owns the pipeline; the surface owns the per-frame rect-list
+    # buffers, because they must stay alive until the frame fence retires.
+    pipe_rect_batch: i64
+    rect_batch_error: text
+    # Slot pool, one slot per batch recorded in the current frame. A slot may
+    # NOT be reused inside a frame: `copy_to_buffer` writes at RECORD time but
+    # the dispatch reads at SUBMIT time, so overwriting slot 0 for a second
+    # batch would silently repaint the first batch's dispatch with the second
+    # batch's rects. `rect_batch_slot` is the next free slot and resets only
+    # when the pending command is cleared (i.e. after the fence).
+    rect_batch_buffers: [i64]
+    rect_batch_capacities: [i64]
+    rect_batch_descriptors: [i64]
+    rect_batch_slot: i64
+    # Dispatches recorded into the current frame's command buffer, counted so
+    # the bench can assert one dispatch per batched frame rather than N.
+    # SCOPE, stated so a reader does not over-trust it: this counts the
+    # FRAMEBUFFER compute lanes only -- `_enqueue_framebuffer_compute` (clear,
+    # rect, line, circle, ...) and `_enqueue_rect_batch*`. Image composites and
+    # font dispatches are NOT counted; it is a rect-lane discriminator, not a
+    # total device-command census.
+    frame_dispatch_count: i64
+    # Dispatch count of the last flushed frame, so a caller can read it after
+    # end_frame without racing the live counter.
+    last_frame_dispatch_count: i64
     # Per-surface font composite storage; the session owns the pipeline.
     d_font_atlas: i64
     d_font_params: i64
@@ -371,6 +397,14 @@ class VulkanBackend:
             pipe_triangle: 0,
             pipe_gradient: 0,
             pipe_blit: 0,
+            pipe_rect_batch: 0,
+            rect_batch_error: "not-installed",
+            rect_batch_buffers: [],
+            rect_batch_capacities: [],
+            rect_batch_descriptors: [],
+            rect_batch_slot: 0,
+            frame_dispatch_count: 0,
+            last_frame_dispatch_count: 0,
             d_font_atlas: 0,
             d_font_params: 0,
             font_atlas_generation: -1,
@@ -660,6 +694,8 @@ impl RenderBackend for VulkanBackend:
         self.pipe_triangle       = session.pipe_triangle
         self.pipe_gradient       = session.pipe_gradient
         self.pipe_blit           = session.pipe_blit
+        self.pipe_rect_batch     = session.pipe_rect_batch
+        self.rect_batch_error    = session.rect_batch_error
 
         self.w = width
         self.h = height
@@ -929,6 +965,75 @@ impl RenderBackend for VulkanBackend:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
+
+    me draw_rect_list_filled(rects: [i32], colors: [u32]):
+        """Paint N filled rects with ONE interpreter transit and one dispatch each.
+
+        Packed layout (frozen, see `_enqueue_rect_batch`):
+          rects[4k..4k+4] = x,y,w,h of rect k; colors[k] = its colour.
+        Painter order is array order. A malformed pair (length mismatch) paints
+        nothing rather than painting a guessed prefix.
+
+        Semantics are identical to calling `draw_rect_filled` once per rect --
+        this method is a throughput lane, not a different renderer. Anything
+        the fast lane cannot express (an active stencil mask, or any
+        non-opaque colour, both of which route through the host image path in
+        the single-rect method) falls back to the single-rect loop for the
+        WHOLE list, so painter order can never be reordered by a partial
+        fallback.
+
+        One deliberate, stated divergence: a zero-or-negative-area rect is
+        SKIPPED here, whereas the single-rect path dispatches it, gets rc 0 back
+        from a gx=0 dispatch, and consequently flushes mid-frame and marks a CPU
+        fallback. The PIXELS are identical either way (a zero-area rect paints
+        nothing); the counters are not. Skipping is the correct behaviour and
+        the single path's is arguably the bug, but this method does not claim to
+        reproduce it.
+        """
+        if self.completion_unknown: return
+        val count = colors.len().to_i64()
+        if count <= 0: return
+        if rects.len().to_i64() != count * 4: return
+        if self.mask_buf.len() > 0:
+            self._draw_rect_list_single(rects, colors, 0, count)
+            return
+        var k: i64 = 0
+        while k < count:
+            if color_a(colors[k]) < 255:
+                self._draw_rect_list_single(rects, colors, 0, count)
+                return
+            k = k + 1
+        # Preferred lane: ONE compute dispatch reading the rect list out of a
+        # GPU storage buffer. This is what removes the per-rect interpreter
+        # cost entirely rather than halving it -- the host loop below still
+        # pays two SFFI calls per rect. When the batch pipeline is unavailable
+        # (old driver, SPIR-V rejected; `rect_batch_error` carries the reason)
+        # the host loop is the fallback, and its pixels are identical.
+        var enqueued: i64 = 0
+        if (self.frame_batching_enabled and self.pipe_rect_batch > 0 and
+            count >= RECT_BATCH_MIN_RECTS):
+            enqueued = self._enqueue_rect_batch_gpu(rects, colors)
+        if enqueued == 0 and self.frame_batching_enabled:
+            enqueued = self._enqueue_rect_batch(self.pipe_rect_filled, rects, colors)
+        if enqueued < 0:
+            self.completion_unknown = true
+            self.mark_cpu_fallback("rect-batch-dispatch-failed")
+            return
+        if enqueued > 0:
+            self.dirty = true
+            self.mark_device_content_changed()
+        if enqueued < count:
+            # Replay only the tail; everything before `enqueued` is already
+            # recorded, so order holds.
+            self._draw_rect_list_single(rects, colors, enqueued, count)
+
+    me _draw_rect_list_single(rects: [i32], colors: [u32], from: i64, to: i64):
+        var k = from
+        while k < to:
+            val base = k * 4
+            self.draw_rect_filled(rects[base], rects[base + 1], rects[base + 2],
+                                  rects[base + 3], colors[k])
+            k = k + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
@@ -1859,6 +1964,11 @@ impl Engine2DExtended for VulkanBackend:
         self.pipe_triangle = 0
         self.pipe_gradient = 0
         self.pipe_blit = 0
+        # The session owns the batch pipeline and destroys it; the surface only
+        # drops its copy of the handle and its own rect-list buffers.
+        self.pipe_rect_batch = 0
+        self.rect_batch_error = "not-installed"
+        self._free_rect_batch_pool()
 
     me install_font_atlas_pipeline(spirv_bytes: [u8]) -> VulkanFontPipelineEvidence:
         """Install through the retained shared session; standalone mode fails closed."""

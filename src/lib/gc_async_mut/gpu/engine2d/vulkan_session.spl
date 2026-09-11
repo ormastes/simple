@@ -27,7 +27,9 @@ use std.gpu.engine2d.backend_vulkan_font_spirv.{
     spirv_font_atlas_composite,
     font_atlas_composite_vulkan_spirv_trusted
 }
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_batch}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_last_error,
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
     vulkan_sffi_compile_glsl,
     vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
@@ -105,6 +107,15 @@ class VulkanSession:
     pipe_blit: i64
     pipe_font_atlas: i64
 
+    # Batched-rect lane (optional). One dispatch paints N rects from a GPU
+    # storage buffer instead of N dispatches. Failure here is NOT a session
+    # init failure: the caller keeps the per-rect loop and reports
+    # `rect_batch_error` as the fallback reason, so a driver that cannot build
+    # this pipeline degrades in throughput, never in pixels.
+    shader_rect_batch: i64
+    pipe_rect_batch: i64
+    rect_batch_error: text
+
     font_atlas_artifact_mode: text
     font_atlas_artifact_identity: text
     font_atlas_emission_compile_ns: i64
@@ -153,6 +164,9 @@ class VulkanSession:
             pipe_gradient: 0,
             pipe_blit: 0,
             pipe_font_atlas: 0,
+            shader_rect_batch: 0,
+            pipe_rect_batch: 0,
+            rect_batch_error: "not-installed",
             font_atlas_artifact_mode: "none",
             font_atlas_artifact_identity: "",
             font_atlas_emission_compile_ns: 0,
@@ -289,6 +303,21 @@ class VulkanSession:
                 self.init_error = "pipeline-blit"
             self._cleanup()
             return 6
+
+        # Optional batched-rect pipeline. Two storage bindings (0 = framebuffer,
+        # 1 = rect list); the runtime reflects the binding count out of the
+        # SPIR-V, so the existing create_descriptor_set path covers it. A
+        # failure is recorded and swallowed on purpose — see the field comment.
+        self.shader_rect_batch = vulkan_sffi_compile_spirv(spirv_rect_batch())
+        if self.shader_rect_batch <= 0:
+            self.rect_batch_error = "rect-batch-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_rect_batch = vulkan_sffi_create_compute_pipeline(
+                self.shader_rect_batch, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_rect_batch <= 0:
+                self.rect_batch_error = "rect-batch-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.rect_batch_error = ""
 
         self.ref_count = 1
         self.is_initialized = true
@@ -497,6 +526,8 @@ class VulkanSession:
         if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
         if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
         if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
+        if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
+        self.pipe_rect_batch = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
         self.pipe_rect_outline = 0
@@ -519,6 +550,9 @@ class VulkanSession:
         if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
         if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
         if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
+        if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
+        self.shader_rect_batch = 0
+        self.rect_batch_error = "not-installed"
         self.shader_clear = 0
         self.shader_rect_filled = 0
         self.shader_rect_outline = 0

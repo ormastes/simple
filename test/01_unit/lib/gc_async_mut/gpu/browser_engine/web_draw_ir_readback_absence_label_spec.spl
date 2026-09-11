@@ -1,0 +1,129 @@
+"""
+## Purpose and audience
+
+Purpose: a readback that carries no device pixels must be reported by its real
+cause -- `zero-length-readback` or `device-lost` -- and never as
+`pixel-mismatch`. Audience: engineers triaging a web Draw IR GPU route that has
+stopped offloading.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_draw_ir_readback_absence_label_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Device-free by construction: every readback here is built in-process, so this
+spec runs on every platform and needs no Vulkan device. It pins the CLASSIFIER
+and the reason string, not the device behavior that produces them.
+
+Background: on 2026-09-11 a wedged Vulkan command buffer made the route's second
+render return an EMPTY buffer. `_web_draw_ir_pixels_equal` rejects on length
+before examining a pixel, so the route reported `reason=pixel-mismatch` -- and
+two investigations went looking for blend rounding, alpha handling and
+half-pixel offsets on a frame that had been proven pixel-EXACT. See
+doc/08_tracking/bug/vulkan_post_readback_dispatch_fails_latches_cpu_fallback_2026-09-11.md.
+"""
+
+# @tag: web, draw-ir, gpu, evidence, regression
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_draw_ir_readback_absence}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_gpu_paint_timing_evidence}
+use std.gpu.engine2d.engine.{Engine2DReadback, engine2d_readback}
+
+fn _full_device_readback() -> Engine2DReadback:
+    var pixels: [u32] = []
+    var i = 0
+    while i < 16:
+        pixels.push(0xFF102030u32)
+        i = i + 1
+    Engine2DReadback(
+        pixels: pixels, source: "device_readback",
+        backend_handle: 1, device_identity: 99,
+        pixel_count: 16, checksum: 7)
+
+# Timings that are VALID, so `timing-unavailable` cannot mask the label under
+# test. Without these the reason chain short-circuits before it is reached.
+fn _evidence_with(absence: text, pixels_match: bool) -> text:
+    web_gpu_paint_timing_evidence(
+        "vulkan", 400, 500, 100, 200, 3,
+        pixels_match, true, true, true, absence).reason
+
+describe("web Draw IR readback absence is classified, not called a mismatch"):
+
+    context("the classifier"):
+
+        it("reports no absence for a full device readback"):
+            expect(web_draw_ir_readback_absence(_full_device_readback())).to_equal("")
+
+        it("names a zero-length readback that still claims device provenance"):
+            # The exact incident shape: the backend reports success and returns
+            # nothing. This is the case that MUST NOT read as a mismatch.
+            expect(web_draw_ir_readback_absence(
+                engine2d_readback([], "device_readback"))).to_equal("zero-length-readback")
+
+        it("names a demoted backend as device-lost"):
+            expect(web_draw_ir_readback_absence(
+                engine2d_readback([], "cpu_fallback"))).to_equal("device-lost")
+
+        it("names an unknown-completion readback as device-lost"):
+            expect(web_draw_ir_readback_absence(
+                engine2d_readback([], "completion_unknown"))).to_equal("device-lost")
+
+        it("names a failed readback as device-lost"):
+            expect(web_draw_ir_readback_absence(
+                engine2d_readback([], "readback_failed"))).to_equal("device-lost")
+
+        it("accepts a host cache refreshed by a completed device copy"):
+            # A real, complete frame that simply did not come straight off the
+            # device. Classifying this as absent would refuse a sound route.
+            var pixels: [u32] = []
+            var i = 0
+            while i < 16:
+                pixels.push(0xFF010203u32)
+                i = i + 1
+            expect(web_draw_ir_readback_absence(Engine2DReadback(
+                pixels: pixels, source: "host_cache_after_device_copy",
+                backend_handle: 1, device_identity: 99,
+                pixel_count: 16, checksum: 7))).to_equal("")
+
+    context("the reported reason"):
+
+        it("reports zero-length-readback rather than pixel-mismatch"):
+            expect(_evidence_with("zero-length-readback", true))
+                .to_equal("zero-length-readback")
+
+        it("reports device-lost rather than pixel-mismatch"):
+            expect(_evidence_with("device-lost", true)).to_equal("device-lost")
+
+        it("keeps the absence label even when pixels_match is already false"):
+            # Order matters: the absence is WHY the compare failed, so it must
+            # win over the mismatch label it caused.
+            expect(_evidence_with("zero-length-readback", false))
+                .to_equal("zero-length-readback")
+
+        it("still reports a genuine pixel mismatch when the readback is present"):
+            # The label must stay discriminating -- this is the case that
+            # legitimately IS a mismatch.
+            expect(_evidence_with("", false)).to_equal("pixel-mismatch")
+
+        it("refuses to offload when the readback is absent"):
+            # Classification is not a tolerance: an absent readback denies the
+            # route exactly as a mismatch would.
+            val ev = web_gpu_paint_timing_evidence(
+                "vulkan", 400, 500, 100, 200, 3,
+                true, true, true, true, "zero-length-readback")
+            expect(ev.available).to_equal(false)
+            expect(ev.should_offload).to_equal(false)
+
+        it("still offloads a clean, present, faster sample"):
+            val ev = web_gpu_paint_timing_evidence(
+                "vulkan", 400, 500, 100, 200, 3,
+                true, true, true, true, "")
+            expect(ev.available).to_equal(true)
+            expect(ev.should_offload).to_equal(true)

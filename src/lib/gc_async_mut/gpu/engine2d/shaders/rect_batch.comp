@@ -1,0 +1,97 @@
+#version 450
+// 2D Engine -- Vulkan batched filled-rectangle compute kernel.
+//
+// ONE dispatch paints N opaque filled rects. The rect list lives in a GPU
+// storage buffer; only the push constants and the dispatch grid change per
+// batch, so a frame with N rects costs one vkCmdPushConstants + one
+// vkCmdDispatch instead of N of each.
+//
+// FROZEN LAYOUT -- do not reorder. The host packer
+// (`_pack_rect_batch_words` in backend_vulkan_helpers.spl) and
+// `scripts/check/check-rect-batch-spirv-pinned.shs` both depend on it byte for
+// byte.
+//
+//   binding 0  Framebuffer : uint data[]  -- row-major pixels,
+//                                            index = y * fb_w + x
+//   binding 1  RectList    : uint data[]  -- 5 words per rect k:
+//                              data[5k+0] = x   (int, bit-cast to uint)
+//                              data[5k+1] = y   (int, bit-cast to uint)
+//                              data[5k+2] = w   (int, bit-cast to uint)
+//                              data[5k+3] = h   (int, bit-cast to uint)
+//                              data[5k+4] = colour (uint, as the single-rect
+//                                                   kernel's pc.color)
+//   push constants (12 x 4 = 48 bytes, in this order):
+//     bx, by, bw, bh   -- batch bounding box in framebuffer space
+//     n                -- rect count
+//     fb_w, fb_h       -- framebuffer size
+//     clip_x, clip_y, clip_w, clip_h, clip_enabled -- frame clip state
+//
+// PAINTER ORDER: one invocation per bounding-box pixel walks the rect list in
+// ASCENDING index order and keeps the LAST rect that covers it, which is
+// exactly what N sequential single-rect dispatches produce (rect k+1 overwrites
+// rect k). The ascending walk is load-bearing: reversing it silently inverts
+// the painter order of every overlapping batch. A pixel covered by no rect is
+// never written, so the batch composes with whatever is already in the
+// framebuffer.
+//
+// The per-pixel guards (framebuffer bounds, then clip) are transcribed from
+// `_glsl_rect_filled` so a batch of N is pixel-exact against N singles.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer {
+    uint data[];
+} fb;
+
+layout(set = 0, binding = 1) readonly buffer RectList {
+    uint data[];
+} rects;
+
+layout(push_constant) uniform PushConstants {
+    int bx;
+    int by;
+    int bw;
+    int bh;
+    int n;
+    int fb_w;
+    int fb_h;
+    int clip_x;
+    int clip_y;
+    int clip_w;
+    int clip_h;
+    int clip_enabled;
+} pc;
+
+void main() {
+    int lx = int(gl_GlobalInvocationID.x);
+    int ly = int(gl_GlobalInvocationID.y);
+    if (lx >= pc.bw || ly >= pc.bh) return;
+
+    int px = pc.bx + lx;
+    int py = pc.by + ly;
+
+    if (px < 0 || px >= pc.fb_w || py < 0 || py >= pc.fb_h) return;
+
+    if (pc.clip_enabled != 0) {
+        if (px < pc.clip_x || px >= pc.clip_x + pc.clip_w ||
+            py < pc.clip_y || py >= pc.clip_y + pc.clip_h) return;
+    }
+
+    bool hit = false;
+    uint color = 0u;
+    for (int k = 0; k < pc.n; ++k) {
+        int base = k * 5;
+        int rx = int(rects.data[base + 0]);
+        int ry = int(rects.data[base + 1]);
+        int rw = int(rects.data[base + 2]);
+        int rh = int(rects.data[base + 3]);
+        if (rw <= 0 || rh <= 0) continue;
+        if (px < rx || px >= rx + rw || py < ry || py >= ry + rh) continue;
+        color = rects.data[base + 4];
+        hit = true;
+    }
+    if (!hit) return;
+
+    uint idx = uint(py) * uint(pc.fb_w) + uint(px);
+    fb.data[idx] = color;
+}
