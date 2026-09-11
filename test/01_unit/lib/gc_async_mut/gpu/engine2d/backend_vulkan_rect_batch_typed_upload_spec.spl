@@ -15,9 +15,14 @@ does the frame still open exactly one queue submission?
 `SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
  <vulkan-capable simple> run \
  test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_typed_upload_spec.spl`
-`SIMPLE_VK_RECT_UPLOAD=bytes` forces the byte payload back on, which is the
-A/B control: every expectation here must hold under BOTH settings, because the
-typed upload is a cost change and not a behaviour change.
+The typed lane is OPT-IN: `SIMPLE_VK_RECT_UPLOAD=u32` requests it explicitly.
+The byte payload is the default (unset, or `SIMPLE_VK_RECT_UPLOAD=bytes`) and
+is the A/B control: every expectation here must hold under BOTH settings,
+because the typed upload is a cost change and not a behaviour change. The
+default is opt-in, not opt-out, because the typed lane calls an extern
+(`rt_vulkan_copy_to_buffer_u32`) a deployed binary built before this file
+landed does not recognise at all -- see
+`doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`.
 
 ## Compatibility and limitations
 This file REQUIRES a real Vulkan device and says so by FAILING, never skipping:
@@ -46,6 +51,7 @@ upload left the mapped-memory path and opened a queue submission of its own.
 # @tag: unit, gpu, engine2d, vulkan, batching, perf
 
 use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use gpu.engine2d.engine.{Engine2D}
 
 val FB: i32 = 256
@@ -223,3 +229,23 @@ describe "A rect batch uploaded as WORDS paints the known pixel oracle in one su
             k = k + 1
         expect(wrong).to_equal(0)
         expect(after - before).to_equal(1)
+
+    it "records which payload shape the last upload actually used":
+        # ABSOLUTE ORACLE. `vulkan_rect_upload_evidence()` must name the SAME
+        # mode this process was configured for: "u32" only when
+        # SIMPLE_VK_RECT_UPLOAD=u32 was explicitly requested AND accepted,
+        # "bytes" in every other case (unset, "bytes", or a declined typed
+        # request). This is what lets a caller tell an extern-unavailable
+        # byte fallback apart from an explicit-request byte fallback -- both
+        # paint identical pixels, so the evidence field is the only witness.
+        val requested_u32 = (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "u32"
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        e.draw_rect_list_filled(packed_rects(2), packed_colors(2))
+        e.finalize_compute_frame_no_readback()
+        val evidence = e.vulkan_rect_upload_evidence()
+        e.shutdown()
+        if requested_u32:
+            expect(evidence).to_equal("u32 reason=typed-requested")
+        else:
+            expect(evidence).to_equal("bytes reason=typed-not-requested")

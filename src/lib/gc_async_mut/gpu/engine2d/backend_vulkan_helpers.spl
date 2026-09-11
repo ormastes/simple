@@ -68,12 +68,42 @@ val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864
 val _VULKAN_ORDER_TRACE_ENABLED =
     (env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
 
-# `SIMPLE_VK_RECT_UPLOAD=bytes` forces the rect batch back onto the `[u8]`
-# payload. It exists so a before/after measurement of the typed upload runs on
-# ONE binary and one tree -- swapping binaries to compare was how a stale
-# deployed build was mistaken for a code regression on this very lane.
-val _VULKAN_RECT_UPLOAD_BYTES_FORCED =
-    (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "bytes"
+# The typed word upload (`vulkan_sffi_copy_to_buffer_u32` ->
+# `rt_vulkan_copy_to_buffer_u32`) calls an extern that a deployed binary built
+# before this extern existed does not recognise AT ALL. On the interpreter
+# that is not a value-level failure the callee can decline from inside a
+# guard -- the interpreter's own "unknown extern function" path aborts the
+# process outright, so any call site reached at runtime on an old binary
+# crashes the whole run before `_vulkan_copy_to_buffer_u32_abi`'s ABI check
+# ever gets a chance to return false. There is no capability probe in this
+# tree that can answer "is rt_vulkan_copy_to_buffer_u32 backed?" without
+# calling it (no `rt_runtime_version`, no unbacked-extern-safe probe for a
+# name the interpreter has literally never heard of), so the only universally
+# safe default is OPT-IN: default to the byte payload, which every deployed
+# binary supports, and only take the typed lane when a caller EXPLICITLY
+# opts in via `SIMPLE_VK_RECT_UPLOAD=u32` on a binary it knows is fresh
+# enough. See doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md.
+val _VULKAN_RECT_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "u32"
+
+# Evidence of which payload shape the last `_enqueue_rect_batch_gpu` upload
+# actually took, and why -- read by tests/tooling that need to tell an
+# extern-unavailable byte fallback apart from an explicit-request byte
+# fallback, both of which look identical on the wire.
+var _vulkan_rect_upload_last_mode: text = "unset"
+var _vulkan_rect_upload_last_reason: text = "no-upload-yet"
+
+fn vulkan_rect_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last rect-batch
+    upload actually used. `"unset"` before any batch has uploaded."""
+    _vulkan_rect_upload_last_mode
+
+fn vulkan_rect_upload_last_reason() -> text:
+    """Why that mode was chosen: `"typed-requested"` (SIMPLE_VK_RECT_UPLOAD=u32
+    and the typed lane accepted), `"typed-not-requested"` (default; the typed
+    lane is opt-in), or `"typed-declined"` (u32 requested but
+    `_vulkan_copy_to_buffer_u32_abi` returned false, e.g. native array ABI)."""
+    _vulkan_rect_upload_last_reason
 
 fn vulkan_order_trace_enabled() -> bool:
     """True when SIMPLE_VK_ORDER_TRACE=1 armed the `[vk-order]` probe.
@@ -899,14 +929,18 @@ impl VulkanBackend:
 
         # Pack the frozen 5-word-per-rect payload.
         #
-        # PREFERRED: pack it as WORDS and hand the words over as words. The
-        # typed upload (`vulkan_sffi_copy_to_buffer_u32`) widens each element to
-        # four little-endian bytes on the runtime side, so this loop costs 5
-        # interpreter array stores per rect instead of 20 -- for a 64-rect batch,
-        # 320 stores instead of 1280. The byte payload below is kept verbatim as
-        # the fallback: its bytes are identical, only its host cost is four
-        # times as high, and it is what runs whenever the typed lane declines
-        # (AOT/native array ABI) or `SIMPLE_VK_RECT_UPLOAD=bytes` forces it.
+        # FASTER when it runs: pack it as WORDS and hand the words over as
+        # words. The typed upload (`vulkan_sffi_copy_to_buffer_u32`) widens
+        # each element to four little-endian bytes on the runtime side, so
+        # this loop costs 5 interpreter array stores per rect instead of 20 --
+        # for a 64-rect batch, 320 stores instead of 1280. It is OPT-IN
+        # (`SIMPLE_VK_RECT_UPLOAD=u32`), not the default: see
+        # `_VULKAN_RECT_UPLOAD_U32_REQUESTED` above for why. The byte payload
+        # below is the default and the fallback: its bytes are identical, only
+        # its host cost is four times as high, and it is what runs whenever
+        # the typed lane was not requested, declines (AOT/native array ABI),
+        # or `SIMPLE_VK_RECT_UPLOAD=bytes` is set explicitly (accepted as a
+        # synonym for the default, for symmetry with the old flag name).
         #
         # CORRECTION to the earlier caveat here (re-measured 2026-09-11): the
         # upload is NOT a second queue submit in the interpreter lane. That lane
@@ -918,7 +952,7 @@ impl VulkanBackend:
         # packing, not a transfer submit, was the real cost.
         val target_buffer = self.rect_batch_buffers[slot]
         var uploaded = false
-        if not _VULKAN_RECT_UPLOAD_BYTES_FORCED:
+        if _VULKAN_RECT_UPLOAD_U32_REQUESTED:
             var words: [u32] = [0u32; count * RECT_BATCH_WORDS_PER_RECT]
             var w: i64 = 0
             k = 0
@@ -932,8 +966,15 @@ impl VulkanBackend:
                 w = w + RECT_BATCH_WORDS_PER_RECT
                 k = k + 1
             uploaded = vulkan_sffi_copy_to_buffer_u32(target_buffer, words, 0)
+            _vulkan_rect_upload_last_mode = "u32"
+            _vulkan_rect_upload_last_reason = "typed-requested"
+            if not uploaded:
+                _vulkan_rect_upload_last_reason = "typed-declined"
 
         if not uploaded:
+            if not _VULKAN_RECT_UPLOAD_U32_REQUESTED:
+                _vulkan_rect_upload_last_reason = "typed-not-requested"
+            _vulkan_rect_upload_last_mode = "bytes"
             var payload: [u8] = [0u8; payload_bytes]
             var off: i64 = 0
             k = 0

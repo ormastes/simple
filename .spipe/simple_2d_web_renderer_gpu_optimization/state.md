@@ -162,3 +162,19 @@ gives 2.78-3.80. The tree was never at 6.7; the deployed binary was stale.
 Also: `cargo build --release --bin simple` with no `--features` yields a binary
 with no Vulkan at all (`default = []`); `--features vulkan,vulkan-graphics` is
 required or the bench reports `backend-unavailable`.
+
+## 2026-09-11 follow-up: typed upload regression fixed (opt-in, not opt-out)
+
+`rt_vulkan_copy_to_buffer_u32` broke every deployed binary older than this
+extern's existence: `unknown extern function` is a fatal process abort on
+the interpreter, uncatchable (Simple has no try/catch), and there is no
+version/capability probe extern in this tree to gate on safely. Fix: flipped
+`_enqueue_rect_batch_gpu` (backend_vulkan_helpers.spl) to OPT-IN via
+`SIMPLE_VK_RECT_UPLOAD=u32` (was opt-out via `=bytes`); default is now the
+byte payload, which every binary supports. Added
+`Engine2D.vulkan_rect_upload_evidence()` (`"<mode> reason=<reason>"`) so
+callers/tests can tell an extern-unavailable byte fallback apart from an
+explicit-request one. Verified: old binary (Sep 7) 8/8 PASS on default,
+6/8 FAIL when `u32` is force-requested (sabotage); fresh seed (Sep 11) 8/8
+PASS both ways. Full writeup:
+`doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`.
