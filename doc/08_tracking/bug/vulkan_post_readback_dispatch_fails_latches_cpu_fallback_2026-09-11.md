@@ -232,7 +232,65 @@ really rendered them). Something about the spec-runner process keeps the failing
 path from being reached. This is recorded rather than hidden, and the spec
 carries the same warning in its docstring.
 
+## The fixed frame is CORRECT, not merely full-length
+
+The obvious hazard of turning a zero-length readback into a full-length one is
+converting an EMPTY frame into a WRONG frame — exactly what the earlier record
+forbids ("the all-black/wrong-frame case tolerance must never admit"). Checked
+directly rather than assumed: `probe_frame2_correct.spl` renders the sanity page
+six times and compares every later frame to frame 1 (which is a proven-exact
+`device_readback`) pixel by pixel:
+
+```
+frame 1: len=684000 (reference)
+frame 2: len=684000 differing_from_frame1=0
+frame 3..6: len=684000 differing_from_frame1=0
+```
+
+**0 of 684000 differing on every frame.** The refused-dispatch frame is served by
+the route's software/upload fallback, which is the same content, so no primitive
+is lost and no wrong frame is admitted.
+
+## Route authorization, finally measured
+
+The 8-frame page probe never reaches the sampler. The entry that does is
+`web_draw_ir_gpu_route_sample` (`simple_web_layout_engine2d_fast.spl:1105`).
+`probe_authorize.spl` drives it 8x on a synthetic three-rect composition at
+400x300, which DOES advance the sampler (`samples` reaches 3) and produces real
+evidence:
+
+```
+frame 1: samples=1 pixels_match=true gpu_proven=true  reason=timing-unavailable
+frame 2: samples=2 pixels_match=true gpu_proven=false reason=timing-unavailable
+frame 3: samples=3 pixels_match=true gpu_proven=false available=false reason=device-lost
+frame 4..8: samples=3 pixels_match=true gpu_proven=false available=false reason=device-lost
+```
+
+Two things to read here, one good and one not:
+
+- **`pixels_match` stays TRUE and the reason is `device-lost`.** The route no
+  longer claims a pixel mismatch it cannot substantiate — the failure is named
+  by its cause. Sabotaging the classifier (forcing the absence to `""`) changes
+  this to `device-proof-unavailable`: still not `pixel-mismatch`, because fixes
+  1-3 removed the zero-length readback that produced that label in the first
+  place. The `pixel-mismatch` mislabel itself is pinned by the device-free unit
+  spec, which exercises the length-mismatch path directly.
+- **The route is still NOT authorized.** `gpu_device_proven` drops false at
+  frame 2 and never recovers, so `available=false` and `should_offload=false`.
+  See "Still open".
+
 ## Still open
+
+- **STEADY STATE IS NOT STEADY-ON-GPU. This fix does not deliver that.**
+  `dispatch-resync-downgraded` fired 4 times in 8 page frames: every fresh
+  engine's SECOND frame still takes the refused `bind_pipeline`, is demoted to
+  `cpu_fallback`, and is then discarded by the slot pool, so a new engine is
+  built and the cycle repeats every two frames. Roughly half the frames reach
+  the device, with engine churn throughout, and `gpu_device_proven` stays false
+  so the route never authorizes. What this change fixes is the PERMANENT poison
+  — one refusal no longer kills the device for the rest of the process, and no
+  frame is ever empty or wrong. Reaching steady GPU residency needs the
+  `bind_pipeline` refusal itself fixed, which is below the Simple boundary.
 
 - **The device spec does not yet discriminate this fix** (above). Until the
   spec-runner/`run` divergence is understood, the probe is the evidence.
