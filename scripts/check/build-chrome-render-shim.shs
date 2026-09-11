@@ -1,0 +1,159 @@
+#!/bin/sh
+# build-chrome-render-shim.shs — build the Chrome (CEF) offscreen render dynlib and assert
+# its exported symbol set is EXACTLY the 10 frozen ABI v1 names.
+#
+# Without --cef-root the shim builds in stub mode (no CEF headers included at all) and
+# every entry point reports CHROME_RENDER_E_BACKEND_UNAVAILABLE. That build is still a
+# real dynlib and is what stage A of check-chrome-dynlib-probe.shs loads.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  exit 0   CHROME_RENDER SHIM BUILD: PASS — 10/10 symbols exported, ...
+#   FAIL  exit 1   CHROME_RENDER SHIM BUILD: FAIL — <what>
+#   ERROR exit 2   CHROME_RENDER SHIM BUILD: ERROR — nothing was built (<reason>)
+#
+# `set -e` is deliberately NOT used: this script reads the compiler's exit status into a
+# variable on the line after the invocation and classifies it itself. Under `set -e` a
+# failed compile would abort before that line and print NO verdict at all, which is the
+# silent-exit failure mode the repo's guards forbid.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+SRC_C="$ROOT_DIR/src/runtime/browser/chrome_render_shim.c"
+OUT_DIR="$ROOT_DIR/build/chrome-render"
+# A drop staged by scripts/setup/setup-cef-dynlib.shs exports SIMPLE_CEF_ROOT; honouring it
+# here is what makes a CEF host build the real shim without any extra flag.
+CEF_ROOT="${SIMPLE_CEF_ROOT:-}"
+CEF_LIB="${SIMPLE_CEF_LIB:-}"
+DROP_SYMBOL=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --cef-root) CEF_ROOT="${2:-}"; shift 2 ;;
+        --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
+        # --drop-symbol renames one exported symbol so the built library is missing it.
+        # It exists for the probe's selftest fixtures and for sabotage verification; it
+        # never produces a library that passes the exact-set assertion below.
+        --drop-symbol) DROP_SYMBOL="${2:-}"; shift 2 ;;
+        --src) SRC_C="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+if [ ! -f "$SRC_C" ]; then
+    echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (source missing: $SRC_C)"
+    exit 2
+fi
+
+CC_BIN="${CC:-}"
+if [ -z "$CC_BIN" ]; then
+    for candidate in clang cc gcc; do
+        if command -v "$candidate" >/dev/null 2>&1; then CC_BIN="$candidate"; break; fi
+    done
+fi
+if [ -z "$CC_BIN" ]; then
+    # Absence of a compiler is absence of evidence, never a pass.
+    echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (no C compiler on PATH)"
+    exit 2
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+    echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (no sha256 tool on PATH)"
+    exit 2
+fi
+
+case "$(uname -s)" in
+    Darwin) LIB_EXT="dylib" ;;
+    *)      LIB_EXT="so" ;;
+esac
+LIB_PATH="$OUT_DIR/libsimple_chrome_render.$LIB_EXT"
+
+EXPECTED_SYMBOLS="simple_chrome_render_abi_version
+simple_chrome_render_create
+simple_chrome_render_load_html
+simple_chrome_render_load_url
+simple_chrome_render_resize
+simple_chrome_render_frame
+simple_chrome_render_read_pixels_into
+simple_chrome_render_event
+simple_chrome_render_last_error_into
+simple_chrome_render_destroy"
+
+WORK_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t chromeshim)"
+cleanup() { rm -rf "$WORK_DIR"; }
+trap cleanup EXIT INT TERM
+
+BUILD_C="$SRC_C"
+BUILD_INCLUDE="$(dirname -- "$SRC_C")"
+if [ -n "$DROP_SYMBOL" ]; then
+    case "$EXPECTED_SYMBOLS" in
+        *"$DROP_SYMBOL"*) : ;;
+        *) echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (--drop-symbol $DROP_SYMBOL is not an ABI v1 symbol)"; exit 2 ;;
+    esac
+    mkdir -p "$WORK_DIR/src"
+    sed "s/${DROP_SYMBOL}/simple_chrome_render_sabotaged_absent/g" "$SRC_C" > "$WORK_DIR/src/chrome_render_shim.c"
+    sed "s/${DROP_SYMBOL}/simple_chrome_render_sabotaged_absent/g" "$(dirname -- "$SRC_C")/chrome_render_shim.h" > "$WORK_DIR/src/chrome_render_shim.h"
+    BUILD_C="$WORK_DIR/src/chrome_render_shim.c"
+    BUILD_INCLUDE="$WORK_DIR/src"
+fi
+
+CEF_FLAGS=""
+CEF_MODE="stub"
+if [ -n "$CEF_ROOT" ]; then
+    if [ ! -d "$CEF_ROOT" ]; then
+        echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (--cef-root $CEF_ROOT does not exist)"
+        exit 2
+    fi
+    CEF_FLAGS="-DSIMPLE_CHROME_CEF -I$CEF_ROOT"
+    CEF_MODE="cef"
+    # Link against the drop's libcef when the setup script named one. Without it the shim
+    # would still compile but every CEF entry point would be an undefined symbol at load.
+    if [ -n "$CEF_LIB" ] && [ -e "$CEF_LIB" ]; then
+        CEF_FLAGS="$CEF_FLAGS -L$(dirname -- "$CEF_LIB") -lcef"
+    fi
+fi
+
+mkdir -p "$OUT_DIR"
+rm -f "$LIB_PATH" "$LIB_PATH.sha256"
+
+# shellcheck disable=SC2086
+"$CC_BIN" -shared -fPIC -fvisibility=hidden -O2 -Wall -Wextra \
+    -I"$BUILD_INCLUDE" $CEF_FLAGS -o "$LIB_PATH" "$BUILD_C"
+BUILD_RC=$?
+if [ "$BUILD_RC" -ne 0 ] || [ ! -f "$LIB_PATH" ]; then
+    echo "CHROME_RENDER SHIM BUILD: FAIL — compile failed (rc=$BUILD_RC, mode=$CEF_MODE)"
+    exit 1
+fi
+
+# Exported, defined, global symbols only. macOS nm prefixes every symbol with '_'.
+nm -gU "$LIB_PATH" 2>/dev/null | awk '{print $NF}' | sed 's/^_//' \
+    | grep '^simple_chrome_render_' | sort -u > "$WORK_DIR/actual.txt" || true
+if [ ! -s "$WORK_DIR/actual.txt" ]; then
+    # Some GNU nm builds do not accept -U; retry with the portable defined-symbol filter.
+    nm -g --defined-only "$LIB_PATH" 2>/dev/null | awk '{print $NF}' | sed 's/^_//' \
+        | grep '^simple_chrome_render_' | sort -u > "$WORK_DIR/actual.txt" || true
+fi
+if [ ! -s "$WORK_DIR/actual.txt" ]; then
+    echo "CHROME_RENDER SHIM BUILD: ERROR — nothing was built (nm listed 0 exported symbols in $LIB_PATH)"
+    exit 2
+fi
+
+printf '%s\n' "$EXPECTED_SYMBOLS" | sort -u > "$WORK_DIR/expected.txt"
+MISSING="$(comm -23 "$WORK_DIR/expected.txt" "$WORK_DIR/actual.txt" | tr '\n' ' ' | sed 's/ *$//')"
+EXTRA="$(comm -13 "$WORK_DIR/expected.txt" "$WORK_DIR/actual.txt" | tr '\n' ' ' | sed 's/ *$//')"
+ACTUAL_COUNT="$(wc -l < "$WORK_DIR/actual.txt" | tr -d ' ')"
+
+if [ -n "$MISSING" ] || [ -n "$EXTRA" ]; then
+    echo "CHROME_RENDER SHIM BUILD: FAIL — exported set is not the frozen 10 (missing: ${MISSING:-none}; extra: ${EXTRA:-none})"
+    exit 1
+fi
+
+DIGEST="$(sha256_of "$LIB_PATH")"
+printf '%s  %s\n' "$DIGEST" "$(basename -- "$LIB_PATH")" > "$LIB_PATH.sha256"
+
+echo "CHROME_RENDER SHIM BUILD: PASS — $ACTUAL_COUNT/10 symbols exported, mode=$CEF_MODE, lib=$LIB_PATH, sha256=$DIGEST"
+exit 0

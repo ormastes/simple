@@ -1,0 +1,408 @@
+#!/bin/sh
+# setup-cef-dynlib.shs — locate, download, verify and stage a PINNED CEF (libcef) binary
+# distribution for the Chrome render dynlib (src/runtime/browser/chrome_render_shim.c).
+#
+# POSIX sh; runs on Linux, macOS, FreeBSD and MSYS/git-bash. The native Windows twin is
+# scripts/setup/setup-cef-dynlib.ps1 (same flags, same receipt keys).
+#
+# The version and every per-platform archive digest live in ONE data file,
+# config/cef/cef_pin.sdn. This script carries no second copy of them.
+#
+# Modes:
+#   --check      (default) report what is staged; never touches the network
+#   --install    download the pinned archive, verify its sha256, extract under build/cef/
+#   --env        print `export SIMPLE_CEF_ROOT=...` lines for a staged drop
+#   --selftest   fatal fixture run; never touches the network
+#
+# Every run ends with a key=value receipt block whose LAST line is:
+#   cef_status=present | missing | hash-mismatch
+# Exit 0 only when cef_status=present (or a selftest passes); every other outcome is
+# non-zero with the reason in cef_reason=. An UNSET pin is REFUSED unless --allow-unpinned,
+# which is announced loudly in the receipt and still marks cef_sha256_status=unpinned.
+#
+# Destructive operations are confined to $INSTALL_ROOT (build/cef); nothing outside it is
+# ever removed.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+PIN_FILE="${SIMPLE_CEF_PIN:-$ROOT_DIR/config/cef/cef_pin.sdn}"
+MODE="check"
+ALLOW_UNPINNED=0
+FORCE_PLATFORM=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) MODE="check"; shift ;;
+        --install) MODE="install"; shift ;;
+        --env) MODE="env"; shift ;;
+        --selftest) MODE="selftest"; shift ;;
+        --allow-unpinned) ALLOW_UNPINNED=1; shift ;;
+        --platform) FORCE_PLATFORM="${2:-}"; shift 2 ;;
+        --pin-file) PIN_FILE="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        *) echo "cef_reason=unknown-argument-$1"; echo "cef_status=missing"; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- pin file access
+
+# Scalar directly under `cef_pin:`.
+pin_scalar() {
+    awk -v key="$1" '
+        $1 == key":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, "", $0); print; exit }
+    ' "$PIN_FILE"
+}
+
+# Field of the row whose `platform:` equals $1. Field name is $2.
+pin_row_field() {
+    awk -v want="$1" -v field="$2" '
+        /^[ \t]*- platform:[ \t]*/ {
+            line = $0; sub(/^[ \t]*- platform:[ \t]*/, "", line)
+            gsub(/^"|"$/, "", line); current = line; next
+        }
+        current == want {
+            line = $0
+            sub(/^[ \t]*/, "", line)
+            if (index(line, field ":") == 1) {
+                sub(/^[^:]*:[ \t]*/, "", line)
+                gsub(/^"|"$/, "", line)
+                print line
+                exit
+            }
+        }
+    ' "$PIN_FILE"
+}
+
+# ---------------------------------------------------------------- platform detection
+
+detect_platform() {
+    os_name="$(uname -s 2>/dev/null || echo unknown)"
+    arch_name="$(uname -m 2>/dev/null || echo unknown)"
+    case "$os_name" in
+        Linux)  os_key="linux" ;;
+        Darwin) os_key="macos" ;;
+        FreeBSD) os_key="freebsd" ;;
+        MINGW*|MSYS*|CYGWIN*) os_key="windows" ;;
+        *) os_key="unknown" ;;
+    esac
+    case "$arch_name" in
+        x86_64|amd64) arch_key="64" ;;
+        arm64|aarch64) arch_key="arm64" ;;
+        *) arch_key="unknown" ;;
+    esac
+    if [ "$os_key" = unknown ] || [ "$arch_key" = unknown ]; then
+        echo "unsupported"
+        return 0
+    fi
+    case "$os_key$arch_key" in
+        linux64) echo "linux64" ;;
+        linuxarm64) echo "linuxarm64" ;;
+        macos64) echo "macosx64" ;;
+        macosarm64) echo "macosarm64" ;;
+        windows64) echo "windows64" ;;
+        windowsarm64) echo "windowsarm64" ;;
+        # CEF publishes no FreeBSD distribution. Say so rather than guessing a near match.
+        freebsd*) echo "unsupported" ;;
+        *) echo "unsupported" ;;
+    esac
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# ---------------------------------------------------------------- receipt
+
+emit_receipt() {
+    # $1 platform, $2 version, $3 lib, $4 sha256_status, $5 reason, $6 status
+    echo "cef_platform=$1"
+    echo "cef_version=$2"
+    echo "cef_lib=$3"
+    echo "cef_sha256_status=$4"
+    if [ -n "${MACOS_HELPER_STATUS:-}" ]; then
+        echo "macos_helper_status=$MACOS_HELPER_STATUS"
+    fi
+    echo "cef_reason=$5"
+    echo "cef_status=$6"
+}
+
+# Inspects a staged drop root. Echoes "<status>|<reason>|<libpath>".
+inspect_drop() {
+    drop_root="$1"
+    rel_lib="$2"
+    if [ ! -d "$drop_root" ]; then
+        echo "missing|no-cef-drop|"
+        return 0
+    fi
+    if [ ! -f "$drop_root/include/capi/cef_app_capi.h" ]; then
+        echo "missing|headers-absent|"
+        return 0
+    fi
+    if [ -z "$rel_lib" ] || [ ! -e "$drop_root/$rel_lib" ]; then
+        echo "missing|libcef-absent|"
+        return 0
+    fi
+    echo "present||$drop_root/$rel_lib"
+}
+
+# ---------------------------------------------------------------- selftest
+
+selftest() {
+    passed=0
+    total=0
+    tmp="$(mktemp -d 2>/dev/null || mktemp -d -t cefself)"
+
+    # Fixture 1 — the platform detection table maps this host to a known row or to the
+    # explicit token `unsupported`; it never invents a platform.
+    total=$((total + 1))
+    detected="$(detect_platform)"
+    case "$detected" in
+        linux64|linuxarm64|macosx64|macosarm64|windows64|windowsarm64|unsupported)
+            passed=$((passed + 1)) ;;
+        *) echo "selftest: fixture 1 detected unknown platform '$detected'" >&2 ;;
+    esac
+
+    # Fixture 2 — a fake extracted tree with headers and a lib passes inspection.
+    total=$((total + 1))
+    mkdir -p "$tmp/good/include/capi" "$tmp/good/Release"
+    : > "$tmp/good/include/capi/cef_app_capi.h"
+    : > "$tmp/good/Release/libcef.so"
+    r2="$(inspect_drop "$tmp/good" "Release/libcef.so")"
+    if [ "${r2%%|*}" = "present" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 2 (complete tree) was not present: $r2" >&2
+    fi
+
+    # Fixture 3 — a tree with headers but no library is `missing`, never present.
+    total=$((total + 1))
+    mkdir -p "$tmp/nolib/include/capi"
+    : > "$tmp/nolib/include/capi/cef_app_capi.h"
+    r3="$(inspect_drop "$tmp/nolib" "Release/libcef.so")"
+    case "$r3" in
+        missing\|libcef-absent\|*) passed=$((passed + 1)) ;;
+        *) echo "selftest: fixture 3 (no libcef) was not refused: $r3" >&2 ;;
+    esac
+
+    # Fixture 4 — an UNSET pin is refused without --allow-unpinned.
+    total=$((total + 1))
+    if [ "$(pin_gate UNSET 0)" = "refused" ] && [ "$(pin_gate UNSET 1)" = "unpinned" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 4 (UNSET pin gate) misbehaved" >&2
+    fi
+
+    # Fixture 5 — a digest that does not match the pin is hash-mismatch, never present.
+    total=$((total + 1))
+    printf 'x' > "$tmp/archive.bin"
+    actual="$(sha256_of "$tmp/archive.bin")"
+    if [ -n "$actual" ] && [ "$(verify_digest "$tmp/archive.bin" "deadbeef")" = "hash-mismatch" ] &&
+       [ "$(verify_digest "$tmp/archive.bin" "$actual")" = "verified" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 5 (digest verification) misbehaved" >&2
+    fi
+
+    rm -rf "$tmp"
+    echo "selftest: $passed/$total fixtures passed"
+    if [ "$passed" -ne "$total" ] || [ "$total" -lt 4 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Pin admission: echoes `refused` | `unpinned` | `pinned`.
+pin_gate() {
+    gate_digest="$1"
+    gate_allow="$2"
+    if [ -z "$gate_digest" ] || [ "$gate_digest" = "UNSET" ]; then
+        if [ "$gate_allow" -eq 1 ]; then
+            echo "unpinned"
+        else
+            echo "refused"
+        fi
+        return 0
+    fi
+    echo "pinned"
+}
+
+# Echoes `verified` | `hash-mismatch` | `no-sha256-tool`.
+verify_digest() {
+    file_path="$1"
+    expected="$2"
+    actual="$(sha256_of "$file_path")"
+    if [ -z "$actual" ]; then
+        echo "no-sha256-tool"
+        return 0
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "hash-mismatch"
+        return 0
+    fi
+    echo "verified"
+}
+
+# ---------------------------------------------------------------- main
+
+if [ ! -f "$PIN_FILE" ]; then
+    emit_receipt "unknown" "unknown" "" "unknown" "pin-file-absent:$PIN_FILE" "missing"
+    exit 2
+fi
+
+if [ "$MODE" = "selftest" ]; then
+    selftest
+    SELF_RC=$?
+    if [ "$SELF_RC" -ne 0 ]; then
+        echo "CEF SETUP: SELFTEST FAIL"
+        exit 1
+    fi
+    echo "CEF SETUP: SELFTEST PASS — 5/5 fixtures"
+    exit 0
+fi
+
+PLATFORM="${FORCE_PLATFORM:-$(detect_platform)}"
+VERSION="$(pin_scalar version)"
+INSTALL_ROOT="$ROOT_DIR/$(pin_scalar install_root)"
+
+if [ "$PLATFORM" = "unsupported" ]; then
+    emit_receipt "unsupported" "$VERSION" "" "unknown" "no-cef-distribution-for-$(uname -s)-$(uname -m)" "missing"
+    exit 2
+fi
+
+REL_LIB="$(pin_row_field "$PLATFORM" lib)"
+ARCHIVE="$(pin_row_field "$PLATFORM" archive)"
+PINNED_SHA="$(pin_row_field "$PLATFORM" sha256)"
+if [ -z "$REL_LIB" ]; then
+    emit_receipt "$PLATFORM" "$VERSION" "" "unknown" "no-pin-row-for-platform" "missing"
+    exit 2
+fi
+
+# An explicitly staged root wins over the managed install path.
+DROP_ROOT="${SIMPLE_CEF_ROOT:-$INSTALL_ROOT/$VERSION/$PLATFORM}"
+
+case "$PLATFORM" in
+    macosx64|macosarm64)
+        if [ "$(pin_scalar macos_helper_required)" = "true" ]; then
+            # Stage B needs CEF's render/GPU subprocesses, which macOS spawns from a
+            # separate helper .app bundle. Loading libcef from a NON-bundled CLI is
+            # UNVERIFIED (blocked row B2) — recorded, never inferred as working.
+            MACOS_HELPER_STATUS="required-unverified-from-non-bundled-cli"
+        fi
+        ;;
+esac
+
+if [ "$MODE" = "install" ]; then
+    GATE="$(pin_gate "$PINNED_SHA" "$ALLOW_UNPINNED")"
+    if [ "$GATE" = "refused" ]; then
+        echo "cef_warning=REFUSED: the sha256 for platform $PLATFORM is UNSET in $PIN_FILE." >&2
+        echo "cef_warning=Fill the pin from the publisher index, or re-run with --allow-unpinned." >&2
+        emit_receipt "$PLATFORM" "$VERSION" "" "unset" "pin-unset-refused" "missing"
+        exit 2
+    fi
+    if [ "$GATE" = "unpinned" ]; then
+        echo "cef_warning=*** --allow-unpinned: installing an UNVERIFIED CEF archive. ***" >&2
+        echo "cef_warning=*** The resulting drop is NOT admitted evidence for any gate.  ***" >&2
+    fi
+    if [ -z "$ARCHIVE" ] || [ "$ARCHIVE" = "UNSET-verify-before-use" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "archive-name-unset" "missing"
+        exit 2
+    fi
+
+    URL_TEMPLATE="$(pin_scalar url_template)"
+    URL="$(printf '%s' "$URL_TEMPLATE" | sed "s|{archive}|$ARCHIVE|")"
+
+    DOWNLOADER=""
+    if command -v curl >/dev/null 2>&1; then
+        DOWNLOADER="curl"
+    elif command -v wget >/dev/null 2>&1; then
+        DOWNLOADER="wget"
+    fi
+    if [ -z "$DOWNLOADER" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "no-downloader-on-path" "missing"
+        exit 2
+    fi
+
+    STAGE_DIR="$INSTALL_ROOT/.download"
+    mkdir -p "$STAGE_DIR"
+    ARCHIVE_PATH="$STAGE_DIR/$ARCHIVE"
+    if [ ! -f "$ARCHIVE_PATH" ]; then
+        if [ "$DOWNLOADER" = "curl" ]; then
+            curl -fSL --retry 3 -o "$ARCHIVE_PATH.part" "$URL"
+        else
+            wget -O "$ARCHIVE_PATH.part" "$URL"
+        fi
+        DL_RC=$?
+        if [ "$DL_RC" -ne 0 ]; then
+            rm -f "$ARCHIVE_PATH.part"
+            emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "download-failed-rc-$DL_RC" "missing"
+            exit 2
+        fi
+        mv "$ARCHIVE_PATH.part" "$ARCHIVE_PATH"
+    fi
+
+    if [ "$GATE" = "pinned" ]; then
+        VERDICT="$(verify_digest "$ARCHIVE_PATH" "$PINNED_SHA")"
+        if [ "$VERDICT" = "hash-mismatch" ]; then
+            # Keep the offending file for inspection; never silently re-download over it.
+            emit_receipt "$PLATFORM" "$VERSION" "" "mismatch" "archive-sha256-does-not-match-pin" "hash-mismatch"
+            exit 3
+        fi
+        if [ "$VERDICT" != "verified" ]; then
+            emit_receipt "$PLATFORM" "$VERSION" "" "unknown" "$VERDICT" "missing"
+            exit 2
+        fi
+    fi
+
+    TARGET="$INSTALL_ROOT/$VERSION/$PLATFORM"
+    # Only ever removes a path under build/cef.
+    case "$TARGET" in
+        "$INSTALL_ROOT"/*) rm -rf "$TARGET" ;;
+        *) emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "refusing-to-write-outside-install-root" "missing"; exit 2 ;;
+    esac
+    mkdir -p "$TARGET"
+    # CEF ships .tar.bz2 for every platform, Windows included.
+    tar -xjf "$ARCHIVE_PATH" -C "$TARGET" --strip-components=1
+    EX_RC=$?
+    if [ "$EX_RC" -ne 0 ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "extract-failed-rc-$EX_RC" "missing"
+        exit 2
+    fi
+    DROP_ROOT="$TARGET"
+fi
+
+RESULT="$(inspect_drop "$DROP_ROOT" "$REL_LIB")"
+STATUS="${RESULT%%|*}"
+REST="${RESULT#*|}"
+REASON="${REST%%|*}"
+LIB_PATH="${REST#*|}"
+
+SHA_STATUS="$(pin_gate "$PINNED_SHA" 1)"
+if [ "$SHA_STATUS" = "pinned" ]; then
+    SHA_STATUS="pinned"
+else
+    SHA_STATUS="unpinned"
+fi
+
+if [ "$MODE" = "env" ]; then
+    if [ "$STATUS" != "present" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$SHA_STATUS" "$REASON" "missing"
+        exit 1
+    fi
+    echo "export SIMPLE_CEF_ROOT=\"$DROP_ROOT\""
+    echo "export SIMPLE_CEF_LIB=\"$LIB_PATH\""
+    echo "export SIMPLE_CEF_PLATFORM=\"$PLATFORM\""
+fi
+
+if [ "$STATUS" = "present" ]; then
+    emit_receipt "$PLATFORM" "$VERSION" "$LIB_PATH" "$SHA_STATUS" "ok" "present"
+    exit 0
+fi
+
+emit_receipt "$PLATFORM" "$VERSION" "" "$SHA_STATUS" "$REASON" "missing"
+exit 1
