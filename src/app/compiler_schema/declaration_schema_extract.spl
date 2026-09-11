@@ -1,0 +1,411 @@
+#![allow(primitive_api)]
+
+# Bounded, fail-closed declaration schema extraction for source-contract gates.
+#
+# This deliberately remains a source scanner rather than importing the compiler
+# frontend: compiler-schema tools must still diagnose declaration drift while a
+# frontend change is incomplete.  Unlike the legacy generator scanners, this
+# API does not silently omit syntax that it cannot classify.
+
+use std.common.string_core.{text_to_bytes}
+
+pub const DECLARATION_SCHEMA_MAX_SOURCE_BYTES_V1: i64 = 1048576
+pub const DECLARATION_SCHEMA_MAX_LINES_V1: i64 = 65536
+pub const DECLARATION_SCHEMA_MAX_LINE_BYTES_V1: i64 = 16384
+pub const DECLARATION_SCHEMA_MAX_MEMBERS_V1: i64 = 1024
+pub const DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1: i64 = 64
+
+pub struct DeclarationFieldSchemaV1:
+    name: text
+    type_text: text
+    visibility: text
+    binding_kind: text
+    has_default: bool
+    default_text: text
+    leading_annotations: [text]
+    trailing_annotation: text
+
+pub struct DeclarationStructSchemaV1:
+    name: text
+    visibility: text
+    annotations: [text]
+    fields: [DeclarationFieldSchemaV1]
+
+pub struct DeclarationEnumVariantSchemaV1:
+    name: text
+    payload_text: text
+    annotations: [text]
+
+pub struct DeclarationEnumSchemaV1:
+    name: text
+    visibility: text
+    annotations: [text]
+    variants: [DeclarationEnumVariantSchemaV1]
+
+fn _declaration_schema_indent_v1(line: text) -> i64:
+    var count: i64 = 0
+    for ch in line.chars():
+        if ch != ' ':
+            return count
+        count = count + 1
+    count
+
+fn _declaration_schema_leading_space_only_v1(line: text) -> bool:
+    for ch in line.chars():
+        if ch == ' ':
+            continue
+        if ch == '\t':
+            return false
+        return true
+    true
+
+fn _declaration_schema_no_comment_v1(line: text) -> text:
+    var out = ""
+    var in_single = false
+    var in_double = false
+    var escaped = false
+    for ch in line.chars():
+        if escaped:
+            out = out + ch
+            escaped = false
+            continue
+        if (in_single or in_double) and ch == '\\':
+            out = out + ch
+            escaped = true
+            continue
+        if not in_double and ch == '\'':
+            in_single = not in_single
+            out = out + ch
+            continue
+        if not in_single and ch == '"':
+            in_double = not in_double
+            out = out + ch
+            continue
+        if not in_single and not in_double and ch == '#':
+            return out
+        out = out + ch
+    out
+
+fn _declaration_schema_identifier_valid_v1(value: text) -> bool:
+    if value == "":
+        return false
+    var index: i64 = 0
+    for ch in value.chars():
+        val alpha = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+        val digit = ch >= '0' and ch <= '9'
+        if index == 0:
+            if not (alpha or ch == '_'):
+                return false
+        elif not (alpha or digit or ch == '_'):
+            return false
+        index = index + 1
+    true
+
+fn _declaration_schema_annotation_valid_v1(value: text) -> bool:
+    if not value.starts_with("@") or value.len() < 2:
+        return false
+    val open = value.find("(")
+    if open < 0:
+        return _declaration_schema_identifier_valid_v1(
+            value.substring(1, value.len()))
+    if not value.ends_with(")"):
+        return false
+    _declaration_schema_identifier_valid_v1(value.substring(1, open))
+
+fn _declaration_schema_trailing_annotation_valid_v1(value: text) -> bool:
+    if _declaration_schema_annotation_valid_v1(value):
+        return true
+    # The frontend also permits memory-mapped fields as `name: T @ EXPR`.
+    value.starts_with("@ ") and value.substring(2, value.len()).trim() != ""
+
+fn _declaration_schema_source_valid_v1(source: text) -> bool:
+    if text_to_bytes(source).len() > DECLARATION_SCHEMA_MAX_SOURCE_BYTES_V1:
+        return false
+    val lines = source.split("\n")
+    if lines.len() > DECLARATION_SCHEMA_MAX_LINES_V1:
+        return false
+    for line in lines:
+        if text_to_bytes(line).len() > DECLARATION_SCHEMA_MAX_LINE_BYTES_V1:
+            return false
+    true
+
+fn _declaration_schema_header_v1(
+    line: text, kind: text, name: text,
+) -> Result<text, text>:
+    val private_header = kind + " " + name + ":"
+    val public_header = "pub " + private_header
+    val explicit_private_header = "private " + private_header
+    if line == private_header:
+        return Ok("private")
+    if line == public_header:
+        return Ok("pub")
+    if line == explicit_private_header:
+        return Ok("private")
+    Err("malformed-declaration-header")
+
+fn _declaration_schema_candidate_v1(line: text, kind: text, name: text) -> bool:
+    val marker = kind + " " + name
+    line == marker or line.starts_with(marker + ":") or
+        line.starts_with(marker + "<") or line.contains(" " + marker)
+
+fn _declaration_schema_contains_field_v1(
+    fields: [DeclarationFieldSchemaV1], name: text,
+) -> bool:
+    for field in fields:
+        if field.name == name:
+            return true
+    false
+
+fn _declaration_schema_contains_variant_v1(
+    variants: [DeclarationEnumVariantSchemaV1], name: text,
+) -> bool:
+    for variant in variants:
+        if variant.name == name:
+            return true
+    false
+
+fn _declaration_schema_field_v1(
+    line: text, annotations: [text],
+) -> Result<DeclarationFieldSchemaV1, text>:
+    var remainder = line.trim()
+    var field_annotations = annotations
+    # `@volatile name: T` is the one inline pre-field annotation recognized by
+    # the frontend outline grammar. Other member annotations occupy their own
+    # line and are supplied by the declaration scanner.
+    if remainder.starts_with("@volatile "):
+        field_annotations.push("@volatile")
+        if field_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+            return Err("field-annotation-limit")
+        remainder = remainder.substring(10, remainder.len()).trim()
+    var visibility = "private"
+    var binding_kind = "field"
+    if remainder.starts_with("pub "):
+        visibility = "pub"
+        remainder = remainder.substring(4, remainder.len()).trim()
+    elif remainder.starts_with("private "):
+        visibility = "private"
+        remainder = remainder.substring(8, remainder.len()).trim()
+    if remainder.starts_with("@volatile "):
+        field_annotations.push("@volatile")
+        if field_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+            return Err("field-annotation-limit")
+        remainder = remainder.substring(10, remainder.len()).trim()
+    if remainder.starts_with("val "):
+        binding_kind = "val"
+        remainder = remainder.substring(4, remainder.len()).trim()
+    elif remainder.starts_with("var "):
+        binding_kind = "var"
+        remainder = remainder.substring(4, remainder.len()).trim()
+
+    val colon = remainder.find(":")
+    if colon <= 0:
+        return Err("unknown-field-form")
+    val name = remainder.substring(0, colon).trim()
+    if not _declaration_schema_identifier_valid_v1(name):
+        return Err("unknown-field-modifier")
+    var type_and_tail = remainder.substring(colon + 1, remainder.len()).trim()
+    if type_and_tail == "":
+        return Err("missing-field-type")
+
+    var has_default = false
+    var default_text = ""
+    val assign = type_and_tail.find("=")
+    if assign >= 0:
+        has_default = true
+        default_text = type_and_tail.substring(assign + 1, type_and_tail.len()).trim()
+        type_and_tail = type_and_tail.substring(0, assign).trim()
+        if default_text == "":
+            return Err("missing-field-default")
+
+    var type_text = type_and_tail
+    var trailing_annotation = ""
+    val annotation_at = type_and_tail.find(" @")
+    if annotation_at >= 0:
+        type_text = type_and_tail.substring(0, annotation_at).trim()
+        trailing_annotation = type_and_tail.substring(
+            annotation_at + 1, type_and_tail.len()).trim()
+        if not _declaration_schema_trailing_annotation_valid_v1(
+                trailing_annotation):
+            return Err("malformed-field-annotation")
+    if type_text == "":
+        return Err("missing-field-type")
+    Ok(DeclarationFieldSchemaV1(
+        name: name, type_text: type_text, visibility: visibility,
+        binding_kind: binding_kind, has_default: has_default,
+        default_text: default_text, leading_annotations: field_annotations,
+        trailing_annotation: trailing_annotation))
+
+fn _declaration_schema_variant_v1(
+    line: text, annotations: [text],
+) -> Result<DeclarationEnumVariantSchemaV1, text>:
+    val trimmed = line.trim()
+    val open = trimmed.find("(")
+    var name = trimmed
+    var payload = ""
+    if open >= 0:
+        if not trimmed.ends_with(")"):
+            return Err("malformed-enum-payload")
+        name = trimmed.substring(0, open).trim()
+        payload = trimmed.substring(open + 1, trimmed.len() - 1).trim()
+    if not _declaration_schema_identifier_valid_v1(name):
+        return Err("unknown-enum-member-form")
+    Ok(DeclarationEnumVariantSchemaV1(
+        name: name, payload_text: payload, annotations: annotations))
+
+pub fn extract_struct_declaration_schema_v1(
+    source: text, name: text,
+) -> Result<DeclarationStructSchemaV1, text>:
+    if not _declaration_schema_identifier_valid_v1(name):
+        return Err("invalid-declaration-name")
+    if not _declaration_schema_source_valid_v1(source):
+        return Err("declaration-source-limit")
+    var found = false
+    var inside = false
+    var visibility = ""
+    var declaration_annotations: [text] = []
+    var pending_annotations: [text] = []
+    var fields: [DeclarationFieldSchemaV1] = []
+    for raw in source.split("\n"):
+        val without_comment = _declaration_schema_no_comment_v1(raw)
+        val trimmed = without_comment.trim()
+        val indent = _declaration_schema_indent_v1(without_comment)
+        if inside and trimmed != "" and not (
+                _declaration_schema_leading_space_only_v1(without_comment)):
+            return Err("unsupported-member-indentation")
+        if not inside:
+            if indent == 0 and trimmed.starts_with("@"):
+                if not _declaration_schema_annotation_valid_v1(trimmed):
+                    return Err("malformed-declaration-annotation")
+                pending_annotations.push(trimmed)
+                if pending_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+                    return Err("declaration-annotation-limit")
+                continue
+            if indent == 0 and _declaration_schema_candidate_v1(trimmed, "struct", name):
+                if found:
+                    return Err("duplicate-declaration")
+                match _declaration_schema_header_v1(trimmed, "struct", name):
+                    case Ok(value): visibility = value
+                    case Err(reason): return Err(reason)
+                found = true
+                inside = true
+                declaration_annotations = pending_annotations
+                pending_annotations = []
+            elif indent == 0 and trimmed != "" and not trimmed.starts_with("#"):
+                pending_annotations = []
+            continue
+        if trimmed == "":
+            continue
+        if indent == 0:
+            if pending_annotations.len() > 0:
+                return Err("dangling-field-annotation")
+            inside = false
+            pending_annotations = []
+            if _declaration_schema_candidate_v1(trimmed, "struct", name):
+                return Err("duplicate-declaration")
+            continue
+        if indent != 4:
+            return Err("unsupported-member-indentation")
+        if trimmed.starts_with("@") and not trimmed.starts_with("@volatile "):
+            if not _declaration_schema_annotation_valid_v1(trimmed):
+                return Err("malformed-field-annotation")
+            pending_annotations.push(trimmed)
+            if pending_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+                return Err("field-annotation-limit")
+            continue
+        if fields.len() >= DECLARATION_SCHEMA_MAX_MEMBERS_V1:
+            return Err("declaration-member-limit")
+        match _declaration_schema_field_v1(trimmed, pending_annotations):
+            case Err(reason): return Err(reason)
+            case Ok(field):
+                if _declaration_schema_contains_field_v1(fields, field.name):
+                    return Err("duplicate-field")
+                fields.push(field)
+        pending_annotations = []
+    if inside and pending_annotations.len() > 0:
+        return Err("dangling-field-annotation")
+    if not found:
+        return Err("declaration-missing")
+    Ok(DeclarationStructSchemaV1(
+        name: name, visibility: visibility,
+        annotations: declaration_annotations, fields: fields))
+
+pub fn extract_enum_declaration_schema_v1(
+    source: text, name: text,
+) -> Result<DeclarationEnumSchemaV1, text>:
+    if not _declaration_schema_identifier_valid_v1(name):
+        return Err("invalid-declaration-name")
+    if not _declaration_schema_source_valid_v1(source):
+        return Err("declaration-source-limit")
+    var found = false
+    var inside = false
+    var visibility = ""
+    var declaration_annotations: [text] = []
+    var pending_annotations: [text] = []
+    var variants: [DeclarationEnumVariantSchemaV1] = []
+    for raw in source.split("\n"):
+        val without_comment = _declaration_schema_no_comment_v1(raw)
+        val trimmed = without_comment.trim()
+        val indent = _declaration_schema_indent_v1(without_comment)
+        if inside and trimmed != "" and not (
+                _declaration_schema_leading_space_only_v1(without_comment)):
+            return Err("unsupported-member-indentation")
+        if not inside:
+            if indent == 0 and trimmed.starts_with("@"):
+                if not _declaration_schema_annotation_valid_v1(trimmed):
+                    return Err("malformed-declaration-annotation")
+                pending_annotations.push(trimmed)
+                if pending_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+                    return Err("declaration-annotation-limit")
+                continue
+            if indent == 0 and _declaration_schema_candidate_v1(trimmed, "enum", name):
+                if found:
+                    return Err("duplicate-declaration")
+                match _declaration_schema_header_v1(trimmed, "enum", name):
+                    case Ok(value): visibility = value
+                    case Err(reason): return Err(reason)
+                found = true
+                inside = true
+                declaration_annotations = pending_annotations
+                pending_annotations = []
+            elif indent == 0 and trimmed != "" and not trimmed.starts_with("#"):
+                pending_annotations = []
+            continue
+        if trimmed == "":
+            continue
+        if indent == 0:
+            if pending_annotations.len() > 0:
+                return Err("dangling-variant-annotation")
+            inside = false
+            pending_annotations = []
+            if _declaration_schema_candidate_v1(trimmed, "enum", name):
+                return Err("duplicate-declaration")
+            continue
+        if indent != 4:
+            return Err("unsupported-member-indentation")
+        if trimmed.starts_with("@"):
+            if not _declaration_schema_annotation_valid_v1(trimmed):
+                return Err("malformed-variant-annotation")
+            pending_annotations.push(trimmed)
+            if pending_annotations.len() > DECLARATION_SCHEMA_MAX_ANNOTATIONS_V1:
+                return Err("variant-annotation-limit")
+            continue
+        if variants.len() >= DECLARATION_SCHEMA_MAX_MEMBERS_V1:
+            return Err("declaration-member-limit")
+        match _declaration_schema_variant_v1(trimmed, pending_annotations):
+            case Err(reason): return Err(reason)
+            case Ok(variant):
+                if _declaration_schema_contains_variant_v1(variants, variant.name):
+                    return Err("duplicate-variant")
+                variants.push(variant)
+        pending_annotations = []
+    if inside and pending_annotations.len() > 0:
+        return Err("dangling-variant-annotation")
+    if not found:
+        return Err("declaration-missing")
+    Ok(DeclarationEnumSchemaV1(
+        name: name, visibility: visibility,
+        annotations: declaration_annotations, variants: variants))
+
+export DeclarationFieldSchemaV1, DeclarationStructSchemaV1
+export DeclarationEnumVariantSchemaV1, DeclarationEnumSchemaV1
+export extract_struct_declaration_schema_v1, extract_enum_declaration_schema_v1

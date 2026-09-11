@@ -1,0 +1,419 @@
+# codex-system-test
+# Closed schema and collision contract for the L7 semantic-owner revisions.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-008 REQ-CSM-012 REQ-CSM-017 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use app.compiler_schema.declaration_schema_extract.{
+    DeclarationFieldSchemaV1,
+    extract_struct_declaration_schema_v1,
+    extract_enum_declaration_schema_v1}
+use compiler.common.cache_contract.semantic_owner_revision_v1.{
+    SemanticOwnerRevisionOwnerV1,
+    SemanticOwnerRevisionV1,
+    SemanticOwnerRevisionSetV1,
+    SemanticOwnerRevisionMapEntryV1,
+    semantic_owner_revision_owner_tag_v1,
+    semantic_owner_revision_owner_name_v1,
+    semantic_owner_revision_owner_from_tag_v1,
+    semantic_owner_revision_map_limit_v1,
+    semantic_owner_revision_frame_v1,
+    semantic_owner_revision_optional_text_canonical_v1,
+    semantic_owner_revision_signed_canonical_v1,
+    semantic_owner_revision_ordered_texts_canonical_v1,
+    semantic_owner_revision_map_canonical_v1,
+    semantic_owner_revision_set_valid_v1,
+    semantic_owner_revision_canonical_v1,
+    semantic_owner_revision_set_digest_v1}
+
+fn d(ch: text) -> text:
+    ch.repeat(64)
+
+fn revision(owner: SemanticOwnerRevisionOwnerV1, index: i64) -> SemanticOwnerRevisionV1:
+    SemanticOwnerRevisionV1(owner: owner,
+        owner_instance_digest: d("a"), owner_generation: index,
+        revision_digest: d("b"), authority_serial: index + 1)
+
+fn complete_set() -> SemanticOwnerRevisionSetV1:
+    SemanticOwnerRevisionSetV1(schema: 1, revisions: [
+        revision(SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0),
+        revision(SemanticOwnerRevisionOwnerV1.TraitCandidatesCoherence, 1),
+        revision(SemanticOwnerRevisionOwnerV1.AspectCandidatesOrdering, 2),
+        revision(SemanticOwnerRevisionOwnerV1.MacroCtfeLookup, 3),
+        revision(SemanticOwnerRevisionOwnerV1.BodyDependencyClosure, 4)])
+
+fn schema_source() -> text:
+    read_file_text("src/compiler/00.common/cache_contract/semantic_owner_revision_v1.spl")
+
+fn field_contract(field: DeclarationFieldSchemaV1) -> text:
+    var default_present = "false"
+    if field.has_default:
+        default_present = "true"
+    field.name + ":" + field.type_text + ":" + field.visibility + ":" +
+        field.binding_kind + ":default_present=" + default_present +
+        ":default=" + field.default_text + ":leading=" +
+        field.leading_annotations.join("|") + ":trailing=" +
+        field.trailing_annotation
+
+fn struct_field_contracts(source: text, name: text) -> [text]:
+    match extract_struct_declaration_schema_v1(source, name):
+        case Err(reason): ["ERROR:" + reason]
+        case Ok(schema):
+            var fields: [text] = []
+            for field in schema.fields:
+                fields.push(field_contract(field))
+            fields
+
+fn struct_header_contract(source: text, name: text) -> text:
+    match extract_struct_declaration_schema_v1(source, name):
+        case Err(reason): "ERROR:" + reason
+        case Ok(schema):
+            schema.name + ":visibility=" + schema.visibility +
+                ":annotations=" + schema.annotations.join("|")
+
+fn enum_variant_contracts(source: text, name: text) -> [text]:
+    match extract_enum_declaration_schema_v1(source, name):
+        case Err(reason): ["ERROR:" + reason]
+        case Ok(schema):
+            var variants: [text] = []
+            for variant in schema.variants:
+                variants.push(variant.name + ":payload=" +
+                    variant.payload_text + ":annotations=" +
+                    variant.annotations.join("|"))
+            variants
+
+fn enum_header_contract(source: text, name: text) -> text:
+    match extract_enum_declaration_schema_v1(source, name):
+        case Err(reason): "ERROR:" + reason
+        case Ok(schema):
+            schema.name + ":visibility=" + schema.visibility +
+                ":annotations=" + schema.annotations.join("|")
+
+fn struct_error(source: text, name: text) -> text:
+    match extract_struct_declaration_schema_v1(source, name):
+        case Err(reason): reason
+        case Ok(_): ""
+
+fn enum_error(source: text, name: text) -> text:
+    match extract_enum_declaration_schema_v1(source, name):
+        case Err(reason): reason
+        case Ok(_): ""
+
+describe "L7 semantic-owner revision V1 schema inventory":
+    it "should derive the exact revision and set layouts from their declarations":
+        step("Extract the closed schema from the owning structs")
+        val source = schema_source()
+        expect(struct_header_contract(source,
+            "SemanticOwnerRevisionSetV1")).to_equal(
+                "SemanticOwnerRevisionSetV1:visibility=pub:annotations=")
+        expect(struct_header_contract(source,
+            "SemanticOwnerRevisionV1")).to_equal(
+                "SemanticOwnerRevisionV1:visibility=pub:annotations=")
+        expect(struct_field_contracts(source,
+            "SemanticOwnerRevisionSetV1")).to_equal([
+                "schema:i64:private:field:default_present=false:default=:leading=:trailing=",
+                "revisions:[SemanticOwnerRevisionV1]:private:field:default_present=false:default=:leading=:trailing="])
+        expect(struct_field_contracts(source,
+            "SemanticOwnerRevisionV1")).to_equal([
+                "owner:SemanticOwnerRevisionOwnerV1:private:field:default_present=false:default=:leading=:trailing=",
+                "owner_instance_digest:text:private:field:default_present=false:default=:leading=:trailing=",
+                "owner_generation:i64:private:field:default_present=false:default=:leading=:trailing=",
+                "revision_digest:text:private:field:default_present=false:default=:leading=:trailing=",
+                "authority_serial:i64:private:field:default_present=false:default=:leading=:trailing="])
+        match extract_struct_declaration_schema_v1(source,
+                "SemanticOwnerRevisionV1"):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(schema):
+                expect(schema.visibility).to_equal("pub")
+                expect(schema.annotations).to_equal([])
+        match extract_struct_declaration_schema_v1(source,
+                "SemanticOwnerRevisionSetV1"):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(schema):
+                expect(schema.visibility).to_equal("pub")
+                expect(schema.annotations).to_equal([])
+
+    it "should derive exactly the five owner variants from the owning enum":
+        step("Extract the closed owner variants from the owning enum")
+        expect(enum_header_contract(schema_source(),
+            "SemanticOwnerRevisionOwnerV1")).to_equal(
+                "SemanticOwnerRevisionOwnerV1:visibility=pub:annotations=")
+        expect(enum_variant_contracts(schema_source(),
+            "SemanticOwnerRevisionOwnerV1")).to_equal([
+            "DeclarationsReexports:payload=:annotations=",
+            "TraitCandidatesCoherence:payload=:annotations=",
+            "AspectCandidatesOrdering:payload=:annotations=",
+            "MacroCtfeLookup:payload=:annotations=",
+            "BodyDependencyClosure:payload=:annotations="])
+        match extract_enum_declaration_schema_v1(schema_source(),
+                "SemanticOwnerRevisionOwnerV1"):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(schema):
+                expect(schema.visibility).to_equal("pub")
+                expect(schema.annotations).to_equal([])
+
+    it "should preserve legal field modifiers, defaults, and annotations":
+        step("Extract modifier-aware field contracts without normalizing source")
+        val source = "@schema_contract\npub struct ModifierFixture:\n" +
+            "    @layer_field(base)\n" +
+            "    pub val visible: i64 = 0\n" +
+            "    private var mutable: text = \"a#b\"\n" +
+            "    width: u8 @bits(4)\n" +
+            "    @volatile status: u32\n" +
+            "    mapped: u32 @ 0x40020000\n"
+        match extract_struct_declaration_schema_v1(source, "ModifierFixture"):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(schema):
+                expect(schema.visibility).to_equal("pub")
+                expect(schema.annotations).to_equal(["@schema_contract"])
+                expect(schema.fields.len()).to_equal(5)
+                expect(field_contract(schema.fields[0])).to_equal(
+                    "visible:i64:pub:val:default_present=true:default=0:leading=@layer_field(base):trailing=")
+                expect(schema.fields[0].leading_annotations).to_equal([
+                    "@layer_field(base)"])
+                expect(field_contract(schema.fields[1])).to_equal(
+                    "mutable:text:private:var:default_present=true:default=\"a#b\":leading=:trailing=")
+                expect(schema.fields[2].trailing_annotation).to_equal("@bits(4)")
+                expect(schema.fields[3].leading_annotations).to_equal(["@volatile"])
+                expect(schema.fields[4].trailing_annotation).to_equal(
+                    "@ 0x40020000")
+
+    it "should expose valid pub and var additions to the frozen drift gate":
+        step("Mutate the actual declaration with modifier-bearing defaulted fields")
+        val source = schema_source()
+        val anchor = "    authority_serial: i64\n\npub struct SemanticOwnerRevisionSetV1:"
+        val pub_added = source.replace(anchor,
+            "    authority_serial: i64\n    pub extra: i64 = 0\n\n" +
+            "pub struct SemanticOwnerRevisionSetV1:")
+        val var_added = source.replace(anchor,
+            "    authority_serial: i64\n    var extra: i64 = 0\n\n" +
+            "pub struct SemanticOwnerRevisionSetV1:")
+        val none_default_added = source.replace(
+            "pub struct SemanticOwnerRevisionV1:",
+            "const none: i64 = 0\n\npub struct SemanticOwnerRevisionV1:").replace(
+            "    authority_serial: i64\n",
+            "    authority_serial: i64 = none\n")
+        val expected = struct_field_contracts(source, "SemanticOwnerRevisionV1")
+        expect(struct_field_contracts(pub_added,
+            "SemanticOwnerRevisionV1") == expected).to_equal(false)
+        expect(struct_field_contracts(var_added,
+            "SemanticOwnerRevisionV1") == expected).to_equal(false)
+        expect(struct_field_contracts(none_default_added,
+            "SemanticOwnerRevisionV1") == expected).to_equal(false)
+        val pub_fields = struct_field_contracts(pub_added,
+            "SemanticOwnerRevisionV1")
+        val var_fields = struct_field_contracts(var_added,
+            "SemanticOwnerRevisionV1")
+        expect(pub_fields.len()).to_equal(6)
+        expect(var_fields.len()).to_equal(6)
+        expect(pub_fields[5]).to_equal(
+            "extra:i64:pub:field:default_present=true:default=0:leading=:trailing=")
+        expect(var_fields[5]).to_equal(
+            "extra:i64:private:var:default_present=true:default=0:leading=:trailing=")
+        val none_default_fields = struct_field_contracts(none_default_added,
+            "SemanticOwnerRevisionV1")
+        expect(none_default_fields[4]).to_equal(
+            "authority_serial:i64:private:field:default_present=true:default=none:leading=:trailing=")
+
+    it "should fail closed on missing, malformed, duplicate, and unknown members":
+        step("Reject source forms that cannot be proven to be data fields")
+        expect(struct_error("pub struct Other:\n    value: i64\n",
+            "Wanted")).to_equal("declaration-missing")
+        expect(struct_error("pub struct Wanted:\n    readonly value: i64\n",
+            "Wanted")).to_equal("unknown-field-modifier")
+        expect(struct_error("pub struct Wanted:\n    fn value() -> i64:\n        0\n",
+            "Wanted")).to_equal("unknown-field-modifier")
+        expect(struct_error("pub struct Wanted:\n    value: i64\n    value: i64\n",
+            "Wanted")).to_equal("duplicate-field")
+        expect(struct_error("pub struct Wanted:\n    @layer_field(base)\n",
+            "Wanted")).to_equal("dangling-field-annotation")
+        expect(struct_error("pub struct Wanted:\n    value: i64\n" +
+            "\tpub extra: i64 = 0\n", "Wanted")).to_equal(
+            "unsupported-member-indentation")
+        expect(enum_error("pub enum Wanted:\n    First\n\tSecond\n",
+            "Wanted")).to_equal("unsupported-member-indentation")
+        expect(struct_error("pub struct Wanted:\n    value: " +
+            "x".repeat(16385) + "\n", "Wanted")).to_equal(
+            "declaration-source-limit")
+
+    it "should fail the declaration-derived drift gate rather than validate a copied inventory":
+        step("Detect removed, reordered, and renamed declaration members")
+        val source = schema_source()
+        expect(source.contains("SemanticOwnerRevisionSchemaInventoryV1")).to_equal(false)
+        expect(source.contains("semantic_owner_revision_declared_fields_v1")).to_equal(false)
+        expect(source.contains("semantic_owner_revision_declared_variants_v1")).to_equal(false)
+        val expected_fields = struct_field_contracts(source,
+            "SemanticOwnerRevisionV1")
+        val expected_struct_header = struct_header_contract(source,
+            "SemanticOwnerRevisionV1")
+        val removed_field = source.replace(
+            "    owner_generation: i64\n", "")
+        val reordered_fields = source.replace(
+            "    owner_instance_digest: text\n    owner_generation: i64\n",
+            "    owner_generation: i64\n    owner_instance_digest: text\n")
+        val private_struct = source.replace(
+            "pub struct SemanticOwnerRevisionV1:",
+            "private struct SemanticOwnerRevisionV1:")
+        val annotated_struct = source.replace(
+            "pub struct SemanticOwnerRevisionV1:",
+            "@schema_tag(v1)\npub struct SemanticOwnerRevisionV1:")
+        expect(struct_field_contracts(removed_field,
+            "SemanticOwnerRevisionV1") == expected_fields).to_equal(false)
+        expect(struct_field_contracts(reordered_fields,
+            "SemanticOwnerRevisionV1") == expected_fields).to_equal(false)
+        expect(struct_header_contract(private_struct,
+            "SemanticOwnerRevisionV1") == expected_struct_header).to_equal(false)
+        expect(struct_header_contract(annotated_struct,
+            "SemanticOwnerRevisionV1") == expected_struct_header).to_equal(false)
+        val expected_variants = enum_variant_contracts(source,
+            "SemanticOwnerRevisionOwnerV1")
+        val expected_enum_header = enum_header_contract(source,
+            "SemanticOwnerRevisionOwnerV1")
+        val removed_variant = source.replace(
+            "    AspectCandidatesOrdering\n", "")
+        val reordered_variants = source.replace(
+            "    TraitCandidatesCoherence\n    AspectCandidatesOrdering\n",
+            "    AspectCandidatesOrdering\n    TraitCandidatesCoherence\n")
+        val renamed_variant = source.replace(
+            "    MacroCtfeLookup\n", "    MacroCtfeLookupV2\n")
+        val payload_variant = source.replace(
+            "    MacroCtfeLookup\n", "    MacroCtfeLookup(i64)\n")
+        val annotated_variant = source.replace(
+            "    MacroCtfeLookup\n",
+            "    @owner_tag(4)\n    MacroCtfeLookup\n")
+        val private_enum = source.replace(
+            "pub enum SemanticOwnerRevisionOwnerV1:",
+            "private enum SemanticOwnerRevisionOwnerV1:")
+        val annotated_enum = source.replace(
+            "pub enum SemanticOwnerRevisionOwnerV1:",
+            "@repr(u8)\npub enum SemanticOwnerRevisionOwnerV1:")
+        expect(enum_variant_contracts(removed_variant,
+            "SemanticOwnerRevisionOwnerV1") == expected_variants).to_equal(false)
+        expect(enum_variant_contracts(reordered_variants,
+            "SemanticOwnerRevisionOwnerV1") == expected_variants).to_equal(false)
+        expect(enum_variant_contracts(renamed_variant,
+            "SemanticOwnerRevisionOwnerV1") == expected_variants).to_equal(false)
+        expect(enum_variant_contracts(payload_variant,
+            "SemanticOwnerRevisionOwnerV1") == expected_variants).to_equal(false)
+        expect(enum_variant_contracts(annotated_variant,
+            "SemanticOwnerRevisionOwnerV1") == expected_variants).to_equal(false)
+        expect(enum_header_contract(private_enum,
+            "SemanticOwnerRevisionOwnerV1") == expected_enum_header).to_equal(false)
+        expect(enum_header_contract(annotated_enum,
+            "SemanticOwnerRevisionOwnerV1") == expected_enum_header).to_equal(false)
+
+    it "should preserve stable owner tags and refuse unknown tags":
+        step("Round-trip stable owner tags and refuse unknown tags")
+        val owners = [
+            SemanticOwnerRevisionOwnerV1.DeclarationsReexports,
+            SemanticOwnerRevisionOwnerV1.TraitCandidatesCoherence,
+            SemanticOwnerRevisionOwnerV1.AspectCandidatesOrdering,
+            SemanticOwnerRevisionOwnerV1.MacroCtfeLookup,
+            SemanticOwnerRevisionOwnerV1.BodyDependencyClosure]
+        var index: i64 = 0
+        for owner in owners:
+            expect(semantic_owner_revision_owner_tag_v1(owner)).to_equal(index + 1)
+            expect(semantic_owner_revision_owner_name_v1(owner)).to_contain("_")
+            expect(semantic_owner_revision_owner_from_tag_v1(index + 1)).to_equal(Some(owner))
+            index = index + 1
+        expect(semantic_owner_revision_owner_from_tag_v1(0)).to_be_nil()
+        expect(semantic_owner_revision_owner_from_tag_v1(6)).to_be_nil()
+
+    it "should distinguish delimiter-bearing text and Unicode by length framing":
+        step("Distinguish delimiter-bearing text and Unicode")
+        val left = semantic_owner_revision_ordered_texts_canonical_v1(["a|b", "c"])
+        val right = semantic_owner_revision_ordered_texts_canonical_v1(["a", "b|c"])
+        expect(left == right).to_equal(false)
+        val composed = semantic_owner_revision_frame_v1("é")
+        val decomposed = semantic_owner_revision_frame_v1("e\u{0301}")
+        expect(composed == decomposed).to_equal(false)
+        expect(composed).to_start_with("2:")
+        expect(decomposed).to_start_with("3:")
+
+    it "should distinguish None from empty text and preserve signed integers":
+        step("Distinguish None from empty text and signed integers")
+        expect(semantic_owner_revision_optional_text_canonical_v1(nil)).to_equal("0:")
+        expect(semantic_owner_revision_optional_text_canonical_v1(Some(""))).to_equal("1:0:")
+        expect(semantic_owner_revision_optional_text_canonical_v1(nil) ==
+            semantic_owner_revision_optional_text_canonical_v1(Some(""))).to_equal(false)
+        expect(semantic_owner_revision_signed_canonical_v1(-1) ==
+            semantic_owner_revision_signed_canonical_v1(1)).to_equal(false)
+        expect(semantic_owner_revision_signed_canonical_v1(-1)).to_contain("-1")
+
+    it "should merge-sort encoded map entries, reject adjacent duplicates, and preserve sequence order":
+        step("Canonicalize maps without a dictionary or library sort")
+        val first = semantic_owner_revision_map_canonical_v1([
+            SemanticOwnerRevisionMapEntryV1(key: "b|x", value: "two"),
+            SemanticOwnerRevisionMapEntryV1(key: "a", value: "one")])
+        val second = semantic_owner_revision_map_canonical_v1([
+            SemanticOwnerRevisionMapEntryV1(key: "a", value: "one"),
+            SemanticOwnerRevisionMapEntryV1(key: "b|x", value: "two")])
+        expect(first).to_equal(second)
+        expect(semantic_owner_revision_map_canonical_v1([
+            SemanticOwnerRevisionMapEntryV1(key: "a", value: "one"),
+            SemanticOwnerRevisionMapEntryV1(key: "a", value: "two")])).to_equal("")
+        val ordered = semantic_owner_revision_ordered_texts_canonical_v1(["a", "b"])
+        val reordered = semantic_owner_revision_ordered_texts_canonical_v1(["b", "a"])
+        expect(ordered == reordered).to_equal(false)
+        val map_limit = semantic_owner_revision_map_limit_v1()
+        expect(map_limit).to_equal(1024)
+        var oversized: [SemanticOwnerRevisionMapEntryV1] = []
+        var map_index: i64 = 0
+        while map_index <= map_limit:
+            oversized.push(SemanticOwnerRevisionMapEntryV1(
+                key: map_index.to_string(), value: "v"))
+            map_index = map_index + 1
+        expect(semantic_owner_revision_map_canonical_v1(oversized)).to_equal("")
+        val source = schema_source()
+        expect(source.contains("SemanticOwnerRevisionMapEncodedEntryV1")).to_equal(true)
+        expect(source.contains("_semantic_owner_revision_map_stable_merge_sort_v1")).to_equal(true)
+        expect(source.contains("_semantic_owner_revision_map_merge_v1")).to_equal(true)
+        expect(source.contains("values_by_key")).to_equal(false)
+        expect(source.contains("Dict<")).to_equal(false)
+        expect(source.contains(".sort(")).to_equal(false)
+
+    it "should validate the exact five-revision set and bind its digest to every field":
+        step("Reject missing, reordered, and negative revisions")
+        val value = complete_set()
+        expect(semantic_owner_revision_set_valid_v1(value)).to_equal(true)
+        expect(semantic_owner_revision_set_digest_v1(value).len()).to_equal(64)
+        val missing = SemanticOwnerRevisionSetV1(schema: 1, revisions: [
+            value.revisions[0], value.revisions[1], value.revisions[2],
+            value.revisions[3]])
+        expect(semantic_owner_revision_set_valid_v1(missing)).to_equal(false)
+        var reordered = complete_set()
+        val held = reordered.revisions[1]
+        reordered.revisions[1] = reordered.revisions[2]
+        reordered.revisions[2] = held
+        expect(semantic_owner_revision_set_valid_v1(reordered)).to_equal(false)
+        var negative = complete_set()
+        negative.revisions[2].owner_generation = -1
+        expect(semantic_owner_revision_set_valid_v1(negative)).to_equal(false)
+
+        step("Bind every revision field into its canonical identity")
+        val base = revision(SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0)
+        val base_canonical = semantic_owner_revision_canonical_v1(base)
+        var owner_changed = revision(
+            SemanticOwnerRevisionOwnerV1.TraitCandidatesCoherence, 0)
+        var instance_changed = revision(
+            SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0)
+        instance_changed.owner_instance_digest = d("c")
+        var generation_changed = revision(
+            SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0)
+        generation_changed.owner_generation = 1
+        var revision_changed = revision(
+            SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0)
+        revision_changed.revision_digest = d("d")
+        var serial_changed = revision(
+            SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0)
+        serial_changed.authority_serial = 2
+        expect(semantic_owner_revision_canonical_v1(owner_changed) ==
+            base_canonical).to_equal(false)
+        expect(semantic_owner_revision_canonical_v1(instance_changed) ==
+            base_canonical).to_equal(false)
+        expect(semantic_owner_revision_canonical_v1(generation_changed) ==
+            base_canonical).to_equal(false)
+        expect(semantic_owner_revision_canonical_v1(revision_changed) ==
+            base_canonical).to_equal(false)
+        expect(semantic_owner_revision_canonical_v1(serial_changed) ==
+            base_canonical).to_equal(false)
