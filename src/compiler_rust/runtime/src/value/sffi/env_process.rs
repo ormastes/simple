@@ -8,7 +8,9 @@
 //! - Platform detection (OS name)
 
 use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_path_probe};
-use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
+use crate::value::collections::{
+    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_new, rt_tuple_set,
+};
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
 use std::sync::{OnceLock, RwLock};
@@ -1475,6 +1477,120 @@ pub extern "C" fn rt_get_host_target_code() -> i64 {
     }
 }
 
+/// Read an x86 extended-control register after the caller has proved OSXSAVE.
+#[no_mangle]
+pub extern "C" fn rt_xgetbv(index: i32) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the Simple capability probe checks CPUID.OSXSAVE before calling.
+        unsafe { std::arch::x86_64::_xgetbv(index as u32) as i64 }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = index;
+        0
+    }
+}
+
+/// Read a Linux auxiliary-vector entry; unsupported hosts report zero.
+#[no_mangle]
+pub extern "C" fn rt_getauxval(key: i64) -> i64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getauxval accepts any key and returns zero when it is absent.
+        unsafe { libc::getauxval(key as libc::c_ulong) as i64 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = key;
+        0
+    }
+}
+
+/// Report whether this runtime is executing on Darwin arm64.
+#[no_mangle]
+pub extern "C" fn rt_is_darwin_arm64() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+/// Read a 32-bit Darwin sysctl value by Simple string name.
+#[no_mangle]
+pub extern "C" fn rt_sysctlbyname_i32(name: RuntimeValue) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        let len = rt_string_len(name);
+        let data = rt_string_data(name);
+        if data.is_null() || len <= 0 || len >= 128 {
+            return 0;
+        }
+
+        let mut key = [0u8; 128];
+        // SAFETY: len was bounded to the local buffer and data is non-null.
+        unsafe { std::ptr::copy_nonoverlapping(data, key.as_mut_ptr(), len as usize) };
+        let mut value = 0i32;
+        let mut value_len = std::mem::size_of::<i32>();
+        // SAFETY: key is NUL-terminated and both output pointers reference valid storage.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                key.as_ptr().cast(),
+                (&mut value as *mut i32).cast(),
+                &mut value_len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && value_len == std::mem::size_of::<i32>() {
+            value
+        } else {
+            0
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
+        0
+    }
+}
+
+/// Read the RISC-V vector-register byte width when compiled for V support.
+#[no_mangle]
+pub extern "C" fn rt_riscv_read_vlenb() -> i32 {
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        let value: usize;
+        // SAFETY: this block is compiled only for targets with the V extension.
+        unsafe { core::arch::asm!("csrr {value}, vlenb", value = out(reg) value) };
+        i32::try_from(value).unwrap_or(0)
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_feature = "v")))]
+    {
+        0
+    }
+}
+
+/// Report the Linux RISC-V V-extension bit from AT_HWCAP.
+#[no_mangle]
+pub extern "C" fn rt_riscv_has_v_ext() -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
+    {
+        const AT_HWCAP: libc::c_ulong = 16;
+        const RISCV_HWCAP_V: libc::c_ulong = 1 << (b'V' - b'A');
+        // SAFETY: getauxval accepts AT_HWCAP and returns zero when unavailable.
+        unsafe { libc::getauxval(AT_HWCAP) & RISCV_HWCAP_V != 0 }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
+    {
+        false
+    }
+}
+
+/// CUDA SM discovery remains unavailable until a provider owns the query.
+#[no_mangle]
+pub extern "C" fn rt_cuda_sm_version(device: i32) -> i32 {
+    let _ = device;
+    0
+}
+
 /// Enable ANSI virtual terminal processing on Windows console.
 /// No-op on non-Windows platforms.
 /// Callable from Simple as: `rt_term_enable_ansi()`
@@ -2034,6 +2150,34 @@ mod tests {
             #[cfg(target_os = "linux")]
             assert_eq!(platform, "linux");
         }
+    }
+
+    #[test]
+    fn architecture_probe_exports_match_host_or_fail_closed() {
+        assert_eq!(
+            rt_is_darwin_arm64(),
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        );
+        assert_eq!(rt_cuda_sm_version(0), 0);
+        assert_eq!(rt_getauxval(0), 0);
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(rt_sysctlbyname_i32(RuntimeValue::NIL), 0);
+        #[cfg(not(all(target_arch = "riscv64", target_feature = "v")))]
+        assert_eq!(rt_riscv_read_vlenb(), 0);
+        #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
+        assert!(!rt_riscv_has_v_ext());
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // CPUID.OSXSAVE proves xgetbv is legal before exercising the export.
+            let cpuid = unsafe { std::arch::x86_64::__cpuid(1) };
+            if cpuid.ecx & (1 << 27) != 0 {
+                assert_ne!(rt_xgetbv(0), 0);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        assert_eq!(rt_xgetbv(0), 0);
     }
 
     #[test]
