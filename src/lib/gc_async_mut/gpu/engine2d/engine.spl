@@ -1425,6 +1425,51 @@ class Engine2D with DrawIrRenderTarget:
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
 
+    me draw_rect_list_filled(rects: [i32], colors: [u32]):
+        """Draw N filled rects in ONE call. Packed, frozen layout:
+        rects[4k..4k+4] = x,y,w,h of rect k; colors[k] = its colour.
+
+        Pixel-identical to calling `draw_rect_filled` once per rect, in array
+        order. It exists because that per-call transit costs ~509 us of
+        interpreter time on the Vulkan lane for ~24 us of GPU enqueue
+        (doc/10_metrics/ui/vk2d_bench_frame_time_attribution_macos_2026-09-11.md),
+        and this routes the whole list through the facade once.
+        """
+        val count = colors.len().to_i64()
+        if count <= 0: return
+        if rects.len().to_i64() != count * 4: return
+        # Only the Vulkan lane implements a real batch; every other backend
+        # dispatches immediately per primitive, so for them the batch IS the
+        # loop and there is nothing to win by adding a method to each one.
+        #
+        # The three preconditions mirror `draw_rect_filled`'s router EXACTLY
+        # (virtio -> baremetal -> cuda -> vulkan). Testing vulkan first here
+        # would let an engine with, say, a virtio surface attached alongside an
+        # initialized Vulkan backend paint the batch on a different backend than
+        # the single-rect path, and no pixel test would catch it because each
+        # lane is internally consistent.
+        if val Some(vg) = self.virtio_gpu_backend:
+            self._draw_rect_list_loop(rects, colors, count)
+        elif val Some(bm) = self.baremetal_backend:
+            self._draw_rect_list_loop(rects, colors, count)
+        elif self.selected_backend_name == "cuda":
+            self._draw_rect_list_loop(rects, colors, count)
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            vulkan.draw_rect_list_filled(rects, colors)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+        else:
+            self._draw_rect_list_loop(rects, colors, count)
+
+    me _draw_rect_list_loop(rects: [i32], colors: [u32], count: i64):
+        """Unpack the batch into single calls, for every non-Vulkan lane."""
+        var k: i64 = 0
+        while k < count:
+            val base = k * 4
+            self.draw_rect_filled(rects[base], rects[base + 1], rects[base + 2],
+                                  rects[base + 3], colors[k])
+            k = k + 1
+
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         """Draw a line between two points."""
         if val Some(vg) = self.virtio_gpu_backend:

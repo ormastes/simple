@@ -6,9 +6,10 @@
 # Run:  SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
 #       <vulkan-seed> run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
 
-use std.io_runtime.{time_now_unix_micros, read_file, file_write_bytes}
+use std.io_runtime.{time_now_unix_micros, read_file, file_write_bytes, get_args}
 use app.io.mod.{env_get}
 use gpu.engine2d.engine.{Engine2D}
+use gpu.engine2d.backend_vulkan_helpers.{_pack_rect_pc}
 
 fn _env_i32(key: text, fallback: i32) -> i32:
     val raw = env_get(key).trim()
@@ -107,14 +108,32 @@ class Vk2dBench:
     var h: i32
 
     me run(rects: [Vk2dRect], frames: i32, capture: bool,
-           warmup_count: i32) -> text:
+           warmup_count: i32, batch: bool) -> text:
+        # Packed batch arrays are built ONCE, outside every measured region:
+        # the thing under test is the per-frame draw path, not scene marshalling.
+        # Layout is the frozen one `Engine2D.draw_rect_list_filled` documents --
+        # rects[4k..4k+4] = x,y,w,h of rect k, colors[k] = its colour.
+        val n = rects.len()
+        var packed: [i32] = [0i32; n * 4]
+        var packed_colors: [u32] = [0u32; n]
+        var pi: i64 = 0
+        while pi < n:
+            packed[pi * 4] = rects[pi].x
+            packed[pi * 4 + 1] = rects[pi].y
+            packed[pi * 4 + 2] = rects[pi].w
+            packed[pi * 4 + 3] = rects[pi].h
+            packed_colors[pi] = rects[pi].color
+            pi = pi + 1
         # Warmup is outside the measured region and uses the same device-only
         # path as every measured frame.
         var warm = 0
         while warm < warmup_count:
             self.engine.clear(0xFF141414u32)
-            for r in rects:
-                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
             if not self.engine.finalize_compute_frame_no_readback():
                 return "simple-vulkan-2d status=blocked reason=warmup-device-finalize-failed"
             warm = warm + 1
@@ -129,8 +148,11 @@ class Vk2dBench:
         while frame < frames:
             var p0 = time_now_unix_micros()
             self.engine.clear(0xFF141414u32)
-            for r in rects:
-                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
             var p1 = time_now_unix_micros()
             val finalized = self.engine.finalize_compute_frame_no_readback()
             var p2 = time_now_unix_micros()
@@ -256,6 +278,72 @@ fn _loop_probe(w: i32, h: i32):
     print "loop-probe alloc_us={t_alloc} sink={sink}"
     print "loop-probe w={w} h={h} unpack_us={t_unpack} copy_us={t_copy} checksum_us={t_checksum} acc={acc} dst0={dst[0]}"
 
+fn _attr_probe(w: i32, h: i32, n: i64):
+    """Differential per-layer attribution of the rect draw path. VK2D_ATTR=1.
+
+    Level-gated and OFF by default, like `_loop_probe` above. Each layer is
+    timed in ISOLATION so the numbers subtract rather than nest:
+      l1 = the full Engine2D facade call
+      l2 = the backend method directly (l1-l2 is the facade transit)
+      l3 = push-constant packing alone
+      l4 = the 4-SFFI enqueue with a pre-packed constant block
+      l5 = a bare `me` call on the same receiver -- the interpreter's floor
+    This is the probe that produced the table in
+    doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md;
+    it lives here rather than in a scratch file because `build/` is gitignored
+    and an untracked driver is not reproducible evidence.
+    """
+    val engine = Engine2D.create_with_backend_fast(w, h, "vulkan")
+    if engine.backend_name() != "vulkan":
+        print "vk2d-attr status=blocked reason=backend-unavailable got={engine.backend_name()}"
+        return
+    engine.clear(0xFF141414u32)
+    var t0 = time_now_unix_micros()
+    var i: i64 = 0
+    while i < n:
+        engine.draw_rect_filled(10, 10, 32, 24, 0xFF3366CCu32)
+        i = i + 1
+    val l1 = time_now_unix_micros() - t0
+    engine.finalize_compute_frame_no_readback()
+    if val Some(vk) = engine.vulkan_backend:
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk.draw_rect_filled(10, 10, 32, 24, 0xFF3366CCu32)
+            i = i + 1
+        val l2 = time_now_unix_micros() - t0
+        vk.submit_batch()
+        t0 = time_now_unix_micros()
+        i = 0
+        var sink: i64 = 0
+        while i < n:
+            sink = sink + _pack_rect_pc(10, 10, 32, 24, 0xFF3366CCu32, w, h, 0, 0, 0, 0, false).len()
+            i = i + 1
+        val l3 = time_now_unix_micros() - t0
+        val pre = _pack_rect_pc(10, 10, 32, 24, 0xFF3366CCu32, w, h, 0, 0, 0, 0, false)
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk._dispatch_framebuffer_checked(vk.pipe_rect_filled, pre, 2, 2, 1)
+            i = i + 1
+        val l4 = time_now_unix_micros() - t0
+        vk.submit_batch()
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk.clear_clip()
+            i = i + 1
+        val l5 = time_now_unix_micros() - t0
+        # NOTE: this probe deliberately does NOT report a batch-lane per-rect
+        # figure. A batch timed here, inside an engine already driven through
+        # l1-l5, measured 223 us/rect against the 67 us/rect the 300-frame
+        # `--batch` run reports, and warming it changed nothing -- so the
+        # discrepancy is a property of this probe's setup that has not been
+        # isolated, not of the batch lane. The authoritative batch measurement
+        # is `--batch` / VK2D_BATCH=1, which times real frames end to end.
+        print "vk2d-attr n={n} us_per_call l1_facade={l1 / n} l2_backend={l2 / n} l3_pack={l3 / n} l4_dispatch={l4 / n} l5_call_floor={l5 / n} sink={sink}"
+    engine.shutdown()
+
 fn main():
     val w = _env_i32("VK2D_W", 800)
     val h = _env_i32("VK2D_H", 600)
@@ -266,6 +354,9 @@ fn main():
 
     if _env_i32("VK2D_PROBE", 0) == 1:
         _loop_probe(w, h)
+        return
+    if _env_i32("VK2D_ATTR", 0) == 1:
+        _attr_probe(w, h, _env_i32("VK2D_ATTR_N", 3200).to_i64())
         return
     # VK2D_BACKEND lets the same scene run on another backend, which is what
     # makes the Simple-vs-Simple parity check possible: the 16 emu_* primitives
@@ -298,5 +389,39 @@ fn main():
             print "simple-vulkan-2d status=blocked reason=scene-table-unreadable path={scenes_path}"
             return
     print "scene_source={scene_source} rects={rects.len()}"
-    print bench.run(rects, frames, readback, warmups)
+    # --batch (or VK2D_BATCH=1) additionally runs the packed-batch lane, so one
+    # invocation reports BOTH numbers and the comparison is same-process,
+    # same-device, same-scene. The single leg always runs and its line keeps the
+    # canonical `simple-vulkan-2d ...` shape the verdict spec parses.
+    var batch_requested = _env_i32("VK2D_BATCH", 0) == 1
+    for a in get_args():
+        if a == "--batch":
+            batch_requested = true
+    val single_line = bench.run(rects, frames, readback, warmups, false)
+    print single_line
+    val ms_single = _kv_i64(single_line, "ms=")
+    if batch_requested:
+        val batch_line = bench.run(rects, frames, readback, warmups, true)
+        print batch_line
+        val ms_batch = _kv_i64(batch_line, "ms=")
+        print "vk2d-compare frames={frames} rects={rects.len()} ms_single={ms_single} ms_batch={ms_batch} per_frame_single_us={ms_single * 1000 / frames.to_i64()} per_frame_batch_us={ms_batch * 1000 / frames.to_i64()}"
     engine.shutdown()
+
+fn _kv_i64(line: text, key: text) -> i64:
+    """Read the integer value of `key` out of a `k=v k=v` result line."""
+    val at = line.index_of(key)
+    if at < 0:
+        return -1
+    var i = at + key.len()
+    var out: i64 = 0
+    var seen = false
+    while i < line.len():
+        val c = line.substring(i, i + 1)
+        val d = "0123456789".index_of(c)
+        if d < 0:
+            break
+        out = out * 10 + d.to_i64()
+        seen = true
+        i = i + 1
+    if seen: out
+    else: -1

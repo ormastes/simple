@@ -930,6 +930,67 @@ impl RenderBackend for VulkanBackend:
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
 
+    me draw_rect_list_filled(rects: [i32], colors: [u32]):
+        """Paint N filled rects with ONE interpreter transit and one dispatch each.
+
+        Packed layout (frozen, see `_enqueue_rect_batch`):
+          rects[4k..4k+4] = x,y,w,h of rect k; colors[k] = its colour.
+        Painter order is array order. A malformed pair (length mismatch) paints
+        nothing rather than painting a guessed prefix.
+
+        Semantics are identical to calling `draw_rect_filled` once per rect --
+        this method is a throughput lane, not a different renderer. Anything
+        the fast lane cannot express (an active stencil mask, or any
+        non-opaque colour, both of which route through the host image path in
+        the single-rect method) falls back to the single-rect loop for the
+        WHOLE list, so painter order can never be reordered by a partial
+        fallback.
+
+        One deliberate, stated divergence: a zero-or-negative-area rect is
+        SKIPPED here, whereas the single-rect path dispatches it, gets rc 0 back
+        from a gx=0 dispatch, and consequently flushes mid-frame and marks a CPU
+        fallback. The PIXELS are identical either way (a zero-area rect paints
+        nothing); the counters are not. Skipping is the correct behaviour and
+        the single path's is arguably the bug, but this method does not claim to
+        reproduce it.
+        """
+        if self.completion_unknown: return
+        val count = colors.len().to_i64()
+        if count <= 0: return
+        if rects.len().to_i64() != count * 4: return
+        if self.mask_buf.len() > 0:
+            self._draw_rect_list_single(rects, colors, 0, count)
+            return
+        var k: i64 = 0
+        while k < count:
+            if color_a(colors[k]) < 255:
+                self._draw_rect_list_single(rects, colors, 0, count)
+                return
+            k = k + 1
+        var enqueued = if self.frame_batching_enabled:
+            self._enqueue_rect_batch(self.pipe_rect_filled, rects, colors)
+        else:
+            0
+        if enqueued < 0:
+            self.completion_unknown = true
+            self.mark_cpu_fallback("rect-batch-dispatch-failed")
+            return
+        if enqueued > 0:
+            self.dirty = true
+            self.mark_device_content_changed()
+        if enqueued < count:
+            # Replay only the tail; everything before `enqueued` is already
+            # recorded, so order holds.
+            self._draw_rect_list_single(rects, colors, enqueued, count)
+
+    me _draw_rect_list_single(rects: [i32], colors: [u32], from: i64, to: i64):
+        var k = from
+        while k < to:
+            val base = k * 4
+            self.draw_rect_filled(rects[base], rects[base + 1], rects[base + 2],
+                                  rects[base + 3], colors[k])
+            k = k + 1
+
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
         if thickness <= 0:
