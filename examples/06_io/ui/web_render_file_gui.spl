@@ -42,27 +42,25 @@ pub fn showcase_dpi() -> i32:
     parsed.to_i32()
 
 fn showcase_backend() -> text:
-    val requested = (env_get("SIMPLE_GUI_BACKEND") ?? "vulkan").trim().lower()
-    if requested == "": "vulkan" else: requested
+    # SIMPLE_GUI_BACKEND wins when both are set; SIMPLE_2D_BACKEND is the
+    # general-purpose Engine2D backend override shared with the other web
+    # entry points.
+    val gui_backend = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim().lower()
+    if gui_backend != "":
+        return gui_backend
+    val backend_2d = (env_get("SIMPLE_2D_BACKEND") ?? "").trim().lower()
+    if backend_2d != "": backend_2d else: "vulkan"
 
-fn varied_nonzero_count(pixels: [u32]) -> i64:
-    if pixels.len() == 0:
-        return 0
-    val first = pixels[0]
-    var varied = false
-    var nonzero: i64 = 0
-    var i = 0
-    while i < pixels.len():
-        if pixels[i] != first:
-            varied = true
-        if (pixels[i] & 0x00FFFFFFu32) != 0u32:
-            nonzero = nonzero + 1
-        i = i + 1
-    if varied: nonzero else: 0
+# Blank-frame checksum for the given dimensions, computed once and reused as
+# the non-blank comparison oracle instead of a full per-frame pixel scan.
+fn blank_frame_checksum(width: i32, height: i32, backend: text) -> i64:
+    val blank = simple_web_render_html_to_readback_result_with_engine2d_backend(
+        "<html><body></body></html>", width, height, backend)
+    blank.readback.checksum
 
 fn run_showcase_input(
     lp: WinitLoop, win: WinitWindow, semantic: HostedWebContentSession,
-    dims: ShowcaseResolution, requested: text, initial_html: text
+    dims: ShowcaseResolution, requested: text, initial_html: text, blank_checksum: i64
 ) -> i64:
     var shown_html = initial_html
     var pointer_x = 0.0
@@ -132,7 +130,7 @@ fn run_showcase_input(
         val count = dims.w.to_i64() * dims.h.to_i64()
         if (changed.render_degraded or changed.resolved_backend != requested or
             pixels.pixel_count != count or pixels.pixels.len().to_i64() != count or
-            pixels.checksum == 0 or varied_nonzero_count(pixels.pixels) == 0):
+            pixels.checksum == 0 or pixels.checksum == blank_checksum):
             return 12
         if requested == "vulkan" and (pixels.source != "device_readback" or
             pixels.backend_handle <= 0 or pixels.device_identity <= 0):
@@ -170,13 +168,14 @@ pub fn run_web_standards_showcase(open_gui: bool, path: text) -> i64:
     val rendered_us = time_now_unix_micros()
     val readback = result.readback
     val expected_pixels = dims.w.to_i64() * dims.h.to_i64()
-    val nonzero = varied_nonzero_count(readback.pixels)
+    val blank_checksum = blank_frame_checksum(dims.w, dims.h, requested)
+    val nonzero = readback.checksum != blank_checksum
 
     if readback.pixel_count != expected_pixels or readback.pixels.len().to_i64() != expected_pixels:
         print "web_standards_showcase status=fail reason=wrong-pixel-count expected={expected_pixels} actual={readback.pixel_count}"
         semantic.close()
         return 2
-    if nonzero == 0 or readback.checksum == 0:
+    if not nonzero or readback.checksum == 0:
         print "web_standards_showcase status=fail reason=blank-or-uniform pixels={readback.pixel_count} checksum={readback.checksum}"
         semantic.close()
         return 3
@@ -225,7 +224,7 @@ pub fn run_web_standards_showcase(open_gui: bool, path: text) -> i64:
         # compositor/scanout timestamp. Emit this before the interactive loop
         # and keep full first-visible-frame acceptance unverified.
         print "web_standards_showcase status=measured first_present_submitted_us={submitted_frame_us} presentation=submitted scanout_status=unverified comparison_admitted=false"
-        val input_status = run_showcase_input(lp, win, semantic, dims, requested, html)
+        val input_status = run_showcase_input(lp, win, semantic, dims, requested, html, blank_checksum)
         winit_window_free(win)
         winit_loop_free(lp)
         if input_status != 0:
