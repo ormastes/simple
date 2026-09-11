@@ -64,13 +64,31 @@ handle. Second, `err=` is **empty** on both failures, and
 `set_error` — which is how the "the pipeline handle was destroyed" and "the
 device was lost" readings were both eliminated rather than argued away.
 
-Where the ghost comes from: a pooled Engine2D. `_web_fast_engine_acquire`
-(`simple_web_layout_engine2d_fast.spl:283-300`) reads a slot back out of
-`_web_fast_engine_slots`, and the value the next frame resumes from predates the
-flush that cleared the batch — class values in this lane are copied at several
-binds (`engine.spl`'s vulkan arms all follow a read-mutate-`self.vulkan_backend =
-Some(vulkan)` write-back idiom for exactly this reason). So the clear performed
-during frame 1 is not what frame 2 starts from.
+Where the ghost comes from — **measured, not inferred.** The obvious suspect is
+the engine slot pool copying the value on the array round-trip. It is not.
+Temporary prints at the store and the read (removed before commit) give:
+
+```
+[r1-origin] release-store pending_cmd=2 pending_n=1
+[r1-origin] acquire-read  pending_cmd=2 pending_n=1
+[r1-origin] release-store pending_cmd=3 pending_n=1
+[r1-origin] acquire-read  pending_cmd=3 pending_n=1        (x4 pairs, all equal)
+```
+
+The pool round-trip is **faithful** — the ghost is already present when the slot
+is stored. So the clear performed by frame 1's flush never reached
+`engine.vulkan_backend` in the first place: it mutated one alias of a copied
+class value while the engine kept an older one. `engine.spl`'s vulkan arms all
+follow a read-mutate-`self.vulkan_backend = Some(vulkan)` write-back idiom for
+exactly this reason, and `self.backend` is a second alias of the same value.
+
+The value it rewinds TO is itself a clue: `pending_n=1`, not `2`. Frame 1's
+fb=3 lane reached `pending_n=2` before flushing, so the surviving snapshot is
+**mid-frame** — the state right after the first dispatch (pipe=13) and before
+the second (pipe=14) — not the last pre-flush state. Whichever call takes that
+copy without writing it back is the true origin, and it has not been pinned to a
+line. This fix does not repair that; it defends the pool boundary, which is
+where the damage was observable and repairable.
 
 Consequence chain, all of it already described by F5: the refused first dispatch
 latches `cpu_fallback`, `gpu_device_proven` drops false at frame 2, the sampler
@@ -111,6 +129,23 @@ reused engine, not a one-off. Logs: `build/perf/r1_2026-09-11/auth_before.log`,
 **The route is AUTHORIZED**, which is the bar F5 explicitly did not reach: it
 needs three samples, so `available` flips at frame 3 and holds.
 
+### The page path too (`probe_frames8.spl`, 900x760, 8 renders in one process)
+
+The authorize probe drives the sampler; the page probe drives the real web
+renderer (`simple_web_render_html_to_pixels_with_engine2d_backend`) and is the
+one F5 measured. Recreated here and re-run after the fix
+(`build/perf/r1_2026-09-11/frames8_after.log`):
+
+```
+frame 1..8: pixels=684000     (F5 before: 684000, 0, then CPU fallback forever)
+enqueue-fail=0   resync-downgraded=0   cpu-fallback-first=0   stale-pending-dropped=7
+```
+
+`resync-downgraded` was **4 per 8 frames** after F5's fix — the "roughly half the
+frames reach the device, with engine churn throughout" steady state it recorded
+as still open. It is now 0. So the single acquire-site guard covers the page
+path as well as the sampler path; that is measured, not assumed.
+
 ## Specs
 
 `test/05_perf/web_render_chrome/vulkan_bind_pipeline_after_readback_spec.spl` —
@@ -147,13 +182,14 @@ what cost the previous two investigations their time.
 
 ## Still open
 
-- **The underlying value-copy semantics are not fixed here**, only defended
-  against at the one place it was observed to bite. A pooled engine resuming from
-  a pre-flush snapshot is the same family as
-  `class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md`; other
-  fields of a pooled `VulkanBackend` could rewind the same way and would not be
-  caught by this guard. Whether to fix the copy semantics or to audit every
-  pooled field is an owner decision.
+- **The write-back miss itself is unfixed and unlocated.** The origin trace above
+  proves it happens INSIDE the engine, before the pool ever sees the value, and
+  that the surviving snapshot is mid-frame (`pending_n=1`). The call that takes a
+  copy of the vulkan backend and does not write it back has not been pinned to a
+  line. Same family as
+  `class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md`. Any
+  OTHER field of `VulkanBackend` can rewind the same way and this guard, which
+  only zeroes the pending-compute fields, would not catch it.
 - Only the interpreter Vulkan runtime was exercised. The native/AOT lane goes to
   `runtime/src/vulkan_graphics_runtime_compute.rs`, whose `bind_pipeline`
   (`:236`) rejects an unknown `cmd` the same way, so the same ghost would fail
