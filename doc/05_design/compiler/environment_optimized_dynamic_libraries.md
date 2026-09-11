@@ -908,8 +908,17 @@ full parsing. The exact startup policy/provider/variant/artifact/environment
 identity is folded into the frontend cache key. Driver and loader modules may
 bind down through this port, while layer 10 imports neither of them.
 
-The loader binding adapter owns the configured sealed activation. The fixed
-package-session draft was rejected:
+`environment_variant_startup_cache_identity_v1` is the canonical pure cache
+projection. It hashes the binary policy digest, exact provider, variant,
+artifact, environment identity and environment generation, plus selected versus
+reference status and the bounded rejection code. Owner/session/generation
+coordinates authorize the live dispatch scope but are intentionally excluded
+from reusable parse-result content identity. Generated-output target CPU and
+feature strings are likewise excluded because they do not authorize the host
+parser implementation.
+
+The loader binding adapter owns the configured sealed activation and a typed
+per-source activation factory. The fixed package-session draft was rejected:
 one startup session serves many immutable source snapshots, so a package
 session cannot be captured once and reused across them. For each transformed
 source, the loader acquires and projects a sealed build-use and invokes only an

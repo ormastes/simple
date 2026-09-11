@@ -13,6 +13,7 @@ use compiler.common.structural_contracts.environment_variant_composite_selector_
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     ENV_ARCH_X86_64_V1, ENV_VECTOR_NONE_V1, ENV_VECTOR_FIXED_V1,
     EnvironmentDigest256V1, EnvironmentFeatureSetV1, EnvironmentSnapshotV1,
+    EnvironmentGpuDeviceV1,
     VariantDescriptorV1,
     environment_snapshot_validate_v1, variant_descriptor_validate_v1
 }
@@ -121,13 +122,14 @@ fn _reference_parity_x86_v1(
         left.numerical_contract_id == right.numerical_contract_id and
         _same_x86_v1(left.resource_layout_digest, right.resource_layout_digest)
 
-pub fn x86_variant_select_admitted_v1(
+pub fn x86_variant_select_admitted_with_devices_v1(
     snapshot: EnvironmentSnapshotV1, feature_words: [u64],
     projection: EnvironmentVariantCatalogPolicyProjectionV1,
-    catalog: EnvironmentVariantCatalogV1
+    catalog: EnvironmentVariantCatalogV1,
+    gpu_devices: [EnvironmentGpuDeviceV1]
 ) -> Result<EnvironmentVariantCompositeSelectionV1, X86VariantAdmissionErrorV1>:
     if snapshot.execution_architecture != ENV_ARCH_X86_64_V1 or
-       environment_snapshot_validate_v1(snapshot, feature_words, []) != Ok(()) or
+       environment_snapshot_validate_v1(snapshot, feature_words, gpu_devices) != Ok(()) or
        not _feature_set_exact_x86_v2(snapshot.hardware_features, feature_words) or
        not _feature_set_exact_x86_v2(snapshot.os_usable_features, feature_words) or
        not _feature_set_exact_x86_v2(snapshot.policy_allowed_features, feature_words):
@@ -181,7 +183,7 @@ pub fn x86_variant_select_admitted_v1(
     if requested_rows == 0:
         return Err(X86VariantAdmissionErrorV1.NoAdmittedVariant)
     val selected = match environment_variant_catalog_select_composite_v1(
-        validated_catalog, snapshot, feature_words, [], projection):
+        validated_catalog, snapshot, feature_words, gpu_devices, projection):
         case Ok(value): value
         case Err(_): return Err(X86VariantAdmissionErrorV1.InvalidProjection)
     if selected.required_missing:
@@ -189,3 +191,13 @@ pub fn x86_variant_select_admitted_v1(
     if selected.selection.selected_index < 0:
         return Err(X86VariantAdmissionErrorV1.NoAdmittedVariant)
     Ok(selected)
+
+# Compatibility entrypoint for CPU-only admission. Publication uses the
+# device-aware form so exact x86 host gating does not erase GPU eligibility.
+pub fn x86_variant_select_admitted_v1(
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1,
+    catalog: EnvironmentVariantCatalogV1
+) -> Result<EnvironmentVariantCompositeSelectionV1, X86VariantAdmissionErrorV1>:
+    x86_variant_select_admitted_with_devices_v1(
+        snapshot, feature_words, projection, catalog, [])

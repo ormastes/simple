@@ -5,11 +5,13 @@ use std.common.crypto.sha256.{sha256_bytes}
 use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.{EnvironmentVariantCatalogPolicyProjectionV1, environment_variant_policy_digest256_v1}
 use compiler.common.structural_contracts.environment_variant_composite_selector_v1.EnvironmentVariantCompositeSelectionV1
 use compiler.common.structural_contracts.environment_variant_composite_selector_v1.environment_variant_catalog_select_composite_v1
+use compiler.driver.x86_variant_admission_v1.x86_variant_select_admitted_with_devices_v1
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
 use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
 use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
 use std.nogc_sync_mut.composition.environment_variants.admission.binding_plan_create_v1
-use std.nogc_sync_mut.composition.environment_variants.catalog_v1.environment_variant_catalog_create_canonical_v1
+use std.nogc_sync_mut.composition.environment_variants.catalog_v1.{
+    EnvironmentVariantCatalogV1, environment_variant_catalog_create_canonical_v1}
 use std.nogc_sync_mut.composition.environment_variants.catalog_identity_v1.environment_variant_descriptor_identity_v1
 use std.nogc_sync_mut.composition.environment_variants.binding_runtime_v1.{
     BindingRuntimeV1, BindingRuntimeReceiptV1, binding_runtime_publish_plan_v1
@@ -118,6 +120,23 @@ fn _environment_composite_selection_publishable_v1(
         return Err(EnvironmentCompositePublicationErrorV1.SelectionAuthorityMismatch)
     Ok(())
 
+fn _environment_composite_select_exact_v1(
+    catalog: EnvironmentVariantCatalogV1, snapshot: EnvironmentSnapshotV1,
+    feature_words: [u64], gpu_devices: [EnvironmentGpuDeviceV1],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<EnvironmentVariantCompositeSelectionV1,
+            EnvironmentCompositePublicationErrorV1>:
+    if snapshot.execution_architecture == ENV_ARCH_X86_64_V1:
+        match x86_variant_select_admitted_with_devices_v1(
+                snapshot, feature_words, projection, catalog, gpu_devices):
+            case Ok(value): return Ok(value)
+            case Err(_): return Err(
+                EnvironmentCompositePublicationErrorV1.CompositeSelectionFailed)
+    match environment_variant_catalog_select_composite_v1(
+            catalog, snapshot, feature_words, gpu_devices, projection):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentCompositePublicationErrorV1.CompositeSelectionFailed)
+
 pub fn environment_composite_publication_admit_v1(
     snapshot: EnvironmentSnapshotV1, arena_bytes: [u8], feature_words: [u64],
     gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
@@ -139,8 +158,11 @@ pub fn environment_composite_publication_admit_v1(
         case Err(_): return Err(EnvironmentCompositePublicationErrorV1.CatalogCreationFailed)
     # Recompute atomically here: callers cannot provide, omit, or rewrite the
     # selected index or ordered rejection evidence used for publication.
-    val composite = match environment_variant_catalog_select_composite_v1(catalog,
-        snapshot, feature_words, gpu_devices, projection):
+    # x86 presets require an exact level descriptor and exact OS-state contract
+    # before generic publication may map anything. Other architectures retain
+    # the shared selector until their own exact preset facade is available.
+    val composite = match _environment_composite_select_exact_v1(
+            catalog, snapshot, feature_words, gpu_devices, projection):
         case Ok(value): value
         case Err(_): return Err(EnvironmentCompositePublicationErrorV1.CompositeSelectionFailed)
     val publishable = _environment_composite_selection_publishable_v1(composite,
