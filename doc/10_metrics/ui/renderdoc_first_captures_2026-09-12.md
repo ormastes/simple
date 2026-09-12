@@ -82,7 +82,11 @@ guards conflict-markers / tree-size / guard-wiring all PASS.
 ## Capture results
 
 **NOT OBTAINED IN THIS SESSION.** The lane run carrying all four fixes,
-`34692788301` (tip `a1477d19`), was still `queued` when the session ended.
+`34692788301` (tip `a1477d19`), sat `queued` for **42+ minutes without a runner
+ever being assigned** — `started_at` was stamped at enqueue, no step ever
+reached a conclusion, and the job status never left `queued`. That is past the
+time budget allotted for this work, so the session stops here and reports
+rather than holding the PR open indefinitely.
 Earlier runs on intermediate commits were cancelled deliberately to free queue
 capacity, and a `workflow_dispatch` run on `main` (`34692247209`) was cancelled
 by the runner queue itself with zero steps executed. The blocker is runner-queue
@@ -131,9 +135,22 @@ cat build/renderdoc/ci/receipt.env              # per-page *_status, *_diff_stat
 cat build/renderdoc/ci/*/diff.md                # RENDERDOC DIFF: verdict
 ```
 
-If the queue cancels the run again, re-dispatch on the branch:
+The fixes are landed on `main`, so re-dispatch there:
 
 ```bash
-gh workflow run renderdoc-web-diff.yml -r work/renderdoc-first-captures-2026-09-12 \
-  -f pages="overview css-layout"
+gh workflow run renderdoc-web-diff.yml -r main -f pages="overview css-layout"
+gh run list --workflow=renderdoc-web-diff.yml -L 1 --json databaseId,status
 ```
+
+**Read the receipt, not just the verdict.** The lane's PASS/FAIL keys off
+capture status and Chrome ANGLE backing; `renderdoc_diff_status` does not
+affect it, so the lane can PASS with the diff still blocked. The keys that say
+whether this work actually finished are:
+
+- `renderdoc_vulkan_only_python_bindings=on` — the bindings built (in
+  `build/tools/renderdoc-linux-vulkan-only-build/evidence.env`); `off` means
+  the swig configure failed and the exporter will report
+  `blocked:pyrenderdoc-module-missing`.
+- `renderdoc_vulkan_only_pymodule_dir` — non-empty means the module was staged.
+- `page_<name>_renderdoc_diff_status` — anything other than `blocked:*` means
+  the diff finally ran.
