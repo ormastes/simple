@@ -1541,10 +1541,81 @@ fn handle_method_call_with_self_update_inner(
                             ctx,
                         ));
                     }
-                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
-                    if let Value::Dict(new_dict) = &result {
-                        // Return both the new dict as result AND the update for self-mutation
-                        let new_dict_val = Value::Dict(new_dict.clone());
+                    // Evaluate the method's argument(s) exactly ONCE, up front, exactly as
+                    // the array fast path above does: the values are consumed by the single
+                    // mutation call below, so an aliased dict is never double-evaluated.
+                    // Re-entering `evaluate_expr` on the whole call -- which is what this
+                    // branch used to do -- dispatched into the purely functional
+                    // `handle_dict_methods`, whose every mutator arm opens with
+                    // `let mut new_map = map.clone()`. That whole-HashMap copy ran on EVERY
+                    // call, so `d.insert(k, v)` / `d.remove(k)` in a loop were O(N^2) while
+                    // the bracket form `d[k] = v` (which mutates through `Arc::make_mut` in
+                    // node_exec.rs) was O(N).
+                    // doc/08_tracking/bug/interpreter_dict_mutator_methods_clone_map_2026-09-12.md
+                    let m = method.as_str();
+                    let (key, value) = match m {
+                        "set" | "insert" => (
+                            Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?),
+                            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
+                        ),
+                        "remove" | "delete" => (
+                            Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?),
+                            None,
+                        ),
+                        "merge" | "extend" => (
+                            None,
+                            Some(eval_arg(
+                                args,
+                                0,
+                                Value::Dict(Arc::new(HashMap::new())),
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
+                        _ => (None, None),
+                    };
+
+                    // Ownership-gated IN-PLACE mutation, same discipline as the array path:
+                    // uniquely owned (`strong_count == 1`) mutates the backing `HashMap` in
+                    // place; a genuinely aliased dict (`val alias = d`) clones-then-mutates,
+                    // so value semantics are preserved exactly. The dict is re-read via
+                    // `env.get_mut` AFTER argument evaluation, so an argument that itself
+                    // retained a reference (`d.merge(d)`) bumps the refcount and correctly
+                    // forces the clone branch. A module-global receiver is aliased by the two
+                    // global stores, so park them first exactly as the array path does; the
+                    // caller's write-through (`sync_flat_global`) republishes the mutated Arc.
+                    // A FrozenDict never reaches here -- `env.get` matched `Value::Dict` above
+                    // -- so `handle_frozen_dict_methods`' rejection still fires for it.
+                    let released = release_global_aliases(obj_name, env);
+                    if let Some(Value::Dict(arc)) = env.get_mut(obj_name) {
+                        crate::perf_counters::bump(&crate::perf_counters::DICT_MUT_CALLS, 1);
+                        if crate::perf_counters::enabled() && Arc::strong_count(arc) > 1 {
+                            crate::perf_counters::bump(&crate::perf_counters::DICT_MUT_COW_CLONES, 1);
+                            crate::perf_counters::bump(
+                                &crate::perf_counters::DICT_MUT_COW_ENTRIES_CLONED,
+                                arc.len() as u64,
+                            );
+                        }
+                        {
+                            let map = Arc::make_mut(arc);
+                            if let Err(e) = super::super::interpreter_method::collections::apply_dict_mutation_in_place(
+                                m, map, key, value,
+                            ) {
+                                if released {
+                                    let cur = Value::Dict(Arc::clone(arc));
+                                    sync_flat_global(obj_name, &cur);
+                                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                                }
+                                return Err(e);
+                            }
+                        }
+                        // Hand the (already-mutated) Arc back as both the binding update and
+                        // the expression result -- an O(1) refcount bump, not a copy. Every
+                        // dict mutator's result is the dict itself.
+                        let new_dict_val = Value::Dict(Arc::clone(arc));
                         return Ok((new_dict_val.clone(), Some((obj_name.clone(), new_dict_val))));
                     }
                 }
@@ -1782,6 +1853,142 @@ mod cow_alias_mechanism_tests {
             arr_ptr(env.get("a").expect("a")),
             arr_ptr(env.get("b").expect("b")),
             "the aliased array must have been isolated by copy-on-write"
+        );
+    }
+
+    fn dict_len(v: &Value) -> usize {
+        match v {
+            Value::Dict(m) => m.len(),
+            other => panic!("expected dict, got {:?}", other),
+        }
+    }
+
+    /// Address of the `Arc`'s allocation, NOT of the `HashMap`'s internal table:
+    /// it is invariant under rehashing but changes on every `Arc::new`, which is
+    /// exactly the distinction these tests need.
+    fn dict_ptr(v: &Value) -> usize {
+        match v {
+            Value::Dict(m) => Arc::as_ptr(m) as usize,
+            other => panic!("expected dict, got {:?}", other),
+        }
+    }
+
+    fn dict_call(receiver: Expr, method: &str, args: Vec<simple_parser::ast::Argument>) -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(receiver),
+            method: method.to_string(),
+            args,
+            generic_args: vec![],
+        }
+    }
+
+    fn insert_call(receiver: Expr, key: &str) -> Expr {
+        dict_call(
+            receiver,
+            "insert",
+            vec![arg(Expr::String(key.to_string())), arg(Expr::Integer(1))],
+        )
+    }
+
+    #[test]
+    fn local_dict_insert_mutates_the_single_owner_in_place() {
+        // Pre-fix the identifier-Dict branch re-entered `evaluate_expr`, which
+        // dispatched into the functional `handle_dict_methods` and rebuilt the whole
+        // map behind a FRESH `Arc` on every call — O(n) per insert. A true in-place
+        // mutation keeps ONE allocation for the whole loop, which is what this asserts.
+        // The pre-fix count is necessarily greater than one (the old Arc is still bound
+        // in `env` while the new one is allocated, so the two addresses cannot
+        // coincide), but only the post-fix `== 1` was actually measured; the
+        // authoritative scaling evidence is the ratio in
+        // test/05_perf/interp/dict_mutator_scaling_spec.spl.
+        const N: usize = 500;
+        let mut env = Env::new();
+        env.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        let mut seen: HashSet<usize> = HashSet::new();
+        for i in 0..N {
+            let call = insert_call(ident("d"), &format!("k{i}"));
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            seen.insert(dict_ptr(env.get("d").expect("d")));
+        }
+        assert_eq!(dict_len(env.get("d").expect("d")), N, "every insert must land");
+        assert_eq!(
+            seen.len(),
+            1,
+            "`d.insert(k, v)` on a sole owner must mutate the map in place; got {} \
+             distinct dict allocations for {N} inserts; pre-fix this path made one \
+             fresh Arc, and one whole-map clone, per call",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn genuinely_aliased_dict_still_copies_on_write() {
+        // Value semantics must survive the optimization, exactly as for arrays: a
+        // second LIVE binding to the same Arc must not observe the mutation.
+        let mut env = Env::new();
+        let mut seed: HashMap<String, Value> = HashMap::new();
+        seed.insert("a".to_string(), Value::Int(0));
+        env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
+        let aliased = env.get("d").expect("d").clone();
+        env.insert("alias".to_string(), aliased);
+        for i in 0..3 {
+            let call = insert_call(ident("d"), &format!("k{i}"));
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        assert_eq!(dict_len(env.get("d").expect("d")), 4, "d must have grown");
+        assert_eq!(dict_len(env.get("alias").expect("alias")), 1, "the alias must be unchanged");
+        assert_ne!(
+            dict_ptr(env.get("d").expect("d")),
+            dict_ptr(env.get("alias").expect("alias")),
+            "the aliased dict must have been isolated by copy-on-write"
+        );
+    }
+
+    #[test]
+    fn dict_mutators_return_the_dict_not_the_element() {
+        // Contract as shipped, and deliberately UNLIKE `array.remove(i)`: every dict
+        // mutator's expression result is the dict itself. The fast path routes through
+        // `apply_dict_mutation_in_place`, the same kernel `handle_dict_methods` uses,
+        // so pin that the RESULT is unchanged.
+        let mut env = Env::new();
+        let mut seed: HashMap<String, Value> = HashMap::new();
+        seed.insert("a".to_string(), Value::Int(1));
+        seed.insert("b".to_string(), Value::Int(2));
+        env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
+        let remove = dict_call(ident("d"), "remove", vec![arg(Expr::String("a".to_string()))]);
+        let (result, update) = run(&remove, &mut env);
+        assert_eq!(dict_len(&result), 1, "remove must yield the updated DICT, not the value");
+        assert!(matches!(result, Value::Dict(_)));
+        if let Some((name, val)) = update {
+            env.insert(name, val);
+        }
+        assert_eq!(dict_len(env.get("d").expect("d")), 1, "the removal must land on the binding");
+
+        // `clear` empties the binding; `merge` with a non-dict keeps the TYPE_MISMATCH.
+        let clear = dict_call(ident("d"), "clear", vec![]);
+        let (_, update) = run(&clear, &mut env);
+        if let Some((name, val)) = update {
+            env.insert(name, val);
+        }
+        assert_eq!(dict_len(env.get("d").expect("d")), 0, "clear must empty the binding");
+        let bad_merge = dict_call(ident("d"), "merge", vec![arg(Expr::Integer(7))]);
+        assert!(
+            handle_method_call_with_self_update(
+                &bad_merge,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .is_err(),
+            "merge with a non-dict argument must still be a TYPE_MISMATCH"
         );
     }
 
