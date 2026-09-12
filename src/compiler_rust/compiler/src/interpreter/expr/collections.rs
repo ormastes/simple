@@ -8,8 +8,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object_opt, normalize_index, slice_collection, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods,
+    comprehension_iterate, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
+    ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
 /// Compute slice indices from start, end, length, and inclusive flag.
@@ -95,8 +95,12 @@ fn string_index_out_of_bounds(s: &str, raw_idx: i64, len: i64) -> CompileError {
     )
 }
 
-fn indexed_string_char(s: &str, raw_idx: i64) -> Result<Value, CompileError> {
-    if s.is_ascii() {
+fn indexed_string_char(s: &Arc<String>, raw_idx: i64) -> Result<Value, CompileError> {
+    // Shares the identity-keyed memo `char_code_at`/`char_at`/`substr` use
+    // (`interpreter_method/mod.rs`'s `shared_text_is_ascii`) instead of
+    // re-running `s.is_ascii()` -- an O(len) scan -- on every `s[i]` call,
+    // which made a `while i < s.len(): s[i]` loop superlinear.
+    if shared_text_is_ascii(s) {
         let len = s.len() as i64;
         let idx = if raw_idx < 0 { len + raw_idx } else { raw_idx };
         if (0..len).contains(&idx) {
@@ -1244,6 +1248,37 @@ main = result_
             let err = evaluate_module(&module.items).expect_err("direct indexing must reject OOB");
             let CompileError::SemanticWithContext(contextual) = err else {
                 panic!("direct indexing must report a contextual semantic error");
+            };
+            assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
+        }
+    }
+
+    // `indexed_string_char` (`s[i]`) now shares `shared_text_is_ascii`'s
+    // identity-keyed memo instead of re-scanning `s.is_ascii()` per call --
+    // see that function's doc comment above. These pin the ASCII fast path,
+    // the non-ASCII fallback, and negative-index wraparound all still agree
+    // with the pre-fix behavior.
+    #[test]
+    fn string_index_ascii_and_non_ascii_agree_with_negative_wraparound() {
+        let src = r#"
+val ascii = "abcd"
+val unicode = "héllo"
+var result_ = 1
+if ascii[0] == "a" and ascii[-1] == "d" and unicode[1] == "é" and unicode[-1] == "o":
+    result_ = 0
+main = result_
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn string_index_out_of_bounds_still_reports_the_same_contextual_error() {
+        for src in ["val s = \"abc\"\nmain = s[5].len()\n", "val s = \"abc\"\nmain = s[-5].len()\n"] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().expect("parse string index OOB fixture");
+            let err = evaluate_module(&module.items).expect_err("string indexing must reject OOB");
+            let CompileError::SemanticWithContext(contextual) = err else {
+                panic!("string indexing must report a contextual semantic error");
             };
             assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
         }
