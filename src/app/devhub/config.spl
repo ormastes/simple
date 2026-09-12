@@ -29,6 +29,20 @@ class ItfConfig:
     bb_workspace: text  # [bitbucket] workspace: <slug>. Previously resolvable ONLY from --workspace or BB_WORKSPACE (design §4 "Still missing"), so a repo could not record its own workspace.
     bb_repo: text  # [bitbucket] repo: <slug>. Same gap as bb_workspace.
     token_envs: [(text, text)]  # (provider, ENV VAR NAME) pairs from the [token_env] section. The NAME of the variable, never the secret. Mirrors token_cmds; see resolve_auth_token().
+    # Atlassian deployment shape (Cloud vs Server/Data Center) — consumed via
+    # app.devhub.atlassian_site. Every field defaults to "" which the shape
+    # helpers fold onto the previous behaviour (Cloud paths, Jira basic auth,
+    # Bitbucket bearer auth, api.bitbucket.org), so an unchanged config.sdn
+    # yields byte-identical URLs and headers.
+    jira_deployment: text        # [jira] deployment: cloud|datacenter
+    jira_auth: text              # [jira] auth: basic|bearer ("" = basic; bearer = Data Center PAT)
+    confluence_deployment: text  # [confluence] deployment: cloud|datacenter
+    confluence_auth: text        # [confluence] auth: basic|bearer ("" = basic; bearer = Data Center PAT)
+    bb_url: text                 # [bitbucket] url: site root ("" = https://api.bitbucket.org/2.0 on Cloud; REQUIRED on datacenter, may carry a context path)
+    bb_deployment: text          # [bitbucket] deployment: cloud|datacenter
+    bb_project: text             # [bitbucket] project: <PROJECT_KEY> — the DC counterpart of `workspace`, placed at /projects/{KEY}/repos/{slug}
+    bb_auth: text                # [bitbucket] auth: bearer|basic ("" = bearer; basic = base64(user:token))
+    bb_user: text                # [bitbucket] user: <username or email> — only read for auth: basic
 
     static fn default() -> ItfConfig:
         ItfConfig(
@@ -49,7 +63,11 @@ class ItfConfig:
             git_default_backend: "",
             bb_workspace: "",
             bb_repo: "",
-            token_envs: []
+            token_envs: [],
+            jira_deployment: "", jira_auth: "",
+            confluence_deployment: "", confluence_auth: "",
+            bb_url: "", bb_deployment: "", bb_project: "",
+            bb_auth: "", bb_user: ""
         )
 
 
@@ -141,7 +159,35 @@ fn _with(config: ItfConfig, confluence_url: text, confluence_user: text, conflue
         git_default_backend: config.git_default_backend,
         bb_workspace: config.bb_workspace,
         bb_repo: config.bb_repo,
-        token_envs: config.token_envs
+        token_envs: config.token_envs,
+        jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+        confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+        bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_auth: config.bb_auth, bb_user: config.bb_user
+    )
+
+
+fn _with_atlassian(config: ItfConfig, jira_deployment: text, jira_auth: text, confluence_deployment: text, confluence_auth: text, bb_url: text, bb_deployment: text, bb_project: text, bb_auth: text, bb_user: text) -> ItfConfig:
+    """Rebuild an ItfConfig changing only the Atlassian deployment-shape
+    fields (the counterpart of _with() for the nine `*.deployment` /
+    `*.auth` / `bitbucket.url|project|user` keys; _with() re-reads these
+    from `config` itself, so it cannot set them)."""
+    ItfConfig(
+        confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
+        jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+        default_output: config.default_output, color_mode: config.color_mode,
+        editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
+        wiki_default_backend: config.wiki_default_backend,
+        tasks_default_backend: config.tasks_default_backend,
+        tasks_jira_done_status: config.tasks_jira_done_status,
+        git_default_backend: config.git_default_backend,
+        bb_workspace: config.bb_workspace,
+        bb_repo: config.bb_repo,
+        token_envs: config.token_envs,
+        jira_deployment: jira_deployment, jira_auth: jira_auth,
+        confluence_deployment: confluence_deployment, confluence_auth: confluence_auth,
+        bb_url: bb_url, bb_deployment: bb_deployment, bb_project: bb_project,
+        bb_auth: bb_auth, bb_user: bb_user
     )
 
 
@@ -174,7 +220,11 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             git_default_backend: config.git_default_backend,
             bb_workspace: config.bb_workspace,
             bb_repo: config.bb_repo,
-            token_envs: config.token_envs + [(key, value)]
+            token_envs: config.token_envs + [(key, value)],
+            jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+            confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+            bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_auth: config.bb_auth, bb_user: config.bb_user
         )
 
     match full_key:
@@ -215,7 +265,11 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: config.git_default_backend,
                 bb_workspace: config.bb_workspace,
                 bb_repo: config.bb_repo,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "tasks.default_backend":
             # Mirrors wiki.default_backend immediately above (same reasoning
@@ -232,7 +286,11 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: config.git_default_backend,
                 bb_workspace: config.bb_workspace,
                 bb_repo: config.bb_repo,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "tasks.jira_done_status":
             # Mirrors tasks.default_backend immediately above (gap G6,
@@ -250,7 +308,11 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: config.git_default_backend,
                 bb_workspace: config.bb_workspace,
                 bb_repo: config.bb_repo,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "git.default_backend":
             # D1's named drift, now closed: `git` finally has the same
@@ -268,8 +330,30 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: value,
                 bb_workspace: config.bb_workspace,
                 bb_repo: config.bb_repo,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
+        "jira.deployment":
+            _with_atlassian(config, value, config.jira_auth, config.confluence_deployment, config.confluence_auth, config.bb_url, config.bb_deployment, config.bb_project, config.bb_auth, config.bb_user)
+        "jira.auth":
+            _with_atlassian(config, config.jira_deployment, value, config.confluence_deployment, config.confluence_auth, config.bb_url, config.bb_deployment, config.bb_project, config.bb_auth, config.bb_user)
+        "confluence.deployment":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, value, config.confluence_auth, config.bb_url, config.bb_deployment, config.bb_project, config.bb_auth, config.bb_user)
+        "confluence.auth":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, value, config.bb_url, config.bb_deployment, config.bb_project, config.bb_auth, config.bb_user)
+        "bitbucket.url":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, value, config.bb_deployment, config.bb_project, config.bb_auth, config.bb_user)
+        "bitbucket.deployment":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, config.confluence_auth, config.bb_url, value, config.bb_project, config.bb_auth, config.bb_user)
+        "bitbucket.project":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, config.confluence_auth, config.bb_url, config.bb_deployment, value, config.bb_auth, config.bb_user)
+        "bitbucket.auth":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, config.confluence_auth, config.bb_url, config.bb_deployment, config.bb_project, value, config.bb_user)
+        "bitbucket.user":
+            _with_atlassian(config, config.jira_deployment, config.jira_auth, config.confluence_deployment, config.confluence_auth, config.bb_url, config.bb_deployment, config.bb_project, config.bb_auth, value)
         "bitbucket.workspace":
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
@@ -282,7 +366,11 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: config.git_default_backend,
                 bb_workspace: value,
                 bb_repo: config.bb_repo,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "bitbucket.repo":
             ItfConfig(
@@ -296,16 +384,40 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 git_default_backend: config.git_default_backend,
                 bb_workspace: config.bb_workspace,
                 bb_repo: value,
-                token_envs: config.token_envs
+                token_envs: config.token_envs,
+                jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+                confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         _:
             config
+
+
+fn _sdn_kv(key: text, value: text) -> text:
+    """One indented `key: value` config line, or "" when the value is unset
+    (nil-safe — an omitted ItfConfig field reads as nil)."""
+    if value == nil or value == "":
+        return ""
+    "    {key}: {value}\n"
 
 
 fn save_config(config: ItfConfig) -> bool:
     """Save config to SDN file."""
     val dir = config_dir()
     var content = "# ITF Configuration\n\nconfluence:\n    url: {config.confluence_url}\n    user: {config.confluence_user}\n    default_space: {config.confluence_default_space}\n\njira:\n    url: {config.jira_url}\n    acli_path: {config.jira_acli_path}\n    email: {config.jira_email}\n\nwiki:\n    default_backend: {config.wiki_default_backend}\n\ntasks:\n    default_backend: {config.tasks_default_backend}\n    jira_done_status: {config.tasks_jira_done_status}\n\noutput:\n    format: {config.default_output}\n    color: {config.color_mode}\n\neditor: {config.editor_override}\npager: {config.pager_override}\n"
+    # Atlassian deployment-shape keys are appended only when set, so a config
+    # that never used them round-trips byte-identically. (Section headers are
+    # repeated on purpose: parse_sdn_sections re-enters a section by name.)
+    val jira_shape = _sdn_kv("deployment", config.jira_deployment) + _sdn_kv("auth", config.jira_auth)
+    if jira_shape != "":
+        content = content + "\njira:\n" + jira_shape
+    val confluence_shape = _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth)
+    if confluence_shape != "":
+        content = content + "\nconfluence:\n" + confluence_shape
+    val bb_shape = _sdn_kv("url", config.bb_url) + _sdn_kv("deployment", config.bb_deployment) + _sdn_kv("project", config.bb_project) + _sdn_kv("auth", config.bb_auth) + _sdn_kv("user", config.bb_user)
+    if bb_shape != "":
+        content = content + "\nbitbucket:\n" + bb_shape
     if config.token_cmds.len() > 0:
         content = content + "\ntoken_cmd:\n"
         for pair in config.token_cmds:
