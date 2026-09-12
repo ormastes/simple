@@ -1,0 +1,91 @@
+# Routing receipts for lexical candidate classification. A receipt records what
+# was actually classified and resolved; verification recomputes it, so a forged
+# or stale receipt is refused and only a truthful one verifies.
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+use std.nogc_async_mut.structural.parse.lexical_candidate_resolution_v1.*
+
+pub enum LexicalRoutingProviderV1:
+    ScalarReference
+    ParserLexicalAvx2
+pub enum LexicalRoutingIssueErrorV1:
+    ProviderNotAdmitted
+    BlockTooWide
+    StateNotAdmitted
+    InvalidTable
+pub enum LexicalRoutingVerifyErrorV1:
+    ProviderNotAdmitted
+    GenerationStale
+    ByteCountMismatch
+    InputStateMismatch
+    MaskMismatch
+    StateMismatch
+    ScalarResolutionNotClaimed
+    BlockTooWide
+    StateNotAdmitted
+    InvalidTable
+
+# scalar_resolution is always true: no provider resolves lexical state. It is a
+# field rather than an invariant so a receipt claiming otherwise can be refused.
+pub struct LexicalRoutingReceiptV1:
+    provider: LexicalRoutingProviderV1
+    generation: u64
+    byte_count: u32
+    input_state: LexicalBlockStateV1
+    output_state: LexicalBlockStateV1
+    masks: LexicalCandidateMasksV1
+    scalar_resolution: bool
+
+pub fn lexical_routing_verifiable_states_v1() -> [LexicalBlockStateV1]:
+    lexical_transition_admitted_states_v1()
+
+fn _issue_err_lrr(e: LexicalCandidateErrorV1) -> LexicalRoutingIssueErrorV1:
+    if e == LexicalCandidateErrorV1.BlockTooWide: return LexicalRoutingIssueErrorV1.BlockTooWide
+    if e == LexicalCandidateErrorV1.StateNotAdmitted:
+        return LexicalRoutingIssueErrorV1.StateNotAdmitted
+    LexicalRoutingIssueErrorV1.InvalidTable
+fn _verify_err_lrr(e: LexicalCandidateErrorV1) -> LexicalRoutingVerifyErrorV1:
+    if e == LexicalCandidateErrorV1.BlockTooWide: return LexicalRoutingVerifyErrorV1.BlockTooWide
+    if e == LexicalCandidateErrorV1.StateNotAdmitted:
+        return LexicalRoutingVerifyErrorV1.StateNotAdmitted
+    LexicalRoutingVerifyErrorV1.InvalidTable
+
+pub fn lexical_routing_receipt_issue_v1(bytes: [u8], input: LexicalBlockStateV1,
+    provider: LexicalRoutingProviderV1, provider_admitted: bool, generation: u64
+) -> Result<LexicalRoutingReceiptV1, LexicalRoutingIssueErrorV1>:
+    if provider == LexicalRoutingProviderV1.ParserLexicalAvx2 and not provider_admitted:
+        return Err(LexicalRoutingIssueErrorV1.ProviderNotAdmitted)
+    val masks = match lexical_candidate_masks_scalar_v1(bytes):
+        case Err(e): return Err(_issue_err_lrr(e))
+        case Ok(m): m
+    val output = match lexical_resolve_state_sealed_v1(bytes, input):
+        case Err(e): return Err(_issue_err_lrr(e))
+        case Ok(s): s
+    Ok(LexicalRoutingReceiptV1(provider: provider, generation: generation,
+        byte_count: bytes.len() as u32, input_state: input, output_state: output,
+        masks: masks, scalar_resolution: true))
+
+# Verification never trusts a receipt field: every one is recomputed from the
+# bytes and input state the caller claims were classified.
+pub fn lexical_routing_receipt_verify_v1(receipt: LexicalRoutingReceiptV1, bytes: [u8],
+    input: LexicalBlockStateV1, provider_admitted: bool, current_generation: u64
+) -> Result<bool, LexicalRoutingVerifyErrorV1>:
+    if receipt.provider == LexicalRoutingProviderV1.ParserLexicalAvx2 and not provider_admitted:
+        return Err(LexicalRoutingVerifyErrorV1.ProviderNotAdmitted)
+    if receipt.generation != current_generation:
+        return Err(LexicalRoutingVerifyErrorV1.GenerationStale)
+    if not receipt.scalar_resolution:
+        return Err(LexicalRoutingVerifyErrorV1.ScalarResolutionNotClaimed)
+    if receipt.byte_count != bytes.len() as u32 or receipt.masks.byte_count != receipt.byte_count:
+        return Err(LexicalRoutingVerifyErrorV1.ByteCountMismatch)
+    if receipt.input_state != input: return Err(LexicalRoutingVerifyErrorV1.InputStateMismatch)
+    val masks = match lexical_candidate_masks_scalar_v1(bytes):
+        case Err(e): return Err(_verify_err_lrr(e))
+        case Ok(m): m
+    if receipt.masks != masks or not lexical_candidate_masks_valid_v1(receipt.masks):
+        return Err(LexicalRoutingVerifyErrorV1.MaskMismatch)
+    val output = match lexical_resolve_state_sealed_v1(bytes, input):
+        case Err(e): return Err(_verify_err_lrr(e))
+        case Ok(s): s
+    if receipt.output_state != output: return Err(LexicalRoutingVerifyErrorV1.StateMismatch)
+    Ok(true)

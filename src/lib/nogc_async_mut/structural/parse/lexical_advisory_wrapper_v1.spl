@@ -1,0 +1,79 @@
+# Advisory wrapper the frontend can call. It always produces the scalar summary
+# and scalar-resolved state. An admitted SIMD provider only supplies candidate
+# masks to compare against; divergence is reported, never applied.
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_candidate_resolution_v1.*
+use std.nogc_async_mut.structural.parse.lexical_routing_receipt_v1.*
+
+pub enum LexicalAdvisoryOutcomeV1:
+    ScalarOnly
+    AdvisoryAgreed
+    AdvisoryDiverged
+
+pub struct LexicalAdvisoryProviderOfferV1:
+    admitted: bool
+    masks: LexicalCandidateMasksV1
+pub struct LexicalAdvisoryResultV1:
+    summary: LexicalBlockSummaryV1
+    output_state: LexicalBlockStateV1
+    outcome: LexicalAdvisoryOutcomeV1
+    divergence_bits: u64
+    receipt: LexicalRoutingReceiptV1
+
+fn _empty_masks_law() -> LexicalCandidateMasksV1:
+    LexicalCandidateMasksV1(byte_count: 0u32, single_quote: 0u32, double_quote: 0u32,
+        backslash: 0u32, hash: 0u32, newline: 0u32, slash: 0u32, star: 0u32,
+        braces: 0u32, structural_delimiters: 0u32)
+pub fn lexical_advisory_no_provider_v1() -> LexicalAdvisoryProviderOfferV1:
+    LexicalAdvisoryProviderOfferV1(admitted: false, masks: _empty_masks_law())
+pub fn lexical_advisory_offer_v1(masks: LexicalCandidateMasksV1) -> LexicalAdvisoryProviderOfferV1:
+    LexicalAdvisoryProviderOfferV1(admitted: true, masks: masks)
+
+# A wrong block width is its own reason, not a structural-mask disagreement.
+pub const LEX_ADVISORY_DIVERGENCE_WIDTH_V1: u64 = 512u64
+
+# One bit per published candidate class, using the same class constants, so a
+# divergence report names the exact field a provider got wrong.
+pub fn lexical_advisory_divergence_bits_v1(scalar: LexicalCandidateMasksV1,
+    offered: LexicalCandidateMasksV1) -> u64:
+    var bits = 0u64
+    if offered.single_quote != scalar.single_quote: bits = bits | LEX_CAND_SINGLE_QUOTE_V1 as u64
+    if offered.double_quote != scalar.double_quote: bits = bits | LEX_CAND_DOUBLE_QUOTE_V1 as u64
+    if offered.backslash != scalar.backslash: bits = bits | LEX_CAND_BACKSLASH_V1 as u64
+    if offered.hash != scalar.hash: bits = bits | LEX_CAND_HASH_V1 as u64
+    if offered.newline != scalar.newline: bits = bits | LEX_CAND_NEWLINE_V1 as u64
+    if offered.slash != scalar.slash: bits = bits | LEX_CAND_SLASH_V1 as u64
+    if offered.star != scalar.star: bits = bits | LEX_CAND_STAR_V1 as u64
+    if offered.braces != scalar.braces: bits = bits | LEX_CAND_BRACES_V1 as u64
+    if offered.structural_delimiters != scalar.structural_delimiters:
+        bits = bits | LEX_CAND_STRUCTURAL_V1 as u64
+    if offered.byte_count != scalar.byte_count: bits = bits | LEX_ADVISORY_DIVERGENCE_WIDTH_V1
+    bits
+
+pub fn lexical_advisory_scan_v1(bytes: [u8], input: LexicalBlockStateV1,
+    offer: LexicalAdvisoryProviderOfferV1, generation: u64
+) -> Result<LexicalAdvisoryResultV1, LexicalCandidateErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalCandidateErrorV1.BlockTooWide)
+    if not lexical_block_state_valid_v1(input): return Err(LexicalCandidateErrorV1.StateNotAdmitted)
+    val summary = match lexical_block_summary_scalar_v1(bytes, input):
+        case Err(_): return Err(LexicalCandidateErrorV1.StateNotAdmitted)
+        case Ok(s): s
+    val output = lexical_resolve_state_sealed_v1(bytes, input)?
+    val scalar_masks = lexical_candidate_masks_scalar_v1(bytes)?
+    var bits = 0u64
+    var outcome = LexicalAdvisoryOutcomeV1.ScalarOnly
+    if offer.admitted:
+        bits = lexical_advisory_divergence_bits_v1(scalar_masks, offer.masks)
+        outcome = if bits == 0u64: LexicalAdvisoryOutcomeV1.AdvisoryAgreed
+            else: LexicalAdvisoryOutcomeV1.AdvisoryDiverged
+    # A diverged provider contributed nothing: the receipt records the fallback
+    # to scalar reference, not a native provider that was merely offered.
+    val native = offer.admitted and bits == 0u64
+    val provider = if native: LexicalRoutingProviderV1.ParserLexicalAvx2
+        else: LexicalRoutingProviderV1.ScalarReference
+    val receipt = match lexical_routing_receipt_issue_v1(bytes, input, provider,
+        offer.admitted, generation):
+        case Err(_): return Err(LexicalCandidateErrorV1.InvalidTable)
+        case Ok(r): r
+    Ok(LexicalAdvisoryResultV1(summary: summary, output_state: output, outcome: outcome,
+        divergence_bits: bits, receipt: receipt))

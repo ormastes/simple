@@ -1,0 +1,355 @@
+# Real callable mapping for an admitted environment variant (EGL package 2).
+#
+# Everything upstream of this module is metadata. `receipt_v1` says of itself
+# that it "does not load a library, invoke a symbol, or inspect the host";
+# `binding_runtime_v1` says its provider handles "are scalar identities
+# supplied by the loader owner" and that it "never maps or invokes an
+# artifact"; `dependency_resolver_v1` is "metadata-only". The loader owner they
+# all defer to did not exist. This module is that owner for the `i64(i64...)`
+# operation family over arity 0..VARIANT_CALLABLE_MAX_ARITY_V1, and only for it.
+#
+# It maps an admitted variant's exported symbol identity to something the
+# process can genuinely call, uniformly across placements (REQ-007), and it
+# refuses rather than fabricates:
+#
+#   * the artifact's bytes are hashed and compared BEFORE it is mapped, because
+#     a shared object's constructors run during load, AND again immediately
+#     after, because those constructors can rewrite or replace the artifact
+#     they were loaded from;
+#   * a symbol that the artifact does not export is refused, never resolved to
+#     a null callable;
+#   * an operation whose ABI identity or provider generation disagrees with the
+#     admitted variant is refused before any mapping happens;
+#   * a placement with no in-process invoke path is refused with a code that
+#     distinguishes "real placement, unavailable on this base" from "out of
+#     scope", so a receipt can tell an operator which one it hit.
+#
+# `mapping_handle` and `callable_handle` are opaque derived tokens, never
+# addresses: the design is explicit that tokens in the public contract are
+# "never native addresses". The raw address stays in a file-private field.
+#
+# SMF is wired and refusing, not silently missing. See
+# VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1 below for the exact blocker.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1,
+    ENV_PLACEMENT_STATIC_V1, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+    ENV_PLACEMENT_SMF_V1, ENV_PLACEMENT_CONTAINED_WORKER_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.{
+    EnvironmentVariantReceiptV1,
+    EnvironmentVariantReceiptIdentityV1,
+    EnvironmentVariantReceiptErrorV1,
+    environment_variant_receipt_mark_mapped_v1,
+    environment_variant_receipt_mark_callable_v1
+}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
+    DynlibAdmissionErrorV1,
+    dynlib_admit_exact_v1,
+    dynlib_symbol_address_v1,
+    dynlib_admitted_close_v1
+}
+use std.nogc_sync_mut.sffi.dynamic.{spl_wffi_call_i64}
+use std.common.string_core.{text_to_bytes}
+
+# The placement is not part of package 2 at all (JIT, contained worker).
+pub const VARIANT_CALLABLE_PLACEMENT_UNSUPPORTED_V1: i32 = 1
+# The placement is real and in scope, but this base has no in-process invoke
+# path for it. SMF is the case: `smf_dlsym` yields a section OFFSET rather than
+# an address, `exec_mapping_map_rx` maps bytes with no entry ABI, and the host
+# module `src/os/smf/smf_dynlib.spl` is owned by another lane. A lane that
+# cannot be executed must say so in its own code, not borrow "unsupported".
+pub const VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1: i32 = 2
+pub const VARIANT_CALLABLE_ARTIFACT_ABSENT_V1: i32 = 3
+pub const VARIANT_CALLABLE_ARTIFACT_DIGEST_MISMATCH_V1: i32 = 4
+pub const VARIANT_CALLABLE_ARTIFACT_MAP_FAILED_V1: i32 = 5
+pub const VARIANT_CALLABLE_SYMBOL_ABSENT_V1: i32 = 6
+pub const VARIANT_CALLABLE_ABI_MISMATCH_V1: i32 = 7
+pub const VARIANT_CALLABLE_GENERATION_STALE_V1: i32 = 8
+pub const VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1: i32 = 9
+pub const VARIANT_CALLABLE_NOT_CALLABLE_V1: i32 = 10
+# The artifact's bytes changed between the digest that admitted them and the
+# mapping that loaded them. Kept distinct from
+# VARIANT_CALLABLE_ARTIFACT_DIGEST_MISMATCH_V1 because that one is refused
+# while the artifact is still inert, and this one is refused after its
+# constructors have already run — an operator needs to tell those apart.
+pub const VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1: i32 = 11
+
+# The mapped operation family: `i64(i64...)` over this arity range, uniformly
+# across placements. The upper bound is the widest shape the design asks an
+# admitted variant to expose — the structural-mask provider session's callable
+# takes a source buffer, a length, two delimiter bytes, an output pointer and
+# an output capacity — and the plan's SIMD equality primitive sits at 2 inside
+# it. It is also within the foreign bridge's register-argument envelope on this
+# host, and every arity in the range is executed by this module's spec rather
+# than assumed to work.
+pub const VARIANT_CALLABLE_MIN_ARITY_V1: i64 = 0
+pub const VARIANT_CALLABLE_MAX_ARITY_V1: i64 = 6
+
+# One statically linked operation, already present in this process. This is the
+# `ENV_PLACEMENT_STATIC_V1` provider surface: the twin a native variant is
+# measured against.
+pub struct VariantStaticOperationV1:
+    operation_id: u32
+    symbol_name: text
+    arity: i64
+    # One argument vector rather than a fixed shape, so a static twin exists
+    # for every arity in the family without a per-arity provider surface.
+    op: ([i64]) -> i64
+
+# What a caller asks for, and what package-1 admission already decided.
+# `admitted_abi_digest` / `admitted_generation` come from the admitted
+# descriptor; `abi_digest` / `provider_generation` are what the CALLER believes
+# it is binding. Disagreement is a refusal, not a coercion.
+pub struct VariantOperationRequestV1:
+    placement: u16
+    operation_id: u32
+    symbol_name: text
+    arity: i64
+    abi_digest: EnvironmentDigest256V1
+    provider_generation: u64
+    admitted_abi_digest: EnvironmentDigest256V1
+    admitted_generation: u64
+    artifact_path: text
+    artifact_digest_hex: text
+
+pub struct VariantCallableRefusalV1:
+    code: i32
+    placement: u16
+    operation_id: u32
+    reason: text
+
+# A mapped, resolvable callable. `native_fptr` and `static_op` are file-private:
+# exactly one of them is live, chosen by `placement`, and neither leaves this
+# module.
+pub class VariantCallableV1:
+    placement: u16
+    operation_id: u32
+    provider_generation: u64
+    arity: i64
+    abi_digest: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    mapping_handle: u64
+    callable_handle: u64
+    native_fptr: i64
+    native_handle: i64
+    static_op: (([i64]) -> i64)?
+
+fn _refuse(code: i32, request: VariantOperationRequestV1,
+           reason: text) -> VariantCallableRefusalV1:
+    VariantCallableRefusalV1(
+        code: code, placement: request.placement,
+        operation_id: request.operation_id, reason: reason)
+
+fn _digest_equal(left: EnvironmentDigest256V1,
+                 right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+# FNV-1a over the token's defining text. Used only to derive opaque, stable,
+# non-address handles; it is not a security digest and is never a file digest.
+fn _token_of(seed: u64, value: text) -> u64:
+    var hash = seed
+    for byte in text_to_bytes(value):
+        hash = hash ^ (byte.to_i64() as u64)
+        hash = hash * 0x100000001b3u64
+    if hash == 0u64:
+        return 1u64
+    hash
+
+fn _hex_nibble(byte: i64) -> i64:
+    if byte >= 48 and byte <= 57:
+        return byte - 48
+    if byte >= 97 and byte <= 102:
+        return byte - 87
+    -1
+
+fn _zero_digest() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+
+# Widens 64 lowercase hex characters into the contract's four-word digest.
+# Returns a zero digest when the text is not a full 256-bit hex digest; callers
+# only reach this after the digest has already been matched against the file.
+fn _digest_from_hex(value: text) -> EnvironmentDigest256V1:
+    val bytes = text_to_bytes(value)
+    if bytes.len() != 64:
+        return _zero_digest()
+    var words: [u64] = [0u64, 0u64, 0u64, 0u64]
+    var index = 0
+    while index < 64:
+        val nibble = _hex_nibble(bytes[index].to_i64())
+        if nibble < 0:
+            return _zero_digest()
+        val slot = index / 16
+        words[slot] = (words[slot] * 16u64) + (nibble as u64)
+        index = index + 1
+    EnvironmentDigest256V1(w0: words[0], w1: words[1], w2: words[2], w3: words[3])
+
+# The static twin has no artifact on disk, so its artifact identity is derived
+# from what actually holds the code: this process image plus the operation.
+fn _static_artifact_digest(request: VariantOperationRequestV1) -> EnvironmentDigest256V1:
+    val tag = "static:{request.symbol_name}:{request.operation_id}"
+    EnvironmentDigest256V1(
+        w0: _token_of(seed: 0xcbf29ce484222325u64, value: tag),
+        w1: _token_of(seed: 0xcbf29ce484222326u64, value: tag),
+        w2: _token_of(seed: 0xcbf29ce484222327u64, value: tag),
+        w3: _token_of(seed: 0xcbf29ce484222328u64, value: tag))
+
+fn _map_static(
+    request: VariantOperationRequestV1, table: [VariantStaticOperationV1]
+) -> Result<VariantCallableV1, VariantCallableRefusalV1>:
+    for entry in table:
+        if entry.symbol_name == request.symbol_name and
+                entry.operation_id == request.operation_id:
+            if entry.arity != request.arity:
+                return Err(_refuse(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1, request,
+                    "static operation {entry.symbol_name} has arity {entry.arity}"))
+            val artifact = _static_artifact_digest(request)
+            val mapping = _token_of(seed: artifact.w0, value: "static-map:{request.provider_generation}")
+            return Ok(VariantCallableV1(
+                placement: ENV_PLACEMENT_STATIC_V1,
+                operation_id: request.operation_id,
+                provider_generation: request.provider_generation,
+                arity: request.arity,
+                abi_digest: request.abi_digest,
+                artifact_digest: artifact,
+                mapping_handle: mapping,
+                callable_handle: _token_of(seed: mapping, value: "call:{request.symbol_name}"),
+                native_fptr: 0,
+                native_handle: 0,
+                static_op: entry.op))
+    Err(_refuse(VARIANT_CALLABLE_SYMBOL_ABSENT_V1, request,
+        "no static operation is registered for {request.symbol_name}"))
+
+fn _admission_refusal(
+    error: DynlibAdmissionErrorV1, request: VariantOperationRequestV1
+) -> VariantCallableRefusalV1:
+    match error:
+        case DynlibAdmissionErrorV1.ArtifactAbsent:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_ABSENT_V1, request,
+                "provider artifact is not present: {request.artifact_path}")
+        case DynlibAdmissionErrorV1.DigestUnreadable:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_ABSENT_V1, request,
+                "provider artifact bytes could not be digested: {request.artifact_path}")
+        case DynlibAdmissionErrorV1.DigestMismatch:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_DIGEST_MISMATCH_V1, request,
+                "provider artifact digest does not match the admitted artifact")
+        case DynlibAdmissionErrorV1.LoadFailed:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_MAP_FAILED_V1, request,
+                "provider artifact could not be mapped: {request.artifact_path}")
+        case DynlibAdmissionErrorV1.SwappedDuringLoad:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1, request,
+                "provider artifact bytes changed between the admitted digest and the mapping")
+
+fn _map_native(
+    request: VariantOperationRequestV1
+) -> Result<VariantCallableV1, VariantCallableRefusalV1>:
+    val admitted = unsafe(capabilities: [ffi]):
+        dynlib_admit_exact_v1(request.artifact_path, request.artifact_digest_hex)
+    val handle = match admitted:
+        case Ok(value): value
+        case Err(error): return Err(_admission_refusal(error, request))
+    val address = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(handle, request.symbol_name)
+    if address <= 0:
+        unsafe(capabilities: [ffi]):
+            dynlib_admitted_close_v1(handle)
+        return Err(_refuse(VARIANT_CALLABLE_SYMBOL_ABSENT_V1, request,
+            "admitted artifact does not export {request.symbol_name}"))
+    val artifact = _digest_from_hex(request.artifact_digest_hex)
+    val mapping = _token_of(seed: artifact.w0, value: "native-map:{request.provider_generation}")
+    Ok(VariantCallableV1(
+        placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+        operation_id: request.operation_id,
+        provider_generation: request.provider_generation,
+        arity: request.arity,
+        abi_digest: request.abi_digest,
+        artifact_digest: artifact,
+        mapping_handle: mapping,
+        callable_handle: _token_of(seed: mapping, value: "call:{request.symbol_name}"),
+        native_fptr: address,
+        native_handle: handle,
+        static_op: nil))
+
+# Maps one admitted operation onto a callable, or refuses with a stable code.
+pub fn variant_callable_map_v1(
+    request: VariantOperationRequestV1,
+    static_table: [VariantStaticOperationV1]
+) -> Result<VariantCallableV1, VariantCallableRefusalV1>:
+    # Placement-independent admission, evaluated before anything is mapped.
+    if request.arity < VARIANT_CALLABLE_MIN_ARITY_V1 or
+            request.arity > VARIANT_CALLABLE_MAX_ARITY_V1:
+        return Err(_refuse(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1, request,
+            "operation arity {request.arity} is outside the mapped i64(i64...) family {VARIANT_CALLABLE_MIN_ARITY_V1}..{VARIANT_CALLABLE_MAX_ARITY_V1}"))
+    if not _digest_equal(request.abi_digest, request.admitted_abi_digest):
+        return Err(_refuse(VARIANT_CALLABLE_ABI_MISMATCH_V1, request,
+            "requested ABI identity does not match the admitted variant"))
+    if request.provider_generation != request.admitted_generation:
+        return Err(_refuse(VARIANT_CALLABLE_GENERATION_STALE_V1, request,
+            "provider generation {request.provider_generation} is not the admitted generation {request.admitted_generation}"))
+    if request.placement == ENV_PLACEMENT_STATIC_V1:
+        return _map_static(request, static_table)
+    if request.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1:
+        return _map_native(request)
+    if request.placement == ENV_PLACEMENT_SMF_V1:
+        return Err(_refuse(VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1, request,
+            "SMF placement has no in-process invoke path on this base: smf_dlsym reports a section offset, not a callable address"))
+    if request.placement == ENV_PLACEMENT_CONTAINED_WORKER_V1:
+        return Err(_refuse(VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1, request,
+            "contained-worker placement is handed off to the worker owner, not mapped in process"))
+    Err(_refuse(VARIANT_CALLABLE_PLACEMENT_UNSUPPORTED_V1, request,
+        "placement {request.placement} is outside the mapped placement set"))
+
+# Invokes the mapped operation with one argument vector, identically for every
+# arity in the family and every placement. Native execution rides the
+# direct-return bridge; the checked transport is not used here because it
+# answers `Ok(0)` for a real non-zero result on seeds built before 2026-09-11.
+pub fn variant_callable_invoke_v1(
+    callable: VariantCallableV1, args: [i64]
+) -> Result<i64, VariantCallableRefusalV1>:
+    if args.len() != callable.arity:
+        return Err(VariantCallableRefusalV1(
+            code: VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
+            placement: callable.placement,
+            operation_id: callable.operation_id,
+            reason: "{args.len()} arguments supplied to an arity-{callable.arity} callable"))
+    if callable.placement == ENV_PLACEMENT_STATIC_V1:
+        match callable.static_op:
+            case Some(op): return Ok(op(args))
+            case nil:
+                return Err(VariantCallableRefusalV1(
+                    code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+                    placement: callable.placement,
+                    operation_id: callable.operation_id,
+                    reason: "static callable carries no operation"))
+    if callable.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1 and callable.native_fptr > 0:
+        val value = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_call_i64(callable.native_fptr, args, args.len())
+        return Ok(value)
+    Err(VariantCallableRefusalV1(
+        code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+        placement: callable.placement,
+        operation_id: callable.operation_id,
+        reason: "callable holds no resolvable entry for placement {callable.placement}"))
+
+# Records mapping and callability as the two distinct receipt states REQ-007
+# asks for, from one observed callable, identically for every placement.
+pub fn variant_callable_receipt_mark_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    callable: VariantCallableV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    val mapped = match environment_variant_receipt_mark_mapped_v1(
+            receipt, identity, callable.mapping_handle):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    environment_variant_receipt_mark_callable_v1(
+        mapped, identity, callable.callable_handle)
+
+# Releases the mapping a native callable holds. A static callable owns no
+# mapping, so releasing it is a no-op that still reports success.
+pub fn variant_callable_release_v1(callable: VariantCallableV1) -> bool:
+    if callable.native_handle <= 0:
+        return true
+    unsafe(capabilities: [ffi]):
+        dynlib_admitted_close_v1(callable.native_handle)

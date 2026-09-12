@@ -1,0 +1,132 @@
+use std.spec.*
+use common.gpu.environment_variant_task_contract_v1.*
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_async_mut.gpu.environment_variant_task_owner_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+
+fn d(v: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn evidence() -> ProviderActivationEvidenceV2:
+    ProviderActivationEvidenceV2(
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        artifact_identity: d(60u64), abi_identity: d(13u64),
+        contract_identity: d(14u64), semantic_identity: d(15u64),
+        grammar_identity: d(16u64), program_identity: d(4u64),
+        plan_identity: d(17u64), environment_identity: d(10u64),
+        environment_generation: 11u64, mapped_handle: 102u64,
+        callable_binding_identity: d(20u64),
+        activation_authority_identity: d(19u64))
+
+fn host_snapshot() -> EnvironmentSnapshotV1:
+    val features = EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1, os_id: 1u32,
+        abi_id: 1u32, object_format_id: 1u32, endian_id: 1u16,
+        pointer_width_bits: 64u16, snapshot_identity: d(10u64),
+        snapshot_generation: 11u64, execution_domain_identity: d(21u64),
+        hardware_features: features, os_usable_features: features,
+        policy_allowed_features: features, vector_state_mode: ENV_VECTOR_FIXED_V1,
+        vector_length_bits: 256u32, loader_permission_bits: 1u64,
+        allowed_effect_bits: 7u64, numerical_contract_id: 2u32,
+        resource_layout_digest: d(5u64),
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+
+fn host_device() -> EnvironmentGpuDeviceV1:
+    EnvironmentGpuDeviceV1(
+        device_identity: d(7u64), api_id: 1u32, api_version: 13u32,
+        enabled_feature_words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        memory_domain_bits: 1u64, max_buffer_bytes: 4096u64,
+        max_workgroup_invocations: 256u32, queue_family_count: 2u32)
+
+fn device() -> GpuEnabledDeviceAuthorityV1:
+    GpuEnabledDeviceAuthorityV1(
+        device_identity: d(7u64), registry_generation: 11u64,
+        device_api_id: 1u32, enabled_api_version: 13u32,
+        enabled_feature_bits: 3u64, maximum_buffer_bytes: 4096u64,
+        maximum_workgroup_invocations: 256u32, queue_family_count: 2u32)
+
+fn provider(generation: u64) -> GpuHostControlProviderV1:
+    GpuHostControlProviderV1(
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        provider_generation: generation, registry_backend_id: 1u32,
+        device_program_identity: d(4u64), resource_layout_digest: d(5u64),
+        artifact_digest: d(60u64), abi_identity: d(13u64),
+        api_contract_identity: d(14u64), allowed_effect_bits: 7u64,
+        numerical_contract_id: 2u32)
+
+fn image() -> GpuDeviceProgramImageV1:
+    GpuDeviceProgramImageV1(
+        program_identity: d(4u64), image_digest: d(6u64), device_api_id: 1u32,
+        minimum_api_version: 12u32, required_feature_bits: 3u64,
+        minimum_buffer_bytes: 128u64, minimum_workgroup_invocations: 64u32,
+        minimum_queue_family_count: 1u32, resource_layout_digest: d(5u64),
+        abi_identity: d(13u64), api_contract_identity: d(14u64),
+        required_effect_bits: 1u64, numerical_contract_id: 2u32)
+
+fn image_authority() -> GpuDeviceProgramImageAuthorityV1:
+    GpuDeviceProgramImageAuthorityV1(
+        observed_image_digest: d(6u64), required_trust_policy_digest: d(70u64),
+        required_verifier_identity: d(71u64), minimum_verifier_generation: 72u64,
+        trust_receipt: ArtifactTrustVerificationReceiptV1(
+            descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+            schema_version: ENV_VARIANT_SCHEMA_V1,
+            authentication_status: ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+            receipt_identity: d(73u64), artifact_digest: d(6u64),
+            trust_policy_digest: d(70u64), verifier_identity: d(71u64),
+            verifier_generation: 72u64, verification_evidence_digest: d(74u64)))
+
+fn lease(generation: u64) -> GpuResourceLeaseV1:
+    GpuResourceLeaseV1(
+        lease_identity: d(8u64), device_identity: d(7u64),
+        provider_generation: generation, resource_layout_digest: d(5u64),
+        leased_bytes: 256u64, lease_generation: 5u64)
+
+describe "GPU environment task native authority gates V1":
+    it "does not treat caller asserted lease capacity and arena digests as allocation authority":
+        val e = evidence()
+        val resources = GpuEnvironmentResourceLeaseOwnerV1.create(
+            e.callable_binding_identity)
+        expect(gpu_environment_resource_lease_issue_v1(
+            resources, device(), lease(1u64), d(80u64), d(81u64), 256u64)).to_equal(
+                Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable))
+
+    it "does not treat caller terminal digests as a native queue or fence event":
+        val callbacks = GpuEnvironmentProviderCallbackOwnerV1.create()
+        expect(gpu_environment_provider_callback_port_register_v1(
+            callbacks, d(1u64), d(2u64), 1u64, d(20u64))).to_equal(
+                Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable))
+        val port = GpuEnvironmentProviderCallbackPortV1(
+            port_id: 1u64, owner_identity: callbacks.owner_identity,
+            provider_identity: d(1u64), variant_identity: d(2u64),
+            provider_generation: 1u64, callable_binding_identity: d(20u64))
+        val submitted = GpuEnvironmentTaskSubmissionReceiptV1(
+            submission_id: 1u64, owner_identity: 1u64, task_id: 1u64,
+            invocation_id: 1u64, provider_generation: 1u64,
+            generation_pin_id: 1u64, state: GpuTaskStateV1.Submitted,
+            routing_evidence_only: true, device_execution_proven: false,
+            native_call_pin_dependency: true)
+        expect(gpu_environment_provider_callback_record_v1(
+            callbacks, port, submitted, GpuEnvironmentProviderTerminalV1.Completed,
+            d(90u64), d(91u64), d(92u64), 16u64, 5u64, true)).to_equal(
+                Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable))
+
+    it "does not admit a self-selected mapper or image trust receipt":
+        val manager = ProviderGenerationManagerV2.create()
+        val e = evidence()
+        val activation = provider_generation_activate_v2(manager, e).unwrap()
+        val resources = GpuEnvironmentResourceLeaseOwnerV1.create(
+            e.callable_binding_identity)
+        val owner = GpuEnvironmentTaskOwnerV1.create(
+            manager, host_snapshot(), [3u64], [host_device()], resources).unwrap()
+        expect(gpu_environment_task_provider_admit_v1(
+            owner, activation, e, provider(activation.generation), image(),
+            image_authority(), device())).to_equal(
+                Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable))
+        expect(provider_generation_exact_pin_count_v2(
+            manager, activation, e)).to_equal(Ok(0u64))

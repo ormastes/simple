@@ -1,0 +1,111 @@
+"""Queue-side redemption of a backend owner's packed-completion callback authority.
+
+The packed DrawIR queue owns exactly two things on this seam: whether an
+authority presented to it belongs to the epoch it is completing, and whether
+that authority has already been spent. It owns neither the fence nor the
+timestamps: the device facts travel inside the authority as the backend owner
+recorded them, and the queue passes them through untouched. A queue that
+re-derived them would be asserting device truth it never observed, which is the
+exact failure the compatibility route avoids by reporting routing evidence only.
+
+`Engine2dPackedCompletionAuthorityV1` is the record the backend owner must
+issue. `completion_handle`/`owner_identity` mirror the opaque pair the backend
+completion port hands out, so an authority projected from that port keeps its
+identity here. A caller-constructed record is a validator fixture, never
+production input: nothing in this module can tell a real fence from a fabricated
+one, and it does not pretend to.
+"""
+
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_QUEUED,
+    Engine2dGpuDeviceEvidence,
+    Engine2dGpuEpochReceipt
+}
+
+struct Engine2dPackedCompletionAuthorityV1:
+    completion_handle: u64
+    owner_identity: u64
+    queue_handle: i64
+    backend_handle: i64
+    queue_generation: u64
+    operation_generation: u64
+    scene_generation: u64
+    surface_generation: u64
+    arena_generation: u64
+    evidence: Engine2dGpuDeviceEvidence
+
+struct Engine2dPackedAuthorityKeyV1:
+    completion_handle: u64
+    owner_identity: u64
+
+struct Engine2dPackedCompletionLedgerV1:
+    spent: [Engine2dPackedAuthorityKeyV1]
+
+struct Engine2dPackedCompletionOutcomeV1:
+    ledger: Engine2dPackedCompletionLedgerV1
+    receipt: Engine2dGpuEpochReceipt
+    admitted: bool
+    refusal: text
+
+fn engine2d_packed_completion_ledger_new() -> Engine2dPackedCompletionLedgerV1:
+    """An empty redemption ledger. One ledger tracks one queue's spent authorities."""
+    Engine2dPackedCompletionLedgerV1(spent: [])
+
+fn _engine2d_packed_authority_key(authority: Engine2dPackedCompletionAuthorityV1) -> Engine2dPackedAuthorityKeyV1:
+    Engine2dPackedAuthorityKeyV1(completion_handle: authority.completion_handle, owner_identity: authority.owner_identity)
+
+fn _engine2d_packed_authority_spent(ledger: Engine2dPackedCompletionLedgerV1, authority: Engine2dPackedCompletionAuthorityV1) -> bool:
+    val key = _engine2d_packed_authority_key(authority)
+    for entry in ledger.spent:
+        if entry == key:
+            return true
+    false
+
+fn engine2d_packed_authority_spend(ledger: Engine2dPackedCompletionLedgerV1, authority: Engine2dPackedCompletionAuthorityV1) -> Engine2dPackedCompletionLedgerV1:
+    """Record one redemption. Callers spend only after the authority validated,
+    so a refused presentation leaves the handle usable against the right epoch.
+    """
+    var spent: [Engine2dPackedAuthorityKeyV1] = []
+    for entry in ledger.spent:
+        spent.push(entry)
+    spent.push(_engine2d_packed_authority_key(authority))
+    Engine2dPackedCompletionLedgerV1(spent: spent)
+
+fn engine2d_packed_authority_refusal(receipt: Engine2dGpuEpochReceipt, queue_handle: i64, backend_handle: i64, ledger: Engine2dPackedCompletionLedgerV1, authority: Engine2dPackedCompletionAuthorityV1?) -> text:
+    """The queue-side admission rules, as a diagnostic; empty means redeemable.
+
+    Every check compares facts both sides already hold. None of them inspects
+    the evidence: whether the device evidence qualifies is the epoch contract's
+    question, answered later by `engine2d_gpu_epoch_advance`.
+    """
+    if authority == nil:
+        return "packed completion requires a backend-issued callback authority"
+    if authority.completion_handle == 0u64 or authority.owner_identity == 0u64:
+        return "callback authority handle is not owner-issued"
+    if receipt.phase != ENGINE2D_GPU_PHASE_QUEUED:
+        return "packed completion advances only a queued epoch, not phase {receipt.phase}"
+    if receipt.token == nil:
+        return "a queued epoch without a ring token owns no slot to complete"
+    if queue_handle != receipt.queue_handle or backend_handle != receipt.backend_handle:
+        return "callback authority was presented to a different runtime queue"
+    if authority.queue_handle != receipt.queue_handle or authority.backend_handle != receipt.backend_handle or authority.queue_generation != receipt.queue_generation or authority.operation_generation != receipt.operation_generation or authority.scene_generation != receipt.scene_generation or authority.surface_generation != receipt.surface_generation or authority.arena_generation != receipt.arena_generation:
+        return "callback authority does not correlate with this epoch"
+    if _engine2d_packed_authority_spent(ledger, authority):
+        return "callback authority is single-use and was already redeemed"
+    ""
+
+fn engine2d_packed_completion_refused(ledger: Engine2dPackedCompletionLedgerV1, receipt: Engine2dGpuEpochReceipt, refusal: text) -> Engine2dPackedCompletionOutcomeV1:
+    Engine2dPackedCompletionOutcomeV1(ledger: ledger, receipt: receipt, admitted: false, refusal: refusal)
+
+fn engine2d_packed_completion_admitted(ledger: Engine2dPackedCompletionLedgerV1, receipt: Engine2dGpuEpochReceipt) -> Engine2dPackedCompletionOutcomeV1:
+    Engine2dPackedCompletionOutcomeV1(ledger: ledger, receipt: receipt, admitted: true, refusal: "")
+
+export Engine2dPackedCompletionAuthorityV1
+export Engine2dPackedAuthorityKeyV1
+export Engine2dPackedCompletionLedgerV1
+export Engine2dPackedCompletionOutcomeV1
+export engine2d_packed_completion_ledger_new
+export engine2d_packed_authority_spend
+export engine2d_packed_authority_refusal
+export engine2d_packed_completion_refused
+export engine2d_packed_completion_admitted

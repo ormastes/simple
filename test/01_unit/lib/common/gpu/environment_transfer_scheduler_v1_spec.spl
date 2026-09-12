@@ -1,0 +1,135 @@
+"""Transfer-aware resident scheduling (EGL package 7).
+
+The routing-only queue seam admits one epoch per call and never reasons about
+what crossing the host/device boundary costs. These examples pin the remaining
+package-7 half: a deterministic plan that orders resident tasks by declared
+transfer cost under a byte budget, charges a shared resident upload once per
+residency class, bounds starvation, and names the plan it produced.
+
+No device is required: every cost here is a declared number, which is exactly
+what makes the scheduler provable on a host with no usable GPU lane.
+"""
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use common.gpu.environment_transfer_scheduler_v1.*
+
+fn cost(up: u64, down: u64) -> TransferCostV1:
+    TransferCostV1(host_to_device_bytes: up, device_to_host_bytes: down)
+
+fn task(id: u64, klass: u64, up: u64, down: u64, deferrals: i64) -> TransferTaskV1:
+    TransferTaskV1(invocation_id: id, residency_class: klass, cost: cost(up, down),
+        deferrals: deferrals)
+
+fn ids_of(plan: TransferPlanV1) -> [u64]:
+    var out: [u64] = []
+    for batch in plan.batches:
+        for id in batch.invocation_ids:
+            out.push(id)
+    out
+
+describe "Environment transfer-aware resident scheduler V1":
+
+    it "refuses an empty task set and a zero budget":
+        # @req REQ-SSPEC-UNIT
+        step("refuses an empty task set and a zero budget")
+        var empty: [TransferTaskV1] = []
+        expect(transfer_aware_plan_v1(empty, 1024u64)).to_equal(
+            Err(TransferScheduleErrorV1.EmptyPlan))
+        expect(transfer_aware_plan_v1([task(1u64, 1u64, 8u64, 8u64, 0)], 0u64)).to_equal(
+            Err(TransferScheduleErrorV1.InvalidBudget))
+
+    it "refuses a duplicate invocation identity":
+        # @req REQ-SSPEC-UNIT
+        step("refuses a duplicate invocation identity")
+        expect(transfer_aware_plan_v1(
+            [task(7u64, 1u64, 8u64, 8u64, 0), task(7u64, 2u64, 8u64, 8u64, 0)],
+            4096u64)).to_equal(Err(TransferScheduleErrorV1.DuplicateInvocation))
+
+    it "orders cheap crossings before expensive ones":
+        # @req REQ-SSPEC-UNIT
+        step("orders cheap crossings before expensive ones")
+        val plan = transfer_aware_plan_v1([
+            task(1u64, 10u64, 900u64, 0u64, 0),
+            task(2u64, 20u64, 10u64, 0u64, 0),
+            task(3u64, 30u64, 100u64, 0u64, 0)
+        ], 4096u64).unwrap()
+        expect(ids_of(plan)).to_equal([2u64, 3u64, 1u64])
+        expect(plan.deferred.len()).to_equal(0)
+
+    it "never plans more than the budget when nothing is starved":
+        # @req REQ-SSPEC-UNIT
+        step("never plans more than the budget when nothing is starved")
+        val plan = transfer_aware_plan_v1([
+            task(1u64, 10u64, 400u64, 0u64, 0),
+            task(2u64, 20u64, 400u64, 0u64, 0),
+            task(3u64, 30u64, 400u64, 0u64, 0)
+        ], 900u64).unwrap()
+        expect(plan.planned_bytes <= plan.budget_bytes).to_equal(true)
+        expect(plan.forced.len()).to_equal(0)
+        expect(plan.deferred).to_equal([3u64])
+
+    it "charges one shared upload for a batched residency class":
+        # @req REQ-SSPEC-UNIT
+        step("charges one shared upload for a batched residency class")
+        # Three tasks resident in the same class: the 1000-byte upload is
+        # already on the device after the first, so a transfer-aware plan
+        # charges it once and only the readbacks per task.
+        val plan = transfer_aware_plan_v1([
+            task(1u64, 10u64, 1000u64, 5u64, 0),
+            task(2u64, 10u64, 1000u64, 5u64, 0),
+            task(3u64, 10u64, 1000u64, 5u64, 0)
+        ], 4096u64).unwrap()
+        expect(plan.batches.len()).to_equal(1)
+        expect(plan.batches[0].invocation_ids).to_equal([1u64, 2u64, 3u64])
+        expect(plan.batches[0].upload_bytes).to_equal(1000u64)
+        expect(plan.batches[0].readback_bytes).to_equal(15u64)
+        expect(plan.planned_bytes).to_equal(1015u64)
+
+    it "bounds starvation by force-admitting a repeatedly deferred class":
+        # @req REQ-SSPEC-UNIT
+        step("bounds starvation by force-admitting a repeatedly deferred class")
+        val heavy_fresh = transfer_aware_plan_v1([
+            task(1u64, 10u64, 50u64, 0u64, 0),
+            task(2u64, 20u64, 5000u64, 0u64, 0)
+        ], 100u64).unwrap()
+        expect(heavy_fresh.deferred).to_equal([2u64])
+        expect(heavy_fresh.forced.len()).to_equal(0)
+
+        val heavy_starved = transfer_aware_plan_v1([
+            task(1u64, 10u64, 50u64, 0u64, 0),
+            task(2u64, 20u64, 5000u64, 0u64, TRANSFER_SCHEDULER_STARVATION_BOUND_V1)
+        ], 100u64).unwrap()
+        expect(heavy_starved.forced).to_equal([2u64])
+        expect(heavy_starved.deferred.len()).to_equal(0)
+        expect(ids_of(heavy_starved)[0]).to_equal(2u64)
+        expect(heavy_starved.budget_exceeded_by_forced).to_equal(true)
+
+    it "is deterministic for a given input regardless of arrival order":
+        # @req REQ-SSPEC-UNIT
+        step("is deterministic for a given input regardless of arrival order")
+        val a = transfer_aware_plan_v1([
+            task(1u64, 10u64, 100u64, 4u64, 0),
+            task(2u64, 20u64, 30u64, 4u64, 0),
+            task(3u64, 10u64, 100u64, 4u64, 0)
+        ], 4096u64).unwrap()
+        val b = transfer_aware_plan_v1([
+            task(3u64, 10u64, 100u64, 4u64, 0),
+            task(2u64, 20u64, 30u64, 4u64, 0),
+            task(1u64, 10u64, 100u64, 4u64, 0)
+        ], 4096u64).unwrap()
+        expect(a.plan_identity).to_equal(b.plan_identity)
+        expect(ids_of(a)).to_equal(ids_of(b))
+
+    it "names the plan it produced in its receipt":
+        # @req REQ-SSPEC-UNIT
+        step("names the plan it produced in its receipt")
+        val plan = transfer_aware_plan_v1([
+            task(1u64, 10u64, 100u64, 0u64, 0),
+            task(2u64, 20u64, 5000u64, 0u64, 0)
+        ], 200u64).unwrap()
+        expect(plan.schema_version).to_equal(TRANSFER_SCHEDULER_SCHEMA_V1)
+        expect(plan.plan_identity).to_contain("transfer-plan/v1")
+        expect(plan.plan_identity).to_contain("budget=200")
+        expect(plan.plan_identity).to_contain("classes=10")
+        expect(plan.plan_identity).to_contain("deferred=2")

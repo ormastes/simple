@@ -1,0 +1,78 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+
+fn partition_summary_lbs(bytes: [u8], split: i64) -> LexicalSummaryCompositionV1:
+    val left = [for i in 0..split: bytes[i]]
+    val right = [for i in split..bytes.len(): bytes[i]]
+    val a = lexical_block_summary_scalar_v1(left, lexical_block_initial_state_v1()).unwrap()
+    val b = lexical_block_summary_scalar_v1(right, a.output_state).unwrap()
+    lexical_summary_compose_v1(lexical_summary_from_block_v1(a), lexical_summary_from_block_v1(b)).unwrap()
+
+describe "canonical scalar lexical block summary V1":
+    it "preserves quote and escape state across 31 32 and 33 byte boundaries":
+        val prefix = [97u8 for _ in 0..30] + [34u8, 92u8]
+        val a = lexical_block_summary_scalar_v1(prefix, lexical_block_initial_state_v1()).unwrap()
+        expect(a.byte_count).to_equal(32u32)
+        expect(a.output_state.quote_kind).to_equal(LexicalQuoteKindV1.Double)
+        expect(a.output_state.escape_parity).to_equal(true)
+        val b = lexical_block_summary_scalar_v1([34u8], a.output_state).unwrap()
+        expect(b.output_state.quote_kind).to_equal(LexicalQuoteKindV1.Double)
+        expect(b.output_state.escape_parity).to_equal(false)
+
+    it "resets line comment at newline and emits deterministic masks":
+        val bytes = [35u8, 97u8, 10u8, 40u8] + [32u8 for _ in 0..27]
+        val s = lexical_block_summary_scalar_v1(bytes, lexical_block_initial_state_v1()).unwrap()
+        expect(s.byte_count).to_equal(31u32)
+        expect(s.line_comment_mask).to_equal(3u32)
+        expect(s.newline_mask).to_equal(4u32)
+        expect(s.delimiter_mask).to_equal(8u32)
+
+    it "checked sequential composition preserves parenthesization and fallback":
+        val initial = lexical_block_initial_state_v1()
+        val a = lexical_block_summary_scalar_v1([34u8], initial).unwrap()
+        val b = lexical_block_summary_scalar_v1([123u8], a.output_state).unwrap()
+        val c = lexical_block_summary_scalar_v1([34u8], b.output_state).unwrap()
+        val ab_c = lexical_summary_compose_v1(
+            lexical_summary_compose_v1(lexical_summary_from_block_v1(a), lexical_summary_from_block_v1(b)).unwrap(),
+            lexical_summary_from_block_v1(c)).unwrap()
+        val a_bc = lexical_summary_compose_v1(lexical_summary_from_block_v1(a),
+            lexical_summary_compose_v1(lexical_summary_from_block_v1(b), lexical_summary_from_block_v1(c)).unwrap()).unwrap()
+        expect(ab_c).to_equal(a_bc)
+        expect((ab_c.fallback_bits & LEX_FALLBACK_INTERPOLATION_V1) != 0u64).to_equal(true)
+        expect(ab_c.canonical_usable).to_equal(false)
+
+    it "tags raw triple custom block comment and indentation for fallback":
+        val cases = [[114u8, 34u8], [34u8, 34u8, 34u8], [97u8, 123u8],
+            [47u8, 42u8], [10u8, 32u8]]
+        var combined = 0u64
+        for bytes in cases:
+            combined = combined | lexical_block_summary_scalar_v1(bytes,
+                lexical_block_initial_state_v1()).unwrap().fallback_bits
+        expect(combined).to_equal(LEX_FALLBACK_RAW_STRING_V1 | LEX_FALLBACK_TRIPLE_STRING_V1 |
+            LEX_FALLBACK_CUSTOM_BLOCK_V1 | LEX_FALLBACK_BLOCK_COMMENT_V1 | LEX_FALLBACK_INDENTATION_V1)
+
+    it "detects every unsupported introducer across every partition of 33 bytes":
+        val pad = [97u8 for _ in 0..30]
+        val inputs = [pad + [34u8, 34u8, 34u8], pad + [97u8, 114u8, 34u8],
+            pad + [97u8, 120u8, 123u8], pad + [97u8, 47u8, 42u8],
+            pad + [97u8, 10u8, 32u8]]
+        val expected = [LEX_FALLBACK_TRIPLE_STRING_V1, LEX_FALLBACK_RAW_STRING_V1,
+            LEX_FALLBACK_CUSTOM_BLOCK_V1, LEX_FALLBACK_BLOCK_COMMENT_V1,
+            LEX_FALLBACK_INDENTATION_V1]
+        var case_index = 0
+        while case_index < inputs.len():
+            var split = 1
+            while split < 33:
+                val composed = partition_summary_lbs(inputs[case_index], split)
+                expect((composed.fallback_bits & expected[case_index]) != 0u64).to_equal(true)
+                split = split + 1
+            case_index = case_index + 1
+
+    it "resets a line comment across every newline partition":
+        val bytes = [35u8] + [97u8 for _ in 0..30] + [10u8, 40u8]
+        var split = 1
+        while split < 33:
+            val composed = partition_summary_lbs(bytes, split)
+            expect(composed.output_state.in_line_comment).to_equal(false)
+            expect(composed.output_state.quote_kind).to_equal(LexicalQuoteKindV1.None)
+            split = split + 1

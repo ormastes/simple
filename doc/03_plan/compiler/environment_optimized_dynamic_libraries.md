@@ -236,12 +236,16 @@ spec is placed under `doc/06_spec`.
 | Workstream | Current evidence | Status | Next promotion gate |
 |---|---|---|---|
 | Shared parser unification | Legacy frontend remains the oracle; a frontend-owned lazy advisory seam, scalar lexical summaries, and a 22-state transition-table foundation exist. Canonical Simple/SDN/sosh grammar parity and full parser replacement do not. | Foundation implemented; unification incomplete | Differential dialect, malformed-input, incremental, interpolation, indentation, and facade parity |
-| GPU parser/offload | Generic provider/device contracts and owner-scoped packed proof/callback schemas exist. No packed parser batch is connected to a concrete backend fence; compatibility completion is routing-only. | Contract scaffold only | Vulkan-owned provider/session/image/device/content/lease/fence authority plus real device readback and negative control |
+| GPU parser/offload | Generic provider/device contracts and owner-scoped packed proof/callback schemas exist. The hosted native ABI now authenticates an exact sealed Linux provider image, issues unguessable bounded session/resource/completion capabilities, pins calls and generations through fence/readback, stages and checksums output before commit, and blocks unload until retained owners drain. No packed parser batch is connected to this substrate; compatibility completion remains routing-only. | Native provider substrate implemented; parser integration incomplete | Authenticated device-program image owner, task-owner bridge, Vulkan parser kernel, physical device readback, and negative control |
 | SIMD optimization of Simple/parser | An authenticated x86-64 SysV AVX2 32-byte equality primitive and lexical mask batch exist; exact bytes executed under QEMU TCG. Scalar code still owns lexical-state resolution; native hardware, Win64, v4, and full-parser execution remain open. | Narrow SIMD kernel implemented; product optimization incomplete | Physical/self-host execution, full ABI/artifact receipts, parity, parser-only packaging, and NFR speedup |
 | Generated JIT/AOT/binary SIMD | Target-codegen contracts and a parser variant build plan separate host and target. Existing AOT is whole-module; parser sibling emission, target-aware JIT materialization, cache V2 implementation, and emitted/executed ISA proof are missing. | Design/contracts in progress | Cache V2 validation, actual sibling artifacts/JIT units, disassembly/metadata checks, callable execution, rollback |
 
-None of the four workstreams is complete. The two immediate independent units
-are the Vulkan retained-fence/lease adapter and cache V2 canonical validation.
+None of the four workstreams is complete. The native GPU substrate is not a
+parser-execution claim: `FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` remains false.
+Linux admission requires the backend provider path and its exact configured
+SHA-256; non-Linux authenticated table admission remains fail-closed until an
+immutable mapped-byte primitive exists. The immediate independent units are
+the device-program/task bridge and cache V2 canonical validation.
 
 ## Stage 7A — Vulkan retained packed completion adapter (planned, not admitted)
 
