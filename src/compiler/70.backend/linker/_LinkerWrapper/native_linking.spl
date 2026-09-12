@@ -969,9 +969,33 @@ pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: b
         return flags
     []
 
+pub fn darwin_sdk_path() -> text:
+    """The macOS SDK to link against, or "" when none can be resolved.
+
+    `xcrun --find clang` prefers the Xcode toolchain, whose DEFAULT SDK can be
+    absent on a host whose active developer dir is CommandLineTools — that clang
+    then fails the link with `ld: library 'System' not found`, which reads like a
+    missing library and is really a missing sysroot. Measured 2026-09-13 on this
+    host: bare `clang t.c -lSystem` fails, the same clang with `-isysroot
+    $(xcrun --show-sdk-path)` succeeds. SDKROOT wins when set, so a caller can
+    still pin a different SDK.
+    See doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md."""
+    val pinned = env_get("SDKROOT") ?? ""
+    if pinned != "" and file_exists(pinned): return pinned
+    if not file_exists("/usr/bin/xcrun"): return ""
+    val (out, _, code) = process_run("/usr/bin/xcrun", ["--show-sdk-path"])
+    if code != 0: return ""
+    val path = out.trim().split("\n")[0]
+    if path != "" and file_exists(path): return path
+    ""
+
 pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
     if os == "macos" or os == "darwin" or os == "Darwin":
         var flags = ["-Wl,-dead_strip"]
+        val sdk = darwin_sdk_path()
+        if sdk != "":
+            flags.push("-isysroot")
+            flags.push(sdk)
         if strip_output: flags.push("-Wl,-S,-x")
         return flags
     if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
