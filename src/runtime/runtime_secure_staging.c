@@ -92,6 +92,20 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+#if defined(_WIN32)
+/* Canonical implementation of the secure-staging pair (this file's own header
+ * says "implemented once, in C"). Every Windows failure mode returned an empty
+ * string, so the AOT diagnostic-staging caller could only ever say "diagnostic
+ * staging unavailable". Name the failing step and the Win32 error.
+ * SIMPLE_QUIET_SECURE_TEMP_DIAG=1 silences. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
+
 int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char parent[RT_SECURE_PATH_MAX], prefix[128], path[RT_SECURE_PATH_MAX];
@@ -103,16 +117,16 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     typedef BOOL (WINAPI *SddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE bcrypt = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
     RandomFn fill = bcrypt ? (RandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
-    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
     FreeLibrary(bcrypt); char suffix[33];
     for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
     int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
     HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
     SddlFn convert = advapi ? (SddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
-    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
     BOOL created = CreateDirectoryA(path, &attributes); LocalFree(descriptor); FreeLibrary(advapi);
-    if (!created) return rt_string_new(NULL, 0);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
     if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
