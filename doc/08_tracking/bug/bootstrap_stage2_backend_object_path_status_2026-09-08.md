@@ -106,3 +106,59 @@ returning 1. Note the trap that cost time on the staging fix —
 `runtime_secure_staging.c` is the one that links, so instrument the copy that is
 actually in the artifact and verify with `strings` on the binary rather than
 assuming.
+
+## 2026-09-13: narrowed to "write reports success, file is empty"
+
+Three instrumentation passes landed today moved this from an opaque status code
+to a specific, reproducible contradiction. Current state:
+
+```
+backend object-path status 1 (diagnostic file empty; path <266 chars>)
+```
+
+and **no** `AOT diagnostic write failed` warning, which is now emitted whenever
+`file_atomic_write` returns false. So:
+
+- the backend DOES reach a failure path and DOES call the diagnostic writer
+  (every one of the twelve failure returns across `compile_ir_to_object_path`,
+  `DynamicBackendAdapter.compile_aot_into_path` and
+  `dynamic_backend_publish_object_v1` writes one);
+- `file_atomic_write` returns **true**;
+- the driver then reads the file successfully and finds it **empty**
+  (`Ok(message)` with `message.len() == 0`, not `Err`);
+- both writer and reader normalise through `host_path_native`, so they agree on
+  the path, and both now get the extended-length prefix (the path is 266 chars,
+  past the 247 ceiling).
+
+A write that reports success and leaves a zero-byte file is the contradiction to
+chase. Candidates not yet eliminated, in the order I would take them:
+
+1. `rt_file_atomic_write` writes to a temp file and publishes by rename. If the
+   temp write succeeds and the publish silently no-ops, the destination exists
+   and is empty and the function still returns success. Instrument the publish
+   step specifically — the temp path is also long.
+2. The content argument arriving empty. `backend_aot_write_diagnostic` bounds
+   the message with a slice before writing; verify the bounded value is
+   non-empty at the call, not just the source message.
+3. A cleanup racing the read: `llvm_object_stage_fail` removes its stage dir,
+   and the driver removes `diagnostic_dir` after reading. Ordering has been
+   reasoned about but not traced.
+
+### Verified NOT the cause (do not re-chase)
+
+- Not MAX_PATH on the directory: `CreateDirectoryA` at 258 chars was real and is
+  fixed (`CreateDirectoryW` + extended-length prefix).
+- Not MAX_PATH on the file open: a 278-char absolute path round-trips correctly
+  through `file_atomic_write` + `file_read_regular_no_follow_bounded` today.
+- Not a missing extern registration, not `SystemRoot`, not `--entry-closure`,
+  not `--mode one-binary`, not the harness argv — the rejected Stage 2 binary
+  hand-builds a hello world at rc=0 under all of those.
+- Not a stale object cache: reproduced with `stage2-native-cache` and
+  `native-objects-*` deleted.
+
+### Note for the next session
+
+`rt_secure_temp_dir` exists in three byte-identical copies and only
+`runtime_secure_staging.c` is the one that links. Instrument the copy that is
+actually in the artifact and confirm with `strings` on the binary before
+concluding a diagnostic is silent — that mistake cost a full cycle here.

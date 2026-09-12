@@ -104,3 +104,79 @@ Instrument inside the real `HirLowering`/`SymbolTable` call graph using **real
 `match`/`case` dispatch as the signal** — never `rt_enum_discriminant` from user
 code — and bisect what actually makes `fn_matched` false. Until that lands, treat
 the mechanism as open.
+
+## Triage 2026-09-12 — REPRODUCED, minimally, deterministically
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+Engine: `bin/simple run` (JIT, with the documented interpreter fallback).
+
+Found in situ first: widening the unified CLI's module graph to reach `os.cli`
+turned `handle_os(["targets"])` into
+`semantic: unknown variant or method 'Riscv64' on enum Architecture`. Reduced
+to **ten lines**, which is what five lanes could not produce:
+
+```spl
+# FAILS
+use os.kernel.arch.arch_context.{Architecture}
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig}
+
+fn pick() -> text:
+    val a = Architecture.Riscv64
+    match a:
+        Architecture.Riscv64: "riscv64"
+        _: "other"
+
+fn main():
+    print "pick={pick()}"
+```
+
+```
+error: semantic: unknown variant or method 'Riscv64' on enum Architecture
+       (declared variants: Arm32, Arm64, RiscV32, RiscV64, X86, X86_64, Avr,
+        I8086, Wasm32, Xtensa)
+```
+
+The variant list in the message is **the other module's** enum
+(`src/lib/nogc_sync_mut/debug/remote/types.spl:5`, which spells the variant
+`RiscV64`), even though `Architecture` was explicitly imported from
+`os.kernel.arch.arch_context` (variant `Riscv64`).
+
+### Two controls, both green — the factor is isolated
+
+| probe | imports | result |
+|---|---|---|
+| b | `os.…arch_context.{Architecture}` **then** `debug.remote.types.{DebugConfig}` | **FAILS** |
+| c | `debug.remote.types.{DebugConfig}` **then** `os.…arch_context.{Architecture}` | `pick=riscv64` |
+| d | `os.…arch_context.{Architecture}` alone | `pick=riscv64` |
+
+So it is **order-dependent and last-registration-wins**: whichever module
+carrying the bare name is registered *later* owns it, and an explicit
+`use M.{Architecture}` earlier in the same file does not protect the reference.
+That is consistent with `named_type_register`
+(`10.frontend/core/types.spl:559`) being a flat, name-keyed, non
+module-qualified global, which this record already identified structurally.
+
+### Why the earlier five lanes missed it
+
+This record's own control already named the trap: *"an unresolved `use`
+silently succeeds"*, so a probe whose setup was `use M.{SomeCollider}` never
+established that the collider module was loaded at all. Probe b avoids that by
+importing a **real, existing** symbol (`DebugConfig`) from the colliding
+module — the import has to resolve, so the module genuinely enters the
+registry. The colliding declaration also does not need to be *used*, only
+*registered*: `DebugConfig` is imported and `Architecture` is not, and it still
+wins.
+
+Third `Architecture` in the tree, same family:
+`src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl:15`.
+
+**Still OPEN.** The fix is module-qualified registration in
+`10.frontend/core/types.spl` (and the matching `enum_variant_index` in MIR),
+which is a compiler-core change well past a triage slot — and no regression
+spec is added here, because a spec pinning the correct behaviour would sit RED.
+The reproducer above is the asset; it makes the fix verifiable in seconds
+instead of by renaming ~40 files against an unproven mechanism.
+
+All three probes above were run with `bin/simple run`, not `bin/simple test`,
+so this is **not** a test-harness module-load artifact: it reproduces on the
+plain run path, which is what the earlier lanes' probes were also using.
