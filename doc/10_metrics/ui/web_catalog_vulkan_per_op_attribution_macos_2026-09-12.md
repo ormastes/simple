@@ -1,6 +1,6 @@
 # Vulkan lane per-op attribution, css-layout.html (macOS M4, 2026-09-12)
 
-Binary bracketed identical on every run: `/Users/ormastes/simple/build/cargo-r2/release/simple`,
+Binary bracketed identical every run: `build/cargo-r2/release/simple`,
 `stat -f '%z %m'` = `39368072 1789171430`. `SIMPLE_2D_BACKEND=vulkan
 SIMPLE_VK_READBACK=native SIMPLE_2D_BACKEND_STRICT=1 SIMPLE_VK_TIMING=1
 SIMPLE_EXECUTION_MODE=interpreter`, one at a time. Page `css-layout.html`;
@@ -13,8 +13,7 @@ logs `build/perf/vk_attr_2026-09-12/` (gitignored).
 | **font_atlas_pack_u32_to_u8** | 5 | **19,012** | **7,433** |
 | font_atlas_payload_sha256 | 5 | 8,234 | 8,308 |
 | font_composite (total) | 5 | 27,348 | 15,669 |
-| rect (all dispatches) | 187 | 145 | 143 |
-| image_composite (1x1) | 76 | 99 | 99 |
+| rect (all 187 dispatches) / image_composite (76 1x1) | | 244 | 242 |
 | enqueue + whole SFFI bind/push/dispatch chain | 112 | 25 | 25 |
 | **frame** | | **47,646** | **35,389 (-25.7%)** |
 
@@ -27,8 +26,8 @@ checksum `325932497106919` unchanged. `font_atlas_sffi_upload` is 44 ms total.
 
 ## 900x760 — the dominant term is a DIFFERENT one
 
-True pair on this tree (before = the two font files checked back to the
-instrumentation-only commit, so instrumentation matches on both sides):
+True pair on this tree (before = font files checked back to the
+instrumentation-only commit, so instrumentation matches both sides):
 
 | bucket | n | before | after |
 |---|---|---|---|
