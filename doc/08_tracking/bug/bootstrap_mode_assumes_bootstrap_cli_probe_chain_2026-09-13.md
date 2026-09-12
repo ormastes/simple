@@ -1,6 +1,14 @@
 # `SIMPLE_BOOTSTRAP=1` is treated as "this compile IS the bootstrap CLI" at several sites
 
-- Status: OPEN (2026-09-13) — two of the sites fixed, at least one more remains
+- Status: FIXED (2026-09-13, BOOT-5) — all three sites closed and the third
+  proven on a freshly built Stage-2 binary. Stage 2 is still not admitted, but
+  for an unrelated defect:
+  `stage2_capsule_receipt_size_canary_blocks_linux_admission_2026-09-13.md`.
+  Proof on `build/bootstrap-boot5/stage2/aarch64-unknown-linux-gnu/simple.rejected`
+  (sha256 `69fdfbf8b1c5e152...`), `SIMPLE_BOOTSTRAP=1`, same probe:
+  `fn-list:start` count 0 (the bootstrap-flat loop is no longer entered) and
+  `lower_function:start main` count 1, identical to the `SIMPLE_BOOTSTRAP=0`
+  control. `MIR module has no functions` no longer occurs in any pass.
 - Found: bootstrap lane BOOT-4, `work/bootstrap-full-2-2026-09-12`
 - Severity: blocks Stage-2 admission. Only reachable once the zero-work
   request-identity defect (`request-invalid`) is fixed — before that, the
