@@ -2,8 +2,8 @@
 
 use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{
-    bind_pattern_value, handle_method_call_with_self_update, range_object_values, restore_pattern_scope,
-    save_pattern_scope,
+    bind_pattern_value, for_loop_iterable_is_items_or_entries_call, handle_method_call_with_self_update,
+    range_object_values, restore_pattern_scope, save_pattern_scope,
 };
 use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -746,7 +746,19 @@ pub(super) fn exec_block_closure_into(
                     impl_methods,
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
-                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                // Bare two-name pattern destructures (no index-wrap) for a
+                // `.items()`/`.entries()` iterable (static check) or direct
+                // dict iteration (runtime `Value::Dict` check, pre-existing,
+                // NOT widened to `FrozenDict` -- see the fuller rationale in
+                // `exec_for_inner`, interpreter_control.rs). Every other
+                // iterable, including an array of 2-tuples or an
+                // `.enumerate()` call, keeps the plain enumerate shorthand
+                // exactly as before. See
+                // `for_loop_iterable_is_items_or_entries_call` and
+                // doc/08_tracking/bug/
+                // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+                let destructure_bare_pattern = for_loop_iterable_is_items_or_entries_call(&for_stmt.iterable)
+                    || matches!(&iterable, Value::Dict(_));
                 // Loop variable is SCOPED TO THE LOOP — see the sibling site
                 // below and `exec_for` in interpreter_control.rs. This is the
                 // closure/block executor, which is the path an `it` block body
@@ -756,7 +768,7 @@ pub(super) fn exec_block_closure_into(
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
                 let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &local_env);
                 'for_loop_own: for (index, val) in iter_values.into_iter().enumerate() {
-                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
+                    let bind_value = if for_stmt.auto_enumerate && !destructure_bare_pattern {
                         Value::Tuple(vec![Value::Int(index as i64), val])
                     } else {
                         val
@@ -1629,13 +1641,25 @@ fn exec_block_closure_mut_inner(
             Node::For(for_stmt) => {
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
-                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                // Bare two-name pattern destructures (no index-wrap) for a
+                // `.items()`/`.entries()` iterable (static check) or direct
+                // dict iteration (runtime `Value::Dict` check, pre-existing,
+                // NOT widened to `FrozenDict` -- see the fuller rationale in
+                // `exec_for_inner`, interpreter_control.rs). Every other
+                // iterable, including an array of 2-tuples or an
+                // `.enumerate()` call, keeps the plain enumerate shorthand
+                // exactly as before. See
+                // `for_loop_iterable_is_items_or_entries_call` and
+                // doc/08_tracking/bug/
+                // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+                let destructure_bare_pattern = for_loop_iterable_is_items_or_entries_call(&for_stmt.iterable)
+                    || matches!(&iterable, Value::Dict(_));
                 // Loop variable is SCOPED TO THE LOOP — sibling of the
                 // `'for_loop_own` site above; both are closure/block executors.
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
                 let for_saved_scope = save_pattern_scope(&for_stmt.pattern, local_env);
                 'for_loop: for (index, val) in iter_values.into_iter().enumerate() {
-                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
+                    let bind_value = if for_stmt.auto_enumerate && !destructure_bare_pattern {
                         Value::Tuple(vec![Value::Int(index as i64), val])
                     } else {
                         val
