@@ -86,7 +86,11 @@ The allocating function is not yet named. `gdb -p <pid>` is **refused on this ho
 candidate UNDER gdb rather than attaching (`scratchpad/boot7/gdb9.sh` + `trace9.py`); the
 adapted harness for this lane is already in place at `scratchpad/boot8/gdb_site9.sh` +
 `trace_boot8.py`, pointed at this candidate and this run's runtime authority. Run the probe
-under gdb, let RSS climb to a few GB, interrupt, and walk the stack — and, given site 8, check
+under gdb, let RSS climb to a few GB, interrupt, and walk the stack. That harness was written
+for a SEGV (catch the signal, dump registers); site 9 needs a TIMED interrupt instead, and the
+form that needs no python is
+`gdb -batch -ex run -ex 'bt 30' --args <candidate> native-build …` with `kill -INT <inferior
+pid>` from a second shell once RSS passes ~3 GB — gdb stops on the SIGINT and prints the stack — and, given site 8, check
 first whether the allocation is another struct-copy shape: every `val` binding, field read and
 argument of a struct type allocates, so a copy inside a hot loop over modules or symbols would
 look exactly like this. See `dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md`.
