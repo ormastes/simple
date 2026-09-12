@@ -21,6 +21,16 @@ build/cargo-r2/release/simple run <spec>` (39,368,072 B, mtime 1789171430)
 ✗ GPU rect_filled dispatch runs (2d) and marks dirty  expected false to equal true
 ```
 
+> **CORRECTED 2026-09-12 — read this first.** The "registration gap" /
+> "fail-open somewhere between them" framing below is wrong. Under a seed built
+> WITH the `metal` feature (`build/cargo-r2/release/simple`, 39,178,424 B, mtime
+> 1789197971) `metal_sffi_create_device(0)` answers a non-zero device, the
+> pipelines compile, and `read_pixels()` really is a device download. There is no
+> fail-open to fix: the earlier binary simply lacked the `metal` cargo feature.
+> With that seed the readback spec's remaining failures were four STALE SPEC
+> ORACLES, not device defects, and the backend needed no change at all. See
+> `doc/08_tracking/bug/metal_engine2d_readback_device_defects_2026-09-12.md`.
+
 **This is not an MSL source defect.** The Metal runtime is not functional in this
 binary on a real Apple M4. Direct probe:
 
