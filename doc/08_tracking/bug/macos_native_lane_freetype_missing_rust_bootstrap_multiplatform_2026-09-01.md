@@ -1,7 +1,7 @@
 # `Native — macOS aarch64` red on `main`: `rust-bootstrap-multiplatform.yml` never installs freetype
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN — pre-existing on `main`, NOT caused by any open PR
+- **Status:** FIX LANDED, verification in progress (2026-09-12) — see "Re-verified" section below
 - **Lane:** `.github/workflows/rust-bootstrap-multiplatform.yml`, job `native`, step `Test`
 - **Severity:** blocks every macOS row of that workflow; every PR touching its trigger paths shows a red macOS check
 
@@ -98,3 +98,39 @@ error, add the corresponding install rather than reclassifying this record.
 | #253 (`52f6af5b9a7`) | queued | expected YES — triggers the same workflow |
 | #247 (`bee1f952460`) | no macOS check-run | no — workflow not triggered by its paths |
 | #235 (`a2475e29cc2`) | no macOS check-run | no — workflow not triggered by its paths |
+
+## Re-verified 2026-09-12 — fix present, `Test`-step verdict still pending
+
+The proposed patch is already committed on `main` (`.github/workflows/rust-bootstrap-multiplatform.yml:150-155`,
+introduced at `6dfbf2cae86` on 2026-09-01): a macOS-gated `Install freetype (macOS)` step runs
+`brew install freetype` and exports `LIBRARY_PATH`/`CPATH` before the `Build`/`Test` steps.
+
+Every recent scheduled/push run of this workflow on `main` is `cancelled` by its own
+`concurrency: group: ${{ github.workflow }}-${{ github.ref }}` before completing (main advances too
+fast for a full multi-hour matrix to finish uncancelled) — `gh run list --workflow=rust-bootstrap-multiplatform.yml --limit 100`
+shows 0 runs with `conclusion` in `{success, failure}` in the last 100 pushes/PRs. This is why the
+fix could not be confirmed passively, and it is also why a direct `gh workflow run ... --ref main`
+dispatch does not help: it shares main's own concurrency group and gets cancelled by the next push
+to main just like every other run.
+
+First dispatch (on `main`, wrong ref for this reason): run
+https://github.com/ormastes/simple/actions/runs/34678730839. `Native — macOS aarch64`'s
+`Install freetype (macOS)` step completed **success** (not skipped) before the whole run was
+cancelled by a later push to `main` — this confirms the step itself works, but does NOT confirm the
+subsequent `Test` step (the one that actually failed with `ld: library 'freetype' not found` in the
+original incident) completes green, since the run never reached a terminal `Test` conclusion.
+
+**Correct verification path (not yet completed this session):** dispatch on an isolated ref instead
+of `main` so the run cannot be cancelled by main's own churn:
+
+```sh
+gh workflow run rust-bootstrap-multiplatform.yml --ref work/macos-lane5-ci-docgen-2026-09-12
+gh run list --workflow=rust-bootstrap-multiplatform.yml --limit 5   # get the run id
+gh run view <id> --log-failed | grep -c "library 'freetype' not found"   # must be 0
+```
+
+Status: fix is landed and its `Install` step is confirmed to execute and succeed; the `Test`-step
+verdict on macOS aarch64/x86_64 is NOT yet confirmed green in this session because every attempted
+run was cancelled by unrelated main-branch concurrency before reaching that step. Do not mark
+RESOLVED until a run dispatched on a non-`main` ref reaches a terminal `Test` conclusion with 0
+occurrences of the original error text.

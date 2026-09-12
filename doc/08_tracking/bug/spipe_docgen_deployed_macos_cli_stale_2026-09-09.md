@@ -2,7 +2,7 @@
 
 Date: 2026-09-09
 
-Status: blocked on a current admitted pure-Simple CLI; generated manual remains stale.
+Status: BLOCKED (re-verified 2026-09-12) on a current admitted pure-Simple CLI; generated manual remains stale.
 
 ## Affected output
 
@@ -94,3 +94,33 @@ scenario source. Preserve that run's executable/source/output identities.
 The focused source whitespace check passed. The executable-spec layout scan
 returned zero `*_spec.spl` files under `doc/06_spec`. These checks do not close
 the missing regeneration evidence or establish a generator PASS.
+
+## Re-verified 2026-09-12 (BLOCKED — confirmed, blocker unchanged)
+
+Reproduced on this host: no `bin/release/macos-arm64/simple` (nor any per-triple
+`bin/release/**/simple`) exists in this worktree; `bin/simple` resolves to
+`bin/release/simple`, and the only executable `simple` binaries present are the Rust
+seeds (`/Users/ormastes/simple/build/cargo-r2/release/simple`,
+`src/compiler_rust/target/bootstrap/simple` — the latter absent here too). The Rust seed
+prints "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it
+as the normal tool. Build and use the pure-Simple bin/simple instead." There is no
+admitted pure-Simple full-CLI binary deployed on this mac host to rerun `spipe-docgen`
+against, so the blocker this record already named is unchanged.
+
+**Exact resume command** (unchanged from "Required closure" above, restated verbatim for
+the next session):
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 bin/release/macos-arm64/simple spipe-docgen \
+  test/02_integration/app/llm_process/knowledge_routing_process_spec.spl \
+  --output doc/06_spec --no-index
+```
+
+to be run only once a fresh bootstrap lane deploys a current, admitted pure-Simple CLI
+to `bin/release/macos-arm64/simple` (or the platform's equivalent slot) on this host.
+Requires exit 0, `1 complete, 0 stubs`, both new steps visible, current folded scenario
+source. Do not run this against the Rust seed — the seed's own banner refuses that role.
+
+Status: BLOCKED on the macOS pure-Simple full-CLI bootstrap/redeploy lane (Lane 1/owned by
+another lane per `doc/03_plan/infra/macos_open_bugs_fix_lanes_2026-09-12.md`), not fixable
+from Lane 5 (CI/admission/docgen).
