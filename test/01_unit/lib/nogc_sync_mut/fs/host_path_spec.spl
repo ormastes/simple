@@ -120,6 +120,21 @@ describe "host_path boundary converter":
             deep = deep + "/dddddddddddddddddddddddddddddd"
             i = i + 1
         assert_true(deep.len() > 260)
-        # `/d/` -> `d:` is length-preserving, so the native form matches exactly.
-        assert_equal(host_path_native_for(deep, "windows").len(), deep.len())
+        # `/d/` -> `d:` is length-preserving, but a path past the 247-char
+        # directory ceiling now also gains the 4-char extended-length prefix:
+        # without it the Win32 ANSI entry points reject the path outright, which
+        # is what left Stage 2 unable to create its staging directory (258 chars)
+        # or write the diagnostic inside it (266). The original intent of this
+        # assertion -- that nothing is silently SHORTENED -- is kept and
+        # strengthened: the tail must still be the exact unprefixed native form.
+        val deep_native = host_path_native_for(deep, "windows")
+        assert_true(deep_native.starts_with("\\\\?\\"))
+        assert_equal(deep_native.len(), deep.len() + 4)
+        val deep_tail = deep_native[4:]
+        assert_equal(deep_tail.len(), deep.len())
+        # The tail is the ordinary native form: drive-converted, same length,
+        # nothing dropped. Asserted directly rather than by re-deriving the
+        # conversion here, which would just duplicate the code under test.
+        assert_true(deep_tail.starts_with("d:\\mp\\"))
+        assert_true(deep_tail.ends_with("dddddddddddddddddddddddddddddd"))
         _assert_exact(host_path_native_for(deep, "linux"), deep)

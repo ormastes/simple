@@ -130,3 +130,31 @@ tmux new-session -d -s t -x 200 -y 50 \
 Consequence to re-check once green: `cs` `/launch caret` should then produce a
 LIVE agent rather than one that immediately reads
 `exited: pane pid <N> is not running`.
+
+## Re-verified 2026-09-12 (Windows, deployed seed `bin/simple.exe` dated 2026-09-02)
+
+Still reproduces on the deployed seed, and it is NOT JIT-specific:
+
+```
+SIMPLE_EXECUTION_MODE=jit         bin/simple run src/app/llm_caret/main.spl --tui --provider dummy  -> rc=1
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run src/app/llm_caret/main.spl --tui --provider dummy  -> rc=1
+error: semantic: unknown extern function: rt_atexit_install
+```
+
+`--help` and `--plain --provider dummy --prompt ...` succeed (rc=0) in both
+modes; only the TUI entry dies. The seed's `interpreter_extern/mod.rs` at HEAD
+already bridges `rt_atexit_install` (and `rt_signal_check` /
+`rt_signal_install`, which a direct probe of `terminal_resize_pending()` under
+`SIMPLE_EXECUTION_MODE=interpreter` also reports as unknown on this seed), so
+the fix is unchanged: build and deploy the seed. Interpreter-only by
+construction — the C runtime defines all three (`src/runtime/runtime.c`), so
+the native / Stage-2 compile path links them; only the seed interpreter's
+extern bridge is missing them.
+
+Found alongside it and fixed in source the same day (they would have been the
+NEXT failures once the seed is redeployed): caret imported three names that no
+module provided — `terminal_stdin_is_tty`, `terminal_install_recovery`,
+`terminal_resize_pending` were missing from the `std.tui.terminal` re-export
+shim (`src/lib/nogc_async_mut/tui/terminal.spl`); `admitRootCommand`
+(`src/app/llm_caret/claude_full/commands.spl`) and `base64_decode_bytes`
+(`src/lib/common/base_encoding/base64.spl`) did not exist at all.

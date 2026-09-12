@@ -4,7 +4,8 @@
 # Delegates to acli via adapter_jira
 
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
-use app.devhub.auth.{check_jira_auth}
+use app.devhub.auth.{check_jira_auth, jira_auth_scheme}
+use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BEARER}
 use app.devhub.adapter_jira.{jira_view_issue, jira_search, jira_create_issue, jira_update_issue, jira_add_comment, jira_transition_issue, JiraIssue}
 use app.devhub.adapter_jira_curl.{JiraClient, jira_curl_update_issue, jira_curl_add_comment, jira_curl_list_transitions, jira_curl_transition_issue}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
@@ -153,18 +154,24 @@ fn _jira_create(args: [text]) -> i64:
 
 
 fn _jira_curl_configured(config: ItfConfig) -> bool:
-    """True if the REST v3 curl-fallback path (adapter_jira_curl) has enough
-    config to run: jira.url, jira.email, and a jira auth token."""
-    config.jira_url != "" and config.jira_email != "" and resolve_auth_token(config, "jira") != ""
+    """True if the REST curl-fallback path (adapter_jira_curl) has enough
+    config to run: jira.url plus a jira auth token, and jira.email unless
+    `jira.auth: bearer` (a Data Center PAT needs no user)."""
+    if config.jira_url == "" or resolve_auth_token(config, "jira") == "":
+        return false
+    jira_auth_scheme(config) == ATLASSIAN_AUTH_BEARER or config.jira_email != ""
 
 
 fn _jira_curl_client(config: ItfConfig) -> JiraClient:
-    """Build a JiraClient from ItfConfig for the curl-fallback path."""
+    """Build a JiraClient from ItfConfig for the curl-fallback path
+    (jira.url / jira.deployment / jira.auth decide the REST shape)."""
     JiraClient(
         base_url: config.jira_url,
         email: config.jira_email,
         api_token: resolve_auth_token(config, "jira"),
         curl_path: "curl",
+        deployment: config.jira_deployment,
+        auth_scheme: config.jira_auth,
     )
 
 

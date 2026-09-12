@@ -158,6 +158,41 @@ fn _cli_resolve_symlink(path: text) -> text:
         path_absolute(path)
     resolved ?? ""
 
+# Ask the kernel which executable OUR OWN pid is running, for platforms that
+# have no /proc (macOS, FreeBSD).
+#
+# Why this is needed at all: before any `.spl` code runs, the driver REPLACES
+# the Simple-visible argv with the script's own args (`rt_set_args`,
+# src/compiler_rust/runtime/src/value/args.rs), so `sys_get_args()[0]` is the
+# `.spl` SOURCE FILE, never the executable. On Linux the /proc branch above
+# returns first and this is never reached; on macOS it used to fall through to
+# that `.spl` path, which callers then tried to SPAWN — the spawn failed with
+# no exit status in ~3ms and `simple test` reported "spawn or reap failure at
+# the process layer" for every spec on the host. See
+# doc/08_tracking/bug/macos_test_child_spawn_or_reap_failure_no_exit_status_2026-09-12.md.
+#
+# `ps -o comm= -p <our pid>` is safe here in a way `readlink -f /proc/self/exe`
+# is not: the trap those comments warn about is a spawned helper describing
+# ITSELF, and `ps` is asked about a PID we name, not about its own process.
+fn _cli_self_exe_via_pid_query() -> text:
+    if _cli_is_windows_platform():
+        return ""
+    val (stdout, _stderr, code) = process_run_direct("ps", ["-o", "comm=", "-p", "{getpid()}"])
+    if code != 0:
+        return ""
+    val lines = stdout.split("\n")
+    if lines.len() == 0:
+        return ""
+    val reported = lines[0].trim()
+    if reported == "" or reported.ends_with(".spl"):
+        return ""
+    var resolved = _cli_resolve_argv0(cwd(), reported)
+    if resolved == "":
+        resolved = _cli_find_on_path(reported)
+    if resolved == "" or not _cli_file_exists_impl(resolved):
+        return ""
+    _cli_resolve_symlink(resolved)
+
 fn _cli_current_exe_path() -> text:
     # Prefer the kernel's record of the real executable: argv0-based
     # resolution breaks under the bin/simple symlink (relative argv0 +
@@ -183,12 +218,21 @@ fn _cli_current_exe_path() -> text:
         if resolved == "":
             resolved = _cli_find_on_path(argv0)
         val configured_binary = cli_env_get("SIMPLE_BINARY") ?? ""
-        return _cli_source_entry_executable(
+        val entry = _cli_source_entry_executable(
             resolved,
             configured_binary,
             _cli_file_exists_impl(configured_binary)
         )
-    ""
+        # A `.spl` here means the driver-replaced argv leaked through and
+        # SIMPLE_BINARY did not rescue it. Never hand a source file back as an
+        # executable — ask the kernel about our own pid instead.
+        if entry != "" and not entry.ends_with(".spl"):
+            return entry
+        val self_exe = _cli_self_exe_via_pid_query()
+        if self_exe != "":
+            return self_exe
+        return entry
+    _cli_self_exe_via_pid_query()
 
 pub fn cli_current_exe_path() -> text:
     _cli_current_exe_path()

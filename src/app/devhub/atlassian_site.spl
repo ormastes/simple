@@ -1,0 +1,189 @@
+# DevHub — Atlassian deployment shape (Cloud vs Server / Data Center)
+#
+# ONE small surface shared by the Jira, Confluence and Bitbucket adapters so
+# the REST path shape is decided in exactly one place instead of being
+# hardcoded per call site. Everything here is a pure function of the
+# `AtlassianSite` value — no I/O, no config reads — so specs can pin both
+# shapes byte-for-byte (test/01_unit/app/devhub/atlassian_site_spec.spl).
+#
+# Deployment values (config keys `jira.deployment`, `confluence.deployment`,
+# `bitbucket.deployment`): "cloud" (the default — "" and nil fold onto it so
+# every pre-existing config keeps its exact previous behaviour) or
+# "datacenter" (aliases "dc", "server").
+#
+# Context path: a Data Center site that lives under a context path
+# (`https://host/jira`, `https://host/confluence`) simply puts that path in
+# the configured URL — the shape helpers append to whatever root they are
+# given, and `_normalize_base` strips a trailing slash. Cloud Confluence
+# already works this way (`https://x.atlassian.net/wiki`), so no second
+# context-path field is introduced.
+#
+# Path shapes pinned here:
+#   Jira        Cloud  {url}/rest/api/3/...      DC  {url}/rest/api/2/...
+#   Confluence  Cloud  {url}/api/v2/...           DC  {url}/rest/api/...
+#   Bitbucket   Cloud  https://api.bitbucket.org/2.0/repositories/{ws}/{slug}/...
+#               DC     {url}/rest/api/1.0/projects/{KEY}/repos/{slug}/...
+#
+# Auth schemes (config keys `jira.auth`, `bitbucket.auth`): "basic"
+# (base64(user:token)) or "bearer" (`Bearer <token>` — Data Center PATs,
+# Bitbucket Cloud repository access tokens). Each adapter keeps its previous
+# default when the key is unset (Jira: basic; Bitbucket: bearer).
+
+use std.common.base_encoding.base64.{base64_encode}
+
+
+val ATLASSIAN_CLOUD = "cloud"
+val ATLASSIAN_DATACENTER = "datacenter"
+
+val ATLASSIAN_AUTH_BASIC = "basic"
+val ATLASSIAN_AUTH_BEARER = "bearer"
+
+val BITBUCKET_CLOUD_API_BASE = "https://api.bitbucket.org/2.0"
+
+
+class AtlassianSite:
+    """Where a product is deployed and how to reach it.
+
+    base_url  — site root without trailing slash; may carry a DC context
+                path (`https://host/jira`). "" for Bitbucket means the
+                Cloud default (api.bitbucket.org/2.0).
+    deployment — ATLASSIAN_CLOUD | ATLASSIAN_DATACENTER (already normalized).
+    """
+    base_url: text
+    deployment: text
+
+    static fn cloud(base_url: text) -> AtlassianSite:
+        AtlassianSite(base_url: atlassian_strip_slash(base_url), deployment: ATLASSIAN_CLOUD)
+
+    static fn create(base_url: text, deployment: text) -> AtlassianSite:
+        AtlassianSite(base_url: atlassian_strip_slash(base_url), deployment: atlassian_normalize_deployment(deployment))
+
+    fn is_datacenter() -> bool:
+        self.deployment == ATLASSIAN_DATACENTER
+
+
+fn atlassian_strip_slash(url: text) -> text:
+    """Strip ONE trailing slash (nil-safe: an omitted field reads as "")."""
+    if url == nil or url == "":
+        return ""
+    if url.ends_with("/"):
+        return url[0:url.len() - 1]
+    url
+
+
+fn atlassian_normalize_deployment(value: text) -> text:
+    """Fold "", nil and the aliases onto the two canonical deployment names.
+    Anything unrecognised is Cloud — the pre-existing behaviour — so a typo
+    can never silently route a Cloud site onto the DC path shape."""
+    if value == nil or value == "":
+        return ATLASSIAN_CLOUD
+    match value.trim().lower():
+        "datacenter" | "data_center" | "data-center" | "dc" | "server":
+            ATLASSIAN_DATACENTER
+        _:
+            ATLASSIAN_CLOUD
+
+
+fn atlassian_normalize_auth(value: text, default_scheme: text) -> text:
+    """Fold "", nil and case onto ATLASSIAN_AUTH_BASIC / ATLASSIAN_AUTH_BEARER;
+    unset falls back to the adapter's own historical default."""
+    if value == nil or value == "":
+        return default_scheme
+    match value.trim().lower():
+        "bearer" | "pat" | "token":
+            ATLASSIAN_AUTH_BEARER
+        "basic":
+            ATLASSIAN_AUTH_BASIC
+        _:
+            default_scheme
+
+
+fn atlassian_auth_header(scheme: text, user: text, token: text) -> text:
+    """Authorization header value for either scheme; "" when the inputs are
+    insufficient (basic needs BOTH user and token; bearer needs the token).
+    Never logs or echoes the token."""
+    if token == nil or token == "":
+        return ""
+    if scheme == ATLASSIAN_AUTH_BEARER:
+        return "Bearer " + token
+    if user == nil or user == "":
+        return ""
+    "Basic " + base64_encode("{user}:{token}")
+
+
+# ---------------------------------------------------------------------------
+# Jira
+# ---------------------------------------------------------------------------
+
+fn jira_rest_root(site: AtlassianSite) -> text:
+    """Cloud: {url}/rest/api/3 — DC: {url}/rest/api/2. "" when no URL."""
+    if site.base_url == "":
+        return ""
+    if site.is_datacenter():
+        return "{site.base_url}/rest/api/2"
+    "{site.base_url}/rest/api/3"
+
+
+fn jira_search_url(site: AtlassianSite) -> text:
+    """Cloud replaced GET/POST /search with POST /search/jql (see
+    adapter_jira_curl.spl header); Data Center still serves POST /search
+    with the same {jql,maxResults,fields} body."""
+    if site.is_datacenter():
+        return "{jira_rest_root(site)}/search"
+    "{jira_rest_root(site)}/search/jql"
+
+
+# ---------------------------------------------------------------------------
+# Confluence
+# ---------------------------------------------------------------------------
+
+fn confluence_rest_root(site: AtlassianSite) -> text:
+    """Cloud: {url}/api/v2 (url already carries /wiki) — DC: {url}/rest/api.
+    Known gap, named rather than papered over: Data Center has no v2 API, so
+    the adapter's `/pages...` resource paths are NOT translated onto DC's
+    `/content...` resources here; only the root switches."""
+    if site.base_url == "":
+        return ""
+    if site.is_datacenter():
+        return "{site.base_url}/rest/api"
+    "{site.base_url}/api/v2"
+
+
+# ---------------------------------------------------------------------------
+# Bitbucket
+# ---------------------------------------------------------------------------
+
+fn bitbucket_api_root(site: AtlassianSite) -> text:
+    """Cloud: configured URL or api.bitbucket.org/2.0 — DC: {url}/rest/api/1.0."""
+    if site.is_datacenter():
+        return "{site.base_url}/rest/api/1.0"
+    if site.base_url == "":
+        return BITBUCKET_CLOUD_API_BASE
+    site.base_url
+
+
+fn bitbucket_owner_url(site: AtlassianSite, owner: text) -> text:
+    """Collection of repositories for a Cloud workspace or a DC project key.
+    Cloud: .../repositories/{ws} — DC: .../projects/{KEY}/repos."""
+    if site.is_datacenter():
+        return "{bitbucket_api_root(site)}/projects/{owner}/repos"
+    "{bitbucket_api_root(site)}/repositories/{owner}"
+
+
+fn bitbucket_repo_url(site: AtlassianSite, owner: text, slug: text) -> text:
+    """Single repository: (workspace, slug) on Cloud, (project key, slug) on DC."""
+    "{bitbucket_owner_url(site, owner)}/{slug}"
+
+
+fn bitbucket_pr_collection_url(site: AtlassianSite, owner: text, slug: text) -> text:
+    """Cloud spells it `pullrequests`, DC `pull-requests`."""
+    if site.is_datacenter():
+        return "{bitbucket_repo_url(site, owner, slug)}/pull-requests"
+    "{bitbucket_repo_url(site, owner, slug)}/pullrequests"
+
+
+fn bitbucket_page_query(site: AtlassianSite, page_size: i64) -> text:
+    """Page-size query parameter: Cloud `pagelen=N`, DC `limit=N`."""
+    if site.is_datacenter():
+        return "limit={page_size}"
+    "pagelen={page_size}"

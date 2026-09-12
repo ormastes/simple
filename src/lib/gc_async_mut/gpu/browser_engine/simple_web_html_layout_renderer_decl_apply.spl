@@ -1,6 +1,20 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
 
+fn _decl_is_current_color_token(raw: text) -> bool:
+    """True when a background color declaration is the `currentColor` keyword,
+    alone or as the color token of a `background` shorthand."""
+    val lowered = raw.trim().lower()
+    if lowered == "currentcolor":
+        return true
+    val parts = lowered.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i].trim() == "currentcolor":
+            return true
+        i = i + 1
+    false
+
 fn _apply_decls_without_grid(
     st: Style, decls: text, decl_tbl: [text], em_base: i32,
     logical_writing_mode: text, apply_display: bool
@@ -42,6 +56,7 @@ fn _apply_decls_without_grid_inner(
     # backwards scan of the whole merged table. See decl_tbl_presence.
     val decl_present = decl_tbl_presence(decl_tbl)
     var bg_v = st.bg
+    var bg_current_color_v = false
     var background_gradient_from_v = st.background_gradient_from
     var background_gradient_to_v = st.background_gradient_to
     # GAP-2: N-stop / angle / radial gradient model, additive alongside the
@@ -290,6 +305,7 @@ fn _apply_decls_without_grid_inner(
             val shorthand = _parse_background_shorthand(bgs)
             if shorthand.valid:
                 bg_v = shorthand.color
+                bg_current_color_v = _decl_is_current_color_token(bgs)
                 background_gradient_from_v = 0u32
                 background_gradient_to_v = 0u32
                 background_gradient_stop_colors_v = []
@@ -379,6 +395,7 @@ fn _apply_decls_without_grid_inner(
                     bg_layers_raw_v = ""
                 else:
                     bg_v = parse_color_alpha(bgs)
+                    bg_current_color_v = _decl_is_current_color_token(bgs)
                     background_gradient_from_v = 0u32
                     background_gradient_to_v = 0u32
                     background_gradient_stop_colors_v = []
@@ -388,6 +405,7 @@ fn _apply_decls_without_grid_inner(
                     bg_layers_raw_v = bgs
         else:
             bg_v = parse_color_alpha(bg)
+            bg_current_color_v = _decl_is_current_color_token(bg)
             background_gradient_from_v = 0u32
             background_gradient_to_v = 0u32
             background_gradient_stop_colors_v = []
@@ -2290,6 +2308,12 @@ fn _apply_decls_without_grid_inner(
         else:
             margin_b_v = margin_token_vh_px(mb)
             margin_b_auto_v = false
+    # CSS Color §5.2: `currentColor` on a background resolves to the element's
+    # OWN computed `color`, so it can only be resolved once the whole
+    # declaration block has been applied (`color` may follow `background-color`
+    # in source order). Resolved here, after `fg_v` is final.
+    if bg_current_color_v:
+        bg_v = fg_v
     if apply_display and display_v == "contents":
         bg_v = 0u32
         width_v = 0

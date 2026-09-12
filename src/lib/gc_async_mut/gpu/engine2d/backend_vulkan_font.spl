@@ -1322,6 +1322,18 @@ impl VulkanBackend:
             # the selfcheck the pixels go wrong, which is the point.
             slot_plan = VK_FONT_SLOT_REUSE_NO_WRITE
             slot_index = 0
+        if vulkan_order_trace_enabled():
+            # Permanent, zero-cost-when-off evidence for the atlas upload-once
+            # invariant. The decision note below shares a fixed 4000-char budget
+            # with the continuity notes and truncates after ~30 runs, which is
+            # exactly the population an upload census has to see; this line does
+            # not, and is armed by the same flag the GPU-boundary audit already
+            # sets, so a re-upload regression is visible in the gate's own log.
+            vulkan_order_trace(
+                "font-slot owner={atlas_owner} slot={slot_index} slot_seq={slot_sequence}" +
+                " host_seq_before={host_sequence_before} batch_seq={batch.atlas_owner_sequence}" +
+                " referenced={slot_referenced} continuity={continuity} spare={spare_slot}" +
+                " plan={slot_plan} dirty={batch.dirty_rects.len()}")
         if vulkan_font_selfcheck_enabled():
             vulkan_font_decision_note(
                 "owner={atlas_owner} slot={slot_index} slot_seq={slot_sequence}" +
@@ -1431,10 +1443,30 @@ impl VulkanBackend:
             var mirror_ready = false
             var packed_on_host = false
             if typed_upload:
-                val _t_up_typed = vulkan_timing_now_us()
-                atlas_uploaded = vulkan_sffi_copy_to_buffer_u32(
-                    self.d_font_atlas, batch.atlas_pixels, 0)
-                vulkan_timing_add(VK_T_FONT_ATLAS_UPLOAD, _t_up_typed)
+                # UPLOAD ONCE PER SLOT PER FLUSH, not once per text run.
+                #
+                # Every run that inserts a glyph bumps the owner's sequence and
+                # so lands here, and this copy used to move the FULL atlas (4 MB
+                # at 1024x1024) each time -- 15 copies, ~60 MB, for a page with
+                # one atlas. All but the last are dead: within a flush the atlas
+                # only grows (`WRITE_IN_PLACE` already rests on cells being
+                # inserted, never relocated), so the final state is a superset
+                # of every intermediate one, and every dispatch that reads the
+                # atlas is recorded into the same not-yet-submitted command
+                # buffer. Parking the copy and draining it immediately before
+                # the submit is therefore observationally identical.
+                #
+                # A park aimed at a DIFFERENT buffer than the one already parked
+                # drains that one first, so the upload count is bounded by the
+                # number of distinct slots written in the frame -- never by the
+                # number of runs.
+                if (self.font_atlas_deferred_buffer != 0 and
+                    self.font_atlas_deferred_buffer != self.d_font_atlas):
+                    self.font_atlas_drain_deferred_upload()
+                self.font_atlas_deferred_buffer = self.d_font_atlas
+                self.font_atlas_deferred_slot = target_slot
+                self.font_atlas_deferred_pixels = batch.atlas_pixels
+                atlas_uploaded = self.d_font_atlas != 0
                 # The device now holds exactly this atlas, so the "mirror" (the
                 # atlas words themselves) is truth by construction.
                 mirror_ready = atlas_uploaded
@@ -1514,6 +1546,21 @@ impl VulkanBackend:
                 self.font_atlas_slot_owners[target_slot] = ""
                 self.font_atlas_slot_sequences[target_slot] = -1
                 return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            # ONE SLOT PER OWNER. A relocating (`WRITE_FRESH`) run takes a
+            # different slot than the one this owner already held, and the old
+            # slot used to keep the owner's NAME while its bytes stayed at the
+            # stale sequence. `_font_atlas_slot_index` returns the FIRST match,
+            # so every later run for that owner found the stale slot, could not
+            # reuse or write in place, and eventually exhausted the table into a
+            # `FLUSH_THEN_WRITE` -- an extra submit per frame on css-layout.html
+            # even with eight slots. Disowning the stale copies keeps the lookup
+            # single-valued and returns their buffers to the spare pool.
+            var stale: i64 = 0
+            while stale < self.font_atlas_slot_owners.len().to_i64():
+                if stale != target_slot and self.font_atlas_slot_owners[stale] == atlas_owner:
+                    self.font_atlas_slot_owners[stale] = ""
+                    self.font_atlas_slot_sequences[stale] = -1
+                stale = stale + 1
             # The slot now holds exactly this owner's atlas at this sequence, so
             # the next run for this owner can reuse it with no write at all.
             self.font_atlas_slot_owners[target_slot] = atlas_owner

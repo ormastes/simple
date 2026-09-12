@@ -19,6 +19,7 @@
 # curl write-out for HTTP status follows the MinIO health-probe pattern.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, bitbucket_pr_collection_url}
 use common.json.parser.{json_parse}
 use common.json.object_ops.{json_object_get}
 use common.json.array_ops.{json_array_get, json_array_length}
@@ -141,16 +142,25 @@ class BbCurlClient:
     to api.bitbucket.org/2.0. curl_path defaults to "curl".
     """
     base_url: text
-    workspace: text
+    workspace: text     # Cloud workspace, or the Server / Data Center PROJECT_KEY
     repo: text
     token: text
     curl_path: text
+    # Optional deployment shape + auth scheme (app.devhub.atlassian_site);
+    # omitted/"" means Cloud + Bearer, the pre-existing behaviour.
+    deployment: text
+    auth_scheme: text
+    user: text          # only read for auth_scheme "basic"
 
     static fn create(workspace: text, repo: text, token: text) -> BbCurlClient:
-        BbCurlClient(base_url: BBC_API_BASE, workspace: workspace, repo: repo, token: token, curl_path: "curl")
+        BbCurlClient(base_url: BBC_API_BASE, workspace: workspace, repo: repo, token: token, curl_path: "curl", deployment: "", auth_scheme: "", user: "")
+
+    fn site() -> AtlassianSite:
+        val base = if self.base_url == nil or self.base_url == BBC_API_BASE: "" else: self.base_url
+        AtlassianSite.create(base, self.deployment)
 
     fn auth_header() -> text:
-        bbc_auth_header(self.token)
+        atlassian_auth_header(atlassian_normalize_auth(self.auth_scheme, ATLASSIAN_AUTH_BEARER), self.user, self.token)
 
     fn is_configured() -> bool:
         # Requires workspace + repo + token. Every call site's blocked-auth
@@ -181,7 +191,9 @@ fn bbc_auth_header(token: text) -> text:
 # ============================================================================
 
 fn bbc_pr_collection_url(client: BbCurlClient) -> text:
-    client.base_url + "/repositories/" + client.workspace + "/" + client.repo + "/pullrequests"
+    """Cloud: {base}/repositories/{ws}/{repo}/pullrequests — Server / Data
+    Center: {base}/rest/api/1.0/projects/{KEY}/repos/{repo}/pull-requests."""
+    bitbucket_pr_collection_url(client.site(), client.workspace, client.repo)
 
 
 fn bbc_pr_url(client: BbCurlClient, pr_id: i64) -> text:

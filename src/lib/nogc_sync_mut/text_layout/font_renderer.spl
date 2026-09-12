@@ -1093,6 +1093,10 @@ class FontRenderer:
     staged_render_config_identity: text = "coverage8;hint=none;subpixel=none"
     staged_execution_target: text = "auto"
     staged_execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
+    # Named refusal for a degenerate staged payload (acceptance item 4 of
+    # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md).
+    # "" means the staged payload is drawable.
+    staged_reject_reason: text = ""
     # Boolean-only native diagnostic receipts for the array-bearing batch
     # boundary. They distinguish local quad production, inbound aggregate
     # transport, and final staged-field storage without returning an aggregate
@@ -1333,7 +1337,23 @@ class FontRenderer:
         self.staged_atlas_owner_generation = batch.atlas_owner_generation
         self.staged_atlas_owner_sequence = if self.atlas_unpublished_mutation: -1 else: self.atlas_owner_sequence
         self.staged_atlas_empty = batch.atlas_pixels.len() == 0
-        self.staged_quads = batch.quads
+        # Reject a zero-glyph or all-zero-area payload with a NAMED reason
+        # instead of storing a zero-length payload that a backend would then
+        # be asked to draw.
+        var drawable_quads: i64 = 0
+        var scan_i: i64 = 0
+        while scan_i < batch.quads.len():
+            if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
+                drawable_quads = drawable_quads + 1
+            scan_i = scan_i + 1
+        val reject_reason = if batch.quads.len() == 0: "empty-quads"
+            elif drawable_quads == 0: "zero-area-quads"
+            else: ""
+        self.staged_reject_reason = reject_reason
+        if reject_reason == "":
+            self.staged_quads = batch.quads
+        else:
+            self.staged_quads = []
         self.quad_phase_stored_nonempty = self.staged_quads.len() > 0
         self.staged_dirty_rects = batch.dirty_rects
         self.staged_render_config_identity = batch.render_config_identity
@@ -1347,6 +1367,8 @@ class FontRenderer:
 
     me receipt_staged_valid() -> bool: self.staged_valid
     me receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0
+    me staged_reject_reason_text() -> text: self.staged_reject_reason
+    me staged_is_drawable() -> bool: self.staged_reject_reason == ""
     me receipt_quad_phase_local_nonempty(token: bool) -> bool:
         token and self.quad_phase_local_nonempty
     me receipt_quad_phase_inbound_nonempty(token: bool) -> bool:
