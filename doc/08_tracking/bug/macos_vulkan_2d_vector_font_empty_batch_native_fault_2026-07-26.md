@@ -468,3 +468,61 @@ Two corrections for whoever schedules this next:
   than half-done -- it is outside lane 2's assigned files AND assigned to no lane at all, so it needs one.
 
 Status unchanged: **open, blocked on the macOS bootstrap/deploy lane.**
+
+## 2026-09-12 — acceptance item 4 RESOLVED in pure Simple (native verification still owed)
+
+Item 4 ("an empty or inconsistent `FontRenderBatch` must return a named failure
+propagated to the caller, without dereferencing a nil aggregate, with evidence
+that no backend batch method was entered") is now implemented at the two seams
+this record identifies. No other acceptance item changed; the record stays
+**open**, blocked on the macOS bootstrap/Stage 4 deploy lane.
+
+What changed:
+
+- `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` `_stage_batch`: counts
+  drawable quads (`width > 0 and height > 0`) and sets a new
+  `staged_reject_reason` field — `"empty-quads"` for a zero-glyph payload,
+  `"zero-area-quads"` when every quad is degenerate, `""` when drawable. On
+  rejection it stores an EMPTY quad list rather than a zero-length payload
+  dressed as drawable, and returns 0. New receipts `staged_reject_reason_text()`
+  / `staged_is_drawable()` (both `me`, never `fn`-reading-`self`).
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` `_draw_font_batch_staged`
+  short-circuits on a non-empty `staged_reject_reason` instead of rebuilding a
+  batch to hand to a backend; `_draw_font_batch_plan` re-checks drawable quads
+  inline (NOT via a zero-arg method on the non-self `batch` local — see the
+  receiver-materialization note in that function) and returns `false` with
+  `last_font_execution_attempts == ["nothing-to-draw:<reason>"]`,
+  `last_font_execution_target == ""`. Truthful counters added:
+  `font_batches_skipped_empty` and `font_backend_dispatches` (incremented at
+  each of the six backend call sites), read through `me` accessors.
+  Side effect: the old false `"<backend>:success"` that a zero-quad batch
+  produced via `quad_index == batch.quads.len()` can no longer occur.
+
+Evidence (interpreter lane, seed
+`/Users/ormastes/simple/build/cargo-r2/release/simple`, `stat -f '%z %m'` =
+`39528776 1789199850`, `SIMPLE_EXECUTION_MODE=interpreter`):
+
+- New spec `test/01_unit/lib/gpu/engine2d/font_empty_batch_fail_closed_spec.spl`
+  — `outcome=OK executed=5 passed=5`. Oracles: backend dispatch counter stays 0
+  for a zero-glyph and for an all-zero-area batch, the framebuffer is
+  byte-identical before/after (absolute pixel oracle), and a batch carrying one
+  drawable quad still dispatches (counter 1, target `cpu`) and still CHANGES
+  pixel 0.
+- Sabotage: neutering both guards (`if false:`) turns the two fail-closed
+  examples RED (`passed=3 failed=2`), then green again on restore.
+- Unchanged: `backend_vulkan_font_quad_partition_spec` 7/7,
+  `vulkan_font_atlas_incremental_repack_spec` 30/30,
+  `draw_ir_em_dash_text_ink_spec` 2/2,
+  `vulkan_font_batch_admission_spec` 7/7,
+  `backend_vulkan_text_fallback_spec` 2/2.
+- Pre-existing reds, verified identical with the changes reverted (NOT caused by
+  this change): `font_runtime_config_spec` (stale `rocm:unavailable` expectation)
+  and `engine2d_font_scalar_receipt_spec`.
+- `vulkan_font_atlas_slot_plan_spec` does not exist anywhere in `test/`.
+
+Still owed: this is a STRUCTURAL fix proven on the interpreter. The native fault
+itself is not re-verified — that needs a `native-build` artifact from a deployed
+Stage 4 self-hosted compiler, which is blocked in the macOS bootstrap lane. What
+this change buys is that the next native occurrence of this class surfaces as
+`nothing-to-draw:<reason>` at the emitter instead of a nil-receiver fault inside
+a backend.
