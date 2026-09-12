@@ -22,7 +22,7 @@
 # identity and worker reuse belong to `lsp_query_session_runner_v1`.
 
 use app.io.minimal_runtime_ops.{env_get}
-use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin}
+use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin, OwnedProcessResult}
 
 const LSP_QUERY_OWNED_MAX_POLLS_V1: i64 = 100000
 const LSP_QUERY_OWNED_OPT_IN_ENV_V1: text = "SIMPLE_LSP_OWNED_PROCESS_V3"
@@ -144,7 +144,9 @@ fn lsp_query_owned_launch_reason_v1(launch: LspQueryOwnedLaunchV1) -> text:
         return "invalid_workspace_root"
     if launch.executable == "":
         return "invalid_executable"
-    if not launch.executable.starts_with(launch.workspace_root):
+    # `workspace_root + "/"`, not the bare root: `/workspace-evil/bin/simple`
+    # is not inside `/workspace`.
+    if not launch.executable.starts_with(launch.workspace_root + "/"):
         return "executable_outside_workspace_root"
     if launch.timeout_ms <= 0:
         return "invalid_timeout"
@@ -217,6 +219,16 @@ fn lsp_query_owned_run_observations_v1(
     _run(LspQueryOwnedOutcomeV1.Failed, "observations_exhausted", -1, 0, 0, true,
         total, 1, 1, elapsed)
 
+# A placeholder collect receipt for the path where the runtime refused to hand
+# one back.  It carries no exit status; the caller answers Failed regardless.
+fn _owned_collect_unknown_v1() -> OwnedProcessResult:
+    OwnedProcessResult(
+        version: 1, exit_code: -1, timed_out: false, cancel_requested: false,
+        term_sent: false, kill_sent: false, identity_revalidated: false,
+        reaped: false, stdout_truncated: false, stderr_truncated: false,
+        stdout_seen: 0, stderr_seen: 0, stdout_kept: 0, stderr_kept: 0,
+        runtime_error: 0)
+
 # Live adapter.  Unreachable on a lane whose provider is unavailable — the
 # guard above returns before any extern is named, which is what keeps this file
 # from aborting on the seed lane.
@@ -248,41 +260,50 @@ fn lsp_query_owned_run_live_v1(
     var stderr_bytes: i64 = 0
     var done = false
     while not done and polls < LSP_QUERY_OWNED_MAX_POLLS_V1:
-        val polled = match lease.poll(launch.poll_wait_ms, launch.max_output_bytes,
+        match lease.poll(launch.poll_wait_ms, launch.max_output_bytes,
             launch.max_output_bytes):
-            Ok(p) => p
             Err(e) =>
+                outcome = LspQueryOwnedOutcomeV1.Failed
                 reason = "owned_process_poll_rejected"
                 done = true
-                continue
-        polls = polls + 1
-        elapsed = elapsed + launch.poll_wait_ms
-        stdout_bytes = polled.stdout_seen
-        stderr_bytes = polled.stderr_seen
-        if polled.runtime_error != 0:
-            outcome = LspQueryOwnedOutcomeV1.Failed
-            reason = "owned_process_runtime_error_" + polled.runtime_error.to_text()
-            done = true
-        elif polled.timed_out:
-            outcome = LspQueryOwnedOutcomeV1.TimedOut
-            reason = "child_timed_out"
-            done = true
-        elif polled.terminal:
-            outcome = LspQueryOwnedOutcomeV1.Completed
-            reason = ""
-            done = true
-        elif elapsed >= launch.timeout_ms:
-            outcome = LspQueryOwnedOutcomeV1.TimedOut
-            reason = "launcher_deadline_exceeded"
-            done = true
+            Ok(polled) =>
+                polls = polls + 1
+                elapsed = elapsed + launch.poll_wait_ms
+                stdout_bytes = polled.stdout_seen
+                stderr_bytes = polled.stderr_seen
+                if polled.runtime_error != 0:
+                    outcome = LspQueryOwnedOutcomeV1.Failed
+                    reason = "owned_process_runtime_error_" + polled.runtime_error.to_text()
+                    done = true
+                elif polled.timed_out:
+                    outcome = LspQueryOwnedOutcomeV1.TimedOut
+                    reason = "child_timed_out"
+                    done = true
+                elif polled.terminal:
+                    outcome = LspQueryOwnedOutcomeV1.Completed
+                    reason = ""
+                    done = true
+                elif elapsed >= launch.timeout_ms:
+                    outcome = LspQueryOwnedOutcomeV1.TimedOut
+                    reason = "launcher_deadline_exceeded"
+                    done = true
 
     if outcome == LspQueryOwnedOutcomeV1.TimedOut or reason == "observations_exhausted":
         cancels = 1
         val _cancelled = lease.cancel()
-    val collected = match lease.collect():
+    var collect_failed = false
+    var collected = match lease.collect():
         Ok(r) => r
-        Err(e) => return _run(LspQueryOwnedOutcomeV1.Failed, "owned_process_collect_rejected",
-            exit_code, stdout_bytes, stderr_bytes, true, polls, cancels, 0, elapsed)
+        Err(e) =>
+            collect_failed = true
+            _owned_collect_unknown_v1()
+    if collect_failed:
+        # The collect receipt is lost, but the child is still ours to reap:
+        # release and close before answering, never leak the lease.
+        val _released_early = lease.release()
+        val _closed_early = pin.close()
+        return _run(LspQueryOwnedOutcomeV1.Failed, "owned_process_collect_rejected",
+            exit_code, stdout_bytes, stderr_bytes, true, polls, cancels, 1, elapsed)
     exit_code = collected.exit_code
     stdout_bytes = collected.stdout_seen
     stderr_bytes = collected.stderr_seen

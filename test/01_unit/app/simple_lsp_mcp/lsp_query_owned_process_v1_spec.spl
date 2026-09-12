@@ -6,6 +6,7 @@
 
 use std.spec.*
 use app.simple_lsp_mcp.lsp_query_owned_process_v1.*
+use app.io.minimal_runtime_ops.{cwd}
 
 fn _launch() -> LspQueryOwnedLaunchV1:
     LspQueryOwnedLaunchV1(
@@ -170,6 +171,17 @@ describe "LspQueryOwnedProcessV1 launcher":
         expect(run.started).to_be(false)
         expect(run.release_count).to_equal(0)
 
+    it "refuses a sibling directory that merely shares the workspace-root prefix":
+        step("Run a launch whose executable sits in /workspace-evil, not /workspace")
+        val launch = LspQueryOwnedLaunchV1(
+            executable: "/workspace-evil/bin/simple", args: ["--version"],
+            workspace_root: "/workspace", timeout_ms: 5000, term_grace_ms: 500,
+            max_output_bytes: 65536, poll_wait_ms: 100)
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), launch, [_terminal(0, 1)])
+        expect(run.reason).to_equal("executable_outside_workspace_root")
+        expect(run.started).to_be(false)
+
     it "refuses a launch with a non-positive timeout or output bound":
         step("Run launches with a zero timeout and a zero output bound")
         val no_timeout = LspQueryOwnedLaunchV1(
@@ -190,7 +202,16 @@ describe "LspQueryOwnedProcessV1 live provider":
         step("Ask the launcher for the lane's own provider and run it live")
         val provider = lsp_query_owned_provider_probe_v1(
             lsp_query_owned_execution_mode_v1(), lsp_query_owned_primitive_declared_v1())
-        val run = lsp_query_owned_run_live_v1(provider, _launch())
+        # A real, existing child under this repo's own root — not the synthetic
+        # /workspace path the scripted examples use, which a live provider would
+        # refuse for absence rather than for shape.
+        val root = cwd()
+        expect(root != "").to_be(true)
+        val launch = LspQueryOwnedLaunchV1(
+            executable: root + "/bin/simple", args: ["--version"],
+            workspace_root: root, timeout_ms: 30000, term_grace_ms: 500,
+            max_output_bytes: 65536, poll_wait_ms: 100)
+        val run = lsp_query_owned_run_live_v1(provider, launch)
         step("Accept only a typed unavailable result or a real completed one")
         if provider.available:
             expect(run.outcome == LspQueryOwnedOutcomeV1.Completed).to_be(true)
