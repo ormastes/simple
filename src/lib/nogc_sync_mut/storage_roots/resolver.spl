@@ -7,6 +7,30 @@ use std.nogc_sync_mut.storage_roots.model.*
 fn _slash(path: text) -> text:
     path.replace("\\", "/")
 
+fn _strip_extended_length_prefix(slashed: text) -> text:
+    """Drop Windows' `\\\\?\\` extended-length prefix, which is spelling, not a path.
+
+    `path_absolute` answers `\\\\?\\C:\\Users\\ormas\\dev\\simple` on Windows (the
+    Rust runtime canonicalizes, and `std::fs::canonicalize` always emits the
+    verbatim prefix). Slashed, that is `//?/C:/Users/...`, whose second
+    character is `/` rather than `:` — so `_is_windows_absolute` said no,
+    `_is_absolute` said yes on the leading `/`, and the POSIX branch produced
+    the root `/?/C:/Users/ormas/dev/simple`. Every derived root then carried
+    that `/?/` head: the worktree root became
+    `/?/C:/Users/ormas/dev/simple/.simple/storage`, a path no Windows API can
+    create, so `dir_create_all` failed on a directory that was never valid.
+    The prefix is a per-call spelling of the SAME path, so stripping it here —
+    the one choke point every root, override and identity flows through —
+    keeps worktree identity stable no matter which spelling arrives.
+    `//?/UNC/host/share` is the verbatim spelling of `\\\\host\\share` and maps
+    back to `//host/share`.
+    """
+    if slashed.starts_with("//?/UNC/"):
+        return "//" + slashed.substring(8)
+    if slashed.starts_with("//?/"):
+        return slashed.substring(4)
+    slashed
+
 fn _is_windows_absolute(path: text) -> bool:
     path.len() >= 3 and path.substring(1, 2) == ":" and path.substring(2, 3) == "/"
 
@@ -14,7 +38,7 @@ fn _is_absolute(path: text) -> bool:
     path.starts_with("/") or _is_windows_absolute(path)
 
 fn _lexical_canonical(path: text) -> text?:
-    val slashed = _slash(path.trim())
+    val slashed = _strip_extended_length_prefix(_slash(path.trim()))
     if slashed == "" or not _is_absolute(slashed):
         return nil
     val prefix = if _is_windows_absolute(slashed): slashed.substring(0, 3) else: "/"
