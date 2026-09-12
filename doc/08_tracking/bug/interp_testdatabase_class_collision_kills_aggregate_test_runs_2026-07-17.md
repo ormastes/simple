@@ -65,3 +65,48 @@ Fixed by renaming the core-struct cluster to `RunnerTestDbCore`
 `test_db_perf.spl`; compat class and its users unchanged; 0 leftovers,
 green single-file and md-lane probes pass). The underlying interpreter
 defect (global struct registry not module-scoped) remains open seed-side.
+
+## Re-check 2026-09-12 — symptom gone across three aggregate runs; root cause unverified, left OPEN
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+Three full directory runs of `test/01_unit/bugs/` (an aggregate target, i.e.
+exactly the shape this row says always dies):
+
+```
+Results: 349 total, 339 passed, 10 failed, 7 skipped     (with 8 new guards)
+Results: 341 total, 331 passed, 10 failed, 7 skipped     (same tree, 8 guards held out)
+Results: 369 total, 359 passed, 10 failed, 7 skipped     (with 11 new guards)
+```
+
+All three reached the summary block and exited through the normal reporting
+path. The documented terminator —
+
+```
+error: semantic: class `TestDatabase` has no field named `db`
+```
+
+— did **not** appear in any of them.
+
+What DID appear, on every run, is a non-fatal line at the very end:
+
+```
+Warning: Could not load test database: could not open or parse
+doc/08_tracking/test/test_db.sdn (existing file is unreadable or migration from
+doc/08_tracking/test/test_db_stable.sdn failed)
+```
+
+### Why this is not closed
+
+The record's own framing separates two things: the runner-side rename (which
+was already "fix in progress") and the **interpreter root cause**, the
+class-name collision itself. Three clean aggregate runs are strong evidence the
+*symptom* is gone; they are no evidence at all about the *collision*, which was
+not probed here. The warning above is also unexplained — it is the surviving
+trace of the test-DB path this row is about, and a row whose failure mode has
+merely softened from fatal to a warning should not be closed on that basis.
+
+Left OPEN. Whoever owns it needs a direct probe of the class-name collision,
+plus a decision on whether the `test_db.sdn` load failure is the same defect
+wearing a quieter face.

@@ -1,6 +1,6 @@
 # Interpreter: cross-module enum variant with discriminant 3 compares FALSE
 
-**Status:** OPEN
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end.
 **Found:** 2026-08-04
 
 ## Symptom
@@ -159,3 +159,41 @@ seed's Rust interpreter — not the pure-Simple `src/compiler/95.interp/`
 tree — is what actually executes `SIMPLE_EXECUTION_MODE=interpreter` today).
 Status unchanged: **OPEN — ARCHITECTURAL (Rust seed interpreter, verified
 2026-08-10)**.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+The record's own `std.ndarray` reproducer, unchanged, on both lanes:
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run enum3.spl
+d0 true    d1 true    d2 true    d3 true
+$ bin/simple run enum3.spl                (JIT)
+d0 true    d1 true    d2 true    d3 true
+```
+
+Discriminant 3 (`DType.Bool`) now compares **true** under the interpreter, and
+the two engines agree on all four rows. **Not reproducible** — status CLOSED.
+
+Regression guard: `test/01_unit/bugs/interpreter_cross_module_enum_discriminant_spec.spl`
+(7 examples). It uses the real cross-module `std.ndarray.DType`, not a locally
+declared enum of the same shape: this record's own bisection established that a
+same-file enum compared correctly *while the bug was live*, so a same-file guard
+would be vacuous for this defect. All four discriminants are asserted (not just
+3) so a future shift of the nil sentinel to another slot is visible, and both
+polarities (`==` and `!=`) are pinned because the 7 scilib failures bottomed out
+in a `!=` guard taking the wrong branch.
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/interpreter_cross_module_enum_discriminant_spec.spl outcome=OK declared>=7 executed=7 passed=7 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: substituting the documented buggy answers for discriminant 3
+(`== DType.Bool` is false, `!= DType.Bool` is true) turns the file RED —
+`outcome=ERROR declared>=7 executed=7 passed=5 failed=2 skipped=0 dropped=0`.
+
+The `test/03_system/feature/scilib` failures attributed to this row should be
+re-run by whoever owns that suite; this re-check covers the root-cause
+expression only, not those 7 specs.

@@ -1,0 +1,118 @@
+"""
+# return inside a match expression Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/interp_return_in_match_expr_swallowed_2026-06-30.md
+
+## Overview
+
+`interp_return_in_match_expr_swallowed_2026-06-30` reported that a `return`
+inside a match **expression** was swallowed and became the expression's value:
+
+```simple
+val x = match r:
+    case Ok(v): v
+    case Err(e): return Err(e)   # should return from the function
+Ok(x + 1)
+```
+
+left `x` bound to the `Err` enum and crashed downstream with "cannot convert
+enum to int" / "method len not found on type enum". The record calls this a
+whole CLASS of `Result`-handling failures.
+
+The discriminating case is the **Err** path: the `Ok` path never exercised the
+defect, so a guard that only checks `f(Ok(41))` would be vacuous. The assertion
+is on the function's RETURN VALUE rather than on a downstream crash, because
+"it did not crash" is not evidence the early return happened — the swallowed
+form could also have produced a plausible value.
+
+Re-checked 2026-09-12: the early return fires on both lanes.
+
+## Syntax
+
+```simple
+val x = match r:
+    case Ok(v): v
+    case Err(e): return Err(e)
+```
+
+"""
+
+use std.spec
+
+
+fn add_one(r: Result<i64, text>) -> Result<i64, text>:
+    val x = match r:
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(x + 1)
+
+
+fn render(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(v):
+            return "Ok(" + str(v) + ")"
+        case Err(e):
+            return "Err(" + e + ")"
+    return "unreachable"
+
+
+fn side_effect_count(r: Result<i64, text>) -> i64:
+    var reached_tail = 0
+    val x = match r:
+        case Ok(v): v
+        case Err(e): return 0 - 1
+    reached_tail = x
+    reached_tail
+
+
+# ============================================================================
+# Test Group 1: the Err path — the case the defect broke
+# ============================================================================
+
+describe "return from the Err arm of a match expression":
+    """
+    ## Early return
+
+    The function must return the `Err`, not bind it to `x` and fall through
+    to the tail expression.
+    """
+
+    it "returns the original Err unchanged":
+        expect(render(add_one(Err("bad")))).to_equal("Err(bad)")
+
+    it "does not reach the tail expression on the Err path":
+        # The tail would have produced 1 (x + 1 with x bound to the Err) or
+        # crashed; the early return produces -1.
+        expect(side_effect_count(Err("bad"))).to_equal(0 - 1)
+
+
+# ============================================================================
+# Test Group 2: the Ok path — the control
+# ============================================================================
+
+describe "the Ok arm of the same match expression":
+    """
+    ## Control
+
+    This path never exercised the defect. It is kept so a future failure is
+    attributable to the early return rather than to match itself.
+    """
+
+    it "binds the Ok payload and runs the tail expression":
+        expect(render(add_one(Ok(41)))).to_equal("Ok(42)")
+
+    it "reaches the tail on the Ok path":
+        expect(side_effect_count(Ok(7))).to_equal(7)
+
+    it "propagates an Err through two nested calls":
+        expect(render(add_one(add_one(Err("deep"))))).to_equal("Err(deep)")
+
+    it "increments twice through two nested calls on the Ok path":
+        expect(render(add_one(add_one(Ok(1))))).to_equal("Ok(3)")

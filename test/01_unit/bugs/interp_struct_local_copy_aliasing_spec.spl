@@ -1,0 +1,123 @@
+"""
+# Struct local copy-on-assign Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/interp_struct_local_copy_aliasing_2026-07-22.md
+
+## Overview
+
+Guards the value semantics of struct assignment into a local `var`.
+
+`interp_struct_local_copy_aliasing_2026-07-22` reported that
+
+```simple
+var out = state
+out.mcr = v
+```
+
+mutated `state` as well: the struct local aliased the source instead of
+copying it, silently corrupting every `val old = s; mutate(s); compare(old, s)`
+before/after pattern (originally seen in
+`src/lib/hardware/soc_rtl/uart16550.spl`'s `uart_mmio_write`).
+
+Re-checked 2026-09-12 on the deployed seed: assignment copies correctly on
+both the default (JIT) and `SIMPLE_EXECUTION_MODE=interpreter` lanes. This
+spec pins that behaviour so the aliasing cannot return unnoticed.
+
+## Syntax
+
+```simple
+var a = S { x: 1 }
+var b = a
+b.x = 2        # must not touch a
+```
+
+"""
+
+use std.spec
+
+
+struct AliasProbe:
+    x: i64
+    y: i64
+
+
+struct UartLike:
+    mcr: u32
+    lsr: u32
+
+
+fn copy_then_mutate() -> [i64]:
+    var a = AliasProbe { x: 1, y: 10 }
+    var b = a
+    b.x = 2
+    b.y = 20
+    return [a.x, a.y, b.x, b.y]
+
+
+fn mutate_source_after_copy() -> [i64]:
+    var src = AliasProbe { x: 1, y: 10 }
+    val snapshot = src
+    src.x = 99
+    return [snapshot.x, src.x]
+
+
+fn uart_before_after() -> [i64]:
+    var state = UartLike { mcr: 0, lsr: 96 }
+    val old = state
+    state.mcr = 3
+    return [old.mcr.to_i64(), state.mcr.to_i64()]
+
+
+# ============================================================================
+# Test Group 1: assignment into a fresh local copies
+# ============================================================================
+
+describe "struct assignment into a local var":
+    """
+    ## Copy, not alias
+
+    Mutating the destination must leave the source untouched, field by field.
+    """
+
+    it "leaves the source struct untouched when the copy is mutated":
+        val r = copy_then_mutate()
+        expect(r.len()).to_equal(4)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(10)
+
+    it "applies the mutation to the copy":
+        val r = copy_then_mutate()
+        expect(r[2]).to_equal(2)
+        expect(r[3]).to_equal(20)
+
+
+# ============================================================================
+# Test Group 2: the before/after snapshot pattern
+# ============================================================================
+
+describe "before/after snapshot of a struct":
+    """
+    ## `val old = s; mutate(s)`
+
+    The snapshot must retain the pre-mutation field values. This is the exact
+    shape `uart16550.spl` had to work around.
+    """
+
+    it "keeps the pre-mutation value in the snapshot":
+        val r = mutate_source_after_copy()
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(1)
+        expect(r[1]).to_equal(99)
+
+    it "distinguishes old and new mcr in the uart16550 shape":
+        val r = uart_before_after()
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal(0)
+        expect(r[1]).to_equal(3)
