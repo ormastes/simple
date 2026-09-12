@@ -10,8 +10,16 @@ itself with a stale-grammar parse error — so the driver called
 `analyze_sspec_text` directly instead). 83 `*_spec.spl` files were added in
 the range; 31 scored below the 80 gate and were fixed with minimal structural
 edits only (docstrings, `step()`, `# @req`, `# @capture`) — no assertion was
-weakened or removed, and every edited file was re-run under the seed to
-confirm 0 failures after editing.
+weakened or removed, and all 31 edited files were re-run under the seed to
+confirm behavior. One mechanical edit (a `"""`-docstring purpose/audience
+insertion in `engine2d_vulkan_readback_unpack_cost_spec.spl`) matched the
+docstring's CLOSING delimiter instead of an opening one and broke the parse;
+this was caught by re-running the file and fixed in a follow-up commit (see
+below). `interpreter_component_scaling_spec.spl` has 9 pre-existing "KNOWN
+RED (quadratic)" perf failures unrelated to and unaffected by this change
+(verified via `git diff origin/main` — only `step()`/`# @req` lines were
+added, no assertion touched); it was already RED before this change and
+stays RED after it.
 
 ## Files edited (before -> after)
 
