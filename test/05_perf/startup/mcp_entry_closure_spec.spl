@@ -3,9 +3,10 @@
 ## Purpose and audience
 Entry-closure ratchet for the MCP server entry (`src/app/mcp/main.spl`). It
 pins the number of PHYSICAL `.spl` files the seed loader reads, and the sum of
-their sizes, for two entries: `mcp-help` (`--help`, no tool dispatch) and
-`mcp-info-call` (initialize + one `tools/call` frame). Written for engineers
-changing imports under `src/app/mcp/`.
+their sizes, for three entries: `mcp-help` (`--help`, no tool dispatch),
+`mcp-info-call` (initialize + one `tools/call` that shells out to the CLI) and
+`mcp-read-call` (initialize + one `tools/call` handled IN PROCESS). Written for
+engineers changing imports under `src/app/mcp/`.
 
 ## Operator workflow
 `bin/simple test test/05_perf/startup/mcp_entry_closure_spec.spl`.
@@ -52,14 +53,38 @@ use std.io_runtime.{env_get, process_run, file_write}
 # own closure. Both numbers reproduce byte-for-byte on the deployed seed
 # (bin/release/aarch64-unknown-linux-gnu/simple), which is what makes the
 # physical-file metric, unlike `spl_opens`, valid across binaries.
-# In-process tools (`simple_read`) still load all nine handler families through
-# the single `_dispatch_in_process` chain: 128 / 1,299,669 after this change.
-# Splitting that chain per family is a code move, not an import move.
+# In-process tools (`simple_read`) loaded all nine handler families through the
+# single `_dispatch_in_process` chain until that chain was split per family;
+# see the in-process baseline and the third scenario below.
 # Budget is the lane target: <= 70% of baseline on both axes.
 val HELP_BASE_FILES = 131
 val HELP_BASE_BYTES = 1323864
 val INFO_BASE_FILES = 131
 val INFO_BASE_BYTES = 1323864
+
+# --- In-process baseline, measured 2026-09-12 on THIS tree (L5-H) -----------
+# binary : bin/release/aarch64-unknown-linux-gnu/simple (deployed seed),
+#          sha256 3d120a6f9ab5704b...
+# entry  : initialize + one `tools/call` for `simple_read`, an IN-PROCESS tool
+#          (no shell-out to the CLI, unlike the `simple_info` family above).
+# Measured on the carry commit, i.e. AFTER the import move and BEFORE the
+# dispatch split: physical_files=129 source_bytes=1,300,197, identical in both
+# lanes. That is the whole eager set: `_dispatch_in_process` was one if-chain
+# over nine handler families, so every family's module was reached whichever
+# in-process tool was called.
+# NOTE the closure includes the file the tool itself READS
+# (`src/lib/common/net/oid.spl` is opened by `file_read`, and the method counts
+# any successful `.spl` openat). That is a constant on both sides of the split,
+# so it does not flatter the delta; it is named here so the number reproduces.
+# Budget for this entry is the lane target of <= 60% of baseline on both axes,
+# i.e. the >= 40% reduction the split has to deliver — NOT the 70% used for the
+# two entries above.
+# MEASURED AFTER the split, both lanes: 55 files / 466,954 bytes (-57.4% /
+# -64.1%), so there is real headroom under the 77 / 780,118 budget. The budget
+# is deliberately left at the acceptance target rather than tightened onto 55:
+# the number that has to hold is the one the row was accepted on.
+val READ_BASE_FILES = 129
+val READ_BASE_BYTES = 1300197
 
 # What this spec is pinning: a `use` written inside a function body is not read
 # until that function runs, so the handler modules are reached only through the
@@ -76,6 +101,9 @@ val INFO_BASE_BYTES = 1323864
 fn budget70(base: i64) -> i64:
     return (base * 7) / 10
 
+fn budget60(base: i64) -> i64:
+    return (base * 6) / 10
+
 fn have_strace() -> bool:
     val (out, err, code) = process_run("sh", ["-c", "command -v strace >/dev/null 2>&1 && echo yes || echo no"])
     return out.contains("yes")
@@ -87,36 +115,70 @@ fn measure_binary() -> text:
     val (out, err, code) = process_run("sh", ["-c", "readlink -f bin/simple"])
     return out.replace("\n", "")
 
+# Descendant-aware child filter (awk, two passes over the same log).
+#
+# Pass 1 records, for every traced tid, the tid that cloned it, and marks every
+# process that execve'd AFTER the first (the first is the entry binary itself)
+# as a child root. Pass 2 prints the `.spl` path of every successful openat made
+# by a tid that has no child root among its ancestors.
+#
+# WHY THE ANCESTOR WALK IS REQUIRED. The obvious filter -- "drop the pids named
+# by an execve after the first" -- is UNSOUND, and silently so. The seed reads
+# source from a worker THREAD, and a thread never execve's, so a child CLI's
+# worker tid appears in no execve line and survives a pid-only filter. Measured
+# here on `simple_read`, whose handler shells out to `<binary> check <file>`:
+# the pid-only filter scored 382 physical files / 5,388,953 bytes, of which
+# 253 files belonged to the child compile (tids 1010156 and 1010245, threads of
+# execve'd pids 1010155 and 1010243). The ancestor walk scores 129, which is
+# what a hand trace of the entry process alone, and the L5-A measurer, both
+# report. The pid-only filter had looked correct only because the other two
+# entries' children ENOEXEC on this host and so read nothing.
+val FILTER_AWK = "function excluded(t,  cur) {\n"
+    + "  cur = t\n"
+    + "  while (cur != \"\") {\n"
+    + "    if (cur in exc) return 1\n"
+    + "    if (cur in parent) cur = parent[cur]; else return 0\n"
+    + "  }\n"
+    + "  return 0\n"
+    + "}\n"
+    + "NR == FNR {\n"
+    + "  if (index($0, \"execve(\") > 0) { nexec++; if (nexec > 1) exc[$1] = 1 }\n"
+    + "  if ($0 ~ /= [0-9]+$/ && ($0 ~ /clone/ || $0 ~ /vfork/)) parent[$NF] = $1\n"
+    + "  next\n"
+    + "}\n"
+    + "{\n"
+    + "  if (excluded($1)) next\n"
+    + "  if ($0 !~ /= [0-9]+$/) next\n"
+    + "  if (!match($0, /openat\\([^,]*, \"[^\"]*\\.spl\"/)) next\n"
+    + "  s = substr($0, RSTART, RLENGTH)\n"
+    + "  q = index(s, \"\\\"\")\n"
+    + "  r = substr(s, q + 1)\n"
+    + "  print substr(r, 1, index(r, \"\\\"\") - 1)\n"
+    + "}\n"
+
 # Runs the entry under strace and returns (physical_files, source_bytes).
 # `stdin_body` empty => no stdin redirection (the --help entry).
 fn measure_closure(argv_tail: text, stdin_body: text) -> (i64, i64):
     val stdin_path = "/tmp/mcp_entry_closure_stdin.jsonl"
+    val filter_path = "/tmp/mcp_entry_closure_filter.awk"
+    file_write(filter_path, FILTER_AWK)
     var redirect = ""
     if stdin_body != "":
         file_write(stdin_path, stdin_body)
         redirect = " < " + stdin_path
-    # Successful `.spl` openat lines -> realpath -> distinct -> count + size sum.
-    #
     # `-f` is required (the loader reads from a worker thread, so an unfollowed
-    # trace sees zero opens), but a tool call may shell out to the CLI, and that
-    # child is a DIFFERENT entry whose closure is not this entry's. Children are
-    # excluded by PID, never by log position: now that handler modules load on
-    # first dispatch, some of this entry's own units are read AFTER the first
-    # shell-out, and a positional cut would score "loaded later" as "not loaded"
-    # (measured: the same tool call read 47 or 128 files depending only on where
-    # the cut fell). Every child re-execs, so pids named by any execve after the
-    # first — the first is the entry binary itself — are the children.
+    # trace sees zero opens) and `-s 4096` keeps strace from truncating a long
+    # path into something that no longer ends in `.spl` and would be dropped.
+    # Successful `.spl` openat lines of the entry's own tids -> realpath ->
+    # distinct -> count + size sum.
     val script = "set -e; LOG=$(mktemp); "
-        + "strace -f -e trace=openat,execve -o \"$LOG\" " + measure_binary()
+        + "strace -f -s 4096 -e trace=openat,execve,clone,clone3,vfork -o \"$LOG\" " + measure_binary()
         + " run src/app/mcp/main.spl " + argv_tail + redirect
         + " >/dev/null 2>/dev/null || true; "
-        + "kids=$(grep 'execve(' \"$LOG\" | sed -n '2,$p' "
-        + "| sed -n 's/^\\([0-9][0-9]*\\) .*/\\1/p' | sort -u | paste -sd'|' -); "
-        + "if [ -n \"$kids\" ]; then grep -vE \"^($kids) \" \"$LOG\" > \"$LOG.f\"; else cp \"$LOG\" \"$LOG.f\"; fi; "
-        + "sed -n 's/.*openat([^,]*, \"\\([^\"]*\\.spl\\)\".*=[[:space:]]*\\([0-9][0-9]*\\)$/\\1/p' \"$LOG.f\" "
+        + "awk -f " + filter_path + " \"$LOG\" \"$LOG\" "
         + "| sort -u | while IFS= read -r p; do readlink -f \"$p\"; done "
         + "| sort -u | while IFS= read -r r; do [ -f \"$r\" ] && stat -c %s \"$r\"; done "
-        + "| awk '{n++; b+=$1} END {print n+0; print b+0}'; rm -f \"$LOG\" \"$LOG.f\""
+        + "| awk '{n++; b+=$1} END {print n+0; print b+0}'; rm -f \"$LOG\""
     val (out, err, code) = process_run("sh", ["-c", script])
     val lines = out.split("\n")
     if lines.len() < 2:
@@ -125,6 +187,7 @@ fn measure_closure(argv_tail: text, stdin_body: text) -> (i64, i64):
 
 val INIT_FRAME = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"closure\",\"version\":\"1\"}}}\n"
 val CALL_FRAME = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_info\",\"arguments\":{}}}\n"
+val READ_FRAME = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{\"path\":\"src/lib/common/net/oid.spl\"}}}\n"
 
 describe "MCP entry closure (EntryClosureReceiptV1, strace-openat-realpath)":
 
@@ -157,3 +220,17 @@ describe "MCP entry closure (EntryClosureReceiptV1, strace-openat-realpath)":
         expect("measured bytes>0: {bytes > 0}").to_equal("measured bytes>0: true")
         expect("files<=budget: {files <= budget70(INFO_BASE_FILES)}").to_equal("files<=budget: true")
         expect("bytes<=budget: {bytes <= budget70(INFO_BASE_BYTES)}").to_equal("bytes<=budget: true")
+
+    it "loads at most 60 percent of the baseline closure for an in-process tool call":
+        # NON-VACUITY GUARD (fail closed) -- see the mcp-help scenario above.
+        # `simple_read` is dispatched IN PROCESS: it never shells out, so what it
+        # loads is exactly what `_dispatch_in_process` reaches. Before the
+        # per-family split that was all nine handler families at once.
+        expect("strace available: {have_strace()}").to_equal("strace available: true")
+        val (files, bytes) = measure_closure("", INIT_FRAME + READ_FRAME)
+        print "[perf] mcp-read-call physical_files={files} baseline={READ_BASE_FILES} budget={budget60(READ_BASE_FILES)}"
+        print "[perf] mcp-read-call source_bytes={bytes} baseline={READ_BASE_BYTES} budget={budget60(READ_BASE_BYTES)}"
+        expect("measured files>0: {files > 0}").to_equal("measured files>0: true")
+        expect("measured bytes>0: {bytes > 0}").to_equal("measured bytes>0: true")
+        expect("files<=budget: {files <= budget60(READ_BASE_FILES)}").to_equal("files<=budget: true")
+        expect("bytes<=budget: {bytes <= budget60(READ_BASE_BYTES)}").to_equal("bytes<=budget: true")
