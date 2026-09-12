@@ -215,3 +215,44 @@ itself is present and on PATH for an interactive shell:
 
 The trace that produced this answer has been removed; re-add it in one line if
 needed (`print` the message length on entry to `backend_aot_write_diagnostic`).
+
+## 2026-09-13, final state of this session
+
+`llc not found` is the confirmed failure (13-byte diagnostic, traced). Two
+attempts to fix it did NOT change the symptom, and both are landed because each
+closed a real gap regardless:
+
+1. **`PATH` added to the Stage 2 allowlist.** A genuine hole — the allowlist is
+   the child's whole environment — but `bootstrap_stage_sanity` already exports
+   `${stage_build_path}`, so the smoke likely had a PATH already.
+2. **`SIMPLE_LLVM_BIN` / `LLVM_SYS_180_PREFIX` added to the allowlist.** The
+   backend's finder consults these BEFORE any PATH lookup (`_env_tool_dirs`), and
+   the MSVC lane exports the prefix. Symptom unchanged.
+
+### The lead I would take next
+
+`LLVM_SYS_180_PREFIX` is set to an **MSYS-style** path:
+`/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc`. `_env_tool_dirs`
+appends `/bin` and hands that to `file_exists`, from a process that is a NATIVE
+Windows binary. Whether `/c/...` survives depends on `host_path_native`'s
+`_mingw_drive_to_windows` running on that path. If it does not, the directory
+probe fails, the finder falls through to `where llc`, and the result is
+identical to having no configuration at all — which is exactly what we observe.
+
+Cheapest decisive test: set `SIMPLE_LLVM_BIN` to a **native** path
+(`C:/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin`) in the lane and
+re-run. If that clears it, the defect is MSYS-vs-native path form in
+`_env_tool_dirs`, not the allowlist at all.
+
+### Re-tracing
+
+The trace that named this was one line in `backend_aot_write_diagnostic`
+printing `message.len()`. It was removed to keep `main` clean. Re-add it before
+the next attempt — without it, every one of these runs is indistinguishable.
+
+### Honest note on effort
+
+This single defect consumed many bootstrap cycles in one session. Each cycle is
+~40 minutes and the reason string is the ONLY signal, so guessing is expensive
+and measuring is cheap. The trace answered in one run what four rounds of
+inference could not. Start there.
