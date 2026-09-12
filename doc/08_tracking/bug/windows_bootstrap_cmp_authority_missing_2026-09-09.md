@@ -21,3 +21,17 @@ inventory so absence, ambient-path mismatch, symlink substitution, or hash
 drift fails early with an explicit binding error. Remaining evidence is the
 applied admitted PATH and one successful post-fix bootstrap admission; no
 build/cache admission has been granted.
+
+## 2026-09-12 re-verification: source fix present, row stays OPEN
+
+`bootstrap_stage3_compare_bind` (`scripts/check/lib/bootstrap-stage3/authority.shs:25-42`)
+binds, canonicalises and hashes the comparator, and
+`bootstrap_stage3_compare_files` re-checks the ambient `cmp` against the bound
+one on every call. It is wired into the admission lane at
+`scripts/bootstrap/bootstrap-from-scratch.sh:2630`.
+
+An audit lead proposed flipping this row to `fixed`. That is **not** warranted:
+this record's own status line still names two outstanding pieces of evidence —
+the applied admitted PATH and one successful post-fix bootstrap admission —
+and neither can be produced here (a bootstrap is already running and this
+session may not start one). Status unchanged.

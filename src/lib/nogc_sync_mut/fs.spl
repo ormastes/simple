@@ -335,8 +335,13 @@ class File:
 
         Returns:
             Some(size) or nil on error
+
+        The runtime reports failure as -1, not as an absent value, so the
+        Optional is built HERE rather than by declaring the extern as `usize?`
+        -- see the note on the `rt_file_size` declaration below.
         """
-        rt_file_size(path)
+        val bytes = rt_file_size(path)
+        if bytes < 0: nil else: Some(bytes as usize)
 
 # ============================================================================
 # Dir - Directory Operations
@@ -630,7 +635,23 @@ use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
 extern fn rt_file_move(old_path: text, new_path: text) -> bool
 use std.io_runtime.{file_copy}
-extern fn rt_file_size(path: text) -> usize?
+# `rt_file_size` returns a plain `int64_t` (`src/runtime/runtime_native.c` and
+# `src/runtime/runtime.c`): the byte count, or -1 when the file cannot be
+# stat'd. It must be DECLARED that way. This module used to declare it as
+# `-> usize?`, i.e. a boxed Optional, while the other six declarations in the
+# tree (io_runtime.spl, io/file_ops.spl, dual_fs, enterprise_store,
+# storage_roots/publisher, and the compiler's own
+# 80.driver/driver_build/incremental.spl) all say `-> i64`. Two incompatible
+# signatures for one extern symbol is a defect on its own, and under native
+# Stage-2 codegen the boxed spelling won: `FileFingerprint.size` came back as a
+# heap ADDRESS instead of a byte count, so the native capsule receipt recorded
+# `54090898177` for a 632-byte object file. Because an address differs between
+# processes, the receipt written by the compile and the receipt recomputed by
+# the sanity gate disagreed while being the same LENGTH -- the
+# `receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648` that blocked
+# every macOS Stage 2. See
+# doc/08_tracking/bug/bootstrap_stage2_native_capsule_receipt_mismatch_equal_byte_counts_2026-09-12.md
+extern fn rt_file_size(path: text) -> i64
 
 # NOTE: no rt_ symbol returns a full FileMetadata struct (size/is_file/
 # is_dir/is_symlink/readonly/modified/created) — only rt_file_stat/

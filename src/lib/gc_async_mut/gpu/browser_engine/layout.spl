@@ -1,6 +1,12 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
 use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox, BeBoxKind}
 use std.gc_async_mut.gpu.browser_engine.css.{CssPx}
+use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{
+    LayoutContext, LayoutBox, LineBox, InlineFragment, layout_context_new
+}
+
+val M14_LINE_HEIGHT = 24
+val M14_BASELINE = 19
 
 export BeLayoutBox
 
@@ -183,8 +189,145 @@ fn first_anchor_box(box: BeLayoutBox, node: BeDomNode) -> BeLayoutBox?:
         i = i + 1
     nil
 
+# =========================================================================
+# M14 public block layout (CSS 2.1 §9.2.1 anonymous block boxes)
+# =========================================================================
+
+fn _m14_is_inline_tag(tag: text) -> bool:
+    """Inline-level tags for the M14 public layout API (CSS 2.1 §9.2.2)."""
+    (
+        tag == "#text" or tag == "span" or tag == "a" or tag == "b" or
+        tag == "i" or tag == "em" or tag == "strong" or tag == "small" or
+        tag == "code" or tag == "label" or tag == "abbr" or tag == "sub" or
+        tag == "sup" or tag == "br" or tag == "var" or tag == "kbd" or
+        tag == "samp" or tag == "time" or tag == "q" or tag == "cite"
+    )
+
+fn _m14_is_non_rendered(tag: text) -> bool:
+    """Tags that generate no box at all."""
+    (
+        tag == "head" or tag == "title" or tag == "meta" or tag == "style" or
+        tag == "script" or tag == "link" or tag == "base" or tag == "template"
+    )
+
+fn _m14_text_of(node: BeDomNode) -> text:
+    """Concatenated text content of an inline-level node."""
+    if node.tag_name == "#text":
+        return node.data
+    var out = ""
+    var i = 0
+    while i < node.children.len():
+        out = out + _m14_text_of(node.children[i])
+        i = i + 1
+    out
+
+fn _m14_rendered_children(node: BeDomNode) -> [BeDomNode]:
+    """Children that generate boxes: drops non-rendered tags and the
+    whitespace-only text nodes the parser inserts between block siblings."""
+    var kids: [BeDomNode] = []
+    var i = 0
+    while i < node.children.len():
+        val c = node.children[i]
+        if not _m14_is_non_rendered(c.tag_name):
+            if c.tag_name != "#text" or c.data.trim() != "":
+                kids.push(c)
+        i = i + 1
+    kids
+
+fn _m14_layout_root(node: BeDomNode) -> BeDomNode:
+    """Resolve the layout root: the parser always wraps author markup in
+    `#document > html > body`, and those wrappers are not author boxes, so
+    descend through them while each has exactly one rendered child."""
+    var cur = node
+    var guard = 0
+    while guard < 8:
+        val t = cur.tag_name
+        if t != "#document" and t != "html" and t != "body":
+            return cur
+        val kids = _m14_rendered_children(cur)
+        if kids.len() != 1 or _m14_is_inline_tag(kids[0].tag_name):
+            # A lone INLINE child is content, not a wrapper: descending into it
+            # would return a box with no children and drop the text.
+            return cur
+        cur = kids[0]
+        guard = guard + 1
+    cur
+
+fn _m14_line_box(x: i32, y: i32, width: i32, run: text) -> LineBox:
+    """One line box holding a single inline fragment for `run`."""
+    val frag = InlineFragment(
+        x: x, y: y, width: width, height: M14_LINE_HEIGHT,
+        baseline_offset: M14_BASELINE, text_run: run
+    )
+    LineBox(
+        x: x, y: y, width: width, height: M14_LINE_HEIGHT,
+        baseline: M14_BASELINE, fragments: [frag]
+    )
+
+fn _m14_anonymous_block(y: i32, width: i32, run: text) -> LayoutBox:
+    """CSS 2.1 §9.2.1: an anonymous block box wrapping an inline run that is
+    a sibling of block-level content."""
+    LayoutBox(
+        x: 0, y: y, width: width, height: M14_LINE_HEIGHT,
+        is_anonymous: true, line_boxes: [_m14_line_box(0, y, width, run)],
+        children: []
+    )
+
+fn _m14_layout_block_node(node: BeDomNode, avail_w: i32, top: i32) -> LayoutBox:
+    """Normal-flow block layout for one element, generating anonymous block
+    boxes around every maximal inline run when the element also has at least
+    one block-level child (CSS 2.1 §9.2.1)."""
+    val kids = _m14_rendered_children(node)
+    var has_block = false
+    var i = 0
+    while i < kids.len():
+        if not _m14_is_inline_tag(kids[i].tag_name):
+            has_block = true
+        i = i + 1
+
+    var children: [LayoutBox] = []
+    var lines: [LineBox] = []
+    var y = top
+    var run = ""
+    i = 0
+    while i < kids.len():
+        val k = kids[i]
+        if _m14_is_inline_tag(k.tag_name):
+            run = run + _m14_text_of(k)
+        else:
+            if run != "":
+                children.push(_m14_anonymous_block(y, avail_w, run))
+                y = y + M14_LINE_HEIGHT
+                run = ""
+            val child_box = _m14_layout_block_node(k, avail_w, y)
+            children.push(child_box)
+            y = y + child_box.height
+        i = i + 1
+
+    if run != "":
+        if has_block:
+            children.push(_m14_anonymous_block(y, avail_w, run))
+        else:
+            lines.push(_m14_line_box(0, y, avail_w, run))
+        y = y + M14_LINE_HEIGHT
+
+    LayoutBox(
+        x: 0, y: top, width: avail_w, height: y - top,
+        is_anonymous: false, line_boxes: lines, children: children
+    )
+
+fn layout_block(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out `node` as a block container over the M14 public LayoutBox type.
+
+    `node` may be the parsed document; the parser-inserted
+    `#document > html > body` wrappers are unwrapped first. Inline runs that
+    are siblings of block-level boxes are wrapped in anonymous block boxes
+    (`is_anonymous == true`) per CSS 2.1 §9.2.1."""
+    _m14_layout_block_node(_m14_layout_root(node), ctx.available_width, 0)
+
 export layout_tree, layout_node, layout_to_scene, paint_box
 export layout_block
+export LayoutContext, LayoutBox, LineBox, InlineFragment, layout_context_new
 export layout_flex
 export layout_text
 export hit_test, hit_test_anchor, first_anchor_box
