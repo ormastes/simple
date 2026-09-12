@@ -185,3 +185,28 @@ Results: 2 total, 2 passed, 0 failed          # rc=0
 
 Assignment through a complex indexed-field receiver (`pool[i].next = x`) no
 longer fails. Closing as already fixed; no source change was made by this lane.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+Both tracking specs are green — including the regression spec this record's fix
+added, which is the one that would catch a relapse of the `alloc_node` /
+`free_node` backing-storage restructure:
+
+```
+$ bin/simple test test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_backing_storage_regression_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0 skipped=0 dropped=0
+
+$ bin/simple test test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0
+```
+
+The library half of this record is confirmed fixed and stays fixed. Closing the
+library bug. The language limitation it names (indexed-field assignment on a
+complex receiver) is a separate, still-open concern and is NOT closed by this
+entry — it has no spec here and was never claimed fixed.
+
+- Status: CLOSED (2026-09-12) — library fix verified on seed sha256 3d120a6f, spec test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_backing_storage_regression_spec.spl 5/5; the underlying language limitation remains open and unowned by this record

@@ -735,3 +735,56 @@ python3 validate.py <path> out.json val.json   # independent zero-occurrence con
 python3 classify.py <path> out.json rows.json  # module-resolves / does-not-resolve split
 ```
 
+
+## Triage 2026-09-12 (BUGFIX-5) — a concrete, mechanical subset: 26 spec files with a `std.lib.` prefix that resolves nowhere
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+This record's §1 draws the right distinction — an unresolved *name* is a
+warning, an unresolved *module* is a hard error. 38 spec files were hitting the
+hard-error side for a trivially mechanical reason: they import
+`use std.lib.<x>` where the resolver maps `std.` -> `src/lib/`, so the extra
+`lib.` segment asks for `src/lib/lib/<x>` — a path that has never existed.
+`grep -rl "use std\.lib\." src/` returns **0**: no product file makes this
+mistake, only specs.
+
+Measured effect before the fix: **every one of the 26 repairable files executed
+0 examples**, e.g.
+
+```
+error: semantic: Cannot resolve module: std.lib.blink.css_parser.selector
+SPEC FILE VERDICT: test/01_unit/lib/blink/css_selector_spec.spl outcome=ERROR declared>=22 executed=0 passed=0 failed=0
+```
+
+That spec was recorded at `22 passed` on 2026-08-10 inside
+`three_computedstyle_concepts_2026-08-10.md`, so this is a regression a later
+edit introduced, not an always-broken file.
+
+Fix applied to the 26 files (13 pairs, both test trees, edited identically):
+`use std.lib.` -> `use std.`, after verifying each target module exists under
+`src/lib/`. Three of them additionally needed `val xs = [T]()` -> `var` where
+the example then calls `xs.push(...)` (`semantic: cannot call mutating method
+'push' on immutable array`), which only became visible once the files loaded.
+
+Result on the same binary: **20 of 26 files go from 0 examples executed to
+fully green**, including `css_selector_spec` (22/22), `computed_style_spec`,
+`style_cascade_spec`, `dom_node_spec`, `input_event_spec`, `paint_chunk_spec`,
+`utf8_validation_spec` and `url_parser_spec`. The remaining 6 (3 pairs) now run
+and fail honestly rather than not running at all — filed as
+`doc/08_tracking/bug/blink_specs_unmasked_by_std_lib_prefix_repair_2026-09-12.md`.
+
+**12 further files are NOT repairable this way** and stay broken: their imports
+name modules that do not exist under any prefix — `blink.dom.document`,
+`blink.feature.paint.paint_controller`, `blink.layout.flex`,
+`blink.navigation.controller`, `blink.network.fetch`, `blink.scroll.manager`
+(`document_spec`, `flex_spec`, `navigation_controller_spec`,
+`navigation_fetch_spec`, `paint_controller_spec`, `scroll_manager_spec`, in both
+trees). Those belong to this record's population proper, and to
+`specs_assert_against_nonexistent_product_paths_2026-08-10.md`.
+
+The 1003-name census this record is really about is untouched; only the
+hard-error module subset above was repaired.
+
+- Status: OPEN (2026-09-12) — census unchanged; the mechanical `std.lib.` subset (26 files) is repaired, 20 now green where 0 examples ran before

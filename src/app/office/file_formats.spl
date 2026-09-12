@@ -191,34 +191,34 @@ fn _footnote_def_parts(line: text) -> (bool, text, text):
         rest = rest.slice(1, rest.len())
     (true, fn_id, rest)
 
-fn _md_block(line: text, comment_start: i32) -> (DocBlock, [CommentDef]):
+fn _md_block(line: text, comment_start: i32) -> MdBlockResult:
     """Classify a single non-fence, non-blank markdown line into a DocBlock.
     `comment_start` is the next free numeric comment id, threaded document-
     wide by `parse_markdown_document` (see `parse_inline_spans`)."""
     val fd = _footnote_def_parts(line)
     if fd.0:
-        return (DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.2, style: InlineStyle.Normal, link_url: "", footnote_id: fd.1, comment_id: "", revision_id: "")]), [])
+        return MdBlockResult(block: DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.2, style: InlineStyle.Normal, link_url: "", footnote_id: fd.1, comment_id: "", revision_id: "")]), comments: [])
     if line.starts_with("### "):
         val r = parse_inline_spans(line.slice(4, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.Heading3, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.Heading3, spans: r.spans), comments: r.comments)
     if line.starts_with("## "):
         val r = parse_inline_spans(line.slice(3, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.Heading2, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.Heading2, spans: r.spans), comments: r.comments)
     if line.starts_with("# "):
         val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.Heading1, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.Heading1, spans: r.spans), comments: r.comments)
     val ordered_len = _ordered_marker_len(line)
     if ordered_len > 0:
         val r = parse_inline_spans(line.slice(ordered_len, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.OrderedItem, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.OrderedItem, spans: r.spans), comments: r.comments)
     if line.starts_with("- ") or line.starts_with("* "):
         val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.BulletItem, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.BulletItem, spans: r.spans), comments: r.comments)
     if line.starts_with("> "):
         val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
-        return (DocBlock(kind: BlockKind.Quote, spans: r.spans), r.comments)
+        return MdBlockResult(block: DocBlock(kind: BlockKind.Quote, spans: r.spans), comments: r.comments)
     val r = parse_inline_spans(line.trim(), comment_start)
-    (DocBlock(kind: BlockKind.Paragraph, spans: r.spans), r.comments)
+    MdBlockResult(block: DocBlock(kind: BlockKind.Paragraph, spans: r.spans), comments: r.comments)
 
 fn parse_markdown_document(content: text, title: text) -> RichDocument:
     """Parse a markdown subset (#/##/### headings, -/* bullets, > quote, ``` code
@@ -242,7 +242,10 @@ fn parse_markdown_document(content: text, title: text) -> RichDocument:
             continue
         if trimmed == "":
             continue
-        doc.blocks.push(_md_block(trimmed))
+        val r = _md_block(trimmed, doc.comments.len() + 1)
+        doc.blocks.push(r.block)
+        for c in r.comments:
+            doc.comments.push(c)
     if in_code:
         doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
     doc
@@ -267,28 +270,54 @@ fn _span_to_markdown(span: TextSpan, comments: [CommentDef]) -> text:
 fn _spans_to_markdown(spans: [TextSpan], comments: [CommentDef]) -> text:
     var out = ""
     for span in spans:
-        out = "{out}{_span_to_markdown(span)}"
+        out = "{out}{_span_to_markdown(span, comments)}"
     out
 
-fn _block_to_markdown(block: DocBlock) -> text:
-    val content = _spans_to_markdown(block.spans)
+fn _tight_run_tag(block: DocBlock) -> text:
+    """Blocks of the same non-empty tag stay on adjacent lines instead of being
+    separated by a blank line — markdown keeps ordered-list items and footnote
+    definitions tight."""
+    match block.kind:
+        case OrderedItem: return "ordered"
+        case FootnoteDef: return "footnote"
+        _: return ""
+
+fn _block_to_markdown(block: DocBlock, comments: [CommentDef], ordinal: i64) -> text:
+    """Serialize one block. `ordinal` is the 1-based position of this block
+    inside the current run of consecutive OrderedItem blocks (0 for every
+    other kind), so `1. / 2. / 3.` numbering survives a round trip."""
+    val content = _spans_to_markdown(block.spans, comments)
     match block.kind:
         case Heading1: return "# {content}"
         case Heading2: return "## {content}"
         case Heading3: return "### {content}"
         case BulletItem: return "- {content}"
+        case OrderedItem: return "{ordinal}. {content}"
         case Quote: return "> {content}"
         case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
+        case FootnoteDef:
+            # The definition's own text, not the `[^id]` reference marker that
+            # `_span_to_markdown` would emit for a span carrying a footnote id.
+            val fid = if block.spans.len() > 0: block.spans.get(0).footnote_id else: ""
+            return "[^{fid}]: {spans_to_plain_text(block.spans)}"
         case Paragraph: return content
 
 fn document_to_markdown(doc: RichDocument) -> text:
-    """Serialize a RichDocument back to markdown text for saving."""
+    """Serialize a RichDocument back to markdown text for saving.
+    Blocks are separated by a blank line, except consecutive ordered-list
+    items, which markdown keeps on adjacent lines."""
     var out = ""
     var first = true
+    var ordinal = 0
+    var prev_tag = ""
     for block in doc.blocks:
-        val line = _block_to_markdown(block)
-        out = if first: line else: "{out}\n\n{line}"
+        val tag = _tight_run_tag(block)
+        ordinal = if tag == "ordered": ordinal + 1 else: 0
+        val line = _block_to_markdown(block, doc.comments, ordinal)
+        val sep = if tag != "" and tag == prev_tag: "\n" else: "\n\n"
+        out = if first: line else: "{out}{sep}{line}"
         first = false
+        prev_tag = tag
     out
 
 # =========================================================================
