@@ -456,6 +456,16 @@ if let Value::Str(ref s) = recv_val {
                 return Ok(Value::text(String::new()));
             }
             let idx = raw_idx as usize;
+            // Same ASCII-memo gate as `char_code_at` below: inside an ASCII
+            // string a character index IS a byte index, so answer straight
+            // out of the buffer instead of paying `chars().nth(idx)`'s O(idx)
+            // walk on every call.
+            if shared_text_is_ascii(s) {
+                return Ok(Value::text(match s.as_bytes().get(idx) {
+                    Some(b) => (*b as char).to_string(),
+                    None => String::new(),
+                }));
+            }
             match s.chars().nth(idx) {
                 Some(c) => return Ok(Value::text(c.to_string())),
                 None => return Ok(Value::text(String::new())),
@@ -618,11 +628,20 @@ if let Value::Str(ref s) = recv_val {
             // Unlike substring(start, end), this uses length
             let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let length = eval_arg_usize(args, 1, s.len(), env, functions, classes, enums, impl_methods)?;
-            // Work with char indices for unicode safety
-            let chars: Vec<char> = s.chars().collect();
-            let start = start.min(chars.len());
-            let end = (start + length).min(chars.len());
-            let result: String = chars[start..end].iter().collect();
+            // CHARACTER indices, unicode-safe. `s.chars().collect()` used to
+            // allocate a Vec<char> of the WHOLE string on every call, which
+            // made a `while i < s.len(): s.substr(i, 1)` loop O(n^2). Same
+            // ASCII-memo gate as `char_code_at` above: inside an ASCII string
+            // a character index IS a byte index, so slice bytes directly.
+            // Otherwise walk `chars()` only as far as `start + length` needs,
+            // never collecting the whole string into a Vec<char>.
+            if shared_text_is_ascii(s) {
+                let len = s.len();
+                let start = start.min(len);
+                let end = (start + length).min(len);
+                return Ok(Value::text(s[start..end].to_string()));
+            }
+            let result: String = s.chars().skip(start).take(length).collect();
             return Ok(Value::text(result));
         }
         "find_all" | "find_indices" => {

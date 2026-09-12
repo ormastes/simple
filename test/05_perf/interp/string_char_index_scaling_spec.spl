@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed interpreter string character-accessor scaling budget: `substr`,
+# `char_at`/`at`, and index (`s[i]`) must stay LINEAR in the number of calls,
+# not O(n^2) in the string length.
+#
+# Mechanism pinned (not just a wall-clock number):
+#   - `interpreter_method/string.rs` `"substr"` did `s.chars().collect()` --
+#     a fresh Vec<char> of the WHOLE string -- on every single call, so a loop
+#     of `n` calls over an `n`-length string cost O(n^2).
+#   - `"char_at" | "at"` had no ASCII fast path at all and always paid
+#     `chars().nth(idx)`'s O(idx) walk from byte 0.
+#   - `interpreter/expr/collections.rs` `indexed_string_char` (backing `s[i]`)
+#     re-ran `s.is_ascii()` -- an O(len) scan -- on every call instead of
+#     reusing the identity-keyed memo `char_code_at` already had.
+#
+# This spec quadruples the string length (20000 -> 80000) and asserts the
+# ratio does not exceed 7 (linear ~= 4). Measured pre-fix on this host (seed
+# `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`,
+# built 2026-09-06): substr ratio ~14.6, char_at/index ratio ~6.6 (RED).
+#
+# See doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+
+use std.spec.step
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn build_ascii_text(n: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < n:
+        parts.push("a")
+        i = i + 1
+    parts.join("")
+
+fn time_substr_loop(s: text, n: i64) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var cnt = 0
+    var i = 0
+    while i < n:
+        cnt = cnt + s.substr(i, 1).len()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(cnt).to_equal(n)
+    elapsed
+
+fn time_char_at_loop(s: text, n: i64) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var cnt = 0
+    var i = 0
+    while i < n:
+        cnt = cnt + s.char_at(i).len()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(cnt).to_equal(n)
+    elapsed
+
+fn time_index_loop(s: text, n: i64) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var cnt = 0
+    var i = 0
+    while i < n:
+        if s[i] == "a":
+            cnt = cnt + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(cnt).to_equal(n)
+    elapsed
+
+describe "seed interpreter: string character accessors scale linearly, not O(n^2)":
+    # @manual scenario evidence
+    it "substr(i, 1) in a loop does not more than septuple when n quadruples":
+        step("substr(i, 1) in a loop does not more than septuple when n quadruples")
+        val s20 = build_ascii_text(20000)
+        val t20 = time_substr_loop(s20, 20000)
+        val s80 = build_ascii_text(80000)
+        val t80 = time_substr_loop(s80, 80000)
+        print "[perf] text_substr: n=20000 {t20}us n=80000 {t80}us"
+        expect(t20 > 0).to_equal(true)
+        expect(t80 * 10 < t20 * 70).to_equal(true)
+
+    it "char_at(i) in a loop does not more than septuple when n quadruples":
+        step("char_at(i) in a loop does not more than septuple when n quadruples")
+        val s20 = build_ascii_text(20000)
+        val t20 = time_char_at_loop(s20, 20000)
+        val s80 = build_ascii_text(80000)
+        val t80 = time_char_at_loop(s80, 80000)
+        print "[perf] text_char_at: n=20000 {t20}us n=80000 {t80}us"
+        expect(t20 > 0).to_equal(true)
+        expect(t80 * 10 < t20 * 70).to_equal(true)
+
+    it "s[i] in a loop does not more than septuple when n quadruples":
+        step("s[i] in a loop does not more than septuple when n quadruples")
+        val s20 = build_ascii_text(20000)
+        val t20 = time_index_loop(s20, 20000)
+        val s80 = build_ascii_text(80000)
+        val t80 = time_index_loop(s80, 80000)
+        print "[perf] str_index: n=20000 {t20}us n=80000 {t80}us"
+        expect(t20 > 0).to_equal(true)
+        expect(t80 * 10 < t20 * 70).to_equal(true)
+
+    it "substr/char_at/index agree on non-ASCII text at several indices":
+        # @req REQ-SSPEC-PERF
+        # "héllo wörld " repeated: byte-length != char-length, so this pins
+        # the non-ASCII (non-memoized) walk path stays correct.
+        var parts: [text] = []
+        var i = 0
+        while i < 20:
+            parts.push("héllo wörld ")
+            i = i + 1
+        val s = parts.join("")
+        expect(s.substr(0, 1)).to_equal("h")
+        expect(s.substr(1, 1)).to_equal("é")
+        expect(s.char_at(1)).to_equal("é")
+        expect(s[1]).to_equal("é")
+        expect(s.substr(7, 1)).to_equal("ö")
+        expect(s.char_at(7)).to_equal("ö")
+        expect(s[7]).to_equal("ö")
+        expect(s.substr(11, 1)).to_equal(" ")
+        expect(s.char_at(11)).to_equal(" ")
+        expect(s[11]).to_equal(" ")
+
+    it "substr past the end returns empty text, not a panic":
+        val s = "abc"
+        expect(s.substr(10, 1)).to_equal("")
+        expect(s.substr(1, 100)).to_equal("bc")
+        expect(s.substr(0, 0)).to_equal("")
+
+    it "char_at/at with a negative index return empty text":
+        val s = "abc"
+        expect(s.char_at(-1)).to_equal("")
+        expect(s.at(-1)).to_equal("")
+
+    it "s[i] with a negative index still wraps from the end":
+        val s = "abcd"
+        expect(s[-1]).to_equal("d")
+        expect(s[-4]).to_equal("a")

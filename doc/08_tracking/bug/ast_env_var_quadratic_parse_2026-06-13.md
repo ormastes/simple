@@ -3,7 +3,43 @@
 **ID:** ast_env_var_quadratic_parse_2026-06-13  
 **Severity:** P1 — `check` on 400+ top-level functions times out (>300 s)  
 **Status:** Localized, fix proposed, not yet implemented  
+**Re-verification 2026-09-12:** NOT RE-VERIFIABLE on this host — see below.  
 **Reported:** 2026-06-13
+
+
+## 2026-09-12 re-verification attempt — blocked, and why the obvious probe lies
+
+Attempted on `origin/main` = `7352f99898c` with
+`src/compiler_rust/target/release/simple` (51226288 bytes, 2026-09-12 10:01:32).
+
+`bin/simple check <file>` **never analyses the file** on this host:
+
+```
+ERROR: no admitted cached self-hosted check worker artifact is available
+```
+
+It still exits after ~1 s and still emits stdlib lint warnings, so it looks like
+it ran. Timings taken through it are therefore **vacuous** and must not be read
+as evidence the quadratic is gone. For the record, what that vacuous probe
+produces (trivial two-statement functions, fresh non-cached content):
+
+| functions | `check` wall |
+|---|---|
+| 100 | 1.08 s |
+| 200 | 1.06 s |
+| 400 | 0.88 s |
+| 800 | 1.07 s |
+
+Flat across an 8x range because no work is being done.
+
+`bin/simple run` is not a substitute either: the seed parses with its own Rust
+parser, not the pure-Simple frontend named in "Primary site"
+(`src/compiler/10.frontend/core/ast_stmt.spl`, `ast_part1.spl`, `ast_part2.spl`).
+That Rust path is linear here — 0.028 s at 100 functions to 0.049 s at 800 — and
+says nothing about the AST env-var store this record is about.
+
+Re-measuring this record needs a host with an admitted self-hosted check worker
+artifact. Left Open, unchanged otherwise.
 
 ---
 

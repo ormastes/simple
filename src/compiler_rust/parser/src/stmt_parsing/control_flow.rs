@@ -535,28 +535,70 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`
+    /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`.
+    ///
+    /// A bare TWO-name pattern `for a, b in e:` is genuinely ambiguous at
+    /// parse time between two live idioms that share identical syntax:
+    ///   - the enumerate shorthand `for i, item in items:` (`items` any
+    ///     iterable; `i` should be the loop's own position) — has a
+    ///     dedicated interpreter fast path
+    ///     (`try_exec_enumerated_int_array_for_loop`, interpreter_control.rs)
+    ///     and is pinned by test/01_unit/app/interpreter/perf_spec.spl's
+    ///     "enumerated ... array foreach index sum" examples;
+    ///   - bare tuple destructuring `for k, v in d.items():` /
+    ///     `for k, v in d.entries():`, meant to behave exactly like the
+    ///     parenthesized `for (k, v) in d.items():` (both already produce
+    ///     the same `Pattern::Tuple([Identifier(a), Identifier(b)])` here).
+    ///
+    /// This can't be resolved here — the parser doesn't evaluate `e`.
+    /// `auto_enumerate = true` defers the decision to the interpreter, which
+    /// applies a STATIC rule on `e`'s own EXPRESSION shape, once per loop
+    /// (`for_loop_iterable_is_items_or_entries_call`,
+    /// interpreter_helpers/patterns.rs): destructure only when `e` is
+    /// written as a `.items()`/`.entries()` method call; every other
+    /// iterable — including an array literal/variable whose elements happen
+    /// to be 2-tuples, e.g. `for i, pair in [(1, 2), (3, 4)]:` — keeps the
+    /// plain enumerate shorthand. (An earlier attempt at this fix decided
+    /// per ITEM at runtime instead, by inspecting whether each yielded value
+    /// was already a 2-tuple; that was wrong — it silently flipped
+    /// `for i, pair in [(1, 2), (3, 4)]:` from enumerate to destructure
+    /// purely because the array's elements happened to be tuples, a real
+    /// feature break that was also data-dependent.) Before either fix
+    /// landed, EVERY bare two-name loop over `d.items()`/`d.entries()` was
+    /// silently double-wrapped — `for k, v in d.items():` bound `k` to the
+    /// loop's positional index and `v` to the whole `(key, value)` tuple
+    /// instead of unpacking it. See doc/08_tracking/bug/
+    /// dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+    ///
+    /// A bare pattern of three or more names (`for a, b, c in e:`) is not
+    /// handled by this shorthand at all — same as before this fix, it falls
+    /// through to a parse error, since only the two-name case has a
+    /// competing "enumerate" idiom to stay compatible with. Widening bare
+    /// tuple patterns to arbitrary arity is a separate grammar change (would
+    /// need a `doc/06_spec` regeneration) and is out of scope here.
+    ///
     /// Returns (pattern, auto_enumerate)
     fn parse_for_pattern(&mut self) -> Result<(Pattern, bool), ParseError> {
         // Check if this looks like enumerate shorthand: bare `ident, pattern`
         // (not a tuple pattern which uses parentheses)
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            let index_name = name.clone();
-            let index_span = self.current.span;
+            let first_name = name.clone();
             self.advance();
 
             // If followed by comma (enumerate shorthand), parse the item pattern
             if self.check(&TokenKind::Comma) {
                 self.advance(); // consume comma
-                let item_pattern = self.parse_pattern()?;
+                let second_pattern = self.parse_pattern()?;
 
-                // Create tuple pattern for (index, item)
-                let tuple_pattern = Pattern::Tuple(vec![Pattern::Identifier(index_name), item_pattern]);
+                // Exactly two bare names: ambiguous — see the doc comment
+                // above. Tag `auto_enumerate = true` so the interpreter
+                // disambiguates per item at runtime.
+                let tuple_pattern = Pattern::Tuple(vec![Pattern::Identifier(first_name), second_pattern]);
                 return Ok((tuple_pattern, true));
             }
 
             // Not enumerate shorthand - just a regular identifier pattern
-            return Ok((Pattern::Identifier(index_name), false));
+            return Ok((Pattern::Identifier(first_name), false));
         }
 
         // Fall back to standard pattern parsing (handles tuples, wildcards, etc.)

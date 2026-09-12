@@ -115,7 +115,18 @@ pub struct ForStmt {
     pub simd_requested: bool,
     /// Suspension for loop (for~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
-    /// Enumerate shorthand: `for i, item in items:` auto-wraps items with indices
+    /// Bare two-name for-pattern (`for a, b in e:`): ambiguous between the
+    /// enumerate shorthand (`for i, item in items:`, wraps each item as
+    /// `(loop_index, item)`) and tuple destructuring (`for k, v in
+    /// d.items():`, same as `for (k, v) in d.items():`). The interpreter
+    /// resolves this with a STATIC rule on the iterable EXPRESSION, once per
+    /// loop — destructure only when `e` is a `.items()`/`.entries()` call
+    /// (see `for_loop_iterable_is_items_or_entries_call` in
+    /// interpreter_helpers/patterns.rs); every other iterable, including an
+    /// array whose elements happen to be 2-tuples, keeps the enumerate
+    /// shorthand. See
+    /// doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+    /// Always `false` for a parenthesized pattern or three-or-more bare names.
     pub auto_enumerate: bool,
     /// Loop invariants for verification
     /// ```simple

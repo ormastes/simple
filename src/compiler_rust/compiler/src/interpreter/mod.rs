@@ -206,7 +206,7 @@ mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 pub(crate) use interpreter_method::{
     evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
-    find_and_exec_method_with_self_owned_values, object_method_exists,
+    find_and_exec_method_with_self_owned_values, object_method_exists, shared_text_is_ascii,
 };
 pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};
 pub use interpreter_method::clear_pinned_strings;

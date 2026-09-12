@@ -1,0 +1,166 @@
+# Pure lifecycle coverage for the inactive persistent LSP query session planner.
+# @req LSP-PERSIST-V4-SESSION
+
+use std.spec.*
+use app.simple_lsp_mcp.lsp_query_session_v1.*
+
+describe "LspQuerySessionV1 lifecycle planner":
+    it "starts one lazy worker and reuses it for one thousand sequential requests":
+        step("Create a dormant workspace-scoped session")
+        var session = lsp_query_session_initial_v1("/workspace")
+        var i: i64 = 0
+        while i < 1000:
+            val request_id = "request-" + i.to_text()
+            val generation = "generation-" + i.to_text()
+            val plan = lsp_query_session_plan_request_v1(
+                session, request_id, "/workspace", generation, 10000 + i, i)
+            expect(plan.accepted).to_be(true)
+            expect(plan.request_id).to_equal(request_id)
+            expect(plan.execution_generation).to_equal(generation)
+            expect(plan.session.answer_cache_enabled).to_be(false)
+            if i == 0:
+                expect(plan.start_worker).to_be(true)
+                expect(plan.reuse_worker).to_be(false)
+            else:
+                expect(plan.start_worker).to_be(false)
+                expect(plan.reuse_worker).to_be(true)
+            val completed = lsp_query_session_note_request_success_v1(
+                plan.session, request_id, generation)
+            expect(completed.accepted).to_be(true)
+            session = completed.session
+            i = i + 1
+        step("Observe one start and one thousand accepted requests")
+        expect(session.worker_start_count).to_equal(1)
+        expect(session.accepted_request_count).to_equal(1000)
+
+    it "forwards each changed generation without caching a semantic answer":
+        step("Plan two requests against successive execution generations")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val first = lsp_query_session_plan_request_v1(
+            initial, "first", "/workspace", "generation-a", 10000, 0)
+        val first_completed = lsp_query_session_note_request_success_v1(
+            first.session, "first", "generation-a")
+        val second = lsp_query_session_plan_request_v1(
+            first_completed.session, "second", "/workspace", "generation-b", 10000, 1000)
+        step("Observe worker reuse with the current generation retained")
+        expect(second.accepted).to_be(true)
+        expect(second.reuse_worker).to_be(true)
+        expect(second.execution_generation).to_equal("generation-b")
+        expect(second.session.last_execution_generation).to_equal("generation-b")
+        expect(second.session.answer_cache_enabled).to_be(false)
+
+    it "requires the matching in-flight completion before the next request":
+        step("Leave the first accepted request in flight")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val first = lsp_query_session_plan_request_v1(
+            initial, "first", "/workspace", "generation-a", 10000, 0)
+        val overlapping = lsp_query_session_plan_request_v1(
+            first.session, "second", "/workspace", "generation-b", 10000, 1000)
+        val stale_completion = lsp_query_session_note_request_success_v1(
+            first.session, "other", "generation-a")
+        step("Record the exact success completion and retry sequentially")
+        expect(overlapping.accepted).to_be(false)
+        expect(overlapping.reason).to_equal("worker_not_ready")
+        expect(stale_completion.accepted).to_be(false)
+        expect(stale_completion.reason).to_equal("completion_identity_mismatch")
+        val completed = lsp_query_session_note_request_success_v1(
+            first.session, "first", "generation-a")
+        val second = lsp_query_session_plan_request_v1(
+            completed.session, "second", "/workspace", "generation-b", 10000, 1000)
+        step("Observe reuse only after matching completion")
+        expect(completed.accepted).to_be(true)
+        expect(second.accepted).to_be(true)
+        expect(second.reuse_worker).to_be(true)
+
+    it "refuses invalid identity workspace generation and deadline before startup":
+        step("Create a dormant session and present invalid requests")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val wrong_root = lsp_query_session_plan_request_v1(
+            initial, "request", "/other", "generation", 10000, 0)
+        val missing_id = lsp_query_session_plan_request_v1(
+            initial, "", "/workspace", "generation", 10000, 0)
+        val missing_generation = lsp_query_session_plan_request_v1(
+            initial, "request", "/workspace", "", 10000, 0)
+        val expired = lsp_query_session_plan_request_v1(
+            initial, "request", "/workspace", "generation", 10000, 10000)
+        step("Observe fail-closed plans without a worker start")
+        expect(wrong_root.reason).to_equal("workspace_root_mismatch")
+        expect(missing_id.reason).to_equal("invalid_request_id")
+        expect(missing_generation.reason).to_equal("invalid_execution_generation")
+        expect(expired.reason).to_equal("request_deadline_exhausted")
+        expect(wrong_root.session.worker_start_count).to_equal(0)
+        expect(missing_id.session.worker_start_count).to_equal(0)
+        expect(missing_generation.session.worker_start_count).to_equal(0)
+        expect(expired.session.worker_start_count).to_equal(0)
+
+    it "refuses oversized request generation and workspace identities":
+        step("Construct values one byte beyond every identity bound")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val oversized_id = lsp_query_session_plan_request_v1(
+            initial, "r".repeat(16385), "/workspace", "generation", 10000, 0)
+        val oversized_generation = lsp_query_session_plan_request_v1(
+            initial, "request", "/workspace", "g".repeat(16385), 10000, 0)
+        val oversized_configured = lsp_query_session_initial_v1("c".repeat(16385))
+        val configured_root = lsp_query_session_plan_request_v1(
+            oversized_configured, "request", "c".repeat(16385), "generation", 10000, 0)
+        val presented_root = lsp_query_session_plan_request_v1(
+            initial, "request", "p".repeat(16385), "generation", 10000, 0)
+        step("Observe exact bounded refusals before a worker start")
+        expect(oversized_id.reason).to_equal("invalid_request_id")
+        expect(oversized_generation.reason).to_equal("invalid_execution_generation")
+        expect(configured_root.reason).to_equal("configured_workspace_root_too_large")
+        expect(presented_root.reason).to_equal("presented_workspace_root_too_large")
+        expect(oversized_id.session.worker_start_count).to_equal(0)
+        expect(oversized_generation.session.worker_start_count).to_equal(0)
+        expect(configured_root.session.worker_start_count).to_equal(0)
+        expect(presented_root.session.worker_start_count).to_equal(0)
+
+    it "blocks fallback until the failed worker is reaped and permits it once":
+        step("Start a worker and bind a failure to the active request")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val request = lsp_query_session_plan_request_v1(
+            initial, "request-7", "/workspace", "generation-7", 11000, 1000)
+        val failed = lsp_query_session_note_worker_failure_v1(
+            request.session, "request-7", "generation-7")
+        val early = lsp_query_session_plan_fallback_v1(
+            failed.session, "request-7", "generation-7", 11000, 3000)
+        step("Record the matching reap receipt before fallback")
+        expect(early.allowed).to_be(false)
+        expect(early.reason).to_equal("worker_not_reaped")
+        val reaped = lsp_query_session_note_worker_reaped_v1(
+            failed.session, "request-7", "generation-7")
+        val fallback = lsp_query_session_plan_fallback_v1(
+            reaped.session, "request-7", "generation-7", 11000, 4000)
+        val duplicate = lsp_query_session_plan_fallback_v1(
+            fallback.session, "request-7", "generation-7", 11000, 5000)
+        step("Observe exactly one fallback under the remaining deadline")
+        expect(fallback.allowed).to_be(true)
+        expect(fallback.remaining_deadline_ms).to_equal(7000)
+        expect(duplicate.allowed).to_be(false)
+        expect(duplicate.reason).to_equal("fallback_already_consumed")
+
+    it "refuses stale failure receipts and an exhausted fallback deadline":
+        step("Present mismatched failure and reap identities")
+        val initial = lsp_query_session_initial_v1("/workspace")
+        val request = lsp_query_session_plan_request_v1(
+            initial, "request-8", "/workspace", "generation-8", 11000, 1000)
+        val stale_failure = lsp_query_session_note_worker_failure_v1(
+            request.session, "request-9", "generation-8")
+        val failed = lsp_query_session_note_worker_failure_v1(
+            request.session, "request-8", "generation-8")
+        val stale_reap = lsp_query_session_note_worker_reaped_v1(
+            failed.session, "request-8", "generation-9")
+        val reaped = lsp_query_session_note_worker_reaped_v1(
+            failed.session, "request-8", "generation-8")
+        val expired = lsp_query_session_plan_fallback_v1(
+            reaped.session, "request-8", "generation-8", 11000, 11000)
+        val inflated = lsp_query_session_plan_fallback_v1(
+            reaped.session, "request-8", "generation-8", 12000, 4000)
+        step("Observe refusals without overlapping a fallback")
+        expect(stale_failure.accepted).to_be(false)
+        expect(stale_reap.accepted).to_be(false)
+        expect(expired.allowed).to_be(false)
+        expect(expired.reason).to_equal("request_deadline_exhausted")
+        expect(inflated.allowed).to_be(false)
+        expect(inflated.reason).to_equal("fallback_deadline_authority_mismatch")
+        expect(expired.session.phase).to_equal(LspQuerySessionPhaseV1.ReapedFailure)

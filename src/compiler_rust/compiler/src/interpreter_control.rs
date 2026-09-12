@@ -66,7 +66,7 @@ use super::{
 };
 
 // Import helpers for pattern binding
-use super::interpreter_helpers::{bind_pattern, iter_to_vec};
+use super::interpreter_helpers::{bind_pattern, for_loop_iterable_is_items_or_entries_call, iter_to_vec};
 
 // Import from interpreter_call for exec_block_value (sibling module)
 use super::interpreter_call::exec_block_value;
@@ -3457,15 +3457,28 @@ fn exec_for_inner(
         iterable
     };
 
-    // Check if iterating over a Dict - auto_enumerate doesn't apply since
-    // dict iteration already returns (key, value) tuples
-    let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+    // Bare two-name pattern destructures (no index-wrap) when the iterable is
+    // a `.items()`/`.entries()` call (static, checked once here) or when its
+    // evaluated value is a `Value::Dict` (direct dict iteration, e.g.
+    // `for k, v in d:` with no method call at all -- no syntactic marker
+    // exists for that case, so it stays the SAME runtime check on the whole
+    // iterable this file already had before this bug's fix; not widened to
+    // `Value::FrozenDict`, whose `for k, v in frozen:` keeps double-wrapping
+    // exactly like before -- a real, pre-existing, separate gap, left alone
+    // rather than folded into this fix). Every other iterable keeps the
+    // plain enumerate shorthand exactly as before, INCLUDING an array whose
+    // elements happen to already be 2-tuples (e.g. `for i, pair in
+    // [(1, 2), (3, 4)]:` still enumerates: `i` = 0, 1; `pair` = the tuple) or
+    // an `.enumerate()` call (`for i, x in arr.enumerate():` still
+    // double-wraps -- also pre-existing, also left alone; see
+    // doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md).
+    // See `for_loop_iterable_is_items_or_entries_call`.
+    let destructure_bare_pattern =
+        for_loop_iterable_is_items_or_entries_call(&for_stmt.iterable) || matches!(&iterable, Value::Dict(_));
 
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
-    // If auto_enumerate, wrap items with indices as tuples
-    // But NOT for dict iteration - dict items are already (key, value) tuples
     for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
         check_execution_limit!();
@@ -3474,9 +3487,7 @@ fn exec_for_inner(
         // For for~ (is_suspend), await each item if it's a Promise
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };
 
-        // Create the value to bind - either (index, item) tuple or just item
-        // For dict iteration, items are already (key, value) tuples, so don't wrap
-        let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
+        let bind_value = if for_stmt.auto_enumerate && !destructure_bare_pattern {
             Value::Tuple(vec![Value::Int(index as i64), item])
         } else {
             item

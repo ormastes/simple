@@ -1390,24 +1390,40 @@ virtual-source registry, L7 issuer/RR worker, L8 namespace/GC, L6 mapper,
 L10 process observation). Every item below has a red-first spec, binary
 identity on every timing, and lands through its own `work/*` PR.
 
+Integration note (2026-09-12): the eight PRs listed below (#544, #545, #548, #549,
+#550, #552, #553, #557) are no longer landed individually. Their FEATURE
+commits — without the per-branch `chore(check): unblock the two push gates`
+commit, which gate-sync supersedes — are cherry-picked in that order onto
+`work/interp-perf-wave-2026-09-12`, which starts at the gate-sync commit
+`2d082ac144e` (PR #561). One branch, one PR, one verification pass; the
+original commit messages and their evidence are carried verbatim, with
+`-x` provenance lines back to each source sha.
+
 | Item | Lane | Vehicle | State (2026-09-12) | Evidence |
 |---|---|---|---|---|
-| Plan L3 query leaf-import slice (approved 2026-09-09, never pushed) + L2 `PersistentSet.is_subset` cardinality guard | L2/L3 | PR #544 | PR open, required check queued | `test/02_integration/app/query_log_modes_spec.spl` 7/1→7/0; `test/05_perf/runtime/persistent_set_subset_spec.spl` 9152 ms→<200 ms |
-| Seed interpreter: `substr` / `char_at` / `s[i]` no longer rescan the whole string per call | L2 | PR #545 | PR open | ratios 14.58/8.44/8.36 → 3.99/4.00/4.00 at 4× n; `string_char_index_scaling_spec.spl` |
-| `utf16_to_utf8` fused single pass (record corrected: linear, not quadratic) | L2 | PR #548 | PR open | 1,039,755 → 301,556 µs on the record's input; `utf16_to_utf8_direct_conversion_perf_spec.spl` |
-| L9 G1 in-process LSP query adapters + G2 bounded cross-file search (full `src/**/*.spl` coverage, 0 child starts); planner `LspQuerySessionV1` landed verbatim | L9 | PR #549 | PR open; **G3/G4 blocked** on `rt_process_owned_v4_*` streaming-stdin primitives (contract in the L9 blocker note) | definition 7,940 ms → 20.6 ms / 20 queries; `lsp_query_inproc_spec` 7/7, `lsp_bounded_search_spec` 16/16 |
-| Seed interpreter: local dict `insert/set/remove/delete/merge` in place | L2 | PR #550 | PR open | 14.69/19.37/15.49/11.78 → 3.88/4.11/3.93/3.86; `dict_mutator_scaling_spec.spl` |
-| Seed interpreter: array mutators on a local inside an expression (`acc + arr.pop()`) | L2 | PR #552 | PR open | 15.4/13.4/17.7 → 1.35/4.29/2.06; `identifier_mutator_in_expression_scaling_spec.spl` |
-| **Structural**: one place-aware in-place mutation kernel for every nested-place receiver (`self.inner.xs.push`, `rows[i].push`, `self.d.insert`, `arr[i].m()`, 2-level index assignment) + the interpreter component scaling spec (one `it` per shape) | L2 | PR #553 | PR open | eight quadratic shapes (8.5–25.6×) → 3.9–4.0×; `interpreter_component_scaling_spec.spl` 15/23 → 23/23 |
-| `for k, v in d.items()` destructures; `Dict.items` bound under JIT | L2 (correctness) | PR #557 | PR open; design conflict recorded (bare comma: seed enumerate vs pure-Simple destructure) | `dict_items_for_loop_spec.spl` 5/5 |
+| Plan L3 query leaf-import slice (approved 2026-09-09, never pushed) + L2 `PersistentSet.is_subset` cardinality guard | L2/L3 | wave PR (this branch) | PR open, required check queued | `test/02_integration/app/query_log_modes_spec.spl` 7/1→7/0; `test/05_perf/runtime/persistent_set_subset_spec.spl` 9152 ms→<200 ms |
+| Seed interpreter: `substr` / `char_at` / `s[i]` no longer rescan the whole string per call | L2 | wave PR (this branch) | PR open | ratios 14.58/8.44/8.36 → 3.99/4.00/4.00 at 4× n; `string_char_index_scaling_spec.spl` |
+| `utf16_to_utf8` fused single pass (record corrected: linear, not quadratic) | L2 | wave PR (this branch) | PR open | 1,039,755 → 301,556 µs on the record's input; `utf16_to_utf8_direct_conversion_perf_spec.spl` |
+| L9 G1 in-process LSP query adapters + G2 bounded cross-file search (full `src/**/*.spl` coverage, 0 child starts); planner `LspQuerySessionV1` landed verbatim | L9 | wave PR (this branch) | PR open; **G3/G4 blocked** on `rt_process_owned_v4_*` streaming-stdin primitives (contract in the L9 blocker note) | definition 7,940 ms → 20.6 ms / 20 queries; `lsp_query_inproc_spec` 7/7, `lsp_bounded_search_spec` 16/16 |
+| Seed interpreter: local dict `insert/set/remove/delete/merge` in place | L2 | wave PR (this branch) | PR open | 14.69/19.37/15.49/11.78 → 3.88/4.11/3.93/3.86; `dict_mutator_scaling_spec.spl` |
+| Seed interpreter: array mutators on a local inside an expression (`acc + arr.pop()`) | L2 | wave PR (this branch) | PR open | 15.4/13.4/17.7 → 1.35/4.29/2.06; `identifier_mutator_in_expression_scaling_spec.spl` |
+| **Structural**: one place-aware in-place mutation kernel for every nested-place receiver (`self.inner.xs.push`, `rows[i].push`, `self.d.insert`, `arr[i].m()`, 2-level index assignment) + the interpreter component scaling spec (one `it` per shape) | L2 | wave PR (this branch) | PR open | eight quadratic shapes (8.5–25.6×) → 3.9–4.0×; `interpreter_component_scaling_spec.spl` 15/23 → 23/23 |
+| `for k, v in d.items()` destructures; `Dict.items` bound under JIT | L2 (correctness) | wave PR (this branch) | PR open; design conflict recorded (bare comma: seed enumerate vs pure-Simple destructure) | `dict_items_for_loop_spec.spl` 5/5 |
 | Seed follows pure-Simple: bare comma in `for` = tuple destructure always; enumerate spelled `.enumerate()`; call-site census + migration | L1 (bootstrap parity) | branch `work/for-comma-destructure` | in progress (user decision (a) on 2026-09-12) | `test/04_smoke/compiler_unparenthesized_tuple_for*.spl` RED → GREEN target |
 | Gate-sync: required CI job green on `main` again (hot-loop baseline +3/−1 with plan note, chrome shim parity row, two bootstrap-tier ledger rows identical to Codex's `codex/push-gate-ledger-fix-20260912`) | L0 | branch `work/gate-sync-2026-09-12` | pushing; lands FIRST, the eight PRs above rebase onto it | `required_ci_job_red_on_main_hotloop_and_parity_2026-09-12.md` |
 | Guard wiring where missing (orphaned guards since 2026-08-15 wired or opted out with a reason; `push-no-direct-rt` manifest/hook agreement) | L0/L11 | branch `work/guard-wiring-2026-09-12` | in progress | `check-guard-wiring.shs` baseline must ratchet down |
 | Sanctioned bootstrap on current `main` (`bootstrap-from-scratch.sh`), pure-Simple fixes only, honest receipt | L1 | branch `work/bootstrap-2026-09-12` | in progress | stage table with artifact sha256 + non-vacuity, or the exact blocker |
 | Plan leftovers with no owner (L9 G3/G4 runtime primitive, L4 bounded caches, L5 MCP/LSP closure delta, L11 traceability for this wave's specs) | L4/L5/L9/L11 | branch `work/plan-elg-leftovers` | triage then ≤3 items | `N_triage.md` then per-item records |
+| EGL fan-out — Environment-optimized dynamic Libraries, packages 2/4/5/7 (packages 1/6/8 arrive merged in the core base `bd8df49e8d4`; L7/L8 stay with Codex `codex/gl-production-current-main-sol-20260912`) | EGL | ten agents N, P, Q, R, S, T, U, V, W, X, core agents (packages 2/4/5/7) work off the core base `bd8df49e8d4`, one `work/egl-<topic>` worktree each | fanned out 2026-09-12; TDD red-first, agents do not commit | `EGL_BRIEF.md`; `doc/03_plan/agent_tasks/environment_optimized_dynamic_libraries.md` follow-up sections take a dated receipt per completed item |
 
 Observed and recorded, not fixed by this wave: `push-no-direct-rt` measures
-6334 against a 6072 baseline already at `7352f99898c` and the hook carries it
-as `TODO` (unenforced); `var a: [i64; 64]` rejects index assignment in the
+6334 against the 6072 tracked baseline already at `7352f99898c` — but it IS
+enforced, blocking, in **delta mode** (`--rev`/`--baseline-rev` against the
+outgoing range's own base), so a branch that adds no new direct `rt_*` site is
+admitted and one that adds any is refused; the `TODO` in the ledger belongs to
+the separate bootstrap-tier `no-direct-rt` row, which is a different id and
+`push_blocking: false`. Reconciliation and both measurements:
+`doc/08_tracking/bug/push_no_direct_rt_red_on_main_2026-09-12.md`.
+Also: `var a: [i64; 64]` rejects index assignment in the
 interpreter; the pre-existing `simple lint` segfault on
 `test/05_perf/text_i18n/*`; the JIT's bare enumerate over any array.
