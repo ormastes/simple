@@ -178,3 +178,35 @@ explicit-request one. Verified: old binary (Sep 7) 8/8 PASS on default,
 6/8 FAIL when `u32` is force-requested (sabotage); fresh seed (Sep 11) 8/8
 PASS both ways. Full writeup:
 `doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`.
+
+## 2026-09-12 — Vulkan readback unpack (interpreter lane)
+
+- **runtime_need**: a scalars-in / array-out primitive that returns the Vulkan
+  framebuffer as `[u32]` on the INTERPRETER lane. The existing one-call native
+  primitive `rt_vulkan_readback_u32_checksum` is `"viii"` and is refused by
+  `interpreter_extern/vulkan.rs::dispatch`, which rejects every signature
+  containing `v` (interpreter `Value` vs runtime `RuntimeValue` have no honest
+  conversion). Plus: skip the second full download `present()` performed after
+  a readback.
+- **facade_checked**: `sffi_vulkan.spl` (`_vulkan_read_buffer_bytes_abi`,
+  `vulkan_sffi_copy_u32_into`, `vulkan_sffi_readback_u32_into`),
+  `interpreter_extern/{vulkan,gpu,conversion,file_io,sffi_array}.rs`,
+  `runtime/src/vulkan_graphics_runtime_buffer.rs`,
+  `codegen/runtime_sffi.rs`. Registry sweep for a scalars-in/array-out GPU
+  symbol returned exactly one row: `rt_vulkan_read_buffer_bytes`.
+- **chosen_path**: NEW extern, interpreter-handler only —
+  `rt_vulkan_readback_u32_array` + `rt_vulkan_readback_u32_array_checksum`
+  (`gpu.rs`, registered in `mod.rs`), in the `rt_vulkan_read_buffer_bytes`
+  shape, gated behind `SIMPLE_VK_READBACK=native`; plus a pure-Simple
+  `host_mirror_frame_fresh` that removes the redundant `present()` download on
+  every binary. Seed rebuilt: `build/cargo-r2/release/simple`, 2m28s warm.
+- **rejected_shortcuts**: `rt_vulkan_map_memory` + `rt_u32s_from_raw` (map
+  returns 1/0, not a pointer); `rt_vulkan_copy_u32_slots` (`"vvi"`, refused);
+  `bytes_to_u32_le` (4 bytes per FFI call); forcing
+  `rt_vulkan_readback_u32_checksum` under the interpreter (hard error);
+  registering the new symbols in `runtime_symbols.rs` / `dynamic_sffi.rs` /
+  `codegen/runtime_sffi.rs` (no native lane calls them — the native lane keeps
+  the existing checksum primitive); defaulting the new path on (unknown extern
+  = uncatchable abort on deployed binaries).
+- **result**: steady 900x760 frame 5,872 -> 3,199 ms (default) -> 23 ms
+  (native); 1080p 33 ms. `readback_calls` 2->1, `unpack_iterations` 1,368,000->0.
