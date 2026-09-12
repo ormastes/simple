@@ -21,7 +21,8 @@ use std.spec.step
 use app.io.mod (getpid, time_now_unix_micros)
 use app.test_runner_new.test_db_compat (micros_to_rfc3339, parse_rfc3339_to_micros)
 use app.test_runner_new.test_db_types (RunRecord)
-use app.test_runner_new.test_db_validation (validate_run_record, ValidationReport)
+use app.test_runner_new.test_db_validation (validate_run_record, ValidationReport, ValidationIssue, validate_database)
+use std.test_runner.test_db_core.{RunnerTestDbCore}
 
 
 # Helper: Create test run with specified fields
@@ -106,6 +107,56 @@ fn create_dead_process_run(run_id: text) -> RunRecord:
 # Helper: Validate a test run record
 fn validate_run(run: RunRecord) -> ValidationReport:
     validate_run_record(run)
+
+# --- Database-level helpers -------------------------------------------------
+# Every helper below returns a primitive so no ValidationIssue / RunRecord field
+# is read from inside an `it` block. Nothing here touches a file: the database is
+# built in memory with RunnerTestDbCore.empty(), so the tracked test_db.sdn is never
+# opened, let alone written.
+#
+# validate_stale_runs matches the lowercase "running" status the runner writes,
+# so these fixtures use that spelling rather than the "Running" used by the
+# single-record scenarios above.
+
+fn db_with_runs(runs: [RunRecord]) -> RunnerTestDbCore:
+    var db = RunnerTestDbCore.empty()
+    for r in runs:
+        db.test_runs.push(r)
+    db
+
+fn lowercase_running_run(run_id: text, started: text) -> RunRecord:
+    create_test_run(run_id, "running", started, "", getpid(), 10, 0, 0, 0, 0)
+
+fn db_issue_count(db: RunnerTestDbCore) -> i64:
+    validate_database(db).len()
+
+fn db_issue_count_of_type(db: RunnerTestDbCore, kind: text) -> i64:
+    var n = 0
+    for issue in validate_database(db):
+        if issue.violation_type == kind:
+            n = n + 1
+    n
+
+fn db_all_issues_auto_fixable(db: RunnerTestDbCore) -> bool:
+    val issues = validate_database(db)
+    if issues.len() == 0:
+        return false
+    for issue in issues:
+        if not issue.auto_fixable:
+            return false
+    true
+
+fn db_runs_with_status(db: RunnerTestDbCore, status: text) -> i64:
+    db.list_runs(status).len()
+
+fn db_total_runs(db: RunnerTestDbCore) -> i64:
+    db.test_runs.len()
+
+fn db_run_ids(db: RunnerTestDbCore) -> [text]:
+    var ids: [text] = []
+    for r in db.test_runs:
+        ids.push(r.run_id)
+    ids
 
 describe "Test Database Integrity Validation":
     # @manual scenario evidence
@@ -466,8 +517,85 @@ describe "Test Database Integrity Validation":
 
             expect(report.max_severity()).to_be("Critical")
 
-    # Note: Database-level and cleanup integration tests removed temporarily
-    # TODO: Implement after adding TestDatabase.validate_all() and cleanup methods
+    # Database-level validation and cleanup. The capability the removed tests
+    # were waiting on already exists under different names: validate_database(db)
+    # is the whole-database sweep, and cleanup_stale_runs / prune_runs are the
+    # cleanup methods.
+    describe "Database-Level Validation":
+
+        it "reports no issues for an empty database":
+            # @req REQ-SSPEC-UNIT
+            step("reports no issues for an empty database")
+            expect(db_issue_count(RunnerTestDbCore.empty())).to_be(0)
+
+        it "reports a stale-running issue per unfinished run":
+            # @req REQ-SSPEC-UNIT
+            step("reports a stale-running issue per unfinished run")
+            val db = db_with_runs([
+                lowercase_running_run("db_stale_1", hours_ago(3)),
+                lowercase_running_run("db_stale_2", hours_ago(4))
+            ])
+            expect(db_issue_count_of_type(db, "StaleRunning")).to_be(2)
+            expect(db_issue_count(db)).to_be(2)
+
+        it "marks every stale-running issue auto-fixable":
+            # @req REQ-SSPEC-UNIT
+            step("marks every stale-running issue auto-fixable")
+            val db = db_with_runs([lowercase_running_run("db_stale_3", hours_ago(3))])
+            expect(db_all_issues_auto_fixable(db)).to_be(true)
+
+        it "leaves a database of completed runs clean":
+            # @req REQ-SSPEC-UNIT
+            step("leaves a database of completed runs clean")
+            val done = create_test_run("db_done_1", "completed", hours_ago(3), hours_ago(2), getpid(), 10, 10, 0, 0, 0)
+            expect(db_issue_count(db_with_runs([done]))).to_be(0)
+
+    describe "Database Cleanup":
+
+        it "crashes out runs older than the age limit and keeps younger ones":
+            # @req REQ-SSPEC-UNIT
+            step("crashes out runs older than the age limit and keeps younger ones")
+            var db = db_with_runs([
+                lowercase_running_run("cleanup_old", hours_ago(3)),
+                lowercase_running_run("cleanup_new", hours_ago(1))
+            ])
+            expect(db_runs_with_status(db, "running")).to_be(2)
+            db.cleanup_stale_runs(2)
+            expect(db_runs_with_status(db, "running")).to_be(1)
+            expect(db_runs_with_status(db, "crashed")).to_be(1)
+            # Cleanup rewrites status, it never drops records.
+            expect(db_total_runs(db)).to_be(2)
+            # And the whole-database sweep is clean afterwards.
+            expect(db_issue_count(db_with_runs([lowercase_running_run("x", hours_ago(3))])) > 0).to_be(true)
+
+        it "leaves everything alone when nothing is older than the limit":
+            # @req REQ-SSPEC-UNIT
+            step("leaves everything alone when nothing is older than the limit")
+            var db = db_with_runs([lowercase_running_run("cleanup_fresh", hours_ago(1))])
+            db.cleanup_stale_runs(2)
+            expect(db_runs_with_status(db, "running")).to_be(1)
+            expect(db_runs_with_status(db, "crashed")).to_be(0)
+
+        it "prunes to the most recent N runs":
+            # @req REQ-SSPEC-UNIT
+            step("prunes to the most recent N runs")
+            var db = db_with_runs([
+                lowercase_running_run("prune_1", hours_ago(5)),
+                lowercase_running_run("prune_2", hours_ago(4)),
+                lowercase_running_run("prune_3", hours_ago(3))
+            ])
+            db.prune_runs(2)
+            expect(db_total_runs(db)).to_be(2)
+            val ids = db_run_ids(db)
+            expect(ids[0]).to_be("prune_2")
+            expect(ids[1]).to_be("prune_3")
+
+        it "does not prune when the database already holds fewer runs":
+            # @req REQ-SSPEC-UNIT
+            step("does not prune when the database already holds fewer runs")
+            var db = db_with_runs([lowercase_running_run("prune_only", hours_ago(1))])
+            db.prune_runs(5)
+            expect(db_total_runs(db)).to_be(1)
 
     describe "Auto-Fixable Detection":
 

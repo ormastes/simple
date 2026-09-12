@@ -26,6 +26,26 @@ use std.spec.step
 
 extern fn rt_time_now_unix_micros() -> i64
 
+# Noise floor, not a weaker bound. On the shared dev host (load ~27 on 20
+# cores, 20+ concurrent `simple` processes) a SINGLE sample of the n=80000
+# loop is inflated by a co-tenant CPU spike often enough to trip the 7x bound
+# on code that is measurably linear: measured 2026-09-12 across four runs of
+# this spec on one binary, `char_at` read 3.0x / 2.5x / 4.0x and ONCE 8.8x
+# (19448us -> 171501us), a RED on a build whose controlled in-process
+# comparison against `char_code_at` and `substr` in the same process put all
+# three at 3.4-4.3x. Taking the BEST of two samples per point discards the
+# spike without touching the 7x ratio, the loop, or what is measured -- a
+# ratio computed from two independent single samples multiplies both points'
+# noise. Both samples must be > 0, so a vacuous (zero-iteration) timing still
+# fails closed. See
+# doc/08_tracking/bug/perf_ratio_specs_single_sample_flake_2026-09-12.md
+fn best_of_two(a: i64, b: i64) -> i64:
+    expect(a > 0).to_equal(true)
+    expect(b > 0).to_equal(true)
+    if a < b:
+        return a
+    b
+
 fn build_ascii_text(n: i64) -> text:
     var parts: [text] = []
     var i = 0
@@ -73,9 +93,9 @@ describe "seed interpreter: string character accessors scale linearly, not O(n^2
     it "substr(i, 1) in a loop does not more than septuple when n quadruples":
         step("substr(i, 1) in a loop does not more than septuple when n quadruples")
         val s20 = build_ascii_text(20000)
-        val t20 = time_substr_loop(s20, 20000)
+        val t20 = best_of_two(time_substr_loop(s20, 20000), time_substr_loop(s20, 20000))
         val s80 = build_ascii_text(80000)
-        val t80 = time_substr_loop(s80, 80000)
+        val t80 = best_of_two(time_substr_loop(s80, 80000), time_substr_loop(s80, 80000))
         print "[perf] text_substr: n=20000 {t20}us n=80000 {t80}us"
         expect(t20 > 0).to_equal(true)
         expect(t80 * 10 < t20 * 70).to_equal(true)
@@ -83,9 +103,9 @@ describe "seed interpreter: string character accessors scale linearly, not O(n^2
     it "char_at(i) in a loop does not more than septuple when n quadruples":
         step("char_at(i) in a loop does not more than septuple when n quadruples")
         val s20 = build_ascii_text(20000)
-        val t20 = time_char_at_loop(s20, 20000)
+        val t20 = best_of_two(time_char_at_loop(s20, 20000), time_char_at_loop(s20, 20000))
         val s80 = build_ascii_text(80000)
-        val t80 = time_char_at_loop(s80, 80000)
+        val t80 = best_of_two(time_char_at_loop(s80, 80000), time_char_at_loop(s80, 80000))
         print "[perf] text_char_at: n=20000 {t20}us n=80000 {t80}us"
         expect(t20 > 0).to_equal(true)
         expect(t80 * 10 < t20 * 70).to_equal(true)
@@ -93,9 +113,9 @@ describe "seed interpreter: string character accessors scale linearly, not O(n^2
     it "s[i] in a loop does not more than septuple when n quadruples":
         step("s[i] in a loop does not more than septuple when n quadruples")
         val s20 = build_ascii_text(20000)
-        val t20 = time_index_loop(s20, 20000)
+        val t20 = best_of_two(time_index_loop(s20, 20000), time_index_loop(s20, 20000))
         val s80 = build_ascii_text(80000)
-        val t80 = time_index_loop(s80, 80000)
+        val t80 = best_of_two(time_index_loop(s80, 80000), time_index_loop(s80, 80000))
         print "[perf] str_index: n=20000 {t20}us n=80000 {t80}us"
         expect(t20 > 0).to_equal(true)
         expect(t80 * 10 < t20 * 70).to_equal(true)
