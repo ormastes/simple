@@ -16,7 +16,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ti
     tile_survivors, tile_op_buffer_finish
 }
 use common.ui.draw_ir.{
-    DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
+    DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
@@ -1056,6 +1056,11 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         var ly = y + text_ink_y_offset(st.font_size)
                         if line_count > 0:
                             val clip = paint_clip_at(clip_cache, i)
+                            # ONE advance table for this run, built from the
+                            # metrics LAYOUT measured it with, and handed to
+                            # both the aligned-width call and the glyph walk
+                            # below so the two cannot disagree.
+                            val txt_by = style_run_byte_advances(st, txt)
                             var line_i = 0
                             # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh; scale/adv/space_adv are already hoisted above the loop
                             while line_i < line_count and ly < fbh:
@@ -1064,11 +1069,12 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.len() else: node_ends[line_i]
                                 val line_base_x = if line_i == 0: text_x + st.text_indent_px else: text_x
                                 val line_box_w = if line_i == 0: w - st.text_indent_px else: w
-                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width(draw_txt, draw_start, draw_end, st, adv, space_adv) else: 0
+                                val line_by = if st.text_overflow_ellipsis and line_i == 0: [] else: txt_by
+                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv) else: 0
                                 val line_text_x = text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
                                 if st.text_shadow_color != 0u32:
-                                    out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip)
-                                out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip)
+                                    out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip, line_by)
+                                out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip, line_by)
                                 if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                     val underline_w = line_w
                                     val underline_y = ly + 7 * scale + st.text_underline_offset_px
@@ -1982,6 +1988,106 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
             ))
     props
 
+# One advance per BYTE of `txt`, from a per-CODEPOINT advance array: the
+# codepoint's advance on its lead byte, 0 on each UTF-8 continuation byte.
+# Returns an empty array when `cp_advances` does not describe `txt`, so the
+# caller falls back rather than emitting a mis-sized array.
+fn _html_draw_ir_byte_advances(txt: text, cp_advances: [i32]) -> [i32]:
+    var out: [i32] = []
+    if cp_advances.len() == 0:
+        return out
+    val n = txt.len()
+    var i = 0
+    var ci = 0
+    while i < n:
+        val b = txt.char_code_at(i)
+        if b >= 128 and b < 192:
+            out.push(0)
+        else:
+            if ci >= cp_advances.len():
+                return []
+            out.push(cp_advances[ci])
+            ci = ci + 1
+        i = i + 1
+    if ci != cp_advances.len():
+        return []
+    out
+
+# Emit ONE Draw IR text command for `txt`, carrying the resolved per-glyph
+# advances the layout path measured the same string with. Factored out of
+# `_html_draw_ir_command` in round 5 so the WRAPPED-line emitters can use the
+# identical code rather than a second, flat-advance measurement model; before
+# that, a wrapped run was drawn with `draw_ir_text_styled_clipped` (no
+# advances) while layout had already sized its lines from real metrics.
+# Falls back to the styled/flat command when vector fonts are off or the
+# resolver returns nothing usable -- in which case BOTH sides are flat, which
+# is consistent, rather than one side each.
+fn _html_draw_ir_resolved_text_command(
+    nodes: [HNode], i: i32, node: HNode, st: Style, cid: text,
+    tx: i32, ty: i32, txt: text, computed_style: [DrawIrStyleProp],
+    clip_rect: DrawIrRect, vector_fonts: bool
+) -> DrawIrCommand:
+    if not vector_fonts:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    val metrics = resolve_font_metrics_with_language(
+        st.font_family, txt, st.font_size,
+        _html_text_language(nodes, i, st)
+    )
+    # BYTE/CODEPOINT ARITY BRIDGE (round 5). `metrics.advances` carries one
+    # advance per CODEPOINT; the Engine2D consumer of this command walks the
+    # string by BYTE (`Engine2D.draw_text_with_advances_*`, engine.spl:2072 ->
+    # `stage_text_with_advances_configured`). On a run carrying one em dash it
+    # reports `advances=71 text_len=73 ... quads=68 batch_valid=false`, returns
+    # false, and Draw-IR then draws NOTHING FOR THE WHOLE PAGE: at origin/main
+    # the `html` and `css-layout` catalog pages both die with `render produced
+    # too few pixels: 0 < 684000`. Rather than drop those runs to the flat
+    # estimate -- which would reintroduce the very layout/paint disagreement
+    # this round exists to remove, since layout keeps using the real metrics --
+    # the array is re-expressed in the consumer's own index space: the
+    # codepoint's advance on its LEAD byte, 0 on each UTF-8 continuation byte
+    # (which carries no glyph). The total width is unchanged by construction,
+    # so layout and paint still measure the run identically. The consumer's
+    # byte/codepoint confusion is the real defect and is filed separately at
+    # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md;
+    # this bridge is what lets the page render while that is fixed, and it is
+    # a no-op on ASCII, where bytes and codepoints already coincide.
+    val byte_advances = _html_draw_ir_byte_advances(txt, metrics.advances)
+    if byte_advances.len() != txt.len():
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var resolved = if metrics.shaping_required:
+        draw_ir_text_shaped_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, byte_advances, metrics.width,
+            metrics.line_height, st.font_size, metrics.glyph_run
+        )
+    else:
+        draw_ir_text_resolved_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, byte_advances, metrics.width,
+            metrics.line_height, st.font_size
+        )
+    if resolved.computed_style.len() == 0:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var merged: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list
+    for prop in computed_style:
+        if (prop.key != "font-family" and prop.key != "font-identity" and
+            prop.key != "font-size" and prop.key != "line-height" and
+            prop.key != "font-shaping"):
+            merged.push(prop)
+    # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / _resolved_font
+    for prop in resolved.computed_style:
+        merged.push(prop)
+    resolved.computed_style = merged
+    resolved.clip_rect = clip_rect
+    resolved
+
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
     clip: ClipRect, vector_fonts: bool
@@ -2060,59 +2166,26 @@ fn _html_draw_ir_command(
         else:
             visual_text_rtl
         if wrap_active:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i),
-                content_x,
-                content_y,
-                visual_text,
-                st.fg,
-                computed_style,
-                clip_rect
+            # Round 5: a wrapped run no longer falls back to the flat
+            # fixed-advance model. LAYOUT sized every one of these lines with
+            # the resolved per-glyph metrics (round 4), so emitting them here
+            # without advances made paint and layout measure the same text two
+            # different ways -- the `forms-media` pixel regression recorded in
+            # doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+            # Metrics are resolved for THIS line's substring, which is exactly
+            # the string the command draws, and the resolver is cached per
+            # (family, content, size, identity, language) so the per-line calls
+            # collapse onto repeated text.
+            return _html_draw_ir_resolved_text_command(
+                nodes, i, node, st, _html_draw_ir_component_id(node, i),
+                content_x, content_y, visual_text, computed_style, clip_rect,
+                vector_fonts
             )
-        if not vector_fonts:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i),
-                content_x,
-                content_y,
-                visual_text,
-                st.fg,
-                computed_style,
-                clip_rect
-            )
-        val metrics = resolve_font_metrics_with_language(
-            st.font_family, visual_text, st.font_size,
-            _html_text_language(nodes, i, st)
+        return _html_draw_ir_resolved_text_command(
+            nodes, i, node, st, _html_draw_ir_component_id(node, i),
+            content_x, content_y, visual_text, computed_style, clip_rect,
+            vector_fonts
         )
-        var resolved = if metrics.shaping_required:
-            draw_ir_text_shaped_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
-                metrics.family, metrics.identity, metrics.advances, metrics.width,
-                metrics.line_height, st.font_size, metrics.glyph_run
-            )
-        else:
-            draw_ir_text_resolved_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
-                metrics.family, metrics.identity, metrics.advances, metrics.width,
-                metrics.line_height, st.font_size
-            )
-        if resolved.computed_style.len() == 0:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i), content_x, content_y,
-                visual_text, st.fg, computed_style, clip_rect
-            )
-        var merged: [DrawIrStyleProp] = []
-        # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list, not a cascade re-run (the cascade is gated on dirty_stage == css in simple_web_layout_rerender_retained)
-        for prop in computed_style:
-            if (prop.key != "font-family" and prop.key != "font-identity" and
-                prop.key != "font-size" and prop.key != "line-height" and
-                prop.key != "font-shaping"):
-                merged.push(prop)
-        # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / draw_ir_text_resolved_font
-        for prop in resolved.computed_style:
-            merged.push(prop)
-        resolved.computed_style = merged
-        resolved.clip_rect = clip_rect
-        return resolved
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,
@@ -2137,7 +2210,7 @@ fn _html_draw_ir_command(
 # wrapped `#text` node, so callers can push its result unconditionally.
 fn _html_draw_ir_wrap_extra_line_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
-    clip: ClipRect
+    clip: ClipRect, vector_fonts: bool
 ) -> [DrawIrCommand]:
     var out: [DrawIrCommand] = []
     val node = nodes[i]
@@ -2175,9 +2248,11 @@ fn _html_draw_ir_wrap_extra_line_commands(
             wrap_line_starts[line_i], wrap_line_ends[line_i]
         )
         val line_y = content_y + line_i * lh
-        out.push(draw_ir_text_styled_clipped(
+        out.push(_html_draw_ir_resolved_text_command(
+            nodes, i, node, st,
             _html_draw_ir_component_id(node, i) + "_line{line_i}",
-            content_x, line_y, line_text, st.fg, computed_style, clip_rect
+            content_x, line_y, line_text, computed_style, clip_rect,
+            vector_fonts
         ))
         line_i = line_i + 1
     out
@@ -3065,7 +3140,7 @@ fn _html_draw_ir_commands(
             # _html_draw_ir_wrap_extra_line_commands), empty for every other
             # node kind and for single-line text
             for extra_line_command in _html_draw_ir_wrap_extra_line_commands(
-                nodes, styles, boxes, i, node_clip
+                nodes, styles, boxes, i, node_clip, vector_fonts
             ):
                 var extra_line = extra_line_command
                 extra_line.parent_id = parent_id

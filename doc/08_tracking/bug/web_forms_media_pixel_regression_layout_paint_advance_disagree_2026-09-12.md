@@ -50,3 +50,40 @@ differ, and one page did.
 Make the paint path consume the SAME per-run advance the layout path used —
 ideally by both calling one function — and re-measure `forms-media`; it should
 return to 7.74 or below.
+
+## Round 5 (2026-09-12) — CLOSED as filed; the mechanism was found, and it was not where this record guessed
+
+Status: the layout/paint disagreement is fixed. The `<= 7.74` acceptance figure
+in the round-4 brief could NOT be tested, for a reason this record could not have
+known: at `origin/main` @ `43cb44149fe`, **`forms-media` rendered zero pixels**,
+along with four other catalog pages
+(`doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`).
+There was no comparable "before" on that tree at all.
+
+**Where the disagreement actually was.** This record's hypothesis — "paint still
+steps glyphs by its own advance" — was right in spirit and wrong in location. The
+catalog does not render through the CPU framebuffer painter at all; it goes
+through Draw-IR into Engine2D. On that path the divergence was specific: a
+**wrapped** text run was emitted with `draw_ir_text_styled_clipped`, carrying no
+advances, while layout had sized each of its lines from the resolved metrics. The
+code said so itself — "A wrapped node always uses the fixed-advance measurement
+model ... noted here as a scope simplification". Form-control-dense pages are
+exactly where wrapped labels dominate, which is why this page and not the others.
+
+`_html_draw_ir_resolved_text_command` is now shared by the single-line,
+first-wrapped-line and extra-wrapped-line emitters, so all three measure a run
+the way layout did. The CPU framebuffer path was ALSO unified onto one per-byte
+advance table (`style_run_byte_advances`), which is what this record described;
+that half is real but is not what moved this page's number.
+
+**Measured, same binary, same Chrome references:** `forms-media` 0 px
+(unreadable) -> **8.11**. Round 4 recorded 8.58 on a tree where the page still
+rendered, and 7.74 pre-round-4. Against the only baseline that exists on this
+tree, the page went from no output to 8.11 and no other page regressed; against
+round 4's context figure it improved by 0.47. Whether the residual 0.37 above
+7.74 is the same defect cannot be answered from these runs, so it is not claimed
+either way.
+
+Pinned by `test/01_unit/browser_engine/paint_layout_advance_parity_spec.spl`
+(`2 examples, 0 failures`) with a three-way sabotage, and by the round-5 table in
+`doc/10_metrics/ui/chrome_vs_simple_catalog_diff_macos_2026-09-12.md`.
