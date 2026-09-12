@@ -1,0 +1,98 @@
+# Shebang-aware process spawn
+#
+# `rt_process_run` hands `cmd` to `CreateProcess` on Windows, which can only
+# launch a PE image. A POSIX script carrying a `#!` line is therefore not
+# launchable and the spawn fails silently with exit code -1, empty stdout and
+# empty stderr. On POSIX hosts `execve` honours the shebang itself, so this
+# module is a Windows-only shim and must stay one.
+#
+# See doc/08_tracking/bug/windows_rt_process_run_cannot_exec_shebang_script_fixtures_2026-09-02.md
+
+use std.env.platform.{is_windows}
+use std.nogc_async_mut.env.types.{rt_process_run}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Single runtime-boundary crossing per extern, so this module adds no new
+# direct `rt_*` call sites beyond the two it replaces in its caller
+# (scripts/check/check-no-direct-rt.shs ratchet).
+@always_inline
+fn _shebang_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+@always_inline
+fn _shebang_read_text_raw(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path) ?? ""
+
+fn _shebang_basename(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val parts = normalized.split("/")
+    parts[parts.len() - 1]
+
+pub fn shebang_interpreter_argv(first_line: text) -> [text]:
+    """Parse a `#!` line into the argv prefix that runs the script.
+
+    Returns an empty list when the line carries no shebang. The interpreter is
+    reduced to its basename so a POSIX absolute path such as `/bin/sh` resolves
+    through PATH on a Windows host, and a `/usr/bin/env NAME` form collapses to
+    `NAME` because `env` is not a Windows image either.
+
+    Example:
+        shebang_interpreter_argv("#!/bin/sh")              # ["sh"]
+        shebang_interpreter_argv("#!/usr/bin/env python3") # ["python3"]
+        shebang_interpreter_argv("plain text")             # []
+    """
+    if not first_line.starts_with("#!"):
+        return []
+    val body = first_line.replace("\t", " ").replace("\r", "").trim()
+    var tokens: [text] = []
+    for token in body.split(" "):
+        if token != "" and token != "#!":
+            tokens = tokens + [token]
+    if tokens.len() == 0:
+        return []
+    var first = tokens[0]
+    if first.starts_with("#!"):
+        first = first.replace("#!", "")
+    if first == "":
+        return []
+    var argv: [text] = [_shebang_basename(first)]
+    var index = 1
+    if argv[0] == "env" and tokens.len() > 1:
+        argv = [_shebang_basename(tokens[1])]
+        index = 2
+    while index < tokens.len():
+        argv = argv + [tokens[index]]
+        index = index + 1
+    argv
+
+pub fn shebang_argv_for_file(path: text) -> [text]:
+    """Read `path` and return its shebang argv prefix, or an empty list."""
+    val content = _shebang_read_text_raw(path)
+    if content == "":
+        return []
+    val first_line = content.split("\n")[0]
+    shebang_interpreter_argv(first_line)
+
+pub fn process_run_script(cmd: text, args: [text]) -> (text, text, i64):
+    """Run `cmd` with `args`, routing a shebang script through its interpreter.
+
+    On POSIX this is exactly `rt_process_run`: the kernel already honours the
+    shebang and re-routing here would change argv[0] for no benefit.
+    """
+    if not is_windows():
+        return _shebang_process_run_raw(cmd, args)
+    val prefix = shebang_argv_for_file(cmd)
+    if prefix.len() == 0:
+        return _shebang_process_run_raw(cmd, args)
+    var spawn_args: [text] = []
+    var index = 1
+    while index < prefix.len():
+        spawn_args = spawn_args + [prefix[index]]
+        index = index + 1
+    spawn_args = spawn_args + [cmd]
+    for arg in args:
+        spawn_args = spawn_args + [arg]
+    _shebang_process_run_raw(prefix[0], spawn_args)

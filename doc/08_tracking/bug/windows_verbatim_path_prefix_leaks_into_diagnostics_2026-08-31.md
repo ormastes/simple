@@ -42,8 +42,20 @@ three lines — once verbatim-Debug, once forward-slashed:
 Rust's `std::fs::canonicalize` on Windows always returns the verbatim
 (`\?\`-prefixed) form. The compiler canonicalizes module paths during
 resolution and then reuses the canonicalized `PathBuf` as the *display* path in
-diagnostics, instead of keeping the user-supplied path for display. Call sites
-that canonicalize include `compiler/src/hir/lower/type_resolver.rs:15`,
+diagnostics, instead of keeping the user-supplied path for display.
+
+**Leak site located precisely (2026-09-12):** the `parse: in "..."` Debug-escaped
+verbatim path is produced by three identical `format!("in {:?}: {e}", path)`
+sites in `src/compiler_rust/compiler/src/pipeline/module_loader.rs` at lines
+**2037, 2089 and 2281** — not in `driver/src/exec_core.rs`, which only threads
+the already-formatted string out at `:1095`
+(`format!("module load error: {}", e)`). An earlier audit named `exec_core.rs`
+as the leak; that is the transport, not the source. Fixing the three
+`module_loader.rs` sites (`{:?}` -> `{}` plus a `cfg(windows)` verbatim-prefix
+strip at the display boundary only) addresses the quoted symptom.
+
+Other canonicalizing call sites
+include `compiler/src/hir/lower/type_resolver.rs:15`,
 `compiler/src/parallel.rs:153,391`, `compiler/src/project.rs:278`, and
 `compiler/src/module_cache.rs` (`normalize_path_key`, ~:318). The diagnostic is
 threaded out through `driver/src/exec_core.rs:1109`
