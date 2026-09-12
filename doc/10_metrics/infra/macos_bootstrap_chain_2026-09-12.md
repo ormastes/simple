@@ -58,3 +58,95 @@ scheduler lineage admission manifest (`SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION` + `�
 re-verified via `bootstrap-scheduler-contract.shs`) **and** `--deploy` or
 `SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1` (the no-deploy authority). Without a scheduler lease
 the manifest cannot be minted, so no Stage 4 CLI candidate exists to smoke-test.
+
+## Runs 6-7 (2026-09-13, same lane, same host)
+
+| run | tip | stage reached | wall | failure class |
+|---|---|---|---|---|
+| 6 | `4a8e716719e` (PR #690) | **Stage 2 sanity** | ~26m (23:55→00:16 local), incl. seed rebuild; Stage 2 build 723s (871 compiled, 0 cached, 0 failed, 135785 KB, linked via clang++) | `Linking failed: nil` at the hello-world smoke link |
+| 7 | `0a7563eeca9` (PR #694) | **Stage 2 sanity** | ~18m, seed cached | `Linking failed: nil` — unchanged, and now provably NOT the link-tool step |
+
+### Verdict lines (verbatim, run 7)
+`error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)` /
+`bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true` /
+`error: in-process native-build: LLVM native linking failed: Linking failed: nil` /
+`error: Stage 2 bootstrap compiler sanity failed` /
+`error: --stop-after-stage2 requires a successful admitted Stage 2 compiler`
+
+Rejected Stage 2 candidate, preserved and NOT deployed:
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
+sha256 `b10911fc830181d11dfcdd59718d2c5d580b039063e25bac5644743171a28ffb`.
+No Stage 3 resume was possible: no run has produced an admitted Stage 2 compiler, so
+there is still no Stage 3 full-CLI artifact to smoke-test.
+
+### The PATH hypothesis is disproven, and the child's env is now on the record
+
+Run 5's blocker was left undiagnosed on purpose, with a PATH-starved sanity child as
+"the natural hypothesis but unproven". It is now **proven false**. The sanity child's
+effective environment is dumped to `<evidence>.env.txt` (PR #690, schema
+`simple-bootstrap-sanity-child-env-v1`, written in the last shell before the perl
+launcher's `exec`, which inherits `%ENV` verbatim; link-relevant names carry values,
+everything else is recorded by NAME only). Run 6 recorded:
+
+```
+PATH=/opt/homebrew/Cellar/llvm@18/18.1.8/bin:/Users/ormastes/.local/bin:/opt/homebrew/bin:
+     /opt/homebrew/sbin:/usr/local/bin:/System/Volumes/Preboot/Cryptexes/App/usr/bin:
+     /usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin:/Users/ormastes/.cargo/bin:
+     /Users/ormastes/.orbstack/bin
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+DEVELOPER_DIR=  CC=  CXX=  LD=
+SIMPLE_DARWIN_CLANG=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
+SIMPLE_DARWIN_LD=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld
+```
+
+`/usr/bin` is on that PATH, so `/usr/bin/which clang` had every opportunity to answer
+and did not. Spawning, not PATH, is what fails from inside the stage-2 native binary —
+which is precisely why the fix's load-bearing step is the pinned absolute path, the one
+branch that runs no subprocess at all.
+
+### `darwin-link-tool-unresolved` is eliminated, verified negatively
+
+`darwin_link_tool_unresolved_error` unconditionally PRINTS its message. Run 7's frontend
+failure log contains **zero** occurrences of `darwin-link-tool` or `[linker-wrapper]`,
+so resolution succeeds and the link now proceeds past it. The remaining `Linking failed:
+nil` is a different defect, filed as
+`doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`.
+
+### A defect found by the fix, in the fix's own error channel
+
+Between runs 5 and 6 the token changed from `darwin-link-tool-unresolved` to `nil`. The
+producing function is declared `-> text` and ends in a concatenation of non-nil texts;
+it returned the full message under the interpreter (spec green, message printed
+verbatim) and `nil` from the stage-2 NATIVE binary. The difference was a `(text, text)`
+tuple return destructured by the caller. Filed as
+`doc/08_tracking/bug/native_tuple_return_of_texts_yields_nil_2026-09-13.md` (OPEN).
+Nothing on the darwin link path returns a tuple any more, and the error builder also
+prints — a returned string is only as trustworthy as the machinery carrying it.
+
+### Operational notes
+- **One virgin evidence root per run** (confirmed again). The tree is written
+  read-only; `chmod -R u+w .simple/storage/build/bootstrap` before `rm -rf`.
+- The post-Stage-2 runtime-authority comparator no longer reports a MISSING OPERAND
+  (`status=2`) as "changed" — run 4's misattribution is fixed.
+- `${bootstrap_darwin_link_env}` is word-split, matching the existing windows env
+  convention, so an Xcode path containing a space would break it. Default Xcode/CLT
+  paths contain none; worth quoting if a custom toolchain path ever does.
+
+### Correction, same day: the tuple was a bystander
+
+The paragraph above ("A defect found by the fix, in the fix's own error channel") blamed
+a `(text, text)` tuple return for the `nil`. Run 7 disproves it: the tuple is gone and
+the `nil` is byte-identical, and run 7's failure log has zero `[linker-wrapper]` lines
+even though the error builder prints unconditionally — so that code was never reached.
+The `nil` predates the tuple and survives its removal. The tuple record is marked
+UNCONFIRMED accordingly. Mechanism for the original `darwin-link-tool-unresolved`
+therefore remains **undiscriminated**: PATH is ruled out, but `process_run` not
+answering, a nil from `.trim().split("\n")[0]` on the native path, and `file_exists` on
+that output are all still live. The discriminating experiment is 10 seconds, not 18
+minutes: run the rejected Stage 2 binary directly with `--verbose` and the pins
+exported, and read which `[linker-wrapper]` site it reaches. Do that first.
+
+Also not done, and not silently: task item 2 asked for the pinned tool paths **plus
+sha256** in the stage receipt. Only the absolute paths are pinned and forwarded; no
+digest is recorded or verified. The rejected candidate's own sha256 is recorded above,
+but the artifact was deleted in cleanup — reproduce in ~18 min from a virgin root.
