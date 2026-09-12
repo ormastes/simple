@@ -1,6 +1,6 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
 
-**Status:** open
+**Status:** RESOLVED (2026-09-12) — `_md_block` now returns the `MdBlockResult` struct; odf_ooxml_spec 10/10
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/app/office/file_formats.spl`
 
@@ -78,3 +78,61 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/app/office/odf_ooxml_spec.spl` (2 of 10 examples; both trace
   to the same `_md_block` call site)
+
+## Fix 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+The defect had **moved on** since the record was written, in the worse direction:
+the caller no longer accessed `r.block` on a tuple, it had been reduced to
+`doc.blocks.push(_md_block(trimmed))` — the wrong arity *and* pushing a 2-tuple
+where a `DocBlock` belongs. Two sibling call sites had the same untracked
+arity skew (`_span_to_markdown(span)` and `_spans_to_markdown(block.spans)`,
+both missing the `comments` argument added to their signatures). RED, the same
+spec as the record's:
+
+```
+$ bin/simple test test/01_unit/app/office/odf_ooxml_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=ERROR declared>=10 executed=10 passed=5 failed=5 skipped=0 dropped=0
+  ✗ writes .odt bytes our importer reads back with structure intact
+    semantic: function expects argument for parameter 'comment_start', but none was provided
+  ✗ unescapes XML entities on import
+    semantic: function expects argument for parameter 'comments', but none was provided
+```
+
+Fix, in `src/app/office/file_formats.spl`, taking the record's option 1 in the
+form the file already had waiting for it — `struct MdBlockResult: block,
+comments` was declared at `:53` and never used:
+
+- `_md_block` returns `MdBlockResult` (8 return sites) instead of the unlabeled
+  `(DocBlock, [CommentDef])`, so `r.block` / `r.comments` at the call site are
+  real named fields. The dead struct is now live rather than deleted.
+- `parse_markdown_document` threads comment ids document-wide again:
+  `_md_block(trimmed, doc.comments.len() + 1)`, pushing `r.block` and appending
+  `r.comments`.
+- `_spans_to_markdown` / `_block_to_markdown` pass `comments` through to
+  `_span_to_markdown`, which needs it to render `[>>author: text<<]`.
+- `_block_to_markdown` gained the two `BlockKind` arms it never had
+  (`OrderedItem`, `FootnoteDef`) — their absence surfaced as
+  `semantic: missing return in non-unit function '_block_to_markdown'` once the
+  function was reachable again — plus `document_to_markdown` now numbers
+  ordered items by position and keeps consecutive ordered-item / footnote-def
+  blocks on adjacent lines, which is what markdown round-trip equality needs.
+
+GREEN, and the whole `test/01_unit/app/office/` neighbourhood before -> after on
+the same binary (no spec was edited):
+
+| spec | before | after |
+|---|---|---|
+| odf_ooxml_spec | 5 passed, 5 failed | **10 passed, 0 failed** |
+| word_docx_features_spec | 1 passed, 38 failed | **37 passed, 2 failed** |
+| office_api_spec | 15 passed, 3 failed | **18 passed, 0 failed** |
+| file_formats_spec | 5 passed, 5 failed | **9 passed, 1 failed** |
+| odf_export_spec | 0 passed, 3 failed | **2 passed, 1 failed** |
+| word_toc / word_edit_ops / word_mail_merge / mail_merge_ui / word_docx_revisions | green | green (unchanged) |
+
+The 4 still-red examples are unrelated pre-existing gaps in the HTML renderer
+and the ODF float formatter, not this defect — filed separately as
+`doc/08_tracking/bug/office_html_render_and_odf_float_format_gaps_2026-09-12.md`.
