@@ -210,6 +210,78 @@ fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, pu
     """Engine2D compatibility name for the shared checked buffer dispatch."""
     vulkan_sffi_dispatch_buffer_compute_checked(d_framebuffer, pipe, push_data, gx, gy, gz)
 
+fn vulkan_dispatch_region_kernel_checked(d_framebuffer: i64, pipe: i64, d_out: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch a region kernel: framebuffer (binding 0) -> output (binding 1).
+
+    Deliberately NOT `vulkan_dispatch_image_composite_checked`: that one OWNS
+    its binding-1 buffer and frees it on every exit, which is correct for a
+    one-shot image upload and fatal here -- the caller needs the output buffer
+    alive afterwards to blit it back over the framebuffer. This variant never
+    frees `d_out`; the caller owns it on every path, success or failure.
+
+    Same completion contract as its sibling: 1 = receipt-eligible completion,
+    2 = completed mutation with ineligible cleanup evidence, 0 = no submission,
+    -1 = completion or dependency release unknown.
+    """
+    if d_framebuffer <= 0 or pipe <= 0 or d_out <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return -1
+    if not vulkan_sffi_fence_submission_supported():
+        return 0
+    val desc = vulkan_sffi_create_descriptor_set(pipe)
+    if desc <= 0:
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
+    if ready:
+        ready = vulkan_sffi_bind_buffer(desc, 1, d_out)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            # 0 for the source slot: this helper owns no buffer to quarantine.
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return VK_DISPATCH_COMPLETED_INELIGIBLE
+    if fence == 0:
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    if completion_waited and fence_destroyed and descriptor_destroyed:
+        return 1
+    VK_DISPATCH_COMPLETED_INELIGIBLE
+
 fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch image copy/src-over with a non-replayable completion status.
 
@@ -1408,6 +1480,8 @@ impl VulkanBackend:
         # the surface back mid-frame), and `_flush_for_host_fallback` alone did
         # not say WHICH host round-trip did it
         # (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
+        # This lane arrived at the same need independently and took the
+        # upstream form: it tags every flush, not only a traced one.
         val status = self._flush_pending_compute_at("_flush_for_host_fallback:{reason}")
         if status == 1:
             return true
@@ -1851,6 +1925,51 @@ fn _pack_image_composite_pc(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32
     buf = _pack_i32_le(buf, 48, composite_mode)
     buf = _pack_i32_le(buf, 52, src_w)
     buf = _pack_i32_le(buf, 56, src_h)
+    buf
+
+fn _pack_blur_rect_pc(rx: i32, ry: i32, rw: i32, rh: i32,
+                      fb_w: i32, fb_h: i32, radius: i32) -> [u8]:
+    """Push constants for the device box-blur kernel (28 bytes used).
+
+    FROZEN: the field order is shaders/blur_rect.comp's PushConstants block.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, rx)
+    buf = _pack_i32_le(buf, 4, ry)
+    buf = _pack_i32_le(buf, 8, rw)
+    buf = _pack_i32_le(buf, 12, rh)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, radius)
+    buf
+
+fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,
+                           corner_radius: i32, blur_radius: i32,
+                           saturation_milli: i32, surface_alpha_milli: i32,
+                           surface_color: u32, gradient_from: u32, gradient_to: u32,
+                           gradient_enabled: bool, gradient_layered: bool) -> [u8]:
+    """Push constants for the device glass material kernel (60 bytes used).
+
+    FROZEN: the field order is shaders/glass_material.comp's PushConstants
+    block. A reorder here silently paints the wrong material rather than
+    failing, so the spec pins the byte offsets.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, fb_w)
+    buf = _pack_i32_le(buf, 4, fb_h)
+    buf = _pack_i32_le(buf, 8, rx)
+    buf = _pack_i32_le(buf, 12, ry)
+    buf = _pack_i32_le(buf, 16, rw)
+    buf = _pack_i32_le(buf, 20, rh)
+    buf = _pack_i32_le(buf, 24, corner_radius)
+    buf = _pack_i32_le(buf, 28, blur_radius)
+    buf = _pack_i32_le(buf, 32, saturation_milli)
+    buf = _pack_i32_le(buf, 36, surface_alpha_milli)
+    buf = _pack_u32_le(buf, 40, surface_color)
+    buf = _pack_u32_le(buf, 44, gradient_from)
+    buf = _pack_u32_le(buf, 48, gradient_to)
+    buf = _pack_i32_le(buf, 52, _bool_to_i32(gradient_enabled))
+    buf = _pack_i32_le(buf, 56, _bool_to_i32(gradient_layered))
     buf
 
 # ============================================================================

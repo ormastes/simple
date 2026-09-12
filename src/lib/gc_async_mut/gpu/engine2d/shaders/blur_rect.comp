@@ -1,0 +1,73 @@
+#version 450
+// Device box-blur kernel — the exact integer twin of emu_draw_blur_rect() in
+// src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl.
+//
+// binding 0 = framebuffer uint[], index = y * fb_w + x (READ ONLY here)
+// binding 1 = output uint[], rw * rh words, index = py * rw + px
+// push constants (28 bytes): rx, ry, rw, rh, fb_w, fb_h, radius
+// dispatch: 2D, ceil(rw/16) x ceil(rh/16) workgroups of 16x16
+//
+// The CPU reference is separable but keeps RAW SUMS and a RAW COUNT in its
+// intermediate arrays, so there is exactly ONE truncating division per channel
+// at the end. This kernel therefore accumulates the full 2D window directly:
+// same sums, same single division, same result. Rewriting it as an average of
+// row averages would truncate twice and差 by one ulp.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer BlurOut { uint data[]; } dst;
+
+layout(push_constant) uniform PushConstants {
+    int rx;
+    int ry;
+    int rw;
+    int rh;
+    int fb_w;
+    int fb_h;
+    int radius;
+} pc;
+
+int clampi(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+// Twin of color.spl rgba(): clamps every component, ARGB layout.
+uint pack_rgba(int r, int g, int b, int a) {
+    return (uint(clampi(a, 0, 255)) << 24u)
+         | (uint(clampi(r, 0, 255)) << 16u)
+         | (uint(clampi(g, 0, 255)) << 8u)
+         | uint(clampi(b, 0, 255));
+}
+
+void main() {
+    int px = int(gl_GlobalInvocationID.x);
+    int py = int(gl_GlobalInvocationID.y);
+    if (px >= pc.rw || py >= pc.rh) return;
+
+    int sr = 0; int sg = 0; int sb = 0; int sa = 0; int cnt = 0;
+    int r = pc.radius;
+    for (int off = -r; off <= r; ++off) {
+        int fy = pc.ry + py + off;
+        if (fy < 0 || fy >= pc.fb_h) continue;
+        int row = fy * pc.fb_w;
+        for (int dxo = -r; dxo <= r; ++dxo) {
+            int fx = pc.rx + px + dxo;
+            if (fx < 0 || fx >= pc.fb_w) continue;
+            uint p = fb.data[uint(row + fx)];
+            sr += int((p >> 16u) & 255u);
+            sg += int((p >> 8u) & 255u);
+            sb += int(p & 255u);
+            sa += int((p >> 24u) & 255u);
+            cnt += 1;
+        }
+    }
+
+    // The host leaves its output array at its 0 initialiser when the whole
+    // window falls outside the framebuffer; match that rather than inventing a
+    // colour for a pixel with no samples.
+    uint outv = 0u;
+    if (cnt > 0) outv = pack_rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt);
+    dst.data[uint(py * pc.rw + px)] = outv;
+}
