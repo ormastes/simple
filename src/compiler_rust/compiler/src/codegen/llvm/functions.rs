@@ -2825,9 +2825,41 @@ impl LlvmBackend {
                 //
                 // A bare (unqualified) name still reaches the table: that is a
                 // genuinely erased receiver, where `rt_to_string` is correct.
+                // ROUTE 4 of the `Poll.unwrap` rebind (2026-09-13, measured: 208
+                // `bl Poll.unwrap` sites across 109 functions survived the
+                // mangler-side guards because they are produced HERE, not by the
+                // mangler). A qualified enum helper such as `i64.unwrap` or
+                // `MirStaticInit.unwrap` is not a builtin OWNER, so this predicate
+                // called it a user-type method, `runtime_func` became `None`, and
+                // the fall-back below suffix-scanned the module for `.unwrap`,
+                // found the single `lib__nogc_async_mut__async__poll__Poll.unwrap`
+                // and bound to it -- returning 0 for every non-`Poll` receiver.
+                //
+                // For the enum helpers the qualifier names the PAYLOAD type, not
+                // an owner that has an `unwrap` method, so it is not type evidence
+                // at all and the builtin lowering is correct for every receiver --
+                // the same conclusion the bare-name guards already rest on.
+                //
+                // A GENUINE user method is still protected: by the time it reaches
+                // here the mangler has rewritten it to its full mangled spelling
+                // (`lib__x__Rival.unwrap`), whose owner carries `__`. A payload-type
+                // qualifier (`i64`, `text`, `T`, `MirStaticInit`) never does, so the
+                // `__` test separates the two without a name list.
+                let enum_helper_payload_qualifier = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    let leaf = dotted.rsplit('.').next().unwrap_or("");
+                    let owner = dotted.rsplit_once('.').map(|(o, _)| o).unwrap_or("");
+                    matches!(
+                        leaf,
+                        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                    ) && !owner.is_empty()
+                        && !owner.contains("__")
+                };
                 let qualified_owner_is_user_type = {
                     let dotted = func_name.replace("_dot_", ".");
-                    dotted.contains('.') && !super::qualified_runtime_method_owner_is_builtin(func_name)
+                    dotted.contains('.')
+                        && !enum_helper_payload_qualifier
+                        && !super::qualified_runtime_method_owner_is_builtin(func_name)
                 };
 
                 // Map well-known methods to runtime functions
