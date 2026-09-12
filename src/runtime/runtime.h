@@ -1381,6 +1381,9 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_regular_no_follow_bounded(
                 const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+/* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
+ * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
+int64_t     rt_file_read_regular_no_follow_last_failure(void);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 /* Failed-existence-probe measurement. begin returns a non-reusable monotonic
