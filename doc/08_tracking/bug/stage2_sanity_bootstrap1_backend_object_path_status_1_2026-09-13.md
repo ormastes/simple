@@ -1,6 +1,8 @@
 # Stage-2 sanity, `SIMPLE_BOOTSTRAP=1` pass: backend object emission returns status 1 with an EMPTY diagnostic
 
-- Status: OPEN (2026-09-13)
+- Status: **FIXED (2026-09-13, lane BOOT-6)** — cause measured, both listed
+  candidates refuted; see "What it actually was" at the end. Originally OPEN
+  (2026-09-13, lane BOOT-5).
 - Found: bootstrap lane BOOT-5, `work/bootstrap-full-3-2026-09-12` rebased onto
   `origin/main` `3a3e0121a7e`
 - Severity: **the current Stage-2 admission blocker on Linux aarch64.** It is the
@@ -88,3 +90,59 @@ Faster, against the preserved candidate (~30 s, no bootstrap), with
 
     CAND_OVERRIDE=<...>/bootstrap-boot5c/stage2/<triple>/simple.rejected \
       sh scratchpad/boot5/disc5.sh bs0_trace bs1_new
+
+
+## What it actually was (BOOT-6, 2026-09-13) — measured, and neither candidate
+
+**The framing above is wrong and the correction matters more than the fix.**
+This is not a `SIMPLE_BOOTSTRAP`-dependent defect. It is a
+**second-build-into-a-populated-cache-scope** defect, and `SIMPLE_BOOTSTRAP`
+only looked causal because the harness always runs pass 0 first
+(`bootstrap-stage3-candidate-builder.shs:376-392` runs pass 1 **only if** pass 0
+succeeded) and both passes share one `HOME`.
+
+Control, same preserved candidate `67786227817bf45f...`, two positional
+`native-build`s of `hello_world.spl` sharing one `HOME`, ~40 s per pair:
+
+| order | first pass | second pass |
+|---|---|---|
+| `SIMPLE_BOOTSTRAP=0` then `=1` | raw_status **0** | raw_status **1** |
+| `SIMPLE_BOOTSTRAP=1` then `=0` | raw_status **0** | raw_status **1** |
+
+Reversing the order moves the failure. The variable is ORDER. With separate
+`HOME`s both passes are green in both orders, which is why the 30 s repro this
+record recommended did not reproduce it.
+
+**The mechanism, from `strace -f -q -y` on the failing run:**
+
+```
+write(.../simple-aot-diagnostic-njhtYD/message.tmp..., "AOT object destination already exists", 37) = 37
+read (.../simple-aot-diagnostic-njhtYD/message, "AOT object destination already e", 32) = 32
+read (.../simple-aot-diagnostic-njhtYD/message, "xists", 32) = 5
+read (.../simple-aot-diagnostic-njhtYD/message, "", 27) = 0
+```
+
+- **Candidate 2 (`status` is wrong) is REFUTED.** The status of 1 is correct.
+  `compile_ir_to_object_path` reached `rt_file_publish_noreplace`, which answers
+  0 on `EEXIST` (`runtime_native.c:13260`, `renameat2(..., RENAME_NOEXCL)` then
+  `link()`), because the FIRST pass had already published
+  `object.<module>.o` (1080 bytes) at that exact path. The `[receipt-size-canary]`
+  lead was a genuine defect but not this one.
+- **Candidate 1 (the diagnostic write was lost) is REFUTED.** The write landed
+  (37 bytes) and this process read all 37 back. The driver's `case Ok(message):`
+  payload read is what lost them — filed separately as
+  `result_bound_text_payload_lost_in_stage2_native_codegen_2026-09-13.md`.
+
+**Fix:** `src/compiler/70.backend/backend/llvm_backend_tools.spl` clears a stale
+destination before publishing. The publish stays no-replace, so a genuinely
+racing publisher still makes this call fail closed rather than being silently
+overwritten. The object staged just above has already been verified (exists,
+regular, non-empty, recognized object magic) and comes from the current MIR, so
+it is authoritative for a path keyed by cache scope and module name only.
+
+Two further defects this exposed are filed, not fixed:
+`native_cache_misses_identical_second_build_2026-09-13.md` (the miss that makes
+the second build recompile at all) and
+`stage2_sanity_passes_share_one_object_store_2026-09-13.md` (the harness's
+`--cache-dir` does not isolate the in-process driver, which reads
+`SIMPLE_NATIVE_BUILD_CACHE_DIR` / `machine_cache_root()` instead).
