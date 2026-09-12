@@ -82,6 +82,10 @@ extern fn rt_vulkan_copy_from_buffer_strided(data: [u8], handle: i64, src_offset
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
 @unsafe(reason: "raw Vulkan one-call pixel readback ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_readback_u32_checksum(pixels: [u32], pixel_count: i64, handle: i64, offset: i64) -> i64
+@unsafe(reason: "raw Vulkan interpreter-legal pixel readback ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
+extern fn rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i64) -> [u32]
+@unsafe(reason: "raw Vulkan interpreter-legal readback checksum ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
+extern fn rt_vulkan_readback_u32_array_checksum(handle: i64, pixel_count: i64, offset: i64) -> i64
 extern fn rt_vulkan_copy_u32_slots(dst: [u32], src: [u32], count: i64) -> i64
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
@@ -1085,6 +1089,81 @@ fn vulkan_sffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
 fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     _vulkan_read_buffer_bytes_abi(handle, byte_count, offset)
 
+# ============================================================================
+# Readback instrumentation
+#
+# Two counters, in the shape `web_draw_ir_fingerprint_pixels_scanned` already
+# uses, so a spec can pin the two properties that matter and nothing else:
+# how many DEVICE readbacks a frame performs, and how many INTERPRETED
+# per-pixel iterations it spends unpacking them. Both were the whole frame:
+# 2 readbacks x 684,000 iterations = 99.6% of a 900x760 web frame.
+# See doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md.
+# ============================================================================
+
+var _vulkan_readback_calls: i64 = 0
+var _vulkan_readback_unpack_iterations: i64 = 0
+
+fn vulkan_sffi_readback_calls() -> i64:
+    """Device readbacks performed since the last counter reset."""
+    _vulkan_readback_calls
+
+fn vulkan_sffi_readback_unpack_iterations() -> i64:
+    """Interpreted per-pixel unpack iterations since the last counter reset."""
+    _vulkan_readback_unpack_iterations
+
+fn vulkan_sffi_reset_readback_counters():
+    """Zero both readback counters, so a caller can measure one frame."""
+    _vulkan_readback_calls = 0
+    _vulkan_readback_unpack_iterations = 0
+
+fn vulkan_sffi_native_readback_opt_in() -> bool:
+    """True when `SIMPLE_VK_READBACK=native` selects the bulk unpack primitive.
+
+    Opt-in rather than default because `rt_vulkan_readback_u32_array` is a NEW
+    interpreter extern: on a binary built before it was registered, calling an
+    unknown extern is an UNCATCHABLE abort, not a recoverable error, so a
+    default-on route would break every already-deployed binary. Flip the
+    default once a seed carrying the symbol is deployed. Same hazard and same
+    remedy as doc/08_tracking/bug/
+    typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md."""
+    (env_get("SIMPLE_VK_READBACK") ?? "") == "native"
+
+@unsafe(reason: "raw Vulkan interpreter-legal bulk readback facade", capabilities: [ffi])
+fn vulkan_sffi_readback_u32_alloc(handle: i64, pixel_count: i32, offset: i64) -> [u32]:
+    """Download `pixel_count` pixels as a FRESHLY ALLOCATED `[u32]`, natively.
+
+    Returns `[]` when this route is unavailable or fails, so every caller
+    keeps `vulkan_sffi_readback_u32_into` as its fallback and no caller can
+    consume a partially-filled surface.
+
+    Why a returned array here when the sibling facade deliberately takes a
+    caller-owned destination: that shape exists to dodge a JIT tuple deep-copy
+    (~12.1 ms per 800x600 frame). On the INTERPRETER lane an array binds by
+    reference (~22 us), so the destination buys nothing — while filling one
+    from a returned array would cost exactly the 684k interpreted iterations
+    this facade exists to remove."""
+    if pixel_count <= 0:
+        return []
+    if not gpu_sffi_uses_interpreter_array_abi():
+        return []
+    if not vulkan_sffi_native_readback_opt_in():
+        return []
+    _vulkan_readback_calls = _vulkan_readback_calls + 1
+    val pixels = rt_vulkan_readback_u32_array(handle, pixel_count.to_i64(), offset)
+    if pixels.len().to_i64() != pixel_count.to_i64():
+        return []
+    pixels
+
+@unsafe(reason: "raw Vulkan interpreter-legal readback checksum facade", capabilities: [ffi])
+fn vulkan_sffi_readback_u32_alloc_checksum(handle: i64, pixel_count: i32, offset: i64) -> i64:
+    """Identity checksum for the same bytes `vulkan_sffi_readback_u32_alloc`
+    returned, computed natively with the SAME `sum % 2147483647` fold the
+    natively-linked lane uses, so the value is lane-independent. -1 on
+    failure (a valid checksum is >= 0)."""
+    if pixel_count <= 0:
+        return -1
+    rt_vulkan_readback_u32_array_checksum(handle, pixel_count.to_i64(), offset)
+
 @unsafe(reason: "raw Vulkan one-call pixel readback facade", capabilities: [ffi])
 fn vulkan_sffi_readback_u32_into(dest: [u32], handle: i64, pixel_count: i32, offset: i64) -> i64:
     """Download pixels into a CALLER-OWNED [u32] and return the readback
@@ -1102,10 +1181,13 @@ fn vulkan_sffi_readback_u32_into(dest: [u32], handle: i64, pixel_count: i32, off
         return -1
     if dest.len().to_i64() < pixel_count.to_i64():
         return -1
+    _vulkan_readback_calls = _vulkan_readback_calls + 1
     if gpu_sffi_uses_interpreter_array_abi():
         val bytes = _vulkan_read_buffer_bytes_abi(handle, pixel_count.to_i64() * 4, offset)
         if bytes.len().to_i64() != pixel_count.to_i64() * 4:
             return -1
+        _vulkan_readback_unpack_iterations = (
+            _vulkan_readback_unpack_iterations + pixel_count.to_i64())
         var i: i64 = 0
         var checksum: i64 = 0
         while i < pixel_count.to_i64():

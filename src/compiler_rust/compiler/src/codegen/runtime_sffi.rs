@@ -1891,6 +1891,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64],
     ),
     RuntimeFuncSpec::new("rt_vulkan_read_buffer_bytes", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_readback_u32_array", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_readback_u32_array_checksum", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv_raw", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv_array", &[I64], &[I64]),

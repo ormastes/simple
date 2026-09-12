@@ -856,10 +856,7 @@ pub fn spl_wffi_call_i64_into_bytes_fn(args: &[Value]) -> Result<Value, CompileE
     // type error: it is returned as the same negative facade status the native
     // implementation returns, so both lanes answer a bad window identically and
     // a caller can branch on it instead of unwinding.
-    let (Ok(offset), Ok(capacity)) = (
-        usize::try_from(args[3].as_int()?),
-        usize::try_from(args[4].as_int()?),
-    ) else {
+    let (Ok(offset), Ok(capacity)) = (usize::try_from(args[3].as_int()?), usize::try_from(args[4].as_int()?)) else {
         return Ok(Value::Int(-WFFI_INVALID_ARGUMENT));
     };
     let Some(end) = offset.checked_add(capacity).filter(|end| *end <= owner.len()) else {
@@ -1379,7 +1376,11 @@ mod tests {
     fn bounded_out_buffer_fills_the_caller_allocation() {
         let (rc, bytes, len) = into_bytes_case(Value::byte_array(vec![0xAA; 8]), 0, 8);
         assert_eq!(rc, Value::Int(0));
-        assert_eq!(len, Value::Int(4096), "the callee's untruncated length is reported verbatim");
+        assert_eq!(
+            len,
+            Value::Int(4096),
+            "the callee's untruncated length is reported verbatim"
+        );
         assert_eq!(
             bytes.byte_array_view().expect("packed storage is preserved"),
             &[0, 7, 14, 21, 28, 35, 42, 49]
@@ -1441,7 +1442,11 @@ mod tests {
             ints(&[9]),
         ])
         .expect("an out-of-bounds window is refused, not unwound");
-        assert_eq!(error, Value::Int(-1), "the native lane's WFFI_INVALID_ARGUMENT, negated");
+        assert_eq!(
+            error,
+            Value::Int(-1),
+            "the native lane's WFFI_INVALID_ARGUMENT, negated"
+        );
     }
 
     #[test]

@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Prove that box-shadow is rasterized as a blurred ALPHA COVERAGE mask
+composited with the shadow colour, so its edge ramps off instead of ending in a
+hard uniform band.
+Audience: browser-engine and Engine2D maintainers.
+
+The previous rasterizer filled an OPAQUE rect expanded by blur_r and then
+blurred that already-filled area in place; blurring a uniformly filled region
+returns the same uniform region, so there was zero falloff.
+See doc/08_tracking/bug/web_box_shadow_no_edge_falloff_2026-09-12.md
+"""
+
+# @req: REQ-BROWSER-ENGINE-BOX-SHADOW-FALLOFF-001 — box-shadow edge coverage ramps off gaussian-like.
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl 8%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+# Fixture geometry: 200x200 page, white body, a 120x60 box at (40, 70) with
+# `box-shadow: 0 0 20px #000000` (blur_r = 20). Absolute oracles are taken on
+# the vertical centre line x = 100, above the box's top edge y = 70.
+val VIEW: i32 = 200
+
+fn fixture(box_bg: text) -> text:
+    (
+        "<html><body style=\"margin:0;padding:0;background:#ffffff\">" +
+        "<div style=\"margin:70px 0 0 40px;width:120px;height:60px;background:" + box_bg +
+        ";box-shadow:0 0 20px #000000\"></div></body></html>"
+    )
+
+fn gray_at(box_bg: text, x: i32, y: i32) -> i32:
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(fixture(box_bg), VIEW, VIEW, "cpu_simd")
+    ((pixels[y * VIEW + x] >> 16) & 0xFFu32) as i32
+
+describe "box-shadow rasterizes an alpha coverage falloff":
+    it "AC-1: the shadow centre is the shadow colour (opaque black)":
+        # A transparent box lets the fully-covered centre of the shadow show.
+        expect(gray_at("transparent", 100, 100)).to_be_less_than(8)
+
+    it "AC-2: one pixel outside the box edge is ~50% of the shadow alpha":
+        # CSS puts the 50% coverage crossing ON the un-expanded rect edge:
+        # 0.5 * 255 = 128, measured 133.
+        val v = gray_at("#ffffff", 100, 69)
+        assert_true(v > 108 and v < 148)
+
+    it "AC-3: three blur radii outside the edge is pure background":
+        expect(gray_at("#ffffff", 100, 10)).to_equal(255)
+
+    it "AC-4: coverage decreases monotonically away from the edge (no hard band)":
+        val near = gray_at("#ffffff", 100, 66)
+        val mid = gray_at("#ffffff", 100, 62)
+        val far = gray_at("#ffffff", 100, 55)
+        assert_true(near < mid)
+        assert_true(mid < far)
+        assert_true(far < 255)

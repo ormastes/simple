@@ -24,19 +24,21 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BACKENDS="cpu_simd vulkan"
 RENDERDOC=0
+PIXEL_DIFF=0
 SELFTEST_ONLY=0
 # Documented path where the Simple web renderer showcase writes its PPMs for the SAME
 # catalog. When it exists, the pixel-diff row is computed; otherwise it is `unavailable`.
 SIMPLE_PPM_DIR=${SIMPLE_WEB_SHOWCASE_PPM_DIR:-build/web_renderer_vulkan_4k_showcase_hardening/simple/ppm}
 
 usage() {
-    echo "Usage: sh scripts/check/check-chrome-web-showcase-perf.shs [--selftest] [--renderdoc]"
+    echo "Usage: sh scripts/check/check-chrome-web-showcase-perf.shs [--selftest] [--renderdoc] [--pixel-diff]"
 }
 
 for arg in "$@"; do
     case "$arg" in
         --selftest) SELFTEST_ONLY=1 ;;
         --renderdoc) RENDERDOC=1 ;;
+        --pixel-diff) PIXEL_DIFF=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "ERROR — nothing was checked (unknown-argument:$arg)"; exit 2 ;;
     esac
@@ -303,6 +305,29 @@ if [ -d "$ROOT/$SIMPLE_PPM_DIR" ]; then
             DIFF_STATUS=diverged
         fi
     fi
+fi
+
+# ---- Optional real pixel diff ---------------------------------------------------
+# The block above only counts frame-buffer mismatches between Simple backends; it
+# never looks at Chrome. --pixel-diff runs the real Chrome-vs-Simple catalog
+# comparison (scripts/check/check-chrome-catalog-pixel-diff.shs) so
+# chrome_vs_simple_pixel_diff_status stops reading "unavailable" on a host that
+# actually has Chrome.
+if [ "$PIXEL_DIFF" -eq 1 ]; then
+    pd_out=$(sh "$ROOT/scripts/check/check-chrome-catalog-pixel-diff.shs" \
+        --out "$ROOT/build/chrome-showcase/pixel-diff" 2>&1)
+    pd_rc=$?
+    printf '%s\n' "$pd_out" > "$ROOT/build/chrome-showcase/pixel-diff.log" 2>/dev/null
+    pd_verdict=$(printf '%s\n' "$pd_out" | tail -1)
+    case "$pd_verdict" in
+        PASS*)
+            DIFF_STATUS=chrome-compared
+            DIFF_COUNT=$(printf '%s\n' "$pd_verdict" | sed -n 's/.*worst=\([0-9.]*\).*/\1/p')
+            ;;
+        FAIL*) DIFF_STATUS=chrome-compare-failed ;;
+        *) DIFF_STATUS="chrome-compare-error:rc=$pd_rc" ;;
+    esac
+    printf '%s\n' "$pd_out" | grep '^page=' || true
 fi
 
 # ---- RenderDoc ------------------------------------------------------------------
