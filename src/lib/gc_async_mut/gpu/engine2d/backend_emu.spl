@@ -246,8 +246,121 @@ fn emu_draw_circle_filled(mut core: RenderBackend, cx: i32, cy: i32, r: i32, col
         dy = dy + 1
 
 # ============================================================================
-# Rounded Rectangle — rect body + 4 corner arcs
+# Rounded Rectangle — 3 band rects + 4 anti-aliased corner boxes
+#
+# SHARED ROUNDED-RECT CORNER COVERAGE FORMULA — v1 (2026-09-12)
+# ----------------------------------------------------------------------------
+# THIS COMMENT BLOCK IS THE SINGLE DEFINITION. Four lanes implement it and MUST
+# stay bit-identical twins (`doc/07_guide/ui/engine2d_cpu_metal_bit_parity.md`):
+#
+#   CPU / software  : this function (backend_software.spl delegates here)
+#   Vulkan          : ALSO this function — backend_vulkan.spl:draw_rounded_rect
+#                     delegates to emu_draw_rounded_rect, so the AA lives in
+#                     this expansion and reaches the GPU as real
+#                     draw_rect_filled dispatches carrying a modulated alpha.
+#                     (The dedicated rounded_rect SPIR-V kernel is deliberately
+#                     unwired — it ignores the radius entirely; see bug
+#                     vulkan_raster_kernels_noop_and_divergent_2026-06-17.)
+#   Metal           : kernel_draw_rounded_rect in backend_metal_msl.spl
+#   parity oracle   : _rr_kernel_pixel_ref in
+#                     test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl
+#                     (an INDEPENDENT re-implementation — it must never import
+#                     these helpers, or the spec proves nothing)
+#
+# GEOMETRY. The rect is partitioned into SEVEN DISJOINT regions, so every pixel
+# is blended EXACTLY ONCE. (Before 2026-09-12 the corner arcs overlapped the
+# side bands at the seam, which double-composited any alpha<255 fill. That
+# overlap could not carry coverage — a partial pixel blended twice is wrong —
+# so exclusivity is a precondition of AA, not a cosmetic cleanup.)
+#
+#   middle band : (x+r,     y,       w-2r, h     )
+#   left  band  : (x,       y+r,     r,    h-2r  )
+#   right band  : (x+w-r,   y+r,     r,    h-2r  )
+#   4 corner boxes, r x r, at each corner — disjoint from the bands and from
+#   each other; their union with the bands is exactly the bounding rect.
+#
+# COVERAGE. Inside a corner box, let (dx, dy) be the pixel's offset from that
+# corner's arc-centre pixel, measured positive AWAY from the rect interior:
+#
+#   top-left     dx = (x+r-1) - px      dy = (y+r-1) - py
+#   top-right    dx = px - (x+w-r)      dy = (y+r-1) - py
+#   bottom-left  dx = (x+r-1) - px      dy = py - (y+h-r)
+#   bottom-right dx = px - (x+w-r)      dy = py - (y+h-r)
+#
+#   q       = (2*dx + 1)^2 + (2*dy + 1)^2          # 4x the squared distance
+#   dist256 = isqrt(q * 16384)                      # 256 * distance, floored
+#   cov256  = clamp(r*256 + 128 - dist256, 0, 256)
+#
+# All integer. `isqrt(v)` is floor(sqrt(v)) — ALGORITHM-INDEPENDENT, so any
+# exact integer square root matches; only a float/`sqrt()` path can diverge,
+# which is why no lane may use one.
+#
+# The `2*d + 1` terms are what make this the TRUE distance rather than an
+# off-by-half approximation: the arc centre is the continuous point
+# (x+r, y+r) and a pixel's centre is (px+0.5, py+0.5), so the real offset is
+# `dx + 0.5`. Doubling clears the halves (2*dx+1), which makes `q` four times
+# the squared distance, so the `* 16384` (not `<< 16`) scales it back:
+# isqrt(q * 65536/4) = 256 * distance. Measuring from the arc-centre PIXEL
+# instead pushes the whole arc outward by half a pixel — it looks fine in
+# isolation but puts the ramp in the wrong place, which is exactly what
+# test/01_unit/browser_engine/border_radius_antialias_engine2d_spec.spl's
+# AC-1 coordinates detect.
+#
+# The `+128` centres the one-pixel-wide ramp so coverage crosses 1/2 exactly
+# on the arc. Straight edges are unaffected because they are BAND pixels,
+# which never enter this function at all.
+#
+#   cov == 256 -> interior, full fill (exact, bit-identical to a plain fill)
+#   cov == 0   -> exterior, pixel untouched (no draw call issued at all)
+#   0 < cov    -> the arc ramp
+#
+# BLEND. Coverage is applied by modulating the source ALPHA BYTE only, then
+# handing the result to the SAME blend every other primitive uses:
+#
+#   a_eff = (alpha_byte(color) * cov) / 256      # cov==256 -> a_eff == alpha
+#
+# and the pixel is drawn with `draw_rect_filled(px, py, 1, 1, recolored)`.
+# Nothing new is introduced into the blend itself — the existing
+# blend_src_over is already proven bit-exact CPU<->Metal by this spec's
+# alpha<255 rows — so the only new shared quantity is `a_eff`.
+#
+# A FIFTH implementation exists and is held to the same formula: the
+# framebuffer web painter's `_corner_coverage256` in
+# src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl.
+# It was aligned to this exact form on 2026-09-12 (it had been using the
+# arc-centre-PIXEL variant, half a pixel out), so the two rounded-rect
+# rasterizers in this repo genuinely agree rather than merely resembling each
+# other. Change one, change all five.
 # ============================================================================
+
+fn _emu_isqrt_i64(v: i64) -> i64:
+    # floor(sqrt(v)) by integer Newton. Result is algorithm-independent; every
+    # lane may use any exact isqrt, but NONE may use a float sqrt.
+    if v <= 0:
+        return 0
+    var guess = v
+    var next = (guess + 1) / 2
+    while next < guess:  # cpu-lane-loop-ok: Newton iteration, O(log v) steps
+        guess = next
+        next = (guess + v / guess) / 2
+    guess
+
+fn _emu_corner_cov256(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val q = ex * ex + ey * ey
+    val dist256 = _emu_isqrt_i64(q * 16384)
+    val cov = ((r as i64) * 256 + 128 - dist256) as i32
+    if cov < 0:
+        return 0
+    if cov > 256:
+        return 256
+    cov
+
+fn _emu_modulate_alpha(color: u32, cov: i32) -> u32:
+    val a = ((color >> 24) & 0xFFu32) as i32
+    val a_eff = (a * cov) / 256
+    (color & 0x00FFFFFFu32) | ((a_eff as u32) << 24)
 
 fn emu_draw_rounded_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
     if w <= 0 or h <= 0:
@@ -263,34 +376,48 @@ fn emu_draw_rounded_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32
     core.draw_rect_filled(x, y + r, r, h - 2 * r, color)
     core.draw_rect_filled(x + w - r, y + r, r, h - 2 * r, color)
 
-    _emu_corner_arc(core, x + r, y + r, r, color, -1, -1)
-    _emu_corner_arc(core, x + w - r - 1, y + r, r, color, 1, -1)
-    _emu_corner_arc(core, x + r, y + h - r - 1, r, color, -1, 1)
-    _emu_corner_arc(core, x + w - r - 1, y + h - r - 1, r, color, 1, 1)
+    if r <= 0:
+        return
 
-fn _emu_corner_arc(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32, dx_sign: i32, dy_sign: i32):
-    var px: i32 = r
-    var py: i32 = 0
-    var d: i32 = 1 - r
+    _emu_corner_box_aa(core, r, color, x + r - 1, y + r - 1, -1, -1)
+    _emu_corner_box_aa(core, r, color, x + w - r, y + r - 1, 1, -1)
+    _emu_corner_box_aa(core, r, color, x + r - 1, y + h - r, -1, 1)
+    _emu_corner_box_aa(core, r, color, x + w - r, y + h - r, 1, 1)
 
-    while px >= py:
-        val sx = cx + dx_sign * px
-        val ex = cx
-        val span_x = _emu_min(sx, ex)
-        val span_w = _emu_abs(sx - ex) + 1
-        core.draw_rect_filled(span_x, cy + dy_sign * py, span_w, 1, color)
-
-        val sx2 = cx + dx_sign * py
-        val span_x2 = _emu_min(sx2, ex)
-        val span_w2 = _emu_abs(sx2 - ex) + 1
-        core.draw_rect_filled(span_x2, cy + dy_sign * px, span_w2, 1, color)
-
-        py = py + 1
-        if d < 0:
-            d = d + 2 * py + 1
-        else:
-            px = px - 1
-            d = d + 2 * (py - px) + 1
+fn _emu_corner_box_aa(mut core: RenderBackend, r: i32, color: u32, ax: i32, ay: i32, sx: i32, sy: i32):
+    # One r x r corner box. (ax, ay) is the arc-centre pixel and (sx, sy) the
+    # outward signs, so the box is exactly the pixels px = ax + sx*dx,
+    # py = ay + sy*dy for dx, dy in 0..r-1 — i.e. dx and dy ARE the shared
+    # formula's offsets, both >= 0. Coverage-256 per the block above; a full
+    # pixel is drawn with the untouched color (bit-identical to a plain fill),
+    # a partial pixel with the alpha-modulated color, an empty pixel not at all.
+    #
+    # Rows are walked in dx order (0 = nearest the interior). cov256 is
+    # monotonically non-increasing in dx for a fixed dy, so the full-coverage
+    # pixels of a row form ONE contiguous run starting at dx=0 — it is emitted
+    # as a single span rather than r separate 1x1 calls, which matters on the
+    # Vulkan lane where every draw_rect_filled is a real dispatch. The pixels
+    # written are identical either way.
+    var dy = 0
+    while dy < r:
+        val py = ay + sy * dy
+        var full = 0
+        while full < r and _emu_corner_cov256(full, dy, r) >= 256:
+            full = full + 1
+        if full > 0:
+            val span_lo = _emu_min(ax + sx * 0, ax + sx * (full - 1))
+            core.draw_rect_filled(span_lo, py, full, 1, color)
+        var dx = full
+        while dx < r:
+            val cov = _emu_corner_cov256(dx, dy, r)
+            if cov <= 0:
+                dx = r
+            else:
+                val c = _emu_modulate_alpha(color, cov)
+                if ((c >> 24) & 0xFFu32) != 0u32:
+                    core.draw_rect_filled(ax + sx * dx, py, 1, 1, c)
+                dx = dx + 1
+        dy = dy + 1
 
 # ============================================================================
 # Triangle Filled — Integer barycentric (Metal-exact)
