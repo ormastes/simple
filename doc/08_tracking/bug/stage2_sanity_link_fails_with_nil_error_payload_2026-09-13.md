@@ -642,6 +642,17 @@ in the rejected binary, including
 and the Cranelift adapter. Zero legitimate external `Poll.unwrap` callers exist.
 The linker was simply the first one whose wrong value was fatal.
 
+**CORRECTION (same day, measured — do not read the paragraph above as "all 270
+were fixed").** Re-counting the same `bl` edges on the run-17 candidate, which
+carries the fix: **208 sites across 109 functions remain.** This fix cleared 62,
+including the one that mattered (`find_linker_path`, now
+`bl <_rt_unwrap_or_trap>`). The rest reach `Poll.unwrap` by a SECOND route that
+PR #750 does not close — the qualified-name single-candidate fallbacks in
+`resolve_call_target`, most likely. They are latent rather than harmless: each
+returns 0 where a payload was expected, and bites only when the value is used in
+a way that notices. Measured, reproduced-shape exclusions and the next step are
+in `unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md`.
+
 ### Method notes, for the next session
 
 1. **The `SIMPLE_TRACE_FIELD_GET=1` transcript replay recommended by run 15 was
