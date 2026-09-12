@@ -1806,3 +1806,50 @@ fn _bytes_to_pixel_array(bytes: [u8], count: i32) -> [u32]:
         pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         i = i + 1
     pixels
+
+# ---------------------------------------------------------------------------
+# Font-atlas mirror continuity (2026-09-12)
+# ---------------------------------------------------------------------------
+# Free function so the decision is testable without a Vulkan device.
+#
+# `atlas_generation` is ONE global counter shared by every atlas owner, so on a
+# page where two font identities interleave an owner's own steps are never
+# contiguous in it and the `host_gen + 1` rule can never hold -- that is the
+# whole of the 8 full 1,048,576-pixel repacks measured at 900x760
+# (doc/08_tracking/bug/vulkan_font_atlas_shared_mirror_repacks_2026-09-12.md).
+# When the producer publishes a per-owner sequence, continuity is tested on
+# THAT instead, with three outcomes:
+#
+#   0 = full repack        -- the mirror cannot be trusted for this batch
+#   1 = incremental repack -- apply this batch's dirty cells to the mirror
+#   2 = mirror is already truth -- this owner added no cells since the mirror
+#                                 was taken, so nothing needs repacking at all
+#
+# Outcome 2 is not an optimisation of 1: a returning owner whose glyphs are all
+# cached emits NO dirty cells, so its sequence does not move, and under a plain
+# `+1` rule that is a full repack of an atlas the mirror already matches.
+val VK_FONT_MIRROR_FULL: i64 = 0
+val VK_FONT_MIRROR_INCREMENTAL: i64 = 1
+val VK_FONT_MIRROR_ALREADY_TRUTH: i64 = 2
+
+fn vulkan_font_mirror_continuity(mirror_coherent: bool, owner_identity: text,
+                                 host_identity: text, bytes_match: bool,
+                                 host_generation: i64, batch_generation: i64,
+                                 host_owner_sequence: i64, batch_owner_sequence: i64,
+                                 dirty_cells: i64) -> i64:
+    if not mirror_coherent or owner_identity == "" or host_identity != owner_identity or not bytes_match:
+        return VK_FONT_MIRROR_FULL
+    if batch_owner_sequence >= 0 and host_owner_sequence >= 0:
+        # Per-owner sequence published by the producer.
+        if batch_owner_sequence == host_owner_sequence and dirty_cells == 0:
+            return VK_FONT_MIRROR_ALREADY_TRUTH
+        if batch_owner_sequence == host_owner_sequence + 1 and dirty_cells > 0:
+            return VK_FONT_MIRROR_INCREMENTAL
+        return VK_FONT_MIRROR_FULL
+    # No per-owner sequence: fall back to the global-generation rule. A gap
+    # there can mean a dirty batch for this owner that never reached this
+    # backend, whose cells the mirror would then be missing, so only an exact
+    # +1 is safe.
+    if host_generation >= 0 and batch_generation == host_generation + 1 and dirty_cells > 0:
+        return VK_FONT_MIRROR_INCREMENTAL
+    VK_FONT_MIRROR_FULL

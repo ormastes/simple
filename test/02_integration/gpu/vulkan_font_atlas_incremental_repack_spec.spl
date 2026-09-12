@@ -13,12 +13,16 @@
 # doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md.
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
-    VulkanBackend,
+    VulkanBackend, VULKAN_FONT_ATLAS_MIRROR_MAX,
     vulkan_font_pack_note, vulkan_font_pack_reset,
     vulkan_font_pack_full_count, vulkan_font_pack_incremental_count,
     vulkan_timing_enabled, vulkan_timing_table
 }
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
+    vulkan_font_mirror_continuity, VK_FONT_MIRROR_FULL,
+    VK_FONT_MIRROR_INCREMENTAL, VK_FONT_MIRROR_ALREADY_TRUTH
+}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontRenderer, font_atlas_park_key}
 
 # ---------------------------------------------------------------------------
 # Independent re-derivation of the atlas pack (NOT imported from the product).
@@ -203,6 +207,80 @@ describe "vulkan font atlas incremental repack":
         expect(vulkan_font_pack_full_count()).to_be(1)
         expect(vulkan_font_pack_incremental_count()).to_be(3)
 
+    # -----------------------------------------------------------------------
+    # PRODUCT: per-owner mirror slots. Two font identities on one page used to
+    # evict each other's host mirror on every switch. These cases drive the
+    # shipped `_font_mirror_activate` on a device-free backend, so they prove
+    # the park/swap-in actually mutates the backend's slot list -- the failure
+    # this guards against is a SILENT NO-OP, where the push lands on a clone
+    # (see doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md)
+    # and every activation misses while the page counters look unchanged.
+    # -----------------------------------------------------------------------
+
+    it "PRODUCT a parked owner's mirror is swapped back in after another owner ran":
+        var backend = VulkanBackend.create()
+        val bytes_a = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = bytes_a
+        # Owner B takes over: A is parked, B has no slot yet.
+        expect(backend._font_mirror_activate("owner-b", true)).to_be(false)
+        backend.font_atlas_host_identity = "owner-b"
+        backend.font_atlas_host_generation = 6
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 22u32))
+        # A comes back: its own bytes and generation must return intact.
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(true)
+        expect(backend.font_atlas_host_generation).to_be(5)
+        expect(bytes_equal(backend.font_atlas_host_bytes, bytes_a)).to_be(true)
+
+    it "PRODUCT SABOTAGE a stale mirror is never parked, so its owner comes back cold":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        # entry_valid=false: the mirror was already incoherent at entry.
+        expect(backend._font_mirror_activate("owner-b", false)).to_be(false)
+        backend.font_atlas_host_identity = "owner-b"
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(false)
+
+    it "PRODUCT the slot list is bounded, so the least recently used owner is evicted":
+        var backend = VulkanBackend.create()
+        val first_bytes = oracle_pack_full(synthetic_atlas(8, 8, 1u32))
+        backend.font_atlas_host_identity = "owner-0"
+        backend.font_atlas_host_generation = 1
+        backend.font_atlas_host_bytes = first_bytes
+        # Park owner-0, then VULKAN_FONT_ATLAS_MIRROR_MAX more distinct owners.
+        var i = 1
+        while i <= VULKAN_FONT_ATLAS_MIRROR_MAX:
+            val name = "owner-" + i.to_text()
+            expect(backend._font_mirror_activate(name, true)).to_be(false)
+            backend.font_atlas_host_identity = name
+            backend.font_atlas_host_generation = (i + 1).to_i64()
+            backend.font_atlas_host_bytes = oracle_pack_full(
+                synthetic_atlas(8, 8, (i + 1).to_u32()))
+            i = i + 1
+        expect(backend.font_atlas_mirror_slots.len()).to_be(
+            VULKAN_FONT_ATLAS_MIRROR_MAX)
+        # owner-0 was the oldest and has been evicted.
+        expect(backend._font_mirror_activate("owner-0", true)).to_be(false)
+
+    it "PRODUCT re-activating the owner that is already active is a no-op, not a park":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(true)
+        expect(backend.font_atlas_mirror_slots.len()).to_be(0)
+        expect(backend.font_atlas_host_generation).to_be(5)
+
+    it "PRODUCT an empty owner identity never activates and never parks":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        expect(backend._font_mirror_activate("", true)).to_be(false)
+        expect(backend.font_atlas_mirror_slots.len()).to_be(0)
+
     it "the pack counters reset to zero so each frame is measured on its own":
         vulkan_font_pack_note(false)
         vulkan_font_pack_reset()
@@ -282,3 +360,157 @@ describe "vulkan font atlas incremental repack":
         val px = synthetic_atlas(w, h, 5u32)
         val empty: [u8] = [0u8; px.len() * 4]
         expect(bytes_equal(empty, oracle_pack_full(px))).to_be(false)
+
+    # -----------------------------------------------------------------------
+    # Per-owner sequence continuity (2026-09-12)
+    # -----------------------------------------------------------------------
+    # These drive the SHIPPED free function `vulkan_font_mirror_continuity`,
+    # which is the decision `composite_font_batch` makes, so they are not a
+    # re-implementation of it. Device-free by construction.
+
+    it "PRODUCT two owners interleaved A,B,A,B pay exactly one full pack each":
+        # Per-owner sequences: A 5,6 and B 9,10. The GLOBAL generations these
+        # ride on are 5,9,6,10 -- contiguous for neither owner, which is the
+        # whole defect.
+        val owners = ["A", "B", "A", "B"]
+        val seqs: [i64] = [5, 9, 6, 10]
+        val gens: [i64] = [100, 101, 102, 103]
+        # Per-owner parked mirror state, as the backend's slots hold it.
+        var park_a: i64 = -1
+        var park_b: i64 = -1
+        var full = 0
+        var incremental = 0
+        var i = 0
+        while i < owners.len():
+            val owner = owners[i]
+            val host_seq = if owner == "A": park_a else: park_b
+            val coherent = host_seq >= 0
+            val host_identity = if coherent: owner else: ""
+            val verdict = vulkan_font_mirror_continuity(
+                coherent, owner, host_identity, true, -1, gens[i], host_seq, seqs[i], 1)
+            if verdict == VK_FONT_MIRROR_INCREMENTAL: incremental = incremental + 1
+            if verdict == VK_FONT_MIRROR_FULL: full = full + 1
+            if owner == "A": park_a = seqs[i] else: park_b = seqs[i]
+            i = i + 1
+        expect(full).to_be(2)
+        expect(incremental).to_be(2)
+
+    it "PRODUCT SABOTAGE the same interleave on the GLOBAL counter is all full packs":
+        # Identical page, but the producer publishes no per-owner sequence
+        # (-1), so continuity falls back to the global generation -- which the
+        # other owner's batch always interrupts. This is the pre-fix behaviour
+        # and it must be visibly worse.
+        val owners = ["A", "B", "A", "B"]
+        val gens: [i64] = [100, 101, 102, 103]
+        var park_a: i64 = -1
+        var park_b: i64 = -1
+        var full = 0
+        var i = 0
+        while i < owners.len():
+            val owner = owners[i]
+            val host_gen = if owner == "A": park_a else: park_b
+            val coherent = host_gen >= 0
+            val host_identity = if coherent: owner else: ""
+            val verdict = vulkan_font_mirror_continuity(
+                coherent, owner, host_identity, true, host_gen, gens[i], -1, -1, 1)
+            if verdict == VK_FONT_MIRROR_FULL: full = full + 1
+            if owner == "A": park_a = gens[i] else: park_b = gens[i]
+            i = i + 1
+        expect(full).to_be(4)
+
+    it "PRODUCT an owner that added no dirty cells never bumps its sequence":
+        # Its mirror IS the truth, so the correct answer is neither a full nor
+        # an incremental repack.
+        val verdict = vulkan_font_mirror_continuity(
+            true, "A", "A", true, -1, 42, 7, 7, 0)
+        expect(verdict).to_be(VK_FONT_MIRROR_ALREADY_TRUTH)
+
+    it "PRODUCT a gap in one owner's sequence forces a full repack for that owner only":
+        # A skipped a step (5 -> 7): a dirty batch of A's went somewhere this
+        # backend never saw, so A's mirror is missing cells.
+        val a = vulkan_font_mirror_continuity(true, "A", "A", true, -1, 50, 5, 7, 1)
+        expect(a).to_be(VK_FONT_MIRROR_FULL)
+        # B, whose own sequence is contiguous, is unaffected by A's gap.
+        val b = vulkan_font_mirror_continuity(true, "B", "B", true, -1, 51, 9, 10, 1)
+        expect(b).to_be(VK_FONT_MIRROR_INCREMENTAL)
+
+    it "PRODUCT a mirror belonging to another owner is never used incrementally":
+        val verdict = vulkan_font_mirror_continuity(true, "A", "B", true, -1, 50, 5, 6, 1)
+        expect(verdict).to_be(VK_FONT_MIRROR_FULL)
+
+    it "PRODUCT an incoherent or wrong-sized mirror always repacks in full":
+        expect(vulkan_font_mirror_continuity(false, "A", "A", true, -1, 50, 5, 6, 1)).to_be(VK_FONT_MIRROR_FULL)
+        expect(vulkan_font_mirror_continuity(true, "A", "A", false, -1, 50, 5, 6, 1)).to_be(VK_FONT_MIRROR_FULL)
+        expect(vulkan_font_mirror_continuity(true, "", "", true, -1, 50, 5, 6, 1)).to_be(VK_FONT_MIRROR_FULL)
+
+    it "PRODUCT the producer parks an atlas per owner and restores its sequence":
+        # `_switch_font_atlas` must bring an owner's atlas AND its per-owner
+        # sequence back; without the restore the sequence would restart and
+        # every return would be a full repack.
+        var fonts = FontRenderer.new()
+        fonts._reset_font_atlas(1, "face-A")
+        val seq_a = fonts.atlas_owner_sequence
+        fonts.atlas_pixels = [7u32; 16]
+        fonts._switch_font_atlas(2, "face-B")
+        expect(fonts.atlas_owner_sequence == seq_a).to_be(false)
+        fonts.atlas_pixels = [9u32; 16]
+        fonts._switch_font_atlas(1, "face-A")
+        expect(fonts.atlas_owner_sequence).to_be(seq_a)
+        expect(fonts.atlas_pixels[0]).to_be(7u32)
+
+    it "PRODUCT park keys separate two faces that differ only by generation":
+        expect(font_atlas_park_key("face-A", 1) == font_atlas_park_key("face-A", 2)).to_be(false)
+        expect(font_atlas_park_key("face-A", 1) == font_atlas_park_key("face-B", 1)).to_be(false)
+
+    it "PRODUCT an atlas mutated without a published dirty batch claims no continuity":
+        # Several staging paths insert a glyph and then abort with
+        # `valid: false` before the `dirty.len() > 0` bump. The atlas moved but
+        # the sequence did not, so publishing it would let a consumer answer
+        # ALREADY_TRUTH for a mirror that is missing those cells.
+        var fonts = FontRenderer.new()
+        fonts._reset_font_atlas(1, "face-A")
+        expect(fonts.atlas_unpublished_mutation).to_be(false)
+        fonts.atlas_unpublished_mutation = true
+        fonts.staged_atlas_owner_sequence = fonts.atlas_owner_sequence
+        # What _stage_batch publishes while the flag is set.
+        val published = if fonts.atlas_unpublished_mutation: -1 else: fonts.atlas_owner_sequence
+        expect(published).to_be(-1)
+        # A -1 sequence is not a continuity claim, so the consumer repacks.
+        expect(vulkan_font_mirror_continuity(true, "A", "A", true, -1, 9, 5, -1, 0)).to_be(VK_FONT_MIRROR_FULL)
+
+    it "PRODUCT two alternating owners: the second switch back is a RESTORE, not a reset":
+        # The defect this catches (traced on css-layout.html 900x760): the park
+        # filed slots under a key re-derived from `atlas_font_identity` /
+        # `atlas_face_generation`, which other paths rewrite between switches,
+        # so 2 resident slots and 2 alternating lookup keys produced ZERO
+        # restores in 5 switches. A restore is proven by the atlas PIXELS and
+        # the per-owner sequence coming back, not by the call not crashing.
+        var fonts = FontRenderer.new()
+        fonts._reset_font_atlas(1, "face-A")
+        val seq_a = fonts.atlas_owner_sequence
+        fonts.atlas_pixels = [0xAAu32; 16]
+        fonts._switch_font_atlas(1, "face-B")
+        fonts.atlas_pixels = [0xBBu32; 16]
+        # A, B now both exist; switching back to A must restore A's atlas.
+        fonts._switch_font_atlas(1, "face-A")
+        expect(fonts.atlas_pixels[0]).to_be(0xAAu32)
+        expect(fonts.atlas_owner_sequence).to_be(seq_a)
+        # And straight back to B, which was parked by the switch just above.
+        fonts._switch_font_atlas(1, "face-B")
+        expect(fonts.atlas_pixels[0]).to_be(0xBBu32)
+
+    it "PRODUCT SABOTAGE a park key re-derived after a shaped-run relabel never matches":
+        # Replays the exact mechanism: the shaped `-2` branch reassigns
+        # `atlas_font_identity`/`atlas_face_generation` without a reset, so a
+        # key re-derived from those fields at park time names the wrong owner.
+        # The shipped code captures `atlas_active_park_key` when the owner
+        # becomes active, which is why the two disagree here.
+        var fonts = FontRenderer.new()
+        fonts._reset_font_atlas(1, "face-A")
+        val captured = fonts.atlas_active_park_key
+        # What the `-2` branch does to the live fields.
+        fonts.atlas_font_identity = "font-faces-v1|6:face-A|6:face-B"
+        fonts.atlas_face_generation = -2
+        val rederived = font_atlas_park_key(fonts.atlas_font_identity, fonts.atlas_face_generation)
+        expect(captured == rederived).to_be(false)
+        expect(captured).to_be(font_atlas_park_key("face-A", 1))
