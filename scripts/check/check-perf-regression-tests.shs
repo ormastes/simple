@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=225
+ROW_FLOOR=234
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -729,6 +729,33 @@ must_contain     "LOADERUNIT manifest cache keyed canonically"  "$MANIFEST" "let
 must_not_contain "LOADERUNIT manifest not keyed by raw path"    "$MANIFEST" "self.manifests.insert(init_path, manifest.clone());"
 must_contain     "LOADERUNIT gate exists and is fail-closed"    "$UNITGATE" "ERROR — nothing was checked"
 must_contain     "LOADERUNIT gate selftest is fatal"            "$UNITGATE" "if ! selftest; then"
+
+# --- 2026-09-12: while-loop fast-path SHAPE cliff (see doc/08_tracking/bug/
+# interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md). `exec_while`'s
+# matchers keyed on the assigned value being EXACTLY a call, so
+# `acc = acc + f(i, 0)` -- the accumulate idiom src/lib/common/** is written in
+# -- fell to the AST walk and cost ~550x the equivalent `acc = f(acc, i)`.
+# The fix generalises to an inline integer EXPRESSION; these rows pin the
+# generalisation, its wiring, its observability, and the two semantics
+# boundaries that must not be widened away.
+INTCTRL="$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs"
+WHILEPARITY="$ROOT/test/05_perf/interp/while_loop_shape_parity_spec.spl"
+must_contain     "WHILESHAPE generalised inline-int matcher exists" \
+    "$INTCTRL" "fn try_exec_inline_int_expr_while_loop("
+must_contain     "WHILESHAPE matcher wired into exec_while" \
+    "$INTCTRL" "if let Some(ctrl) = try_exec_inline_int_expr_while_loop(while_stmt, env, functions)? {"
+must_contain     "WHILESHAPE accelerated iterations are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "WHILE_INLINE_INT_ITERS"
+must_contain     "WHILESHAPE two-arg helper matcher reports its iterations" \
+    "$INTCTRL" "crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);"
+must_contain     "WHILESHAPE inlined helper body may not read a caller global" \
+    "$INTCTRL" "let (_, steps) = binds.iter().find(|(param, _)| param == name)?;"
+must_not_contain "WHILESHAPE Div stays outside the inlinable operator set" \
+    "$INTCTRL" "BinOp::Div => Some(InlineIntArith"
+must_contain     "WHILESHAPE parity spec ratio pin"  "$WHILEPARITY" "expect(slow <= fast * 3).to_equal(true)"
+must_contain     "WHILESHAPE parity spec absolute pin" "$WHILEPARITY" "expect(slow * 2 <= PERF_N).to_equal(true)"
+must_contain     "WHILESHAPE parity spec is non-vacuous on the counter" \
+    "$WHILEPARITY" "expect(r.counter >= 0).to_equal(true)"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
