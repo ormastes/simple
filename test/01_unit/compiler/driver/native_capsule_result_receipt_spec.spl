@@ -9,7 +9,8 @@ use compiler.driver.driver_aot_native_output.{
     driver_native_capsule_result_reason_v1,
     driver_native_collect_capsule_result_v1,
     driver_native_capsule_inputs_valid_v1,
-    driver_native_capsule_receipt_size_reason_v1
+    driver_native_capsule_receipt_size_reason_v1,
+    driver_native_capsule_receipt_size_canary_v1
 }
 
 fn receipt_ctx() -> CompileContext:
@@ -100,33 +101,39 @@ describe "native capsule result receipt":
                 _ = file_delete(capsule.object_path)
 
 describe "native capsule receipt size plausibility":
-    # Fail-closed gate on receipt line 4. Both receipt sites take the size from
-    # `rt_file_size`; the `FileFingerprint.size` field read is passed in only as
-    # a canary, because reading that `i64` field off an optional-bound struct is
-    # miscompiled under Stage-2 native codegen and yields a tagged heap pointer.
-    # A run in which the two disagree must FAIL at the site that noticed it,
-    # never write a pointer into a receipt and surface far away as an opaque
-    # `receipt-content-mismatch`.
-    it "admits a size the runtime and the struct field agree on":
-        assert_equal(driver_native_capsule_receipt_size_reason_v1(632, 632), "")
-        assert_equal(driver_native_capsule_receipt_size_reason_v1(0, 0), "")
-
-    it "rejects the heap pointer the Stage-2 blocker actually recorded":
-        # 37196932097 is the verbatim line-4 value from the 2026-09-13 run-8
-        # receipt, written for a 632-byte object.
-        val reason = driver_native_capsule_receipt_size_reason_v1(37196932097, 632)
-        assert_true(reason.contains("receipt-size-implausible"))
-        assert_true(reason.contains("field=37196932097"))
-        assert_true(reason.contains("runtime=632"))
-
-    it "rejects a runtime size that is itself a pointer":
-        # 2^40 is the bound: at or above it the value cannot be a byte count.
-        assert_true(driver_native_capsule_receipt_size_reason_v1(
-            1099511627776, 1099511627776).contains("receipt-size-implausible"))
-        assert_equal(driver_native_capsule_receipt_size_reason_v1(
-            1099511627775, 1099511627775), "")
+    # Two checks, deliberately split. `..._reason_v1` is BLOCKING and gates the
+    # value actually WRITTEN to receipt line 4, which both receipt sites take
+    # from `rt_file_size`. `..._canary_v1` is ADVISORY and compares that value
+    # with the `FileFingerprint.size` struct-field read of the same quantity;
+    # a disagreement is the optional-bound scalar-field miscompile, reported
+    # unconditionally but never failing the build, because the written value
+    # does not pass through the field. Run 9 of the macOS Stage 2 chain
+    # (2026-09-13) measured the canary in blocking form: it fired with
+    # field=34363944961 against runtime=632 and stopped the whole bootstrap
+    # over a defect this file already routes around.
+    it "admits a size the runtime can plausibly have produced":
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(632), "")
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(0), "")
 
     it "rejects the stat sentinel instead of recording it as a size":
         # `FileFingerprint.from_file` passes -1 through unchecked.
-        assert_true(driver_native_capsule_receipt_size_reason_v1(-1, -1)
+        assert_true(driver_native_capsule_receipt_size_reason_v1(-1)
             .contains("receipt-size-unreadable"))
+
+    it "rejects a written size that is itself a pointer":
+        # 2^40 is the bound: at or above it the value cannot be a byte count.
+        assert_true(driver_native_capsule_receipt_size_reason_v1(1099511627776)
+            .contains("receipt-size-implausible"))
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(1099511627775), "")
+
+    it "names both values when the struct field disagrees with the runtime":
+        # 34363944961 is the verbatim run-9 field value against a 632-byte
+        # object -- a tagged heap pointer, and WELL BELOW the 2^40 bound, which
+        # is why the inequality and not the magnitude test is load-bearing.
+        val canary = driver_native_capsule_receipt_size_canary_v1(34363944961, 632)
+        assert_true(canary.contains("field=34363944961"))
+        assert_true(canary.contains("runtime=632"))
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(34363944961), "")
+
+    it "stays quiet when the struct field and the runtime agree":
+        assert_equal(driver_native_capsule_receipt_size_canary_v1(632, 632), "")

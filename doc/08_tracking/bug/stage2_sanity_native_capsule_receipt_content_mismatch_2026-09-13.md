@@ -169,3 +169,59 @@ value 37196932097 against a 632-byte object. Measured on the Rust seed:
 `receipt_ctx()`) while the function takes 4
 (`driver_aot_native_output.spl:1033`). Byte-identical at `HEAD` before this
 change, so it is spec/impl arity drift predating this lane.
+
+### Which half of the gate is load-bearing
+
+**The `field != runtime` inequality is the check that fires here. The 2^40 bound
+is a backstop and would NOT have caught this host's pointers.** The three
+measured garbage values — 37196932097 (run 8), and 53657758209 / 53657761281
+(PR #677's two same-process reads) — are all ~3.7e10 to 5.4e10, i.e. **below**
+2^40 = 1099511627776. Tagged aarch64 heap addresses on this host land two orders
+of magnitude under that bound. Nobody may later rely on the magnitude test
+alone; it exists only for a value so large it cannot be anything but a pointer,
+and this defect's pointers are not that large.
+
+## Run 9 (2026-09-13) — the canary fired, and it is the mode-matched reproducer
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-a87b4c8362f754818`, carrying PR #708. Stage 1
+built and admitted; Stage 2 built its 834-unit closure clean; the failure is
+again entirely inside the smoke build the candidate performs — **but it is a
+different failure, and it names the defect exactly.** Verbatim:
+
+```
+error: AOT compile error -- unit, reason and lengths follow on the next lines
+error:   unit (bare):
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+error:   reason (bare):
+capsule-receipt-size-implausible:field=34363944961:runtime=632:<...>/object.scripts.check.cert.redeploy_gate.fixtures.hello_world.o
+error:   name-len=53 reason-len=403
+```
+
+`receipt-content-mismatch` **does not appear.** What this establishes, on the
+real Stage-2 artifact in the real build mode — which F45's single-entry T1
+probes could not reproduce:
+
+1. **`rt_file_size(path)` is CORRECT under `--mode=dynload --entry-closure`.**
+   It returned **632**, the true byte count of the object.
+2. **The optional-bound scalar field read is MISCOMPILED in that same binary,
+   in the same function, on the same file.** `fp.size` returned
+   **34363944961** = `0x8_0010_2001`. The same log's earlier line
+   `[DEBUG] Creating codegen adapter for backend=<enum@0x80101efe0>` shows a
+   live heap object at `0x8_0101_efe0` — the same `0x8_…` address space. It is
+   a tagged heap pointer, not a byte count.
+3. Therefore **PR #677's remedy is right and is now proven end to end**: going
+   to the runtime for the value produces the correct number where the struct
+   field produces a pointer. The receipt itself is sound in run 9; nothing
+   garbage was written.
+4. The 2^40 backstop did **not** fire (34363944961 is ~3.1% of 2^40). The
+   `field != runtime` inequality is what caught it, as recorded above.
+
+**The build stopped only because the canary is fail-closed.** Without it, run 9's
+receipt would have been written and verified correctly from `rt_file_size` on
+both sides. The defect is no longer in the receipt path; it is in codegen, and
+it now has a measured, reproducible witness with both values named.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted. Rejected candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`.
