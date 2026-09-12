@@ -34,18 +34,23 @@ strategy_repo_root=$(CDPATH= cd -- "${strategy_dir}/../.." && pwd -P) || exit 70
 . "${strategy_dir}/lib/centralized-storage.shs"
 simple_bootstrap_storage_init "${strategy_repo_root}" || exit 70
 output_arg=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
+stage_engine_delimiter_seen=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strategy=*) strategy=${1#*=} ;;
         --output=*) output_arg=${1#*=} ;;
-        --) shift; break ;;
+        --) stage_engine_delimiter_seen=1; shift; break ;;
         --help|-h) usage; exit 0 ;;
         *) echo "bootstrap-scheduler-error: unknown supervisor option: $1" >&2; exit 2 ;;
     esac
     shift
 done
-[ "$#" -gt 0 ] || {
-    echo 'bootstrap-scheduler-error: missing stage-engine arguments after --' >&2
+# The stage engine takes no required arguments -- a plain `bootstrap-from-scratch.sh`
+# with no options is the documented default run, and forwards an EMPTY list here.
+# Fail closed on a caller that omitted the `--` delimiter entirely (which would
+# mean its option list was never terminated), not on an empty-but-delimited list.
+[ "$stage_engine_delimiter_seen" -eq 1 ] || {
+    echo 'bootstrap-scheduler-error: missing -- delimiter before stage-engine arguments' >&2
     exit 2
 }
 case "$strategy" in adhoc|normal|full) ;; *)
