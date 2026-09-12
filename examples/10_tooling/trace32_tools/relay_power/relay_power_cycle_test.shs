@@ -1,0 +1,100 @@
+#!/bin/sh
+# Example: T32 debugger + USB relay automated test workflow.
+#
+# Power-cycles the target board via a USB relay, waits for the T32 probe
+# to become ready, flashes firmware, and runs an on-target test.
+#
+# Prerequisites:
+#   - USB relay connected and detected (see scripts/relay_common.shs)
+#   - TRACE32 PowerView installed and configured
+#   - T32 probe physically connected to target board
+#
+# Usage:
+#   ./relay_power_cycle_test.shs [firmware.elf] [test.cmm]
+#
+# Environment:
+#   RELAY_DEVICE   Explicit relay serial device (optional, auto-detected)
+#   T32_HOST       TRACE32 host (default: localhost)
+#   T32_PORT       TRACE32 RCL port (default: 20000)
+
+set -eu
+
+PROJ_ROOT="$(CDPATH= cd -- "$(dirname "$0")/../../../.." && pwd)"
+FIRMWARE="${1:-}"
+TEST_CMM="${2:-}"
+T32_HOST="${T32_HOST:-localhost}"
+T32_PORT="${T32_PORT:-20000}"
+
+log() {
+    printf '[T32-RELAY] %s\n' "$*" >&2
+}
+
+# -------------------------------------------------------------------
+# Step 1: Power off the board
+# -------------------------------------------------------------------
+log "Step 1/6: Powering off target board"
+"$PROJ_ROOT/scripts/relay_off.shs"
+sleep 1
+
+# -------------------------------------------------------------------
+# Step 2: Wait for capacitors to drain
+# -------------------------------------------------------------------
+log "Step 2/6: Waiting 2s for power rail to settle"
+sleep 2
+
+# -------------------------------------------------------------------
+# Step 3: Power on the board
+# -------------------------------------------------------------------
+log "Step 3/6: Powering on target board"
+"$PROJ_ROOT/scripts/relay_on.shs"
+
+# -------------------------------------------------------------------
+# Step 4: Wait for boot and check T32 probe
+# -------------------------------------------------------------------
+log "Step 4/6: Waiting for target boot and T32 probe"
+sleep 3
+
+if [ -x "$PROJ_ROOT/scripts/t32_check_ready.shs" ]; then
+    "$PROJ_ROOT/scripts/t32_check_ready.shs" "$T32_HOST" "$T32_PORT" || {
+        log "ERROR: T32 probe not ready after power-on"
+        exit 1
+    }
+else
+    log "WARN: t32_check_ready.shs not found, skipping probe check"
+fi
+
+# -------------------------------------------------------------------
+# Step 5: Flash firmware (if provided)
+# -------------------------------------------------------------------
+if [ -n "$FIRMWARE" ]; then
+    log "Step 5/6: Flashing $FIRMWARE"
+    if [ -x "$PROJ_ROOT/bin/simple" ]; then
+        "$PROJ_ROOT/bin/simple" debug flash --target-type t32 \
+            --host "$T32_HOST" --port "$T32_PORT" "$FIRMWARE"
+    else
+        log "WARN: bin/simple not found, skipping flash"
+    fi
+else
+    log "Step 5/6: No firmware specified, skipping flash"
+fi
+
+# -------------------------------------------------------------------
+# Step 6: Run on-target test (if provided)
+# -------------------------------------------------------------------
+if [ -n "$TEST_CMM" ]; then
+    log "Step 6/6: Running test $TEST_CMM"
+    if [ -x "$PROJ_ROOT/bin/simple" ]; then
+        "$PROJ_ROOT/bin/simple" debug practice-script --target-type t32 \
+            --host "$T32_HOST" --port "$T32_PORT" "$TEST_CMM"
+    else
+        log "WARN: bin/simple not found, skipping test"
+    fi
+else
+    log "Step 6/6: No test script specified, skipping"
+fi
+
+# -------------------------------------------------------------------
+# Report
+# -------------------------------------------------------------------
+STATE="$("$PROJ_ROOT/scripts/relay_state.shs")"
+log "Done. Board power state: $STATE"
