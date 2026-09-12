@@ -8,7 +8,8 @@ use compiler.driver.driver_aot_native_output.{
     driver_native_capsule_result_valid_v1,
     driver_native_capsule_result_reason_v1,
     driver_native_collect_capsule_result_v1,
-    driver_native_capsule_inputs_valid_v1
+    driver_native_capsule_inputs_valid_v1,
+    driver_native_capsule_receipt_size_reason_v1
 }
 
 fn receipt_ctx() -> CompileContext:
@@ -97,3 +98,35 @@ describe "native capsule result receipt":
                     assert_true(reason.contains("first-diff-line=4"))
                 _ = file_delete(capsule.object_path + ".capsule-receipt")
                 _ = file_delete(capsule.object_path)
+
+describe "native capsule receipt size plausibility":
+    # Fail-closed gate on receipt line 4. Both receipt sites take the size from
+    # `rt_file_size`; the `FileFingerprint.size` field read is passed in only as
+    # a canary, because reading that `i64` field off an optional-bound struct is
+    # miscompiled under Stage-2 native codegen and yields a tagged heap pointer.
+    # A run in which the two disagree must FAIL at the site that noticed it,
+    # never write a pointer into a receipt and surface far away as an opaque
+    # `receipt-content-mismatch`.
+    it "admits a size the runtime and the struct field agree on":
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(632, 632), "")
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(0, 0), "")
+
+    it "rejects the heap pointer the Stage-2 blocker actually recorded":
+        # 37196932097 is the verbatim line-4 value from the 2026-09-13 run-8
+        # receipt, written for a 632-byte object.
+        val reason = driver_native_capsule_receipt_size_reason_v1(37196932097, 632)
+        assert_true(reason.contains("receipt-size-implausible"))
+        assert_true(reason.contains("field=37196932097"))
+        assert_true(reason.contains("runtime=632"))
+
+    it "rejects a runtime size that is itself a pointer":
+        # 2^40 is the bound: at or above it the value cannot be a byte count.
+        assert_true(driver_native_capsule_receipt_size_reason_v1(
+            1099511627776, 1099511627776).contains("receipt-size-implausible"))
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(
+            1099511627775, 1099511627775), "")
+
+    it "rejects the stat sentinel instead of recording it as a size":
+        # `FileFingerprint.from_file` passes -1 through unchecked.
+        assert_true(driver_native_capsule_receipt_size_reason_v1(-1, -1)
+            .contains("receipt-size-unreadable"))

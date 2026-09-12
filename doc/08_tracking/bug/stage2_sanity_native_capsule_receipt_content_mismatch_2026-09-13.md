@@ -110,3 +110,62 @@ from a worktree with a virgin evidence root. ~35 min with a cold Rust seed.
 - `doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`
 - `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md`
 - PR #702
+
+## ROOT CAUSE (2026-09-13): the fix was already written, and PR #702 reverted it
+
+Run 8 did not disprove anything — **it executed a compiler built without the
+fix.** Commit `54660c1a0d4` ("fix(driver): say HOW the AOT diagnostic was lost",
+PR #702) is a **stale-snapshot clobber** of
+`src/compiler/80.driver/driver_aot_native_output.spl`. It is a net
+**+22 / -100** on that one file, and of its 22 added lines only 11 are its own
+work (the `diagnostic_note` interpolation); the other 11 are the OLD code it
+restored. What it reverted:
+
+- `0e437dec9b1` (PR #677) — the `rt_file_size` extern and all three receipt
+  sites composing line 4 from the runtime instead of `fp.size` / `materialized.size`;
+- `418399c2d84` (PR #670) — the `first-diff-line=<n>:expected=…:actual=…`
+  diagnostic, which is literally what this record's "next step 1" asked for.
+
+Evidence: `git log -S'rt_file_size(capsule.object_path)' -- <file>` names
+`54660c1a0d4` as the removing commit; `git log 0e437dec9b1..54660c1a0d4^ -- <file>`
+is EMPTY, so #702's parent for this file was #677's commit and nothing else
+intervened. `git show 54660c1a0d4 --stat` shows exactly one file touched, so
+the clobber is scoped to this file and nothing else was lost.
+
+This is the `.claude/rules/vcs.md` § "Sync must never clobber" failure mode,
+disclosed here as that section requires. The receipt-verifier spec
+`test/01_unit/compiler/driver/native_capsule_result_receipt_spec.spl` was left
+RED on `main` by the clobber (its `first-diff-line=4` assertion had nothing to
+assert against) — a standing signal that went unread.
+
+## Fix
+
+1. **Restored** both reverted commits' content, preserving #702's own
+   `diagnostic_note` addition. Verified: zero `fp.size` / `materialized.size`
+   READS remain (the 3 grep hits are the explanatory comments), and the
+   `first-diff-line` verifier is back.
+2. **Added a fail-closed plausibility gate**,
+   `driver_native_capsule_receipt_size_reason_v1(field_size, runtime_size)`.
+   Both receipt sites already take the written size from `rt_file_size`; the
+   `fp.size` struct-field read of the same quantity is now passed in purely as a
+   **canary**. `FileFingerprint.from_file` sets `size = incremental_file_size(path)
+   -> rt_file_size(path)` (`driver_build/incremental.spl:60,640`), so the two are
+   the same quantity and equality is a sound invariant, not a vacuous one.
+   The gate fails closed on a negative stat sentinel, on any value >= 2^40 (a
+   pointer, never a byte count), and on field/runtime divergence — turning the
+   codegen miscompile into a named failure at the site that notices it
+   (`capsule-receipt-size-implausible:field=…:runtime=…`) instead of an opaque
+   `receipt-content-mismatch` far away.
+
+Spec: 4 new examples in
+`test/01_unit/compiler/driver/native_capsule_result_receipt_spec.spl`
+("native capsule receipt size plausibility"), including the verbatim run-8
+value 37196932097 against a 632-byte object. Measured on the Rust seed:
+**4 examples, 0 failures**; the restored `first-diff-line=4` example also passes.
+
+**Pre-existing RED, not caused by this change and left RED per
+`.claude/rules/testing.md`:** the spec's first example calls
+`driver_native_collect_capsule_result_v1` with 5 arguments (a leading
+`receipt_ctx()`) while the function takes 4
+(`driver_aot_native_output.spl:1033`). Byte-identical at `HEAD` before this
+change, so it is spec/impl arity drift predating this lane.
