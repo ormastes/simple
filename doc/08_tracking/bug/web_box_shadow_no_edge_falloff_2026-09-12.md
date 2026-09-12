@@ -57,8 +57,10 @@ outside `255`.
 ## Blast radius
 
 `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` is
-unchanged by this fix (1 pre-existing failure before and after — `draw_line
-(thick)`), as are `backend_software_primitives_spec.spl`,
+unchanged by this fix — measured on the committed tree (shadow fix present,
+corner fix reverted): `40 executed, 39 passed, 1 failed`, the single failure
+being the pre-existing `draw_line (thick)` row, identical to the baseline run on
+unmodified files. So are `backend_software_primitives_spec.spl`,
 `cpu_sw_primitive_readback_spec.spl` and `engine2d_primitives_spec.spl` (all green).
 
 ## Not done

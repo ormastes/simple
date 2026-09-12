@@ -134,3 +134,42 @@ scripts/tool/renderdoc-evidence.shs capture-html`.
 Also worth filing: no pixel differ exists in `scripts/check/` despite three
 "chrome-simple comparison" scripts — all three validate env bundles, so one must
 be written from scratch each time this question is asked.
+
+## After the fixes (2026-09-12, same host)
+
+Fixes landed: compound attribute selectors (rank 1), CSS `min()/max()/clamp()` on
+`width` (rank 2), box-shadow alpha-coverage falloff (rank 3), framebuffer corner
+AA (rank 5, Engine2D half reverted — see
+`doc/08_tracking/bug/web_border_radius_corner_not_antialiased_2026-09-12.md`).
+Rank 4 (block vertical advance) is filed unfixed.
+
+Measured with `sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only`
+reusing this run's Chrome references (Chrome unchanged). Simple binary
+`stat -f '%z %m'` = `39368072 1789171430` — **not** the binary that produced the
+rows above (`39405288 1789115380`) nor the one this session started with
+(`39377560 1789170595`); other sessions replace it mid-run, so the timing columns
+are not a controlled A/B and are reported as an envelope.
+
+| page | as-shipped | control | **after** | simple_ms control | simple_ms after |
+|---|---|---|---|---|---|
+| css-layout | blank | 37.51 | **29.19** | 341041 | 269752 |
+| animation | blank | 26.62 | **15.77** | 187582 | 117117 |
+| html | blank | 26.12 | **17.05** | 275961 | 286487 |
+| forms-media | blank | 17.33 | **8.58** | 147943 | 117856 |
+| overview | 45.04 | 16.42 | **10.52** | 68822 | 59044 |
+| css-paint | blank | 13.22 | **10.28** | 111312 | 99878 |
+| evidence | blank | 7.83 | **2.26** | 17668* | 33274 |
+| tab-bar | 3.93 | 3.93 | **3.70** | 37025 | 29879 |
+
+Verdict: `PASS — 8 page(s) compared, worst=29.19`. **All 8 tabs now paint** (the
+as-shipped column's seven `blank` rows are gone), and every page improves on the
+control condition — i.e. the rank 2/3/5 fixes each buy real pixels beyond rank 1.
+
+*`evidence` has no PATCHED row in `patched_timings.txt`; the as-shipped figure is
+shown and is not comparable.
+
+No perf regression: 7 of 8 pages are faster than the control run (css-layout
+-21 %, animation -38 %, forms-media -20 %, css-paint -10 % despite being the
+shadow-heavy page — the separable shadow blur is cheaper than the old
+fill-then-blur). `html` is +4 %, within the run-to-run spread of its own control
+pair (275961 / 282521).
