@@ -163,3 +163,41 @@ that samples them. Flushing instead would have removed the readback while
 leaving the submit count where it was.
 
 Only `host_pixel_iterations=15 (font_atlas_pack_u32_to_u8)` still violates.
+
+## Appended 2026-09-12 — typed font-atlas upload (`SIMPLE_VK_FONT_UPLOAD=u32`), gate now PASSes
+
+Same binary throughout (`build/cargo-r2/release/simple`, `39528776 1789199850`,
+identity bracketed before and after every run), overview.html 900x760, 2 frames.
+
+| key | bytes lane | u32 lane |
+|---|---|---|
+| verdict | FAIL `host_pixel_iterations=23` | **PASS** |
+| `host_pixel_iterations` | 23 (`font_atlas_pack_u32_to_u8:15`, `image_pack_u32_to_u8:8`) | **0** (`none`) |
+| `host_pixel_iterations_lower_bound` | 4,194,304 | **0** |
+| `atlas_full_repacks` | 4 | 0 |
+| `upload_ms` | 146 | **45** |
+| `submits_per_frame` | 1 | 1 |
+| `readbacks_per_frame` | 1 | 1 |
+| `dispatches_per_frame` | 107 | 107 |
+| `uploads_per_frame` | 23 | 23 |
+| `fence_waits` | 1 | 1 |
+| `frame_digest` | `a15c50cd` | `a15c50cd` |
+
+```
+PASS — 2 frame(s) audited, host_pixel_iterations=0, readbacks_per_frame<=1, submits_per_frame<=1
+```
+
+css-layout.html 900x760, 2 frames, same binary: `host_pixel_iterations` 47
+(`font:20`, `image:27`) -> **0**, `upload_ms` 184 -> 58, `frame_digest`
+`811c9dc5` on both lanes. That page still FAILs on `submits_per_frame=3 (>1)`,
+a pre-existing violation of a different lane.
+
+Sabotage control: byte-swapping each word inside the typed upload left every
+count identical and moved `frame_digest` to `acadc75d`; reverting restored
+`a15c50cd`.
+
+Residual: the 15 font-atlas uploads per frame are now ~60 MB of runtime memcpy
+instead of 15 million interpreted host stores — net strongly positive
+(`upload_ms` 146 -> 45), but the upload COUNT (one per text run rather than one
+per owner per frame) is a separate lane's defect. Detail:
+`doc/08_tracking/bug/vulkan_font_atlas_host_pack_last_host_loop_2026-09-12.md`.

@@ -5,8 +5,11 @@
   `test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches across multiple
   independent RFC 3610 vectors).
-- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl` now PASSes)
   values are canonical.
+
+- **Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+  (aarch64). **Do not touch the expected vectors** — RFC 3610 §8 values are
+  canonical (they were verified canonical; see the re-check below).
 
 ## Symptom
 
@@ -62,3 +65,42 @@ canonical values.
 
 ## Triage 2026-09-12
 Rule B: ran `bin/simple test test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256
+prefix `3d120a6f`), `Simple Language v1.0.0-rc.1`. Note the original repro was
+recorded on the **x86_64** seed on 2026-07-20; this re-check is aarch64.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 300 bin/simple test \
+  test/01_unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl --no-session-daemon
+```
+
+```
+✓ Vector #1 encrypt  ✓ Vector #1 decrypt  ✓ Vector #1 corrupted-CT rejected
+✓ Vector #1 modified-AAD rejected  ✓ Vector #4 encrypt  ✓ Vector #4 decrypt
+✓ Vector #7 encrypt  ✓ Vector #7 decrypt  ✓ Vector #7 corrupted-tag rejected
+9 examples, 0 failures
+✓ empty PT + empty AAD round-trips at M=8
+✓ empty AAD + non-empty PT round-trips at M=16
+✓ M=16 detects single-bit ciphertext flip
+3 examples, 0 failures
+SPEC FILE VERDICT: test/01_unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl \
+  outcome=OK declared>=12 executed=12 passed=12 failed=0 skipped=0 dropped=0
+```
+
+The spec's expected vectors were independently confirmed canonical against
+RFC 3610 §8 (Packet Vector #1 CT `588C979A61C663D2F066D0C2C0F989806D5F6B61DAC384`,
+tag `17E8D12CFDF926E0`), so the pass is a real match, not a loosened assertion.
+
+### One thing the old transcript reveals, worth recording
+
+In the 2026-07-20 failure output the *expected* tag rendered as
+`[23, 232, 209, 44, 237, 233, 38, 224]` = `17E8D12C**ED E9**26E0`, while the
+source constant is `17E8D12C**FD F9**26E0`. Two `0xF` high nibbles rendered as
+`0xE`. That is a wrong-value defect in the expected side, i.e. in the spec's
+`_hex_digit`/`text[i]` path on that build — the same family as
+`char_to_text_yields_placeholder_not_character_2026-09-06`, not an AES-CCM
+defect. `_hex_digit` was re-probed on the current seed and decodes `F` -> 15
+correctly, consistent with the spec now passing.
