@@ -173,7 +173,17 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
-const ARRAY_MUTATING_METHODS: &[&str] = &[
+///
+/// `pub(crate)` (was private) so `interpreter/expr/calls.rs`'s identifier
+/// branch can gate its own dispatch to `handle_method_call_with_self_update`
+/// on the same mutator set this module already uses, instead of routing
+/// every `Value::Array` identifier receiver through it — which would recurse
+/// forever for a non-mutator (`arr.len()`): this module's own Array branch
+/// falls through to `evaluate_expr(value_expr)` for anything not in this
+/// list, and `evaluate_expr` on a `MethodCall` dispatches straight back to
+/// `eval_call_expr` in calls.rs.
+/// doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+pub(crate) const ARRAY_MUTATING_METHODS: &[&str] = &[
     "append",
     "push",
     "pop",

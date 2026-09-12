@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=147
+ROW_FLOOR=195
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -633,6 +633,24 @@ must_contain     "LOADER28 env_value_nul_free scans bytes"         "$LEXSTRUCT" 
 must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" "if char_code(value[i:i + 1]) == 0:"
 must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
 must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
+
+# --- identifier array mutator nested in an expression (2026-09-12) --------
+# doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+# `acc = acc + arr.pop()`, `f(arr.pop())`, `if arr.pop() % 2 == 0:` used to
+# fall through interpreter/expr/calls.rs's identifier branch to
+# evaluate_method_call_with_self_update, which evaluates the receiver to a
+# COPY before the mutator runs -- O(n) per call. The fix routes Array
+# identifier receivers through the SAME in-place kernel the statement fast
+# path (interpreter_helpers::patterns::handle_method_call_with_self_update)
+# already uses, gated on ARRAY_MUTATING_METHODS so a non-mutator (`arr.len()`)
+# still falls through unchanged (that gate is also what stops the two
+# functions from recursing into each other forever).
+CALLS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+PATTERNS="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+must_contain     "ARRAYMUTEXPR calls.rs gates on the shared mutator set"       "$CALLS" "crate::interpreter::interpreter_helpers::patterns::ARRAY_MUTATING_METHODS"
+must_contain     "ARRAYMUTEXPR calls.rs routes to the shared in-place kernel"  "$CALLS" "crate::interpreter::interpreter_helpers::patterns::handle_method_call_with_self_update("
+must_contain     "ARRAYMUTEXPR gate checks the receiver is an Array"          "$CALLS" "matches!(env.get(var_name), Some(Value::Array(_)))"
+must_contain     "ARRAYMUTEXPR mutator const made cross-module visible"       "$PATTERNS" "pub(crate) const ARRAY_MUTATING_METHODS"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
