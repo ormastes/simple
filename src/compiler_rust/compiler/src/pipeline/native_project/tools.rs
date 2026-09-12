@@ -557,16 +557,38 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
         let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-        let status = std::process::Command::new(&cc)
-            .arg("-c")
-            .arg("-Os")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg("-fno-unwind-tables")
-            .arg("-fno-asynchronous-unwind-tables")
-            .arg("-fno-stack-protector")
-            .arg("-fPIC")
-            .arg("-std=gnu11")
+        // cl.exe understands none of the GNU codegen flags -- it reports each as
+        // `warning D9002: ignoring unknown option` -- and, decisively, reads
+        // `-o` as its long-deprecated `/o` (`warning D9035`) rather than as
+        // "write the object here". Every translation unit then compiles
+        // successfully while no .obj appears at the requested path, and the
+        // failure surfaces much later and far from its cause, at the archive
+        // step: `llvm-ar: runtime_native.obj: no such file or directory`.
+        let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+        let mut command = std::process::Command::new(&cc);
+        if msvc {
+            command
+                .arg("-c")
+                .arg("-O1")   // -Os: optimise for size
+                .arg("-Gy")   // -ffunction-sections
+                .arg("-Gw")   // -fdata-sections
+                .arg("-GS-"); // -fno-stack-protector
+            // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+            // code is position-independent by construction and SEH unwind data
+            // is not optional there.
+        } else {
+            command
+                .arg("-c")
+                .arg("-Os")
+                .arg("-ffunction-sections")
+                .arg("-fdata-sections")
+                .arg("-fno-unwind-tables")
+                .arg("-fno-asynchronous-unwind-tables")
+                .arg("-fno-stack-protector")
+                .arg("-fPIC")
+                .arg("-std=gnu11");
+        }
+        let status = command
             .args(msvc_c11_atomics_flags(&cc))
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
             // Selects runtime_memory.c as THE memory provider and compiles out
@@ -577,8 +599,11 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(source))
-            .arg("-o")
-            .arg(&object)
+            .args(if msvc {
+                vec![format!("-Fo{}", object.display())]
+            } else {
+                vec!["-o".to_string(), object.display().to_string()]
+            })
             .status()
             .ok()?;
         if !status.success() {
