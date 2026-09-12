@@ -1,0 +1,114 @@
+# codex-impl
+# Parser-only bridge from canonical build planning to separated target-codegen,
+# binary-inspection, selection, and execution evidence. It emits no code.
+
+use compiler.driver.environment_variant_build_planner_v1.{
+    ENV_VARIANT_BUILD_PLAN_SCHEMA_V1, ENV_VARIANT_SCOPE_PARSER_V1,
+    EnvironmentVariantBuildPlanV1, EnvironmentVariantArtifactPlanV1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentDigest256V1}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenReceiptV1, target_codegen_receipt_finalize_v1
+}
+
+pub const PARSER_IMPL_SCALAR_REFERENCE_V1: u16 = 1u16
+pub const PARSER_IMPL_SIMD_V1: u16 = 2u16
+
+pub enum ParserSimdArtifactContractErrorV1:
+    InvalidBuildPlan
+    ParserArtifactNotFound
+    NotParserOnly
+    TargetEvidenceIncomplete
+    ArtifactIdentityMismatch
+    SelectionExecutionMismatch
+    InvalidInspectionEvidence
+    ScalarReferenceClaimsSimd
+    SimdNotEmitted
+    SimdNotExecuted
+
+pub struct ParserSimdInspectionEvidenceV1:
+    implementation_kind: u16
+    inspected_artifact_digest: EnvironmentDigest256V1
+    inspection_tool_identity: EnvironmentDigest256V1
+    inspection_evidence_digest: EnvironmentDigest256V1
+    observed_vector_instruction_count: u64
+
+pub struct ParserSimdArtifactEvidenceV1:
+    build_plan_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    cache_key: EnvironmentDigest256V1
+    implementation_kind: u16
+    requested_features_present: bool
+    backend_features_accepted: bool
+    artifact_features_declared: bool
+    vector_instructions_observed: bool
+    selected_provider_identity: EnvironmentDigest256V1
+    executed_provider_identity: EnvironmentDigest256V1
+    invocation_count: u64
+    inspection_evidence_digest: EnvironmentDigest256V1
+
+fn _declared(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _features_present(feature_set, words: [u64]) -> bool:
+    var i = 0u32
+    while i < feature_set.words.count:
+        if words[(feature_set.words.offset + i) as i64] != 0u64: return true
+        i = i + 1u32
+    false
+
+pub fn parser_simd_artifact_evidence_v1(
+    plan: EnvironmentVariantBuildPlanV1, selected_variant_identity: EnvironmentDigest256V1,
+    receipt: TargetCodegenReceiptV1, feature_words: [u64],
+    inspection: ParserSimdInspectionEvidenceV1
+) -> Result<ParserSimdArtifactEvidenceV1, ParserSimdArtifactContractErrorV1>:
+    if plan.schema_version != ENV_VARIANT_BUILD_PLAN_SCHEMA_V1 or plan.artifacts.len() == 0 or
+       not _declared(plan.plan_identity):
+        return Err(ParserSimdArtifactContractErrorV1.InvalidBuildPlan)
+    var selected: Optional<EnvironmentVariantArtifactPlanV1> = nil
+    for item in plan.artifacts:
+        if _same(item.variant_identity, selected_variant_identity):
+            if selected.is_some(): return Err(ParserSimdArtifactContractErrorV1.ParserArtifactNotFound)
+            selected = Some(item)
+    if selected.is_none(): return Err(ParserSimdArtifactContractErrorV1.ParserArtifactNotFound)
+    val artifact = selected.unwrap()
+    if artifact.scope != ENV_VARIANT_SCOPE_PARSER_V1:
+        return Err(ParserSimdArtifactContractErrorV1.NotParserOnly)
+    if target_codegen_receipt_finalize_v1(artifact.target_profile, receipt, feature_words) != Ok(()):
+        return Err(ParserSimdArtifactContractErrorV1.TargetEvidenceIncomplete)
+    if not _same(receipt.artifact_identity, artifact.artifact_identity) or
+       not _declared(receipt.artifact_digest) or
+       not _same(inspection.inspected_artifact_digest, receipt.artifact_digest):
+        return Err(ParserSimdArtifactContractErrorV1.ArtifactIdentityMismatch)
+    if not _same(receipt.selected_implementation_identity, artifact.artifact_identity) or
+       not _same(receipt.executed_implementation_identity, artifact.artifact_identity):
+        return Err(ParserSimdArtifactContractErrorV1.SelectionExecutionMismatch)
+    if not _declared(inspection.inspection_tool_identity) or
+       not _declared(inspection.inspection_evidence_digest) or
+       (inspection.implementation_kind != PARSER_IMPL_SCALAR_REFERENCE_V1 and
+        inspection.implementation_kind != PARSER_IMPL_SIMD_V1):
+        return Err(ParserSimdArtifactContractErrorV1.InvalidInspectionEvidence)
+    val requested = _features_present(artifact.target_profile.requested_features, feature_words)
+    val executed = _features_present(receipt.executed_features, feature_words)
+    if inspection.implementation_kind == PARSER_IMPL_SCALAR_REFERENCE_V1:
+        if requested or executed or inspection.observed_vector_instruction_count != 0u64:
+            return Err(ParserSimdArtifactContractErrorV1.ScalarReferenceClaimsSimd)
+    else:
+        if not requested or inspection.observed_vector_instruction_count == 0u64:
+            return Err(ParserSimdArtifactContractErrorV1.SimdNotEmitted)
+        if not executed or receipt.invocation_count == 0u64:
+            return Err(ParserSimdArtifactContractErrorV1.SimdNotExecuted)
+    Ok(ParserSimdArtifactEvidenceV1(build_plan_identity: plan.plan_identity,
+        variant_identity: artifact.variant_identity, artifact_identity: artifact.artifact_identity,
+        cache_key: artifact.cache_key, implementation_kind: inspection.implementation_kind,
+        requested_features_present: requested, backend_features_accepted: receipt.backend_accepted,
+        artifact_features_declared: receipt.artifact_declared,
+        vector_instructions_observed: inspection.observed_vector_instruction_count > 0u64,
+        selected_provider_identity: receipt.selected_implementation_identity,
+        executed_provider_identity: receipt.executed_implementation_identity,
+        invocation_count: receipt.invocation_count,
+        inspection_evidence_digest: inspection.inspection_evidence_digest))

@@ -1,0 +1,249 @@
+# codex-impl
+# Canonical identities for typed environment-variant catalogs.
+#
+# Ordering is part of the contract: descriptors are strictly ascending by
+# (provider_identity, variant_identity), their dependency slices form one
+# contiguous partition, and dependencies inside each slice are strictly
+# ascending by their complete requirement tuple.  No caller-supplied digest is
+# accepted by this module.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentArenaRangeV1, EnvironmentFeatureSetV1,
+    VariantDependencyV1, VariantDescriptorV1, variant_descriptor_validate_v1,
+    ENV_VARIANT_MAX_ARENA_BYTES_V1, ENV_VARIANT_MAX_DEPENDENCIES_V1,
+    ENV_VARIANT_MAX_FACET_BINDINGS_V1, ENV_VARIANT_MAX_FEATURE_WORDS_V1
+}
+
+pub const ENV_CATALOG_IDENTITY_SCHEMA_V1: u16 = 1u16
+
+pub enum EnvironmentCatalogIdentityErrorV1:
+    EmptyCatalog
+    CapacityExceeded
+    InvalidDescriptor
+    NonCanonicalDescriptorOrder
+    NonCanonicalDependencyPartition
+    NonCanonicalDependencyOrder
+
+pub struct EnvironmentCatalogIdentityV1:
+    schema_version: u16
+    catalog_content_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_less_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    if left.w0 != right.w0: return left.w0 < right.w0
+    if left.w1 != right.w1: return left.w1 < right.w1
+    if left.w2 != right.w2: return left.w2 < right.w2
+    left.w3 < right.w3
+
+fn _descriptor_less_v1(left: VariantDescriptorV1, right: VariantDescriptorV1) -> bool:
+    if not _digest_equal_v1(left.provider_identity, right.provider_identity):
+        return _digest_less_v1(left.provider_identity, right.provider_identity)
+    _digest_less_v1(left.variant_identity, right.variant_identity)
+
+fn _dependency_equal_v1(left: VariantDependencyV1, right: VariantDependencyV1) -> bool:
+    _digest_equal_v1(left.provider_identity, right.provider_identity) and
+        _digest_equal_v1(left.contract_identity, right.contract_identity) and
+        left.minimum_contract_major == right.minimum_contract_major and
+        left.minimum_contract_minor == right.minimum_contract_minor and
+        _digest_equal_v1(left.artifact_digest, right.artifact_digest)
+
+fn _dependency_less_v1(left: VariantDependencyV1, right: VariantDependencyV1) -> bool:
+    if not _digest_equal_v1(left.provider_identity, right.provider_identity):
+        return _digest_less_v1(left.provider_identity, right.provider_identity)
+    if not _digest_equal_v1(left.contract_identity, right.contract_identity):
+        return _digest_less_v1(left.contract_identity, right.contract_identity)
+    if left.minimum_contract_major != right.minimum_contract_major:
+        return left.minimum_contract_major < right.minimum_contract_major
+    if left.minimum_contract_minor != right.minimum_contract_minor:
+        return left.minimum_contract_minor < right.minimum_contract_minor
+    _digest_less_v1(left.artifact_digest, right.artifact_digest)
+
+fn _push_u16_v1(out: [i64], value: u16):
+    out.push((value & 255u16) as i64)
+    out.push(((value >> 8u16) & 255u16) as i64)
+
+fn _push_u32_v1(out: [i64], value: u32):
+    out.push((value & 255u32) as i64)
+    out.push(((value >> 8u32) & 255u32) as i64)
+    out.push(((value >> 16u32) & 255u32) as i64)
+    out.push(((value >> 24u32) & 255u32) as i64)
+
+fn _push_u64_v1(out: [i64], value: u64):
+    _push_u32_v1(out, (value & 4294967295u64) as u32)
+    _push_u32_v1(out, ((value >> 32u64) & 4294967295u64) as u32)
+
+fn _push_digest_v1(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64_v1(out, value.w0)
+    _push_u64_v1(out, value.w1)
+    _push_u64_v1(out, value.w2)
+    _push_u64_v1(out, value.w3)
+
+fn _push_range_v1(out: [i64], value: EnvironmentArenaRangeV1):
+    _push_u32_v1(out, value.offset)
+    _push_u32_v1(out, value.count)
+
+fn _push_feature_set_v1(out: [i64], value: EnvironmentFeatureSetV1):
+    _push_u16_v1(out, value.architecture)
+    _push_range_v1(out, value.words)
+
+fn _push_dependency_v1(out: [i64], value: VariantDependencyV1):
+    _push_digest_v1(out, value.provider_identity)
+    _push_digest_v1(out, value.contract_identity)
+    _push_u16_v1(out, value.minimum_contract_major)
+    _push_u16_v1(out, value.minimum_contract_minor)
+    _push_digest_v1(out, value.artifact_digest)
+
+fn _push_descriptor_v1(out: [i64], value: VariantDescriptorV1):
+    _push_u32_v1(out, value.descriptor_size)
+    _push_u16_v1(out, value.schema_version)
+    _push_u16_v1(out, value.placement)
+    _push_digest_v1(out, value.provider_identity)
+    _push_digest_v1(out, value.variant_identity)
+    _push_digest_v1(out, value.contract_identity)
+    _push_u16_v1(out, value.contract_major)
+    _push_u16_v1(out, value.contract_minor)
+    _push_digest_v1(out, value.abi_digest)
+    _push_digest_v1(out, value.semantic_identity)
+    _push_digest_v1(out, value.grammar_identity)
+    _push_digest_v1(out, value.program_identity)
+    _push_digest_v1(out, value.artifact_digest)
+    _push_range_v1(out, value.artifact_location)
+    _push_u16_v1(out, value.target_architecture)
+    _push_u32_v1(out, value.required_os_id)
+    _push_u32_v1(out, value.required_abi_id)
+    _push_u32_v1(out, value.required_object_format_id)
+    _push_u16_v1(out, value.required_endian_id)
+    _push_u16_v1(out, value.required_pointer_width_bits)
+    _push_u64_v1(out, value.required_loader_permission_bits)
+    _push_feature_set_v1(out, value.required_cpu_features)
+    _push_range_v1(out, value.required_os_state_words)
+    _push_u16_v1(out, value.required_vector_state_mode)
+    _push_u32_v1(out, value.required_vector_length_bits)
+    _push_u32_v1(out, value.required_device_api)
+    _push_u32_v1(out, value.minimum_device_api_version)
+    _push_range_v1(out, value.required_device_features)
+    _push_u64_v1(out, value.required_memory_domain_bits)
+    _push_u64_v1(out, value.minimum_device_buffer_bytes)
+    _push_u32_v1(out, value.minimum_workgroup_invocations)
+    _push_u32_v1(out, value.minimum_queue_family_count)
+    _push_u64_v1(out, value.required_effect_bits)
+    _push_u32_v1(out, value.numerical_contract_id)
+    _push_digest_v1(out, value.resource_layout_digest)
+    _push_range_v1(out, value.dependencies)
+    _push_digest_v1(out, value.assurance_receipt_digest)
+    _push_u64_v1(out, value.startup_budget_us)
+    _push_u64_v1(out, value.max_session_bytes)
+    _push_u32_v1(out, value.max_inflight_operations)
+
+fn _read_u64_v1(bytes: [i64], offset: i64) -> u64:
+    (bytes[offset] as u64) |
+        ((bytes[offset + 1] as u64) << 8u64) |
+        ((bytes[offset + 2] as u64) << 16u64) |
+        ((bytes[offset + 3] as u64) << 24u64) |
+        ((bytes[offset + 4] as u64) << 32u64) |
+        ((bytes[offset + 5] as u64) << 40u64) |
+        ((bytes[offset + 6] as u64) << 48u64) |
+        ((bytes[offset + 7] as u64) << 56u64)
+
+fn _sha256_digest_v1(material: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(
+        w0: _read_u64_v1(raw, 0), w1: _read_u64_v1(raw, 8),
+        w2: _read_u64_v1(raw, 16), w3: _read_u64_v1(raw, 24))
+
+pub fn environment_variant_descriptor_identity_v1(
+    descriptor: VariantDescriptorV1, artifact_location_bytes: [u8],
+    referenced_feature_words: [u64], referenced_dependencies: [VariantDependencyV1]
+) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_u16_v1(material, ENV_CATALOG_IDENTITY_SCHEMA_V1)
+    _push_descriptor_v1(material, descriptor)
+    _push_u32_v1(material, artifact_location_bytes.len() as u32)
+    for byte in artifact_location_bytes: material.push(byte as i64)
+    _push_u32_v1(material, referenced_feature_words.len() as u32)
+    for word in referenced_feature_words: _push_u64_v1(material, word)
+    _push_u32_v1(material, referenced_dependencies.len() as u32)
+    for dependency in referenced_dependencies: _push_dependency_v1(material, dependency)
+    _sha256_digest_v1(material)
+
+pub fn environment_catalog_identity_compute_v1(
+    arena_bytes: [u8], feature_words: [u64],
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1]
+) -> Result<EnvironmentCatalogIdentityV1, EnvironmentCatalogIdentityErrorV1>:
+    if descriptors.len() == 0:
+        return Err(EnvironmentCatalogIdentityErrorV1.EmptyCatalog)
+    if arena_bytes.len() > ENV_VARIANT_MAX_ARENA_BYTES_V1 as i64 or
+       feature_words.len() > ENV_VARIANT_MAX_FEATURE_WORDS_V1 as i64 * 3 or
+       descriptors.len() > ENV_VARIANT_MAX_FACET_BINDINGS_V1 as i64 or
+       dependencies.len() > ENV_VARIANT_MAX_DEPENDENCIES_V1 as i64:
+        return Err(EnvironmentCatalogIdentityErrorV1.CapacityExceeded)
+
+    var dependency_cursor: u32 = 0u32
+    var i = 0
+    while i < descriptors.len():
+        val descriptor = descriptors[i]
+        if variant_descriptor_validate_v1(
+            descriptor, arena_bytes.len() as u32, feature_words.len() as u32,
+            dependencies.len() as u32, dependencies) != Ok(()):
+            return Err(EnvironmentCatalogIdentityErrorV1.InvalidDescriptor)
+        if i > 0 and not _descriptor_less_v1(descriptors[i - 1], descriptor):
+            return Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDescriptorOrder)
+        if descriptor.dependencies.offset != dependency_cursor:
+            return Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDependencyPartition)
+        var j: u32 = 1u32
+        while j < descriptor.dependencies.count:
+            val previous = dependencies[(descriptor.dependencies.offset + j - 1u32) as i64]
+            val current = dependencies[(descriptor.dependencies.offset + j) as i64]
+            if _dependency_equal_v1(previous, current) or not _dependency_less_v1(previous, current):
+                return Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDependencyOrder)
+            j = j + 1u32
+        dependency_cursor = dependency_cursor + descriptor.dependencies.count
+        i = i + 1
+    if dependency_cursor != dependencies.len() as u32:
+        return Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDependencyPartition)
+
+    var catalog_material: [i64] = []
+    _push_u16_v1(catalog_material, ENV_CATALOG_IDENTITY_SCHEMA_V1)
+    _push_u32_v1(catalog_material, arena_bytes.len() as u32)
+    i = 0
+    while i < arena_bytes.len():
+        catalog_material.push(arena_bytes[i] as i64)
+        i = i + 1
+    _push_u32_v1(catalog_material, feature_words.len() as u32)
+    i = 0
+    while i < feature_words.len():
+        _push_u64_v1(catalog_material, feature_words[i])
+        i = i + 1
+    _push_u32_v1(catalog_material, descriptors.len() as u32)
+    i = 0
+    while i < descriptors.len():
+        _push_descriptor_v1(catalog_material, descriptors[i])
+        i = i + 1
+    _push_u32_v1(catalog_material, dependencies.len() as u32)
+    i = 0
+    while i < dependencies.len():
+        _push_dependency_v1(catalog_material, dependencies[i])
+        i = i + 1
+
+    var lock_material: [i64] = []
+    _push_u16_v1(lock_material, ENV_CATALOG_IDENTITY_SCHEMA_V1)
+    _push_u32_v1(lock_material, descriptors.len() as u32)
+    i = 0
+    while i < descriptors.len():
+        val descriptor = descriptors[i]
+        _push_digest_v1(lock_material, descriptor.provider_identity)
+        _push_digest_v1(lock_material, descriptor.variant_identity)
+        _push_range_v1(lock_material, descriptor.dependencies)
+        var j: u32 = 0u32
+        while j < descriptor.dependencies.count:
+            _push_dependency_v1(lock_material, dependencies[(descriptor.dependencies.offset + j) as i64])
+            j = j + 1u32
+        i = i + 1
+    Ok(EnvironmentCatalogIdentityV1(
+        schema_version: ENV_CATALOG_IDENTITY_SCHEMA_V1,
+        catalog_content_digest: _sha256_digest_v1(catalog_material),
+        dependency_lock_digest: _sha256_digest_v1(lock_material)))

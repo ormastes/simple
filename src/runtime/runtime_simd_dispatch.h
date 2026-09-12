@@ -99,6 +99,18 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
  * CPU Feature Detection
  * ================================================================ */
 
+/* AVX-512 execution needs the OS to preserve XMM, YMM, opmask, ZMM_hi256,
+ * and hi16_ZMM state.  Keep this pure predicate shared with the native
+ * selfcheck so each missing prerequisite can be tested without executing
+ * XGETBV on a host where that instruction is not enabled. */
+static inline bool simd_x86_avx512_os_state_usable_from_raw(
+        uint32_t cpuid_leaf1_ecx, uint64_t xcr0) {
+    const uint32_t xsave_osxsave = (1U << 26) | (1U << 27);
+    const uint64_t xmm_ymm_opmask_zmm = UINT64_C(0xE6);
+    return (cpuid_leaf1_ecx & xsave_osxsave) == xsave_osxsave &&
+           (xcr0 & xmm_ymm_opmask_zmm) == xmm_ymm_opmask_zmm;
+}
+
 #if SIMD_HAS_X86
 /* _MSC_VER FIRST: clang-cl defines __clang__ *and* _MSC_VER, so testing the
  * GNU branch first pulled in GCC's <cpuid.h>, whose 5-argument `__cpuid` macro
