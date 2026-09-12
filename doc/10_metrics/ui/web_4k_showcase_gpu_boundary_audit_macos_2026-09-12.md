@@ -1,5 +1,20 @@
 # Web showcase CPU<->GPU boundary audit (macOS M4, 2026-09-12)
 
+> **CORRECTION (2026-09-12, same day): ranked defects 2 and 4 below name the
+> WRONG file.** Presenter-owned counters (`[web-route-stage]`, now drained per
+> frame by the gate) read `readbacks_upload=0 readbacks_gpu_paint=0
+> host_paint_pixels=0` on this exact lane: the presenter is not on the audited
+> path at all, because the default lane reaches
+> `simple_web_layout_engine2d_fast.spl:1260` and only consults the presenter's
+> A/B route under `SIMPLE_WEB_GPU_PAINT=1`, which this gate does not set. The
+> two readbacks are (1) the parent-material "glass" seed at
+> `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:2583` — a FULL-surface read
+> cropped on the host, re-uploaded into an offscreen delta and composited back,
+> the real device->host->device pass-through — and (2) the final frame read.
+> Cutting the count to <=1 needs device-side glass on the Vulkan backend.
+> Evidence, counters and handoff:
+> `doc/08_tracking/bug/web_presenter_double_readback_and_host_paint_passthrough_2026-09-12.md`.
+
 Gate `scripts/check/check-web-vulkan-gpu-boundary-audit.shs`, aggregator
 `src/app/ui/chrome_showcase/gpu_boundary_audit.spl`, spec
 `test/01_unit/app/ui/gpu_boundary_audit_spec.spl`, bootstrap row
