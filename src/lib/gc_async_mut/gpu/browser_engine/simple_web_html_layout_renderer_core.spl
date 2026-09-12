@@ -1315,9 +1315,28 @@ fn simple_match(
         if attr_end < attr_start:
             return false
         val node_base = base.substring(0, attr_start).trim()
-        val expr = base.substring(attr_start + 1, attr_end)
-        if not (base_selector_matches(node_base, tag, cls, class_words, id) and attr_selector_matches(attrs, expr)):
+        if not base_selector_matches(node_base, tag, cls, class_words, id):
             return false
+        # A compound selector may carry SEVERAL attribute groups
+        # ("[role=tabpanel][hidden]"); every one of them must match. Evaluating
+        # only the first group applied "[role=tabpanel][hidden]{display:none}"
+        # to the *visible* panel and blanked the page.
+        var group_start = attr_start
+        var group_count = 0
+        while group_start >= 0 and group_count < 32:  # cpu-lane-loop-ok: walks the bracket groups of ONE compound selector, capped at 32
+            group_count = group_count + 1
+            val rest = base.substring(group_start + 1, base.len())
+            val rel_end = text_index_of(rest, "]")
+            if rel_end < 0:
+                return false
+            if not attr_selector_matches(attrs, rest.substring(0, rel_end)):
+                return false
+            val tail = rest.substring(rel_end + 1, rest.len())
+            val next_rel = text_index_of(tail, "[")
+            if next_rel < 0:
+                group_start = 0 - 1
+            else:
+                group_start = group_start + 1 + rel_end + 1 + next_rel
     else:
         if not base_selector_matches(base, tag, cls, class_words, id):
             return false
