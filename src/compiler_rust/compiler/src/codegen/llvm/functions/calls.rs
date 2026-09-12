@@ -2105,7 +2105,22 @@ impl LlvmBackend {
             "set" => Some("rt_index_set"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
-            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+            // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+            // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+            // the representation `rt_is_some`/`rt_is_none` already accept) is not
+            // one -- so every `.unwrap()` on a flat optional silently produced nil
+            // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+            // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+            // implements the flat-nullable convention ("not a boxed enum: return
+            // the value unchanged") and traps only on a genuine None/Err.
+            // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+            // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+            // exported err-trap twin, and routing it through the Ok-trap helper
+            // would abort on the very receiver it exists to read.
+            "unwrap" => Some("rt_unwrap_or_trap"),
+            "unwrap_or" => Some("rt_unwrap_or_value"),
+            "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
         .or(exact_string_bytes_runtime)
@@ -2288,7 +2303,22 @@ impl LlvmBackend {
                 "set" => Some("rt_index_set"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
-                "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                // one -- so every `.unwrap()` on a flat optional silently produced nil
+                // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                // implements the flat-nullable convention ("not a boxed enum: return
+                // the value unchanged") and traps only on a genuine None/Err.
+                // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                // exported err-trap twin, and routing it through the Ok-trap helper
+                // would abort on the very receiver it exists to read.
+                "unwrap" => Some("rt_unwrap_or_trap"),
+                "unwrap_or" => Some("rt_unwrap_or_value"),
+                "unwrap_err" => Some("rt_enum_payload"),
                 "is_none" => Some("rt_is_none"),
                 "is_some" => Some("rt_is_some"),
                 "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
@@ -2406,9 +2436,13 @@ impl LlvmBackend {
 
         if let Some(method_name) = direct_method_name {
             if matches!(method_name, "unwrap" | "unwrap_err") && args.len() == 1 {
-                let rt_func = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                // See the redirect table above: `rt_enum_payload` returns NIL
+                // for a FLAT nullable, so `.unwrap()` must go to
+                // `rt_unwrap_or_trap`. `unwrap_err` keeps the raw reader.
+                let helper = if method_name == "unwrap" { "rt_unwrap_or_trap" } else { "rt_enum_payload" };
+                let rt_func = module.get_function(helper).unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    module.add_function("rt_enum_payload", fn_type, None)
+                    module.add_function(helper, fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;

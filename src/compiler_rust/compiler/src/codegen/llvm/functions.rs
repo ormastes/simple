@@ -2930,7 +2930,22 @@ impl LlvmBackend {
                     "repeat" => Some("lib__common__string_core__str_repeat"),
                     "map" => Some("rt_option_map"),
                     // Option/Result methods (LLVM-specific)
-                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                    // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                    // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                    // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                    // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                    // one -- so every `.unwrap()` on a flat optional silently produced nil
+                    // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                    // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                    // implements the flat-nullable convention ("not a boxed enum: return
+                    // the value unchanged") and traps only on a genuine None/Err.
+                    // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                    // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                    // exported err-trap twin, and routing it through the Ok-trap helper
+                    // would abort on the very receiver it exists to read.
+                    "unwrap" => Some("rt_unwrap_or_trap"),
+                    "unwrap_or" => Some("rt_unwrap_or_value"),
+                    "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),

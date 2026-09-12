@@ -264,3 +264,262 @@ sibling record) and read the `[PB]` payload-bind lines for `mold.spl` /
 `native_linking.spl`. The `[PB] Result.Ok slot0 expected_ty=... field_ty=...`
 channel already prints for every Result bind in the closure and is the direct
 analogue of the `[FIELD-TRACE]` line that settled the sibling defect in one read.
+
+## ROOT CAUSE, 2026-09-13 — the LLVM backend routes `.unwrap()` to `rt_enum_payload`
+
+Reproduced in a **1-unit, single-file module** with the Rust seed
+(`SIMPLE_NATIVE_BUILD_RUST=1 ... native-build --backend llvm --mode one-binary`),
+~2 s per iteration. No bootstrap, no transcript replay, no trace flags were
+needed; the closure-size dependence that made the sibling receipt-size defect
+hard to corner is absent here.
+
+```
+fn opt_call() -> text?:
+    val p: text? = "/from/call"
+    p
+fn plain_ok() -> Result<text, text>:
+    Ok("/usr/bin/plain")
+fn main():
+    val a: text? = "/local/lit"
+    print "1 flat-optional unwrap: [{a.unwrap()}]"
+    print "2 cross-fn optional unwrap: [{opt_call().unwrap()}]"
+    print "3 boxed Ok unwrap: [{plain_ok().unwrap()}]"
+```
+
+Before (seed at `origin/main` 7dd8b7f509e):
+
+```
+1 flat-optional unwrap: []
+2 cross-fn optional unwrap: []
+3 boxed Ok unwrap: [/usr/bin/plain]
+```
+
+Row 3 is the discriminator, and it **exonerates `Result`**. `Ok("...")`
+constructs a genuine boxed heap enum and unwraps correctly. What is broken is
+`.unwrap()` on an **Optional**, and specifically on the FLAT representation — a
+`text?` holding a bare text pointer rather than a boxed `Some`. So the task's
+framing (a `Result<T,E>` payload-slot or `case Ok(p)` pattern-binding defect) is
+wrong: the real site never pattern-matches, and `Result` is fine.
+
+### The mechanism, named
+
+`src/compiler_rust/compiler/src/codegen/llvm/` mapped `.unwrap()` to
+`rt_enum_payload` in four redirect tables and two direct-call sites:
+
+- `emitter.rs:368` (table) and `:601` (direct call)
+- `functions.rs:2933` (table)
+- `functions/calls.rs:2108`, `:2291` (tables) and `:2408` (direct call)
+
+`rt_enum_payload` (`runtime/src/value/objects.rs:519`) is:
+
+```rust
+get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+    .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
+```
+
+— it returns **NIL for every receiver that is not a boxed heap Enum**. A flat
+nullable is not one. `rt_is_some`/`rt_is_none` in the same file already accept
+the flat form as present (that is why `if p.?:` took the true branch all along),
+so the two halves of the same representation disagreed.
+
+The correct helper already existed and was already documented:
+`rt_unwrap_or_trap` (`objects.rs:388`) opens with *"Not a boxed enum —
+bare/flat-nullable payload convention: return the raw value unchanged"*, then
+traps only on a genuine `None`/`Err`. The Cranelift/JIT backend has routed
+`.unwrap()` there since 2026-08-11
+(`codegen/instr/closures_structs.rs:2055`, pinned by
+`codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload`), and the
+tree-walk interpreter returns the receiver itself for a non-enum
+(`interpreter_helpers/method_dispatch.rs:909`). **`native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md`
+fixed ONE backend. LLVM was never brought along, and no LLVM-side assertion
+existed to notice.** This is a backend-parity defect, not a lowering or
+slot-index defect.
+
+### Why it surfaced exactly here
+
+`src/compiler/70.backend/linker/mold.spl:704` `find_linker_path()`:
+
+```
+val mold_path = find_mold_path()        # -> text?   (FLAT)
+if mold_path.?:
+    return Ok(mold_path.unwrap())       # <-- unwrap yields NIL; Ok(nil) is built
+```
+
+`native_linking.spl:294` then unwraps a perfectly good `Ok` enum and gets that
+NIL payload back. `darwin_resolve_link_tool(nil)` fails `file_exists`, takes the
+unresolved branch, and the link dies as `Linking failed: no error payload`.
+Run 14's bare print of the value rendered as `0`, which is consistent with NIL
+(the special sentinel `3`) read back through an integer decode (`3 >> 3 == 0`) —
+offered as a consistency check, not as independently proven.
+
+This also means PR #717's source-level change (tuple -> `Result<text,text>`) was
+never going to help: the nil is produced one line EARLIER, by the inner
+`mold_path.unwrap()`, and both spellings carry it equally.
+
+### Fix
+
+Route the LLVM `unwrap` family to the flat-nullable-aware helpers, at all six
+sites:
+
+- `unwrap` -> `rt_unwrap_or_trap`
+- `unwrap_or` -> `rt_unwrap_or_value` (the previous mapping sent this
+  two-argument method to a one-argument helper, silently **dropping the
+  default**; same table, same defect class)
+- `unwrap_err` -> **keeps** `rt_enum_payload`: no err-trap twin is exported, and
+  the Ok-trap helper would abort on the very `Err` receiver `unwrap_err` exists
+  to read.
+
+After (same fixture, rebuilt seed):
+
+```
+1 flat-optional unwrap: [/local/lit]
+2 cross-fn optional unwrap: [/from/call]
+3 boxed Ok unwrap: [/usr/bin/plain]
+4 Ok(flat.unwrap()) unwrap: [/usr/bin/ld] is_err=false
+5 unwrap_or present: [/local/lit]
+```
+
+Regression tests, both in `codegen/llvm/emitter.rs`'s test module:
+`llvm_unwrap_family_routes_to_the_flat_nullable_aware_helpers` (asserts the
+callable table, each live mapping paired with the dead one being absent so
+deleting an arm cannot satisfy it) and
+`no_llvm_redirect_table_still_sends_unwrap_to_rt_enum_payload` (a source-level
+invariant over all three files, because three of the four tables are inline
+`match` closures no unit test can call — and a partial fix would leave the live
+one broken, which is precisely how this survived; it also asserts a minimum live
+mapping count so a rename cannot pass vacuously).
+
+### Semantics change to expect downstream
+
+`rt_enum_payload` on a genuine `None`/`Err` silently returned nil; the new
+helpers abort with `called unwrap on None` / `called unwrap on Err`. Any
+`.unwrap()` on an actually-absent value that the Stage 2 compiler executes was
+previously MASKED and will now crash. Cranelift already had these semantics, so
+such a crash is a latent bug surfacing, not a regression introduced here — read
+any new verdict carrying those messages in that light.
+
+### Adjacent gaps found and NOT fixed here
+
+- `rt_unwrap_or_value` / `rt_unwrap_or_trap` treat a **flat nil** as a present
+  value (not a boxed None), so `val n: text? = nil; n.unwrap_or("/fallback")`
+  returns empty rather than the fallback. Pre-existing in the shared helpers and
+  identical on the Cranelift path AND the tree-walk interpreter (measured); out
+  of scope here. Filed as
+  `doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md`.
+- `val a: text? = "..."` then `a.expect("msg")` is refused at the semantic layer
+  as ``cannot resolve method call `str.expect`: receiver is a builtin type`` —
+  the declared `?` is dropped from the local's type. `.unwrap()` compiles only
+  because it has a bare-name redirect (`expect` appears in none of the three
+  LLVM redirect tables — verified by grep). Filed as
+  `doc/08_tracking/bug/declared_optional_local_loses_question_mark_expect_refused_2026-09-13.md`.
+
+## CORRECTION, run 15 (2026-09-13): the LLVM unwrap fix is REAL but is NOT this blocker
+
+The section immediately above claims the LLVM `.unwrap()` -> `rt_enum_payload`
+routing was this blocker's root cause. **That claim is wrong and is retracted
+here.** The routing defect is real, verified, and fixed — but run 15 carried the
+fix and this site failed **byte-for-byte identically**.
+
+Run 15: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
+virgin evidence root `.simple/storage/build/bootstrap-run15`, stock
+Homebrew-first PATH (no `/usr/bin` workaround). Stage 1 admitted; Stage 2 built
+clean; sanity FAILED. Verdict verbatim:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+error: Stage 2 bootstrap compiler sanity failed
+```
+
+Rejected candidate:
+`.simple/storage/build/bootstrap-run15/stage2/aarch64-apple-darwin/simple.rejected`
+(139326920 bytes). The seed the script itself built was verified to carry the
+unwrap fix before the verdict landed, by running the 1-unit repro against
+`.../bootstrap-run15/rust-authority-*/target/aarch64-apple-darwin/bootstrap/simple`:
+it prints `[/local/lit]`, so this is not a stale-seed or cargo-profile artifact.
+
+### What run 15 actually establishes — and it narrows the search sharply
+
+Direct replay on the rejected candidate (~40 s, no bootstrap lane), trace tail:
+
+```
+[LINKER] calling find_linker...
+[LINKER] find_linker returned, is_err=false
+[LINKER] linker_info unwrapped
+0                                   <-- bare print of linker_path
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+0
+                                    <-- trail: empty
+```
+
+**`0` is the INTEGER ZERO, not a nil.** This is the measurement that overturns
+the previous reading. On this same native lane a nil prints as a BLANK LINE
+(measured directly: a flat-optional `unwrap` returning nil printed an empty
+line, and an interpolation carrying nil collapses entirely). A bare `0` is
+therefore a live integer value, not an absent one. The earlier "NIL's sentinel
+3 read through an int decode gives `3 >> 3 == 0`" consistency check was an
+invention and is withdrawn.
+
+Follow the value back with that:
+
+1. Before the fix, the print came from `rt_enum_payload(linker_result)`. That
+   helper returns NIL — a blank line — for any receiver that is not a boxed
+   heap Enum. It printed `0`, so `linker_result` **was** a well-formed boxed
+   enum whose payload is the integer 0.
+2. After the fix, `rt_unwrap_or_trap` takes the `Ok` arm and returns that same
+   payload: `0`. Identical output, for the correct reason. The fix changed
+   nothing here because there was never anything wrong with the unwrap at this
+   site.
+3. So `Ok(x)` was CONSTRUCTED with `x = 0` inside `find_linker_path`, i.e. one
+   of `find_mold_path` / `find_lld_path` / `find_ld_path` returned integer 0,
+   and `Some(0)` / `.?` / `.unwrap()` all carried it faithfully:
+   `rt_is_none(0)` is FALSE (integer 0 boxes to bit pattern `0x0`, which is not
+   the nil sentinel `3` — see the long comment at `objects.rs:528`), so `p.?`
+   took the true branch on a zero.
+
+**`is_err=false` never proved the Result was well formed.** `is_ok`/`is_err`
+compile to `rt_enum_check_discriminant`, which answers false for a non-`Err`
+receiver of any shape. Three runs read that line as evidence that
+`find_linker_path` succeeded; it is not, and future readings of this trace
+should not treat it as such.
+
+### Where the next session should look
+
+The defect is in `find_mold_path` / `find_lld_path` / `find_ld_path`
+(`src/compiler/70.backend/linker/mold.spl:29,75,87`) returning integer 0 at
+877 units. All three have the same shape:
+
+```
+val which_result = shell_output("which <tool> 2>/dev/null")
+if which_result.len() > 0:
+    Some(which_result)
+else:
+    nil
+```
+
+Integer 0 is also a process EXIT STATUS, which makes the leading hypothesis that
+`which_result` is bound to the wrong member of whatever `shell_output` produces
+once the receiver's type is lost at closure scale — the same **family** as the
+receipt-size defect F54 fixed (`static_call_return_type_name` /
+`get_field_info(TypeId::ANY, ...)`'s LOCAL-BEST smallest-index scan), reached by
+a route that function does not cover, since `shell_output(...)` is a free-function
+call and not a `Type.method(...)` static. **Not proven** — it needs the
+instruction-level or `[FIELD-TRACE]` evidence that settled the sibling.
+
+Two probes that did NOT settle it, recorded so they are not repeated:
+- A 1-unit and a 2-unit (cross-module) reproduction of the exact
+  `shell_output` -> `.len()` -> `Some` -> `Ok` -> `unwrap` chain **cannot model
+  this**: in a small binary `shell_output` is an UNBACKED extern and returns nil
+  (`raw len: -1`), so the chain correctly yields `Err`. The defect needs the
+  full closure.
+- Re-running the rejected candidate with `SIMPLE_LINKER=/usr/bin/ld` to bypass
+  `find_*_path` does not isolate it either: it fails EARLIER, with
+  `backend object-path status 1`, i.e. into
+  `stage2_sanity_bootstrap1_backend_object_path_status_1_2026-09-13.md`.
+
+Recommended next step, unchanged in kind from the sibling's successful one but
+now aimed at a named target: replay `stage2-command.transcript` with
+`SIMPLE_TRACE_FIELD_GET=1` and read `[FIELD-TRACE]` for `mold.spl`.

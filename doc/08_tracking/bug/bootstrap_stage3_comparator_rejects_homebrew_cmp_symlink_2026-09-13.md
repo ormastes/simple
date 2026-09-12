@@ -66,3 +66,52 @@ accept an explicitly pinned tool without also demanding a matching non-symlinked
 Found while verifying
 `doc/08_tracking/bug/macos_seed_build_duplicate_rt_process_twin_symbols_2026-09-13.md`
 (fixed by PR #718); this is the NEXT blocker on the same lane.
+
+## RESOLVED 2026-09-13 — it was a STALE-SNAPSHOT CLOBBER, not an unfixed defect
+
+PR #670 (`418399c2d84`, "fix(bootstrap): accept a symlinked cmp ...") DID land the
+fix: a portable `bootstrap_stage3_resolve_symlinks` (walks the chain, resolves a
+RELATIVE target against the LINK's directory, caps at 32 hops), a
+`compare_bind` that binds the RESOLVED physical target, and a `compare_files`
+that uses the BOUND path instead of re-resolving the ambient `cmp` on every
+comparison. Four fixtures went into `self-test.shs`, including the symlinked-cmp
+regression.
+
+One of the four later commits that touched
+`scripts/check/lib/bootstrap-stage3/authority.shs`
+(`3f005ff07a2`, `c4d3c9e738f`, `621a4d6b2ab`, `80c1099f466`) re-snapshotted a
+STALE copy of that file and reverted the comparator half wholesale, while the
+self-test half survived in its own file. The tree therefore carried a selftest
+calling `bootstrap_stage3_resolve_symlinks` against an `authority.shs` that no
+longer defined it — fixture 1/4 died at `command not found` and the bind was back
+to `[ "$candidate" = "$canonical" ] || return 2`. That is why the bug "reappeared"
+after #670. `git diff 418399c2d84 HEAD -- .../authority.shs` shows the revert as
+two hunks of pure deletion, alongside one genuine forward delta (the
+`SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH` addition to
+`bootstrap_stage3_stage2_canonical_env_names`).
+
+Fix applied here: re-apply exactly the two comparator hunks, KEEPING the env
+allowlist forward delta. No new design; #670's design was already right.
+
+Verified on this host with the stock Homebrew-first PATH and **no** `/usr/bin`
+workaround (`command -v cmp` = `/opt/homebrew/bin/cmp` ->
+`/opt/homebrew/Cellar/diffutils/3.12/bin/cmp`):
+
+```
+which cmp: /opt/homebrew/bin/cmp
+resolved:  /opt/homebrew/Cellar/diffutils/3.12/bin/cmp
+bind of a symlinked fixture cmp -> binds the PHYSICAL target, not the link
+```
+
+`bootstrap_stage3_provenance_self_test` now runs all four comparator fixtures and
+proceeds past them (1/4 symlinked bind, 2/4 no-cmp = ERROR 2, 3/4 `#!` wrapper
+refused, 4/4 shadowed pin refused). The suite still returns 1 further downstream,
+in `bootstrap_stage3_seed_inputs_fingerprint`, which refuses an empty
+`abi_policy` argument — a **separate, pre-existing** red with no relation to the
+comparator, not introduced or repaired here.
+
+Status: **CLOSED** (comparator). The lesson is the clobber, and it is the third
+instance of the class `.claude/rules/vcs.md` § "Sync must never clobber"
+describes: a whole-file snapshot taken before a fetch silently rewinds another
+session's landed fix while the commit that carries it looks like forward
+progress.
