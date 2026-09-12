@@ -1,0 +1,81 @@
+# crosslang_work_receipt — proof that an adapter actually executed the work it
+# was timed on, verified before the collector accepts a sample.
+#
+# Gap this fills (L10 recorded rejection cause 2, plan
+# doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# lines 735-769): the parity candidate was rejected in part because "Simple
+# count is constant" and "pure repeated calls remain hoistable". A fixture
+# whose result is never consumed can be optimized away entirely, so a duration
+# proves a process ran — not that the measured work happened. Every historical
+# row produced that way is an unequal-work row.
+#
+# A work receipt is the missing evidence: a checksum over the OUTPUT the
+# adapter produced, plus the number of items it produced. A hoisted, elided or
+# partially-executed loop yields different output, hence a different checksum,
+# hence a refused sample.
+#
+# Pure: this module computes and compares receipts. It runs no benchmark and
+# starts no process (the plan forbids a fourth collector cycle).
+#
+# Fail-closed by construction: an absent receipt, a zero item count and an
+# empty timing array are each a refusal with a named reason. A sample is never
+# admitted on the strength of its timings alone.
+
+pub struct WorkReceipt:
+    adapter_id: text
+    output_checksum: text
+    item_count: i64
+
+pub struct ReceiptVerdict:
+    accepted: bool
+    reason: text
+
+pub fn crosslang_checksum(items: [i64]) -> text:
+    """Order-sensitive, element-sensitive 63-bit FNV-1a over the produced
+    output. An empty output has NO checksum (empty text) so that "nothing was
+    produced" can never be mistaken for a legitimate digest."""
+    val n = items.len()
+    if n == 0:
+        return ""
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < n:
+        val v = items[i.to_i32()]
+        # Mix the index in as well, so a reordering changes the digest even
+        # when the multiset of values is identical.
+        h = (h ^ (v + i * 1099511628211)) * 1099511628211
+        i = i + 1
+    "fnv1a64:{(h & 0x7FFFFFFFFFFFFFFF).to_text()}"
+
+pub fn crosslang_work_receipt(adapter_id: text, produced: [i64]) -> WorkReceipt:
+    """Build the receipt an adapter presents alongside its timing samples."""
+    WorkReceipt(
+        adapter_id: adapter_id,
+        output_checksum: crosslang_checksum(produced),
+        item_count: produced.len(),
+    )
+
+pub fn crosslang_verify_receipt(expected: WorkReceipt, actual: WorkReceipt) -> ReceiptVerdict:
+    """Compare an adapter's receipt against the fixture's expected work."""
+    if actual.output_checksum == "":
+        return ReceiptVerdict(accepted: false, reason: "missing_receipt: adapter={actual.adapter_id}")
+    if actual.item_count <= 0:
+        return ReceiptVerdict(accepted: false, reason: "zero_item_count: adapter={actual.adapter_id}")
+    if actual.item_count != expected.item_count:
+        return ReceiptVerdict(accepted: false,
+            reason: "item_count_mismatch: expected={expected.item_count.to_text()} actual={actual.item_count.to_text()}")
+    if actual.output_checksum != expected.output_checksum:
+        return ReceiptVerdict(accepted: false,
+            reason: "checksum_mismatch: expected={expected.output_checksum} actual={actual.output_checksum}")
+    ReceiptVerdict(accepted: true, reason: "")
+
+pub fn crosslang_accept_sample(expected: WorkReceipt, actual: WorkReceipt, timings: [i64]) -> ReceiptVerdict:
+    """The collector's sample gate: receipt first, timings second. Valid-looking
+    timings never rescue a sample whose executed work is unproven, and a sample
+    that carries no timings at all is refused rather than counted."""
+    val receipt = crosslang_verify_receipt(expected, actual)
+    if not receipt.accepted:
+        return receipt
+    if timings.len() == 0:
+        return ReceiptVerdict(accepted: false, reason: "no_timing_samples: adapter={actual.adapter_id}")
+    ReceiptVerdict(accepted: true, reason: "")
