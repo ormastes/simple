@@ -556,7 +556,18 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 timed_out: false, cached: false,
                 mcdc_skip_reason: "coverage-abort: wrapper failed to compile"
             )
-        if (mcdc_enabled and not options.coverage and uncompilable_construct) or (options.coverage and wrapper_active):
+        # WIDENED 2026-09-12, mirroring the LIVE twin in
+        # src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl (this app
+        # copy is reached by no import; `app.test_runner_new.test_runner_main`
+        # uses `std.test_runner.test_runner_execute`). Requiring
+        # `uncompilable_construct` degraded a SOFT "constructs that require the
+        # interpreter" failure while a HARD one (`Undefined(...)`,
+        # `HIR lowering: Unsupported feature`) fell through and lost every
+        # example in the file. Both are properties of the standalone-SMF
+        # compile, not of the spec's assertions; the fallback below runs the
+        # ORIGINAL source and reports its REAL pass/fail. The `degraded=`
+        # verdict-line token is produced only by the live twin.
+        if (mcdc_enabled and not options.coverage) or (options.coverage and wrapper_active):
             if cleanup_path != "" and not options.keep_artifacts:
                 if file_exists(cleanup_path):
                     file_delete(cleanup_path)
@@ -575,8 +586,10 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             val fb_tag = if options.coverage: "coverage-fallback" else: "mcdc-fallback"
             val fb_reason = if options.coverage:
                 "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source."
-            else:
+            elif uncompilable_construct:
                 "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution."
+            else:
+                "MC/DC instrumentation skipped: spec failed to compile to standalone SMF; degraded to plain interpreter execution, which reports this file's REAL pass/fail."
             print "[{fb_tag}] {file_path}: {fb_reason}"
             val fb_base = make_result_from_output(file_path, fb_result.stdout, fb_result.stderr, fb_result.exit_code, fb_duration_ms, options.timeout)
             return TestFileResult(

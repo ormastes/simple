@@ -45,6 +45,10 @@ use std.spec.*
 
 use std.io_runtime.{process_run_timeout}
 
+use std.test_runner.test_runner_execute.{smf_compile_degrade_token}
+
+use app.test_daemon.light_protocol.{ran_verdict_line}
+
 val FIXTURE_DIR: text = "test/fixtures/runner_degrade/"
 
 # One child run, shared by every example below: the runner is far too expensive
@@ -73,6 +77,30 @@ val VERDICT_LINES: text = capture_fixture_verdict_lines()
 
 describe "hard SMF-compile failures degrade to the interpreter":
     # @manual scenario evidence
+    describe "the degrade token names which kind of compile failure it was", :
+        it "tags a HARD compile failure as smf-compile-error and keeps its cause", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("classify a real Undefined(...) diagnostic")
+            val hard = "error: compile failed (/tmp/x_spec_native.spl): semantic: /tmp/x_spec_native.spl: Undefined(\"undefined identifier: print_raw\")"
+            val token = smf_compile_degrade_token(hard)
+            # The run-varying temp path is dropped and the CAUSE is kept.
+            expect(token).to_equal("smf-compile-error:Undefined(undefined_identifier:_print_raw)")
+            # A verdict line is whitespace-separated key=value tokens.
+            expect(token).to_not_contain(" ")
+
+        it "keeps the SOFT interpreter-only failure distinguishable", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("classify the failure class the runner already degraded on")
+            val soft = "error: cannot compile to standalone SMF: 3 function(s) contain constructs that require the interpreter"
+            expect(smf_compile_degrade_token(soft)).to_contain("smf-interpreter-only-constructs")
+
+        it "leaves a non-degraded verdict line byte-identical", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("an undegraded file must gain no new token")
+            expect(ran_verdict_line("test/x_spec.spl", 2, 0)).to_not_contain("degraded=")
+            expect(ran_verdict_line("test/x_spec.spl", 2, 0, 0, "smf-compile-error:boom"))
+                .to_contain("dropped=0 degraded=smf-compile-error:boom")
+
     describe "the child run produced evidence at all", :
         it "captured at least one SPEC FILE VERDICT line", :
             # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
