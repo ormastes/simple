@@ -119,11 +119,57 @@ overview.html, 900x760, `--upload-mode u32`:
 | `host_pixel_iterations` | 16 | 15 |
 | `readbacks_per_frame` | 2 | 2 |
 
+css-layout.html, 900x760, `--upload-mode u32`:
+
+| counter | `SLOTS=1` control | default |
+|---|---|---|
+| `submits_per_frame` | 8 | **4** |
+| `fence_waits` | 8 | **4** |
+| `atlas_full_repacks` | 5 | 5 (equal to F24's 5) |
+
+Read the css-layout control as a LOWER BOUND on the pre-fix cost, not as the
+pre-fix cost: at depth 1 the `REUSE_NO_WRITE` rule still fires whenever the sole
+slot happens to hold the right owner, so depth 1 is strictly better than the old
+design, which had no such rule at all. The honest pre-fix number measured
+against the actual pre-fix tree is the overview page's 17. The control's value
+is that it moves in the right direction from the same binary and tree.
+
+### Attribution of the 2 remaining submits — measured, not assumed
+
+The gate arms `SIMPLE_VK_ORDER_TRACE=1`, and every submit this backend performs
+comes from exactly one `_flush_pending_compute`, tagged with its call site.
+Across the 2-frame after-run:
+
+```
+2 flush site=submit_batch              rc=1 pending_n=78 font_n=19
+2 flush site=untagged                  rc=1 pending_n=0  font_n=0
+2 flush site=_flush_for_host_fallback  rc=1 pending_n=3  font_n=0
+4 flush site=read_pixels_with_source / 2 present / 3 shutdown   (outside the frame body)
+```
+
+Per frame the two submits are `submit_batch` (the legitimate single
+end-of-frame submit, carrying all 19 font descriptors) and one `untagged` with
+**`font_n=0`** — i.e. no font work pending, so it is not an atlas transition.
+The untagged font-lane site in this file (`font_oracle_mode`, line 1185) is not
+active in this run; the untagged callers are `engine.spl:3149,3181`. **Zero
+atlas-transition flushes remain**, which the `atlas_forced=` counter now on the
+order-trace line confirms independently. Removing the residual submit is F29's
+work, not this lane's.
+
 The gate still reports FAIL, honestly: the two invariants it names besides
 submits — `readbacks_per_frame=2` and `host_pixel_iterations=15` — belong to
-F29 (presenter) and the mirror-pack lane, not to this one. Of the 2 remaining
-submits, 1 is the frame's single end-of-frame submit and 1 is owed by a lane
-this change does not own; attributing it further is F29/F31's work.
+F29 (presenter) and the mirror-pack lane (F16), not to this one.
+
+### Pixel identity
+
+- Frame `sha256` digests in the order trace are byte-identical between the
+  pre-fix tree and the fixed tree.
+- All 8 `chrome_showcase` PPMs at 900x760 (`animation`, `css-layout`,
+  `css-paint`, `evidence`, `forms-media`, `html`, `overview`, `tab-bar`) are
+  `cmp`-identical between `SIMPLE_VK_FONT_ATLAS_SLOTS=1` and the default.
+- `SIMPLE_VK_FONT_SELFCHECK=1` over the same render: clean (0 mirror
+  mismatches, 0 `atlas-slot-owner-mismatch`), and its PPM is identical to the
+  non-selfcheck one.
 
 Specs: `backend_vulkan_font_atlas_slot_plan_spec` 12/12 (new; counter oracle for
 the submit count, the depth-1 control, and the overflow case),
@@ -145,3 +191,21 @@ the submit count, the depth-1 control, and the overflow case),
   `SIMPLE_VK_FONT_SELFCHECK=1` and the incremental-repack spec, and a selfcheck
   slot-owner assertion (`atlas-slot-owner-mismatch`) was added to catch a
   wrong-slot bind that a pixel oracle could miss.
+
+- **The sabotage half is only PARTLY demonstrated, and this is stated rather
+  than implied.** `SIMPLE_VK_FONT_ATLAS_SABOTAGE=same-slot` forces every run
+  onto slot 0 AND onto the no-write outcome. It provably takes effect — under
+  it, overview's `atlas_full_repacks` falls 4 -> 1 and
+  `host_pixel_iterations` 16 -> 1, because uploads stop happening. What was NOT
+  produced in this session is a pixel-level RED from it: the audit log carries
+  no frame-pixel digest (its `sha256=` fields are font identities), and the
+  `chrome_showcase` PPM path does not appear to route text through this
+  composite — all 8 PPMs stayed identical under sabotage, which is evidence
+  about that path, not about the guard. The `atlas-slot-owner-mismatch`
+  assertion is therefore present and reachable but has not been observed
+  firing. A follow-up needs a pixel oracle on a page with two font owners that
+  provably goes through `_composite_font_batch`.
+  A weaker first attempt — pointing every owner at slot 0 WITHOUT forcing the
+  plan — was absorbed entirely by the slot logic (it saw the sequence mismatch
+  and took a fresh slot), leaving all 8 PPMs identical. That negative result is
+  recorded because it is the reason the knob forces both halves.
