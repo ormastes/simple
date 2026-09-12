@@ -81,6 +81,18 @@ Distinguish by printing the field the load at `+1280` targets (disassemble
 
 Before site 7 was fixed this route stopped with a clean error at phase 2; it now SEGVs at
 native_compile. The failure mode got LOUDER. That is not a regression introduced by the fix:
-the same SEGV was already reachable before it — BOOT-7's `nostream` control
-(`SIMPLE_STAGE3_STREAMING_SURFACES=0`) SEGVed on the pre-fix candidate `3ad6fc2a0ac80727...`
-with rc=139. The phase-2 guard was standing in front of this crash, not preventing it.
+the same SEGV was already reachable before it, and this is now backed by a backtrace rather
+than by a bare exit code. Running the probe against the PRE-fix candidate
+`3ad6fc2a0ac80727...` with `SIMPLE_STAGE3_STREAMING_SURFACES=0`
+(`scratchpad/boot7/gdb10.sh`, `gdb_trace_prefix_nostream.log`) gives:
+
+```
+#0  0x00000000036776e4 in compiler.mir.mir_json.serialize_mir_function ()
+#1  compiler.driver.driver_types.native_capsule_mir_identity_v1 ()
+#2  compiler.driver.driver_aot_native_output.driver_native_shadow_witness_v1 ()
+x21  0x3      x24  0x0
+```
+
+Same function, same caller chain, same faulting value `x21 = 3` — only the pc offset within
+the function differs, as it must between two different binaries. The phase-2 guard was
+standing in front of this crash, not preventing it.
