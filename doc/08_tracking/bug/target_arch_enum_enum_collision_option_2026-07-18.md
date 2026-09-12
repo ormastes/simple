@@ -109,3 +109,32 @@ caller's lexical binding instead of a flat global registry.
 SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test --no-session-daemon test/feature/usage/architecture_spec.spl
 => Passed: 25  Failed: 2  (both: parse_target_arch(...).? on the enum-collision path)
 ```
+
+## Re-check 2026-09-12
+
+- Status: CLOSED (2026-09-12) — not reproducible on `3d120a6f9ab5`
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+The exact command in "Verification of current state" above now passes in full:
+
+```
+$ SIMPLE_LIB=src bin/simple test --no-session-daemon test/feature/usage/architecture_spec.spl
+SPEC FILE VERDICT: test/feature/usage/architecture_spec.spl outcome=OK declared>=27 executed=27 passed=27 failed=0 skipped=0 dropped=0
+```
+
+27/27, where this record measured 25/27 with both `parse_target_arch(name).?`
+examples red. The `Option<TargetArch>` + `.?` path is no longer corrupted.
+
+**Important: the collision itself was NOT removed.** Both same-named top-level
+declarations still coexist —
+
+```
+src/compiler/70.backend/backend/backend_selector.spl:26:enum TargetArch:
+src/lib/common/target.spl:1:enum TargetArch:
+```
+
+— so what changed is the interpreter's `Option<T>`/enum boxing resolution, i.e.
+the symptom this record tracked, not the underlying flat-global-registry
+mechanism. The systemic lane
+(`duplicate_type_name_collision_audit_2026-07-17.md`) therefore still owns the
+enum-vs-enum extension this record contributed; closing only this instance.
