@@ -7,7 +7,7 @@
   (a tampered token is not being rejected). No exploitability/impact
   analysis was performed in this triage pass; that judgment is out of scope
   here and should not be assumed either way pending investigation.
-- **Status:** OPEN.
+- **Status:** RESOLVED (2026-09-12) — root cause was NOT signature verification; see "Root cause 2026-09-12" at the end of this file
 
 ## Symptom
 

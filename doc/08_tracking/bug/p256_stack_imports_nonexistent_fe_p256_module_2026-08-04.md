@@ -1,6 +1,6 @@
 # The whole P-256 stack imports `std.common.math.field.fe_p256`, which was never written
 
-**Status:** OPEN
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end of this file
 **Found:** 2026-08-04
 
 ## Symptom

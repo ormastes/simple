@@ -4,8 +4,7 @@
 - **Area:** Salsa20/XSalsa20 implementation exercised via `test/unit/lib/crypto/salsa20_spec.spl` and `salsa20_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches — output is wrong,
   not merely mis-imported).
-- **Status:** OPEN. **Do not touch the expected vectors** — they are the
-  canonical DJB/NaCl/libsodium published values.
+- **Status:** RESOLVED (2026-09-12) — the implementation was correct and FOUR expected vectors were fabricated; the original "do not touch the expected vectors" instruction was itself wrong for those four. See "Re-check 2026-09-12" at the end of this file before editing any vector here.
 
 ## Symptom
 

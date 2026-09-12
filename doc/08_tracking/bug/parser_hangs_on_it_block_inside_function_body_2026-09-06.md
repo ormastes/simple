@@ -1,7 +1,7 @@
 # Parser hangs forever on a spec `it` block nested inside a function body
 
 Date: 2026-09-06
-Status: OPEN (source of the hang worked around; parser defect unfixed)
+Status: CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end of this file
 Area: parser / error recovery
 
 ## Symptom

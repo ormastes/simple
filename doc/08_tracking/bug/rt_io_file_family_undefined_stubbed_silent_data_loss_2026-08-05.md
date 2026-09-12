@@ -2,7 +2,7 @@
 
 Date: 2026-08-05
 Lane: IO-REWIRE
-Status: CONFIRMED. Silent data loss in an exported stdlib API.
+Status: CLOSED (2026-09-12) — the family has since been implemented; see "Re-check 2026-09-12" at the end of this file. (Was CONFIRMED silent data loss when filed.)
 Severity: HIGH (silent, exit 0, engine-divergent)
 
 ## Summary

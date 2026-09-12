@@ -8,7 +8,7 @@
 
 
 - **Filed:** 2026-08-09 (stream P10, Lab debug/profile endpoints)
-- **Status:** OPEN — worked around in `src/app/simple_lab/lab_debug.spl`
+- **Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end of this file. (The workaround in `src/app/simple_lab/lab_debug.spl` was left in place.)
 - **Severity:** high. Silent, partial, and produces wrong answers with no diagnostic.
 - **Engine:** interpreter (`SIMPLE_EXECUTION_MODE=interpreter`), seed binary
   `bin/release/x86_64-unknown-linux-gnu/simple` (`Simple Language v1.0.0-beta`).
