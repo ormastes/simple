@@ -8,7 +8,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind
     vulkan_timing_note, VK_T_FONT_COMPOSITE, VK_T_FONT_ATLAS_BUILD,
     VK_T_FONT_ATLAS_PACK, VK_T_FONT_ATLAS_UPLOAD, VK_T_FONT_ATLAS_DIGEST,
     VK_T_FONT_PACKED_PARAMS, VK_T_FONT_QUAD_VALIDATE, VK_T_FONT_OWNER_IDENTITY,
-    vulkan_font_dirty_note, vulkan_font_pack_note}
+    vulkan_font_dirty_note, vulkan_font_pack_note,
+    vulkan_font_selfcheck_enabled, vulkan_font_mirror_note, vulkan_font_decision_note}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
@@ -985,16 +986,52 @@ impl VulkanBackend:
             # host bytes are still an accurate copy of the same atlas, so
             # repacking them would be pure waste.
             val atlas_owner = font_render_batch_atlas_owner_identity(batch)
+            # Generation continuity is the load-bearing condition. `dirty_rects`
+            # lists only the cells THIS batch inserted, so applying it to the
+            # mirror is correct only if the mirror already holds every earlier
+            # insertion. A batch that never reached this backend at all still
+            # bumped the global generation counter, and no state inside this
+            # function can see that -- but the gap it leaves in the sequence
+            # can. Requiring exactly +1 turns every such gap into a full repack.
             val can_increment = (mirror_was_valid and
                 atlas_owner != "" and
                 self.font_atlas_host_identity == atlas_owner and
+                self.font_atlas_host_generation >= 0 and
+                batch.atlas_generation == self.font_atlas_host_generation + 1 and
                 self.font_atlas_host_bytes.len().to_i64() == atlas_bytes and
                 batch.dirty_rects.len() > 0)
             var mirror_ready = false
             if can_increment:
                 mirror_ready = self._repack_atlas_dirty_cells(batch)
+            if vulkan_font_selfcheck_enabled():
+                vulkan_font_decision_note(
+                    "gen={batch.atlas_generation} host_gen={self.font_atlas_host_generation}" +
+                    " was_valid={mirror_was_valid} owner_match={self.font_atlas_host_identity == atlas_owner}" +
+                    " len_match={self.font_atlas_host_bytes.len().to_i64() == atlas_bytes}" +
+                    " dirty={batch.dirty_rects.len()} can_inc={can_increment} ready={mirror_ready}")
             if not mirror_ready:
                 self.font_atlas_host_bytes = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
+            elif vulkan_font_selfcheck_enabled():
+                # Ground truth: what a full pack of this same atlas produces.
+                val truth = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
+                var bad: i64 = 0
+                var detail = ""
+                var bi: i64 = 0
+                while bi < truth.len():
+                    if truth[bi] != self.font_atlas_host_bytes[bi]:
+                        bad = bad + 1
+                        if detail == "":
+                            val px = bi / 4
+                            val ax = px % batch.atlas_width.to_i64()
+                            val ay = px / batch.atlas_width.to_i64()
+                            var inside = false
+                            for q in batch.dirty_rects:
+                                if (ax >= q.atlas_x.to_i64() and ax < q.atlas_x.to_i64() + q.width.to_i64() and
+                                    ay >= q.atlas_y.to_i64() and ay < q.atlas_y.to_i64() + q.height.to_i64()):
+                                    inside = true
+                            detail = "gen={batch.atlas_generation} px=({ax},{ay}) inside_dirty_rect={inside}"
+                    bi = bi + 1
+                vulkan_font_mirror_note(bad, detail)
             vulkan_timing_add(VK_T_FONT_ATLAS_PACK, _t_pack)
             val _t_up = vulkan_timing_now_us()
             val atlas_uploaded = vulkan_sffi_copy_to_buffer(self.d_font_atlas, self.font_atlas_host_bytes, 0)
@@ -1009,6 +1046,7 @@ impl VulkanBackend:
             # The device buffer now holds exactly the mirror, so the mirror is
             # coherent again and the next batch for this owner may go dirty-only.
             self.font_atlas_host_identity = atlas_owner
+            self.font_atlas_host_generation = batch.atlas_generation
             self.font_atlas_host_valid = atlas_owner != ""
             vulkan_font_pack_note(mirror_ready)
             val payload_hash_started = clock.now_micros() * 1000

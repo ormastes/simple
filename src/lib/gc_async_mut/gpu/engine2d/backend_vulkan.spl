@@ -275,6 +275,13 @@ class VulkanBackend:
     font_atlas_host_bytes: [u8]
     font_atlas_host_identity: text
     font_atlas_host_valid: bool
+    # The atlas generation the mirror actually incorporated. Generations come
+    # from ONE global counter bumped once per dirty batch, so `batch
+    # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
+    # batch slipped between this one and the mirror's last update -- including
+    # batches this backend never saw at all, which no flag inside the composite
+    # can observe. Any gap forces a full repack, which is always safe.
+    font_atlas_host_generation: i64
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -461,6 +468,7 @@ class VulkanBackend:
             font_atlas_host_bytes: [],
             font_atlas_host_identity: "",
             font_atlas_host_valid: false,
+            font_atlas_host_generation: -1,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -920,6 +928,7 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_host_bytes = []
         self.font_atlas_host_identity = ""
         self.font_atlas_host_valid = false
+        self.font_atlas_host_generation = -1
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -2727,16 +2736,63 @@ pub fn vulkan_font_pack_reset():
     _vk_font_pack_full = 0
     _vk_font_pack_incremental = 0
 
+# Mirror self-check (SIMPLE_VK_FONT_SELFCHECK=1). After an incremental repack,
+# the mirror is compared byte-for-byte against a full pack of the same atlas --
+# the ground truth. This is the only way to tell the three candidate causes of a
+# moved frame apart: a mismatch INSIDE a reported dirty rect means the repack
+# loop is wrong; a mismatch OUTSIDE every dirty rect means the producer changes
+# cells it does not report; zero mismatches means the divergence is downstream
+# of the mirror entirely. Costs a full pack per incremental repack, so it is
+# opt-in and never on in a timed run.
+var _vk_font_mirror_checks: i64 = 0
+var _vk_font_mirror_bad_calls: i64 = 0
+var _vk_font_mirror_bad_bytes: i64 = 0
+var _vk_font_mirror_first: text = ""
+var _vk_font_decisions: text = ""
+
+pub fn vulkan_font_selfcheck_enabled() -> bool:
+    (env_get("SIMPLE_VK_FONT_SELFCHECK") ?? "") == "1"
+
+pub fn vulkan_font_mirror_note(mismatched_bytes: i64, detail: text):
+    _vk_font_mirror_checks = _vk_font_mirror_checks + 1
+    if mismatched_bytes > 0:
+        _vk_font_mirror_bad_calls = _vk_font_mirror_bad_calls + 1
+        _vk_font_mirror_bad_bytes = _vk_font_mirror_bad_bytes + mismatched_bytes
+        if _vk_font_mirror_first == "":
+            _vk_font_mirror_first = detail
+
+pub fn vulkan_font_decision_note(detail: text):
+    """One line per composite recording every `can_increment` input and the
+    decision, so a full<->incremental swap is visible without re-deriving it."""
+    if _vk_font_decisions.len() < 4000:
+        _vk_font_decisions = _vk_font_decisions + "\n    " + detail
+
+pub fn vulkan_font_mirror_line() -> text:
+    ("font_mirror_selfcheck checks={_vk_font_mirror_checks}" +
+     " bad_calls={_vk_font_mirror_bad_calls}" +
+     " bad_bytes={_vk_font_mirror_bad_bytes}" +
+     " first=[{_vk_font_mirror_first}]" +
+     " decisions:{_vk_font_decisions}")
+
+pub fn vulkan_font_mirror_reset():
+    _vk_font_mirror_checks = 0
+    _vk_font_mirror_bad_calls = 0
+    _vk_font_mirror_bad_bytes = 0
+    _vk_font_mirror_first = ""
+    _vk_font_decisions = ""
+
 pub fn vulkan_font_dirty_line() -> text:
     ("font_atlas_dirty composites={_vk_font_composites}" +
      " gen_changed={_vk_font_dirty_gen}" +
      " identity_changed={_vk_font_dirty_identity}" +
      " dims_changed={_vk_font_dirty_dims}" +
      " generations=[{_vk_font_gen_trace} ]" +
-     " pack_full={_vk_font_pack_full} pack_incremental={_vk_font_pack_incremental}")
+     " pack_full={_vk_font_pack_full} pack_incremental={_vk_font_pack_incremental}" +
+     (if _vk_font_mirror_checks > 0 or _vk_font_decisions != "": "\n  " + vulkan_font_mirror_line() else: ""))
 
 pub fn vulkan_font_dirty_reset():
     vulkan_font_pack_reset()
+    vulkan_font_mirror_reset()
     _vk_font_dirty_gen = 0
     _vk_font_dirty_identity = 0
     _vk_font_dirty_dims = 0

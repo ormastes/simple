@@ -58,7 +58,27 @@ missing. The waste was rebuilding all 4 MB for a few new glyph cells.
 | font_composite | 27,348 ms | 16,208 ms |
 | pack_full / pack_incremental | 5 / 0 | **2 / 3** |
 | frame checksum | 325932497106919 | unchanged |
-| PPM | — | **byte-identical (`cmp`)** |
+| PPM | — | **byte-identical (`cmp`)** at 300x253 ONLY |
+
+**Pixel equality holds at 300x253 and NOT at 900x760.** Do not read the row
+above as a general claim. At 900x760 the frame checksum moves off the
+no-mirror baseline `2936851417192293`, and three code variants gave two values
+NON-monotonically with identical `pack_full=8 pack_incremental=13` throughout:
+
+| variant | 900x760 checksum |
+|---|---|
+| no mirror (baseline) | 2936851417192293 |
+| mirror, invalidate inside dirty branch | 2936851411469080 |
+| + invalidate at function entry | 2936851404759230 |
+| + require generation continuity (strictly stricter) | 2936851411469080 |
+
+A strictly stricter variant returning to a looser variant's value, with the
+pack counts never moving, is not explicable by the guard conditions. A repeat
+run of one variant WAS byte-identical, so the render is deterministic for at
+least that variant. The cause is under diagnosis with a mirror self-check
+(`SIMPLE_VK_FONT_SELFCHECK=1`) that compares the mirror against a full pack of
+the same atlas after every incremental repack and reports whether any
+mismatching pixel lies inside a reported dirty rect.
 
 cpu_simd control, same page/size/binary: **25,xxx ms** (see below). Vulkan went
 from 2.7x that to 1.44x.
