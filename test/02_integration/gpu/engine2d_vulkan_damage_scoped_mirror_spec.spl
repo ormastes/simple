@@ -1,0 +1,157 @@
+use std.spec.*
+use gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+# The Vulkan damage path was dead: `present_damage_valid` and
+# `host_mirror_valid` were false on every frame, so `_refresh_host_damage` never
+# ran, and it was itself an interpreted nested per-pixel copy. Draw calls now
+# accumulate their own damage union and a dirty readback re-downloads ONLY that
+# rect, one native row call per damaged row.
+# doc/08_tracking/bug/vulkan_damage_path_dead_interpreted_copy_2026-09-12.md
+
+val W = 200
+val H = 120
+val BG = 0xFF102030u32
+val FG = 0xFF00FF00u32
+
+fn vulkan_available() -> bool:
+    val probe = Engine2D.create_with_backend_fast(8, 8, "vulkan")
+    probe.backend_name() == "vulkan"
+
+describe "A partial frame refreshes exactly its damage rect":
+    it "reproduce: one 10x10 rect after a full frame copies 100 pixels, not the surface":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                val seed = b.read_pixels_with_source()
+                expect(seed.pixels.len()).to_equal(W * H)
+                b.present()
+                b.draw_rect_filled(20, 30, 10, 10, FG)
+                val frame = b.read_pixels_with_source()
+                # The damage union is exactly the rect, and the interpreted
+                # mirror patch is bounded by it. Before this change the same
+                # frame re-downloaded and re-unpacked all W*H pixels.
+                expect(b.damage_rect_px).to_equal(100)
+                expect(b.mirror_copy_iterations).to_equal(100)
+                # Pixel oracle: painted inside, untouched outside.
+                expect(frame.pixels[30 * W + 20]).to_equal(FG)
+                expect(frame.pixels[39 * W + 29]).to_equal(FG)
+                expect(frame.pixels[0]).to_equal(BG)
+                expect(frame.pixels[30 * W + 19]).to_equal(BG)
+                expect(frame.pixels[40 * W + 20]).to_equal(BG)
+
+    it "generalize: two disjoint rects damage their union bounding box":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                b.read_pixels_with_source()
+                b.present()
+                b.draw_rect_filled(10, 10, 4, 4, 0xFFFF0000u32)
+                b.draw_rect_filled(50, 40, 4, 4, 0xFF0000FFu32)
+                val frame = b.read_pixels_with_source()
+                # Union of (10,10,4,4) and (50,40,4,4) is (10,10)-(54,44):
+                # 44 wide by 34 tall.
+                expect(b.damage_rect_px).to_equal(44 * 34)
+                expect(b.mirror_copy_iterations).to_equal(44 * 34)
+                expect(frame.pixels[10 * W + 10]).to_equal(0xFFFF0000u32)
+                expect(frame.pixels[40 * W + 50]).to_equal(0xFF0000FFu32)
+                expect(frame.pixels[0]).to_equal(BG)
+
+    it "generalize: a full-frame clear damages the whole surface and takes the full route":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                b.read_pixels_with_source()
+                b.present()
+                b.clear(0xFF445566u32)
+                val frame = b.read_pixels_with_source()
+                # A whole-surface union is not profitable to patch row by row,
+                # so the single contiguous full download stays the route and no
+                # interpreted element write happens at all.
+                expect(b.damage_rect_px).to_equal((W * H).to_i64())
+                expect(b.mirror_copy_iterations).to_equal(0)
+                expect(frame.pixels[0]).to_equal(0xFF445566u32)
+                expect(frame.pixels[W * H - 1]).to_equal(0xFF445566u32)
+
+    it "generalize: a damage-scoped frame's present receipt matches the full route's":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                b.read_pixels_with_source()
+                b.present()
+                val baseline_full = b.present_full_readback_count
+                b.draw_rect_filled(20, 30, 10, 10, FG)
+                b.read_pixels_with_source()
+                b.present()
+                # The damage arm must NOT clear `dirty`: that would send
+                # present() down its "not dirty" noop arm, whose receipt claims
+                # no readback happened at all on a frame that really did read
+                # back. Both flags stay true and no extra full download occurs.
+                val receipt = b.latest_frame_receipt()
+                expect(receipt.readback_completed).to_equal(true)
+                expect(receipt.host_cache_refresh_completed).to_equal(true)
+                expect(b.present_full_readback_count).to_equal(baseline_full)
+
+    it "contract: patching the mirror in place does NOT write through a handed-out readback":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                val seed = b.read_pixels_with_source()
+                expect(seed.pixels[30 * W + 20]).to_equal(BG)
+                b.present()
+                b.draw_rect_filled(20, 30, 10, 10, FG)
+                val frame = b.read_pixels_with_source()
+                expect(frame.pixels[30 * W + 20]).to_equal(FG)
+                # The damage route is the FIRST path that writes into
+                # `self.host_buf` in place rather than rebinding a fresh array,
+                # so it is the first that could write through into pixels an
+                # earlier readback already handed out -- the exact hazard F8's
+                # readback spec pins ("no write-through into a handed-out
+                # readback array"), which its own examples never reach on this
+                # route. Measured here: the earlier handout is NOT disturbed,
+                # so a caller retaining readback pixels across frames (e.g.
+                # `state.validated_pixels` in simple_web_layout_engine2d_fast)
+                # still compares against what it was actually given.
+                expect(seed.pixels[30 * W + 20]).to_equal(BG)
+                expect(seed.pixels[0]).to_equal(BG)
+
+    it "generalize: a frame with zero draws copies nothing":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                b.read_pixels_with_source()
+                b.present()
+                val frame = b.read_pixels_with_source()
+                expect(b.damage_rect_px).to_equal(0)
+                expect(b.mirror_copy_iterations).to_equal(0)
+                expect(frame.pixels[0]).to_equal(BG)
