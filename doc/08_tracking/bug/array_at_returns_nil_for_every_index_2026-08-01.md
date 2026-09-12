@@ -420,3 +420,22 @@ evidence about the native or JIT lanes — which is exactly why
 close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
+
+
+## Re-check 2026-09-12 — evidence only, status deliberately unchanged
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/lib/common/array_at_option_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/lib/common/array_at_option_spec.spl outcome=OK declared>=11 executed=11 passed=11 failed=0 skipped=0 dropped=0
+```
+
+The spec is green, and this record is **not** being closed on that, because the
+residual scope is the pure-Simple `native-build` lane, which this record already names as the one still-open lane and which a `simple test` run does not exercise.
+
+Recording the green so the next triage pass does not re-run it expecting red,
+and so nobody mistakes a passing interpreter-lane spec for the lane that is
+actually open.

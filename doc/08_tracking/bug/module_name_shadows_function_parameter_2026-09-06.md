@@ -94,3 +94,54 @@ up across all three requests.
 
 Binary measured: `bin/release/aarch64-unknown-linux-gnu/simple`,
 `Simple Language v1.0.0-rc.1` (Rust bootstrap seed).
+
+## Triage 2026-09-12 — still OPEN, but the two simple shapes now resolve correctly
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+Identical results on the default (JIT) and `SIMPLE_EXECUTION_MODE=interpreter`.
+
+Three probe shapes, all of which the summary above predicts should bind the
+MODULE and lose the local binding:
+
+**1. Named import, function parameter.** `use std.nogc_sync_mut.io.file.{read_file_text}`
+(so the bare name `file` names an imported module) plus
+`fn takes_file(file: i64) -> i64: return file + 1`:
+
+```
+param=42        # correct — the parameter won, not the module
+```
+
+**2. Named import, lambda parameter.** `val f = \file: file + 2` in the same file:
+
+```
+lambda=12       # correct
+```
+
+**3. Sibling module by relative import, struct-typed parameter, with the
+`val srv: Srv = server` re-binding line from the original report.** A local
+`server.spl` exporting `mod_marker()`, imported as `use .server.{mod_marker}`,
+and `fn takes(server: Srv) -> str: val srv: Srv = server; …`:
+
+```
+id=7            # correct — srv is the struct, not the module namespace dict
+MODULE          # and the module's own function is still reachable
+```
+
+### What this does and does not establish
+
+It does **not** close the bug. The original failure was in
+`src/lib/nogc_sync_mut/http_server/server.spl` inside a
+`thread_spawn_with_args(stream, self, \conn_stream, server: …)` lambda — a
+lambda parameter captured across a thread-spawn boundary — and that shape was
+**not** reproduced here. The three shapes above are the ones a reader would try
+first from the summary, so recording that they are clean saves the next person
+the same 20 minutes, and narrows the suspect surface to the capture/spawn path
+rather than plain name resolution.
+
+Left OPEN. The workarounds in `server.spl` (`srv`/`owner`) should stay until
+the thread-spawn shape is probed directly; removing them on the strength of
+these three probes would be unjustified.
+
+Seed-side in any case: this is Rust name resolution, out of scope for a
+pure-Simple bugfix lane.

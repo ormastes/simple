@@ -359,6 +359,27 @@ class VulkanBackend:
     # buffer. Cleared wholesale by `_clear_pending_compute_state`, which runs at
     # the end of every flush path including the failure ones.
     font_atlas_slot_referenced: [bool]
+    # DEFERRED ATLAS UPLOAD (typed `u32` lane only).
+    #
+    # A text run that inserts glyphs bumps the owner's published sequence, so
+    # the slot plan is WRITE_IN_PLACE and the whole 1024x1024 atlas used to be
+    # copied to the device once PER RUN -- 15 copies (~60 MB) for a page that
+    # has exactly one atlas. Every one of those copies but the last is dead:
+    # the atlas only ever GROWS within a frame (cells are inserted, never
+    # relocated, which is the same invariant `WRITE_IN_PLACE` already rests on),
+    # so the final state is a superset of every intermediate one, and every
+    # dispatch that reads the atlas is recorded into the SAME pending command
+    # buffer and runs only after the flush. Parking the copy and performing it
+    # once, immediately before the submit, is therefore observationally
+    # identical and collapses the count to one upload per slot per flush.
+    #
+    # Only one park is held at a time: a write aimed at a DIFFERENT buffer
+    # drains the parked one first, so the count is bounded by the number of
+    # distinct slots written, never by the number of runs. 0 = nothing parked.
+    font_atlas_deferred_buffer: i64
+    font_atlas_deferred_slot: i64
+    font_atlas_deferred_pixels: [u32]
+    font_atlas_deferred_uploads: i64
     # Index into the tables above of the slot `d_font_atlas` currently aliases.
     # -1 = none bound yet.
     font_atlas_active_slot: i64 = -1
@@ -571,6 +592,10 @@ class VulkanBackend:
             font_atlas_slot_owners: [],
             font_atlas_slot_sequences: [],
             font_atlas_slot_referenced: [],
+            font_atlas_deferred_buffer: 0,
+            font_atlas_deferred_slot: -1,
+            font_atlas_deferred_pixels: [],
+            font_atlas_deferred_uploads: 0,
             font_atlas_active_slot: -1,
             font_atlas_slot_hits: 0,
             font_atlas_slot_inplace_writes: 0,
@@ -1092,6 +1117,13 @@ impl RenderBackend for VulkanBackend:
         for slot_handle in self.font_atlas_slot_handles:
             if slot_handle != 0:
                 vulkan_sffi_free_buffer(slot_handle)
+        # A parked upload names a buffer that is about to be freed. Discarding
+        # it is the only correct action -- draining would copy into a doomed
+        # buffer, and keeping it would leave a dangling handle for the next
+        # flush to write through.
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
         val atlas_was_slotted = self.font_atlas_slot_handles.len() > 0
         self.font_atlas_slot_handles = []
         self.font_atlas_slot_owners = []
@@ -1248,6 +1280,15 @@ impl RenderBackend for VulkanBackend:
                 return
             val masked_pixels: [u32] = [color; w * h]
             self.draw_image(x, y, w, h, masked_pixels)
+            return
+        if w <= 0 or h <= 0:
+            # A zero-area opaque rect paints nothing. The alpha and masked arms
+            # above already return here; this arm did not, and `(0 + 15) / 16`
+            # is 0 workgroups, which the enqueue rejects as invalid. The reject
+            # was then read as a transient bind-chain failure, costing a full
+            # flush (an extra SUBMIT), a futile retry and a CPU-fallback latch.
+            # Measured on css-layout.html: 2 such rects per frame, which is the
+            # entire `submits_per_frame=3` overshoot.
             return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
