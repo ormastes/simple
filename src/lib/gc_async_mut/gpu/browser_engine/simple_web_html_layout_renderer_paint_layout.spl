@@ -3272,10 +3272,35 @@ fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32
             body_bg = styles[i].bg
         i = i + 1
     if html_bg != 0u32:
-        return html_bg | 0xFF000000u32
+        return _web_canvas_background_over(html_bg, fallback)
     if body_bg != 0u32:
-        return body_bg | 0xFF000000u32
+        return _web_canvas_background_over(body_bg, fallback)
     fallback
+
+fn _web_canvas_background_over(color: u32, base: u32) -> u32:
+    """Composite a canvas background color over the page base (CSS Backgrounds
+    §2.11.2 + CSS Compositing simple alpha `over`). A semi-transparent canvas
+    background must blend with the base the UA paints under it, not be forced
+    opaque: `rgba(0,0,0,0.5)` over white is #808080, which is what Chrome paints
+    and what this used to report as pure black."""
+    val a = (color >> 24) & 0xFFu32
+    if a >= 255u32:
+        return color | 0xFF000000u32
+    val br = (base >> 16) & 0xFFu32
+    val bg_ = (base >> 8) & 0xFFu32
+    val bb = base & 0xFFu32
+    val cr = (color >> 16) & 0xFFu32
+    val cg = (color >> 8) & 0xFFu32
+    val cb = color & 0xFFu32
+    # 8-bit alpha is a rounded sample of the authored fraction (`0.5` -> 128),
+    # so blending with `255 - a` reintroduces the rounding loss and lands a
+    # half-transparent black on white at 127 where Chrome paints 128. Weighting
+    # with `256 - a` over a 256 denominator keeps the authored half exact.
+    val inv = 256u32 - a
+    val r = (cr * a + br * inv + 128u32) / 256u32
+    val g = (cg * a + bg_ * inv + 128u32) / 256u32
+    val b = (cb * a + bb * inv + 128u32) / 256u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
 
 # ---------------------------------------------------------------------------
 # Iframe embedding (rendering-inside-rendering). A hidden/private capability:

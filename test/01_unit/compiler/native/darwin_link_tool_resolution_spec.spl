@@ -1,0 +1,58 @@
+# Darwin link-tool resolution must not depend on PATH.
+#
+# Regression for the macOS Stage 2 sanity failure of 2026-09-12, where the
+# whole native link died with the single token `darwin-link-tool-unresolved`
+# (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md, run 5). The
+# resolver consulted `/usr/bin/which` and nothing else, so it inherited
+# whatever PATH the child happened to get, and its failure said nothing about
+# what had been attempted.
+use std.io_runtime.{env_set}
+use compiler.backend.linker._LinkerWrapper.native_linking.{
+    darwin_link_tool_env_name, darwin_link_tool_xcrun_name,
+    darwin_link_tool_unresolved_error, darwin_resolve_link_tool,
+    darwin_link_tool_trail
+}
+
+describe "darwin link tool resolution":
+    it "maps each link-tool command to the env var that pins its path":
+        expect(darwin_link_tool_env_name("ld")).to_equal("SIMPLE_DARWIN_LD")
+        expect(darwin_link_tool_env_name("/usr/bin/ld")).to_equal("SIMPLE_DARWIN_LD")
+        expect(darwin_link_tool_env_name("cc")).to_equal("SIMPLE_DARWIN_CLANG")
+        expect(darwin_link_tool_env_name("clang")).to_equal("SIMPLE_DARWIN_CLANG")
+        expect(darwin_link_tool_env_name("clang++")).to_equal("SIMPLE_DARWIN_CLANG")
+
+    it "leaves an unknown command unpinned rather than guessing a var":
+        expect(darwin_link_tool_env_name("mold")).to_equal("")
+        expect(darwin_link_tool_xcrun_name("mold")).to_equal("")
+
+    it "names the canonical xcrun tool for the fallback probe":
+        expect(darwin_link_tool_xcrun_name("ld")).to_equal("ld")
+        expect(darwin_link_tool_xcrun_name("/usr/bin/cc")).to_equal("clang")
+        expect(darwin_link_tool_xcrun_name("clang++")).to_equal("clang++")
+
+    it "reports what was tried instead of a bare token":
+        val message = darwin_link_tool_unresolved_error("simple-no-such-link-tool")
+        expect(message).to_contain("darwin-link-tool-unresolved")
+        expect(message).to_contain("command=simple-no-such-link-tool")
+        expect(message).to_contain("tried=[")
+        expect(message).to_contain("PATH=")
+
+    it "resolves from the pinned env var without spawning anything":
+        # The load-bearing case. In the stage-2 native binary neither `which`
+        # nor `xcrun` answers, so the ONLY step that can succeed is the one
+        # that runs no subprocess: read the pinned absolute path and stat it.
+        # /bin/sh stands in for the real clang -- any existing executable
+        # proves the branch, and nothing here needs Xcode to be installed.
+        assert_true(env_set("SIMPLE_DARWIN_LD", "/bin/sh"))
+        expect(darwin_resolve_link_tool("ld")).to_equal("/bin/sh")
+
+    it "does not accept a pinned path that does not exist":
+        assert_true(env_set("SIMPLE_DARWIN_LD", "/simple/no/such/linker"))
+        val trail = darwin_link_tool_trail("ld")
+        expect(trail).to_contain("SIMPLE_DARWIN_LD=/simple/no/such/linker(absent)")
+        expect(trail).to_contain("xcrun --find ld")
+        expect(trail).to_contain("which ld")
+
+    it "names the pinned env var as unset when the lane forwarded nothing":
+        assert_true(env_set("SIMPLE_DARWIN_LD", ""))
+        expect(darwin_link_tool_trail("ld")).to_contain("SIMPLE_DARWIN_LD(unset)")

@@ -81,16 +81,32 @@ guards conflict-markers / tree-size / guard-wiring all PASS.
 
 ## Capture results
 
-**NOT OBTAINED IN THIS SESSION.** The lane run carrying all four fixes,
-`34692788301` (tip `a1477d19`), sat `queued` for **42+ minutes without a runner
-ever being assigned** — `started_at` was stamped at enqueue, no step ever
-reached a conclusion, and the job status never left `queued`. That is past the
-time budget allotted for this work, so the session stops here and reports
-rather than holding the PR open indefinitely.
-Earlier runs on intermediate commits were cancelled deliberately to free queue
-capacity, and a `workflow_dispatch` run on `main` (`34692247209`) was cancelled
-by the runner queue itself with zero steps executed. The blocker is runner-queue
-capacity, not the lane.
+**NOT OBTAINED IN THIS SESSION — blocked on runner capacity, not on the lane.**
+
+The lane run carrying all four fixes, `34692788301` (tip `a1477d19`), sat
+`queued` for **42+ minutes without a runner ever being assigned**: `started_at`
+was stamped at enqueue, the job status never left `queued`, and no step ever
+reached a conclusion.
+
+After the fixes landed on `main` (`32e8167c07f`), two further
+`workflow_dispatch` runs were tried on the merged tip. **Both were cancelled
+with zero steps executed**, as was the very first dispatch of the session:
+
+| run | trigger | ref | outcome |
+|---|---|---|---|
+| `34692247209` | dispatch | `main` @ `f38ceb0f` | cancelled, 0 steps |
+| `34692788301` | pull_request | `a1477d19` | queued 42+ min, never assigned |
+| `34694715103` | dispatch | `main` @ `32e8167c` | cancelled, 0 steps |
+| `34694720379` | dispatch | `main` @ `32e8167c` | cancelled, 0 steps |
+
+Three zero-step cancellations on three separate dispatches is not a lane
+defect — nothing in this workflow ran. The workflow declares no `concurrency`
+group, so it is not self-cancelling. The likely causes, in order, are exhausted
+Actions minutes/billing quota or an org/runner-group policy cancelling queued
+jobs; **this was not confirmed** and is the first thing the next session should
+check (`gh api repos/ormastes/simple/actions/runs/<id>` for a cancellation
+actor, and the org's Actions billing page). Until a run actually executes a
+step, no amount of lane fixing will produce a capture.
 
 Local coverage of these changes is partial and stated as such: the capture
 lane's classifier selftest passes on macOS (9 fixtures), but
