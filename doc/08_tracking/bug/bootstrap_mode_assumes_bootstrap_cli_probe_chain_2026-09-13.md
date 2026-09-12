@@ -76,6 +76,12 @@ Spec: `test/01_unit/compiler/driver/bootstrap_ambient_mir_policy_requires_reques
 
 ## Site still open (superseded by the section above)
 
+One env-only site is deliberately NOT changed: `driver_aot_pipeline.spl:93`
+`bootstrap_flat_aot`, which skips borrow-check and the flat MIR passes on
+`SIMPLE_BOOTSTRAP` alone. It is benign for a non-bootstrap module — the three
+`--entry` probes already pass under `SIMPLE_BOOTSTRAP=1` with those passes
+skipped — so the next lane should not chase it.
+
 After both fixes the same probe fails one phase later:
 
     [native-compile-failed] scripts.check.cert.redeploy_gate.fixtures.hello_world:

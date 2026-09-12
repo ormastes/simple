@@ -68,3 +68,12 @@ bootstrap-flat path legitimately lowers.
 
     sh scratchpad/boot5/disc5.sh bs1_trace
     grep '\[mir-lower\]' scratchpad/boot5/d_bs1_trace.log
+
+## Possibly-shared root cause (NOT established)
+
+`dict_len_returns_minus_one_on_struct_keyed_dict_stage2_2026-09-13.md` records a
+second struct-keyed-`Dict` anomaly measured in the SAME run: `MirModule.functions`
+(`Dict<SymbolId, MirFunction>`) answers `.len() == -1` while holding one function.
+Defect 2 above is also a `Dict<SymbolId, …>`: a key from `keys()` matching no
+value in the same dict. They may share a root cause in struct-keyed `Dict`
+lowering on a native binary; that is a hypothesis, not a finding.
