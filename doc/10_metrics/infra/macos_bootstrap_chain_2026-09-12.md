@@ -232,7 +232,7 @@ thing F45's single-entry probes could not reproduce — `rt_file_size` returns
 space as live heap objects in that process. #677's remedy is proven end to end.
 
 The build stopped only because that check was fail-closed, over a codegen defect
-the file already routes around, on a run whose receipt was sound. PR #710 split
+the file already routes around, on a run whose receipt was sound. PR #712 split
 it: **blocking** on the value actually written (`-1` sentinel, `>= 2^40`),
 **advisory** on the field-vs-runtime divergence. Note the 2^40 backstop did NOT
 fire — 34363944961 is ~3% of it — so the inequality is the load-bearing half.
@@ -242,7 +242,7 @@ attempted.
 
 ### Run 10 — capsule collection PASSES
 
-Same command, virgin root, carrying PR #710. **The smoke build got past native
+Same command, virgin root, carrying PR #712. **The smoke build got past native
 capsule collection for the first time in this chain.** The advisory canary fired
 three times:
 
@@ -273,6 +273,8 @@ Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
 attempted; no Stage 3 artifact exists, so none is offered as a candidate.
 Rejected Stage 2 candidate preserved at
 `.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`;
-the run-9 copy is pinned at sha256
-`a9e61220cb17e438a959083ebb4554138dd2bc3bd333ea8de0ee1ce6c6aeb736`
-(139044728 bytes) as the standalone codegen reproducer.
+that run-10 binary IS the standalone codegen reproducer, sha256
+`67c9c3a25dc6fdda945c3677e5d8a3fe4629a1cd80ac1d6d898596bb9cd049b4`, in worktree
+`agent-a87b4c8362f754818`. It is **not tracked in git**; if that worktree is
+reclaimed, rerun the command above — the defect has reproduced on every run so
+far, so a fresh Stage 2 is a reliable source of a fresh reproducer.
