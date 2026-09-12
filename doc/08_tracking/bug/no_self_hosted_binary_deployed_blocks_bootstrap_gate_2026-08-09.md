@@ -188,3 +188,18 @@ staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
 
+## Update 2026-09-09 — current Windows Phase 1 verdict is FAIL
+
+The deployed Windows tool selected by `bin/simple.cmd` is
+`bin/release/x86_64-pc-windows-msvc/simple.exe`, 16,347,136 bytes, SHA-256
+`6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`.
+It is byte-identical to `bin/simple.exe`, self-identifies as the Rust bootstrap
+seed, and has no repository deployment/provenance receipt admitting that digest
+as a pure-Simple Stage 4 CLI.
+
+Accordingly the current Phase 1 essential-tools result is **FAIL**, not skipped
+and not seed-qualified: test, native-build, fmt, lint, and query evidence from
+this deployment cannot satisfy the self-hosted-tool requirement. The abnormal
+help/dispatch exits observed in the same smoke run are retained under
+`deployed_bin_simple_still_seed_2026-08-05.md` until command-specific logs can
+establish a common cause. The gate remains correct to reject the artifact.

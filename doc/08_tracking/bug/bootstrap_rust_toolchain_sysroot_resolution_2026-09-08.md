@@ -172,3 +172,24 @@ fingerprint temporary records are not retained, and the published stamp stores
 only the aggregate digest. The changed-input cause therefore remains for the
 next scoped diagnostic lane. The published Phase 1 tuple was preserved; the new
 fingerprint's partial Cargo cache is retained. No Stage 2 artifact was admitted.
+
+## Modern rustup settings schema (2026-09-09)
+
+Windows installed-rust authority also failed closed at `settings-host=parse-fail`
+when rustup metadata omitted the legacy `default_host_tuple` and provided only
+`default_toolchain = "stable-x86_64-pc-windows-msvc"`. The authority now
+accepts either schema: the modern value is used only when it matches the
+selected policy channel, while conflicting dual keys, duplicate keys, missing
+channel prefixes, and empty/invalid hosts remain rejected. The focused resolver
+test covers legacy, modern x86_64/aarch64 MSVC hosts, conflict, duplicate,
+wrong-channel, malformed, missing-key, and invalid-host cases.
+
+The current host path authority is recorded in
+`config/host/DESKTOP-VMF96U6.sdn`; it binds only verified canonical POSIX
+directories and places `/c/Users/ormas/.cargo/bin` first for rustc/cargo
+discovery. The config/schema and sourced-shell lookup oracle must pass before a
+new bootstrap attempt; this host fix does not imply bootstrap success.
+
+The host loader now preserves declared PATH precedence while remaining
+idempotent; the MSVC chain oracle confirms rustc/cargo resolve from the rustup
+proxy and LLVM, VC, MSYS, and SDK directories retain their required order.

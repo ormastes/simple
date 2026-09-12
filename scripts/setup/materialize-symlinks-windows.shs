@@ -26,7 +26,7 @@
 #     (`mklink /H`) — also privilege-free, same-volume only (this repo's
 #     targets are always same-volume, being inside the same checkout).
 #
-# Usage: materialize-symlinks-windows.shs [repo-root]
+# Usage: materialize-symlinks-windows.shs [--strict-missing] --receipt ABS_PATH [repo-root]
 #   repo-root defaults to the toplevel of the git repo containing this script.
 # Idempotent: safe to re-run — already-correct junctions/hardlinks are left
 # alone, and targets that do not exist yet (e.g. a build artifact not yet
@@ -36,6 +36,7 @@
 # placeholder could not be resolved despite its target existing on disk.
 
 set -u
+set -o pipefail
 
 SELF=materialize-symlinks-windows
 
@@ -54,16 +55,29 @@ esac
 # materialise COMMITTED source content — where every target is tracked and must
 # already be present — pass this so a dangling symlink can never degrade into
 # path text that a compiler then parses as source.
+approve_conversion=0
 strict_missing=0
+receipt_path=""
 repo_root=""
 while [ $# -gt 0 ]; do
     case "$1" in
+        --approve-symlink-conversion) approve_conversion=1; shift ;;
         --strict-missing) strict_missing=1; shift ;;
+        --receipt)
+            [ "$#" -ge 2 ] || { echo "$SELF: --receipt requires an absolute path" >&2; exit 2; }
+            receipt_path=$2
+            shift 2
+            ;;
         --) shift; break ;;
         -*) echo "$SELF: unknown option '$1'" >&2; exit 2 ;;
         *) repo_root="$1"; shift ;;
     esac
 done
+[ -z "$receipt_path" ] || case "$receipt_path" in
+    /*) ;;
+    *) echo "$SELF: --receipt path must be absolute" >&2; exit 2 ;;
+esac
+[ -n "$receipt_path" ] && strict_missing=1
 if [ -z "$repo_root" ]; then
     script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
     repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd) || exit 1
@@ -72,6 +86,785 @@ repo_root=$(CDPATH= cd -- "$repo_root" && pwd) || { echo "$SELF: cannot resolve 
 
 cd "$repo_root" || exit 1
 git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "$SELF: '$repo_root' is not a git repository" >&2; exit 1; }
+git_root=$(git rev-parse --show-toplevel) || exit 1
+case "$git_root" in
+    /*) ;;
+    *) command -v cygpath >/dev/null 2>&1 || exit 1
+       git_root=$(cygpath -u "$git_root") || exit 1 ;;
+esac
+[ "$git_root" = "$repo_root" ] || {
+    echo "$SELF: repository root does not match Git toplevel" >&2
+    exit 1
+}
+head_sha=$(git rev-parse --verify HEAD) || {
+    echo "$SELF: cannot bind Git HEAD" >&2
+    exit 1
+}
+producer_path=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+producer_hash_line=$(sha256sum -- "$producer_path") || exit 1
+producer_sha256=${producer_hash_line%% *}
+producer_dir=$(dirname -- "$producer_path")
+policy_path="$producer_dir/windows-materialized-pending-policy.tsv"
+policy_hash_line=$(sha256sum -- "$policy_path") || exit 1
+policy_sha256=${policy_hash_line%% *}
+case "$producer_sha256:$policy_sha256" in *[!0-9A-Fa-f:]*|*:*:*|:*) exit 1 ;; esac
+[ "${#producer_sha256}" -eq 64 ] && [ "${#policy_sha256}" -eq 64 ] || exit 1
+case "$repo_root" in *[[:cntrl:]]*) echo "$SELF: invalid repository root" >&2; exit 1 ;; esac
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/materializer.XXXXXXXX") || exit 1
+receipt_tmp="$work_dir/receipt"
+links_list="$work_dir/list"
+raw_links_list="$work_dir/raw"
+records_file="$work_dir/records"
+blob_file="$work_dir/blob"
+cleanup_materializer() {
+    if [ -n "${batch_pid:-}" ]; then
+        exec 8>&- 9<&-
+        kill "$batch_pid" 2>/dev/null || :
+        wait "$batch_pid" 2>/dev/null || :
+    fi
+    rm -f -- "$links_list" "$raw_links_list" "$records_file" "$work_dir/receipt" "$blob_file" "$work_dir/tracked" "$work_dir/api.ps1" "$work_dir/journal" "$work_dir/metadata" "$work_dir/policy"
+    rmdir -- "$work_dir"
+}
+trap cleanup_materializer EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+: >"$links_list" || exit 1
+: >"$records_file" || exit 1
+if [ -n "$receipt_path" ]; then
+    case "$receipt_path" in *[[:cntrl:]]*) echo "$SELF: invalid receipt path" >&2; exit 2 ;; esac
+    case "$receipt_path" in
+        "$repo_root/build/bootstrap"/*|/tmp/*|/var/tmp/*) ;;
+        "$repo_root"/*) echo "$SELF: receipt must use the dedicated bootstrap output root" >&2; exit 2 ;;
+        /*) ;;
+        *) echo "$SELF: invalid receipt path" >&2; exit 2 ;;
+    esac
+    [ ! -e "$receipt_path" ] && [ ! -L "$receipt_path" ] || {
+        echo "$SELF: receipt path already exists: $receipt_path" >&2
+        exit 1
+    }
+    # Native helper checks and locks every ancestor before creating parents
+    # or publishing. No shell operation writes through the output pathname.
+fi
+
+materializer_fail() {
+    echo "$SELF: FAIL ($1)" >&2
+    exit 1
+}
+
+hex_encode() {
+    printf '%s' "$1" | od -An -tx1 | tr -d ' \n'
+}
+
+repo_path() {
+    case "$1" in
+        "$repo_root"/*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$1"
+}
+
+validate_target_path() {
+    [ -n "$1" ] || return 1
+    case "$1" in *[[:cntrl:]]*) return 1 ;; esac
+    case "$1" in
+        [A-Za-z]:\\*|\\\\*) return 1 ;;
+    esac
+    command -v realpath >/dev/null 2>&1 || return 1
+    target_abs=$(realpath -ms -- "$link_dir/$1") || return 1
+    repo_path "$target_abs" >/dev/null || return 1
+    [ "$target_abs" != "$abs_link" ] || return 1
+    if [ -e "$target_abs" ]; then
+        target_real=$(realpath -- "$target_abs") || return 1
+        case "$target_real" in "$repo_root"/*) ;; *) return 1 ;; esac
+    fi
+    return 0
+}
+
+byte_length() {
+    LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '
+}
+
+record_link() {
+    [ -n "$receipt_path" ] || return 0
+    case "$1:$2:$3:$4" in *[[:cntrl:]]*) return 1 ;; esac
+    if [ "$4" != pending-untracked ]; then
+        record_kind=$3
+        capture_target_metadata || return 1
+    else
+        native_action pending "$(receipt_to_win_path "$abs_link")" "$(receipt_to_win_path "$target_abs")" || return 1
+        record_target_resolved_len=0 record_target_resolved_hex=-
+        record_target_volume=- record_target_file_id=- record_target_size=- record_target_sha256=-
+    fi
+    record_link_hex=$(hex_encode "$1") || return 1
+    record_target_hex=$(hex_encode "$2") || return 1
+    record_link_len=$(byte_length "$1") || return 1
+    record_target_len=$(byte_length "$2") || return 1
+    printf 'path_len=%s|path_hex=%s|target_len=%s|target_hex=%s|target_resolved_len=%s|target_resolved_hex=%s|target_volume=%s|target_file_id=%s|target_size=%s|target_sha256=%s|kind=%s|state=%s\n' \
+        "$record_link_len" "$record_link_hex" "$record_target_len" "$record_target_hex" \
+        "${record_target_resolved_len:-0}" "${record_target_resolved_hex:--}" \
+        "${record_target_volume:--}" "${record_target_file_id:--}" "${record_target_size:--}" "${record_target_sha256:--}" "$3" "$4" \
+        >>"$records_file" || return 1
+    record_count=$((record_count + 1))
+}
+
+capture_target_metadata() {
+    # v2 metadata is emitted together by the native held-handle operation.
+    native_action metadata "$(receipt_to_win_path "$abs_link")" "$(receipt_to_win_path "$target_abs")" >"$work_dir/metadata" || return 1
+    native_action parse "$(to_win_path "$work_dir/metadata")" "$record_kind" || return 1
+    record_metadata=$(cat "$work_dir/metadata") || return 1
+    IFS='|' read -r record_target_resolved_len record_target_resolved_hex record_target_volume record_target_file_id record_target_size record_target_sha256 <<EOF
+$record_metadata
+EOF
+}
+# One native API boundary: all path arguments are environment data. File IDs
+# avoid comparing DOS, native-prefix, UNC, case, and alias path spellings.
+cat >"$work_dir/api.ps1" <<'POWERSHELL'
+$ErrorActionPreference = "Stop"
+try {
+Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class MaterializerApi {
+    static readonly Dictionary<string, byte[]> Blobs = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+    static readonly HashSet<string> Tracked = new HashSet<string>(StringComparer.Ordinal);
+    static System.Diagnostics.Process Git;
+    static byte[] PolicyBytes;
+    static string PolicyHash;
+    public static void Initialize() {
+        string tree = new UTF8Encoding(false,true).GetString(File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_TREE")));
+        foreach (string row in tree.Split('\0')) {
+            if (row.Length == 0) continue;
+            int first = row.IndexOf(' '), second = row.IndexOf(' ', first + 1);
+            if (first < 0 || second < 0) throw new IOException("tree.fields");
+            Tracked.Add(row.Substring(second + 1));
+        }
+        PolicyBytes = File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_POLICY"));
+        using (var hash = System.Security.Cryptography.SHA256.Create())
+            PolicyHash = BitConverter.ToString(hash.ComputeHash(PolicyBytes)).Replace("-", "").ToLowerInvariant();
+        if (PolicyHash != Environment.GetEnvironmentVariable("MATERIALIZER_POLICY_SHA256")) throw new IOException("receipt.policy-digest-mismatch");
+        var start = new System.Diagnostics.ProcessStartInfo("git", "cat-file --batch");
+        start.WorkingDirectory = Environment.GetEnvironmentVariable("MATERIALIZER_ROOT");
+        start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardInput = true; start.RedirectStandardOutput = true;
+        Git = System.Diagnostics.Process.Start(start);
+    }
+    public static void Shutdown() {
+        if (Git == null) return;
+        try { Git.StandardInput.Close(); if (!Git.WaitForExit(1000)) Git.Kill(); }
+        finally { Git.Dispose(); }
+    }
+    public static string IsTracked(string path) { return Tracked.Contains(path) ? "tracked" : "untracked"; }
+    static int GitRead(byte[] bytes, int offset, int count) {
+        var read = Git.StandardOutput.BaseStream.ReadAsync(bytes, offset, count);
+        if (!read.Wait(30000)) throw new IOException("git.batch-timeout");
+        int n = read.Result;
+        if (n == 0) throw new IOException("git.batch-eof");
+        return n;
+    }
+    public static void GitBlob(string oid) {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(oid, "\\A(?:[0-9a-f]{40}|[0-9a-f]{64})\\z")) throw new IOException("git.object-id");
+        byte[] bytes;
+        if (!Blobs.TryGetValue(oid, out bytes)) {
+            Git.StandardInput.WriteLine(oid); Git.StandardInput.Flush();
+            var header = new StringBuilder(); var one = new byte[1];
+            while (true) {
+                GitRead(one, 0, 1); if (one[0] == 10) break;
+                if (header.Length >= 100 || one[0] > 127) throw new IOException("git.batch-header");
+                header.Append((char)one[0]);
+            }
+            string[] f = header.ToString().Split(' '); int size;
+            if (f.Length != 3 || f[0] != oid || f[1] != "blob" || !Int32.TryParse(f[2], out size) || size < 1 || size >= 4096)
+                throw new IOException("git.batch-object");
+            bytes = new byte[size];
+            for (int n = 0; n < size;) n += GitRead(bytes, n, size - n);
+            GitRead(one, 0, 1); if (one[0] != 10) throw new IOException("git.batch-delimiter");
+            Blobs.Add(oid, bytes);
+        }
+        File.WriteAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_BLOB"), bytes);
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Info {
+        public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh,
+            WriteLow, WriteHigh, Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct TagInfo { public uint Attributes, Tag; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFileW(string p, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFileAttributesW(string p);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle h, out Info info);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, byte[] data, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out TagInfo info, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] input, int inputSize,
+        byte[] output, int outputSize, out int returned, IntPtr overlapped);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool CreateHardLinkW(string link, string target, IntPtr security);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool CreateDirectoryW(string path, IntPtr security);
+    [StructLayout(LayoutKind.Sequential)] struct UnicodeName { public ushort Length, MaximumLength; public IntPtr Buffer; }
+    [StructLayout(LayoutKind.Sequential)] struct ObjectAttributes {
+        public int Length; public IntPtr Root, Name; public uint Attributes; public IntPtr Security, Quality;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IoStatus { public IntPtr Status, Information; }
+    [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle h, uint access,
+        ref ObjectAttributes attrs, out IoStatus status, IntPtr size, uint attributes,
+        uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+    static SafeFileHandle CreateDirectoryHeld(string path) {
+        string native = @"\??\" + Path.GetFullPath(path);
+        IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
+        try {
+            var u = new UnicodeName { Length = checked((ushort)(native.Length * 2)), MaximumLength = checked((ushort)(native.Length * 2)), Buffer = buffer };
+            Marshal.StructureToPtr(u, name, false);
+            var a = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Name = name, Attributes = 0x40 };
+            SafeFileHandle h; IoStatus io;
+            int status = NtCreateFile(out h, 0x40100080, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
+            if (status < 0) { if (h != null) h.Dispose(); throw new IOException("directory.create-exclusive:ntstatus=" + status); }
+            return h;
+        } finally { Marshal.FreeHGlobal(name); Marshal.FreeHGlobal(buffer); }
+    }
+    static Exception Error(string predicate) {
+        return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
+    }
+    static SafeFileHandle Open(string p, bool raw, uint access) {
+        var h = CreateFileW(p, access, 1, IntPtr.Zero, 3,
+            0x02000000u | (raw ? 0x00200000u : 0), IntPtr.Zero);
+        if (h.IsInvalid) { h.Dispose(); throw Error("api.open:" + p); }
+        return h;
+    }
+    static TagInfo Tag(SafeFileHandle h) {
+        TagInfo i;
+        if (!GetFileInformationByHandleEx(h, 9, out i, 8)) throw Error("api.attribute-tag");
+        return i;
+    }
+    static Info Identity(SafeFileHandle h) {
+        Info i;
+        if (!GetFileInformationByHandle(h, out i)) throw Error("api.file-identity");
+        return i;
+    }
+    // Retain handles without write/delete sharing through the protected action.
+    // Starting at the volume/share root prevents ancestor rename/reparse swaps.
+    static void Parents(string path, bool create, List<SafeFileHandle> held) {
+        string full = Path.GetFullPath(path), root = Path.GetPathRoot(full);
+        string parent = Path.GetDirectoryName(full);
+        if (String.IsNullOrEmpty(parent)) parent = root;
+        string current = root;
+        var parts = parent.Substring(root.Length).Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries);
+        // Phase 1 is read-only: hold every existing prefix before any creation.
+        int n;
+        for (n = -1; n < parts.Length; n++) {
+            string candidate = n >= 0 ? Path.Combine(current, parts[n]) : current;
+            uint attrs = GetFileAttributesW(candidate);
+            if (attrs != 0xFFFFFFFFu && (attrs & 0x400u) != 0)
+                throw new IOException("ancestor.reparse:" + candidate);
+            var h = CreateFileW(candidate, 0, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
+            if (h.IsInvalid) {
+                int error = Marshal.GetLastWin32Error(); h.Dispose();
+                if (n >= 0 && error == 2) {
+                    if (!create) return;
+                    break;
+                }
+                throw new IOException("api.open-parent:" + candidate + ":win32=" + error);
+            }
+            held.Add(h);
+            var t = Tag(h);
+            if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + candidate);
+            if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + candidate);
+            Identity(h);
+            current = candidate;
+        }
+        // Phase 2 starts at the first missing component under the held prefix.
+        // A concurrent creation fails closed; never adopt an unowned collision.
+        for (; n < parts.Length; n++) {
+            current = Path.Combine(current, parts[n]);
+            var h = CreateDirectoryHeld(current); held.Add(h);
+            var t = Tag(h);
+            if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + current);
+            if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + current);
+            Identity(h);
+        }
+    }
+    public static void ProbeTarget(string path) {
+        var held = new List<SafeFileHandle>();
+        try {
+            string full = Path.GetFullPath(path), root = Path.GetPathRoot(full), current = root;
+            var parts = full.Substring(root.Length).Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries);
+            for (int n = -1; n < parts.Length; n++) {
+                if (n >= 0) current = Path.Combine(current, parts[n]);
+                var h = CreateFileW(current, 0, 1, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+                if (h.IsInvalid) {
+                    int error = Marshal.GetLastWin32Error(); h.Dispose();
+                    if (error == 2 || error == 3) return;
+                    throw new IOException("target.probe:win32=" + error);
+                }
+                held.Add(h);
+                if ((Tag(h).Attributes & 0x400) != 0) throw new IOException("target.reparse:" + current);
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    public static void Validate(string link, string target, bool directory) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(link, false, held); Parents(target, false, held);
+            using (var raw = Open(link, true, 0)) {
+                var tag = Tag(raw);
+                if (directory ? tag.Tag != 0xA0000003u : (tag.Attributes & 0x400) != 0)
+                    throw new IOException("tag.expected=" + (directory ? "0xA0000003" : "non-reparse") +
+                        ":actual=0x" + tag.Tag.ToString("X8"));
+                using (var expected = Open(target, true, 0)) {
+                    var et = Tag(expected);
+                    if ((et.Attributes & 0x400) != 0) throw new IOException("target.reparse");
+                    if (((et.Attributes & 0x10) != 0) != directory) throw new IOException("target.kind");
+                    using (var final = Open(link, false, 0)) {
+                        var x = Identity(final); var y = Identity(expected);
+                        if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
+                            throw new IOException("identity.volume-file-id.mismatch");
+                    }
+                }
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    public static void Create(string link, string target, bool directory) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(link, false, held); Parents(target, false, held);
+            var expected = Open(target, true, 0x80000000); held.Add(expected);
+            if ((Tag(expected).Attributes & 0x400) != 0) throw new IOException("target.reparse");
+            using (var placeholder = Open(link, true, 0x80010000)) {
+                if ((Tag(placeholder).Attributes & 0x410) != 0) throw new IOException("placeholder.kind");
+                using (var input = new FileStream(placeholder, FileAccess.Read)) {
+                    byte[] blob = File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_BLOB"));
+                    if (input.Length != blob.Length) throw new IOException("tampered placeholder bytes");
+                    foreach (byte b in blob) if (input.ReadByte() != b) throw new IOException("tampered placeholder bytes");
+                    if (!SetFileInformationByHandle(placeholder, 4, new byte[] {1,0,0,0}, 4)) throw Error("placeholder.delete-owned");
+                }
+            }
+            CreateLocked(link, target, directory);
+            foreach (var h in held) Save(h);
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    static void CreateLocked(string link, string target, bool directory) {
+        if (!directory) {
+            if (!CreateHardLinkW(link, target, IntPtr.Zero)) throw Error("api.create-hardlink");
+            return;
+        }
+        string full = Path.GetFullPath(target);
+        string native = full.StartsWith("\\\\") ? "\\??\\UNC\\" + full.Substring(2) : "\\??\\" + full;
+        byte[] substitute = Encoding.Unicode.GetBytes(native), print = Encoding.Unicode.GetBytes(full);
+        if (substitute.Length > UInt16.MaxValue || print.Length > UInt16.MaxValue ||
+            substitute.Length + print.Length + 18 > UInt16.MaxValue)
+            throw new IOException("junction.path-too-long");
+        byte[] data = new byte[16 + substitute.Length + 2 + print.Length + 2];
+        Buffer.BlockCopy(BitConverter.GetBytes(0xA0000003u), 0, data, 0, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)(data.Length - 8)), 0, data, 4, 2);
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)0), 0, data, 8, 2);
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)substitute.Length), 0, data, 10, 2);
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)(substitute.Length + 2)), 0, data, 12, 2);
+        Buffer.BlockCopy(BitConverter.GetBytes((ushort)print.Length), 0, data, 14, 2);
+        Buffer.BlockCopy(substitute, 0, data, 16, substitute.Length);
+        Buffer.BlockCopy(print, 0, data, 18 + substitute.Length, print.Length);
+        using (var h = CreateDirectoryHeld(link)) {
+            int returned;
+            if (!DeviceIoControl(h, 0x000900A4, data, data.Length, null, 0, out returned, IntPtr.Zero))
+                throw Error("api.set-junction-tag");
+            Save(h);
+        }
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder path, uint size, uint flags);
+    static string FinalPath(SafeFileHandle h) {
+        var path = new StringBuilder(32768);
+        uint n = GetFinalPathNameByHandleW(h, path, (uint)path.Capacity, 0);
+        if (n == 0 || n >= path.Capacity) throw Error("target.final-path");
+        string p = path.ToString();
+        if (!p.StartsWith(@"\\?\") || p.Length < 7 || p[5] != ':' || p[6] != '\\' ||
+            !((p[4] >= 'A' && p[4] <= 'Z') || (p[4] >= 'a' && p[4] <= 'z')))
+            throw new IOException("target.unsupported-final-namespace");
+        return p.Substring(0, 4) + Char.ToUpperInvariant(p[4]) + p.Substring(5);
+    }
+    // Schema v2 consumer contract: target_resolved_hex is strict UTF-8 of the
+    // normalized Win32 extended DOS final path (\\?\C:\...), no newline.
+    // Only drive volumes are admitted; UNC/device namespaces fail closed.
+    // Consumers must explicitly accept v2, decode as native Windows path, and
+    // compare volume + high:low file ID, unsigned decimal byte size and SHA256.
+    // Directory size is the handle's size, SHA is '-'; no POSIX stat semantics.
+    public static string Metadata(string link, string target) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(target, false, held); Parents(link, false, held);
+            held.Add(Open(link, true, 0));
+            // Read sharing only excludes existing/future writers and deletion,
+            // including writes through hardlinks. The stream owns this handle.
+            using (var h = Open(target, true, 0x80000000)) {
+                var tag = Tag(h);
+                if ((tag.Attributes & 0x400) != 0) throw new IOException("target.reparse");
+                bool directory = (tag.Attributes & 0x10) != 0;
+                var before = Identity(h);
+                string path = FinalPath(h);
+                Validate(link, target, directory);
+                // Bind validation to this exact held target, not a later reopen.
+                using (var actual = Open(link, false, 0)) {
+                    var i = Identity(actual);
+                    if (i.Volume != before.Volume || i.IndexHigh != before.IndexHigh || i.IndexLow != before.IndexLow)
+                        throw new IOException("target.replacement");
+                }
+                string sha = "-";
+                FileStream stream = null;
+                try {
+                    if (!directory) {
+                        stream = new FileStream(h, FileAccess.Read);
+                        using (var hash = System.Security.Cryptography.SHA256.Create())
+                            sha = BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                    }
+                    var after = Identity(h);
+                    if (before.Volume != after.Volume || before.IndexHigh != after.IndexHigh || before.IndexLow != after.IndexLow ||
+                        before.SizeHigh != after.SizeHigh || before.SizeLow != after.SizeLow ||
+                        before.WriteHigh != after.WriteHigh || before.WriteLow != after.WriteLow || path != FinalPath(h))
+                        throw new IOException("target.changed-during-capture");
+                    foreach (var ancestor in held) Save(ancestor);
+                    Save(h);
+                    byte[] bytes = new UTF8Encoding(false, true).GetBytes(path);
+                    return bytes.Length.ToString() + "|" + BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant() + "|" +
+                        before.Volume.ToString() + "|" + before.IndexHigh.ToString() + ":" + before.IndexLow.ToString() + "|" +
+                        (((ulong)before.SizeHigh << 32) | before.SizeLow).ToString() + "|" + sha;
+                } finally { if (stream != null) stream.Dispose(); }
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    static string Decode(string hex) {
+        if (hex.Length == 0 || hex.Length > 262136 || hex.Length % 2 != 0 ||
+            !System.Text.RegularExpressions.Regex.IsMatch(hex, "\\A[0-9a-f]+\\z")) throw new IOException("receipt.hex");
+        byte[] bytes = new byte[hex.Length/2];
+        for (int n=0;n<bytes.Length;n++) bytes[n]=Convert.ToByte(hex.Substring(n*2,2),16);
+        return new UTF8Encoding(false,true).GetString(bytes);
+    }
+    static string Fingerprint(SafeFileHandle h) {
+        var i = Identity(h); var t = Tag(h);
+        return i.Volume + ":" + i.IndexHigh + ":" + i.IndexLow + ":" + t.Attributes + ":" + t.Tag;
+    }
+    static void Save(SafeFileHandle h) {
+        File.AppendAllText(Environment.GetEnvironmentVariable("MATERIALIZER_JOURNAL"),
+            Convert.ToBase64String(Encoding.UTF8.GetBytes(FinalPath(h))) + "|" + Fingerprint(h) + "\n");
+    }
+    public static void ParseMetadata(string path, string kind) {
+        string text = new UTF8Encoding(false, true).GetString(File.ReadAllBytes(path));
+        if (text.EndsWith("\r\n")) text = text.Substring(0, text.Length-2);
+        else if (text.EndsWith("\n")) text = text.Substring(0, text.Length-1);
+        ParseMetadataText(text, kind);
+    }
+    static void ParseMetadataText(string text, string kind) {
+        string[] f = text.Split('|');
+        if (f.Length != 6 || text.IndexOfAny(new char[] {'\r','\n'}) >= 0) throw new IOException("metadata.fields");
+        ulong length = Number(f[0], 131068), volume = Number(f[2], UInt32.MaxValue);
+        Number(f[4], UInt64.MaxValue);
+        string[] id = f[3].Split(':');
+        if (id.Length != 2) throw new IOException("metadata.id");
+        Number(id[0], UInt32.MaxValue); Number(id[1], UInt32.MaxValue);
+        if (length < 7 || (ulong)f[1].Length != length * 2 || !System.Text.RegularExpressions.Regex.IsMatch(f[1], "\\A[0-9a-fA-F]+\\z")) throw new IOException("metadata.hex");
+        byte[] bytes = new byte[(int)length];
+        for (int n=0; n<bytes.Length; n++) bytes[n] = Convert.ToByte(f[1].Substring(n*2,2),16);
+        string resolved = new UTF8Encoding(false,true).GetString(bytes);
+        if (!resolved.StartsWith(@"\\?\") || resolved.Length < 7 || resolved[5] != ':' || resolved[6] != '\\' ||
+            !((resolved[4] >= 'A' && resolved[4] <= 'Z') || (resolved[4] >= 'a' && resolved[4] <= 'z')))
+            throw new IOException("metadata.namespace");
+        foreach (char c in resolved) if (Char.IsControl(c)) throw new IOException("metadata.control");
+        if (kind == "directory" ? f[5] != "-" : kind != "file" || !System.Text.RegularExpressions.Regex.IsMatch(f[5], "\\A[0-9a-fA-F]{64}\\z")) throw new IOException("metadata.sha");
+    }
+    static ulong Number(string value, ulong max) {
+        ulong n;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(value, "\\A(?:0|[1-9][0-9]*)\\z") || !UInt64.TryParse(value, out n) || n > max) throw new IOException("metadata.number");
+        return n;
+    }
+    static string Relative(string hex, string length, bool target) {
+        ulong size = Number(length, 131068);
+        if (size == 0 || (ulong)hex.Length != size * 2) throw new IOException("receipt.byte-length");
+        string value = Decode(hex);
+        bool ordinary = false;
+        foreach (string part in value.Split('/')) {
+            if (target && part == ".." && !ordinary) continue;
+            ordinary = true;
+            if (part.Length == 0 || part == "." || part == ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                part.IndexOf('\\') >= 0 || part.EndsWith(".") || part.EndsWith(" ") ||
+                System.Text.RegularExpressions.Regex.IsMatch(part, "\\A(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\\.|\\z)"))
+                throw new IOException("receipt.relative-path");
+            foreach (char c in part) if (Char.IsControl(c)) throw new IOException("receipt.relative-path");
+        }
+        if (!ordinary) throw new IOException("receipt.relative-path");
+        return value;
+    }
+    public static void Pending(string link, string target) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(link, false, held); Parents(target, false, held);
+            held.Add(Open(link, true, 0x80000000));
+            uint attrs = GetFileAttributesW(target);
+            int error = Marshal.GetLastWin32Error();
+            if (attrs != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("pending.not-absent");
+            foreach (var h in held) Save(h);
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    static void Reacquire(List<SafeFileHandle> held) {
+        string journal = Environment.GetEnvironmentVariable("MATERIALIZER_JOURNAL");
+        if (!File.Exists(journal)) return;
+        foreach (string row in File.ReadAllLines(journal)) {
+            string[] f = row.Split('|');
+            if (f.Length != 2 || String.IsNullOrEmpty(f[0]) || String.IsNullOrEmpty(f[1])) throw new IOException("journal.fields");
+            string path;
+            try { path = new UTF8Encoding(false,true).GetString(Convert.FromBase64String(f[0])); }
+            catch { throw new IOException("journal.base64"); }
+            string[] fp = f[1].Split(':');
+            if (fp.Length != 5) throw new IOException("journal.fingerprint");
+            foreach (string part in fp) { UInt64 ignored; if (!UInt64.TryParse(part, out ignored)) throw new IOException("journal.fingerprint"); }
+            if (String.IsNullOrEmpty(path) || !Path.IsPathRooted(path)) throw new IOException("journal.path");
+            Parents(path, false, held);
+            var h = Open(path, true, 0); held.Add(h);
+            if (Fingerprint(h) != f[1]) throw new IOException("publication.identity-changed");
+        }
+    }
+    public static void Publish(string source, string destination, bool checkOnly) {
+        var held = new List<SafeFileHandle>();
+        FileStream policyStream = null;
+        try {
+            Parents(destination, !checkOnly, held);
+            using (var existing = CreateFileW(destination, 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+                if (!existing.IsInvalid) throw new IOException("receipt.destination-exists");
+                int e = Marshal.GetLastWin32Error();
+                if (e != 2 && !(checkOnly && e == 3)) throw Error("receipt.destination-probe");
+            }
+            if (checkOnly) return;
+            Reacquire(held);
+            var pending = new List<string>();
+            string root = Environment.GetEnvironmentVariable("MATERIALIZER_ROOT");
+            byte[] receiptBytes = File.ReadAllBytes(source);
+            string receiptText = new UTF8Encoding(false,true).GetString(receiptBytes);
+            if (!receiptText.EndsWith("\n") || receiptText.IndexOf('\r') >= 0) throw new IOException("receipt.line-format");
+            var all = receiptText.Substring(0,receiptText.Length-1).Split('\n');
+            var headers = new Dictionary<string,string>();
+            var rows = new List<string>();
+            bool inRecords = false;
+            int beginCount = 0, endCount = 0;
+            foreach (string line in all) {
+                if (endCount != 0) throw new IOException("receipt.trailing-data");
+                if (line == "records_begin") { if (inRecords || ++beginCount != 1) throw new IOException("receipt.records-markers"); inRecords = true; continue; }
+                if (line == "records_end") { if (!inRecords || ++endCount != 1) throw new IOException("receipt.records-markers"); inRecords = false; continue; }
+                if (inRecords) { rows.Add(line); continue; }
+                int split = line.IndexOf('=');
+                if (split <= 0) throw new IOException("receipt.header-format");
+                string key = line.Substring(0, split);
+                if (headers.ContainsKey(key)) throw new IOException("receipt.header-duplicate");
+                headers.Add(key, line.Substring(split + 1));
+            }
+            if (!inRecords && beginCount == 1 && endCount == 1) { }
+            else throw new IOException("receipt.records-markers");
+            string[] required = new string[] {"schema","root","head","producer_sha256","policy_sha256","tracked_mode120000","created","already_ok","skipped_pending","failed","pending_untracked","record_count","records_sha256","pending_count","pending_requires_consumer_revalidation","result"};
+            if (headers.Count != required.Length) throw new IOException("receipt.header-set");
+            foreach (string key in required) if (!headers.ContainsKey(key)) throw new IOException("receipt.header-missing");
+            foreach (string key in new string[] {"producer_sha256","policy_sha256","records_sha256"})
+                if (!System.Text.RegularExpressions.Regex.IsMatch(headers[key], "\\A[0-9a-f]{64}\\z")) throw new IOException("receipt.header-digest");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(headers["head"], "\\A(?:[0-9a-f]{40}|[0-9a-f]{64})\\z")) throw new IOException("receipt.header-head");
+            string expectedRoot = Encoding.UTF8.GetString(Convert.FromBase64String(Environment.GetEnvironmentVariable("MATERIALIZER_ROOT_POSIX_B64")));
+            if (headers["schema"] != "simple-windows-materialized-links-v2" || headers["root"] != expectedRoot ||
+                headers["head"] != Environment.GetEnvironmentVariable("MATERIALIZER_HEAD") ||
+                headers["producer_sha256"] != Environment.GetEnvironmentVariable("MATERIALIZER_PRODUCER_SHA256") ||
+                headers["policy_sha256"] != Environment.GetEnvironmentVariable("MATERIALIZER_POLICY_SHA256"))
+                throw new IOException("receipt.header-mismatch");
+            string policyFile = Environment.GetEnvironmentVariable("MATERIALIZER_POLICY");
+            Parents(policyFile, false, held);
+            var policyHandle = Open(policyFile, true, 0x80000000); held.Add(policyHandle);
+            if ((Tag(policyHandle).Attributes & 0x410) != 0) throw new IOException("receipt.policy-kind");
+            string policyIdentity = Fingerprint(policyHandle);
+            policyStream = new FileStream(policyHandle, FileAccess.Read);
+            byte[] policyBytes;
+            using (var snapshot = new MemoryStream()) { policyStream.CopyTo(snapshot); policyBytes = snapshot.ToArray(); }
+            string[] policyRows = new UTF8Encoding(false,true).GetString(PolicyBytes ?? policyBytes).Split('\n');
+            string policyDigest;
+            using (var hash = System.Security.Cryptography.SHA256.Create())
+                policyDigest = BitConverter.ToString(hash.ComputeHash(policyBytes)).Replace("-", "").ToLowerInvariant();
+            if (policyDigest != headers["policy_sha256"] || (PolicyHash != null && policyDigest != PolicyHash)) throw new IOException("receipt.policy-digest-mismatch");
+            var recordText = new StringBuilder();
+            foreach (string row in rows) recordText.Append(row).Append('\n');
+            string digest = BitConverter.ToString(System.Security.Cryptography.SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(recordText.ToString()))).Replace("-", "").ToLowerInvariant();
+            if (headers["records_sha256"] != digest) throw new IOException("receipt.records-digest-mismatch");
+            var counts = new Dictionary<string,ulong>();
+            foreach (string key in new string[] {"tracked_mode120000","created","already_ok","skipped_pending","failed","pending_untracked","record_count","pending_count"}) counts.Add(key, Number(headers[key], Int32.MaxValue));
+            if (headers["result"] != "complete" || headers["failed"] != "0" || headers["pending_requires_consumer_revalidation"] != "1" ||
+                counts["record_count"] != (ulong)rows.Count || counts["tracked_mode120000"] != counts["record_count"] ||
+                counts["created"] + counts["already_ok"] + counts["pending_untracked"] != counts["record_count"] ||
+                counts["skipped_pending"] != 0 || counts["pending_untracked"] != counts["pending_count"])
+                throw new IOException("receipt.count-mismatch");
+            ulong createdRows = 0, existingRows = 0;
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] keys = "path_len|path_hex|target_len|target_hex|target_resolved_len|target_resolved_hex|target_volume|target_file_id|target_size|target_sha256|kind|state".Split('|');
+            foreach (string row in rows) {
+                var fields = new Dictionary<string,string>();
+                string[] cells = row.Split('|');
+                if (cells.Length != keys.Length) throw new IOException("receipt.row-fields");
+                for (int n=0;n<keys.Length;n++) {
+                    if (!cells[n].StartsWith(keys[n] + "=", StringComparison.Ordinal)) throw new IOException("receipt.row-order");
+                    fields.Add(keys[n],cells[n].Substring(keys[n].Length+1));
+                }
+                string path = Relative(fields["path_hex"], fields["path_len"], false);
+                if (!paths.Add(path)) throw new IOException("receipt.duplicate-path");
+                string link = Path.Combine(root, path.Replace('/', '\\'));
+                string relative = Relative(fields["target_hex"], fields["target_len"], true);
+                string target = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(link), relative.Replace('/', '\\')));
+                if (!target.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase) || String.Equals(target,link,StringComparison.OrdinalIgnoreCase)) throw new IOException("receipt.target-escape");
+                if (fields["state"] == "pending-untracked") {
+                    if (fields["kind"] != "unknown" || fields["target_resolved_len"] != "0") throw new IOException("receipt.pending-metadata");
+                    foreach (string key in new string[] {"target_resolved_hex","target_volume","target_file_id","target_size","target_sha256"})
+                        if (fields[key] != "-") throw new IOException("receipt.pending-metadata");
+                    string policy = Decode(fields["path_hex"]) + "\t" + relative;
+                    if (Array.IndexOf(policyRows, policy) < 0) throw new IOException("pending.policy");
+                    uint pendingAttributes = GetFileAttributesW(target);
+                    int pendingError = Marshal.GetLastWin32Error();
+                    if (pendingAttributes != 0xFFFFFFFFu || (pendingError != 2 && pendingError != 3)) throw new IOException("pending.not-absent");
+                    pending.Add(target);
+                    if (new UTF8Encoding(false,true).GetString(File.ReadAllBytes(link)) != relative) throw new IOException("pending.placeholder");
+                } else {
+                    if (fields["kind"] != "file" && fields["kind"] != "directory") throw new IOException("receipt.kind");
+                    if (fields["state"] == "created") createdRows++;
+                    else if (fields["state"] == "already") existingRows++;
+                    else throw new IOException("receipt.state");
+                    var h = Open(target, true, 0x80000000); held.Add(h);
+                    string actual = Metadata(link, target);
+                    string expected = fields["target_resolved_len"] + "|" + fields["target_resolved_hex"] + "|" + fields["target_volume"] + "|" + fields["target_file_id"] + "|" + fields["target_size"] + "|" + fields["target_sha256"];
+                    ParseMetadataText(expected, fields["kind"]);
+                    if (actual != expected) throw new IOException("publication.metadata-changed");
+                }
+            }
+            if ((ulong)pending.Count != counts["pending_count"] || createdRows != counts["created"] || existingRows != counts["already_ok"]) throw new IOException("receipt.pending-count-mismatch");
+            string temp = Path.Combine(Path.GetDirectoryName(destination), ".materializer-" + Guid.NewGuid().ToString("N") + ".tmp");
+            using (var h = CreateFileW(temp, 0x40010000, 0, IntPtr.Zero, 1, 0x80, IntPtr.Zero)) {
+                if (h.IsInvalid) throw Error("receipt.create-exclusive");
+                bool published = false;
+                // Keep the exclusive owned handle open through rename/cleanup.
+                using (var output = new FileStream(h, FileAccess.Write)) {
+                    try {
+                        output.Write(receiptBytes, 0, receiptBytes.Length);
+                        output.Flush(true);
+                        byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                        int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                        byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
+                        // ReplaceIfExists=FALSE, RootDirectory=NULL; native full path.
+                        Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
+                        Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
+                        foreach (string absent in pending) {
+                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
+                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
+                                throw new IOException("pending.not-absent-after-publish");
+                            }
+                        }
+                        if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("receipt.policy-identity");
+                        if (!SetFileInformationByHandle(h, 3, rename, (uint)rename.Length)) throw Error("receipt.rename-no-replace");
+                        // Absence cannot be locked. Invalidation is best effort;
+                        // every consumer MUST revalidate pending immediately at use.
+                        foreach (string absent in pending) {
+                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
+                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
+                                throw new IOException("pending.not-absent-after-publish");
+                            }
+                        }
+                        published = true;
+                    } finally {
+                        if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
+                            throw Error("receipt.cleanup-owned-handle");
+                    }
+                }
+            }
+        } finally { if (policyStream != null) policyStream.Dispose(); foreach (var h in held) h.Dispose(); }
+    }
+}
+"@
+[MaterializerApi]::Initialize()
+[Console]::WriteLine("READY")
+while ($null -ne ($request = [Console]::ReadLine())) {
+    if ($request.Length -gt 262144) { throw "batch.request-bound" }
+    $fields = $request.Split([char]9)
+    if ($fields.Length -ne 3) { throw "batch.request-fields" }
+    $env:MATERIALIZER_ACTION = $fields[0]
+    $env:MATERIALIZER_LINK_WIN = $fields[1]
+    $env:MATERIALIZER_TARGET_WIN = $fields[2]
+    $answer = ""
+switch ($env:MATERIALIZER_ACTION) {
+    "gitblob" { [MaterializerApi]::GitBlob($env:MATERIALIZER_LINK_WIN) }
+    "tracked" { $answer = [MaterializerApi]::IsTracked($env:MATERIALIZER_LINK_WIN) }
+    "parse" { [MaterializerApi]::ParseMetadata($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
+    "pending" { [MaterializerApi]::Pending($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
+    "target" { [MaterializerApi]::ProbeTarget($env:MATERIALIZER_LINK_WIN) }
+    "blob" {
+        $text = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($env:MATERIALIZER_LINK_WIN))
+        foreach ($part in $text.Split([char]47)) {
+            if ($part -eq "." -or $part -eq "..") { continue }
+            if (!$part -or $part.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+                $part -match "[. ]$" -or $part -match "^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)") {
+                throw "blob.invalid-windows-component"
+            }
+        }
+    }
+    "directory" { [MaterializerApi]::Validate($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $true) }
+    "file" { [MaterializerApi]::Validate($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $false) }
+    "metadata" { $answer = [MaterializerApi]::Metadata($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
+    "junction" { [MaterializerApi]::Create($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $true) }
+    "hardlink" { [MaterializerApi]::Create($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $false) }
+    "prepare" { [MaterializerApi]::Publish($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $true) }
+    "publish" { [MaterializerApi]::Publish($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN, $false) }
+    default { throw "api.unknown-action" }
+}
+    if ($answer.Length) { [Console]::WriteLine("OK|" + $answer) } else { [Console]::WriteLine("OK") }
+}
+[MaterializerApi]::Shutdown()
+exit 0
+} catch {
+    [Console]::Error.WriteLine("materializer-validator:" + $_.Exception.ToString())
+    [MaterializerApi]::Shutdown()
+    exit 1
+}
+POWERSHELL
+[ "$?" -eq 0 ] || materializer_fail "cannot write native helper"
+
+start_native_batch() {
+    export MATERIALIZER_JOURNAL="$(to_win_path "$work_dir/journal")" MATERIALIZER_BLOB="$(to_win_path "$blob_file")"
+    export MATERIALIZER_POLICY="$(to_win_path "$policy_path")" MATERIALIZER_ROOT="$(to_win_path "$repo_root")"
+    export MATERIALIZER_TREE="$(to_win_path "$raw_links_list")" MATERIALIZER_APPROVE_CONVERSION="$approve_conversion"
+    export MATERIALIZER_HEAD="$head_sha" MATERIALIZER_ROOT_POSIX_B64="$(printf '%s' "$repo_root" | base64 -w0)"
+    export MATERIALIZER_PRODUCER_SHA256="$producer_sha256" MATERIALIZER_POLICY_SHA256="$policy_sha256"
+    coproc MATERIALIZER_BATCH { powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(to_win_path "$work_dir/api.ps1")"; }
+    batch_pid=$MATERIALIZER_BATCH_PID
+    exec 8>&${MATERIALIZER_BATCH[1]} 9<&${MATERIALIZER_BATCH[0]}
+    IFS= read -r -t 60 ready <&9 || return 1
+    # PowerShell may emit CRLF; normalize exactly one protocol CR before
+    # comparing the bounded startup token.
+    ready=${ready%$'\r'}
+    [ "$ready" = READY ]
+}
+native_action() {
+    # Git and filesystem path controls are rejected before entering this protocol.
+    case "$1$2$3" in *[[:cntrl:]]*) return 1 ;; esac
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >&8 || return 1
+    IFS= read -r -t 60 response <&9 || { echo 'batch.dead-or-timeout' >&2; return 1; }
+    # PowerShell may emit CRLF; normalize exactly one protocol CR before
+    # token matching and payload parsing.
+    response=${response%$'\r'}
+    case "$response" in
+        OK) return 0 ;;
+        OK'|'*) printf '%s\n' "${response#OK|}"; return 0 ;;
+        *) echo "$response" >&2; return 1 ;;
+    esac
+}
+
+validate_materialized_file() {
+    native_action file "$(to_win_path "$abs_link")" "$(to_win_path "$target_abs")"
+}
+validate_materialized_directory() {
+    native_action directory "$(to_win_path "$abs_link")" "$(to_win_path "$target_abs")"
+}
 
 to_win_path() {
     # POSIX path -> native Windows path, for PowerShell
@@ -82,35 +875,46 @@ to_win_path() {
     fi
 }
 
-# NOTE: deliberately NOT using `cmd //c mklink /J|/H` here. git-bash/MSYS
-# rewrites any bare `/x`-shaped argument that looks like a Unix absolute path
-# before it reaches cmd.exe — that silently mangles both the `/c` dispatch
-# switch itself and `/J`/`/H`, and neither `MSYS2_ARG_CONV_EXCL="*"` nor the
-# `//c` doubled-slash escape produced a combination that both (a) avoided
-# cmd.exe falling back to an interactive shell and (b) parsed the quoted
-# paths correctly — PROVEN by hand across three attempts on 2026-08-08.
-# PowerShell's `New-Item -ItemType Junction|HardLink` takes plain
-# already-Windows-style path strings as ordinary parameters, so none of that
-# MSYS argument-mangling applies. Both are privilege-free (junctions and
-# hardlinks are NOT symlinks and do not need SeCreateSymbolicLinkPrivilege).
-make_junction() {
-    # $1 = link path (Windows), $2 = target path (Windows)
-    powershell -NoProfile -Command "New-Item -ItemType Junction -Path '$1' -Target '$2' -ErrorAction Stop | Out-Null" >/dev/null 2>&1
+receipt_to_win_path() {
+    # Receipt ancestry must preserve the caller's lexical spelling.  Do not
+    # pass this security-sensitive path through cygpath/realpath/readlink.
+    case "$1" in
+        /[A-Za-z]/*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *\\*|*//*|*/|*[[:cntrl:]]*) return 1 ;;
+    esac
+    receipt_drive=${1#/}; receipt_drive=${receipt_drive%%/*}
+    receipt_rest=${1#*/}; receipt_rest=${receipt_rest#*/}
+    [ "${#receipt_drive}" -eq 1 ] || return 1
+    case "$receipt_rest" in
+        ''|/*|*:*|*'<'*|*'>'*|*'"'*|*'|'*|*'?'*|*'*'*) return 1 ;;
+    esac
+    receipt_old_ifs=$IFS; IFS=/; set -f
+    set -- $receipt_rest
+    IFS=$receipt_old_ifs
+    for receipt_part do
+        case "$receipt_part" in
+            ''|.|..|*[.\ ]|*'"'*|*'<'*|*'>'*|*'|'*|*'?'*|*'*'*) return 1 ;;
+        esac
+        receipt_upper=$(printf '%s' "$receipt_part" | tr '[:lower:]' '[:upper:]') || return 1
+        case "$receipt_upper" in
+            CON|CON.*|PRN|PRN.*|AUX|AUX.*|NUL|NUL.*|COM[1-9]|COM[1-9].*|LPT[1-9]|LPT[1-9].*|COM¹|COM¹.*|COM²|COM².*|COM³|COM³.*|LPT¹|LPT¹.*|LPT²|LPT².*|LPT³|LPT³.*) return 1 ;;
+        esac
+    done
+    receipt_drive_upper=$(printf '%s' "$receipt_drive" | tr '[:lower:]' '[:upper:]') || return 1
+    receipt_native="$receipt_drive_upper:"
+    for receipt_part do receipt_native="${receipt_native}\\${receipt_part}"; done
+    printf '%s' "$receipt_native"
 }
 
-make_hardlink() {
-    # $1 = link path (Windows), $2 = target path (Windows)
-    powershell -NoProfile -Command "New-Item -ItemType HardLink -Path '$1' -Target '$2' -ErrorAction Stop | Out-Null" >/dev/null 2>&1
-}
+make_junction() { native_action junction "$1" "$2"; }
+make_hardlink() { native_action hardlink "$1" "$2"; }
+
 
 placeholder_looks_like_target() {
-    # $1 = file path. True (0) if the file's entire content is a single line
-    # with no NUL bytes and no trailing newline artifacts beyond one — i.e.
-    # it plausibly IS a degraded-symlink placeholder, not real file content
-    # that happens to be short. We additionally require the path to still be
-    # listed as mode 120000 in git's index, which is the authoritative signal
-    # — this heuristic only guards against acting on a path git no longer
-    # considers a symlink.
+    # Only a size guard; cmp below proves exact equality to the HEAD blob.
     [ -f "$1" ] || return 1
     size=$(wc -c < "$1" 2>/dev/null) || return 1
     [ "$size" -gt 0 ] && [ "$size" -lt 4096 ]
@@ -131,32 +935,106 @@ target_is_tracked() {
         "$repo_root"/*) _tit_rel=${1#"$repo_root"/} ;;
         *) return 1 ;;
     esac
-    git -C "$repo_root" ls-files --error-unmatch -- "$_tit_rel" >/dev/null 2>&1
+    classification=$(native_action tracked "$_tit_rel" "") || materializer_fail "cannot classify bound HEAD"
+    [ "$classification" = tracked ]
+}
+pending_policy_allows() {
+    grep -Fqx "$1	$2" "$work_dir/policy"
 }
 
 created=0
 skipped_pending=0
+pending_untracked=0
 failed=0
 already_ok=0
+tracked_count=0
+last_path=""
+record_count=0
 
-git ls-tree -r --format='%(objectmode) %(path)' HEAD 2>/dev/null | while IFS= read -r entry; do
+git -c core.quotePath=false ls-tree -r -t -z --format='%(objectmode) %(objectname) %(path)' \
+    "$head_sha" >"$raw_links_list" 2>/dev/null || materializer_fail "git ls-tree failed"
+cp -- "$policy_path" "$work_dir/policy" || materializer_fail "policy snapshot"
+start_native_batch || materializer_fail "native batch startup"
+
+receipt_path_win=""
+if [ -n "$receipt_path" ]; then
+    receipt_path_win=$(receipt_to_win_path "$receipt_path") || materializer_fail "invalid lexical receipt path"
+    native_action prepare "" "$receipt_path_win" ||
+        materializer_fail "receipt ancestor/destination precondition"
+fi
+
+while IFS= read -r -d '' entry; do
     mode=${entry%% *}
-    path=${entry#* }
+    rest=${entry#* }
+    oid=${rest%% *}
+    path=${rest#* }
     [ "$mode" = "120000" ] || continue
-    printf '%s\n' "$path"
-done > /tmp/materialize-symlinks-windows.$$.list 2>/dev/null || {
-    echo "$SELF: git ls-tree failed" >&2
-    exit 1
-}
+    printf '%s\0%s\0' "$path" "$oid" >>"$links_list" || exit 1
+done <"$raw_links_list"
 
-while IFS= read -r path; do
+
+while IFS= read -r -d '' path && IFS= read -r -d '' oid; do
     [ -n "$path" ] || continue
+    tracked_count=$((tracked_count + 1))
+    if [ -n "$last_path" ]; then
+        LC_ALL=C [ "$path" \> "$last_path" ] ||
+            materializer_fail "tracked symlink paths are not unique and sorted"
+    fi
+    last_path="$path"
     abs_link="$repo_root/$path"
     link_dir=$(dirname "$abs_link")
+    native_action gitblob "$oid" "" || materializer_fail "cannot read tracked target: $path"
+    # Inspect bytes BEFORE shell substitution: NUL and newlines must not be
+    # discarded by the shell. Reject control bytes and Windows-invalid syntax.
+    LC_ALL=C od -An -v -tu1 "$blob_file" | awk '
+        { for (i=1; i<=NF; i++) if ($i < 32 || $i == 127) bad=1 }
+        END { exit bad ? 1 : 0 }' || materializer_fail "blob.control-byte: $path"
+    native_action blob "$(to_win_path "$blob_file")" "" || materializer_fail "blob.invalid-encoding-or-path: $path"
+    target_rel=$(cat "$blob_file" && printf '.') || materializer_fail "blob.read: $path"
+    target_rel=${target_rel%.}
+    case "$target_rel" in
+        ""|*[\\\":\<\>\|\?\*]*|/*) materializer_fail "blob.invalid-path: $path" ;;
+    esac
+    case "$path" in *[[:cntrl:]]*|*[\\\":\<\>\|\?\*]*) materializer_fail "link.invalid-path" ;; esac
+    validate_target_path "$target_rel" || {
+        [ -n "$receipt_path" ] && materializer_fail "external, dangling, or invalid target: $path -> $target_rel"
+        if [ "$strict_missing" -eq 1 ]; then
+            echo "$SELF: DANGLING or invalid symlink: $path -> $target_rel" >&2
+            failed=$((failed + 1))
+        else
+            skipped_pending=$((skipped_pending + 1))
+        fi
+        continue
+    }
+    native_action target "$(to_win_path "$target_abs")" "" || materializer_fail "target path predicate: $path"
+    if [ ! -e "$target_abs" ]; then
+        cmp -s -- "$abs_link" "$blob_file" || materializer_fail "pending placeholder bytes: $path"
+        if target_is_tracked "$target_abs"; then
+            echo "$SELF: DANGLING symlink (tracked target missing): $path -> $target_rel" >&2
+            [ -n "$receipt_path" ] && materializer_fail "tracked target missing: $path -> $target_rel"
+            failed=$((failed + 1))
+        else
+            echo "$SELF: pending-untracked symlink: $path -> $target_rel" >&2
+            if [ -n "$receipt_path" ]; then
+                pending_policy_allows "$path" "$target_rel" || materializer_fail "unexpected pending target: $path -> $target_rel"
+                pending_untracked=$((pending_untracked + 1))
+                record_link "$path" "$target_rel" unknown pending-untracked ||
+                    materializer_fail "cannot record pending symlink: $path"
+            else
+                skipped_pending=$((skipped_pending + 1))
+            fi
+        fi
+        continue
+    fi
 
     if [ -d "$abs_link" ] && [ ! -f "$abs_link" ]; then
-        # Already a junction (or real directory) at this path — nothing to do.
-        already_ok=$((already_ok + 1))
+        if validate_materialized_directory; then
+            already_ok=$((already_ok + 1))
+            record_link "$path" "$target_rel" directory already ||
+                materializer_fail "cannot record directory link: $path"
+        else
+            materializer_fail "directory link is not the expected junction: $path"
+        fi
         continue
     fi
 
@@ -169,8 +1047,10 @@ while IFS= read -r path; do
         # on re-run (observed 2026-08-08: skipped_pending went 9 -> 33 on an
         # idempotent second pass with zero repo changes in between).
         nlink=$(stat -c %h "$abs_link" 2>/dev/null) || nlink=1
-        if [ "${nlink:-1}" -gt 1 ]; then
+        if [ "${nlink:-1}" -gt 1 ] && validate_materialized_file; then
             already_ok=$((already_ok + 1))
+            record_link "$path" "$target_rel" file already ||
+                materializer_fail "cannot record file link: $path"
             continue
         fi
     fi
@@ -178,20 +1058,16 @@ while IFS= read -r path; do
     placeholder_looks_like_target "$abs_link" || {
         # Either missing entirely, or content too large to be a placeholder
         # (already replaced with real content by something else). Leave it.
+        [ -n "$receipt_path" ] && materializer_fail "ordinary or tampered link path: $path"
         [ -f "$abs_link" ] && already_ok=$((already_ok + 1))
         continue
     }
-
-    target_rel=$(cat "$abs_link" 2>/dev/null) || { failed=$((failed + 1)); continue; }
-    [ -n "$target_rel" ] || { failed=$((failed + 1)); continue; }
-
-    target_abs=$(CDPATH= cd -- "$link_dir" 2>/dev/null && cd -- "$(dirname -- "$target_rel")" 2>/dev/null && pwd)/$(basename -- "$target_rel")
-    target_abs=${target_abs%/.}
+    cmp -s -- "$abs_link" "$blob_file" ||
+        materializer_fail "ordinary or tampered placeholder bytes: $path"
 
     if [ -d "$target_abs" ]; then
         win_link=$(to_win_path "$abs_link")
         win_target=$(to_win_path "$target_abs")
-        rm -f "$abs_link" || { failed=$((failed + 1)); continue; }
         if make_junction "$win_link" "$win_target"; then
             created=$((created + 1))
         else
@@ -201,7 +1077,6 @@ while IFS= read -r path; do
     elif [ -f "$target_abs" ]; then
         win_link=$(to_win_path "$abs_link")
         win_target=$(to_win_path "$target_abs")
-        rm -f "$abs_link" || { failed=$((failed + 1)); continue; }
         if make_hardlink "$win_link" "$win_target"; then
             created=$((created + 1))
         else
@@ -216,16 +1091,76 @@ while IFS= read -r path; do
         # "expected expression, found Slash" — a diagnostic that points at the
         # wrong thing entirely. Fail loudly here instead.
         echo "$SELF: DANGLING symlink (target does not exist): $path -> $target_rel" >&2
+        [ -n "$receipt_path" ] && materializer_fail "tracked target missing: $path -> $target_rel"
         failed=$((failed + 1))
     else
         # Target does not exist yet (e.g. an unbuilt binary). Not an error —
         # leave the placeholder; re-run this script after the target exists.
+        [ -n "$receipt_path" ] && materializer_fail "target pending: $path -> $target_rel"
         skipped_pending=$((skipped_pending + 1))
     fi
-done < /tmp/materialize-symlinks-windows.$$.list
-rm -f /tmp/materialize-symlinks-windows.$$.list
+    if [ -n "$receipt_path" ]; then
+        if [ -d "$target_abs" ]; then
+            validate_materialized_directory || materializer_fail "created directory link is invalid: $path"
+            record_link "$path" "$target_rel" directory created ||
+                materializer_fail "cannot record created directory link: $path"
+        else
+            validate_materialized_file || materializer_fail "created file link is invalid: $path"
+            record_link "$path" "$target_rel" file created ||
+                materializer_fail "cannot record created file link: $path"
+        fi
+    fi
+done <"$links_list"
+rm -f "$links_list"
 
 _strict_note=""
 [ "$strict_missing" -eq 1 ] && _strict_note=" strict_missing=1"
 echo "$SELF: created=$created already_ok=$already_ok skipped_pending(target missing)=$skipped_pending failed=$failed$_strict_note"
+if [ "$failed" -ne 0 ]; then
+    [ -z "$receipt_path" ] || materializer_fail "materialization incomplete"
+    exit 1
+fi
+if [ -n "$receipt_path" ]; then
+    head_after=$(git rev-parse --verify HEAD) ||
+        materializer_fail "cannot recheck Git HEAD"
+    [ "$head_after" = "$head_sha" ] ||
+        materializer_fail "Git HEAD changed during materialization"
+    [ "$record_count" -eq "$tracked_count" ] ||
+        materializer_fail "materialization record count mismatch"
+    records_hash_line=$(sha256sum "$records_file" 2>/dev/null) ||
+        materializer_fail "cannot hash materialization records"
+    records_sha256=${records_hash_line%% *}
+    [ "${#records_sha256}" -eq 64 ] || materializer_fail "invalid materialization record digest length"
+    case "$records_sha256" in
+        *[!0-9A-Fa-f]*) materializer_fail "invalid materialization record digest character" ;;
+    esac
+    {
+        printf 'schema=simple-windows-materialized-links-v2\n'
+        printf 'root=%s\n' "$repo_root"
+        printf 'head=%s\n' "$head_sha"
+        printf 'producer_sha256=%s\n' "$producer_sha256"
+        printf 'policy_sha256=%s\n' "$policy_sha256"
+        printf 'tracked_mode120000=%s\n' "$tracked_count"
+        printf 'created=%s\n' "$created"
+        printf 'already_ok=%s\n' "$already_ok"
+        printf 'skipped_pending=%s\n' "$skipped_pending"
+        printf 'failed=%s\n' "$failed"
+        printf 'pending_untracked=%s\n' "$pending_untracked"
+        printf 'record_count=%s\n' "$record_count"
+        printf 'records_sha256=%s\n' "$records_sha256"
+        printf 'pending_count=%s\n' "$pending_untracked"
+        printf 'pending_requires_consumer_revalidation=1\n'
+        printf 'result=complete\n'
+    } >"$receipt_tmp" || materializer_fail "cannot write receipt"
+    printf 'records_begin\n' >>"$receipt_tmp" || materializer_fail "cannot write receipt records"
+    cat "$records_file" >>"$receipt_tmp" || materializer_fail "cannot write receipt records"
+    printf 'records_end\n' >>"$receipt_tmp" || materializer_fail "cannot write receipt records"
+    chmod 600 "$receipt_tmp" || materializer_fail "cannot protect receipt"
+    head_before_publish=$(git rev-parse --verify HEAD) || materializer_fail "cannot bind HEAD before receipt publish"
+    [ "$head_before_publish" = "$head_sha" ] || materializer_fail "Git HEAD changed before receipt publish"
+    [ "$(sha256sum -- "$producer_path" | awk '{print $1}')" = "$producer_sha256" ] || materializer_fail "producer digest changed before receipt publish"
+    [ "$(sha256sum -- "$policy_path" | awk '{print $1}')" = "$policy_sha256" ] || materializer_fail "policy digest changed before receipt publish"
+    native_action publish "$(to_win_path "$receipt_tmp")" "$receipt_path_win" ||
+        materializer_fail "receipt publication predicate"
+fi
 [ "$failed" -eq 0 ]

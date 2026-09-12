@@ -5,6 +5,7 @@ set -euo pipefail
 # owns the pipeline so Windows follows the same pure-Simple/full-build policy.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 abi="${SIMPLE_WINDOWS_ABI:-}"
 forward=()
 
@@ -32,8 +33,14 @@ esac
 # nothing, breaking the loader in confusing ways far from this root cause.
 # No-op, fast, and idempotent on a checkout where symlinks already resolved
 # correctly (e.g. an elevated or Developer-Mode-since-logon session).
-sh "${script_dir}/../setup/materialize-symlinks-windows.shs" "${script_dir}/../.." || {
-  echo "warning: symlink materialization reported failures; continuing, but the build may hit missing-source errors below" >&2
+materialized_receipt_dir="${repo_root}/build/bootstrap/materialized-links"
+materialized_receipt="${materialized_receipt_dir}/windows-materialized-links.$$.env"
+umask 077
+export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="${materialized_receipt}"
+sh "${script_dir}/../setup/materialize-symlinks-windows.shs" \
+  --strict-missing --receipt "${materialized_receipt}" "${repo_root}" || {
+  echo "error: required Windows symlink materialization failed; see ${materialized_receipt}" >&2
+  exit 1
 }
 
 exec sh "${script_dir}/bootstrap-from-scratch.sh" "${forward[@]}"
