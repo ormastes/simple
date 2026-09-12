@@ -132,7 +132,7 @@ Rule B: ran `bin/simple test test/01_unit/lib/database/server/credential_zeroiza
 
 ## Re-check 2026-09-12 — one real defect fixed, the rest is environmental
 
-- Status: OPEN (2026-09-12) — `authenticate` fixed; the zeroization half cannot
+- Status: OPEN (2026-09-12) — `authenticate` fixed in e1f195303e6; the zeroization half cannot
   be verified on the seed interpreter, reason isolated below
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
 - Spec: `test/01_unit/lib/database/server/credential_zeroization_spec.spl`

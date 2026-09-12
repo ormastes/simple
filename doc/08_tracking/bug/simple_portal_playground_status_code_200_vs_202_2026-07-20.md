@@ -44,7 +44,7 @@ Rule B: ran `bin/simple test test/02_integration/app/simple_portal/simple_portal
 
 ## Re-check 2026-09-12
 
-- Status: RESOLVED (2026-09-12) — spec `test/02_integration/app/simple_portal/simple_portal_server_spec.spl`
+- Status: RESOLVED (2026-09-12) — ad89ab383bc, spec `test/02_integration/app/simple_portal/simple_portal_server_spec.spl`
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
 
 Reproduced exactly as filed, then root-caused (the record left this open):

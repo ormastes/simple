@@ -89,3 +89,12 @@ spec passes, which is consistent with the collision never having been the cause.
 The lowering is in the Rust seed, outside this pass's pure-Simple scope. Filed
 with the discriminating matrix so the owner can go straight to the argument-position
 special case.
+
+## What was NOT tested
+
+"Call-argument position" was measured against exactly one call — `expect(...)`.
+`if X.?:` and string-interpolation `"{X.?}"` were not probed, so it is not known
+whether the predicate behaviour is specific to `expect`, to any call argument, or
+to any boolean-consuming context. The blast-radius grep matched tail position
+only (`)\.\?$`), so `if X.?:` call sites are not counted in the list above and the
+real population may be larger.

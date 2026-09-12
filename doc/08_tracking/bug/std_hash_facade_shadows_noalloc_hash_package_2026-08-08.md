@@ -53,7 +53,7 @@ shadowing cannot regress silently.
 
 ## Re-check 2026-09-12
 
-- Status: RESOLVED (2026-09-12) — spec `test/01_unit/lib/std_hash_facade_spec.spl`
+- Status: RESOLVED (2026-09-12) — c845453a1af, spec `test/01_unit/lib/std_hash_facade_spec.spl`
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
 
 The source half had already landed: `src/lib/hash.spl` carries
