@@ -472,3 +472,101 @@ the same change is worth 64-83 % of the geometry magnitude error on five pages �
 and that trade is recorded as a judgement in
 `doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md`,
 which also names the fix: have both paths call one advance function.
+
+## Round 5 — 2026-09-12 (the catalog was rendering 5 of 8 pages as ZERO pixels)
+
+Round 5 began as a fix for the round-4 `forms-media` pixel regression. The
+baseline pass found something larger first, so that is the headline.
+
+### Baseline, measured on a clean `origin/main` @ `43cb44149fe`
+
+```
+SIMPLE_BIN=<repo>/build/cargo-r2/release/simple \
+sh scripts/check/check-chrome-catalog-pixel-diff.shs --out build/perf/r5_base
+FAIL — 3 page(s) compared, 5 unreadable, worst=3.89
+```
+
+**Five of the eight pages produced no framebuffer at all** — `html`,
+`css-layout`, `css-paint`, `forms-media` and `animation` each ended
+`render produced too few pixels: 0 < 684000`. `forms-media`, the page this round
+was briefed to repair, was among them, so the brief's `<= 7.74` target had no
+measurable "before" at HEAD.
+
+Cause, read straight off the render log and then confirmed by sabotage:
+`[e2d-batch] advances-draw-failed ... advances=71 batch_valid=false quads=68`
+with `text_len=73` on a run containing one em dash. `ResolvedFontMetrics.advances`
+carries one entry per CODEPOINT; the Engine2D consumer walks BYTES. U+2014 is 3
+bytes and 1 codepoint, the arrays run at different rates, the batch is rejected,
+and Draw-IR then draws nothing for the ENTIRE page. One em dash cost every pixel.
+Record: `doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`.
+
+### Table
+
+`--simple-only` against the same Chrome references, same binary, same host. The
+"before" column is this round's own baseline run, NOT round 4's published table:
+round 4 measured on a tree where these pages still rendered, so its figures are
+context, not a baseline. Three pages have a real before/after; five went from no
+output at all.
+
+| page | before (r5 baseline) | after | round-4 figure, for context |
+|---|---|---|---|
+| css-layout | **0 px (unreadable)** | **10.29** | 29.19 |
+| html | **0 px (unreadable)** | 17.11 | 17.05 |
+| animation | **0 px (unreadable)** | 15.63 | 15.77 |
+| css-paint | **0 px (unreadable)** | 10.50 | 10.28 |
+| forms-media | **0 px (unreadable)** | **8.11** | 8.58 (7.74 pre-round-4) |
+| overview | 3.89 | 3.89 | 3.89 |
+| evidence | 2.26 | 2.26 | 2.26 |
+| tab-bar | 1.14 | 1.14 | 1.14 |
+
+Verdicts: baseline `FAIL — 3 page(s) compared, 5 unreadable, worst=3.89`;
+after `PASS — 1 page(s) compared, worst=17.11` (html, run first as the
+discriminating probe) and `PASS — 7 page(s) compared, worst=15.63`.
+
+No page regressed against a figure that existed. `css-layout` is the largest
+single movement this project has recorded on the pixel differ, and it is a
+side effect: the page was not merely mis-rendered before, it was blank.
+
+**Artifact caveat:** `--simple-only` overwrites `*.simple.ppm` in place, so
+`build/perf/r5_base` now holds the AFTER renders. The baseline survives only as
+the figures above and in the run log; do not diff those files expecting
+before/after.
+
+### What round 5 changed
+
+1. **Wrapped Draw-IR text lines now carry the resolved advances.** A wrapped run
+   used to be emitted with `draw_ir_text_styled_clipped` — no advances, flat
+   fixed-advance model — while LAYOUT had already sized every one of those lines
+   from the real metrics (round 4). That is the recorded `forms-media`
+   layout/paint disagreement, and the file's own comment had called it "a scope
+   simplification". `_html_draw_ir_resolved_text_command` is now shared by the
+   single-line, first-wrapped-line and extra-wrapped-line emitters.
+2. **The advance array is re-expressed in the consumer's index space**
+   (`_html_draw_ir_byte_advances`): the codepoint's advance on its lead byte, 0
+   on each UTF-8 continuation byte. Same total width, one entry per byte. This
+   is the containment for the defect above; it is a no-op on ASCII.
+3. **The CPU framebuffer painter and the aligned line width step by one table.**
+   `style_run_byte_advances` in `..._layout.spl` is now the single source for
+   `style_text_line_advance_width` and for the glyph stepper
+   (`fb_text_thin_scaled_clip_range_adv`), replacing a third rule that indexed
+   the per-codepoint array with byte offsets.
+
+### Spec and sabotage
+
+`test/01_unit/browser_engine/paint_layout_advance_parity_spec.spl` —
+`2 examples, 0 failures`; asserts paint's line width equals the element's layout
+box width AND Chrome's (`em` 68, `a` 108, +/-1). Sabotage triple, each re-run:
+
+| sabotage | result |
+|---|---|
+| `style_run_byte_advances` returns `[]` | `2 examples, 2 failures` |
+| byte table filled with the flat `style_text_advance` | `2 examples, 2 failures` |
+| pass `metrics.advances` straight through (no byte expansion) | `html` back to `render produced too few pixels: 0 < 684000` |
+
+### Still open after round 5
+
+Bold-face advances (BLOCKED one level below the signature — no loadable bold
+face exists), the `<li>` last-child bottom margin, and table shrink-to-fit /
+UA `border-spacing`. Each has a record naming the exact mechanism and why it was
+not attempted on this round's oracle budget (~1 h per full catalog pass, run
+strictly one page at a time).
