@@ -1,0 +1,50 @@
+#!/bin/sh
+# Build the Rust seed `simple` binary with the GPU feature list its host can
+# actually use.
+#
+# Why this exists: the GPU feature list for an ad-hoc seed was codified NOWHERE
+# in the repo, so a macOS seed was built `--features vulkan,vulkan-graphics`
+# with the `metal` feature OFF. `rt_metal_create_device` then compiles to its
+# `#[cfg(not(all(target_os = "macos", feature = "metal")))]` stub
+# (src/compiler_rust/runtime/src/metal_graphics_runtime.rs:977-986), which
+# returns 0. The extern IS registered (interpreter_extern/mod.rs:1136), so the
+# zero handle propagates silently as a device handle of 0 and every Metal spec
+# on a real Apple M4 goes red for a reason that looks like a runtime defect.
+# See doc/08_tracking/bug/metal_sffi_create_device_returns_null_under_fresh_seed_2026-09-12.md
+#
+# Note `vulkan-graphics` is a feature of the `simple-compiler` crate, not of
+# `simple-driver` which owns `--bin simple`, so it must be named with its
+# package prefix on the command line.
+#
+# Usage:
+#   sh scripts/setup/build-gpu-seed.shs [extra cargo args...]
+# Env:
+#   CARGO_TARGET_DIR   where to build (default: build/cargo-r2 under repo root)
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+: "${CARGO_TARGET_DIR:=$repo_root/build/cargo-r2}"
+export CARGO_TARGET_DIR
+
+case "$(uname -s)" in
+    Darwin)
+        # MoltenVK for Vulkan, plus the native Metal backend. `metal` is the
+        # whole gate for every rt_metal_* extern.
+        features="vulkan,metal,simple-compiler/vulkan-graphics"
+        ;;
+    *)
+        features="vulkan,simple-compiler/vulkan-graphics"
+        ;;
+esac
+
+echo "building seed --bin simple --features $features -> $CARGO_TARGET_DIR"
+cd "$repo_root/src/compiler_rust"
+cargo build --release --bin simple --features "$features" "$@"
+
+out="$CARGO_TARGET_DIR/release/simple"
+if [ ! -x "$out" ]; then
+    echo "ERROR — nothing was built ($out missing)" >&2
+    exit 2
+fi
+echo "PASS — built $out ($(wc -c < "$out" | tr -d ' ') bytes) with features $features"
