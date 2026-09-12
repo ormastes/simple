@@ -176,3 +176,7 @@ which is a compiler-core change well past a triage slot — and no regression
 spec is added here, because a spec pinning the correct behaviour would sit RED.
 The reproducer above is the asset; it makes the fix verifiable in seconds
 instead of by renaming ~40 files against an unproven mechanism.
+
+All three probes above were run with `bin/simple run`, not `bin/simple test`,
+so this is **not** a test-harness module-load artifact: it reproduces on the
+plain run path, which is what the earlier lanes' probes were also using.

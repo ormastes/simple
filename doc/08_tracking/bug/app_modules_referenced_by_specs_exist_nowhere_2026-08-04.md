@@ -109,3 +109,12 @@ CLI's module graph to reach `os.cli` pulled a second `enum Architecture` into
 the same flat name registry. That record was open precisely because five lanes
 failed to reproduce the collision; a 10-line reproducer derived from this
 failure is recorded there today.
+
+**Unmeasured, flagged rather than assumed:** dispatching `os` inline widens
+`app.cli.main`'s import graph to reach `os.cli` and `os.qemu_runner`. The
+startup-time cost of that was NOT measured. `static_startup_fast_path_spec.spl`
+stayed green but it is a structural assertion, not a timing one, so it would not
+catch a regression; `.claude/rules/commands.md` flags CLI startup as
+perf-sensitive. Weighed against the bug's own severity — a user could invoke
+`simple os` and get nothing back — the wiring was judged the right trade, but
+someone should measure it.
