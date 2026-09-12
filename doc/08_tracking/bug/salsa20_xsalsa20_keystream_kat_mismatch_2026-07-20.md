@@ -4,8 +4,7 @@
 - **Area:** Salsa20/XSalsa20 implementation exercised via `test/unit/lib/crypto/salsa20_spec.spl` and `salsa20_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches — output is wrong,
   not merely mis-imported).
-- **Status:** OPEN. **Do not touch the expected vectors** — they are the
-  canonical DJB/NaCl/libsodium published values.
+- **Status:** RESOLVED (2026-09-12) — the implementation was correct and FOUR expected vectors were fabricated; the original "do not touch the expected vectors" instruction was itself wrong for those four. See "Re-check 2026-09-12" at the end of this file before editing any vector here.
 
 ## Symptom
 
@@ -73,3 +72,41 @@ vectors (DJB spec, NaCl, libsodium), not internal fixtures.
 
 - `test/unit/lib/crypto/salsa20_spec.spl` (3 of 14 examples)
 - `test/unit/lib/crypto/salsa20_kat_spec.spl` (1 of 9 examples)
+
+## Re-check 2026-09-12 — NOT an implementation defect; four expected vectors were fabricated
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```
+SIMPLE_RUST_SEED_WARNING=0 bin/simple test test/unit/lib/crypto/salsa20_spec.spl --no-session-daemon
+SIMPLE_RUST_SEED_WARNING=0 bin/simple test test/unit/lib/crypto/salsa20_kat_spec.spl --no-session-daemon
+```
+
+RED: salsa20_spec 14 examples, 11 passed, 3 failed; salsa20_kat_spec 10 examples,
+9 passed, 1 failed.
+
+An independent Salsa20/20 + HSalsa20 + XSalsa20 reference implementation, written
+from the DJB spec, was used to arbitrate every disputed value. It reproduces the
+two vectors these specs already passed, so it is calibrated against published data:
+
+| case | reference | `src/os/crypto/salsa20.spl` | spec's literal |
+|---|---|---|---|
+| key=0, nonce=0 (published eSTREAM) | `9a97f65b9b4c721b…` | same | same (passed) |
+| key=0x80.., nonce=0 (published) | `e3be8fdd8beca2e3…` | same | same (passed) |
+| key=0, nonce=0x80.. | `2aba3dc45b494700…` | same | `317d791f…` |
+| NaCl HSalsa20 core test | `dc908dda0b9344a9…` | same | `497effe5…` |
+| XSalsa20 ciphertext (35 B) | `f47b8d74044e8ee4…` | same | `e2621942…` |
+| XSalsa20 keystream[0..32] (NaCl `crypto_stream_xsalsa20`) | `eea6a7251c1e7291…` | same | `3ef1fcae…` |
+
+The implementation matches the reference on **every** case. `317d791f…` matches no
+key/nonce/counter combination that was searched, and `dc908dda…` / `eea6a725…` are
+the canonical NaCl outputs — i.e. the record's instruction "do not touch the
+expected vectors, they are the canonical published values" was itself wrong for
+these four literals. The "key=0, nonce=0x80.." case is not a published vector at
+all (no published set pairs a zero key with a nonzero nonce) and is now labelled
+as derived rather than as "DJB spec Set 2 vector 0".
+
+GREEN: salsa20_spec 14/14, salsa20_kat_spec 10/10, in both `test/unit/` and
+`test/01_unit/`.
+
+- Status: RESOLVED (2026-09-12) — commit "fix(crypto): replace fabricated Salsa20/XSalsa20 expected vectors with verified ones", specs test/unit/lib/crypto/salsa20_spec.spl and test/unit/lib/crypto/salsa20_kat_spec.spl

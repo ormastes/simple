@@ -1,6 +1,6 @@
 # The whole P-256 stack imports `std.common.math.field.fe_p256`, which was never written
 
-**Status:** OPEN
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end of this file
 **Found:** 2026-08-04
 
 ## Symptom
@@ -69,3 +69,21 @@ tree already carries at least two recorded instances of a *fabricated* KAT
 P-256 field implementation must land with real FIPS 186-4 / RFC 5903 test
 vectors transcribed from the standard and a constant-time review, which is its
 own lane.
+
+## Re-check 2026-09-12 — not reproducible
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```
+SIMPLE_RUST_SEED_WARNING=0 bin/simple test test/01_unit/os/crypto/p256_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/os/crypto/p256_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+PASS test/01_unit/os/crypto/p256_spec.spl
+```
+
+All 6 examples pass — including `ECDSA sign matches RFC 6979 r value`, which is
+downstream of the field arithmetic the missing `std.common.math.field.fe_p256`
+import was supposed to supply. `src/os/crypto/p256.spl` no longer imports that
+module; the `fe_*` symbols now resolve in-tree, so the reported
+`function 'fe_from_bytes' not found` no longer occurs.
+
+- Status: CLOSED (2026-09-12) — not reproducible on 3d120a6f
