@@ -1248,7 +1248,10 @@ k1_composition_file="${k1_composition_root}/compiler/driver/bootstrap_k1_selecte
   echo "error: selected K1 composition is missing or a symlink: ${k1_composition_file}" >&2
   exit 1
 }
-k1_composition_sha256_before=$(shasum -a 256 "${k1_composition_file}" | awk '{print $1}')
+k1_composition_sha256_before=$(bootstrap_stage3_hash_file "${k1_composition_file}") || {
+  echo "error: failed to hash selected K1 composition" >&2
+  exit 1
+}
 SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}
 export SIMPLE_K1_COMPOSITION_SHA256_BEFORE
 
@@ -2604,14 +2607,20 @@ else
   stage2_hosted_runtime_relative_path=\
 ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
+  bootstrap_stage3_compare_bind || {
+    echo "error: could not bind canonical Stage 3 comparator" >&2
+    exit 1
+  }
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_after}")" \
     "${runtime_origin_absolute}" || exit 1
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_admitted_snapshot}")" \
     "$(absolute_path "${stage2_runtime_authority}")" || exit 1
-  cmp -s "${runtime_origin_before}" "${runtime_origin_after}" &&
-    cmp -s "${runtime_origin_after}" "${runtime_admitted_snapshot}" || {
+  bootstrap_stage3_require_equal "Rust runtime authority private-admission origin" \
+    "${runtime_origin_before}" "${runtime_origin_after}" &&
+    bootstrap_stage3_require_equal "Rust runtime authority private-admission snapshot" \
+      "${runtime_origin_after}" "${runtime_admitted_snapshot}" || {
     echo "error: Rust runtime authority changed during private admission" >&2
     exit 1
   }
@@ -2855,7 +2864,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
-  cmp -s "${runtime_admitted_snapshot}" \
+  bootstrap_stage3_require_equal "Rust runtime authority before Stage 2" \
+    "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
   # A pre-execution transcript refusal produces no build log. Remove the prior
@@ -2923,7 +2933,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
-  cmp -s "${runtime_admitted_snapshot}" \
+  bootstrap_stage3_require_equal "Rust runtime authority after Stage 2" \
+    "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" || {
     echo "error: frozen runtime authority changed during Stage 2" >&2
     exit 1
@@ -2966,15 +2977,21 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt" \
       "${stage_runtime_absolute}" || exit 1
     receiver_status=fail
+    receiver_compare_status=0
     if [ "${stage2_receiver_status}" -eq 0 ] &&
-      [ "${stage2_receiver_sha_before}" = "${stage2_receiver_sha_after}" ] &&
-      cmp -s "${runtime_admitted_snapshot}" \
-        "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt"; then
-      receiver_status=pass
+      [ "${stage2_receiver_sha_before}" = "${stage2_receiver_sha_after}" ]; then
+      if bootstrap_stage3_require_equal "Rust runtime authority after receiver" \
+          "${runtime_admitted_snapshot}" \
+          "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt"; then
+        receiver_status=pass
+      else
+        receiver_compare_status=$?
+      fi
     fi
     {
       echo "schema=simple-bootstrap-stage2-receiver-evidence-v1"
       echo "status=${receiver_status}"
+      echo "runtime_compare_status=${receiver_compare_status}"
       echo "probe_exit=${stage2_receiver_status}"
       echo "candidate_sha256_before=${stage2_receiver_sha_before}"
       echo "candidate_sha256_after=${stage2_receiver_sha_after}"
@@ -2983,7 +3000,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "probe_log_sha256=$(bootstrap_stage3_hash_file "${stage2_receiver_log}")"
     } >"${stage2_receiver_evidence}"
     if [ "${receiver_status}" != pass ]; then
-      echo "error: Stage 2 struct receiver/runtime capability failed" >&2
+      if [ "${receiver_compare_status}" -gt 1 ]; then
+        echo "error: Stage 2 receiver admission comparator infrastructure failed (status=${receiver_compare_status})" >&2
+      else
+        echo "error: Stage 2 struct receiver/runtime capability failed" >&2
+      fi
       stage2_status=3
       stage2_rejected_dir="${output_dir}/stage2-rejected/${PLATFORM}"
       stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
@@ -3013,11 +3034,23 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "$(absolute_path "${tool_authority_after}")" "${PATH}" "${repo_root}" || exit 1
     bootstrap_stage3_git_state "${repo_root}" "${stage3_git_after}" || exit 1
     bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
-    if ! cmp -s "${tool_authority_before}" "${tool_authority_after}" ||
-       ! cmp -s "${stage3_source_before}" "${stage3_source_after}" ||
+    stage2_tool_compare_status=0
+    if bootstrap_stage3_require_equal "Stage 2 tool authority" "${tool_authority_before}" "${tool_authority_after}"; then :; else
+      stage2_tool_compare_status=$?
+    fi
+    stage3_source_compare_status=0
+    if bootstrap_stage3_require_equal "Stage 3 source snapshot" "${stage3_source_before}" "${stage3_source_after}"; then :; else
+      stage3_source_compare_status=$?
+    fi
+    if [ "${stage2_tool_compare_status}" -ne 0 ] ||
+       [ "${stage3_source_compare_status}" -ne 0 ] ||
        ! grep -qx 'status=pass' "${stage2_sanity_evidence}" ||
        ! grep -qx 'status=pass' "${stage2_receiver_evidence}"; then
-      echo "error: refused incomplete Stage 2 admission provenance" >&2
+      if [ "${stage2_tool_compare_status}" -gt 1 ] || [ "${stage3_source_compare_status}" -gt 1 ]; then
+        echo "error: refused Stage 2 admission: comparator infrastructure failure" >&2
+      else
+        echo "error: refused incomplete Stage 2 admission provenance" >&2
+      fi
       stage2_status=4
     else
       stage2_origin_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
@@ -3034,7 +3067,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # Re-snapshot after publication: a concurrent source edit invalidates
       # the private copy and prevents a stop-after-stage2 false admission.
       bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
-      if ! cmp -s "${stage3_source_before}" "${stage3_source_after}"; then
+      if ! bootstrap_stage3_require_equal "Stage 3 source snapshot" "${stage3_source_before}" "${stage3_source_after}"; then
         chmod u+w "${stage2_admitted_bin}"
         rm -f "${stage2_admitted_bin}"
         rmdir "${stage2_admitted_dir}" 2>/dev/null || true
@@ -3177,7 +3210,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_directory_snapshot \
       "${stage3_provenance_dir}/runtime-before-stage3.txt" \
       "${stage_runtime_absolute}" || exit 1
-    cmp -s "${runtime_admitted_snapshot}" \
+    bootstrap_stage3_require_equal "Rust runtime authority before Stage 3" \
+      "${runtime_admitted_snapshot}" \
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
     bootstrap_stage3_directory_snapshot \
       "${phase2_cache_before_stage3}" "${stage2_cache_absolute}" || exit 1
@@ -3257,7 +3291,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   if [ "${stage2_status}" -eq 0 ]; then
     bootstrap_stage3_directory_snapshot \
       "${phase2_cache_after_stage3}" "${stage2_cache_absolute}" || exit 1
-    cmp -s "${phase2_cache_before_stage3}" \
+    bootstrap_stage3_require_equal "Phase 2 cache immutability" \
+      "${phase2_cache_before_stage3}" \
       "${phase2_cache_after_stage3}" || {
       echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
       exit 1
@@ -3300,7 +3335,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_directory_snapshot \
       "${stage3_provenance_dir}/runtime-after-stage3.txt" \
       "${stage_runtime_absolute}" || exit 1
-    cmp -s "${runtime_admitted_snapshot}" \
+    bootstrap_stage3_require_equal "Rust runtime authority after Stage 3" \
+      "${runtime_admitted_snapshot}" \
       "${stage3_provenance_dir}/runtime-after-stage3.txt" || {
       echo "error: frozen runtime authority changed during Stage 3" >&2
       exit 1
@@ -3389,7 +3425,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_tool_authority_snapshot \
       "$(absolute_path "${tool_authority_after}")" "${PATH}" \
       "${repo_root}" || exit 1
-    cmp -s "${tool_authority_before}" "${tool_authority_after}" || {
+    bootstrap_stage3_require_equal "Bootstrap tool authority Stage 2/3" \
+      "${tool_authority_before}" "${tool_authority_after}" || {
       echo "error: bootstrap tool authority changed during Stage 2/3" >&2
       exit 1
     }

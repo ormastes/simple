@@ -100,21 +100,34 @@ host_env_sdn_get_list() {
     ' "$1"
 }
 
-# host_env_apply_path -> prepend SIMPLE_HOST_PATH_PREPEND onto PATH.
-# Idempotent: an entry already present in PATH is not re-added.
+# host_env_apply_path -> prepend SIMPLE_HOST_PATH_PREPEND onto PATH in the
+# declared order. Idempotent: an entry already present in PATH is not re-added.
 host_env_apply_path() {
     [ -n "${SIMPLE_HOST_PATH_PREPEND:-}" ] || return 0
     _hen_old_ifs="${IFS}"
+    _hen_ambient_path="${PATH}"
+    _hen_configured_path="${SIMPLE_HOST_PATH_PREPEND}"
     IFS=:
-    set -- ${SIMPLE_HOST_PATH_PREPEND}
-    IFS="${_hen_old_ifs}"
+    set -- ${_hen_configured_path}
+    _hen_prefix=""
     for _hen_entry in "$@"; do
         [ -n "${_hen_entry}" ] || continue
-        case ":${PATH}:" in
+        case ":${_hen_prefix}:" in
             *":${_hen_entry}:"*) ;;
-            *) PATH="${_hen_entry}:${PATH}" ;;
+            *) _hen_prefix="${_hen_prefix:+${_hen_prefix}:}${_hen_entry}" ;;
         esac
     done
+    _hen_ambient_filtered=""
+    set -- ${_hen_ambient_path}
+    for _hen_entry in "$@"; do
+        [ -n "${_hen_entry}" ] || continue
+        case ":${_hen_configured_path}:" in
+            *":${_hen_entry}:"*) ;;
+            *) _hen_ambient_filtered="${_hen_ambient_filtered:+${_hen_ambient_filtered}:}${_hen_entry}" ;;
+        esac
+    done
+    IFS="${_hen_old_ifs}"
+    PATH="${_hen_prefix}${_hen_prefix:+:}${_hen_ambient_filtered}"
     export PATH
 }
 
@@ -242,18 +255,18 @@ EOF
     SIMPLE_HOST_PATH_PREPEND="/st/dup-one:/st/dup-two"
     export SIMPLE_HOST_PATH_PREPEND
     _st_saved_path="${PATH}"
-    PATH="/st/baseline"
+    PATH="/st/dup-two:/st/ambient:/st/dup-one:/st/other"
     host_env_apply_path
     host_env_apply_path
     _st_result_path="${PATH}"
     PATH="${_st_saved_path}"
     export PATH
     _st_count=$(printf '%s' "${_st_result_path}" | tr ':' '\n' | grep -c '^/st/dup-one$')
-    if [ "${_st_count}" = "1" ]; then
-        printf 'ok - (d) applying PATH twice does not duplicate entries\n'
+    if [ "${_st_count}" = "1" ] && [ "${_st_result_path}" = "/st/dup-one:/st/dup-two:/st/ambient:/st/other" ]; then
+        printf 'ok - (d) applying PATH twice preserves declared order without duplicates\n'
         _st_pass=$((_st_pass + 1))
     else
-        printf 'not ok - (d) applying PATH twice does not duplicate entries (count=%s)\n' "${_st_count}"
+        printf 'not ok - (d) applying PATH twice preserves declared order (count=%s path=%s)\n' "${_st_count}" "${_st_result_path}"
         _st_fail=$((_st_fail + 1))
     fi
     unset SIMPLE_HOST_PATH_PREPEND
