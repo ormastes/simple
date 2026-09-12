@@ -402,6 +402,29 @@ pub fn compile_ir_to_object_path(
     if not elf_magic and not macho_magic and not coff_magic:
         return llvm_object_stage_fail(stage_dir, diagnostic_path,
             "llc produced object without recognized magic", 1)
+    # Clear a destination left behind by an EARLIER build in this cache scope.
+    #
+    # `obj_path` is `"{output_base}.{module}.o"` -- keyed by cache scope and
+    # module name, never by source content -- so a second native-build of the
+    # same module into the same scope finds its own previous output sitting
+    # there. `rt_file_publish_noreplace` answers 0 for that (EEXIST), and the
+    # arm below turns the 0 into the hard failure "AOT object destination
+    # already exists". MEASURED 2026-09-13 (lane BOOT-6) on the Stage-2
+    # candidate `67786227817bf45f...`: two positional builds of hello_world
+    # sharing one HOME fail on the SECOND one in either order --
+    # `SIMPLE_BOOTSTRAP=0` then `=1` fails the `=1` pass, `=1` then `=0` fails
+    # the `=0` pass -- which is the whole of the Stage-2 sanity blocker. The
+    # object staged above was verified (exists, regular, non-empty, recognized
+    # object magic) and was produced from the CURRENT MIR, so it is the
+    # authoritative content for this destination; anything already there is
+    # either stale output from an earlier source revision or an equivalent
+    # object from a concurrent build of the same inputs.
+    #
+    # The publish itself stays no-replace on purpose. Clearing first is not the
+    # same as clobbering: a publisher that wins the window between these two
+    # calls still makes this one fail closed rather than being overwritten.
+    if file_exists(obj_path):
+        file_delete(obj_path)
     val publish_status = rt_file_publish_noreplace(staged_obj_path, obj_path)
     if publish_status == 1:
         # Publication is the commit point. Once the canonical destination is
