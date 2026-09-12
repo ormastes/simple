@@ -253,26 +253,114 @@ bootstrap_stage3_validate_descriptor_map() (
 # newline-bearing paths; NUL-delimited xargs keeps every other shell character
 # opaque while batching to the host's argument limit. sha256/openssl retain the
 # portable single-file path because their multi-file output formats differ.
+#
+# Large manifests are split into contiguous blocks hashed concurrently, one
+# worker per block. Order is still exact: within a block xargs runs its batches
+# strictly sequentially in argument order and each hash invocation emits one
+# line per input file in the order given, and the blocks themselves are
+# contiguous and concatenated in index order -- so output line N still
+# corresponds to input line N, which is what the callers that discard the
+# filename field and match positionally require. Concurrency is a pure
+# throughput change with no effect on the bytes produced.
+bootstrap_stage3_hash_path_list_block() {
+    # $1 = newline-delimited path file, $2 = hash tool
+    if [ "$2" = sha256sum ]; then
+        while IFS= read -r bootstrap_stage3_hash_path; do
+            printf '%s\0' "$bootstrap_stage3_hash_path"
+        done <"$1" |
+            xargs -0 sha256sum --
+    else
+        while IFS= read -r bootstrap_stage3_hash_path; do
+            printf '%s\0' "$bootstrap_stage3_hash_path"
+        done <"$1" |
+            xargs -0 shasum -a 256 --
+    fi
+}
+
+# Workers for a manifest of $1 lines: an explicit SIMPLE_NATIVE_BUILD_THREADS
+# wins, else the host CPU count. Forking is not worth it for a short manifest,
+# and a block below the floor buys nothing, so both are clamped -- a small list
+# deterministically resolves to 1 worker and the original sequential path.
+bootstrap_stage3_hash_worker_count() {
+    bootstrap_stage3_hash_wc=${SIMPLE_NATIVE_BUILD_THREADS:-}
+    case "$bootstrap_stage3_hash_wc" in
+        ''|*[!0-9]*)
+            bootstrap_stage3_hash_wc=$(getconf _NPROCESSORS_ONLN 2>/dev/null) ||
+                bootstrap_stage3_hash_wc=1
+            ;;
+    esac
+    case "$bootstrap_stage3_hash_wc" in ''|*[!0-9]*) bootstrap_stage3_hash_wc=1 ;; esac
+    [ "$bootstrap_stage3_hash_wc" -ge 1 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
+    [ "$1" -ge 4096 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
+    while [ "$bootstrap_stage3_hash_wc" -gt 1 ] &&
+        [ $(( $1 / bootstrap_stage3_hash_wc )) -lt 1024 ]; do
+        bootstrap_stage3_hash_wc=$(( bootstrap_stage3_hash_wc - 1 ))
+    done
+    printf '%s\n' "$bootstrap_stage3_hash_wc"
+}
+
 bootstrap_stage3_hash_path_list() {
     [ "$#" -eq 1 ] || return 1
     bootstrap_stage3_hash_paths=$1
     [ -f "$bootstrap_stage3_hash_paths" ] || return 1
     [ -s "$bootstrap_stage3_hash_paths" ] || return 0
+    bootstrap_stage3_hash_tool=
     if command -v xargs >/dev/null 2>&1 &&
         printf '' | xargs -0 true >/dev/null 2>&1; then
         if command -v sha256sum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 sha256sum --
-            return
+            bootstrap_stage3_hash_tool=sha256sum
         elif command -v shasum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 shasum -a 256 --
+            bootstrap_stage3_hash_tool=shasum
+        fi
+    fi
+    if [ -n "$bootstrap_stage3_hash_tool" ]; then
+        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths") ||
+            return 1
+        bootstrap_stage3_hash_lines=${bootstrap_stage3_hash_lines# }
+        bootstrap_stage3_hash_workers=$(
+            bootstrap_stage3_hash_worker_count "$bootstrap_stage3_hash_lines"
+        ) || return 1
+        if [ "$bootstrap_stage3_hash_workers" -le 1 ]; then
+            bootstrap_stage3_hash_path_list_block \
+                "$bootstrap_stage3_hash_paths" "$bootstrap_stage3_hash_tool"
             return
         fi
+        bootstrap_stage3_hash_dir=$(mktemp -d) || return 1
+        bootstrap_stage3_hash_per=$((
+            ( bootstrap_stage3_hash_lines + bootstrap_stage3_hash_workers - 1 ) /
+            bootstrap_stage3_hash_workers
+        ))
+        awk -v per="$bootstrap_stage3_hash_per" \
+            -v dir="$bootstrap_stage3_hash_dir" '
+            { print > sprintf("%s/in.%04d", dir, int((NR - 1) / per)) }
+        ' "$bootstrap_stage3_hash_paths" || {
+            rm -rf -- "$bootstrap_stage3_hash_dir"
+            return 1
+        }
+        bootstrap_stage3_hash_pids=
+        for bootstrap_stage3_hash_block in "$bootstrap_stage3_hash_dir"/in.*; do
+            bootstrap_stage3_hash_path_list_block \
+                "$bootstrap_stage3_hash_block" \
+                "$bootstrap_stage3_hash_tool" \
+                >"${bootstrap_stage3_hash_block}.out" &
+            bootstrap_stage3_hash_pids="$bootstrap_stage3_hash_pids $!"
+        done
+        bootstrap_stage3_hash_rc=0
+        for bootstrap_stage3_hash_pid in $bootstrap_stage3_hash_pids; do
+            wait "$bootstrap_stage3_hash_pid" || bootstrap_stage3_hash_rc=1
+        done
+        # Emit what was produced even on a partial failure and report the
+        # status, exactly as the sequential xargs pipeline does -- callers
+        # decide, and swallowing the output here would itself be a behaviour
+        # change.
+        for bootstrap_stage3_hash_block in \
+            "$bootstrap_stage3_hash_dir"/in.*; do
+            case "$bootstrap_stage3_hash_block" in *.out) continue ;; esac
+            cat -- "${bootstrap_stage3_hash_block}.out" ||
+                bootstrap_stage3_hash_rc=1
+        done
+        rm -rf -- "$bootstrap_stage3_hash_dir"
+        return "$bootstrap_stage3_hash_rc"
     fi
     while IFS= read -r bootstrap_stage3_hash_path; do
         bootstrap_stage3_path_hash=$(
