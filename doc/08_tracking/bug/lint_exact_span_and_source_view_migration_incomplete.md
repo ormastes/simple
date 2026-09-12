@@ -1,5 +1,7 @@
 # Lint exact-span and shared source-view migration is incomplete
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Standalone and query lint now reuse one line view and indexed fallback locations
@@ -25,3 +27,7 @@ latency and allocation measurements show no regression.
 
 Missing spans remain explicit fallbacks. They must never become proof of typed semantics,
 purity, alias safety, or transformation legality.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

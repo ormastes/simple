@@ -1,5 +1,7 @@
 # `compile --native` binary omits program body — silent exit 3 (NIL sentinel)
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED; native execution pending · **Area:** native AOT / linker
 **Blocks:** running showcases as native binaries (the fast lane that escapes
 the interpreter wall now that the LINK step is fixed).
@@ -78,3 +80,7 @@ SIMPLE_RUNTIME_PATH="$PWD/build/simple-core" SIMPLE_LINKER=ld \
   bin/simple compile --native examples/06_io/ui/graphics_2d_showcase.spl -o /tmp/g2d
 SHOWCASE_RESOLUTION=320x240 /tmp/g2d ; echo $?   # -> silent, 3
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

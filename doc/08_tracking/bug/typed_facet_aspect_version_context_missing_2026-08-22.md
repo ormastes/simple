@@ -1,5 +1,7 @@
 # Typed facet parser lacks authoritative aspect-version context
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open integration dependency. Typed facet declarations fail closed when the
@@ -73,3 +75,7 @@ verified descriptor. Missing, duplicate, or unmatched names fail closed. The
 driver must never take provider IDs, concrete/interface/method IDs, ABI/layout
 hashes, capability, or sidecar facts from source declarations or recompute
 them from HIR as a substitute.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

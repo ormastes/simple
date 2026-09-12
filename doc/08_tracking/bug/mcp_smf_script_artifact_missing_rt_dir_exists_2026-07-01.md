@@ -1,5 +1,7 @@
 # MCP SMF script artifact missing `rt_dir_exists`
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 Date: 2026-07-01
 
 ## Status
@@ -68,3 +70,7 @@ env SIMPLE_LIB=src bin/simple compile src/app/mcp/main.spl -o build/mcp-script/s
 env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple build/mcp-script/simple_mcp_server.smf < framed-init-tools-list.in
 MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # Stage 4 access CLI alias export and WM text boundary
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Owner export and exact WM text-boundary repair PASS in focused and full-closure
@@ -42,3 +44,7 @@ The strengthened contract imports and executes `wm_access_operation`, so the
 real WM module and its hub/grammar topology are compiled. It linked 44 modules
 and exited 30. Full Phase 4 cycle 3 then crossed the WM adapter and stopped
 later in `app.mcp_t32.session_tools`, proving the original blocker is cleared.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

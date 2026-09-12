@@ -1,5 +1,7 @@
 # Seed: lambda expression typed as its BODY type de-JITs the whole stage1 closure — 2026-08-22
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 FIXED 2026-08-22 (seed, HIR lowering). Commit: see below.
 
@@ -67,3 +69,7 @@ FILLME
   `lambda_passed_to_any_param_is_not_scalar_boxed` (fails pre-fix: `BoxInt` on
   the closure register in `main`) and
   `lambda_value_has_function_type_not_body_type`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

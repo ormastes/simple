@@ -1,5 +1,7 @@
 # `describe(...)` as the tail expression of `fn main()` leaks a constant 1 into the child exit code, manufacturing a phantom failure (2026-08-08) — FIXED
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 FIXED in `src/app/test_runner_new/test_runner_single.spl`. This closes the
@@ -163,3 +165,7 @@ depend on it: `has_summary == 0` falls through to verdict + glyph evidence, and
 the `(has_summary == 0 or summary_failed == 0)` clause means that once the
 scraper is repaired, a summary reporting real failures will still veto the
 exemption.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

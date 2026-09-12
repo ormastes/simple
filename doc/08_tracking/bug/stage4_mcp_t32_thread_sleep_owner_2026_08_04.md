@@ -1,5 +1,7 @@
 # Stage 4 T32 MCP thread-sleep owner
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Thread and file-read owners fixed; focused native contract PASS; the full
@@ -35,3 +37,7 @@ module's two free `rt_file_read_text` calls. Both reads now use the existing
 `read_file` facade. The strengthened 41-module contract reads a deliberately
 missing CMM path, returns an empty warning set, and exits 30. The following full
 cycle crossed the entire T32 module.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

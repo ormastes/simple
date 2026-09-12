@@ -1,5 +1,7 @@
 # Push gates were unrunnable on macOS: two BSD-awk incompatibilities
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-03  **Status:** both fixed, but NOT by this change — see below; a third, pre-existing blocker documented below
 
 > **Amended 2026-09-04.** This record originally shipped alongside its own two
@@ -103,3 +105,7 @@ to `src`.
 `land.shs: submitted work/...` while the underlying `git push` had failed with
 `error: failed to push some refs`. It does not propagate the push's exit status,
 so a blocked push reads as a successful landing.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

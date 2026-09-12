@@ -1,5 +1,7 @@
 # macOS Vulkan Host-WM Evidence Uses a CPU Presentation Mirror and Synthetic Commands
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 **OPEN — fail closed.** This is a source-path audit only. No host-WM live
@@ -124,3 +126,7 @@ PASS; it must precede QEMU WM and Metal WM work.
 - `sh -n scripts/check/check-wm-production-fullscreen-evidence.shs`: PASS.
 - Source trace confirmed the producer/consumer paths above.
 - No compiler, native-build, live launch, or screenshot probe was run.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

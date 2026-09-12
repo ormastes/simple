@@ -1,5 +1,7 @@
 # Typed collection diagnostics lack a built-in method identity
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open compiler/lint integration blocker. Source-audited on 2026-08-24; runtime
@@ -61,3 +63,7 @@ would make diagnostic severity forgeable and revision-unsafe.
   name inference; Allow/Warn/Deny policy is applied once by its policy owner.
 - Unsupported equality kinds fail with a precise compiler diagnostic rather
   than linking an absent runtime symbol or silently using text semantics.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

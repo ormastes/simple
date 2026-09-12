@@ -1,5 +1,7 @@
 # Pre-existing test-tree divergence stepped over by the cs / log-opt landing
 
+**Status:** OPEN (unverified 2026-09-12)
+
 > Recorded 2026-09-03 to satisfy the scoped-delta escape in
 > `.claude/rules/vcs.md` — landing on a delta-PASS REQUIRES recording the
 > pre-existing offender list. An unrecorded step-over is a violation even when
@@ -65,3 +67,7 @@ invisible.
 
 OPEN (the pre-existing red is not this lane's to fix). The step-over itself is
 closed by this record.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

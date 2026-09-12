@@ -1,5 +1,7 @@
 # Stale untracked `.smf` stubs shadow real modules → every spec fails `unresolved name: describe`
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-24 · **Severity:** critical (tooling) · **Status:** mitigated (quarantine), root fix open
 
 ## Symptom
@@ -60,3 +62,7 @@ normally — devhub suite verified 25 files / 517 examples / 0 failures.
   builds; cf. the Jul-17 "std.spec SMF shadowing = Rust-layer defect" note)
   remains unpinned — but with the producer dead, the cache gated, and current
   resolvers proven .spl-first, the class is closed at every reachable layer.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

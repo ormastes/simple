@@ -1,5 +1,7 @@
 # macOS Vulkan live backend is unavailable before rendering
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Open. The current trusted self-hosted Vulkan harness rebuilds, but no current
@@ -68,3 +70,7 @@ runtime error: field access on nil receiver
 blocked dynamic-text ABI instead of unsafely calling it. Provider availability,
 device count, dyld resolution, and provider error remain unobserved in this
 run. No Rust seed fallback and no exhausted full-live Vulkan command were used.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

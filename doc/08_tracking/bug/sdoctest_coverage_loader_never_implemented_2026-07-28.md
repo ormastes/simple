@@ -1,5 +1,7 @@
 # `load_sdoctest_blocks` / `compute_sdoctest_coverage` are re-exported and called but never defined
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-28 · **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/cli/**`.
@@ -88,3 +90,7 @@ the four call sites assume), or remove the two `export` lines from
 
 ## Triage 2026-09-12
 Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

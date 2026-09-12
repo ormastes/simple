@@ -1,5 +1,7 @@
 # Hosted WM Capture `put_pixel` Lowering Failure
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Open; blocks retained hosted framebuffer evidence for the Aetheric WM theme.
@@ -30,3 +32,7 @@ This is a compiler/lowering prerequisite rather than a theme ownership bug.
 The theme implementation must not substitute fixture, synthetic, or private
 renderer evidence. Fix the owner-level lowering defect, then rerun the checker
 once in a fresh verification session.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

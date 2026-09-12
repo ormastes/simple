@@ -1,5 +1,7 @@
 # Native cross-module arithmetic probe exits 5
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Source-fixed; rebuilt execution pending. Stage2/3 rebuilt successfully from
@@ -71,3 +73,7 @@ rebuild Stage2/3 incrementally and run the unchanged cross-module fixture once.
 If it still fails, disassemble the keys before considering the separate
 `translate_load` provenance audit. Do not weaken or delete the fixture, and do
 not advance to Stage4/QEMU until it passes.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

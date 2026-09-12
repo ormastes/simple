@@ -1,5 +1,7 @@
 # rt_vulkan_* Only Execute Under Classic Interpreter - 2026-06-17
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Severity
 P1 — GPU backends silently no-op (report zero devices) outside the classic
 interpreter, with no error surfaced. This is the substrate that makes
@@ -90,3 +92,7 @@ its loader probes only `libvulkan.so.1` and `libvulkan.so` under `cfg(unix)`,
 so Darwin never tries `libvulkan.1.dylib` or `libvulkan.dylib`. That source
 file was already dirty in another active compiler lane and was not modified
 by this investigation.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

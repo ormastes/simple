@@ -1,5 +1,7 @@
 # Adding an unused function changes the results of unrelated examples (interpreter, silent wrong result)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 STILL-OPEN — P1, but **NO LONGER REPRODUCIBLE** on the seed rebuilt
@@ -195,3 +197,7 @@ cannot be run until a binary that reproduces the baseline RED is identified.
   whose P1 verdict is blocked on this.
 - `shellout_specs_target_refusing_production_wrapper_2026-08-17.md` — a sibling
   in kind: test infrastructure producing plausible, defect-shaped false REDs.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

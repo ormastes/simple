@@ -1,5 +1,7 @@
 # `bin/simple stats` / `bin/simple doc-coverage` fail with "file not found" (seed dispatch gap)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom (RED, measured on deployed `bin/simple`, the Rust seed)
 ```
 $ bin/simple stats
@@ -148,3 +150,7 @@ The remaining non-zero exit is **not this bug**: it is the seed correctly
 refusing a Rust fallback for a pure-Simple-only tool, which is the documented
 KNOWN BLOCKER in `.claude/rules/bootstrap.md`. Tracking of that belongs to the
 bootstrap/self-host records, not here. Closing.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

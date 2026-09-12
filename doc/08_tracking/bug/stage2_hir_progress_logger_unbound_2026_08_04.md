@@ -1,5 +1,7 @@
 # Stage 2 HIR progress logger is unbound
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved on 2026-08-04.
@@ -24,3 +26,7 @@ method and is not replaced by the environment-gated phase logger.
 `test/01_unit/compiler/driver/hir_progress_cadence_contract_spec.spl` checks
 the helper export, the split-module import, both HIR call sites, and the
 16-module cadence.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

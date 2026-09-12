@@ -1,5 +1,7 @@
 # Stage 3 frontier: one `unresolved name` whose name and location disagree (2026-08-25)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 SOURCE FIXED; rebuilt Stage 2 and Stage 3 evidence pending. Stage 3 is the
@@ -115,3 +117,7 @@ false at origin/main. Do not act on it.
 NOT verified here: why the third importer fails while the other two succeed, and
 whether the 19-line span offset is specific to this diagnostic or general to
 `unresolved name`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

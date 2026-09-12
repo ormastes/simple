@@ -1,5 +1,7 @@
 # Interpreter `rt_file_open` / `rt_file_close` were stubs returning -1 / false
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-05 · **Status:** FIXED in source (uncommitted), deployed seed still affected · **Lane:** `.spipe/sosix_runtime_unification/state.md`
 
 ## Defect
@@ -28,3 +30,7 @@ mirroring the runtime's mode table (0 read, 1 read-write, 2 write). Landed with
 - Generalization: same spec, "writes bytes at an offset…" (read-write mode) and
   "reports failures as -errno…" (a closed descriptor yields -EBADF, proving the
   close really closed).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

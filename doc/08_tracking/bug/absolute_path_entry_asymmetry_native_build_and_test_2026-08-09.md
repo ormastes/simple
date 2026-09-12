@@ -1,5 +1,7 @@
 # Absolute paths are mishandled in opposite directions by `native-build --entry` and `simple test` -- 2026-08-09
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status: PARTIALLY FIXED (Half 1 implemented 2026-08-16; admitted Stage 2/4 verification pending). Half 2 remains OPEN / fail-open.
 
 Two CLI entry points disagree about absolute paths, and they fail in *opposite*
@@ -103,3 +105,7 @@ The `simple test` half is the dangerous one: it manufactures false GREENs.
   exit non-zero.
 - Both checks belong in the CLI-behaviour spec corpus so the asymmetry cannot
   silently return.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # `slh_dsa_wots.spl` retype — archive-lane verification demo (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Assignment (part 2 of 2): re-apply the pass-11 reverted retype
 (`base_2b`/`wots_checksum_digits_p`/`wots_msg_to_digits_p`/128s wrappers,
 `: list` → `[i64]`, 2 census-counted sites / 5 signature occurrences) and
@@ -104,3 +106,7 @@ src/os/crypto` (or otherwise narrow its discovery root) to avoid the
 unrelated whole-program MIR-lowering gap, and budget the KAT spec run
 without concurrent CPU-heavy jobs competing for cycles.
 
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

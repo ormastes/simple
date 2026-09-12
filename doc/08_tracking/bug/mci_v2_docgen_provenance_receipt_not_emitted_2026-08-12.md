@@ -1,5 +1,7 @@
 # MCI-v2 docgen provenance receipt is not emitted
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 IMPLEMENTED, NOT RELEASE-VERIFIED — still blocks MCI-DOC-001 and MCI-DOC-002.
@@ -40,3 +42,7 @@ exact-current pure-Simple CLI, run docgen once with `--provenance-receipt`,
 then run
 `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` and the live
 traceability producer.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

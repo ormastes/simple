@@ -1,5 +1,7 @@
 # Stage 4 streaming lexer early-release SIGSEGV
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open after the bounded 2026-08-04 focused cycle.
@@ -37,3 +39,7 @@ Refreshed-producer probe:
 `build/focused/stage4-streaming-lexer-release/full-build-refreshed.log`.
 Both completed the 1,726-file closure and terminated with SIGSEGV immediately
 after `phase2:surface:file:released ... seq=1`. No candidate exists.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

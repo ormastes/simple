@@ -1,5 +1,7 @@
 # Stage 4 module-surface builder normalizes every source path twice
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status and claim
 
 FIXED IN SOURCE — claimed by `stage4_perf_profile` on 2026-08-02. The owned
@@ -50,3 +52,7 @@ AST declaration graphs, or serial Phase-2 execution.
   21/21 PASS.
 - Optimizer analysis completed for both changed pure-Simple compiler files.
 - Direct environment-runtime guards PASS for working and staged scopes.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

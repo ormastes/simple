@@ -1,5 +1,7 @@
 # VirtIO input SFFI publishes split mutable event snapshots
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open ABI and concurrency blocker. ARM64 and RV64 facades remain unsafe.
@@ -31,3 +33,7 @@ before a safe promotion. Until then, declarations and wrappers require
 The migration must reduce six calls to one, use a stack/local output descriptor,
 and add no heap allocation, copy of queue payloads, map lookup, hash, signature
 verification, lock, or generic dispatch per poll. Admission remains one-time.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

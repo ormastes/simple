@@ -1,5 +1,7 @@
 # Verification of ae5401713a9 import-re-export risk: BLOCKED (inconclusive)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-18
 
 ## Task
@@ -60,3 +62,7 @@ and no fix was applied to `env_ops.spl` because it is out of scope for this
 review (different commit, different concern). Recommend: fix
 `env_ops.spl:8`'s invalid import syntax first (blocking bug, filed here), then
 re-run this verification.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

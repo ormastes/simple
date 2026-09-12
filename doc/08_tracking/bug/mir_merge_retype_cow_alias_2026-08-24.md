@@ -1,5 +1,7 @@
 # MIR merge retype retains earlier COW aliases
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Source-level evidence only; runtime measurement is intentionally omitted
@@ -31,3 +33,7 @@ ownership transfer that demonstrably releases the temporary before retyping.
 Preserve instruction/terminator order, merge placeholder behavior, inferred
 type selection, spans, and result-match semantic markers. Add allocation/COW
 evidence before closing this bug.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

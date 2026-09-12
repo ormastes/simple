@@ -1,5 +1,7 @@
 # Lint directory targets fail as opaque files
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Source-fixed; fresh pure-Simple Stage 4 qualification remains pending.
@@ -42,3 +44,7 @@ Source execution through the temporary Rust bootstrap interpreter produced one
 W001 and one failed-file summary for the mixed-spelling overlap. This is not
 production qualification: the retained binary predates the fix, and a fresh
 Stage 4 essential-tools run remains required.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

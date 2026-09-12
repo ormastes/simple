@@ -1,5 +1,7 @@
 # Interpreter JIT file-state hot path
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Source inspection only; no benchmark was run in the no-verification sync
@@ -25,3 +27,7 @@ recovery solely to improve a microbenchmark.
 Raw file and PID declarations are removed. Canonical owners preserve existing
 operation counts, typed read failure, exact one-call writes, and validated PID
 identity. No extra I/O was added by the SFFI authority migration.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

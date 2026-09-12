@@ -1,5 +1,7 @@
 # Vulkan DrawIR showcase native build exceeds 10 minutes
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. This blocks live Simple-to-Rust validation of the no-readback Vulkan
@@ -64,3 +66,7 @@ bounded worker lifetime (`--timeout`, default 180 seconds) and writes closure,
 phase, and progress receipts beside the requested artifact. It exits `6`
 before build on the current seed-only state rather than consuming the old
 ten-minute budget. This is a fail-closed deployment fix, not an 8K/80 result.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

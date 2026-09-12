@@ -1,5 +1,7 @@
 # Stage 4 compile-target trace environment facade
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 - Claimed: 2026-08-02
@@ -37,3 +39,7 @@ facade. The adjacent save/restore reads remain facade-owned and no raw
 Focused source contract: 2 examples passed (exact trace pair plus adjacent
 save/restore reads). `direct-env-runtime-guard.shs --working` also reported
 `STATUS: PASS`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

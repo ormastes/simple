@@ -1,5 +1,7 @@
 # Stage 4 duplicate checker uses unresolved `float` conversion
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved in source on 2026-08-04; the next x86 Phase 4 blocker is tracked
@@ -31,3 +33,7 @@ malformed split/equal forms. The focused native shard crossed parsing, HIR, and
 object generation, then stopped only at the deliberately narrow core bundle's
 unrelated `rt_http_request` link boundary. Production Phase 4 cycle 1 crossed
 all four sites and advanced to `test_runner_main.spl`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

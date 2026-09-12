@@ -1,5 +1,7 @@
 # caret wiki_write appends `.md` but wiki_read does not — a page cannot be read back by the id used to write it
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-25 · **Severity:** MEDIUM (silent round-trip failure in a shipped tool) · **Status:** OPEN
 **Found by:** the acceptance spec (`test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl`)
 
@@ -32,3 +34,7 @@ already ends in `.md`, and the Confluence backend's id handling.
 ## Unblock condition
 `wiki_read(wiki_write(id).page_id)` returns the written body byte-identically
 for every id form the tool accepts, pinned by a spec.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # Bug: Rust seed reserves `me` as a keyword token, rejecting it as an ordinary `val`/pattern name
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-28
 **Component:** `src/compiler_rust/parser` (seed lexer/parser), consumer: `src/app/test_daemon/light_daemon.spl`
 **Severity:** High — broke the light test daemon for every seed-only worktree, degrading
@@ -79,3 +81,7 @@ already know it's a keyword). Two follow-ups worth tracking separately:
   error (proceeds to normal daemon startup/import warnings).
 - See `$S/light_daemon_parse_REPORT.md` for the full whole-compiler-tests rerun after
   this fix.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

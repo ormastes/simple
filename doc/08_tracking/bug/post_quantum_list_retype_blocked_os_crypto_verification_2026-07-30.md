@@ -1,5 +1,7 @@
 # Post-quantum sig/KEM `list` retype batch — documented, not landed (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Assignment (part 2): next crypto retype batch per the pass-9 fix order —
 post-quantum sig/KEM files (`ml_dsa*`, `ml_kem*`, `slh_dsa_wots.spl`), same
 rigor as the kafka fix (both-engine A/B, NIST KAT references where present
@@ -125,3 +127,7 @@ landmine applies" clause, generalized to the verification blocker found
 here. The site-fix order from pass 9 is otherwise unchanged; this doc
 narrows it with the specific `os.crypto` blocker any future pass needs to
 clear first.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

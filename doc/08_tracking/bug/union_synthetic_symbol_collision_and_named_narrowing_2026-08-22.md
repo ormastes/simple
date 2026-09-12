@@ -1,5 +1,7 @@
 # Structural union symbol and named-narrowing follow-up
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Partially resolved by the module-owned SymbolTable registry and bare named-type
@@ -34,3 +36,7 @@ remain unsupported.
   diagnostic behavior.
 - Sorted preregistration makes genuine same-hash assignment independent of
   declaration and dictionary traversal order.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # env/process facade bypass: an 80-site backlog behind a guard recorded as a one-line RED
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-06 · **Status:** RECORDED (census, not fixed) · **Measured at:** `a12a19eb775`
 (worktree checkout of `origin/main`). No build was run.
 
@@ -91,3 +93,7 @@ silently.
 - **No trend.** The census is a single point at one sha. Whether 80 is growing, flat, or
   shrinking against the 2026-08-06 state is unknown, because that record published no
   count to compare against. A ratchet baseline would fix that and is not proposed here.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
