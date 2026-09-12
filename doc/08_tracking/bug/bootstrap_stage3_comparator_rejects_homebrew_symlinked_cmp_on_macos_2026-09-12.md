@@ -1,7 +1,38 @@
 # Stage-3 comparator binding refuses a Homebrew-symlinked `cmp`, blocking every macOS bootstrap (2026-09-12)
 
-Status: OPEN, root-caused, workaround proven. Found while re-running lane 1 of
+Status: **FIXED 2026-09-12, PR #670.** Found while re-running lane 1 of
 `doc/03_plan/infra/macos_open_bugs_fix_lanes_round2_2026-09-12.md`.
+
+The suggested fix at the bottom of this record is what landed, plus the second
+half the record correctly identified as necessary: `compare_files` no longer
+re-resolves the ambient `cmp` at all, because shadowing is now decided ONCE at
+bind time. `bootstrap_stage3_compare_bind` binds the PHYSICAL target, resolved
+by a new portable `bootstrap_stage3_resolve_symlinks` (`readlink -f` is
+GNU-only, so it walks the chain one link at a time, resolves a RELATIVE target
+against the LINK's directory rather than the caller's cwd, caps at 32 hops, and
+then uses the repo's existing `cd -P` canonicaliser). The anti-alias property is
+carried by `BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256` exactly as this record
+proposed: it pins the CONTENT, and an aliased name cannot change which bytes
+run.
+
+Every refusal path now prints a reason, so the misleading "Rust runtime
+authority changed during private admission" no longer stands in for "the
+comparator was refused". A `#!` script wrapper is REFUSED rather than receipted
+-- the trust model is a byte-hash pin of the bound file, and a wrapper's own
+bytes do not determine what actually runs, so hashing it would pin nothing.
+
+The missing fixture this record called for is in place: four comparator cases in
+`bootstrap_stage3_provenance_self_test` (symlinked `cmp` accepted and bound to
+its physical target; no `cmp` on PATH -> 2; script wrapper -> 2; a pin shadowed
+by a different ambient `cmp` -> 2). They are deliberately placed EARLY in that
+function, because on macOS a later step (seed-stamp ABI policy) is
+baseline-red and would otherwise stop the suite before they ran.
+
+Verified on the real host with stock Homebrew-first PATH, NO `/usr/bin`
+workaround and NO pin: binds `/opt/homebrew/Cellar/diffutils/3.12/bin/cmp`,
+equal->0, differ->1. Two live `bootstrap-from-scratch.sh` runs in that
+configuration cleared the bind, cleared Stage 1, and reached `Stage 2: admitted
+parent`. The workaround below is no longer required.
 
 ## Symptom
 
