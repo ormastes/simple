@@ -2682,8 +2682,30 @@ impl Lowerer {
                     // would make the next consumer read `42 << 3` as a raw int.
                     // `ANY` is what every other tagged-value producer reports.
                     let _ = pointee;
+                    // Identity on the VALUE is not the same as returning the
+                    // word unchanged. A `T?` STATIC type does not guarantee a
+                    // bare runtime word: `Some(x)` lowers to `BuiltinCall
+                    // "Some"` (calls.rs:638) and boxes a real Option enum, so
+                    // `val b: text? = Some("world"); b!` handed the Option
+                    // WRAPPER to the next consumer — `b!.len()` answered -1 and
+                    // `"[" + b! + "]"` answered "". That is a silent wrong
+                    // answer, and it is what made every MCP CLI tool report
+                    // "centralized child storage environment is unavailable":
+                    // `_optional_environment` (storage_roots/environment_owner.spl:13)
+                    // returns `Some(value)` into `text?`, and the resolver's
+                    // `environment.local_app_data! == ""` then compared the
+                    // wrapper, not the path.
+                    // `rt_unwrap_or_self` is precisely the normalizer for this:
+                    // it is the identity on a bare/flat word and on every
+                    // non-Option enum, and yields the payload only for the
+                    // reserved OPTION_ENUM_ID (runtime/src/value/objects.rs:326).
+                    // So a genuinely-flat nullable keeps its previous behaviour
+                    // bit for bit, and a boxed `Some(x)` is flattened to `x`.
                     return Ok(HirExpr {
-                        kind: inner_hir.kind,
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir],
+                        },
                         ty: TypeId::ANY,
                     });
                 }
@@ -2719,8 +2741,20 @@ impl Lowerer {
                     self.module.types.get(pointee),
                     Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
                 ) {
+                    // Same `Some(x)`-into-`T?` boxing hazard as the scalar case
+                    // above, and it is on the same incident path one line down:
+                    // `tooling_paths.spl` caches `_tooling_roots = Some(roots)`
+                    // (a `StorageRoots?`) and then returns `Ok(_tooling_roots!)`,
+                    // so the second call in a request handed the Option wrapper
+                    // out typed as `StorageRoots`. `rt_unwrap_or_self` leaves a
+                    // real object reference — and every non-Option user enum —
+                    // untouched, so the class/enum identity this branch exists
+                    // to preserve is preserved.
                     return Ok(HirExpr {
-                        kind: inner_hir.kind,
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir],
+                        },
                         ty: pointee,
                     });
                 }

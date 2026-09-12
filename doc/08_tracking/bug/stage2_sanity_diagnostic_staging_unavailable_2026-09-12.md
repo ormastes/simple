@@ -75,3 +75,55 @@ failure path — at minimum log `GetLastError()` and the attempted path on the
 Windows branch — and rerun. That one change should identify which of the three
 hypotheses is correct, and it is the same "fail closed WITH a reason" principle
 that located the Stage 2 env-name and CC-path defects earlier today.
+
+---
+
+## Update 2026-09-12, later: the Stage 2 compiler WORKS. The harness is the problem.
+
+A rejected Stage 2 binary is now preserved at
+`.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected`,
+which makes this directly testable instead of only reachable through a ~40
+minute bootstrap. Results:
+
+| probe | result |
+|---|---|
+| `simple.exe.rejected --version` | `simple-bootstrap 1.0.1-beta.1`, rc=0 |
+| `native-build` hello world, MSVC env, shallow out dir | **rc=0, exe produced** |
+| same, into the deep stage3 output dir | **rc=0** |
+| same, into a parent directory that does not exist | **rc=0** |
+| same, under `env -i` WITH SystemRoot/SystemDrive | **rc=0** |
+| same, under `env -i` WITHOUT SystemRoot/SystemDrive | **rc=0** |
+
+So the Stage 2 compiler natively builds a hello world successfully, including in
+a stripped environment. `diagnostic staging unavailable` could not be reproduced
+outside the sanity harness at all.
+
+### Hypotheses now disproven
+
+- **NOT MAX_PATH** (measured 164 vs 260, previously).
+- **NOT a missing parent directory** — explicitly tested above.
+- **NOT missing `SystemRoot`/`SystemDrive`** in the `env -i` allowlist. This
+  looked compelling: `LoadLibraryA("bcrypt.dll")` needs them to resolve system
+  DLLs, they ARE passed at `authority.shs:716-717` for other invocations, and
+  they are NOT in `bootstrap_stage3_stage2_canonical_env_names`. Tested both
+  ways anyway: both rc=0. Recorded because it is the obvious next guess and
+  someone else will otherwise spend the same time on it.
+- **NOT the Win32 call sequence** — a standalone C probe succeeds at every step.
+
+### Operational trap for whoever continues
+
+The `rt_secure_temp_dir` diagnostic landed in this session (PR #672, in BOTH
+`runtime.c` and `runtime_native.c`) **did not appear in the rejected Stage 2
+binary**: `strings simple.exe.rejected | grep rt_secure_temp_dir:` returns 0.
+The core-c archive it linked predates the change, so the instrumentation never
+ran. Bust that archive cache before concluding the diagnostic is silent — a
+silent diagnostic here means "not linked", not "did not fire".
+
+### Where to look next
+
+The difference is in how the sanity harness *invokes* the compiler, not in the
+compiler. Compare the harness's exact argv and environment
+(`bootstrap_stage_sanity` in `scripts/bootstrap/bootstrap-from-scratch.sh`, and
+the frontend smoke driver it runs) against the working invocations tabled above.
+The unit it compiles is `scripts.check.cert.redeploy_gate.fixtures.hello_world`,
+reached through `--entry-closure`, which none of the probes above used.
