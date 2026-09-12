@@ -32,10 +32,15 @@ fn read_db_file(path: text) -> Result<text, text>:
 # =========================================================================
 
 fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
-    # Acquire lock
-    val lock = match TestDbFileLock.acquire(path, LOCK_TIMEOUT):
-        case Ok(acquired): acquired
-        case Err(reason): return Err(reason)
+    # Acquire lock. `acquire` yields `TestDbFileLock?`, never a Result, so it
+    # is tested for nil; matching it against Ok/Err arms aborted every call
+    # with "match expression exhausted". The binding is explicitly typed so
+    # the bare `release` call below resolves to TestDbFileLock.release rather
+    # than sitting on the ambiguous-method codegen path.
+    val acquired = TestDbFileLock.acquire(path, LOCK_TIMEOUT)
+    if acquired == nil:
+        return Err("Failed to acquire lock for {path} within {LOCK_TIMEOUT}s")
+    var lock: TestDbFileLock = acquired
 
     # Guard against overwriting non-empty with empty
     if content.trim() == "" and file_exists(path):
@@ -63,9 +68,11 @@ fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
 # =========================================================================
 
 fn update_db_file(path: text, updater: fn(text) -> text) -> Result<(), text>:
-    val lock = match TestDbFileLock.acquire(path, LOCK_TIMEOUT):
-        case Ok(acquired): acquired
-        case Err(reason): return Err(reason)
+    # Same Option contract as write_db_file_locked above.
+    val acquired = TestDbFileLock.acquire(path, LOCK_TIMEOUT)
+    if acquired == nil:
+        return Err("Failed to acquire lock for {path} within {LOCK_TIMEOUT}s")
+    var lock: TestDbFileLock = acquired
 
     var content = ""
     if file_exists(path):
