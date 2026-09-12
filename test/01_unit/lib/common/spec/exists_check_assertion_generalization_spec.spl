@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Generalization companion to exists_check_assertion_position_spec.spl. The
+reproducing spec pins one helper; this one shows the assertion-position
+collapse is a property of `.?` ITSELF, not of that helper — it holds for
+locally declared optionals, for dict lookups, for optionals produced by
+arithmetic, and on both sides of a comparison written inside `expect(...)`.
+
+Written for spec authors auditing a spec that reads `expect(x.?)`: if the
+subject is an optional and the oracle is a non-bool, the spec is asserting
+presence while claiming to assert value, and is wrong in the same way
+backend_metal_font_spec.spl was.
+
+## Operator workflow
+SIMPLE_EXECUTION_MODE=interpreter simple run test/01_unit/lib/common/spec/exists_check_assertion_generalization_spec.spl
+
+## Compatibility and limitations
+Self-contained: every optional here is produced in this file, so the
+contract is pinned independently of any library. No GPU, no device, no I/O.
+
+## Verification guidance and troubleshooting
+If these go red while the reproducing spec stays green, the collapse has
+become helper-specific rather than universal — that is a worse state than
+either reading, because the meaning of `.?` would then depend on where the
+value came from.
+"""
+# Lifecycle: doc/08_tracking/bug/backend_metal_font_spec_exists_check_in_assertion_position_2026-09-12.md
+# @manual_section: exists-check-semantics
+
+use std.spec.{describe, it, expect, step}
+
+
+fn maybe_double(n: i64) -> i64?:
+    if n < 0:
+        return nil
+    n * 2
+
+fn maybe_name(key: text) -> text?:
+    if key == "known":
+        return "metal"
+    nil
+
+
+describe "Existence check collapse generalizes":
+    it "collapses a locally produced numeric optional":
+        # @req REQ-SPEC-EXISTS-010
+        # @capture(statistics): presence bools for a present and an absent numeric optional
+        step("Assert on `.?` of numeric optionals produced in this file")
+        expect(maybe_double(21).?).to_equal(true)  # oracle: 21 >= 0 so the optional is present
+        expect(maybe_double(-1).?).to_equal(false)  # oracle: a negative input yields nil, so absent
+
+    it "collapses a text optional the same way":
+        # @req REQ-SPEC-EXISTS-011
+        # @capture(statistics): presence bools for a present and an absent text optional
+        step("Assert on `.?` of text optionals — payload type does not change the collapse")
+        expect(maybe_name("known").?).to_equal(true)  # oracle: "known" maps to "metal", so present
+        expect(maybe_name("other").?).to_equal(false)  # oracle: any other key yields nil, so absent
+
+    it "recovers every payload by binding before asserting":
+        # @req REQ-SPEC-EXISTS-012
+        # @capture(statistics): payloads recovered from numeric and text optionals
+        step("Bind each optional to a val, then assert on the recovered payload")
+        val doubled = maybe_double(21)
+        expect(doubled ?? 0).to_equal(42)  # oracle: 21 doubled is 42
+        val absent_number = maybe_double(-1)
+        expect(absent_number ?? -7).to_equal(-7)  # oracle: an absent optional falls through to the default
+        val name = maybe_name("known")
+        expect(name ?? "").to_equal("metal")  # oracle: the present text payload is "metal"
+        val absent_name = maybe_name("other")
+        expect(absent_name ?? "none").to_equal("none")  # oracle: absent text falls through to the default
+
+    it "keeps to_be_nil reading the optional itself, not its presence":
+        # @req REQ-SPEC-EXISTS-013
+        # @capture(statistics): to_be_nil verdicts on raw optionals with no `.?`
+        step("Assert on the optional WITHOUT `.?` so the matcher sees the optional")
+        expect(maybe_double(-1)).to_be_nil()  # oracle: the absent optional itself is nil
+        expect(maybe_name("other")).to_be_nil()  # oracle: the absent text optional itself is nil
