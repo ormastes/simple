@@ -2425,13 +2425,6 @@ mod cow_alias_mechanism_tests {
         (now.0 - before.0, now.1 - before.1)
     }
 
-    fn dict_len(v: &Value) -> usize {
-        match v {
-            Value::Dict(d) => d.len(),
-            other => panic!("expected dict, got {:?}", other),
-        }
-    }
-
     fn nested_box_with_empty_xs() -> Value {
         let mut inner: HashMap<String, Value> = HashMap::new();
         inner.insert("xs".to_string(), Value::array(vec![]));
