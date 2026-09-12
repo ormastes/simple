@@ -376,13 +376,12 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
            not rt_transient_heap_promote(surface.export_route_target_names) or
            not rt_transient_heap_promote(surface.export_route_is_glob):
             return false
-        if not module_surface_promote_freeze_names(surface):
-            return false
+        module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
     roots.push(registry)
     module_surface_promote_roots(roots)
 
-fn module_surface_promote_freeze_names(surface: ModuleSurface) -> bool:
+fn module_surface_promote_freeze_names(surface: ModuleSurface):
     """Promote the four scalar texts `module_surfaces_freeze` re-assigns.
 
     `module_surfaces_freeze` (module_surface_registry_index.spl) overwrites
@@ -397,22 +396,30 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface) -> bool:
     built nil/garbage node keys and dereferenced a nil `HirStruct`. See
     doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md
 
-    A field that is ALREADY persistent returns false from the first promote and
-    that is not an error: `canonical_name` aliases `logical_name`, and an empty
-    `preferred_registry_name` is a shared literal. The post-condition below is
-    what fails closed, because a second promote reports true only for a value
-    that is STILL owned by the dying scope.
+    This used to end in a post-condition asserting that a SECOND promote of each
+    name answers false, on the premise that a repeat promote reports true only
+    for a value still owned by the dying scope. That premise is false, measured
+    with gdb on the Stage-2 candidate: it holds only for a transient heap STRING,
+    whose `RT_CORE_STRING_FLAG_TRANSIENT` the C runtime clears on promote
+    (runtime_native.c:2474). A raw allocation keeps its lookup-table entry and
+    only loses `RT_CORE_TRANSIENT_RAW_OWNED_BIT` (runtime_native.c:2488); an
+    array/dict/enum/closure only has its `transient_scope_id` zeroed; and
+    `rt_core_transient_classify` (runtime_native.c:2362) consults neither, so it
+    keeps answering "tracked" and the promote keeps answering true. Under
+    `SIMPLE_NATIVE_ARENA_DECLS=1` these four names are not plain transient heap
+    strings, so the post-condition fired on every run and turned a SUCCESSFUL
+    promotion into `Module surface registry graph promotion failed after phase 2`
+    — the `--stop-after-stage2` admission blocker. The promotion itself is the
+    work; the driver still fails closed on the real invariant, because it runs
+    `module_surfaces_retained_alignment_error` AFTER
+    `_sffi_transient_array_scope_end()`, and that check reads these names back
+    (module_surface_registry_index.spl:321). See
+    doc/08_tracking/bug/stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md
     """
     val _logical = rt_transient_heap_promote(surface.logical_name)
     val _canonical = rt_transient_heap_promote(surface.canonical_name)
     val _package = rt_transient_heap_promote(surface.package_name)
     val _preferred = rt_transient_heap_promote(surface.preferred_registry_name)
-    if rt_transient_heap_promote(surface.logical_name) or
-       rt_transient_heap_promote(surface.canonical_name) or
-       rt_transient_heap_promote(surface.package_name) or
-       rt_transient_heap_promote(surface.preferred_registry_name):
-        return false
-    true
 
 pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
     module_surfaces_frozen_alignment(registry)
