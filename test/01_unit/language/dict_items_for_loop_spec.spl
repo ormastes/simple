@@ -19,23 +19,17 @@
 # interpreter under the spec runner's own engine and structurally cannot
 # observe what the JIT does.
 #
-# Pin (a) (regression guard, interpreter only): the fix is a STATIC rule on
-# the iterable EXPRESSION -- destructure only when it is written as a
-# `.items()`/`.entries()` call; every other iterable, including an array
-# whose elements happen to be 2-tuples, keeps the plain enumerate shorthand.
-# `for i, pair in [(1, 2), (3, 4)]:` must still enumerate (`i` = 0, 1;
-# `pair` = the tuple unchanged), never destructure. An earlier (rejected) fix
-# decided this per ITEM at runtime instead (wrap unless the yielded value was
-# already a 2-tuple), which silently flipped this exact shape from enumerate
-# to destructure -- a real feature break, and data-dependent since the same
-# source could flip behavior depending on what the array happened to hold.
-#
-# Pin (a) is INTERPRETER-ONLY, not JIT: the JIT's bare-enumerate loop over
-# ANY plain array (tuples or not) is a separate, PRE-EXISTING defect,
-# unrelated to and unaffected by this fix in either direction -- confirmed
-# byte-identical (`IDX_SUM=4`, `PAIR_REPR=nil-nil;nil-nil;`) on both the
-# original deployed seed and every rebuilt candidate in this session. Not
-# fixed here; out of scope for this bug.
+# Pin (a), REVERSED 2026-09-12: the static `.items()`/`.entries()` rule this
+# spec originally pinned was superseded by a language decision -- a bare comma
+# for-pattern is ALWAYS a tuple destructure, whatever the iterable is, and the
+# seed's enumerate shorthand was REMOVED (it was a seed-only feature the
+# pure-Simple compiler never had and the seed's own JIT never implemented).
+# `for i, pair in [(1, 2), (3, 4)]:` therefore destructures now: i = 1, 3 and
+# pair = 2, 4. Both engines answer identically, so pin (a) is asserted for the
+# JIT lane too -- the former "JIT bare enumerate over any array" gap is gone,
+# because there is no bare enumerate to be missing. Enumerate intent is spelled
+# `for i, x in xs.enumerate():`. See doc/08_tracking/bug/
+# seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
 #
 # Pin (b): `for k, v in d.entries():` (the second alias) destructures the
 # same as `.items()`, in both lanes.
@@ -79,12 +73,12 @@ describe "for k, v in d.items() (bare two-name pattern) on the interpreter":
         expect(field(out, "KV_MATCH")).to_equal("1")
         expect(field(out, "COUNT_MATCH")).to_equal("1")
 
-    it "still enumerates a bare two-name pattern over an array of 2-tuples (pin a, regression guard)":
-        step("interpreter: for i, pair in [(1,2),(3,4)] still enumerates, does not destructure")
+    it "destructures a bare two-name pattern over an array of 2-tuples (pin a)":
+        step("interpreter: for i, pair in [(1,2),(3,4)] destructures, does not enumerate")
         val out = run_probe_in_mode("interpreter")
         expect(out).to_contain("PROBE_DONE")
-        expect(field(out, "IDX_SUM")).to_equal("1")
-        expect(field(out, "PAIR_REPR")).to_equal("1-2;3-4;")
+        expect(field(out, "FIRST_SUM")).to_equal("4")
+        expect(field(out, "SECOND_REPR")).to_equal("2;4;")
 
     it "destructures the .entries() alias the same as .items() (pin b)":
         step("interpreter: for k, v in d.entries() destructures like d.items()")
@@ -114,9 +108,12 @@ describe "Dict.items() under the JIT":
         expect(jit).to_contain("PROBE_DONE")
         expect(field(jit, "ENTRIES_BARE_TOTAL")).to_equal("6")
 
-    # Pin (a) is deliberately NOT asserted here for the JIT lane: the JIT's
-    # bare-enumerate loop over ANY plain array is a separate, pre-existing
-    # defect (see the header comment), unrelated to and unaffected by this
-    # fix. Asserting IDX_SUM/PAIR_REPR here would either fail on an
-    # unrelated pre-existing gap or require fixing it, which is out of scope
-    # for this bug.
+    it "destructures a bare two-name pattern over an array of 2-tuples (pin a, JIT)":
+        step("jit: same destructure as the interpreter, byte for byte")
+        val jit = run_probe_in_mode("jit")
+        val interp = run_probe_in_mode("interpreter")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(field(jit, "FIRST_SUM")).to_equal("4")
+        expect(field(jit, "SECOND_REPR")).to_equal("2;4;")
+        expect(field(jit, "FIRST_SUM")).to_equal(field(interp, "FIRST_SUM"))
+        expect(field(jit, "SECOND_REPR")).to_equal(field(interp, "SECOND_REPR"))

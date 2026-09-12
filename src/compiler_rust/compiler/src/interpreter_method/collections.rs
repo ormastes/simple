@@ -1634,7 +1634,6 @@ mod keys_materialization_tests {
             },
             simd_requested: false,
             is_suspend: false,
-            auto_enumerate: false,
             invariants: vec![],
             label: None,
         };
@@ -1698,7 +1697,6 @@ mod keys_materialization_tests {
                 },
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate: false,
                 invariants: vec![],
                 label: None,
             };

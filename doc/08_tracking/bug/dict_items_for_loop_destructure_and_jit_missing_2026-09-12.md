@@ -1,6 +1,9 @@
 # `for k, v in d.items()` fails in the interpreter; `Dict.items` is missing under JIT
 
-- Status: PARTIALLY FIXED (2026-09-12) — both original defects fixed and
+- Status: PARTIALLY FIXED (2026-09-12); the open design question is now
+  RESOLVED — see "Design conflict" below and
+  `doc/08_tracking/bug/seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md`.
+  Both original defects fixed and
   verified in-tree (worktree `simple-dict-items`, branch
   `work/dict-items-for-loop`); **the lead-mandated static-rule design leaves
   two checked-in `test/04_smoke/` tests at their deployed-seed RED state —
@@ -51,7 +54,41 @@ Deployed seed `bin/release/aarch64-unknown-linux-gnu/simple`, 2026-09-06 09:59.
 2. Add `items` beside `keys`/`values` in the JIT builtin dispatch and the
    native runtime, pinned by a lane-parity spec.
 
-## Design conflict, needs a lead decision (read this first)
+## Design conflict — RESOLVED 2026-09-12 (read this first)
+
+**This section is superseded.** The lead decision came down on the side of
+the pure-Simple compiler, and is recorded, implemented and verified in
+`doc/08_tracking/bug/seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md`.
+
+The decision: **a bare comma pattern in a for loop is ALWAYS a tuple
+destructure, of any arity, regardless of what the iterable is.** The seed's
+enumerate shorthand — the seed-only feature this section describes as
+genuine and separately tested — was **removed**, not preserved. Enumerate
+intent is now written `for i, x in arr.enumerate():` in every lane.
+
+Consequences for what is written below:
+
+- Design 1 and Design 2 are both superseded; neither ships. Design 2's code
+  (the static `.items()`/`.entries()` rule, `for_loop_iterable_is_items_or_entries_call`
+  in `interpreter_helpers/patterns.rs`) has been **deleted**.
+- `test/04_smoke/compiler_unparenthesized_tuple_for(.runtime).spl` are GREEN
+  on the fixed binary, in both engines. They were right all along; they read
+  as regression tests for the pure-Simple model because that is what they
+  are.
+- The "seed has a genuine enumerate-shorthand FEATURE that pure-Simple does
+  not" framing was accurate, and is exactly why the feature was removed
+  rather than propagated: the seed's own JIT never implemented it either, so
+  the shorthand was a one-engine-out-of-three divergence, not a language
+  feature.
+- The `.enumerate()` double-wrap this section calls "pre-existing, left
+  alone" is also fixed, as a direct consequence.
+- Pin (a) in `probe_dict_items_for_loop.spl` / `dict_items_for_loop_spec.spl`
+  has been REVERSED to assert destructure, and is now asserted for the JIT
+  lane too.
+
+The original text follows, unedited, for the record.
+
+## Design conflict, needs a lead decision (read this first) — SUPERSEDED, see above
 
 This is a CROSS-ENGINE semantics conflict, not two seed-interpreter tests
 disagreeing with each other. `test/04_smoke/compiler_unparenthesized_tuple_for.spl`

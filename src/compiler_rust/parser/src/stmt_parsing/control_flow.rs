@@ -451,8 +451,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::For)?;
 
-        // Check for enumerate shorthand: `for i, item in items:`
-        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
+        // A bare comma pattern (`for a, b in e:`) is a tuple destructure.
+        let pattern = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -500,7 +500,6 @@ impl<'a> Parser<'a> {
                 body,
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate,
                 invariants,
                 label,
             }))
@@ -528,82 +527,71 @@ impl<'a> Parser<'a> {
                 body,
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate,
                 invariants: vec![],
                 label,
             }))
         }
     }
 
-    /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`.
+    /// Parse a for loop's binding pattern.
     ///
-    /// A bare TWO-name pattern `for a, b in e:` is genuinely ambiguous at
-    /// parse time between two live idioms that share identical syntax:
-    ///   - the enumerate shorthand `for i, item in items:` (`items` any
-    ///     iterable; `i` should be the loop's own position) — has a
-    ///     dedicated interpreter fast path
-    ///     (`try_exec_enumerated_int_array_for_loop`, interpreter_control.rs)
-    ///     and is pinned by test/01_unit/app/interpreter/perf_spec.spl's
-    ///     "enumerated ... array foreach index sum" examples;
-    ///   - bare tuple destructuring `for k, v in d.items():` /
-    ///     `for k, v in d.entries():`, meant to behave exactly like the
-    ///     parenthesized `for (k, v) in d.items():` (both already produce
-    ///     the same `Pattern::Tuple([Identifier(a), Identifier(b)])` here).
+    /// A bare comma list — `for a, b in e:`, `for a, b, c in e:` — is
+    /// ALWAYS a tuple destructure, of any arity, exactly like the
+    /// parenthesized `for (a, b) in e:`. The iterable is never consulted:
+    /// both spellings produce the same `Pattern::Tuple([...])` here, so no
+    /// later stage can tell them apart, which is the point.
     ///
-    /// This can't be resolved here — the parser doesn't evaluate `e`.
-    /// `auto_enumerate = true` defers the decision to the interpreter, which
-    /// applies a STATIC rule on `e`'s own EXPRESSION shape, once per loop
-    /// (`for_loop_iterable_is_items_or_entries_call`,
-    /// interpreter_helpers/patterns.rs): destructure only when `e` is
-    /// written as a `.items()`/`.entries()` method call; every other
-    /// iterable — including an array literal/variable whose elements happen
-    /// to be 2-tuples, e.g. `for i, pair in [(1, 2), (3, 4)]:` — keeps the
-    /// plain enumerate shorthand. (An earlier attempt at this fix decided
-    /// per ITEM at runtime instead, by inspecting whether each yielded value
-    /// was already a 2-tuple; that was wrong — it silently flipped
-    /// `for i, pair in [(1, 2), (3, 4)]:` from enumerate to destructure
-    /// purely because the array's elements happened to be tuples, a real
-    /// feature break that was also data-dependent.) Before either fix
-    /// landed, EVERY bare two-name loop over `d.items()`/`d.entries()` was
-    /// silently double-wrapped — `for k, v in d.items():` bound `k` to the
-    /// loop's positional index and `v` to the whole `(key, value)` tuple
-    /// instead of unpacking it. See doc/08_tracking/bug/
-    /// dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+    /// This matches the pure-Simple compiler, which is the language's
+    /// reference semantics: `parse_for_stmt` +`encode_for_tuple_binding`
+    /// (src/compiler/10.frontend/core/parser_stmts.spl) joins an arbitrary
+    /// bare name list into the same `"(a,b,c)"` pattern the parenthesized
+    /// spelling produces, unconditionally, and the HIR lowering
+    /// (src/compiler/20.hir/hir_lowering/statements.spl, `StmtKind.For`)
+    /// emits one `let name = __for_tuple_elem[i]` per name.
     ///
-    /// A bare pattern of three or more names (`for a, b, c in e:`) is not
-    /// handled by this shorthand at all — same as before this fix, it falls
-    /// through to a parse error, since only the two-name case has a
-    /// competing "enumerate" idiom to stay compatible with. Widening bare
-    /// tuple patterns to arbitrary arity is a separate grammar change (would
-    /// need a `doc/06_spec` regeneration) and is out of scope here.
-    ///
-    /// Returns (pattern, auto_enumerate)
-    fn parse_for_pattern(&mut self) -> Result<(Pattern, bool), ParseError> {
-        // Check if this looks like enumerate shorthand: bare `ident, pattern`
-        // (not a tuple pattern which uses parentheses)
-        if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            let first_name = name.clone();
-            self.advance();
-
-            // If followed by comma (enumerate shorthand), parse the item pattern
-            if self.check(&TokenKind::Comma) {
-                self.advance(); // consume comma
-                let second_pattern = self.parse_pattern()?;
-
-                // Exactly two bare names: ambiguous — see the doc comment
-                // above. Tag `auto_enumerate = true` so the interpreter
-                // disambiguates per item at runtime.
-                let tuple_pattern = Pattern::Tuple(vec![Pattern::Identifier(first_name), second_pattern]);
-                return Ok((tuple_pattern, true));
+    /// There is NO "enumerate shorthand". Until 2026-09-12 the seed tagged a
+    /// bare two-name pattern `auto_enumerate = true` and the interpreter
+    /// index-wrapped every element (`i` = the loop's own position, `item` =
+    /// the element), a feature the pure-Simple compiler has never had and
+    /// the seed's own JIT never implemented. Enumerate intent is now written
+    /// `for i, x in xs.enumerate():` in every lane. See
+    /// doc/08_tracking/bug/
+    /// seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+    fn parse_for_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // A bare comma list can only start with a plain name or `_`.
+        // Anything else — `for (a, b) in e:`, `for [a, b] in e:`, a literal —
+        // is a complete pattern on its own and is parsed exactly as before.
+        let first = match &self.current.kind {
+            TokenKind::Identifier { name, .. } => {
+                let name = name.clone();
+                self.advance();
+                Pattern::Identifier(name)
             }
+            TokenKind::Underscore => {
+                self.advance();
+                Pattern::Wildcard
+            }
+            _ => return self.parse_pattern(),
+        };
 
-            // Not enumerate shorthand - just a regular identifier pattern
-            return Ok((Pattern::Identifier(first_name), false));
+        if !self.check(&TokenKind::Comma) {
+            return Ok(first);
         }
 
-        // Fall back to standard pattern parsing (handles tuples, wildcards, etc.)
-        let pattern = self.parse_pattern()?;
-        Ok((pattern, false))
+        let mut patterns = vec![first];
+        while self.check(&TokenKind::Comma) {
+            self.advance(); // consume the separator
+            // NOT `parse_pattern`: a `,` here separates BINDINGS, so it must
+            // not be swallowed as a comma or-pattern. Until 2026-09-12 this
+            // used `parse_pattern`, which is why `for a, b, c in e:` parsed
+            // as `(a, b | c)` — a two-element tuple whose second element was
+            // an Or pattern — and then silently bound nothing at all,
+            // skipping every iteration. Same reasoning as
+            // `parse_enum_payload_patterns` and the struct-pattern field
+            // list, which both avoid `parse_pattern` for this exact reason.
+            patterns.push(self.parse_pattern_no_comma_or()?);
+        }
+        Ok(Pattern::Tuple(patterns))
     }
 
     pub(crate) fn parse_while(&mut self) -> Result<Node, ParseError> {
@@ -1205,8 +1193,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::ForSuspend)?;
 
-        // Check for enumerate shorthand: `for~ i, item in items:`
-        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
+        // A bare comma pattern (`for a, b in e:`) is a tuple destructure.
+        let pattern = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -1245,7 +1233,6 @@ impl<'a> Parser<'a> {
             body,
             simd_requested: false,
             is_suspend: true,
-            auto_enumerate,
             invariants,
             label: None,
         }))
