@@ -197,6 +197,18 @@ fn _vulkan_scaled_image_args_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i3
 # Vulkan Backend
 # ============================================================================
 
+# One parked host byte mirror of a font atlas, keyed on the atlas OWNER identity
+# (the font face) and the atlas generation those bytes incorporate. Nothing here
+# is device state: the bytes are a copy of `batch.atlas_pixels`, so a parked slot
+# stays valid across device buffer rewrites and is invalidated only by a
+# generation gap, which the incremental repack already requires to be exactly +1.
+class VulkanFontAtlasMirror:
+    identity: text
+    generation: i64
+    bytes: [u8]
+
+val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 4
+
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
 
@@ -279,6 +291,14 @@ class VulkanBackend:
     font_atlas_host_bytes: [u8]
     font_atlas_host_identity: text
     font_atlas_host_valid: bool
+    # Parked mirrors for atlas owners that are not currently active. Two font
+    # identities on one page used to evict each other's mirror on every switch,
+    # so BOTH paid a full 1,048,576-pixel repack per batch (measured: every
+    # owner switch was a `pack_full`). Parking the outgoing owner's bytes and
+    # swapping the incoming owner's back in makes an alternating A,B,A,B page
+    # repack only its dirty cells. Bounded LRU: index 0 is the least recently
+    # used and is evicted first.
+    font_atlas_mirror_slots: [VulkanFontAtlasMirror]
     # The atlas generation the mirror actually incorporated. Generations come
     # from ONE global counter bumped once per dirty batch, so `batch
     # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
@@ -481,6 +501,7 @@ class VulkanBackend:
             font_atlas_host_bytes: [],
             font_atlas_host_identity: "",
             font_atlas_host_valid: false,
+            font_atlas_mirror_slots: [],
             font_atlas_host_generation: -1,
             font_atlas_width: 0,
             font_atlas_height: 0,
@@ -1005,6 +1026,7 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_host_identity = ""
         self.font_atlas_host_valid = false
         self.font_atlas_host_generation = -1
+        self.font_atlas_mirror_slots = []
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -2921,6 +2943,15 @@ pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
 
 var _vk_font_pack_full: i64 = 0
 var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_per_owner_mirror_enabled() -> bool:
+    """Per-owner atlas mirrors, on by default; `0` restores the single mirror.
+
+    The off position exists as a MEASUREMENT CONTROL: it lets the same binary
+    and the same tree produce the pre-change pack counts, so a before/after
+    comparison cannot be contaminated by a rebuild.
+    """
+    (env_get("SIMPLE_VK_FONT_PER_OWNER_MIRROR") ?? "") != "0"
 
 pub fn vulkan_font_pack_note(incremental: bool):
     """Record whether an atlas upload repacked the whole atlas or only the

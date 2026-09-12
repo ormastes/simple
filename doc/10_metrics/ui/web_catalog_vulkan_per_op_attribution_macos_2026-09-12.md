@@ -204,3 +204,78 @@ per-owner mirror removes it), which would leave ~167,000 ms. That floor is host
 rasterization plus the 29,451 ms document pipeline, not GPU work — the presenter
 rasterizes the page on the CPU and uses the GPU as a pass-through. The cpu_simd
 bar on this page is 263,636 ms.
+
+## Appended 2026-09-12 (F-follow-up): two hypotheses measured, both refuted
+
+Same binary `/Users/ormastes/simple/build/cargo-r2/release/simple`, same page,
+`SIMPLE_2D_BACKEND=vulkan SIMPLE_VK_READBACK=native SIMPLE_VK_IMAGE_UPLOAD=u32
+SIMPLE_2D_BACKEND_STRICT=1 SIMPLE_EXECUTION_MODE=interpreter`, serial.
+
+### 1. The Draw IR route sampler never runs on this lane
+
+New level-gated stage counters (`SIMPLE_WEB_ROUTE_STAGES=1`, read-only) on
+`simple_web_layout_engine2d_fast.spl`, at **both** sizes:
+
+```
+route_stages oracle_raster_ms=0 oracle_n=0 present_upload_ms=0 present_n=0 \
+  gpu_route_ms=0 gpu_n=0 consults=0 canonical_submissions=0 cached_reuses=0
+```
+
+`_web_draw_ir_choose_route` is never entered: every call site is behind
+`web_gpu_paint_enabled()`, which needs `SIMPLE_WEB_GPU_PAINT=1`, never set on
+this lane. There is no per-document software-oracle A/B pass to remove, and no
+probe-authorization mechanism was built. The host-raster floor comes instead
+through `simple_web_html_engine2d_presenter.spl:~597` (not owned here). Detail:
+`doc/08_tracking/bug/web_vulkan_lane_per_document_software_sampling_2026-09-12.md`.
+
+### 2. Per-owner atlas mirrors change nothing on this page
+
+Controlled by `SIMPLE_VK_FONT_PER_OWNER_MIRROR` (same binary, same tree):
+
+| size | per-owner | pack_full | pack_incremental | identity_changed | PPM |
+|---|---|---|---|---|---|
+| 300x253 | off | 2 | 3 | 2 | — |
+| 300x253 | on | 2 | 3 | 2 | `cmp` clean vs off |
+| 900x760 | off | 8 | 13 | 8 | — |
+| 900x760 | on | 8 | 13 | 8 | `cmp` clean vs off |
+
+Cause: `atlas_generation` is ONE global counter shared by all owners, so an
+interleaved page always violates the `+1` continuity rule the incremental repack
+requires — generations `[2 4 5 6 7 8 9 9 10 11 11 12 12 13 15 17]`. The fix needs
+a per-owner sequence field on `FontRenderBatch` (`font_renderer.spl`, not owned
+here). Detail:
+`doc/08_tracking/bug/vulkan_font_atlas_shared_mirror_repacks_2026-09-12.md`.
+
+`test/02_integration/gpu/vulkan_font_atlas_incremental_repack_spec.spl`:
+**14 examples, 0 failures** with the per-owner cache in the tree.
+
+### Wall clock is not usable as evidence at this size right now
+
+Three 900x760 runs of essentially the same work: **226 s, 336 s, 584 s** under
+concurrent agent load on this host. The ≤100 s target is **MISSED**, and with the
+two candidate terms refuted the remaining floor is the presenter's host raster,
+which this lane does not own. Reported honestly rather than fitted.
+
+### 3. Stage table at 900x760 — 82% of the cold render is outside the Vulkan backend
+
+Control run (`SIMPLE_VK_FONT_PER_OWNER_MIRROR=0`, `SIMPLE_VK_TIMING=1`), 336 s wall:
+
+| bucket | n | total ms |
+|---|---|---|
+| font_composite | 23 | 54,103 |
+| — font_atlas_pack_u32_to_u8 | 21 | 53,221 |
+| — font_atlas_sffi_upload | 21 | 326 |
+| — font_atlas_payload_sha256 | 21 | 261 |
+| rect | 550 | 1,285 |
+| image_composite | 264 | 1,056 |
+| image_blend | 262 | 858 |
+| readback | 2 | 1,540 |
+| **Σ backend** | | **~59,000** |
+| **wall − Σ** | | **~277,000 (82%)** |
+
+The font atlas pack is still the dominant backend term (53 s, 8 full packs), and
+everything else on the device is noise. The remaining 277 s is host work in
+parse/style/layout/Draw IR and the present path — **bounded here, not located**,
+and not instrumented by this lane. An earlier claim in the sampling record that
+pinned it to `simple_web_html_engine2d_presenter.spl:~597` was retracted: that
+function's call from `_web_draw_ir_upload_route` is on the dead sampler path.

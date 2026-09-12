@@ -13,7 +13,7 @@
 # doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md.
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
-    VulkanBackend,
+    VulkanBackend, VULKAN_FONT_ATLAS_MIRROR_MAX,
     vulkan_font_pack_note, vulkan_font_pack_reset,
     vulkan_font_pack_full_count, vulkan_font_pack_incremental_count,
     vulkan_timing_enabled, vulkan_timing_table
@@ -202,6 +202,80 @@ describe "vulkan font atlas incremental repack":
         vulkan_font_pack_note(true)
         expect(vulkan_font_pack_full_count()).to_be(1)
         expect(vulkan_font_pack_incremental_count()).to_be(3)
+
+    # -----------------------------------------------------------------------
+    # PRODUCT: per-owner mirror slots. Two font identities on one page used to
+    # evict each other's host mirror on every switch. These cases drive the
+    # shipped `_font_mirror_activate` on a device-free backend, so they prove
+    # the park/swap-in actually mutates the backend's slot list -- the failure
+    # this guards against is a SILENT NO-OP, where the push lands on a clone
+    # (see doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md)
+    # and every activation misses while the page counters look unchanged.
+    # -----------------------------------------------------------------------
+
+    it "PRODUCT a parked owner's mirror is swapped back in after another owner ran":
+        var backend = VulkanBackend.create()
+        val bytes_a = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = bytes_a
+        # Owner B takes over: A is parked, B has no slot yet.
+        expect(backend._font_mirror_activate("owner-b", true)).to_be(false)
+        backend.font_atlas_host_identity = "owner-b"
+        backend.font_atlas_host_generation = 6
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 22u32))
+        # A comes back: its own bytes and generation must return intact.
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(true)
+        expect(backend.font_atlas_host_generation).to_be(5)
+        expect(bytes_equal(backend.font_atlas_host_bytes, bytes_a)).to_be(true)
+
+    it "PRODUCT SABOTAGE a stale mirror is never parked, so its owner comes back cold":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        # entry_valid=false: the mirror was already incoherent at entry.
+        expect(backend._font_mirror_activate("owner-b", false)).to_be(false)
+        backend.font_atlas_host_identity = "owner-b"
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(false)
+
+    it "PRODUCT the slot list is bounded, so the least recently used owner is evicted":
+        var backend = VulkanBackend.create()
+        val first_bytes = oracle_pack_full(synthetic_atlas(8, 8, 1u32))
+        backend.font_atlas_host_identity = "owner-0"
+        backend.font_atlas_host_generation = 1
+        backend.font_atlas_host_bytes = first_bytes
+        # Park owner-0, then VULKAN_FONT_ATLAS_MIRROR_MAX more distinct owners.
+        var i = 1
+        while i <= VULKAN_FONT_ATLAS_MIRROR_MAX:
+            val name = "owner-" + i.to_text()
+            expect(backend._font_mirror_activate(name, true)).to_be(false)
+            backend.font_atlas_host_identity = name
+            backend.font_atlas_host_generation = (i + 1).to_i64()
+            backend.font_atlas_host_bytes = oracle_pack_full(
+                synthetic_atlas(8, 8, (i + 1).to_u32()))
+            i = i + 1
+        expect(backend.font_atlas_mirror_slots.len()).to_be(
+            VULKAN_FONT_ATLAS_MIRROR_MAX)
+        # owner-0 was the oldest and has been evicted.
+        expect(backend._font_mirror_activate("owner-0", true)).to_be(false)
+
+    it "PRODUCT re-activating the owner that is already active is a no-op, not a park":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        expect(backend._font_mirror_activate("owner-a", true)).to_be(true)
+        expect(backend.font_atlas_mirror_slots.len()).to_be(0)
+        expect(backend.font_atlas_host_generation).to_be(5)
+
+    it "PRODUCT an empty owner identity never activates and never parks":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_identity = "owner-a"
+        backend.font_atlas_host_generation = 5
+        backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, 11u32))
+        expect(backend._font_mirror_activate("", true)).to_be(false)
+        expect(backend.font_atlas_mirror_slots.len()).to_be(0)
 
     it "the pack counters reset to zero so each frame is measured on its own":
         vulkan_font_pack_note(false)

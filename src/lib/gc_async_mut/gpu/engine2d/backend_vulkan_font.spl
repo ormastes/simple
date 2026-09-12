@@ -4,6 +4,7 @@
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error,
+    VulkanFontAtlasMirror, VULKAN_FONT_ATLAS_MIRROR_MAX,
     vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
     vulkan_timing_note, VK_T_FONT_COMPOSITE, VK_T_FONT_ATLAS_BUILD,
     VK_T_FONT_ATLAS_PACK, VK_T_FONT_ATLAS_UPLOAD, VK_T_FONT_ATLAS_DIGEST,
@@ -11,7 +12,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind
     vulkan_font_dirty_note, vulkan_font_pack_note,
     vulkan_font_selfcheck_enabled, vulkan_font_payload_digest_full,
     vulkan_font_overlap_enabled, vulkan_font_overlap_note,
-    vulkan_font_mirror_note, vulkan_font_decision_note}
+    vulkan_font_mirror_note, vulkan_font_decision_note,
+    vulkan_font_per_owner_mirror_enabled}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
@@ -847,6 +849,67 @@ fn vulkan_text_atlas_fallback_safe(status: text) -> bool:
     status == "unavailable" or status == "rejected"
 
 impl VulkanBackend:
+    me _font_mirror_activate(owner: text, entry_valid: bool) -> bool:
+        """Make `owner`'s host mirror the active one; return whether it is coherent.
+
+        Two font identities on one page alternate batches, and a single active
+        mirror keyed on the owner meant every switch missed and repacked all
+        1,048,576 atlas pixels -- each owner destroying the other's mirror.
+        Park the outgoing owner's bytes instead and swap the incoming owner's
+        back in, bounded to VULKAN_FONT_ATLAS_MIRROR_MAX slots (index 0 = least
+        recently used, evicted first).
+
+        `entry_valid` is the ACTIVE mirror's validity as captured at the start
+        of the composite, before it was cleared: a mirror that was already stale
+        must never be parked, or a later switch would resurrect it.
+
+        All dirty-cell writes keep going through `self.font_atlas_host_bytes`;
+        a parked slot's bytes are only ever replaced wholesale, never mutated in
+        place.
+        """
+        if owner == "":
+            return false
+        if not vulkan_font_per_owner_mirror_enabled():
+            return self.font_atlas_host_identity == owner and entry_valid
+        if self.font_atlas_host_identity == owner:
+            return entry_valid
+        # Park the outgoing owner, replacing any older slot of the same name.
+        if entry_valid and self.font_atlas_host_identity != "" and
+            self.font_atlas_host_generation >= 0 and
+            self.font_atlas_host_bytes.len() > 0:
+            var existing = -1
+            var pi = 0
+            while pi < self.font_atlas_mirror_slots.len():
+                if self.font_atlas_mirror_slots[pi].identity == self.font_atlas_host_identity:
+                    existing = pi
+                pi = pi + 1
+            if existing >= 0:
+                self.font_atlas_mirror_slots.remove(existing)
+            if self.font_atlas_mirror_slots.len() >= VULKAN_FONT_ATLAS_MIRROR_MAX:
+                self.font_atlas_mirror_slots.remove(0)
+            self.font_atlas_mirror_slots.push(VulkanFontAtlasMirror(
+                identity: self.font_atlas_host_identity,
+                generation: self.font_atlas_host_generation,
+                bytes: self.font_atlas_host_bytes))
+        # Swap the incoming owner in, if it has a parked slot.
+        var found = -1
+        var i = 0
+        while i < self.font_atlas_mirror_slots.len():
+            if self.font_atlas_mirror_slots[i].identity == owner:
+                found = i
+            i = i + 1
+        if found < 0:
+            self.font_atlas_host_identity = ""
+            self.font_atlas_host_generation = -1
+            self.font_atlas_host_bytes = []
+            return false
+        val slot = self.font_atlas_mirror_slots[found]
+        self.font_atlas_mirror_slots.remove(found)
+        self.font_atlas_host_identity = slot.identity
+        self.font_atlas_host_generation = slot.generation
+        self.font_atlas_host_bytes = slot.bytes
+        true
+
     me _repack_atlas_dirty_cells(batch: FontRenderBatch) -> bool:
         """Rewrite only the glyph cells this batch inserted into the host mirror.
 
@@ -1225,6 +1288,11 @@ impl VulkanBackend:
             # host bytes are still an accurate copy of the same atlas, so
             # repacking them would be pure waste.
             val atlas_owner = font_render_batch_atlas_owner_identity(batch)
+            # Swap this owner's parked mirror in before deciding. Without this
+            # the check below compares against whatever owner ran last, so two
+            # alternating font identities each forced the other's full repack.
+            val mirror_coherent = self._font_mirror_activate(
+                atlas_owner, mirror_was_valid)
             # Generation continuity is the load-bearing condition. `dirty_rects`
             # lists only the cells THIS batch inserted, so applying it to the
             # mirror is correct only if the mirror already holds every earlier
@@ -1232,7 +1300,7 @@ impl VulkanBackend:
             # bumped the global generation counter, and no state inside this
             # function can see that -- but the gap it leaves in the sequence
             # can. Requiring exactly +1 turns every such gap into a full repack.
-            val can_increment = (mirror_was_valid and
+            val can_increment = (mirror_coherent and
                 atlas_owner != "" and
                 self.font_atlas_host_identity == atlas_owner and
                 self.font_atlas_host_generation >= 0 and
@@ -1245,7 +1313,7 @@ impl VulkanBackend:
             if vulkan_font_selfcheck_enabled():
                 vulkan_font_decision_note(
                     "gen={batch.atlas_generation} host_gen={self.font_atlas_host_generation}" +
-                    " was_valid={mirror_was_valid} owner_match={self.font_atlas_host_identity == atlas_owner}" +
+                    " was_valid={mirror_coherent} owner_match={self.font_atlas_host_identity == atlas_owner}" +
                     " len_match={self.font_atlas_host_bytes.len().to_i64() == atlas_bytes}" +
                     " dirty={batch.dirty_rects.len()} can_inc={can_increment} ready={mirror_ready}")
             if not mirror_ready:
