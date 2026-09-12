@@ -48,7 +48,7 @@ use compiler.driver.perf.compiler_work_counters.{
     compiler_work_counters_reset_v1, compiler_work_counters_snapshot_v1,
     compiler_work_counters_zero_v1, compiler_work_counters_receipt_v1
 }
-use std.io_runtime.{file_copy}
+use std.io_runtime.{file_copy, env_get_opt}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -68,12 +68,18 @@ fn driver_noop_default_output_v1(input_files: [text]) -> text:
 fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
     val options = ctx.options
     val delivery_output = options.output_file ?? driver_noop_default_output_v1(options.input_files)
-    val output = env_get("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? delivery_output
+    # env_get_opt, not env_get: std.nogc_sync_mut.io.env_ops.env_get is TOTAL
+    # (env_ops.spl:48 returns "" for an unset name), so `??` never reached its
+    # fallback here and both this output and the cache root below came out "".
+    # native_noop_request_v1 then blanked the identity and publication refused
+    # the whole build with `request-invalid`, which is what rejected Stage 2 on
+    # 2026-09-12.
+    val output = env_get_opt("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? delivery_output
     val environment = native_build_environment_fingerprint_v1()
     val environment_digest = if environment.valid: environment.digest else: ""
     val invocation_identity = native_noop_normalized_invocation_v1(options, output)
     native_noop_request_v1(
-        env_get("SIMPLE_NATIVE_NOOP_CACHE_ROOT") ?? machine_cache_root() + "/native-build/noop-v1",
+        env_get_opt("SIMPLE_NATIVE_NOOP_CACHE_ROOT") ?? (machine_cache_root() + "/native-build/noop-v1"),
         output, options.backend, ctx.native_target,
         compileoptions_effective_mir_opt_level(options), options.release,
         options.debug_info, options.gc_off, options.profile,

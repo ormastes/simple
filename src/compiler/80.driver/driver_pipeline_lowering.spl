@@ -286,7 +286,26 @@ impl CompilerDriver:
                 skip_idx = skip_idx + 1
             return self.ctx.error_count_value == 0
 
-        if allow_bootstrap_shortcuts and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        # The fixed-entry bootstrap path below lowers app.cli.bootstrap_main and
+        # nothing else, so it must only be entered when THIS compile actually
+        # asked for the bootstrap CLI. SIMPLE_BOOTSTRAP=1 alone does not say
+        # that: the Stage-2 admission probe builds hello_world.spl in bootstrap
+        # mode, and a POSITIONAL source routes through lower_to_mir()
+        # (allow_bootstrap_shortcuts=true) while an --entry build routes through
+        # lower_to_mir_for_explicit_target() (false). That is exactly why, of
+        # the four candidate_frontend probes, only hello-world-positional failed
+        # in the bootstrap-mode pass -- on a program that never requested the
+        # bootstrap CLI. Membership is read from ctx.sources, the same identity
+        # the SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER branch above uses. The nil guard
+        # inside is KEPT unchanged for the case it was written for: the
+        # bootstrap CLI was requested but did not lower.
+        var bootstrap_entry_requested = false
+        var bootstrap_entry_idx = 0
+        while bootstrap_entry_idx < self.ctx.sources.len():
+            if self.ctx.sources[bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
+                bootstrap_entry_requested = true
+            bootstrap_entry_idx = bootstrap_entry_idx + 1
+        if allow_bootstrap_shortcuts and bootstrap_entry_requested and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
