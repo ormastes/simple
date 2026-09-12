@@ -3,7 +3,7 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 **Date:** 2026-08-09 (rewritten same day after measurement disproved the first version)
-Status: OPEN (P1)
+Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** silent wrong-body dispatch; the same-signature class can make importing specs **vacuous**
 
@@ -191,3 +191,23 @@ Regression guard:
    produces wrong answers and can vacate specs.
 3. Use the 373 count as the regression metric. Absence of a specific warning is
    the bar for a single symbol; a falling total is the bar for the campaign.
+
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/cache/action_key_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/cache/action_key_spec.spl outcome=OK declared>=32 executed=32 passed=32 failed=0 skipped=0 dropped=0
+```
+
+Every example in the spec this record names as its reproduction passes. Scope
+of the claim, stated plainly: the re-check exercised **that spec only**, on the
+**deployed seed** on **aarch64**. It did not re-measure any other lane (native
+LLVM / self-hosted binary / other architecture), and it did not audit whether
+the spec's assertions still cover the original symptom as tightly as when the
+record was written. If a residual lane is known to be uncovered, reopen with
+the lane named rather than relying on this line.
