@@ -1,0 +1,97 @@
+"""Reading argv must not drag the `std.io` / `std.env` facades into every CLI app.
+
+`std.cli.cli_util` resolves to `src/lib/nogc_async_mut/cli/cli_util.spl`, and its
+header says it is "used by all app/*/main.spl command implementations". It is
+therefore loaded before `main()` runs for essentially every `simple <subcommand>`
+-- including the ones that only print help.
+
+It used to reach `file_exists`/`file_read` through the `std.io` FACADE and
+`get_current_dir` through `std.env`. The io facade unconditionally imports
+nogc_{sync,async}_mut.io.{file,tcp,udp,buffer,pipe,event_loop} plus
+async.future, none of which this module uses. Measured 2026-09-12 on the
+deployed seed (sha256 3d120a6f9ab5704b..., aarch64) by counting `.spl` opens
+under `strace -f -e trace=openat` for a probe importing one name:
+
+| import                                                    | .spl opens |
+|-----------------------------------------------------------|-----------:|
+| `std.io.{file_exists, file_read}`                          |        134 |
+| `std.nogc_async_mut.io.file_ops.{file_exists, file_read}`  |         30 |
+| `std.env.{get_current_dir}`                                |         67 |
+| `std.nogc_async_mut.env.platform.{get_current_dir}`        |         43 |
+| `std.cli.cli_util.{get_cli_args}` (before)                 |        183 |
+| `std.cli.cli_util.{get_cli_args}` (after)                  |         61 |
+
+End to end, `simple check --help` fell from 203 to 81 `.spl` opens and
+`simple lint --help` from 1532 to 1259, with `simple run hello.spl` unchanged at
+5 and every CLI stdout byte-identical.
+
+The measured example fails closed: an strace that captured nothing, or a count
+that did not parse, is a FAIL, not a pass.
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use std.io_runtime.{process_run}
+
+val CLI_UTIL: text = "src/lib/nogc_async_mut/cli/cli_util.spl"
+
+# Measured after the fix: 81. The ceiling keeps headroom for unrelated growth
+# while staying far below the 203 the facade closure cost.
+val CHECK_HELP_SPL_OPEN_CEILING: i64 = 120
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+fn top_level_use_lines(source: text) -> [text]:
+    var found: [text] = []
+    for line in source.split("\n"):
+        if line.starts_with("use ") or line.starts_with("export use "):
+            found.push(line)
+    found
+
+fn facade_use_lines(uses: [text]) -> [text]:
+    """The `std.io` and `std.env` facade spellings, if any survive."""
+    var offenders: [text] = []
+    for line in uses:
+        if line.starts_with("use std.io.") or line.starts_with("use std.io "):
+            offenders.push(line)
+        if line.starts_with("use std.env.") or line.starts_with("use std.env "):
+            offenders.push(line)
+    offenders
+
+fn parse_field(blob: text, key: text) -> i64:
+    for token in blob.split(" "):
+        if token.starts_with(key + "="):
+            return token.substring(key.len() + 1, token.len()).trim().to_i64()
+    -1
+
+describe "argv reading closure budget":
+    it "reaches its file and cwd helpers through leaf owners, not facades":
+        step("read the module that every CLI app loads to read argv")
+        val source = read_file(CLI_UTIL)
+        expect(source.len()).to_be_greater_than(0)
+        val uses = top_level_use_lines(source)
+        expect(uses.len()).to_be_greater_than(0)
+        step("no top-level use may name the std.io or std.env facade")
+        expect(facade_use_lines(uses).len()).to_equal(0)
+        step("the leaf owners it does use must still be named")
+        expect(source).to_contain("std.nogc_async_mut.io.file_ops")
+        expect(source).to_contain("std.nogc_async_mut.env.platform")
+
+    it "keeps `simple check --help` inside its source-open budget":
+        step("count .spl opens for a help-only invocation")
+        val script = "tmp=$(mktemp -d); b=$SIMPLE_BINARY; "
+            + "test -n \"$b\" || b=bin/simple; "
+            + "strace -f -e trace=openat -o $tmp/tr $b check --help >/dev/null 2>&1; "
+            + "echo tracelines=$(wc -l < $tmp/tr) splopens=$(grep -c '[.]spl' $tmp/tr); "
+            + "rm -rf $tmp"
+        val (out, _code) = run_sh(script)
+        expect(out.len()).to_be_greater_than(0)
+        step("fail closed when strace captured nothing")
+        val trace_lines = parse_field(out, "tracelines")
+        expect(trace_lines).to_be_greater_than(0)
+        step("budget")
+        val spl_opens = parse_field(out, "splopens")
+        expect(spl_opens).to_be_greater_than(0)
+        expect(spl_opens).to_be_less_than(CHECK_HELP_SPL_OPEN_CEILING)
