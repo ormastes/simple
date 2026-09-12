@@ -13,10 +13,19 @@ class GvarTable:
     flags: u16
     glyph_variation_data_array_offset: u32
     glyph_variation_data_offsets: [u32]
+    # Absolute offset of the gvar table inside `blob`. glyph_variation_data_array_offset
+    # is gvar-table-relative per the spec, so the two must be added to address the
+    # glyph variation data array.
+    table_offset: u32
+    # The font blob the table was parsed from, so delta application does not need
+    # the enclosing OtFont handed back in.
+    blob: [u8]
 
 fn parse_gvar(font: OtFont) -> Option<GvarTable>:
-    # Tag 'gvar' = 0x67766172
-    val gvar_tag: u32 = 1735811954
+    # Tag 'gvar' = 0x67766172 = [103, 118, 97, 114] = 1735811442.
+    # The previous constant, 1735811954, is 0x67766372 ('gvcr'): no real font ever
+    # matched it, so parse_gvar always answered None.
+    val gvar_tag: u32 = 1735811442
     val maybe_tbl = find_table(font, gvar_tag)
     val tbl = match maybe_tbl:
         Some(value):
@@ -66,58 +75,21 @@ fn parse_gvar(font: OtFont) -> Option<GvarTable>:
         glyph_count: glyph_count,
         flags: flags,
         glyph_variation_data_array_offset: gvar_data_array_off,
-        glyph_variation_data_offsets: offsets
+        glyph_variation_data_offsets: offsets,
+        table_offset: base as u32,
+        blob: blob
     ))
 
+# apply_glyph_deltas — apply variable-font deltas using the blob GvarTable was
+# parsed from. Equivalent to apply_glyph_deltas_with_font when the font handed in
+# there is the same one parse_gvar read.
 fn apply_glyph_deltas(outline: SkPath, gvar: GvarTable, glyph_id: u32, normalized_coords: [f64]) -> SkPath:
-    # Return outline unchanged if no coords or glyph out of range
-    if normalized_coords.len() == 0:
-        return outline
-    if (glyph_id as i64) >= (gvar.glyph_count as i64):
-        return outline
-    if (gvar.glyph_variation_data_offsets.len() as i64) < ((glyph_id as i64) + 2):
-        return outline
-    val start_off = gvar.glyph_variation_data_offsets[glyph_id as i64] as i64
-    val end_off = gvar.glyph_variation_data_offsets[glyph_id as i64 + 1] as i64
-    if start_off >= end_off:
-        return outline
-    # Gather original points from the path
-    val n_segs = outline.segments.len() as i64
-    var orig_xs: [f64] = []
-    var orig_ys: [f64] = []
-    var si: i64 = 0
-    while si < n_segs:
-        val seg = outline.segments[si]
-        var pi: i64 = 0
-        while pi < (seg.pts.len() as i64):
-            orig_xs.append(seg.pts[pi].x)
-            orig_ys.append(seg.pts[pi].y)
-            pi = pi + 1
-        si = si + 1
-    val n_points = orig_xs.len() as i64
-    # Accumulate delta sums
-    var delta_x: [f64] = []
-    var delta_y: [f64] = []
-    var di: i64 = 0
-    while di < n_points:
-        delta_x.append(0.0)
-        delta_y.append(0.0)
-        di = di + 1
-    # TupleVariation header parsing
-    # gvar data base = font's gvar table offset + glyph_variation_data_array_offset + glyph start_off
-    # We need the font blob — store it via the OtFont passed implicitly via gvar.
-    # NOTE: apply_glyph_deltas receives gvar but not font; we cannot re-read the blob here.
-    # For this pass, return outline unchanged (blob access requires font param).
-    # TODO: support packed delta stream format
-    # In a complete implementation, parse TupleVariation records from the blob using:
-    #   tupleVariationCount (u16), dataOffset (u16), then per-variation tupleVariationHeader.
-    # For each variation compute scalar = product of piecewise-linear(peak[i], normalized_coords[i]),
-    # then add scalar * delta to each point's accumulated total.
-    # Without the font blob we cannot decode the variation data, so return unchanged.
-    outline
+    _apply_glyph_deltas_blob(gvar.blob, outline, gvar, glyph_id, normalized_coords)
 
 fn apply_glyph_deltas_with_font(font: OtFont, outline: SkPath, gvar: GvarTable, glyph_id: u32, normalized_coords: [f64]) -> SkPath:
-    # Real implementation with font blob access.
+    _apply_glyph_deltas_blob(font.blob, outline, gvar, glyph_id, normalized_coords)
+
+fn _apply_glyph_deltas_blob(blob: [u8], outline: SkPath, gvar: GvarTable, glyph_id: u32, normalized_coords: [f64]) -> SkPath:
     if normalized_coords.len() == 0:
         return outline
     if (glyph_id as i64) >= (gvar.glyph_count as i64):
@@ -128,8 +100,9 @@ fn apply_glyph_deltas_with_font(font: OtFont, outline: SkPath, gvar: GvarTable, 
     val end_off = gvar.glyph_variation_data_offsets[glyph_id as i64 + 1] as i64
     if start_off >= end_off:
         return outline
-    val blob = font.blob
-    val data_base = gvar.glyph_variation_data_array_offset as i64 + start_off
+    # glyph_variation_data_array_offset is relative to the start of the gvar
+    # table, so the table's own absolute offset has to be added.
+    val data_base = (gvar.table_offset as i64) + (gvar.glyph_variation_data_array_offset as i64) + start_off
     if data_base + 3 >= blob.len() as i64:
         return outline
     # Gather original points
