@@ -49,7 +49,7 @@ already `[u32]`:
 
 | bucket | n | before | after |
 |---|---|---|---|
-| **frame 900x760** | | **830,187** | **259,523 (-68.7%)** |
+| **frame 900x760** | | **830,186** | **259,523 (-68.7%)** |
 | image_composite | 264 | 573,780 | **940** |
 | both pack buckets | 264/262 | 572,254 | **0 (never fire)** |
 | font_composite | 23 | 68,745 | 70,708 |
@@ -60,9 +60,10 @@ pair also matched but F16 means a future difference there is noise, not
 evidence). `upload_reason=typed-requested` confirms the typed lane ran — the two
 lanes write identical bytes, so no pixel can witness it. 300x253 is unchanged
 (30,861 -> 33,403 ms, noise): all 76 composites there are 1x1, nothing to pack.
-Origin of the large composites:
-`simple_web_html_engine2d_presenter.spl:597` uploads a host-rasterized full
-layout surface and reads it straight back — NOT an eliminable identity blit.
+Origin: `simple_web_html_engine2d_presenter.spl:597` uploads a host-rasterized
+full layout surface and reads it straight back (NOT an eliminable identity
+blit) — but that only explains the 684k-px class; the 12.87M-px source is a
+scaled/synthesized draw at `draw_ir_adv.spl:2263/2289/2291`, not pinned further.
 `font_composite` is now the dominant term. No upload cache: no O(1) array
 identity or producer generation exists, and an interpreted digest is the same
 O(n) class as the pack (`font_atlas_payload_sha256` = 8.3 s). Detail:

@@ -200,6 +200,32 @@ then `engine.draw_image(0, 0, width, height, pixels)` with a **host-rasterized
 full layout surface**, and immediately `read_pixels_with_source()`. The GPU is a
 pass-through: upload the whole page, read the whole page back.
 
+**But the presenter is NOT the origin of the biggest composite, and the record
+must not imply it is.** `presenter.spl:597` passes `pixels` with
+`pixels.len() == width * height`, so it can only ever produce a **684,000**-px
+source at this size. The composite that cost 185,586 ms alone has a
+**12,874,224**-px source — 18.8x the surface — so it is a large source SCALED
+DOWN, which the presenter never does. Its producer is one of the scaled/
+synthesized image draws in `draw_ir_adv.spl`:
+
+- `:2263` — `eng.draw_image_blend(css_x, css_y, css_bounds.width,
+  css_bounds.height, css.pixels)`, a CSS background rasterized on the host by
+  `_engine2d_draw_ir_css_background_pixels` under
+  `css_background_pixel_work_budget`;
+- `:2289` / `:2291` — `draw_image_scaled_blend` / `draw_image_scaled`, whose
+  SOURCE is `image.width x image.height` independent of the destination rect.
+
+**Not narrowed further, and stated rather than guessed.** The source fixture
+`examples/06_io/ui/browser_common_elements_showcase.html` contains **zero**
+`<img>` and zero `background-image`, so the pixels are host-synthesized rather
+than decoded from a resource, but which of the three call sites emitted the
+12.87M-px source was not pinned: `vulkan_order_trace` prints the DESTINATION
+rect, not the source dims, so the existing probe cannot answer it. Pinning it
+needs either src dims added to that trace or a per-call-site counter. This does
+not affect the fix — the typed upload covers every one of these producers
+identically — but it does mean "origin = presenter:597" is true only of the
+684k-px class.
+
 Two further full-surface producers exist and are NOT the Vulkan lane's:
 - `draw_ir_adv.spl:3255` — `engine.draw_image(0, 0, eng.width(), eng.height(),
   eng.read_pixels())` IS an identity blit of the surface onto itself, but it is
