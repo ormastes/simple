@@ -107,3 +107,70 @@ file:line.
 compile/runtime error. Silently returning 0 is the worst option. Until then,
 consider a lint/fence for `<string-typed>[i].to_i64()` once type-aware scanning
 is available.
+
+## Triage 2026-09-12 — still OPEN, and the characterization above is now WRONG
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+Identical results on `SIMPLE_EXECUTION_MODE=jit` and `=interpreter`.
+
+Repro (one file):
+
+```simple
+fn probe() -> str:
+    val a: text = "A"
+    val d: text = "7"
+    val s = "A7"
+    return "textA=" + str(a.to_i64()) + " text7=" + str(d.to_i64())
+         + " idxA=" + str(s[0].to_i64()) + " idx7=" + str(s[1].to_i64())
+         + " charatA=" + str(s.char_at(0).to_i64()) + " charat7=" + str(s.char_at(1).to_i64())
+         + " multi=" + str("12".to_i64())
+print probe()
+```
+
+```
+textA=65 text7=7 idxA=65 idx7=7 charatA=nil charat7=7 multi=12
+```
+
+**"Returns 0 for every character" no longer holds.** The title and the Defect
+section are stale. What the deployed seed actually does is worse to reason
+about, because one expression shape now has **three** different answers:
+
+| expression | `"A"` (non-numeric) | `"7"` (numeric) |
+|---|---|---|
+| `(x: text).to_i64()` | **65** — the code point | 7 — parsed |
+| `s[i].to_i64()` | **65** — the code point | 7 — parsed |
+| `s.char_at(i).to_i64()` | **nil** | 7 — parsed |
+
+So: indexing agrees with a plain `text` receiver, `char_at` does not, and the
+*same receiver* silently switches between "parse me as a number" and "give me
+my code point" based on the character's own content. The digit case is the
+dangerous one and is unchanged from the original report's real-world damage —
+`chrome_webgpu_draw_evidence.spl`'s digit-validation loops broke precisely
+because "parse gives 7, not 55".
+
+A plain `text` receiver returning its code point is separately wrong: `"A".to_i64()`
+is a string-to-integer parse and should be 0/nil/error, never 65. That is a
+NEW observation, not in the record above.
+
+`s.char_at(i).to_i64()` returning **nil** is the third answer and the most
+dangerous of the three: `str(nil)` renders `"nil"` and the value flows into
+arithmetic without a diagnostic.
+
+### Why this was not fixed here
+
+Seed-side, not pure-Simple. The dispatch is in the Rust seed:
+`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:44,1527,1742`
+(`"to_int" | "to_i64" => Some(TypeId::I64)`) routing to `rt_string_to_int`, and
+`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:496,515`. There is no
+`to_i64` implementation for a text receiver anywhere under `src/lib` (checked).
+Out of scope for a pure-Simple bugfix lane per the fan-out guide.
+
+### Fix direction (unchanged in spirit, sharpened)
+
+Pick ONE contract and make all three shapes obey it. The record's own
+recommendation — code point, or a hard error — still stands, and the content-
+dependent switch is the part that must go. Whichever is chosen, `char_at`'s
+`nil` must be eliminated in the same change, or the divergence merely moves.
+The existing scanner `scripts/check/check-string-index-char-to-i64.shs` is the
+right place to ratchet call sites once the contract is fixed.

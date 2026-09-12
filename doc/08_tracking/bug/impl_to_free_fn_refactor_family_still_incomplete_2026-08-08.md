@@ -6,7 +6,7 @@
   below): **25 oracle hits, of which 12 are actual refactor damage**. 7 are
   `fuzz.spl`'s missing-module defect, 5 are known regex false positives, 1 is a
   Class C stdlib gap. Quote both numbers (oracle-25 / family-12) or the next
-  reader chases 13 non-issues. **The family is NOT closed.**
+  reader chases 13 non-issues. **The family is NOT closed.** SUPERSEDED IN PART by "Triage 2026-09-12" at the end: the six `src/compiler` Class A entries are docstring phantoms, so real Class A damage under `src/compiler` is ZERO, not twelve.
   (Superseded figures, 2026-08-08: oracle-40 / family-27.)
 - **Found by:** adversarial review of `b0c98541d2a`, `bc052a4470d`
 
@@ -521,3 +521,124 @@ A SIGTERMed spec dies before printing its header, which through a pipe launders 
 exit 0 with no `Results:` line — indistinguishable from the silent-green class. Both
 specs therefore need a re-run on a quiet host, or with that foreign monitor stopped,
 before any verdict is claimed for them.
+
+## Triage 2026-09-12 — the "12 Class A" figure is wrong; TWO detector defects found
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+Status stays **PARTIALLY FIXED / OPEN**; the numbers change, not the verdict.
+
+### Defect 1 (FIXED here): the census is docstring-blind
+
+Every one of the SIX Class A survivors this document lists under `src/compiler`
+was read at source. **All six are inside `"""` docstrings**, not call sites:
+
+| listed site | what is actually there |
+|---|---|
+| `10.frontend/desugar/desugar_async.spl:44` `response_text` | the `Input:`/`Output:` sketch in the module docstring |
+| `90.tools/desugar_async.spl:42` `response_text` | same sketch, sibling file |
+| `15.blocks/blocks/definition.spl:60,61` `parser_set_mode`, `parser_parse_expr` | ```` ```simple ```` example inside `parse_payload`'s docstring |
+| `15.blocks/blocks/easy.spl:113` `pattern_trim` | ```` ```simple ```` example in `define_const_block`'s docstring |
+| `15.blocks/blocks/registry.spl:26,182` `blk_lexer_mode` | two docstring examples |
+
+Docstring text is never compiled, so a call site there is not refactor damage.
+Counting it manufactured phantom damage — this is the same false-positive class
+as the `me fn` blind spot recorded in the 2026-08-17 re-measurement, and it is
+why this document claims twelve Class A sites when, under `src/compiler`, the
+real count is **zero**.
+
+Fixed in `test/01_unit/compiler/common/impl_to_free_fn_zero_definition_census_spec.spl`:
+a new `docstring_fence_count` / `damage_callees_in_source` pair skips `"""`
+bodies, with three new synthetic controls (a call inside a docstring must not
+count; a real call in the same source must still count; a one-line `"""…"""`
+must not swallow the rest of the file). `known_survivors()` shrinks from 7
+entries to 1 — only `70.backend/backend/exhaustiveness_validator.spl:sys_exit`
+(`std.sys_exit(sys, 1)`, real code, Class C) remains.
+
+RED before the fix / GREEN after, same file:
+
+```
+before: outcome=ERROR declared>=10 executed=10 passed=7 failed=3   (the 3 docstring controls)
+after:  outcome=ERROR declared>=10 executed=10 passed=9 failed=1   (only the census example, see below)
+```
+
+The seventh listed site, `src/compiler_rust/lib/std/src/spec/formatter/markdown.spl:164`
+`path_file_exists`, is outside `scan_root()` so the census never saw it. It is
+also a false positive for a THIRD reason: line 10 of that file reads
+`use io.fs_helpers.{read_text_file, exist as path_file_exists}` — an aliased
+import. The oracle resolves no `use … as` aliases.
+
+The four `src/lib/gc_async_mut/gpu/engine2d/engine.spl:1229-1244` `vulkan_*`
+sites were **not** re-checked: that file is fenced to another lane in this
+fan-out, and the recorded line numbers no longer point at `vulkan_*` calls, so
+the entry needs re-deriving rather than re-reading.
+
+### Defect 2 (FOUND, NOT fixed): the census's definition set is scoped too narrowly
+
+The census example is **RED on this tree and was RED before this change** —
+44 survivors against a 1-entry known list. It has not been baselined away.
+
+Cause: the published oracle in this document collects definitions from ALL of
+`src/`, but the spec collects them only from `scan_root()` = `src/compiler`
+(1,945 of the tree's 16,570 `.spl` files). Call sites under the compiler
+legitimately resolve against `src/lib` (8,173 files) and `src/plugins` (89), so
+every damage-shaped call to a function defined outside the compiler tree is
+reported as a survivor. Spot-checked, all of which exist:
+
+- `dir_create_all` — `src/lib/nogc_sync_mut/file_system/dir_ops.spl:25`
+- `dir_list` — `src/lib/nogc_sync_mut/file_system/dir_ops.spl:46`
+- `file_atomic_write` — `src/lib/nogc_sync_mut/io/file_ops.spl:130`
+- `operand_to_vhdl`, `local_to_vhdl` — `src/plugins/backend_vhdl/vhdl_entity_compile.spl:297,276`
+
+Not fixed here because widening the walk is a measured perf question, not a
+one-line change: the scan-root walk alone costs ~100s in this spec, and
+`src/lib` is 4.2x larger. Guessing at it would trade a false-positive problem
+for an unrunnable spec. Left to the owning lane, with the full measured
+survivor list saved alongside this triage.
+
+### The 44 survivors measured 2026-09-12 (docstring-filtered, def-scope defect NOT corrected)
+
+- `src/compiler/00.common/transition/check_main.spl:dir_list`
+- `src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:dir_list`
+- `src/compiler/10.frontend/frontend_parse_cache.spl:dir_create_all`
+- `src/compiler/15.blocks/blocks/highlighting.spl:text_index_of`
+- `src/compiler/15.blocks/blocks/highlighting.spl:text_len`
+- `src/compiler/20.hir/abi_interface.spl:bitfield_identity`
+- `src/compiler/20.hir/abi_interface.spl:dim_identity`
+- `src/compiler/20.hir/abi_interface.spl:effect_identity`
+- `src/compiler/20.hir/abi_interface.spl:effects_identity`
+- `src/compiler/20.hir/abi_interface.spl:fields_identity`
+- `src/compiler/20.hir/abi_interface.spl:function_identity`
+- `src/compiler/20.hir/abi_interface.spl:layout_identity`
+- `src/compiler/20.hir/abi_interface.spl:symbol_identity`
+- `src/compiler/35.semantics/lint/_SimdOpportunityLint/byte_checks.spl:mask_select`
+- `src/compiler/35.semantics/macro_check/template.spl:s_len`
+- `src/compiler/40.mono/monomorphize_integration.spl:callee_generic_name`
+- `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:local_mir_type_of`
+- `src/compiler/50.mir/_MirLoweringExpr/literals.spl:local_mir_type_of`
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:local_mir_type_of`
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:receiver_declared_type`
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:receiver_declared_type`
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:variant_owner_keys`
+- `src/compiler/50.mir/mir_lowering_stmts.spl:local_mir_type_of`
+- `src/compiler/70.backend/backend/common/literal_converter.spl:value_string`
+- `src/compiler/70.backend/backend/exhaustiveness_validator.spl:sys_exit`
+- `src/compiler/70.backend/backend/hwir_to_vhdl.spl:output_node_id`
+- `src/compiler/70.backend/backend/hwir_to_vhdl.spl:register_node_id`
+- `src/compiler/70.backend/backend/hwir_to_vhdl.spl:rule_node_id`
+- `src/compiler/70.backend/backend/vhdl_backend.spl:module_has_vhdl_hardware`
+- `src/compiler/70.backend/backend/_VhdlProcess/process_codegen.spl:local_operand_expr`
+- `src/compiler/70.backend/backend/_VhdlProcess/process_codegen.spl:local_to_vhdl`
+- `src/compiler/70.backend/backend/_VhdlProcess/terminator_codegen.spl:operand_to_vhdl`
+- `src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:inst_def_id`
+- `src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:inst_used_ids`
+- `src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:local_to_vhdl`
+- `src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:operand_to_vhdl`
+- `src/compiler/80.driver/cache/package_module_index.spl:dir_list`
+- `src/compiler/80.driver/cache/persistent_code_cache.spl:dir_create_all`
+- `src/compiler/80.driver/driver_build/incremental.spl:dir_list`
+- `src/compiler/80.driver/watcher/smf_manifest.spl:dir_create_all`
+- `src/compiler/90.tools/fix/main.spl:file_atomic_write`
+- `src/compiler/90.tools/verify/project_gen.spl:dir_create_all`
+- `src/compiler/95.interp/execir.spl:operand_reg`
+- `src/compiler/99.loader/module_resolver/resolution.spl:dir_list`
