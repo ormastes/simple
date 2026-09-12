@@ -1,7 +1,10 @@
 # Stage 2 sanity fails `native-capsule-receipt-invalid` with IDENTICAL byte counts (macOS, 2026-09-12)
 
-Status: **ROOT-CAUSED 2026-09-12. Receipt sites worked around in PR #677; the
-underlying codegen defect remains OPEN and is the real item here.**
+Status: **OPEN. Receipt sites worked around in PR #677. The "root cause"
+below named the right SYMPTOM but the wrong TRIGGER: a compiler-fix lane
+reproduced none of it at T1 from four probes, up to and including the verbatim
+pre-#677 receipt code using the real `FileFingerprint` — see the 2026-09-12
+follow-up section before acting on the section immediately below.**
 **Supersedes the Stage-2 `serialize_mir_function` SEGV as lane 1's Stage-2
 blocker** — see "The SEGV did not reproduce" below before scheduling any work
 against that older item.
@@ -63,6 +66,134 @@ untouched and will misread any other scalar field read the same way. Whoever
 takes it: the reproducer is a one-field probe -- build a struct with an `i64`
 field, wrap it in an Optional, bind it with `if val`, and print the field under
 Stage-2 native codegen; a pointer-shaped value means the defect is live.
+
+## 2026-09-12 follow-up: the one-field reproducer does NOT reproduce at T1
+
+A compiler-fix lane took the "one-field probe" instruction above literally and
+could not make it fail. Four probes, each compiled by a **live Stage 1**
+(the pure-Simple compiler built from `src/compiler` by the Rust seed in this
+same run) and then executed, all printed the correct `632`:
+
+| probe | shape | result |
+|---|---|---|
+| `disc.spl` | local `struct` + `-> S?` free fn + `if val` + `match`, fields `i64`/`i32`/`bool`/`f64`/`text`, field read twice | all correct |
+| `disc2.spl` | the same across a **second module**, built by a `static fn from_file(path) -> Self?` whose `size` comes from a file-local `extern fn rt_file_size` | all correct |
+| `disc3.spl` | the **real** `compiler.driver.driver_build.incremental.FileFingerprint`, `from_file` on a 632-byte file, `.size` read twice plus a second independent `from_file` | all correct |
+| `disc4.spl` | the **verbatim pre-#677 receipt shape**: `val object_fp = FileFingerprint.from_file(p)` / `if not object_fp.?: return ...` / `if val fp = object_fp:` / `"...\n{fp.size}\n{fp.content_hash}\n"`, called twice | byte-identical receipts, `632` both times |
+
+`disc4` is the load-bearing one: it is the failing code, with the real struct,
+the real `.?` guard (see
+`dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`,
+which was a live suspect and is hereby ruled out for this defect), the real
+five-line interpolation — and it is correct.
+
+**So the trigger is not the source shape.** It is something about the build in
+which the failing code runs: Stage 2 is the whole compiler compiled
+`--entry-closure` in `dynload` mode as 834 units, and the probes are one-unit
+programs that merely import the same module. Any further work should start from
+that difference (unit splitting / lazy imports / dynload symbol transport), not
+from the `if val` binding.
+
+### Hypothesis examined and disproved
+
+A read of the MIR lowering suggested this chain: `if val` promotes a binding
+only for a **Float** payload
+(`src/compiler/50.mir/mir_lowering_stmts.spl:2804-2814`), otherwise
+`bind_local(if_val_symbol_id, if_val_raw_local)` (`:2840-2842`) leaves the name
+bound to the raw Option local, which was marked `option_value_locals` +
+`mark_runtime_value_local` at
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1708-1710`;
+`expr_type_symbol` (`src/compiler/50.mir/_MirLowering/function_lowering.spl:1725`)
+matches only `case Named(symbol, _)` so an `Optional(Named(Struct))` base loses
+its owner struct; and the Field arm
+(`expr_dispatch.spl:3460-3522`) emits `emit_get_field` with no
+`decode_runtime_value` (`:1073`) — that unbox guard exists only on the
+`??`/`!`/unwrap arms (`:4088`, `:4228`, `:4349`).
+
+That chain is real code, but it is **not** this defect: every probe above
+exercises exactly it and reads the scalar correctly. Do not edit those lines on
+the strength of this record.
+
+### Verification tier and exact commands
+
+T0 is unavailable on this host and that is itself worth recording:
+
+- `bin/release/aarch64-apple-darwin-macho/simple` (Sep-7) SEGVs (rc=139) on a
+  three-line hello world with
+  `[simple-runtime][error] rejected invalid array handle before dereference;
+  probable compiler/FFI ABI mismatch`.
+- `bootstrap/stage{1,2,3}/simple` are the bootstrap wrapper and answer
+  `error: bootstrap_main cannot emit a seed-wrapper fallback for a.out`.
+- Running the pure-Simple compiler under the seed interpreter
+  (`seed run src/app/cli/bootstrap_main.spl native-build ...`) fails twice:
+  without the composition it prints
+  `PLUG-E-K1-POLICY: bootstrap backend composition admission failed`
+  (the `--source src/compositions/kernel_llvm_cranelift` overlay the bootstrap
+  passes is not a seed `run` flag), and with the composition overlaid it dies
+  on `error: semantic: unknown extern function: rt_env_vars`.
+- `.simple/storage/build/bootstrap/lane-stage2-rerun2.log` does not exist in a
+  fresh checkout; the F44 Stage 1 referenced elsewhere is not on this host.
+
+T1 was therefore produced by a live bootstrap, and the Stage 1 it preserves is
+directly usable:
+
+```sh
+# ~3 min Rust seed (after `cp -Rc` of another checkout's src/compiler_rust/target
+# -- APFS clone, per the seed-reuse note below), then Stage 1.
+PATH="/usr/bin:$PATH" BOOTSTRAP_STAGE3_COMPARE_TOOL=/usr/bin/cmp \
+SIMPLE_CACHE_SCOPE=codegen-optbind \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2 \
+     --full-bootstrap --mode=dynload --jobs=half
+# Stage 1 lands at build/phase_snapshots/phase1_<epoch>/simple
+
+# Build any single .spl through it (the env block is the script's own
+# Stage1->Stage2 block, lines 2783-2818; without it the binary re-spawns
+# itself as a worker and dies with "method `len` not found on type `i64`"):
+env SIMPLE_BOOTSTRAP=1 SIMPLE_ABI_POLICY=simple-v1 \
+    SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn \
+    SIMPLE_KERNEL_K1_POLICY=llvm-cranelift \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE_DIR="$CACHE/frontend" \
+    SIMPLE_BINARY="$STAGE1" SIMPLE_LIB="$PWD/src" \
+  "$STAGE1" native-build --target aarch64-apple-darwin --backend llvm \
+    --runtime-bundle core-c-bootstrap \
+    --source src/compositions/kernel_llvm_cranelift \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure --threads 4 --cache-dir "$CACHE" \
+    --mode dynload --entry <file>.spl -o <out>
+```
+
+Calibrated on `scripts/check/cert/redeploy_gate/fixtures/hello_world.spl`
+(prints `hello`) before any probe was trusted. Module imports resolve relative
+to the **cwd**, so a probe that does `use compiler....` must be built from the
+repo root.
+
+**`SIMPLE_NATIVE_INCREMENTAL=1` now breaks the lane.** The reproduction recipe
+at the top of this file sets it; at `origin/main@cf5d186754a` that aborts Stage
+2 before any build with
+
+```
+error: stage2 env assignment names do not match the canonical list for aarch64-apple-darwin
+  unexpected: SIMPLE_NATIVE_INCREMENTAL
+```
+
+PR #674 forwards the variable but `bootstrap_stage3_stage2_canonical_env_names`
+was not extended, so the two disagree. Drop the variable to run the lane.
+
+### Regression scaffolding added
+
+- `test/01_unit/compiler/codegen/optional_bound_struct_scalar_field_spec.spl`
+  — 8 examples, absolute oracle `632`, plus `i32`/`bool`/`f64`/`text` and a
+  nested-optional case. Passes on the seed interpreter (pins the semantics).
+- `test/01_unit/compiler/codegen/probe_optional_bound_struct_scalar_field.spl`
+  — native probe printing one `PASS`/`FAIL` line, built and run by the
+  self-hosted lane with the recipe above. Currently PASSes at T1, which is the
+  measurement, not a claim that the defect is fixed.
+
+**Status of the underlying defect: still OPEN, and still worked around at the
+three #677 call sites** — which were therefore left in place, since reverting
+them without a reproduction would re-open a known Stage-2 blocker.
 
 ## Reproduction
 
