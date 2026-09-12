@@ -490,9 +490,13 @@ returned **Ok**, so not one of `expr/access.rs`'s name-keyed fallbacks
    `ctx.add_local(name, ty, ..)` — a TypeId and nothing else. With the subject
    erased to ANY there was no `type_name_hint` (that is set only for parameters)
    and no hint row keyed by `object_fp` to inherit, so `fp` carried no name.
-3. `expr/access.rs:231`'s ambiguous-field guard DID fire (`size` is ambiguous)
-   and asked `try_resolve_receiver_struct_name_from_expr(fp)` — which returned
-   None, so the recovery declined. This is why the guard looked dead.
+3. `expr/access.rs:231`'s ambiguous-field guard could not have helped either
+   way: its `try_resolve_receiver_struct_name_from_expr(fp)` had no hint source
+   to draw on, so it could only return None. **Whether the guard fired and
+   declined, or was never reached, is NOT measured** — neither branch emits a
+   trace line. What IS measured is (a) `size` is index-ambiguous, (b) the
+   receiver typed ANY, (c) no `[FT2]` line, (d) the `[FIELD-TRACE]` line below.
+   The fix does not depend on which of the two it was.
 4. `get_field_info(TypeId::ANY, "size")` (`hir/lower/type_resolver.rs:675`) then
    reached its LOCAL-BEST scan: the SMALLEST index among every `HirType::Struct`
    in `module.types` declaring the name. It returned `Ok((0, _))` from a 7-field
