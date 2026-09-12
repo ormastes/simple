@@ -125,7 +125,13 @@ probes in `scratchpad/boot8/probe/`):
 | `for k in d.keys(): d[k]` | `for_keys_hits=2 of 2` |
 | the same keys through the sort as written (`val temporary = result[i]`) | `sorted_hits=1 of 2` |
 | sort an int permutation, rebuild with `result.push(keys[index])` | `b_hits=3 of 3`, order `2,5,9` |
-| the real `native_capsule_sorted_symbol_ids_v1` on a 20-key dict, after the fix | `sorted_hits=20 of 20` |
+| the real `native_capsule_sorted_symbol_ids_v1` on a 20-key dict, interpreter lane | `sorted_hits=20 of 20` |
+
+**Correction to that last row, which the fix commit message overstated.** The 20-of-20 was
+measured in the INTERPRETER lane and is **not discriminating**: the old code scores 20 of 20
+there too, because that lane never allocates the copy (re-measured after the fix, identical
+output, `scratchpad/boot8/real_sort_after.txt`). The discriminating measurements are the
+JIT-lane `1 of 2` / `2 of 3` versus `3 of 3`, and the disassembly of the new Stage-2 binary.
 
 ## Fix
 
