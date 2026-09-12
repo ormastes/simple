@@ -15,6 +15,10 @@ use compiler.backend.linker._LinkerWrapper.native_all_support.{
     native_link_std_lib_args, native_link_uses_crt_objects,
     native_link_shared_std_libs
 }
+use compiler.backend.linker._LinkerWrapper.native_linking.{
+    native_cc_platform_flags, darwin_sdk_path
+}
+use std.platform.{host_os}
 
 fn count_of(args: [text], needle: text) -> i64:
     var n = 0
@@ -65,6 +69,24 @@ describe "native link line per target":
             ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSystem", "-lSDL2"])
         expect(native_link_std_lib_args("darwin", "cc-pre")).to_equal(
             ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSDL2"])
+
+    it "pins the macOS SDK so the resolved clang can find libSystem":
+        # `xcrun --find clang` prefers the Xcode toolchain, whose default SDK can
+        # be absent when the active developer dir is CommandLineTools; that clang
+        # then fails with `ld: library 'System' not found`. Only assert the flag
+        # where an SDK actually resolves — on a host with none, "" is correct and
+        # the link must not be handed an empty -isysroot.
+        val sdk = darwin_sdk_path()
+        val flags = native_cc_platform_flags("darwin", false)
+        if host_os() == "macos" or host_os() == "darwin":
+            expect(sdk).to_not_equal("")
+        if sdk != "":
+            expect(count_of(flags, "-isysroot")).to_equal(1)
+            expect(count_of(flags, sdk)).to_equal(1)
+        else:
+            expect(count_of(flags, "-isysroot")).to_equal(0)
+        # Linux must gain no sysroot flag from this.
+        expect(count_of(native_cc_platform_flags("linux", false), "-isysroot")).to_equal(0)
 
     it "shapes the shared-library line per target too":
         expect(native_link_shared_std_libs("linux")).to_equal(
