@@ -1,6 +1,22 @@
 # Block vertical advance over-measured ~12 % — cause still NOT isolated (2026-09-12)
 
-**Status:** OPEN. Not fixed. Four candidate causes now excluded by fixture.
+**Status:** RESOLVED 2026-09-12 — and the premise was wrong: there is no single
+block-advance defect. The symptom was **two independent element-specific causes**,
+both now fixed and spec'd:
+`doc/08_tracking/bug/web_form_control_inherits_page_font_2026-09-12.md` (form
+controls inherited the page font: button 42 px vs Chrome's 33) and
+`doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md`
+(auto-width flex items filled a whole wrap line: the overview card's list row
+124 px vs Chrome's 80 — that is the +43 below). The four exclusions recorded
+here were all correct; the "Where to look next" step that closed it was the
+`--dump-dom` + `getBoundingClientRect` element diff this record names as the
+cheapest next step and did not run. Overview now matches Chrome element for
+element; round-2 table in
+`doc/10_metrics/ui/chrome_vs_simple_catalog_diff_macos_2026-09-12.md`.
+
+Original text follows.
+
+**Status (original):** OPEN. Not fixed. Four candidate causes now excluded by fixture.
 **Component:** pure-Simple web renderer, block layout.
 
 ## Symptom
