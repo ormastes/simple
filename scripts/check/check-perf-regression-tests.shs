@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=147
+ROW_FLOOR=153
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -644,6 +644,21 @@ IDXRS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/collections.rs"
 must_contain     "STRIDX substr walks start+len, never collects"   "$STRRS" "s.chars().skip(start).take(length)"
 must_contain     "STRIDX char_at byte-indexes ASCII text"           "$STRRS" "(*b as char).to_string()"
 must_contain     "STRIDX s[i] uses the shared ASCII memo"           "$IDXRS" "shared_text_is_ascii(s)"
+# --- UTF16FUSE: utf16_to_utf8 single pass, no O(scalar-count) intermediates ---
+# doc/08_tracking/bug/utf16_to_utf8_intermediate_array_perf_2026-08-26.md.
+# The fix is 3.45x on 32,765 code units (in-process A/B, min of 3). Two
+# allocations per code unit are what it removed: the code-point array built by
+# utf16_decode_all, and the 1..4-element array utf8_encode_one returns. Either
+# one creeping back is the regression, so both are pinned negatively, plus the
+# fused loop bound positively.
+UTF16SPL="$ROOT/src/lib/common/encoding/utf16.spl"
+UTF16FIX="$ROOT/test/05_perf/text_i18n/utf16_to_utf8_direct_conversion_perf_spec.spl"
+must_contain     "UTF16FUSE single pass over units.len()"       "$UTF16SPL" "val n = units.len()"
+must_contain     "UTF16FUSE appends UTF-8 bytes directly"       "$UTF16SPL" "result.push(0xE0 | (codepoint >> 12))"
+must_not_contain "UTF16FUSE must not rebuild a codepoint array" "$UTF16SPL" "val codepoints = utf16_decode_all(units)"
+must_not_contain "UTF16FUSE must not re-import utf8_encode_one" "$UTF16SPL" "utf8_encode_one("
+must_contain     "UTF16FUSE fix-test keeps the decode oracle"   "$UTF16FIX" "utf8_encode_all(utf16_decode_all(units))"
+must_contain     "UTF16FUSE fix-test pins speedup vs the oracle" "$UTF16FIX" "expect(cleared * 2).to_be_greater_than(CONV_ROUNDS)"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
