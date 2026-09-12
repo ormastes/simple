@@ -101,6 +101,8 @@ int64_t rt_gpu_provider_submit_raw(int64_t, int64_t, int64_t, int64_t, int64_t,
 int64_t rt_gpu_provider_wait_raw(int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_readback_raw(int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_completion_release(int64_t, int64_t, int64_t);
+int64_t rt_gpu_provider_device_image_authority_word(
+        int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_unload(int64_t);
 
 int main(int argc, char **argv) {
@@ -117,6 +119,8 @@ int main(int argc, char **argv) {
             rt_gpu_provider_capability_bits(SIMPLE_GPU_BACKEND_VULKAN) != 3 ||
             rt_gpu_provider_generation(SIMPLE_GPU_BACKEND_VULKAN) <= 0) return 3;
     session = rt_gpu_provider_session_open(SIMPLE_GPU_BACKEND_VULKAN, 3);
+    if (!session || rt_gpu_provider_device_image_authority_word(
+            SIMPLE_GPU_BACKEND_VULKAN, session, 1, 0) != 0) return 8;
     resource = rt_gpu_provider_resource_alloc(SIMPLE_GPU_BACKEND_VULKAN,
         session, sizeof(output), 0, 1);
     for (i = 0; i < sizeof(expected); i++) expected[i] = (uint8_t)(i + 1);

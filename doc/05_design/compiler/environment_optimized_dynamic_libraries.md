@@ -274,6 +274,22 @@ The bridge cannot be invoked by the compatibility queue until a real backend
 supplies qualifying device timestamps, negative-control evidence, and stable
 provider tokens. This preserves current routing-only behavior.
 
+`environment_variant_native_task_bridge_v1` is the native capability
+consumption seam. It reprojects provider, resource and terminal completion
+tokens before comparing backend/session/generation, exact provider artifact,
+device, canonical resource-lease identity, invocation, output range and
+readback length. The task owner calls that seam using its retained task record;
+a caller-shaped bridge receipt alone is never accepted as authority.
+
+Device-program images remain a separate capability. The runtime exports a
+typed image-authority projection, but every word currently returns zero because
+no exact-byte image owner is installed. Consequently admission cannot cross
+the image gate, completion remains routing evidence only, and
+`FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` remains false. Installing an image owner
+must bind retained bytes and program identity to the same provider generation;
+it must not be enabled by changing a Boolean without that issuer and its
+negative-control evidence.
+
 ## Parser SIMD artifact qualification refinement
 
 Parser SIMD promotion consumes three distinct identities:

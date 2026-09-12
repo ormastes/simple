@@ -947,6 +947,19 @@ int64_t rt_gpu_provider_completion_authority_word(int64_t backend_bit,
     return (int64_t)value;
 }
 
+int64_t rt_gpu_provider_device_image_authority_word(int64_t backend_bit,
+        int64_t session_token, int64_t image_token, int64_t word) {
+    /* Device-program bytes are not owned by the hosted provider registry yet.
+     * A provider/session pair cannot manufacture image authority from routing
+     * metadata, so every word remains unavailable until that retained owner is
+     * implemented and independently verified. */
+    (void)backend_bit;
+    (void)session_token;
+    (void)image_token;
+    (void)word;
+    return 0;
+}
+
 int64_t rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session_token,
         int64_t size_bytes, int64_t flags, int64_t usage_bits) {
     SimpleGpuCallPinV1 pin;

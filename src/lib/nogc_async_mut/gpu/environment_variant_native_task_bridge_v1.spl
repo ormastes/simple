@@ -1,0 +1,215 @@
+# Typed consumption boundary between runtime-owned GPU capabilities and the
+# environment task contract. It does not submit work or upgrade routing into a
+# physical-execution claim.
+
+use common.gpu.environment_variant_task_contract_v1.*
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_async_mut.gpu.environment_variant_native_authority_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1}
+
+pub const GPU_NATIVE_TASK_DEVICE_IMAGE_AUTHORITY_AVAILABLE_V1: bool = false
+pub const GPU_NATIVE_TASK_PHYSICAL_EXECUTION_AVAILABLE_V1: bool = false
+
+pub enum GpuNativeTaskBridgeErrorV1:
+    InvalidTask
+    ProviderAuthorityUnavailable
+    DeviceImageAuthorityUnavailable
+    ResourceAuthorityUnavailable
+    CompletionAuthorityUnavailable
+    AuthorityMismatch
+    PhysicalExecutionUnavailable
+
+pub struct GpuNativeTaskAdmissionReceiptV1:
+    invocation_id: u64
+    provider_generation: u64
+    lease_generation: u64
+    backend: i64
+    session: i64
+    resource: i64
+    device_image: i64
+    image_digest: EnvironmentDigest256V1
+    routing_evidence_only: bool
+    physical_execution_proven: bool
+
+pub struct GpuNativeTaskCompletionReceiptV1:
+    invocation_id: u64
+    provider_generation: u64
+    resource: i64
+    completion: i64
+    fence_identity: EnvironmentDigest256V1
+    completion_identity: EnvironmentDigest256V1
+    readback_identity: EnvironmentDigest256V1
+    readback_bytes: u64
+    terminal_readback_verified: bool
+    retirement_observed: bool
+    physical_execution_proven: bool
+
+fn _same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+pub fn gpu_native_task_provider_shape_matches_v1(
+    provider: GpuHostControlProviderV1,
+    device: GpuEnabledDeviceAuthorityV1,
+    native: GpuNativeProviderAuthorityV1
+) -> bool:
+    native.backend > 0 and native.backend <= 4294967295 and
+        native.session > 0 and
+        provider.registry_backend_id == native.backend as u32 and
+        provider.provider_generation == native.provider_generation and
+        _same(provider.provider_identity,
+            gpu_native_scalar_identity_v1(native.provider_identity)) and
+        _same(provider.artifact_digest, native.artifact_digest) and
+        _same(device.device_identity,
+            gpu_native_scalar_identity_v1(native.device_identity))
+
+pub fn gpu_native_task_resource_shape_matches_v1(
+    lease: GpuResourceLeaseV1,
+    task: GpuBoundedTaskV1,
+    native: GpuNativeResourceAuthorityV1
+) -> bool:
+    native.backend > 0 and native.session > 0 and native.resource > 0 and
+        native.provider_generation == task.provider_generation and
+        lease.provider_generation == native.provider_generation and
+        lease.lease_generation == native.resource as u64 and
+        lease.leased_bytes == native.capacity_bytes and
+        _same(lease.lease_identity,
+            gpu_native_resource_lease_identity_v1(native)) and
+        task.arena_capacity_bytes <= native.capacity_bytes
+
+pub fn gpu_native_task_resource_lease_project_v1(
+    provider: GpuNativeProviderAuthorityV1,
+    resource: GpuNativeResourceAuthorityV1,
+    device: GpuEnabledDeviceAuthorityV1,
+    resource_layout: EnvironmentDigest256V1
+) -> Result<GpuResourceLeaseV1, GpuNativeTaskBridgeErrorV1>:
+    if not gpu_native_provider_authority_live_v1(provider):
+        return Err(GpuNativeTaskBridgeErrorV1.ProviderAuthorityUnavailable)
+    if not gpu_native_resource_authority_live_v1(resource):
+        return Err(GpuNativeTaskBridgeErrorV1.ResourceAuthorityUnavailable)
+    if resource.backend != provider.backend or
+       resource.session != provider.session or
+       resource.provider_generation != provider.provider_generation or
+       not _same(device.device_identity,
+           gpu_native_scalar_identity_v1(provider.device_identity)):
+        return Err(GpuNativeTaskBridgeErrorV1.AuthorityMismatch)
+    Ok(GpuResourceLeaseV1(
+        lease_identity: gpu_native_resource_lease_identity_v1(resource),
+        device_identity: device.device_identity,
+        provider_generation: resource.provider_generation,
+        resource_layout_digest: resource_layout,
+        leased_bytes: resource.capacity_bytes,
+        lease_generation: resource.resource as u64))
+
+pub fn gpu_native_task_admission_consume_v1(
+    provider: GpuHostControlProviderV1,
+    image: GpuDeviceProgramImageV1,
+    device: GpuEnabledDeviceAuthorityV1,
+    lease: GpuResourceLeaseV1,
+    task: GpuBoundedTaskV1,
+    native_provider: GpuNativeProviderAuthorityV1,
+    native_image: GpuNativeDeviceProgramImageAuthorityV1,
+    native_resource: GpuNativeResourceAuthorityV1
+) -> Result<GpuNativeTaskAdmissionReceiptV1, GpuNativeTaskBridgeErrorV1>:
+    if gpu_bounded_task_validate_v1(task) != Ok(()):
+        return Err(GpuNativeTaskBridgeErrorV1.InvalidTask)
+    if not gpu_native_provider_authority_live_v1(native_provider):
+        return Err(GpuNativeTaskBridgeErrorV1.ProviderAuthorityUnavailable)
+    if not GPU_NATIVE_TASK_DEVICE_IMAGE_AUTHORITY_AVAILABLE_V1 or
+       not gpu_native_device_program_image_authority_live_v1(native_image):
+        return Err(GpuNativeTaskBridgeErrorV1.DeviceImageAuthorityUnavailable)
+    if not gpu_native_resource_authority_live_v1(native_resource):
+        return Err(GpuNativeTaskBridgeErrorV1.ResourceAuthorityUnavailable)
+    if not gpu_native_task_provider_shape_matches_v1(
+            provider, device, native_provider) or
+       native_image.backend != native_provider.backend or
+       native_image.session != native_provider.session or
+       native_image.provider_generation != native_provider.provider_generation or
+       not _same(native_image.program_identity, image.program_identity) or
+       not _same(native_image.image_digest, image.image_digest) or
+       native_resource.backend != native_provider.backend or
+       native_resource.session != native_provider.session or
+       not gpu_native_task_resource_shape_matches_v1(
+            lease, task, native_resource) or
+       gpu_environment_variant_admit_v1(provider, image, device) != Ok(()) or
+       gpu_environment_variant_lease_validate_v1(
+            provider, image, device, lease) != Ok(()) or
+       task.lease_generation != lease.lease_generation:
+        return Err(GpuNativeTaskBridgeErrorV1.AuthorityMismatch)
+    Ok(GpuNativeTaskAdmissionReceiptV1(
+        invocation_id: task.invocation_id,
+        provider_generation: task.provider_generation,
+        lease_generation: task.lease_generation,
+        backend: native_provider.backend, session: native_provider.session,
+        resource: native_resource.resource, device_image: native_image.image,
+        image_digest: native_image.image_digest,
+        routing_evidence_only: true, physical_execution_proven: false))
+
+pub fn gpu_native_task_completion_consume_v1(
+    provider: GpuHostControlProviderV1,
+    image: GpuDeviceProgramImageV1,
+    device: GpuEnabledDeviceAuthorityV1,
+    lease: GpuResourceLeaseV1,
+    task: GpuBoundedTaskV1,
+    native_provider: GpuNativeProviderAuthorityV1,
+    native_image: GpuNativeDeviceProgramImageAuthorityV1,
+    native_resource: GpuNativeResourceAuthorityV1,
+    native_completion: GpuNativeCompletionAuthorityV1
+) -> Result<GpuNativeTaskCompletionReceiptV1, GpuNativeTaskBridgeErrorV1>:
+    # Reconstruct admission from the live issuer-owned capabilities. A public
+    # receipt is evidence for callers, never authority for completion.
+    val admitted = gpu_native_task_admission_consume_v1(
+        provider, image, device, lease, task,
+        native_provider, native_image, native_resource)
+    if admitted.is_err(): return Err(admitted.unwrap_err())
+    val admission = admitted.unwrap()
+    if not GPU_NATIVE_TASK_PHYSICAL_EXECUTION_AVAILABLE_V1:
+        return Err(GpuNativeTaskBridgeErrorV1.PhysicalExecutionUnavailable)
+    if not gpu_native_completion_authority_live_v1(native_completion):
+        return Err(GpuNativeTaskBridgeErrorV1.CompletionAuthorityUnavailable)
+    if admission.invocation_id != task.invocation_id or
+       admission.provider_generation != native_provider.provider_generation or
+       admission.backend != native_provider.backend or
+       admission.session != native_provider.session or
+       admission.resource != native_resource.resource or
+       admission.device_image != native_image.image or
+       native_completion.backend != native_provider.backend or
+       native_completion.session != native_provider.session or
+       native_completion.provider_generation != native_provider.provider_generation or
+       native_completion.resource != native_resource.resource as u64 or
+       native_completion.correlation_id != task.invocation_id or
+       native_completion.device_identity != native_provider.device_identity or
+       native_completion.readback_bytes == 0u64 or
+       native_completion.readback_bytes > task.output_arena.length:
+        return Err(GpuNativeTaskBridgeErrorV1.AuthorityMismatch)
+    val fence = EnvironmentDigest256V1(
+        w0: native_completion.completion as u64,
+        w1: native_completion.correlation_id,
+        w2: native_completion.provider_generation,
+        w3: native_completion.device_identity)
+    val completed = EnvironmentDigest256V1(
+        w0: native_completion.checksum,
+        w1: native_completion.readback_bytes,
+        w2: native_completion.resource,
+        w3: native_image.image as u64)
+    Ok(GpuNativeTaskCompletionReceiptV1(
+        invocation_id: task.invocation_id,
+        provider_generation: task.provider_generation,
+        resource: native_resource.resource,
+        completion: native_completion.completion,
+        fence_identity: fence, completion_identity: completed,
+        readback_identity: EnvironmentDigest256V1(
+            w0: native_completion.checksum,
+            w1: native_completion.readback_bytes,
+            w2: native_completion.resource,
+            w3: native_completion.correlation_id),
+        readback_bytes: native_completion.readback_bytes,
+        terminal_readback_verified: true, retirement_observed: false,
+        physical_execution_proven: false))
+
+pub fn gpu_native_task_missing_authority_decision_v1(
+    task: GpuBoundedTaskV1
+) -> GpuTaskFallbackDecisionV1:
+    gpu_task_missing_provider_decision_v1(
+        task.fallback_policy, task.cpu_fallback_semantically_allowed)

@@ -6,6 +6,8 @@
 
 use common.gpu.environment_variant_task_contract_v1.*
 use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_async_mut.gpu.environment_variant_native_authority_v1.*
+use std.nogc_async_mut.gpu.environment_variant_native_task_bridge_v1.*
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
 use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
 
@@ -818,6 +820,68 @@ pub fn gpu_environment_task_submit_v1(
     record.submission = receipt
     owner.tasks[task_index] = record
     Ok(receipt)
+
+pub fn gpu_environment_task_native_authorities_consume_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1,
+    native_provider: GpuNativeProviderAuthorityV1,
+    native_image: GpuNativeDeviceProgramImageAuthorityV1,
+    native_resource: GpuNativeResourceAuthorityV1
+) -> Result<GpuNativeTaskAdmissionReceiptV1, GpuEnvironmentTaskErrorV1>:
+    val task_index = _task_index(owner, handle)
+    if task_index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val record = owner.tasks[task_index]
+    if record.state != GpuTaskStateV1.Prepared or record.was_submitted:
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    val admission_index = _admission_index(owner, record.admission)
+    if admission_index < 0:
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    val admission = owner.admissions[admission_index]
+    val consumed = gpu_native_task_admission_consume_v1(
+        admission.provider, record.image, record.device, record.lease,
+        record.task, native_provider, native_image, native_resource)
+    if consumed.is_err():
+        val failure = consumed.unwrap_err()
+        if failure == GpuNativeTaskBridgeErrorV1.InvalidTask:
+            return Err(GpuEnvironmentTaskErrorV1.TaskContractMismatch)
+        if failure == GpuNativeTaskBridgeErrorV1.AuthorityMismatch:
+            return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
+    Ok(consumed.unwrap())
+
+pub fn gpu_environment_task_native_completion_consume_v1(
+    owner: GpuEnvironmentTaskOwnerV1,
+    handle: GpuEnvironmentTaskHandleV1,
+    native_provider: GpuNativeProviderAuthorityV1,
+    native_image: GpuNativeDeviceProgramImageAuthorityV1,
+    native_resource: GpuNativeResourceAuthorityV1,
+    native_completion: GpuNativeCompletionAuthorityV1
+) -> Result<GpuNativeTaskCompletionReceiptV1, GpuEnvironmentTaskErrorV1>:
+    val task_index = _task_index(owner, handle)
+    if task_index < 0: return Err(GpuEnvironmentTaskErrorV1.TaskUnknown)
+    val record = owner.tasks[task_index]
+    if not record.was_submitted or record.submission == nil or
+       (record.state != GpuTaskStateV1.Submitted and
+        record.state != GpuTaskStateV1.Cancelled) or
+       record.terminal_consumed or record.terminal_fence_observed or
+       record.committed:
+        return Err(GpuEnvironmentTaskErrorV1.InvalidState)
+    val admission_index = _admission_index(owner, record.admission)
+    if admission_index < 0:
+        return Err(GpuEnvironmentTaskErrorV1.AdmissionMismatch)
+    val admission = owner.admissions[admission_index]
+    val consumed = gpu_native_task_completion_consume_v1(
+        admission.provider, record.image, record.device, record.lease,
+        record.task,
+        native_provider, native_image, native_resource, native_completion)
+    if consumed.is_err():
+        val failure = consumed.unwrap_err()
+        if failure == GpuNativeTaskBridgeErrorV1.InvalidTask:
+            return Err(GpuEnvironmentTaskErrorV1.TaskContractMismatch)
+        if failure == GpuNativeTaskBridgeErrorV1.AuthorityMismatch:
+            return Err(GpuEnvironmentTaskErrorV1.CompletionMismatch)
+        return Err(GpuEnvironmentTaskErrorV1.NativeAuthorityUnavailable)
+    Ok(consumed.unwrap())
 
 pub fn gpu_environment_task_completion_record_v1(
     owner: GpuEnvironmentTaskOwnerV1,

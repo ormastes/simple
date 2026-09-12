@@ -439,6 +439,10 @@ int64_t  rt_gpu_provider_resource_authority_word(int64_t backend_bit,
         int64_t session, int64_t resource, int64_t word);
 int64_t  rt_gpu_provider_completion_authority_word(int64_t backend_bit,
         int64_t session, int64_t completion, int64_t word);
+/* Reserved typed projection for a future runtime-owned, exact-byte device
+ * image lease. Returns zero until an authenticated image owner is installed. */
+int64_t  rt_gpu_provider_device_image_authority_word(int64_t backend_bit,
+        int64_t session, int64_t image, int64_t word);
 int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
