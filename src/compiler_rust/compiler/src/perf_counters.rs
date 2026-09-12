@@ -32,6 +32,10 @@ counters!(
     ARR_MUT_CALLS,
     ARR_MUT_COW_CLONES,
     ARR_MUT_COW_ELEMS_CLONED,
+    // identifier-receiver dict mutation (d.insert(k, v) / d.remove(k) and friends)
+    DICT_MUT_CALLS,
+    DICT_MUT_COW_CLONES,
+    DICT_MUT_COW_ENTRIES_CLONED,
     // object-field array mutation (obj.field.push(x) / self.field.push(x))
     SELF_FIELD_ARR_MUT_CALLS,
     SELF_FIELD_ARR_COW_CLONES,

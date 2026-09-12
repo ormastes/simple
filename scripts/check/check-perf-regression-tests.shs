@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=147
+ROW_FLOOR=155
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -633,6 +633,25 @@ must_contain     "LOADER28 env_value_nul_free scans bytes"         "$LEXSTRUCT" 
 must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" "if char_code(value[i:i + 1]) == 0:"
 must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
 must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
+
+# --- interpreter dict mutator methods, identifier receiver (2026-09-12) -----
+# doc/08_tracking/bug/interpreter_dict_mutator_methods_clone_map_2026-09-12.md
+# `d.insert(k, v)` / `d.remove(k)` / `d.merge(o)` on a bare-identifier receiver
+# re-entered `evaluate_expr`, which dispatched into the purely functional
+# `handle_dict_methods` -- whose every mutator arm opens `let mut new_map =
+# map.clone()`. That whole-HashMap copy ran per call, so building or draining a
+# dict through the METHOD forms was O(N^2) while the bracket form `d[k] = v`
+# (which mutates through `Arc::make_mut` in node_exec.rs) was O(N).
+DICTPAT="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+DICTCOLL="$ROOT/src/compiler_rust/compiler/src/interpreter_method/collections.rs"
+must_contain     "DICTMUT one in-place kernel exists"              "$DICTCOLL" "pub(crate) fn apply_dict_mutation_in_place("
+must_contain     "DICTMUT functional arms route through it"        "$DICTCOLL" "apply_dict_mutation_in_place(method, &mut new_map, Some(key_val), Some(value))?"
+must_contain     "DICTMUT identifier path mutates through the Arc" "$DICTPAT" "let map = Arc::make_mut(arc);"
+must_contain     "DICTMUT identifier path calls the same kernel"   "$DICTPAT" "collections::apply_dict_mutation_in_place("
+must_not_contain "DICTMUT must not re-enter evaluate_expr per call" "$DICTPAT" "if let Value::Dict(new_dict) = &result {"
+must_contain     "DICTMUT COW is counted, not silent"              "$DICTPAT" "DICT_MUT_COW_ENTRIES_CLONED"
+must_contain     "DICTMUT scaling spec is present"                 "$ROOT/test/05_perf/interp/dict_mutator_scaling_spec.spl" "expect(large * 10 < small * 70).to_equal(true)"
+must_contain     "DICTMUT alias still copies on write"             "$DICTPAT" "fn genuinely_aliased_dict_still_copies_on_write("
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
