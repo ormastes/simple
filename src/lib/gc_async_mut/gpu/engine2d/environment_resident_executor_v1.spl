@@ -1,0 +1,241 @@
+"""Resident frontend/render execution island for environment-selected tasks.
+
+EGL package 7. `engine2d_gpu_epoch_admit` (common.gpu.engine2d.gpu_epoch) is a
+routing-only seam: it re-decides admission on every call, keeps nothing alive
+between calls, and its own receipts say `routing_evidence_only`. This module is
+the other half of the remaining package-7 work — an executor that admits a
+bounded task ONCE, keeps the surface it admitted resident across calls, and
+retires it on an idle/lease bound.
+
+What it consumes rather than re-derives:
+
+- `GpuBoundedTaskV1` and `gpu_bounded_task_validate_v1` — the package-6 bounded
+  task contract. Admission is that validator's verdict, not a second opinion.
+- `gpu_task_missing_provider_decision_v1` — the package-6 fallback authority.
+  With no provider, a task that requires the requested provider, or whose
+  semantics forbid the CPU lane, is REFUSED here; it is never quietly run.
+
+What it does not reach: a device. The only execution body wired in is the
+existing CPU/software rasterizer (`SoftwareBackend`), reused unchanged — no new
+renderer. Every receipt states that (`lane == "cpu_emulated"`,
+`device_execution_proven == false`), so a green run of this module is never
+evidence of device execution. A real provider is refused outright
+(`DeviceLaneUnavailable`) rather than silently served by the CPU lane.
+
+Lifecycle: admit -> resident -> retired.
+
+  - `admit` grants one lease and initializes one resident surface.
+  - `execute` renders onto THAT surface, with no re-admission; state therefore
+    accumulates across calls, which is what residency means here.
+  - `sweep` retires leases idle past the island's bound; the record is kept so
+    the lease reports `NotResident` rather than vanishing.
+  - `retire` returns the terminal receipt and frees the slot; the lease is
+    unknown afterwards.
+"""
+
+use common.gpu.environment_variant_task_contract_v1.{
+    GpuBoundedTaskV1, GpuTaskFallbackDecisionV1,
+    gpu_bounded_task_validate_v1, gpu_task_missing_provider_decision_v1
+}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+pub val RESIDENT_PHASE_ADMITTED_V1: text = "admitted"
+pub val RESIDENT_PHASE_RESIDENT_V1: text = "resident"
+pub val RESIDENT_PHASE_RETIRED_V1: text = "retired"
+pub val RESIDENT_LANE_CPU_EMULATED_V1: text = "cpu_emulated"
+
+# One island holds a bounded live set. The bound exists so a leaking caller
+# cannot pin surfaces indefinitely; it is deliberately small because each live
+# entry owns a full framebuffer.
+pub const RESIDENT_ISLAND_MAX_LIVE_V1: i64 = 8
+
+pub enum ResidentExecutorErrorV1:
+    TaskContractRejected
+    AuthorityMissing
+    DeviceLaneUnavailable
+    CapacityExceeded
+    SurfaceUnavailable
+    UnknownLease
+    NotResident
+
+pub struct ResidentLeaseV1:
+    lease_handle: u64
+    owner_identity: u64
+
+pub struct ResidentReceiptV1:
+    lease_handle: u64
+    invocation_id: u64
+    phase: text
+    executions: i64
+    resident_since_tick: i64
+    last_used_tick: i64
+    idle_bound_ticks: i64
+    readback_checksum: i64
+    pixel_count: i64
+    lane: text
+    device_execution_proven: bool
+    routing_evidence_only: bool
+
+struct _ResidentRecordV1:
+    lease_handle: u64
+    invocation_id: u64
+    phase: text
+    executions: i64
+    resident_since_tick: i64
+    last_used_tick: i64
+    readback_checksum: i64
+    pixel_count: i64
+
+var _next_resident_island_owner_v1: u64 = 1u64
+
+pub class ResidentExecutionIslandV1:
+    var owner_identity: u64
+    var idle_bound_ticks: i64
+    var surface_width: i32
+    var surface_height: i32
+    var next_handle: u64
+    var admissions_granted: i64
+    var records: [_ResidentRecordV1]
+    var surfaces: [SoftwareBackend]
+
+    pub static fn create(idle_bound_ticks: i64, width: i32, height: i32) -> ResidentExecutionIslandV1:
+        val identity = _next_resident_island_owner_v1
+        if identity != 0u64 and identity != 0xffffffffffffffffu64:
+            _next_resident_island_owner_v1 = identity + 1u64
+        ResidentExecutionIslandV1(owner_identity: identity,
+            idle_bound_ticks: idle_bound_ticks, surface_width: width,
+            surface_height: height, next_handle: 1u64, admissions_granted: 0,
+            records: [], surfaces: [])
+
+    me _index_of(lease: ResidentLeaseV1) -> i64:
+        if lease.owner_identity != self.owner_identity:
+            return -1
+        var i: i64 = 0
+        while i < self.records.len():
+            if self.records[i].lease_handle == lease.lease_handle:
+                return i
+            i = i + 1
+        -1
+
+    me _receipt(index: i64) -> ResidentReceiptV1:
+        val record = self.records[index]
+        ResidentReceiptV1(lease_handle: record.lease_handle,
+            invocation_id: record.invocation_id, phase: record.phase,
+            executions: record.executions,
+            resident_since_tick: record.resident_since_tick,
+            last_used_tick: record.last_used_tick,
+            idle_bound_ticks: self.idle_bound_ticks,
+            readback_checksum: record.readback_checksum,
+            pixel_count: record.pixel_count, lane: RESIDENT_LANE_CPU_EMULATED_V1,
+            device_execution_proven: false, routing_evidence_only: false)
+
+    pub me admit(task: GpuBoundedTaskV1, provider_available: bool,
+        tick: i64) -> Result<ResidentLeaseV1, ResidentExecutorErrorV1>:
+        """Admit a bounded task once and make its surface resident."""
+        if gpu_bounded_task_validate_v1(task).is_err():
+            return Err(ResidentExecutorErrorV1.TaskContractRejected)
+        if provider_available:
+            # A device provider was offered, but this island implements no
+            # device body. Refusing keeps the CPU lane from impersonating one.
+            return Err(ResidentExecutorErrorV1.DeviceLaneUnavailable)
+        val decision = gpu_task_missing_provider_decision_v1(task.fallback_policy,
+            task.cpu_fallback_semantically_allowed)
+        if decision != GpuTaskFallbackDecisionV1.UseCpu:
+            return Err(ResidentExecutorErrorV1.AuthorityMissing)
+        if self.records.len() >= RESIDENT_ISLAND_MAX_LIVE_V1 or
+           self.next_handle == 0u64 or self.next_handle == 0xffffffffffffffffu64:
+            return Err(ResidentExecutorErrorV1.CapacityExceeded)
+        var surface = SoftwareBackend.create()
+        if not surface.init(self.surface_width, self.surface_height):
+            return Err(ResidentExecutorErrorV1.SurfaceUnavailable)
+        val handle = self.next_handle
+        self.next_handle = handle + 1u64
+        self.records.push(_ResidentRecordV1(lease_handle: handle,
+            invocation_id: task.invocation_id, phase: RESIDENT_PHASE_ADMITTED_V1,
+            executions: 0, resident_since_tick: tick, last_used_tick: tick,
+            readback_checksum: 0, pixel_count: 0))
+        self.surfaces.push(surface)
+        self.admissions_granted = self.admissions_granted + 1
+        Ok(ResidentLeaseV1(lease_handle: handle, owner_identity: self.owner_identity))
+
+    pub me execute(lease: ResidentLeaseV1, tick: i64, x: i32, y: i32, w: i32,
+        h: i32, color: u32) -> Result<ResidentReceiptV1, ResidentExecutorErrorV1>:
+        """Render one operation onto the already-admitted resident surface.
+
+        There is no re-admission here: the contract was validated at `admit`,
+        and the surface has been alive since. Successive calls accumulate on
+        the same framebuffer, which is exactly what the readback checksum
+        witnesses.
+        """
+        val index = self._index_of(lease)
+        if index < 0:
+            return Err(ResidentExecutorErrorV1.UnknownLease)
+        if self.records[index].phase == RESIDENT_PHASE_RETIRED_V1:
+            return Err(ResidentExecutorErrorV1.NotResident)
+        var surface = self.surfaces[index]
+        surface.draw_rect_filled(x, y, w, h, color)
+        val readback = surface.read_pixels_with_source()
+        self.surfaces[index] = surface
+        var record = self.records[index]
+        record.phase = RESIDENT_PHASE_RESIDENT_V1
+        record.executions = record.executions + 1
+        record.last_used_tick = tick
+        record.readback_checksum = readback.checksum
+        record.pixel_count = readback.pixel_count
+        self.records[index] = record
+        Ok(self._receipt(index))
+
+    pub me sweep(tick: i64) -> i64:
+        """Retire every lease idle longer than the island's bound.
+
+        The record is retained so a stale lease reports `NotResident` instead
+        of silently becoming an unknown handle.
+        """
+        var retired: i64 = 0
+        var i: i64 = 0
+        while i < self.records.len():
+            var record = self.records[i]
+            if record.phase != RESIDENT_PHASE_RETIRED_V1 and
+               tick - record.last_used_tick > self.idle_bound_ticks:
+                var surface = self.surfaces[i]
+                surface.shutdown()
+                self.surfaces[i] = surface
+                record.phase = RESIDENT_PHASE_RETIRED_V1
+                self.records[i] = record
+                retired = retired + 1
+            i = i + 1
+        retired
+
+    pub me retire(lease: ResidentLeaseV1,
+        tick: i64) -> Result<ResidentReceiptV1, ResidentExecutorErrorV1>:
+        """Hand the lease back and free its slot, returning the final receipt."""
+        val index = self._index_of(lease)
+        if index < 0:
+            return Err(ResidentExecutorErrorV1.UnknownLease)
+        var record = self.records[index]
+        if record.phase != RESIDENT_PHASE_RETIRED_V1:
+            var surface = self.surfaces[index]
+            surface.shutdown()
+            self.surfaces[index] = surface
+            record.phase = RESIDENT_PHASE_RETIRED_V1
+        record.last_used_tick = tick
+        self.records[index] = record
+        val receipt = self._receipt(index)
+        var kept_records: [_ResidentRecordV1] = []
+        var kept_surfaces: [SoftwareBackend] = []
+        var i: i64 = 0
+        while i < self.records.len():
+            if i != index:
+                kept_records.push(self.records[i])
+                kept_surfaces.push(self.surfaces[i])
+            i = i + 1
+        self.records = kept_records
+        self.surfaces = kept_surfaces
+        Ok(receipt)
+
+    pub me live_count() -> i64:
+        var live: i64 = 0
+        for record in self.records:
+            if record.phase != RESIDENT_PHASE_RETIRED_V1:
+                live = live + 1
+        live
