@@ -143,7 +143,23 @@ Seeds: before `13d5781c52fd5ffa...`, after `4384bd65ea4d6622...`, both
   depth <= 16, all checked at parse time (`neg_deep_nesting`).
 - A parameter or return type annotated as anything but a 64-bit integer is
   declined, so a float-typed helper keeps the generic path's coercion.
-- Locals shadowing the callee name are declined.
+- Locals shadowing the callee name are declined. This is what keeps the
+  `closure_capture` shape in `interpreter_component_scaling_spec.spl`
+  (`acc = acc + f(i)` where `f` is a local lambda) on the generic path: verified
+  directly, `WHILE_INLINE_INT_ITERS=0` and the value is unchanged.
+
+### One pre-existing hole this widens (not introduced here)
+
+An inlined helper's `contract` block (`requires`/`ensures`) is **not evaluated** —
+inlining skips the call entirely. This is shared with the existing one-arg and
+two-arg helper matchers, which do not check `function.contract` either; the
+generalisation only widens the set of call sites it can reach (now also
+`acc = acc + f(i)`, not just `acc = f(acc, i)`). Adding
+`|| function.contract.is_some()` to `inline_int_signature_is_integer`'s decline
+conditions would close it for all three; it was not done here because it is a
+pre-existing behaviour change rather than a regression of this lane, and no
+in-repo helper of the inlinable shape (whole body = one arithmetic expression
+over its own parameters) currently carries a contract.
 
 ### Parse-cost negative control
 
@@ -162,6 +178,24 @@ count they accelerated. That is strictly better (a number instead of an absence)
 but it changes the recipe. **The other sixteen `try_exec_*_while_loop` matchers
 still emit nothing**, so for those the old detector still applies. Bumping the
 counter in all nineteen is straightforward and is left as follow-up.
+
+### Suites, before -> after (base seed vs candidate seed, same host)
+
+| suite | base | candidate |
+|---|---|---|
+| `cargo test --release --lib -p simple-compiler` | 4012 passed / 16 failed | 4012 passed / 16 failed, **identical failure set** |
+| `test/01_unit/interpreter/` (2 specs) | OK 5/5, OK 3/3 | identical |
+| `test/01_unit/compiler/interpreter/` (104 verdicts) | 36 FAIL | 36 FAIL, **verdict-line diff EMPTY** |
+| `test/05_perf/interp/` (6 specs) | see below | see below |
+
+The perf directory is the only place a line moved, and both moves are accounted for:
+`while_loop_shape_parity_spec.spl` ERROR 0/7 -> **OK 7/7** (this change), and
+`interpreter_component_scaling_spec.spl`'s `closure_capture` ratio pin, which is a
+single-sample timing flake on BOTH seeds — timed standalone 5x per seed, the BASE produced a
+failing ratio (8.3 vs the 7.0 bound) and the candidate produced none, with fully overlapping
+distributions. That loop (`acc = acc + f(i)`, `f` a local lambda) is verified NOT taken by the
+new matcher: `WHILE_INLINE_INT_ITERS=0`, identical value on both seeds.
+`push_call_loop_env_cache_spec.spl` is RED on origin/main and unchanged.
 
 ### Evidence
 
