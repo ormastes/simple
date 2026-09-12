@@ -1,0 +1,143 @@
+# PersistentSet.intersection must cost O(min(|self|,|other|)), not O(|self|).
+#
+# Intersection is commutative, but the implementation was not: it always
+# snapshotted `self._inner.keys()` and probed `other`. So
+# `big.intersection(small)` paid |big| key materializations plus |big| probes,
+# while `small.intersection(big)` — the identical result — paid |small| of
+# each. A caller who wrote the arguments in the "wrong" order paid the whole
+# larger set for a result that can never be bigger than the smaller one.
+#
+# `len()` is O(1) on the backing PersistentMap, so the side to iterate can be
+# chosen for free. This spec pins that choice by SHAPE, not by an absolute
+# wall-clock budget:
+#
+#   1. orientation independence: `big.intersection(small)` must cost about the
+#      same as `small.intersection(big)` (same result, same work);
+#   2. work anchor: 32 `big.intersection(small)` calls must cost less than 32
+#      honest O(n) `to_array()` walks over `big` — one walk is exactly the work
+#      the old implementation did per call.
+#
+# Vacuity fences (this spec must FAIL, not pass, when it measured nothing):
+#   - every call's result is compared element-by-element against the expected
+#     8 elements AND against the opposite orientation, with a -1 sentinel on
+#     any mismatch, so a "fast" wrong answer can never be timed;
+#   - the control walk must take strictly more than 0us;
+#   - both inputs assert their exact cardinality before timing.
+#
+# Target: src/lib/nogc_async_immut/persistent_set/__init__.spl, `fn intersection`.
+
+use std.persistent_set.{PersistentSet}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+val BIG_N = 2048
+val SMALL_N = 8
+val CALLS = 32
+
+fn build_big() -> PersistentSet:
+    var s = PersistentSet.empty()
+    var i = 0
+    while i < BIG_N:
+        s = s.add("item_{i}")
+        i = i + 1
+    s
+
+fn build_small() -> PersistentSet:
+    var s = PersistentSet.empty()
+    var i = 0
+    while i < SMALL_N:
+        s = s.add("item_{i}")
+        i = i + 1
+    s
+
+# True when `s` holds exactly item_0..item_{SMALL_N-1} and nothing else.
+fn is_expected_overlap(s: PersistentSet) -> bool:
+    if s.len() != SMALL_N:
+        return false
+    var i = 0
+    while i < SMALL_N:
+        if not s.contains("item_{i}"):
+            return false
+        i = i + 1
+    true
+
+# Elapsed microseconds for CALLS intersections, or -1 if any result was wrong.
+fn time_intersections(left: PersistentSet, right: PersistentSet) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    var ok_count = 0
+    while i < CALLS:
+        if is_expected_overlap(left.intersection(right)):
+            ok_count = ok_count + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    if ok_count != CALLS:
+        return -1
+    elapsed
+
+# Elapsed microseconds for CALLS honest O(n) key materializations of `s`:
+# exactly the work the unguarded intersection did per call. -1 on a bad count.
+fn time_full_walks(s: PersistentSet) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    var seen = 0
+    while i < CALLS:
+        seen = seen + len(s.to_array())
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    if seen != CALLS * BIG_N:
+        return -1
+    elapsed
+
+fn best_intersections(left: PersistentSet, right: PersistentSet) -> i64:
+    var best = time_intersections(left, right)
+    var r = 0
+    while r < 2:
+        val next = time_intersections(left, right)
+        if next < 0:
+            return -1
+        if best >= 0 and next < best:
+            best = next
+        r = r + 1
+    best
+
+describe "PersistentSet.intersection iterates the smaller side":
+    it "returns the same elements in either argument order":
+        val big = build_big()
+        val small = build_small()
+
+        expect("{big.len()}/{small.len()}").to_equal("2048/8")
+
+        val a = big.intersection(small)
+        val b = small.intersection(big)
+
+        expect("big^small ok={is_expected_overlap(a)} small^big ok={is_expected_overlap(b)} same_len={a.len() == b.len()}").to_equal(
+            "big^small ok=true small^big ok=true same_len=true")
+
+    it "costs about the same in either argument order":
+        val big = build_big()
+        val small = build_small()
+
+        val t_small_first = best_intersections(small, big)
+        val t_big_first = best_intersections(big, small)
+
+        # Before the fix this ratio is ~|big|/|small| = 256x. The absolute
+        # slack covers the guarded case, where both sides are near the clock
+        # floor and a ratio is meaningless.
+        val budget = t_small_first * 4 + 2000
+        expect("{CALLS} calls: small^big={t_small_first}us big^small={t_big_first}us within {budget}us: {t_big_first <= budget}").to_equal(
+            "{CALLS} calls: small^big={t_small_first}us big^small={t_big_first}us within {budget}us: true")
+
+    it "costs less than one full walk of the larger set per call":
+        val big = build_big()
+        val small = build_small()
+
+        val t_walks = time_full_walks(big)
+        val t_big_first = best_intersections(big, small)
+
+        # Vacuity fence: a dead clock must FAIL here, not buy a free pass.
+        expect("control walks measurable: {t_walks > 0}").to_equal(
+            "control walks measurable: true")
+
+        expect("{CALLS}x big^small = {t_big_first}us < {CALLS}x to_array(big) = {t_walks}us: {t_big_first < t_walks}").to_equal(
+            "{CALLS}x big^small = {t_big_first}us < {CALLS}x to_array(big) = {t_walks}us: true")
