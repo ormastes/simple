@@ -34,7 +34,7 @@ extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
 extern fn rt_host_dynlib_close(handle: i64) -> i64
 extern fn rt_file_hash_sha256(path: text) -> text
 
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_size}
 
 # RTLD_NOW: resolve every relocation at load time rather than discovering a
 # missing dependency at the first call.
@@ -45,6 +45,7 @@ pub enum DynlibAdmissionErrorV1:
     DigestUnreadable
     DigestMismatch
     LoadFailed
+    SwappedDuringLoad
 
 # SHA-256 of the artifact's bytes on disk. Empty when the file cannot be read.
 pub fn dynlib_artifact_digest_hex_v1(path: text) -> text:
@@ -52,30 +53,66 @@ pub fn dynlib_artifact_digest_hex_v1(path: text) -> text:
         return ""
     rt_file_hash_sha256(path)
 
-# Hash first, map second: a shared object's ELF constructors run during load, so
-# a mismatched artifact has to be rejected while it is still inert.
+# Size in bytes, or -1 when the artifact cannot be sized. Carried alongside the
+# digest because the two are read in one pass and a size change is the cheapest
+# possible witness that the bytes behind the path are not the bytes that were
+# admitted.
+pub fn dynlib_artifact_size_v1(path: text) -> i64:
+    if path == "" or not file_exists(path):
+        return -1
+    file_size(path)
+
+# Does the artifact behind `path` still have exactly the size and digest it had
+# when it was admitted? Public because a long-lived mapping is re-checked when
+# its provider generation is re-pinned, not only at admission.
+pub fn dynlib_artifact_unchanged_v1(
+    path: text, expected_digest_hex: text, expected_size: i64
+) -> bool:
+    dynlib_artifact_size_v1(path) == expected_size and
+        expected_size >= 0 and expected_digest_hex.len() == 64 and
+        dynlib_artifact_digest_hex_v1(path) == expected_digest_hex
+
+# Hash first, map second, hash again: a shared object's ELF constructors run
+# during load, so a mismatched artifact has to be rejected while it is still
+# inert — and an artifact that changes WHILE it is being loaded has to be
+# rejected too, because by then the pre-load digest describes bytes that are no
+# longer the bytes in this process.
 #
-# Honest limit — this is NOT fd-pinned. The digest is taken by path and the
-# artifact is then opened by the same path, so a swap between the two calls is
-# not detected, and the architecture's "identities bind to the exact bytes
-# mapped" is therefore not met yet. Closing it needs the snapshot-descriptor
-# route `ExactArtifactDynLib.load_exact_linux` already takes (hash
-# `/proc/self/fd/N`, dlopen that same descriptor), which is unavailable here
-# because `spl_dynlib_snapshot_linux` is unbacked on this seed.
+# The load window is the whole point. Both digests are taken through the same
+# byte-reading surface (`rt_file_hash_sha256` over the artifact path), with the
+# size read in the same pass, and the mapping is released rather than kept when
+# the two disagree.
+#
+# Honest limit, narrowed but not closed — this is still not fd-pinned. It
+# detects a change that lands between the two reads, which is the whole
+# rename-swap class and every constructor that rewrites its own artifact, but
+# an attacker who swaps the artifact and swaps it BACK inside the same window
+# would still see both reads agree. Closing that needs a descriptor the loader
+# and the hasher share. Both routes to one are unavailable on this seed:
+# `spl_dynlib_snapshot_linux` (which `ExactArtifactDynLib.load_exact_linux`
+# uses) answers `semantic: unknown extern function`, and so does
+# `rt_file_view_open_beneath_no_follow_v1`. `/proc/self/map_files/<range>`,
+# which would identify the mapped inode directly, is readable but cannot be
+# OPENED in-process on this kernel: measured `errno=1 (Operation not permitted)`
+# on 6.17.0-1032-nvidia, since that path requires CAP_SYS_ADMIN.
 @unsafe(reason: "maps an unverified foreign artifact once its digest is bound", capabilities: [ffi])
 pub fn dynlib_admit_exact_v1(
     path: text, expected_digest_hex: text
 ) -> Result<i64, DynlibAdmissionErrorV1>:
     if path == "" or not file_exists(path):
         return Err(DynlibAdmissionErrorV1.ArtifactAbsent)
+    val before_size = file_size(path)
     val actual = rt_file_hash_sha256(path)
-    if actual.len() != 64:
+    if actual.len() != 64 or before_size < 0:
         return Err(DynlibAdmissionErrorV1.DigestUnreadable)
     if actual != expected_digest_hex:
         return Err(DynlibAdmissionErrorV1.DigestMismatch)
     val handle = rt_host_dynlib_open(path, DYNLIB_ADMIT_RESOLVE_NOW_V1)
     if handle <= 0:
         return Err(DynlibAdmissionErrorV1.LoadFailed)
+    if not dynlib_artifact_unchanged_v1(path, actual, before_size):
+        rt_host_dynlib_close(handle)
+        return Err(DynlibAdmissionErrorV1.SwappedDuringLoad)
     Ok(handle)
 
 # Address of `name` in the admitted artifact, or 0 when it is not exported.

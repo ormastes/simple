@@ -5,15 +5,17 @@
 # `binding_runtime_v1` says its provider handles "are scalar identities
 # supplied by the loader owner" and that it "never maps or invokes an
 # artifact"; `dependency_resolver_v1` is "metadata-only". The loader owner they
-# all defer to did not exist. This module is that owner for the exact
-# `i64(i64, i64)` operation family, and only for it.
+# all defer to did not exist. This module is that owner for the `i64(i64...)`
+# operation family over arity 0..VARIANT_CALLABLE_MAX_ARITY_V1, and only for it.
 #
 # It maps an admitted variant's exported symbol identity to something the
 # process can genuinely call, uniformly across placements (REQ-007), and it
 # refuses rather than fabricates:
 #
 #   * the artifact's bytes are hashed and compared BEFORE it is mapped, because
-#     a shared object's constructors run during load;
+#     a shared object's constructors run during load, AND again immediately
+#     after, because those constructors can rewrite or replace the artifact
+#     they were loaded from;
 #   * a symbol that the artifact does not export is refused, never resolved to
 #     a null callable;
 #   * an operation whose ABI identity or provider generation disagrees with the
@@ -66,10 +68,23 @@ pub const VARIANT_CALLABLE_ABI_MISMATCH_V1: i32 = 7
 pub const VARIANT_CALLABLE_GENERATION_STALE_V1: i32 = 8
 pub const VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1: i32 = 9
 pub const VARIANT_CALLABLE_NOT_CALLABLE_V1: i32 = 10
+# The artifact's bytes changed between the digest that admitted them and the
+# mapping that loaded them. Kept distinct from
+# VARIANT_CALLABLE_ARTIFACT_DIGEST_MISMATCH_V1 because that one is refused
+# while the artifact is still inert, and this one is refused after its
+# constructors have already run — an operator needs to tell those apart.
+pub const VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1: i32 = 11
 
-# The only operation shape this version maps. Widening it means widening the
-# foreign call bridge too, so the bound is stated rather than assumed.
-pub const VARIANT_CALLABLE_SUPPORTED_ARITY_V1: i64 = 2
+# The mapped operation family: `i64(i64...)` over this arity range, uniformly
+# across placements. The upper bound is the widest shape the design asks an
+# admitted variant to expose — the structural-mask provider session's callable
+# takes a source buffer, a length, two delimiter bytes, an output pointer and
+# an output capacity — and the plan's SIMD equality primitive sits at 2 inside
+# it. It is also within the foreign bridge's register-argument envelope on this
+# host, and every arity in the range is executed by this module's spec rather
+# than assumed to work.
+pub const VARIANT_CALLABLE_MIN_ARITY_V1: i64 = 0
+pub const VARIANT_CALLABLE_MAX_ARITY_V1: i64 = 6
 
 # One statically linked operation, already present in this process. This is the
 # `ENV_PLACEMENT_STATIC_V1` provider surface: the twin a native variant is
@@ -78,7 +93,9 @@ pub struct VariantStaticOperationV1:
     operation_id: u32
     symbol_name: text
     arity: i64
-    op: (i64, i64) -> i64
+    # One argument vector rather than a fixed shape, so a static twin exists
+    # for every arity in the family without a per-arity provider surface.
+    op: ([i64]) -> i64
 
 # What a caller asks for, and what package-1 admission already decided.
 # `admitted_abi_digest` / `admitted_generation` come from the admitted
@@ -116,7 +133,7 @@ pub class VariantCallableV1:
     callable_handle: u64
     native_fptr: i64
     native_handle: i64
-    static_op: ((i64, i64) -> i64)?
+    static_op: (([i64]) -> i64)?
 
 fn _refuse(code: i32, request: VariantOperationRequestV1,
            reason: text) -> VariantCallableRefusalV1:
@@ -220,6 +237,9 @@ fn _admission_refusal(
         case DynlibAdmissionErrorV1.LoadFailed:
             _refuse(VARIANT_CALLABLE_ARTIFACT_MAP_FAILED_V1, request,
                 "provider artifact could not be mapped: {request.artifact_path}")
+        case DynlibAdmissionErrorV1.SwappedDuringLoad:
+            _refuse(VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1, request,
+                "provider artifact bytes changed between the admitted digest and the mapping")
 
 fn _map_native(
     request: VariantOperationRequestV1
@@ -257,9 +277,10 @@ pub fn variant_callable_map_v1(
     static_table: [VariantStaticOperationV1]
 ) -> Result<VariantCallableV1, VariantCallableRefusalV1>:
     # Placement-independent admission, evaluated before anything is mapped.
-    if request.arity != VARIANT_CALLABLE_SUPPORTED_ARITY_V1:
+    if request.arity < VARIANT_CALLABLE_MIN_ARITY_V1 or
+            request.arity > VARIANT_CALLABLE_MAX_ARITY_V1:
         return Err(_refuse(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1, request,
-            "operation arity {request.arity} is outside the mapped i64(i64,i64) family"))
+            "operation arity {request.arity} is outside the mapped i64(i64...) family {VARIANT_CALLABLE_MIN_ARITY_V1}..{VARIANT_CALLABLE_MAX_ARITY_V1}"))
     if not _digest_equal(request.abi_digest, request.admitted_abi_digest):
         return Err(_refuse(VARIANT_CALLABLE_ABI_MISMATCH_V1, request,
             "requested ABI identity does not match the admitted variant"))
@@ -279,15 +300,22 @@ pub fn variant_callable_map_v1(
     Err(_refuse(VARIANT_CALLABLE_PLACEMENT_UNSUPPORTED_V1, request,
         "placement {request.placement} is outside the mapped placement set"))
 
-# Invokes the mapped operation. Native execution rides the direct-return
-# bridge; the checked transport is not used here because it answers `Ok(0)` for
-# a real non-zero result on seeds built before 2026-09-11.
-pub fn variant_callable_invoke2_v1(
-    callable: VariantCallableV1, first: i64, second: i64
+# Invokes the mapped operation with one argument vector, identically for every
+# arity in the family and every placement. Native execution rides the
+# direct-return bridge; the checked transport is not used here because it
+# answers `Ok(0)` for a real non-zero result on seeds built before 2026-09-11.
+pub fn variant_callable_invoke_v1(
+    callable: VariantCallableV1, args: [i64]
 ) -> Result<i64, VariantCallableRefusalV1>:
+    if args.len() != callable.arity:
+        return Err(VariantCallableRefusalV1(
+            code: VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
+            placement: callable.placement,
+            operation_id: callable.operation_id,
+            reason: "{args.len()} arguments supplied to an arity-{callable.arity} callable"))
     if callable.placement == ENV_PLACEMENT_STATIC_V1:
         match callable.static_op:
-            case Some(op): return Ok(op(first, second))
+            case Some(op): return Ok(op(args))
             case nil:
                 return Err(VariantCallableRefusalV1(
                     code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
@@ -296,7 +324,7 @@ pub fn variant_callable_invoke2_v1(
                     reason: "static callable carries no operation"))
     if callable.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1 and callable.native_fptr > 0:
         val value = unsafe(capabilities: [ffi, raw_ptr]):
-            spl_wffi_call_i64(callable.native_fptr, [first, second], 2)
+            spl_wffi_call_i64(callable.native_fptr, args, args.len())
         return Ok(value)
     Err(VariantCallableRefusalV1(
         code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
