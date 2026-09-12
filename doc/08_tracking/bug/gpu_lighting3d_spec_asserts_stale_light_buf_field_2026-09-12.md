@@ -18,6 +18,20 @@ Stream D: GpuLightingState init
 SPEC FILE VERDICT: ... outcome=ERROR declared>=18 executed=18 passed=17 failed=1
 ```
 
+In a whole-DIRECTORY run the same defect is much worse: the file does not lose one
+case, it fails to compile at all and collapses to one synthetic failure —
+
+```
+FAIL test/01_unit/lib/nogc_sync_mut/engine/render/gpu_lighting3d_spec.spl (0 passed, 1 failed)
+error: compile failed (...gpu_lighting3d_spec_spec_native.spl): semantic: HIR lowering:
+Unsupported feature: cannot infer field type while lowering main:
+struct 'GpuLightingState' field 'light_buf'
+SPEC FILE VERDICT: ... outcome=ERROR declared>=1 executed=1 passed=0 failed=1
+```
+
+So the blast radius is all 18 cases in dir/compiled mode, not the single case that
+single-file (interpreted) mode reports.
+
 ## Repro
 
 ```
