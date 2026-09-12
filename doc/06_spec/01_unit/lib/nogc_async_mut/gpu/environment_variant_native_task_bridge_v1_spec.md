@@ -1,8 +1,8 @@
 # Native GPU environment task authority bridge V1
 
-This executable specification is for compiler/runtime owners integrating
-environment-selected GPU work. It verifies that native provider, resource,
-device-image and completion records remain distinct typed capabilities.
+This authored specification is for compiler/runtime owners integrating
+environment-selected GPU work. It checks shape comparisons and fail-closed
+entry into the typed provider, resource, image, and completion bridge APIs.
 
 ## Preconditions
 
@@ -25,7 +25,9 @@ the bounded task arena is rejected rather than rounded or widened.
 
 Given a zero provider/session handle, resource-lease projection returns
 `ProviderAuthorityUnavailable` before attempting an FFI call or creating a
-lease.
+lease. Admission and completion consumption return the same failure before
+touching image, resource, or completion handles. The retained task-owner path
+is present in source but is not exercised by this focused spec.
 
 ## Scenario: require exact image ownership
 

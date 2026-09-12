@@ -1,7 +1,7 @@
 # Purpose: prove native GPU task consumption is typed and remains fail-closed
 # until the runtime owns exact device-program image bytes.
-# @req REQ-011
-# @req REQ-012
+# @req: REQ-011
+# @req: REQ-012
 
 use std.spec.*
 use common.gpu.environment_variant_task_contract_v1.*
@@ -45,6 +45,17 @@ fn task() -> GpuBoundedTaskV1:
         required_effect_bits: 1u64, numerical_contract_id: 2u32,
         cpu_fallback_semantically_allowed: true)
 
+fn image() -> GpuDeviceProgramImageV1:
+    GpuDeviceProgramImageV1(
+        program_identity: d(11u64), image_digest: d(15u64),
+        device_api_id: 1u32, minimum_api_version: 1u32,
+        required_feature_bits: 1u64, minimum_buffer_bytes: 1u64,
+        minimum_workgroup_invocations: 1u32,
+        minimum_queue_family_count: 1u32,
+        resource_layout_digest: d(12u64), abi_identity: d(13u64),
+        api_contract_identity: d(14u64), required_effect_bits: 1u64,
+        numerical_contract_id: 2u32)
+
 fn native_provider() -> GpuNativeProviderAuthorityV1:
     GpuNativeProviderAuthorityV1(
         backend: 2, session: 31, provider_identity: 7u64,
@@ -56,28 +67,44 @@ fn native_resource() -> GpuNativeResourceAuthorityV1:
         backend: 2, session: 31, resource: 41,
         capacity_bytes: 128u64, provider_generation: 3u64)
 
+fn lease() -> GpuResourceLeaseV1:
+    val resource = native_resource()
+    GpuResourceLeaseV1(
+        lease_identity: gpu_native_resource_lease_identity_v1(resource),
+        device_identity: d(4u64), provider_generation: 3u64,
+        resource_layout_digest: d(12u64), leased_bytes: 128u64,
+        lease_generation: 41u64)
+
+fn native_image() -> GpuNativeDeviceProgramImageAuthorityV1:
+    GpuNativeDeviceProgramImageAuthorityV1(
+        backend: 2, session: 31, image: 51,
+        provider_generation: 3u64, program_identity: d(11u64),
+        image_digest: d(15u64), image_bytes: 64u64)
+
+fn native_completion() -> GpuNativeCompletionAuthorityV1:
+    GpuNativeCompletionAuthorityV1(
+        backend: 2, session: 31, completion: 61,
+        correlation_id: 17u64, provider_generation: 3u64,
+        resource: 41u64, checksum: 71u64, readback_bytes: 64u64,
+        device_identity: 4u64)
+
 describe "native GPU environment task authority bridge V1":
-    it "matches provider and resource facts without upgrading them to live authority":
+    it "should match provider and resource facts without granting live authority":
         step("Compare exact provider, artifact, generation, device and backend facts")
         expect(gpu_native_task_provider_shape_matches_v1(
             provider(), device(), native_provider())).to_be(true)
         val resource = native_resource()
-        val lease = GpuResourceLeaseV1(
-            lease_identity: gpu_native_resource_lease_identity_v1(resource),
-            device_identity: d(4u64), provider_generation: 3u64,
-            resource_layout_digest: d(12u64), leased_bytes: 128u64,
-            lease_generation: 41u64)
         expect(gpu_native_task_resource_shape_matches_v1(
-            lease, task(), resource)).to_be(true)
+            lease(), task(), resource)).to_be(true)
 
         step("Reject a resource whose runtime-owned capacity is one byte short")
         val short_resource = GpuNativeResourceAuthorityV1(
             backend: 2, session: 31, resource: 41,
             capacity_bytes: 127u64, provider_generation: 3u64)
         expect(gpu_native_task_resource_shape_matches_v1(
-            lease, task(), short_resource)).to_be(false)
+            lease(), task(), short_resource)).to_be(false)
 
-    it "rejects a native backend that cannot be represented by the registry id":
+    it "should reject a native backend wider than the registry id":
         step("Keep the signed native backend outside the u32 projection boundary")
         val too_wide = GpuNativeProviderAuthorityV1(
             backend: 4294967296, session: 31, provider_identity: 7u64,
@@ -86,7 +113,7 @@ describe "native GPU environment task authority bridge V1":
         expect(gpu_native_task_provider_shape_matches_v1(
             provider(), device(), too_wide)).to_be(false)
 
-    it "rejects invalid live-provider handles before any device image can be consumed":
+    it "should reject invalid live handles through every bridge consumer":
         step("Use zero runtime handles so no foreign call is attempted")
         val native = GpuNativeProviderAuthorityV1(
             backend: 0, session: 0, provider_identity: 0u64,
@@ -95,8 +122,16 @@ describe "native GPU environment task authority bridge V1":
         expect(gpu_native_task_resource_lease_project_v1(
             native, native_resource(), device(), d(12u64))).to_equal(
                 Err(GpuNativeTaskBridgeErrorV1.ProviderAuthorityUnavailable))
+        expect(gpu_native_task_admission_consume_v1(
+            provider(), image(), device(), lease(), task(), native,
+            native_image(), native_resource())).to_equal(
+                Err(GpuNativeTaskBridgeErrorV1.ProviderAuthorityUnavailable))
+        expect(gpu_native_task_completion_consume_v1(
+            provider(), image(), device(), lease(), task(), native,
+            native_image(), native_resource(), native_completion())).to_equal(
+                Err(GpuNativeTaskBridgeErrorV1.ProviderAuthorityUnavailable))
 
-    it "keeps required GPU parsing unavailable without exact image authority":
+    it "should keep required GPU parsing unavailable without exact image authority":
         step("Assert routing and physical execution gates independently")
         expect(GPU_NATIVE_TASK_DEVICE_IMAGE_AUTHORITY_AVAILABLE_V1).to_be(false)
         expect(GPU_NATIVE_TASK_PHYSICAL_EXECUTION_AVAILABLE_V1).to_be(false)
