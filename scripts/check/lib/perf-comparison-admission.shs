@@ -119,6 +119,123 @@ perf_admission_validate_bound_file() {
     [ "$(perf_admission_hash_file "$perf_admission_bound_path")" = "$perf_admission_bound_hash" ]
 }
 
+# Write the binary-admission receipt that perf_admission_validate_receipt reads.
+# Until 2026-09-12 NO caller anywhere produced this file, so every comparison
+# row carried an empty binary_admission_path/sha256 and the pairwise admission
+# could only ever answer `invalid-<side>-binary-admission`. Callers must invoke
+# this only after that leg's own live-contract checks have passed: the receipt
+# asserts "this exact binary, of this kind, was admitted", nothing more.
+#   perf_compare_write_binary_admission OUT_PATH BINARY_KIND BINARY_SHA256
+# Echoes the receipt's own sha256 on success.
+perf_compare_write_binary_admission() {
+    perf_admission_out=$1
+    perf_admission_kind=$2
+    perf_admission_binary_hash=$3
+    case "$perf_admission_kind" in
+        native-reference|system-browser|admitted-selfhosted) ;;
+        *) return 1 ;;
+    esac
+    perf_admission_valid_sha256 "$perf_admission_binary_hash" || return 1
+    rm -f "$perf_admission_out"
+    {
+        echo "schema=perf-binary-admission-v1"
+        echo "status=admitted"
+        echo "binary_kind=$perf_admission_kind"
+        echo "binary_sha256=$perf_admission_binary_hash"
+    } >"$perf_admission_out" || return 1
+    perf_admission_hash_file "$perf_admission_out"
+}
+
+# Per-leg admission. The pairwise perf_compare_admit_env below can only run once
+# BOTH legs already read `admitted`, so on its own it can never promote a leg out
+# of `measured-unadmitted` -- the admission step was gated behind the very status
+# it exists to produce, and a perfectly clean measurement reported
+# `compare_status=skipped` unconditionally (bug vulkan_2d_c_compare_skips_on_macos,
+# Cause 1). This performs exactly the SINGLE-SIDED checks the pairwise function
+# already performs, over one projected row, and nothing else: the cross-leg
+# equality checks stay in perf_compare_admit_env and are not weakened.
+# Sets PERF_LEG_ADMISSION_STATUS (admitted|unadmitted) and PERF_LEG_ADMISSION_REASON.
+perf_compare_admit_leg() {
+    perf_leg_row=$1
+    perf_leg_prefix=$2
+    PERF_LEG_ADMISSION_STATUS=unadmitted
+    PERF_LEG_ADMISSION_REASON=not-evaluated
+
+    perf_leg_validation=$(perf_admission_validate_projection "$perf_leg_row" "$perf_leg_prefix") || {
+        PERF_LEG_ADMISSION_REASON="invalid-row:$perf_leg_validation"
+        return 0
+    }
+
+    for perf_leg_key in viewport_width viewport_height warmup_count sample_count; do
+        perf_leg_value=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}${perf_leg_key}")
+        if ! perf_admission_positive_integer "$perf_leg_value"; then
+            PERF_LEG_ADMISSION_REASON="invalid-$perf_leg_key"
+            return 0
+        fi
+    done
+
+    perf_leg_value=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}fallback_state")
+    if [ "$perf_leg_value" != none ]; then
+        PERF_LEG_ADMISSION_REASON="fallback-$perf_leg_value"
+        return 0
+    fi
+
+    case "$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}gpu_identity")" in
+        unknown|unverified|synthetic|software|*fallback*)
+            PERF_LEG_ADMISSION_REASON=invalid-gpu-identity; return 0 ;;
+    esac
+    case "$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}checksum")" in
+        *[!0-9A-Za-z:._+-]*) PERF_LEG_ADMISSION_REASON=invalid-checksum; return 0 ;;
+    esac
+
+    perf_leg_source=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}source_path")
+    perf_leg_revision=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}source_revision")
+    if ! perf_admission_validate_bound_file "$perf_leg_source" "$perf_leg_revision"; then
+        PERF_LEG_ADMISSION_REASON=stale-source
+        return 0
+    fi
+
+    perf_leg_binary=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_path")
+    perf_leg_binary_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_sha256")
+    perf_leg_kind=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_kind")
+    case "$perf_leg_kind" in
+        native-reference|system-browser|admitted-selfhosted) ;;
+        *) PERF_LEG_ADMISSION_REASON=invalid-binary-kind; return 0 ;;
+    esac
+    if ! perf_admission_validate_bound_file "$perf_leg_binary" "$perf_leg_binary_hash" ||
+       [ ! -x "$perf_leg_binary" ]; then
+        PERF_LEG_ADMISSION_REASON=stale-binary
+        return 0
+    fi
+    case "$perf_leg_binary" in
+        *compiler_rust*|*bootstrap*|*rust-seed*|*/seed/*|*seed-simple*)
+            PERF_LEG_ADMISSION_REASON=seed-binary-forbidden; return 0 ;;
+    esac
+    if [ "$perf_leg_kind" = admitted-selfhosted ] && command -v strings >/dev/null 2>&1 &&
+       LC_ALL=C strings "$perf_leg_binary" 2>/dev/null | grep -Eqi 'bootstrap seed only|compiler_rust/target|rust-built Simple binary'; then
+        PERF_LEG_ADMISSION_REASON=seed-binary-content-forbidden
+        return 0
+    fi
+
+    perf_leg_receipt=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_admission_path")
+    perf_leg_receipt_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_admission_sha256")
+    if ! perf_admission_valid_sha256 "$perf_leg_receipt_hash" ||
+       ! perf_admission_validate_receipt "$perf_leg_receipt" "$perf_leg_receipt_hash" "$perf_leg_kind" "$perf_leg_binary_hash"; then
+        PERF_LEG_ADMISSION_REASON=invalid-binary-admission
+        return 0
+    fi
+
+    perf_leg_artifact=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}artifact_path")
+    perf_leg_artifact_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}artifact_sha256")
+    if ! perf_admission_validate_bound_file "$perf_leg_artifact" "$perf_leg_artifact_hash"; then
+        PERF_LEG_ADMISSION_REASON=stale-artifact
+        return 0
+    fi
+
+    PERF_LEG_ADMISSION_STATUS=admitted
+    PERF_LEG_ADMISSION_REASON=admitted
+}
+
 perf_compare_admit_env() {
     perf_admission_left=$1
     perf_admission_left_prefix=$2

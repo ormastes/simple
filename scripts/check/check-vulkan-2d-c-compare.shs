@@ -569,6 +569,8 @@ trap 'exit 143' TERM
 c_status=skipped; c_reason=not-attempted; c_p95=0; c_bin="$OUT_DIR/vk2d_bench"
 c_device=; c_checksum=; c_bin_sha=; c_timing_scope=draw-plus-submit-to-fence-p95
 c_artifact="$OUT_DIR/c-framebuffer.rgba"; c_artifact_sha=
+c_admission="$OUT_DIR/c.binary.admission.env"; c_admission_sha=
+c_admission_public="$FINAL_RUN_DIR/c.binary.admission.env"
 c_stdout_raw="$OUT_DIR/c.stdout.raw"; c_stderr_raw="$OUT_DIR/c.stderr.raw"
 c_metrics="$OUT_DIR/c.runtime.env"; c_toolchain="$OUT_DIR/c.toolchain.env"
 c_bin_public="$FINAL_RUN_DIR/vk2d_bench"
@@ -701,6 +703,12 @@ else
                 c_checksum=$c_checksum_candidate
                 c_bin_sha=$(hash_file "$c_bin")
                 c_artifact_sha=$(hash_file "$c_artifact")
+                # The binary-admission receipt this leg needs to reach `admitted`.
+                # Written only here, i.e. only after every live-contract check
+                # above passed, and bound to the exact measured binary.
+                c_admission_sha=$(perf_compare_write_binary_admission \
+                    "$c_admission" native-reference "$c_bin_sha") ||
+                    { c_status=fail; c_reason=cannot-write-binary-admission; }
                 echo "c_line=$c_out"
             fi
             ;;
@@ -720,6 +728,8 @@ simple_status=skipped; simple_reason=not-attempted; s_p95=0
 simple_device=; simple_checksum=; simple_bin_sha=; simple_timing_scope=draw-plus-submit-to-fence-p95
 simple_artifact="$OUT_DIR/simple-framebuffer.rgba"; simple_artifact_sha=
 simple_artifact_public="$FINAL_RUN_DIR/simple-framebuffer.rgba"
+simple_admission="$OUT_DIR/simple.binary.admission.env"; simple_admission_sha=
+simple_admission_public="$FINAL_RUN_DIR/simple.binary.admission.env"
 simple_stdout_raw="$OUT_DIR/simple.stdout.raw"; simple_stderr_raw="$OUT_DIR/simple.stderr.raw"
 simple_metrics="$OUT_DIR/simple.runtime.env"
 simple_stdout_raw_public="$FINAL_RUN_DIR/simple.stdout.raw"
@@ -775,6 +785,9 @@ else
                 simple_checksum=$(line_value "$s_out" checksum)
                 simple_bin_sha=$(hash_file "$SIMPLE_BIN")
                 simple_artifact_sha=$(hash_file "$simple_artifact")
+                simple_admission_sha=$(perf_compare_write_binary_admission \
+                    "$simple_admission" admitted-selfhosted "$simple_bin_sha") ||
+                    { simple_status=fail; simple_reason=cannot-write-binary-admission; }
                 if [ -z "$simple_device" ]; then
                     simple_status=fail; simple_reason=missing-gpu-device-identity
                 elif [ "$c_device" != "$simple_device" ]; then
@@ -831,10 +844,10 @@ fi
     echo "simple_binary_path=$SIMPLE_BIN"
     echo "c_binary_sha256=$c_bin_sha"
     echo "simple_binary_sha256=$simple_bin_sha"
-    echo "c_binary_admission_path="
-    echo "simple_binary_admission_path="
-    echo "c_binary_admission_sha256="
-    echo "simple_binary_admission_sha256="
+    echo "c_binary_admission_path=$c_admission_public"
+    echo "simple_binary_admission_path=$simple_admission_public"
+    echo "c_binary_admission_sha256=$c_admission_sha"
+    echo "simple_binary_admission_sha256=$simple_admission_sha"
     echo "c_artifact_path=$c_artifact_public"
     echo "simple_artifact_path=$simple_artifact_public"
     echo "c_artifact_sha256=$c_artifact_sha"
@@ -866,8 +879,77 @@ fi
     echo "simple_artifact_sha256=$simple_artifact_sha"
 } >"$simple_metrics"
 # Split rows for the --aggregate contract path.
-sed -n 's/^c_/c_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
-sed -n 's/^simple_/simple_/p' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
+#
+# These MUST go through project_row, exactly as the --aggregate path does. A
+# plain `sed 's/^c_/c_/p'` copies consumer keys (c_status, c_reason, c_p95_ns)
+# into the row, and perf_admission_validate_projection rejects any key outside
+# its 21-name schema -- so the live path could only ever answer
+# `admission-invalid-left-row:unexpected-key-status`, a second unconditional
+# skip stacked on top of Cause 1 of the recorded bug.
+LC_ALL=C grep '^c_' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
+LC_ALL=C grep '^simple_' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
+# `c.env` / `simple.env` keep the consumer keys (status/reason/p95_ns) because
+# the `--aggregate` replay path reads them back out of the published row. The
+# 21-key PROJECTION that admission actually validates is derived separately --
+# perf_admission_validate_projection rejects any key outside that schema, so
+# feeding it the full row could only ever answer
+# `admission-invalid-left-row:unexpected-key-status`, a second unconditional
+# skip stacked on top of Cause 1 of the recorded bug.
+project_row "$OUT_DIR/c.env" c_ "$OUT_DIR/c.env.projected" || fail "malformed or inexact C row"
+project_row "$OUT_DIR/simple.env" simple_ "$OUT_DIR/simple.env.projected" || fail "malformed or inexact Simple row"
+
+# Per-leg admission, against STAGE paths.
+#
+# The durable rows above name the PUBLISHED paths (`$FINAL_RUN_DIR/...`), which
+# do not exist until perf_immutable_publish_run runs at the end of this script,
+# so hashing them here would answer `stale-binary` for a perfectly good binary.
+# The admission rows below are byte-identical apart from those four path fields,
+# which name the staged files that are actually on disk right now. The published
+# rows stay authoritative for the `--aggregate` replay path, which re-validates
+# the published copies.
+stage_row() {
+    LC_ALL=C sed \
+        -e "s#=$c_bin_public\$#=$c_bin#" \
+        -e "s#=$c_artifact_public\$#=$c_artifact#" \
+        -e "s#=$c_admission_public\$#=$c_admission#" \
+        -e "s#=$simple_artifact_public\$#=$simple_artifact#" \
+        -e "s#=$simple_admission_public\$#=$simple_admission#" \
+        "$1" > "$2"
+}
+stage_row "$OUT_DIR/c.env.projected" "$OUT_DIR/c.env.admit"
+stage_row "$OUT_DIR/simple.env.projected" "$OUT_DIR/simple.env.admit"
+
+if [ "$c_status" = measured-unadmitted ]; then
+    perf_compare_admit_leg "$OUT_DIR/c.env.admit" c_
+    if [ "$PERF_LEG_ADMISSION_STATUS" = admitted ]; then
+        c_status=admitted; c_reason=admitted
+    else
+        c_reason="$PERF_LEG_ADMISSION_REASON"
+    fi
+fi
+if [ "$simple_status" = measured-unadmitted ]; then
+    perf_compare_admit_leg "$OUT_DIR/simple.env.admit" simple_
+    if [ "$PERF_LEG_ADMISSION_STATUS" = admitted ]; then
+        simple_status=admitted; simple_reason=admitted
+    else
+        simple_reason="$PERF_LEG_ADMISSION_REASON"
+    fi
+fi
+# Re-stamp the consumer status lines now that admission has run, so the durable
+# rows record the post-admission verdict. The 21-key projections are unaffected:
+# status/reason are not part of the projection schema.
+restamp_statuses() {
+    LC_ALL=C sed \
+        -e "s/^c_status=.*/c_status=$c_status/" \
+        -e "s/^c_reason=.*/c_reason=$c_reason/" \
+        -e "s/^simple_status=.*/simple_status=$simple_status/" \
+        -e "s/^simple_reason=.*/simple_reason=$simple_reason/" \
+        "$1" > "$1.next"
+    mv "$1.next" "$1"
+}
+restamp_statuses "$OUT_DIR/c.env.raw"
+restamp_statuses "$OUT_DIR/c.env"
+restamp_statuses "$OUT_DIR/simple.env"
 
 live_commit=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
 live_tree=$(git -C "$ROOT" rev-parse --verify HEAD^{tree} 2>/dev/null || true)
@@ -885,7 +967,7 @@ if [ "$live_commit" != "$git_commit" ] || [ "$live_tree" != "$git_tree" ] ||
 else
     set +e
     aggregate "$c_p95" "$s_p95" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
-        "$OUT_DIR/c.env" "$OUT_DIR/simple.env" \
+        "$OUT_DIR/c.env.admit" "$OUT_DIR/simple.env.admit" \
         >"$OUT_DIR/evidence.env"
     aggregate_rc=$?
     set -e
@@ -944,6 +1026,10 @@ mv "$OUT_DIR/evidence.env.complete" "$OUT_DIR/evidence.env"
     echo "c_runtime_receipt_sha256=$(hash_file "$c_metrics")"
     echo "c_toolchain_receipt=$c_toolchain_public"
     echo "c_toolchain_receipt_sha256=$(hash_file "$c_toolchain")"
+    echo "c_binary_admission_receipt=${c_admission_public:-none}"
+    echo "c_binary_admission_receipt_sha256=${c_admission_sha:-none}"
+    echo "simple_binary_admission_receipt=${simple_admission_public:-none}"
+    echo "simple_binary_admission_receipt_sha256=${simple_admission_sha:-none}"
     echo "simple_raw_stdout=$simple_stdout_raw_public"
     echo "simple_raw_stdout_sha256=$(hash_file "$simple_stdout_raw")"
     echo "simple_raw_stderr=$simple_stderr_raw_public"
