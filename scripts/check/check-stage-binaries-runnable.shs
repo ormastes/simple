@@ -425,6 +425,21 @@ scan_tree() {
             continue
         fi
 
+        # RATCHET (2026-09-12): the deploy tool ALWAYS triple-scopes stage
+        # outputs now (`bootstrap_stage_output_path`, misc_commands.rs), so a
+        # tracked artifact still sitting at a BARE `bootstrap/stageN/simple`
+        # path can only be residue of the pre-fix clobber. It is an offender
+        # regardless of its format -- checking the format first would let a
+        # host-native bare blob (the shape on the very host that wrote it)
+        # pass, which is exactly how the clobber kept re-landing.
+        # Scoped to real binary artifacts: a `script` is how the selftest
+        # fixtures stand in for a compiler, and a real stage artifact is never
+        # one, so exempting scripts costs no coverage of the incident.
+        if [ -z "$_ptriple" ] && [ "$_fmt" != 'script' ] && [ "$_fmt" != 'unknown' ]; then
+            SCAN_BAD=$((SCAN_BAD + 1))
+            SCAN_BADNAMES="$SCAN_BADNAMES $_p:unscoped-stage-path(deploy-clobber-residue,$_fmt)"
+            continue
+        fi
         printf '%s: probing %s\n' "$SELF_NAME" "$_p"
         probe_binary "$_p" "$_exe" "$_wd"
         SCAN_BINS=$((SCAN_BINS + 1))
@@ -551,6 +566,65 @@ kill -SEGV $$
             _bad="$_bad fixture7_foreign_bare(reason-not-wrong-architecture:$SCAN_BADNAMES)" ;;
     esac
 
+    # 10: must-FAIL -- a HOST-NATIVE binary blob at a BARE stage path. This is
+    # the half fixture 7 cannot reach: on the very host that ran the clobbering
+    # deploy the bare blob is native, so a format-first check calls it fine and
+    # the residue re-lands forever. Since 2026-08-31 the deploy tool always
+    # triple-scopes, so a bare binary artifact is residue by construction.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_native_bare"
+    make_fake_repo "$_d" "$_good"
+    mkdir -p "$_d/bootstrap/stage8"
+    if [ "$(host_native_format)" = 'macho' ]; then
+        printf '\317\372\355\376\014\000\000\001' >"$_d/bootstrap/stage8/simple"
+    else
+        printf '\177ELF\002\001\001' >"$_d/bootstrap/stage8/simple"
+    fi
+    chmod +x "$_d/bootstrap/stage8/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+    scan_tree "$_d"
+    case "$SCAN_BADNAMES" in
+        *unscoped-stage-path*)
+            if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -eq 1 ] && [ "$SCAN_RUNS" -gt 0 ]; then
+                _pass=$((_pass + 1))
+            else
+                _bad="$_bad fixture10_native_bare(bad=$SCAN_BAD,runs=$SCAN_RUNS,err=$SCAN_ERR)"
+            fi ;;
+        *)
+            _bad="$_bad fixture10_native_bare(reason-not-unscoped:$SCAN_BADNAMES)" ;;
+    esac
+
+    # 11: generalization -- the SAME native blob, correctly triple-scoped under
+    # this host's own triple, must NOT be an offender for being unscoped. It is
+    # probed like any other host-native artifact, so the ratchet fences the
+    # PATH SHAPE and not the platform.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_native_scoped"
+    make_fake_repo "$_d" "$_good"
+    mkdir -p "$_d/bootstrap/stage8/$(host_triple)"
+    # The SAME host-native binary blob fixture 10 uses -- not a script, or the
+    # script exemption would carry the fixture and it would constrain nothing.
+    if [ "$(host_native_format)" = 'macho' ]; then
+        printf '\317\372\355\376\014\000\000\001' >"$_d/bootstrap/stage8/$(host_triple)/simple"
+    else
+        printf '\177ELF\002\001\001' >"$_d/bootstrap/stage8/$(host_triple)/simple"
+    fi
+    chmod +x "$_d/bootstrap/stage8/$(host_triple)/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+    scan_tree "$_d"
+    case "$SCAN_BADNAMES" in
+        *unscoped-stage-path*)
+            _bad="$_bad fixture11_native_scoped(flagged-unscoped:$SCAN_BADNAMES)" ;;
+        *)
+            # It is a truncated blob, so it is probed and fails on its merits;
+            # what this fixture pins is that the PATH SHAPE is not the reason.
+            if [ -z "$SCAN_ERR" ] && [ "$SCAN_RUNS" -gt 0 ]; then
+                _pass=$((_pass + 1))
+            else
+                _bad="$_bad fixture11_native_scoped(runs=$SCAN_RUNS,err=$SCAN_ERR)"
+            fi ;;
+    esac
+
     # 8: must-SKIP -- foreign-format blob correctly scoped in a foreign-triple
     # subdir: counted and named as a skip, never an offender, never a pass
     # contribution.
@@ -663,7 +737,7 @@ if ! selftest; then
 fi
 CFG_REV="$_saved_rev"
 if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
-    verdict_pass "selftest only, no scan requested (9 fixture(s) correct)"
+    verdict_pass "selftest only, no scan requested (11 fixture(s) correct)"
 fi
 
 printf '%s: scanning %s (rev=%s)\n' "$SELF_NAME" "$CFG_ROOT" "${CFG_REV:-<working tree>}"
