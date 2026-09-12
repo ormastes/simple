@@ -1,6 +1,8 @@
 # Lane 4 triage: `metal_msl_pipeline_spec` 7/5, `backend_vulkan_drawing_spec` 40/44
 
-**Status:** OPEN — both specs are CORRECT and stay RED. Neither failure is fixable
+**Status:** PARTIALLY RESOLVED — section 2 (`backend_vulkan_drawing_spec`) is
+RESOLVED 2026-09-12, now **44/44** on this M4. Section 1 (`metal_msl_pipeline_spec`)
+stays OPEN, unchanged: both specs are CORRECT and section 1 stays RED. Neither failure is fixable
 inside Lane 4's file scope; the exact edits each needs are named below.
 
 **Date:** 2026-09-12 · **Host:** Apple M4, macOS · `origin/main` = `b9667d6584f`
@@ -99,3 +101,45 @@ failing on its third example and is now 3/0 — see
 `device=Apple M4 ... samples=300 parity_frames=4 frame_mismatches=0`, confirming
 the original "checksum alternates by frame parity" symptom was the bench's own
 self-cancelling accumulator and not a two-buffer present.
+
+
+## RESOLUTION — section 2 only, 2026-09-12
+
+`backend_vulkan_drawing_spec` is **44 examples, 0 failures** on this M4 with the
+same runner line as above. Two fixes, both pure Simple:
+
+1. **Per-primitive dispatch reasons.** `_dispatch_framebuffer_checked`
+   (`backend_vulkan_helpers.spl`) now takes a `reason: text` and records THAT
+   instead of the generic `framebuffer-dispatch-failed`. All eight call sites in
+   `backend_vulkan.spl` pass their own token (`clear-`, `rect-outline-`,
+   `rect-`, `axis-line-rect-`, `line-`, `circle-filled-`, `triangle-filled-`,
+   `gradient-rect-dispatch-failed`); the four now-dead caller-side
+   `mark_cpu_fallback` calls were deleted (first-wins had already fired inside).
+   F5's resync semantics (`pending_before == 0` retry, `completion_unknown`
+   clearing) are untouched. The `vk2d_bench.spl` call site was updated for the
+   new arity.
+2. **The `pending_compute_sources.len() == 256` receipt.** The diagnosis above
+   ("second image source dropped, reads back 0 pixels") was **wrong**: the
+   pixels assertion `[red, bg, bg, green]` already passed; only the post-fence
+   table length failed. The three pending tables are now a **block-grown slot
+   table** (`_ensure_pending_compute_slot`, blocks of
+   `VK_IMAGE_SOURCE_POOL_CAPACITY = 256`) assigned at
+   `[self.pending_compute_count]`, and `_clear_pending_compute_state` zeroes the
+   slots in place instead of reallocating. A fresh backend still starts at
+   length 0, so R6's "no preallocated dispatch ceiling" holds and no
+   `count >= len()` ceiling can force a mid-frame flush.
+
+**Evidence (device, one run at a time, `build/cargo-r2/release/simple`
+39368072 B mtime 1789171430):**
+
+| spec | before | after |
+|---|---|---|
+| `backend_vulkan_drawing_spec` | 44/40 (4 failures) | **44/44** |
+| `backend_vulkan_batch_and_clip_boundary_spec` | 7/7 | 7/7 |
+| `engine2d_vulkan_readback_unpack_cost_spec` | — | 6/6 |
+| `engine2d_vulkan_damage_scoped_mirror_spec` | — | 6/6 |
+| `backend_vulkan_rect_batch_typed_upload_spec` | — | 8/8 |
+| `vulkan_engine2d_frame_batch_contract_spec` | was RED (its `[count] = d_src` text was absent) | 3/3 |
+
+**Sabotage proof:** reverting the gradient token to
+`"framebuffer-dispatch-failed"` → 43/44 (1 failure); restored → 44/44.

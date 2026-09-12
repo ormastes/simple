@@ -365,7 +365,7 @@ class VulkanBackend:
     frame_device_present: bool
     frame_batching_enabled: bool
     pending_compute_command: i64
-    pending_compute_pipelines: [i64]   # grown by push; one entry per distinct pipeline / image source
+    pending_compute_pipelines: [i64]   # block-grown slot table; entries [0, pending_compute_count) are live
     pending_compute_descriptors: [i64] # parallel to pipelines
     pending_compute_sources: [i64]     # image source buffer per slot; zero for framebuffer-only work
     pending_compute_count: i64         # live entries in the two arrays above
@@ -1010,12 +1010,11 @@ impl RenderBackend for VulkanBackend:
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
         self.hint_damage(0, 0, _i64(self.w), _i64(self.h))
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1, "clear-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("clear-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
@@ -1031,7 +1030,7 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
-        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
@@ -1075,12 +1074,11 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1, "rect-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("rect-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
@@ -1191,12 +1189,11 @@ impl RenderBackend for VulkanBackend:
             self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
             val rect_dispatched = self._dispatch_framebuffer_checked(
                 self.pipe_rect_filled, rect_pc,
-                (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1)
+                (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1, "axis-line-rect-dispatch-failed")
             if rect_dispatched > 0:
                 self.dirty = true
                 self.host_mirror_frame_fresh = false
             else:
-                self.mark_cpu_fallback("axis-line-rect-dispatch-failed")
                 if rect_dispatched < 0:
                     self.completion_unknown = true
             return
@@ -1214,12 +1211,11 @@ impl RenderBackend for VulkanBackend:
             self.clip_x, self.clip_y, self.clip_w, self.clip_h,
             self.clip_enabled)
         val dispatched = self._dispatch_framebuffer_checked(
-            self.pipe_line, pc, 1, 1, 1)
+            self.pipe_line, pc, 1, 1, 1, "line-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("line-dispatch-failed")
         if dispatched < 0:
             self.completion_unknown = true
 
@@ -1240,7 +1236,7 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_circle_pc(cx, cy, r, color, self.w, self.h, 1, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1, "circle-filled-dispatch-failed")
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         if self.completion_unknown: return
@@ -1276,7 +1272,7 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_triangle_pc(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1, "triangle-filled-dispatch-failed")
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if self.completion_unknown: return
@@ -1284,7 +1280,7 @@ impl RenderBackend for VulkanBackend:
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
-        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1, "gradient-rect-dispatch-failed")
 
     # Bitmap text goes through the font-atlas pipeline whenever that pipeline can
     # reproduce the CPU raster exactly (`_bitmap_text_atlas_path`,

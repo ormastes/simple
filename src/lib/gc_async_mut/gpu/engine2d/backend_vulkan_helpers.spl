@@ -336,6 +336,26 @@ impl VulkanBackend:
             i = i + 1
         true
 
+    me _ensure_pending_compute_slot():
+        """Guarantee slot `pending_compute_count` exists in the three tables.
+
+        The tables start empty (a fresh backend has no preallocated dispatch
+        ceiling -- R6) and grow in whole blocks of
+        `VK_IMAGE_SOURCE_POOL_CAPACITY`, never by one. Growth is unbounded, so
+        no `count >= len()` ceiling ever forces a mid-frame flush; the block
+        only avoids a reallocation per primitive and keeps the post-fence
+        table length stable across frames.
+        """
+        val have = self.pending_compute_pipelines.len().to_i64()
+        if self.pending_compute_count < have:
+            return
+        var added: i64 = 0
+        while added < VK_IMAGE_SOURCE_POOL_CAPACITY:
+            self.pending_compute_pipelines.push(0)
+            self.pending_compute_descriptors.push(0)
+            self.pending_compute_sources.push(0)
+            added = added + 1
+
     me _image_source_is_pending(source: i64) -> bool:
         if source <= 0:
             return false
@@ -499,9 +519,17 @@ impl VulkanBackend:
         # the next frame's first batch.
         self.rect_batch_slot = 0
         self.pending_compute_command = 0
-        self.pending_compute_pipelines = []
-        self.pending_compute_descriptors = []
-        self.pending_compute_sources = []
+        # Zero the slots in place instead of dropping the tables: the capacity
+        # a frame grew is what the NEXT frame reuses, and the drawing spec's
+        # post-fence receipt reads it (`pending_compute_sources.len()`), so a
+        # reallocation here would erase the evidence that the batch existed.
+        var slot: i64 = 0
+        val slots = self.pending_compute_sources.len().to_i64()
+        while slot < slots:
+            self.pending_compute_pipelines[slot] = 0
+            self.pending_compute_descriptors[slot] = 0
+            self.pending_compute_sources[slot] = 0
+            slot = slot + 1
         self.pending_compute_count = 0
 
     me discard_stale_pending_compute() -> bool:
@@ -724,9 +752,10 @@ impl VulkanBackend:
                             desc, 0, 0, 0)
                 val flushed = self._flush_pending_compute()
                 return if flushed < 0: -1 else: 0
-            self.pending_compute_pipelines.push(pipe)
-            self.pending_compute_descriptors.push(desc)
-            self.pending_compute_sources.push(0)
+            self._ensure_pending_compute_slot()
+            self.pending_compute_pipelines[self.pending_compute_count] = pipe
+            self.pending_compute_descriptors[self.pending_compute_count] = desc
+            self.pending_compute_sources[self.pending_compute_count] = 0
             self.pending_compute_count = self.pending_compute_count + 1
         val cmd = self.pending_compute_command
         val _t_bp = vulkan_timing_now_us()
@@ -782,9 +811,10 @@ impl VulkanBackend:
                 if not vulkan_sffi_destroy_descriptor_set(desc):
                     vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
             return 0
-        self.pending_compute_pipelines.push(pipe)
-        self.pending_compute_descriptors.push(desc)
-        self.pending_compute_sources.push(0)
+        self._ensure_pending_compute_slot()
+        self.pending_compute_pipelines[self.pending_compute_count] = pipe
+        self.pending_compute_descriptors[self.pending_compute_count] = desc
+        self.pending_compute_sources[self.pending_compute_count] = 0
         self.pending_compute_count = self.pending_compute_count + 1
         desc
 
@@ -1202,9 +1232,10 @@ impl VulkanBackend:
         # fails, the common flush/discard path still owns their lifetime.
         if self.frame_batching_enabled and not pooled:
             self.image_descriptor_pool.push(desc)
-        self.pending_compute_pipelines.push(pipe)
-        self.pending_compute_descriptors.push(desc)
-        self.pending_compute_sources.push(d_src)
+        self._ensure_pending_compute_slot()
+        self.pending_compute_pipelines[self.pending_compute_count] = pipe
+        self.pending_compute_descriptors[self.pending_compute_count] = desc
+        self.pending_compute_sources[self.pending_compute_count] = d_src
         self.pending_compute_count = self.pending_compute_count + 1
         val ready = (
             vulkan_sffi_bind_pipeline(cmd, pipe) and
@@ -1226,7 +1257,7 @@ impl VulkanBackend:
             return false
         status == VK_DISPATCH_COMPLETED_INELIGIBLE
 
-    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64, reason: text) -> i64:
         # Captured BEFORE the enqueue: a retry is only safe when this dispatch
         # had no already-recorded siblings to lose. Post-readback that is
         # always the case (the readback's own flush cleared the batch).
@@ -1303,7 +1334,7 @@ impl VulkanBackend:
             self.dirty = true
             self.mark_device_content_changed()
         else:
-            self.mark_cpu_fallback("framebuffer-dispatch-failed")
+            self.mark_cpu_fallback(reason)
             if dispatched < 0 and not resync_recovered:
                 self.completion_unknown = true
             elif dispatched < 0:
