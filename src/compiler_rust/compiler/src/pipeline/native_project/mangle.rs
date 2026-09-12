@@ -191,6 +191,27 @@ fn is_enum_helper_method(name: &str) -> bool {
     )
 }
 
+/// Owner-segment match for an enum-helper rebind.
+///
+/// A mangled candidate is `<module__path>__<Owner>.<method>`; the owner is the
+/// segment between the last `__` and the `.`. For the enum helpers the ONLY
+/// safe rebind is one where the receiver qualifier names that owner exactly.
+///
+/// The `contains(type_part)` heuristic the generic arms use is actively unsafe
+/// here: lowercased, the single Stage 2 candidate
+/// `lib__nogc_async_mut__async__poll__Poll.unwrap` contains the letters of most
+/// short type names, so a generic parameter (`T`, `R`, `U`) or a type called
+/// `Mut` / `Sync` / `Async` / `Lib` / `Wrap` substring-matches it and gets its
+/// `.unwrap()` bound to an unrelated type's method, which returns 0 for a
+/// non-`Poll` receiver (2026-09-13, 208 residual sites across 109 functions).
+fn enum_helper_owner_matches(candidate: &str, type_part: &str) -> bool {
+    let Some((owner_path, _method)) = candidate.rsplit_once('.') else {
+        return false;
+    };
+    let owner = owner_path.rsplit("__").next().unwrap_or(owner_path);
+    owner.eq_ignore_ascii_case(type_part)
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,
@@ -750,6 +771,23 @@ fn resolve_call_target(
             .or_else(|| suffix_index.get(lookup_name))
             .or_else(|| local_suffix_index.get(method))
             .or_else(|| suffix_index.get(method));
+        if is_enum_helper_method(method) {
+            // SECOND ROUTE for the `Poll.unwrap` rebind (2026-09-13). PR #750
+            // guarded `mangle_mir`'s two bare scans and the str/text/string UFCS
+            // arm in `resolve_method_call_static`; 208 sites survived because a
+            // QUALIFIED `T.unwrap` reaches here instead, where `.get(method)`
+            // discards the qualifier and the `candidates.len() == 1` arm below
+            // (plus both `resolve_by_suffix` fall-throughs) binds it to the only
+            // `unwrap` in the 877-unit closure regardless of receiver type.
+            // `static_.init.unwrap()` in cranelift_codegen_adapter.spl is one
+            // such site. For these names the only sound rebind is an exact owner
+            // match; anything else must stay bare so codegen's `bare_rt_redirect`
+            // lowering owns it, which is correct for every receiver shape.
+            if let Some(b) = candidates.into_iter().flatten().find(|c| enum_helper_owner_matches(c, type_part)) {
+                *target = target.with_name(b.clone());
+            }
+            return;
+        }
         if let Some(candidates) = candidates {
             let best = candidates
                 .iter()
@@ -972,6 +1010,21 @@ fn resolve_method_call_static(
         }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
+        if is_enum_helper_method(method) {
+            // Qualified enum helpers: exact owner match only. The generic
+            // `contains(&type_part_lower)` arm below is a substring test against
+            // the FULL mangled path, so `T.unwrap` / `Mut.unwrap` /
+            // `Async.unwrap` all match
+            // `lib__nogc_async_mut__async__poll__Poll.unwrap` by accident. Same
+            // defect class and same remedy as the guard in
+            // `resolve_call_target`; the str/text/string arm further down keeps
+            // its own `!is_enum_helper_method` check as a belt-and-braces
+            // statement of the same invariant.
+            if let Some(b) = candidates.into_iter().flatten().find(|c| enum_helper_owner_matches(c, type_part)) {
+                *func_name = b.clone();
+            }
+            return;
+        }
         if let Some(candidates) = candidates {
             let best = if has_type_qualifier {
                 candidates.iter().find(|c| c.to_lowercase().contains(&type_part_lower))
@@ -1266,8 +1319,102 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
 
 #[cfg(test)]
 mod tests {
-    use super::{is_enum_helper_method, resolve_method_call_static};
+    use super::{enum_helper_owner_matches, is_enum_helper_method, resolve_call_target, resolve_method_call_static};
+    use crate::mir::CallTarget;
     use std::collections::HashMap;
+
+    fn poll_index() -> HashMap<String, Vec<String>> {
+        HashMap::from([(
+            "unwrap".to_string(),
+            vec!["lib__nogc_async_mut__async__poll__Poll.unwrap".to_string()],
+        )])
+    }
+
+    fn run_call_target(name: &str, suffix_index: &HashMap<String, Vec<String>>) -> String {
+        let mut target = CallTarget::Pure(name.to_string());
+        let mut unresolved = 0usize;
+        resolve_call_target(
+            &mut target,
+            name,
+            &HashMap::new(),
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            suffix_index,
+            "caller",
+            "prefix",
+            &mut unresolved,
+        );
+        target.name().to_string()
+    }
+
+    fn run_method_static(name: &str, suffix_index: &HashMap<String, Vec<String>>) -> String {
+        let mut out = name.to_string();
+        resolve_method_call_static(&mut out, &HashMap::new(), &HashMap::new(), &HashMap::new(), suffix_index);
+        out
+    }
+
+    /// Route 2 of the `Poll.unwrap` rebind (2026-09-13): a QUALIFIED helper
+    /// call reaching `resolve_call_target`, whose candidate lookup discards the
+    /// qualifier and whose `candidates.len() == 1` arm then binds any receiver
+    /// to the lone `unwrap` in the closure. `static_.init.unwrap()` in
+    /// cranelift_codegen_adapter.spl is a real site of exactly this shape.
+    #[test]
+    fn qualified_enum_helpers_never_rebind_in_resolve_call_target() {
+        let idx = poll_index();
+        for receiver in ["MirStaticInit", "T", "Mut", "Async", "Lib", "Wrap", "i64", "text"] {
+            let name = format!("{receiver}.unwrap");
+            assert_eq!(run_call_target(&name, &idx), name, "{name} must stay bare");
+        }
+        // The genuine owner still resolves, so the guard is not vacuous.
+        assert_eq!(
+            run_call_target("Poll.unwrap", &idx),
+            "lib__nogc_async_mut__async__poll__Poll.unwrap"
+        );
+        // A non-helper method keeps today's single-candidate behaviour.
+        let other = HashMap::from([("render".to_string(), vec!["lib__ui__widget__Widget.render".to_string()])]);
+        assert_eq!(run_call_target("Button.render", &other), "lib__ui__widget__Widget.render");
+    }
+
+    /// Route 3: the same shape reaching `resolve_method_call_static`, where the
+    /// surviving hole was `find(|c| c.to_lowercase().contains(&type_part_lower))`
+    /// -- a substring test against the FULL mangled path, which
+    /// `lib__nogc_async_mut__async__poll__Poll.unwrap` satisfies for most short
+    /// type names.
+    #[test]
+    fn qualified_enum_helpers_never_substring_match_in_method_call_static() {
+        let idx = poll_index();
+        for receiver in ["T", "Mut", "Async", "Lib", "Wrap", "As", "MirStaticInit"] {
+            for helper in ["unwrap", "is_some", "is_ok"] {
+                let name = format!("{receiver}.{helper}");
+                let idx = if helper == "unwrap" {
+                    idx.clone()
+                } else {
+                    HashMap::from([(
+                        helper.to_string(),
+                        vec![format!("lib__nogc_async_mut__async__poll__Poll.{helper}")],
+                    )])
+                };
+                assert_eq!(run_method_static(&name, &idx), name, "{name} must stay bare");
+            }
+        }
+        assert_eq!(
+            run_method_static("Poll.unwrap", &idx),
+            "lib__nogc_async_mut__async__poll__Poll.unwrap"
+        );
+    }
+
+    #[test]
+    fn enum_helper_owner_match_is_exact_not_substring() {
+        let poll = "lib__nogc_async_mut__async__poll__Poll.unwrap";
+        assert!(enum_helper_owner_matches(poll, "Poll"));
+        assert!(enum_helper_owner_matches(poll, "poll"));
+        for wrong in ["T", "Mut", "Async", "Lib", "Wrap", "Pol", "PollX"] {
+            assert!(!enum_helper_owner_matches(poll, wrong), "{wrong} must not match");
+        }
+        // An unqualified candidate (a free function) owns no type.
+        assert!(!enum_helper_owner_matches("lib__tooling__notify__unwrap_or", "notify"));
+    }
 
     #[test]
     fn array_join_stays_builtin_when_path_join_is_imported() {
