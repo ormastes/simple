@@ -1,7 +1,7 @@
 # Bug: builtin `range(start, end, step)` silently ignores the 3rd (step) argument
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/loops_spec.spl`)
+- **Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 - **Area:** `src/compiler_rust/compiler/src/interpreter_call/builtins.rs` (`"range"` arm),
   deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`
 
@@ -60,3 +60,34 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/loops_spec.s
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter (the path `bin/simple test` exercises on
 this host) was probed.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+Direct probe — `bin/simple run` on the exact shapes from the symptom section:
+
+```
+pos_step=[0 2 4 6 8 ]      # range(0, 10, 2)  -> step honoured
+neg_step=[5 4 3 2 1 ]      # range(5, 0, -1)  -> descending, step honoured
+two_arg=[0 1 2 ]           # range(0, 3)      -> end-exclusive, 3 elements
+```
+
+Both defects named in the record are gone: the 3rd (step) argument is read, and
+the secondary note ("the 2-arg form appears to be inclusive of `end`") no longer
+holds either — `range(0, 3)` yields 3 elements, not 4.
+
+The spec that originally exposed this is green, non-vacuously, with both step
+examples executing:
+
+```
+$ bin/simple test test/03_system/feature/usage/loops_spec.spl --no-session-daemon
+  range with step
+    ✓ iterates with positive step
+    ✓ iterates with negative step
+SPEC FILE VERDICT: test/03_system/feature/usage/loops_spec.spl outcome=OK declared>=21 executed=21 passed=21 failed=0 skipped=0 dropped=0
+```
+
+No code change made. Closing.
