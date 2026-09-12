@@ -75,10 +75,23 @@ SPEC FILE VERDICT: ... executed=0 passed=0 failed=0 dropped=1 timeout=0 inconclu
   reason=child-died-early exit_code=-1 elapsed_ms=3 budget_ms=930000
 ```
 
-The measured 3ms is now visible. It also makes the real defect legible for the
-first time: the child dies essentially instantly, which is a spawn/exec failure,
-not a slow spec. That remains OPEN and belongs to whoever owns the direct-child
-lane; this record closes only the misreporting.
+The measured 3ms is now visible, and it makes the real defect legible for the
+first time. Probed directly, the inner single-runner had the diagnosis all
+along:
+
+```
+<seed> test --no-session-daemon --timeout 900 <spec>
+  -> rc=5, Duration: 3ms
+  UNVERIFIED <spec>: TERMINATED: child produced no exit status -- spawn or reap
+    failure at the process layer, not a timeout and not a signal death
+```
+
+So the inner runner explicitly said "not a timeout" and the outer client
+overrode it with "outer-bound-timeout". That underlying spawn/reap failure is
+FILED as its own OPEN record —
+`doc/08_tracking/bug/macos_test_child_spawn_or_reap_failure_no_exit_status_2026-09-12.md`
+— not left to "whoever owns the lane". This record closes only the
+misreporting.
 
 ## Specs (both required by .claude/rules/testing.md)
 
