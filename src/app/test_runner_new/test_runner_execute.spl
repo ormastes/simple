@@ -668,14 +668,33 @@ fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResul
 # G1: Safe mode execution with resource limits
 # =========================================================================
 
+"""Safe mode's resource caps as `(memory_bytes, cpu_seconds, max_fds, max_procs)`.
+
+Safe mode's caps are deliberately tighter than the ordinary lanes', but
+`--no-limits` must still mean no limits. Every other lane in this file gates its
+caps on `options.no_limits`; safe mode hardcoded them, so the one documented
+escape hatch silently did nothing there. `ulimit -u` in particular is a
+**per-UID** cap, not a per-test cap: RLIMIT_NPROC counts every process the user
+already has, so 64 on an interactive workstation makes the child's very next
+`fork` fail. A zero means "emit no `ulimit` clause at all" — every cap in
+`resource_scope.spl` is gated on `> 0`.
+
+See doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md
+"""
+fn safe_mode_caps(no_limits: bool) -> (i64, i64, i64, i64):
+    if no_limits:
+        return (0, 0, 0, 0)
+    (512 * 1024 * 1024, 30, 256, 64)
+
 fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
-    val memory_bytes = 512 * 1024 * 1024
-    val cpu_seconds = 30
-    val max_fds = 256
-    val max_procs = 64
+    val caps = safe_mode_caps(options.no_limits)
+    val memory_bytes = caps.0
+    val cpu_seconds = caps.1
+    val max_fds = caps.2
+    val max_procs = caps.3
 
     var run_args: [text] = [file_path]
     if options.gc_log:
