@@ -1,4 +1,5 @@
 # Bracket-slice byte-index survey — fix pass 3 (2026-07-29)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Batch 3, widened hunt per the coordinator's pattern: files mixing bare
 single-index `s[i]` (character-indexed) with a `.len()`/`.length()`-bounded
@@ -208,3 +209,6 @@ guard — matching what's provably verified).
 10 files changed: `toml.spl` (fix), `mqtt/packet.spl` × 3 (fix),
 `kafka/serialization.spl` × 3 (fix), 3 new multi-byte specs. No
 gate/budget files touched.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

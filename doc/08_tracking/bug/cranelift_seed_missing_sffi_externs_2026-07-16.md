@@ -1,6 +1,6 @@
 ---
 id: cranelift_seed_missing_sffi_externs_2026-07-16
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: medium
 discovered: 2026-07-16
 discovered_by: scripts/check/check-native-seed-parity.shs strict-cranelift family (all 9 cases red at tip de7cb5a238a)
@@ -140,3 +140,6 @@ every cranelift build still XFAILs either way under this seed — so it is
 pure churn against an already-correct call site for zero verification-gate
 benefit. Fix remains: redeploy the seed/self-hosted binary from current
 source.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

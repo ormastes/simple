@@ -51,3 +51,6 @@ mechanical relocation; it perturbs this fragile resolution.
 Recommend (1) or (3) — both are their own tracked work, not a rider on the purity fix. Until then,
 `common/js/engine/runtime.spl` stays the last baselined-adjacent core-purity item (gate
 `core_purity_new=1`).
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/common/js_runtime_host_property_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # Bug: `EnumName.assoc_fn()` is never called on the JIT — returns a bogus value, no error
 
 - **Date:** 2026-07-28
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** critical (silent wrong values codebase-wide on the default engine; engines disagree)
 - **Found by:** lane S3 while diagnosing "SdnValue insert does not persist"; reproduced independently by the coordinator
 
@@ -120,3 +120,6 @@ sources so it matches HEAD.
    re-check them; assume vacuous until re-verified.
 3. Fix the interpreter's `case` binding so an enum payload is not deep-copied,
    or document that payload mutation must be written back by the caller.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # `simple check` silently passes type errors and undefined variables — it is parse-only (OPEN, structural)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom (measured 2026-09-01, seed md5 `f9bf124d933a0de0af5d999444234996`)
 
@@ -175,3 +176,6 @@ diagnostics. `check` was NOT narrowed, aliased, or turned into a no-op.
 Cross-platform: no source change was made for this defect, so there is no
 Unix/Windows impact. All measurement was on Windows; the code paths named are
 platform-neutral `.spl`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

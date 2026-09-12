@@ -330,3 +330,5 @@ staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
 
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

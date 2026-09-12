@@ -1,4 +1,5 @@
 # bootstrap_main selected the core-C runtime for compiler-provider imports
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Evidence
 
@@ -25,3 +26,6 @@ Production Stage 4 remains tools-only
 and compiles zero compiler sources; this Rust provider selection is diagnostic
 bootstrap evidence, not an admitted pure-Simple Stage-3 receipt or production
 PASS.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

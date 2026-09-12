@@ -1,4 +1,5 @@
 # Bug: generic fn over trait bound fails for typed dual-backend seam
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** dual_backend_generic_typed_seam_2026-06-15
 **Filed:** 2026-06-15
@@ -61,3 +62,6 @@ Seam A: write separate non-generic helpers per output type (`alpha_run_digest`,
 
 - `doc/08_tracking/bug/crypto_digest_generic_struct_2026-06-15.md` — generic struct params
 - `doc/08_tracking/bug/generic_type_alias_parse_reject_2026-06-10.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

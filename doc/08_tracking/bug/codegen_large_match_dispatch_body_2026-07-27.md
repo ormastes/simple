@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** stage4 native-build (cranelift), full-CLI closure
-- **Status:** open — blocks stage4 full-CLI build (last remaining compile blocker)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 `native-build` of `src/app/office/sheets/formula.spl` fails:
@@ -31,3 +31,6 @@ Calc TUI UI access`.
    separate `fn` with a manageable arm count, called in sequence. Preserves exact
    behavior; gets each body under the codegen limit. Being applied to unblock the
    stage4 deploy while the compiler fix is pending.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

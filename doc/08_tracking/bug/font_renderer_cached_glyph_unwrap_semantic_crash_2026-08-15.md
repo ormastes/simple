@@ -1,4 +1,5 @@
 # font_renderer advance-cache hit crashes interpreter: `unwrap` not found on `CachedGlyph`
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl` now PASSes)
 
 **Date:** 2026-08-15
 **Severity:** medium (interpreter lane, glyph-cache hit path)
@@ -59,3 +60,6 @@ access crashed on wrapped values. Fix: all three sites now use
 cross-engine repeat-draw repro passes (r1=1, r2=1), original five probes
 still green, coverage spec 22/22 PASS at 80% (124/155 decisions) with the
 "Qz" workaround no longer load-bearing.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

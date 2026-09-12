@@ -1,7 +1,7 @@
 # Async-tier mutex/rwlock have no async-suspend locking (block the carrier OS thread)
 
 - **Date:** 2026-07-28
-- **Status:** open (follow-up; deliberate interim state)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** src/lib/nogc_async_mut/concurrent/{mutex,rwlock}.spl
 
 ## Summary
@@ -20,3 +20,6 @@ on unlock (scheduler integration in
 `src/lib/nogc_async_mut/concurrent/green_thread.spl` / runtime hooks). Until
 then the sync-backed facade is intentional and loudly documented in both facade
 files — do not remove the warning without implementing suspend semantics.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

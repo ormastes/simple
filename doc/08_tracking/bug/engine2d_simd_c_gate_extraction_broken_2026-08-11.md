@@ -1,4 +1,5 @@
 # Engine2D SIMD C gate extraction is broken
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-11
 
@@ -27,3 +28,6 @@ The extractor now emits the Engine2D receipt/boxing prelude, skips the complete
 declarations. The standalone test supplies the same per-function AVX2 target
 macro used by the runtime translation unit. Canonical rerun passes both raw
 kernel and in-place ABI tests, then reports the 4K/8K row-scheduling evidence.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

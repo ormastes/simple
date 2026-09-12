@@ -125,3 +125,6 @@ An unlanded lane exists at `/dev/shm/aspect-loader-operational-seal`
 that does not exist on main. The library-layer half of that work — the
 `apk_loader_seal_operational_state` API — **did** land
 (`src/lib/common/aspect_pack.spl:1378`); the loader half did not.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

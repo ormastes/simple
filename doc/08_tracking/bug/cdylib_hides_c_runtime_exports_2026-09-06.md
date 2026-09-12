@@ -1,4 +1,5 @@
 # `libsimple_runtime.so` hides all 350 C-defined `rt_*` providers
+**Status:** OPEN (unverified 2026-09-12)
 
 - Filed: 2026-09-06
 - Measured on: aarch64-unknown-linux-gnu, `--profile bootstrap`,
@@ -105,3 +106,6 @@ fail on the first C-provided `rt_*`. The static archive remains correct.
 - Check: `scripts/check/check-runtime-shared-library.shs` (asserts the export
   count is non-vacuous and above a floor; it would catch a total collapse of the
   export table, but by design does not assert C/Rust parity — that is this bug)
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,7 +1,7 @@
 # Engine2D factory returns a module-namespace dict under the test runner (match-arm binding shadowed by MODULE_GLOBALS)
 
 - **ID:** `engine2d_factory_returns_dict_under_test_runner_2026-08-19`
-- Status: OPEN (P1)
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl` now PASSes)
 - **Found:** 2026-08-19
 - Related: `module_named_like_its_class_shadows_it_inside_it_blocks_2026-08-04`
   (same root fact 1: importing one symbol registers the WHOLE module under its
@@ -109,3 +109,6 @@ basenames.
   vs `use ...engine2d.color`, and a `for` / `if-let` pattern binding variant.
 - After fix: `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl`
   (2/2), `vulkan_strict_spec.spl`, `cuda_strict_spec.spl` stay green.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

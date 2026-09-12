@@ -1,6 +1,6 @@
 # Bug: Game2D Engine2D compute adapter needs a capsule boundary design
 
-Status: open (triaged 2026-06-11)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Date
 
@@ -73,3 +73,6 @@ Before implementing the game2d adapter, introduce one of:
 
 Do not wire this by direct cross-family imports; that would make verify fail
 the capsule boundary.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

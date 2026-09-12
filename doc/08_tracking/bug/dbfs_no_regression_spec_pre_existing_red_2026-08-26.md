@@ -1,4 +1,5 @@
 # dbfs_no_regression_spec pre-existing RED at HEAD (2026-08-26)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 `bin/simple test test/integration/storage/dbfs/dbfs_no_regression_spec.spl`
@@ -28,3 +29,6 @@ DbFsDriver hosted mount must accept trailing-slash stat of the mount root and
 resolve/open hosted file paths such as `/data/README.TXT` (or the spec's
 fixture expectations must be reconciled with the driver's current hosted
 behavior by the feature owner).
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,4 +1,5 @@
 # check-dangling-references: two false-positive classes — symlinked source trees and untracked providers
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** checker defect (false positives)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -85,3 +86,6 @@ treats a SYMBOL finding as proof of a missing implementation will chase these.
 In the `src/app/{cli,dashboard}` slice they are 2 of 25 (8%); the symlink class
 is likely much larger repo-wide, since the numbered compiler tier directories
 are all reached through symlinks.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # base58_decode reversed-polarity engine bug — root cause (2026-07-29)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Assignment: root-cause the pass-5 finding that `base58_decode`'s
 carry-propagation loop corrupted values under the DEFAULT engine while the
@@ -195,3 +196,6 @@ an open item at the end of the bracket-slice byte/char index campaign
 (pass 3, stays with the engine investigation lanes) and the newly-found
 `sha256_bytes`/base58check-encode engine divergence noted above (new,
 unowned).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

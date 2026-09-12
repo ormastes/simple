@@ -1970,3 +1970,6 @@ the loss is dominated by ordinary transient values that no eviction call would
 ever be handed. Whoever picks this up next should cost a reclamation strategy
 for `rt_core_*` allocations on the native lane first, and treat arena/eviction
 work as downstream of it.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

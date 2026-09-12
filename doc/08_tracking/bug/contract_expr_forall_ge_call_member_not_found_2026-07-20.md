@@ -1,7 +1,7 @@
 # Bug: `ContractExprKind.Forall` (enum variant) and `ContractExpr.ge`/`.call` (static methods) report "not found" from outside the module even though they are defined in source, while sibling members (`.gt`, `.Ge`, etc.) resolve fine
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl` now PASSes)
 - **Area:** `src/compiler_rust/lib/std/src/verification/models/contracts.spl` (`enum ContractExprKind`, `class ContractExpr`), exercised via `test/00_formal_verification/compiler/unified_attrs_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning — likely a seed-interpreter symbol-table/dispatch defect; not independently re-verified on a genuinely self-hosted binary.
 
@@ -62,3 +62,6 @@ Needs actual interpreter/semantic-checker instrumentation to compare symbol-tabl
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl --no-session-daemon
 ```
 4/5 examples fail as above.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

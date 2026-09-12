@@ -1,4 +1,5 @@
 # CPU-SIMD 4K/8K render-scale evidence terminates in interpreter path
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -28,3 +29,6 @@ too expensive for this lane; the canonical evidence path is native mode.
 ## Required Fix
 
 No remaining action for this bug.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

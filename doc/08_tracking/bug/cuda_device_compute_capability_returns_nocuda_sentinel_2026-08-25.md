@@ -34,3 +34,6 @@ SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programmin
 ```
 → `Results: 5 total, 4 passed, 1 failed`, failing example
 `discovers the machine's GPUs and what they are, with no CUDA toolkit installed`.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -52,3 +52,6 @@ Do not touch the expected NIST SP 800-38A F.5.5/F.5.6 byte arrays.
 
 - `test/unit/lib/crypto/aes_ctr_nist_spec.spl` (2 of 4 examples, both
   AES-256-CTR only)
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/unit/lib/crypto/aes_ctr_nist_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

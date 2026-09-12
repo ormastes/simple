@@ -1,4 +1,5 @@
 # The only deployed Simple binary predates the tip, so a whole class of gate cannot speak — and the rebuild that would fix it is prohibited
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-09-06 · **Status:** RECORDED (verification cap, not a code defect) · **Host:** macOS aarch64.
 No build was run; this record exists precisely because one could not be.
@@ -108,3 +109,6 @@ a scheduling detail.
 - **No claim that the 09-05 binary is the newest obtainable one.** Only the local deploy
   was inspected; whether a fresher artifact exists elsewhere (CI, another host) was not
   checked.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

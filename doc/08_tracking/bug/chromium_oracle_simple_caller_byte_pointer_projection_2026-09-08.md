@@ -1,4 +1,5 @@
 # Chromium oracle Simple caller byte-pointer projection fails in seed interpreter
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -62,3 +63,6 @@ the prior three failed cycles.
 3. Exact-once release passes and duplicate release is rejected.
 4. A native-compiled caller passes once the compiler supports the required
    checked dynamic-loader constructs.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

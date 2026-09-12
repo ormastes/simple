@@ -2,7 +2,7 @@
 
 - **ID:** BUG-2026-08-05-deployed-seed-not-selfhosted
 - **Date:** 2026-08-05
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler_core/interpreter/match_fallthrough_diagnostic_spec.spl` now PASSes)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** medium — contradicts stated policy, hides pure-Simple interpreter
   fixes from `bin/simple run`/`bin/simple test` until redeployed
@@ -184,3 +184,6 @@ invent a compiler root cause from correlated failures on a disqualified seed.
 Status remains **OPEN**. This digest must not certify Phase 1 tools or MCP/LSP
 verification. Closure requires a provenance-admitted self-hosted Stage 4
 deployment and a fresh essential-tools smoke over the deployed bytes.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler_core/interpreter/match_fallthrough_diagnostic_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

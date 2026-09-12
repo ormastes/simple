@@ -1,4 +1,5 @@
 # Deployed Simple misses Engine2D blend-span externs
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/gpu/engine2d/backend_software_blend_span_spec.spl` now PASSes)
 
 ## Status
 
@@ -41,3 +42,6 @@ negative clipping, transparent no-op, identical damage rectangles, nonzero
 native receipts for an ISA lane, and no per-row allocation. Keep the existing
 cross-architecture C operation report as native kernel evidence, not as an
 end-to-end Engine2D or 8K/80 receipt.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/gpu/engine2d/backend_software_blend_span_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

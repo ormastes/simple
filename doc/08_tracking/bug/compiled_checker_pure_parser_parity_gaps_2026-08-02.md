@@ -1,4 +1,5 @@
 # Compiled checker pure-parser parity gaps
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/parser/parser_category_c_spec.spl` now PASSes)
 
 ## Status
 
@@ -129,3 +130,6 @@ manifest checker; do not modify invalid source merely to hide a parser gap.
 Batch parser-state leakage was investigated and disproved by a two-file minimal
 pair.  The aggregate checker correctly reports one failing file of two; passing
 members of a nonzero batch are not false positives.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/parser/parser_category_c_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

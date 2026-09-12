@@ -1,4 +1,5 @@
 # any_audit: dict-literal type value position classified `field` instead of `generic` (pre-existing)
+**Status:** OPEN (unverified 2026-09-12)
 
 - Date: 2026-08-26
 - Spec: `test/01_unit/app/any_audit/any_audit_classify_spec.spl`
@@ -11,3 +12,6 @@
 - Unblock condition: fix the classifier in `src/app/any_audit/` so a
   dict-literal `{K: V}` type in value position classifies as `generic`,
   then this spec goes green.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

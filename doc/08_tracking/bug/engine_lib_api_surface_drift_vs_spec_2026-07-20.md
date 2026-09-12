@@ -1,4 +1,5 @@
 # Engine lib API surface drift vs. spec expectations
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing/mismatched implementation, not a test-naming issue)
@@ -117,3 +118,6 @@ is highest-leverage since 3 specs depend on it), decide whether to update the
 source to the generational-handle design the specs assume or prune the specs
 down to the current design, and implement/port method-by-method with the
 specs as the acceptance criteria.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

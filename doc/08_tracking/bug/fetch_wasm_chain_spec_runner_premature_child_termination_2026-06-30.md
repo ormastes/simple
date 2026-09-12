@@ -1,7 +1,7 @@
 # Bug: `browser_session_fetch_wasm_chain_spec.spl` file-level FAIL despite 250/250 passing
 
 - **Date:** 2026-06-30
-- **Status:** Open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Component:** test runner (`src/app/test_runner_new/`) — NOT the js/web library under test
 - **Severity:** Medium (false-negative test result; the code under test is correct)
 - **Spec:** `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` (250 it-blocks, ~6370 lines)
@@ -118,3 +118,6 @@ The identifier is defined and exported from
 but not in compile mode. This does not affect the default interpreter test path
 but blocks `--mode=native/smf` for this spec. Tracks with the known
 "compile-mode false-greens / SSpec compile pipeline" fragility.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,6 @@
 # Missing implementation: src/hardware/fpga_linux/generate_rv64_test_program_package.spl
 
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/hardware/fpga_linux/` — RV64 FPGA test-program VHDL package
   generator
@@ -80,3 +80,6 @@ alongside: `bin/simple run` on an unreadable/missing entry file exits `0`
 despite printing `error: compile failed: ...` — callers that check only the
 exit code (like this spec's `shell()` helper) silently proceed past a real
 compile failure.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

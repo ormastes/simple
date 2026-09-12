@@ -1,6 +1,6 @@
 ---
 id: bootstrap_stage2_empty_mir_bodies_2026-07-05
-status: IN_PROGRESS
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 severity: critical
 discovered: 2026-07-05
 discovered_by: Bootstrap stage-2 binary verification
@@ -1751,3 +1751,6 @@ codegen/runtime root cause and not grounds to close this record.  The next bound
 Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
 whether the missing-return cascade disappears, and compare peak RSS because the
 local may introduce one additional value-semantic `HirParam` copy per parameter.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -2,7 +2,7 @@
 
 Date: 2026-06-06
 
-Status: Open
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` now PASSes)
 
 ## Summary
 
@@ -70,3 +70,6 @@ Rust seed tree.
 
 Per this sweep's scope rules (no edits under `src/compiler_rust/**`), this
 defect is left **OPEN / out of scope for this sweep**. No source changes made.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

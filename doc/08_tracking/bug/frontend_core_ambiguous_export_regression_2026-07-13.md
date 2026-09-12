@@ -1,4 +1,5 @@
 # Regression: ambiguous package exports in `10.frontend/core/__init__.spl` break all fresh native-builds
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Introduced by** the parallel commit `050209d9b36` ("fix: speed up pure Simple
 bootstrap") on origin/main. Breaks any `native-build` that loads the compiler
@@ -43,3 +44,6 @@ LLVM backend, so it is forced onto the buggy cranelift path. The unblock is the
 #99 whole-compiler redeploy: build the in-guest toolchain with the pure-Simple
 SELF-HOSTED compiler (no such miscompile), not the seed. See
 `scratchpad/lanebx_recover/DIAGNOSIS_FINAL.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

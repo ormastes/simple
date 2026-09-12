@@ -1,7 +1,7 @@
 # `env_get(...) ?? default` is a DEAD fallback against `std.io_runtime`'s `env_get` — silently yields `""` instead of the default
 
 - **ID:** env_get_nil_coalesce_dead_fallback_2026-07-25
-- **Status:** OPEN — root-caused, one instance fixed, general sweep NOT done
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high — silent wrong value, no error, no warning; the idiom reads
   as correct and is used ~680 times in-tree.
 
@@ -263,3 +263,6 @@ as coverage until someone quotes its verdict on a quieter host.
 The fix itself is unaffected: it rests on the reproducing spec's
 before/after pair plus the direct `bin/simple run` probe. Only the claim about
 the second spec was too strong.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

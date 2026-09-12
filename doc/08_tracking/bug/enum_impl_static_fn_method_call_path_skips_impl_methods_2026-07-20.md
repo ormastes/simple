@@ -1,7 +1,7 @@
 # Bug: `EnumName.static_method()` call-expression path ignores `impl EnumName:` static methods (only checks inline enum-body methods)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/shared/control_flow/static_fn_spec.spl`)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** `src/compiler_rust/compiler/src/interpreter_method/mod.rs` (`Value::EnumType` method-call dispatch), deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`
 
 ## Symptom
@@ -131,3 +131,6 @@ through that arm (test-path ≠ run-path — confirmed separately for `?`), OR t
 so the lookup finds nothing. Next fixer: first locate WHERE the SSpec `it`-block
 call is evaluated and whether impl-block methods are registered there — do NOT
 re-apply the dispatch-arm patch blindly (it compiles clean and does nothing).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

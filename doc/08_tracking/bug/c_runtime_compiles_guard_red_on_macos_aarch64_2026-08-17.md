@@ -1,4 +1,5 @@
 # `check-c-runtime-compiles-push.shs` is RED on origin/main when run on macOS aarch64
+**Status:** OPEN (unverified 2026-09-12)
 
 ## FIXED — 2026-08-17
 
@@ -105,3 +106,6 @@ green rather than compare failure lists.
    passed, but distinguishable from a real defect. Until then the guard cannot
    reach PASS on macOS and every landing from this host has to reason around
    it manually.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

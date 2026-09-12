@@ -80,3 +80,6 @@ three artifact-dependent gates
 currently, and correctly, fail-closed on the same unmet precondition.
 
 Do not "fix" this spec by weakening or skipping it.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/app/llm_caret/messaging/caret_launcher_policy_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

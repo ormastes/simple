@@ -2,7 +2,7 @@
 
 **ID:** ast_env_var_quadratic_parse_2026-06-13  
 **Severity:** P1 — `check` on 400+ top-level functions times out (>300 s)  
-**Status:** Localized, fix proposed, not yet implemented  
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Re-verification 2026-09-12:** NOT RE-VERIFIABLE on this host — see below.  
 **Reported:** 2026-06-13
 
@@ -186,3 +186,6 @@ Eliminating 6×O(N·S) `setenv` calls per parse and converting all reads to O(1)
 This is a **real latent quadratic** — it will become the bottleneck once the env-var issue is fixed and `infer_module` is actually wired up to the driver pipeline. Currently `infer_module` is defined (`inference_control.spl:594`) but **never called** from the check/compile driver path (`type_check_impl` is a documented stub no-op; `lower_and_check_impl` creates empty HIR shells for non-bootstrap single-file input). Not the active bottleneck today.
 
 Fix when it becomes active: replace the `[i64]` linear-scan containers (`to_generalize.contains`, `scheme.vars.contains`) with `Dict<i64, bool>` sets. Both `env_free_var_ids` and `generalize` become O(N·depth) rather than O(N²).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

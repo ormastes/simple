@@ -1,6 +1,6 @@
 # LZ4 auto-frame round-trip rejects its own empty-payload output as corrupt
 
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/unit/lib/common/compress_facade_harness_spec.spl` now PASSes)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/lib/common/compress/lz4.spl` — LZ4 frame encoder/decoder facade
 - **Severity:** Medium — breaks the empty-input round-trip for the public
@@ -79,3 +79,6 @@ The spec's assertion (`expect(decoded.unwrap()).to_equal(payload)` /
 weakened or dropped — round-tripping an empty payload through a compression
 codec is a legitimate requirement. This is a genuine codec defect, not a
 stale test.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/common/compress_facade_harness_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

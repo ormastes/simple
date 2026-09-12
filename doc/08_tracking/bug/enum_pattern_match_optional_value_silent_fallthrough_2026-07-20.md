@@ -1,6 +1,6 @@
 ---
 id: enum_pattern_match_optional_value_silent_fallthrough_2026-07-20
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: medium
 discovered: 2026-07-20
 discovered_by: SPEC-REPAIR lane (test/01_unit/app/ui.browser/input_translation_spec.spl repair)
@@ -146,3 +146,6 @@ binding in `doc/07_guide/quick_reference/syntax_quick_reference.md`.
 3. Add a regression spec directly targeting this shape (Optional-enum matched
    with field-binding constructor arms) so a future compiler fix has a red
    test to turn green, and so this doesn't regress unnoticed again.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

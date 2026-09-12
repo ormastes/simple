@@ -1,4 +1,5 @@
 # `expect <ident>` fails when the identifier is named `exists` (2026-08-18)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 OPEN — seed parser/desugar defect, found while fixing the screenshot SFFI externs.
@@ -33,3 +34,6 @@ renaming the local would hide the defect.
 ## Next step
 Find where `exists` is treated as a keyword/postfix operator in the seed parser
 and stop it from swallowing the `expect` statement head.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

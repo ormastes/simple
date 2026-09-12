@@ -1,6 +1,6 @@
 # CompilerContext multi-def name collision (W13-H class 3b reclassification)
 
-Status: - **W15-K (this filing):** documented; not fixed in W15-K scope.
+Status: RESOLVED (2026-09-12, per body: "## Status" §"2026-05-19 (Wave 5): Rust-side fix verified complete" and "**Blocking:** resolved.")
 
 **Filed:** 2026-05-02 by W15-K agent
 **Discovered during:** W15-K HIR class 3b source-side typo fixes
@@ -89,3 +89,6 @@ silently fight each other.
     pre-existing in out-of-scope files (`local_execution.rs`,
     `expression_tests.rs`).
 - **Blocking:** resolved.
+
+## Triage 2026-09-12
+Rule E: the leading status line disagreed with the record's own "## Status" section, which already documents Wave 5 (2026-05-19) verifying the Rust-side fix complete and states "**Blocking:** resolved."; aligned the leading status line to that body verdict instead of closing it stale. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

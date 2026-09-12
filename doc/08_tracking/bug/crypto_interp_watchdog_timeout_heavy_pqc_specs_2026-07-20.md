@@ -10,7 +10,7 @@
   within the test-runner's internal watchdog (~60s) or the outer harness
   timeout (90s); correctness of the underlying primitives is UNVERIFIED,
   not merely slow.
-- **Status:** OPEN. This is not one of the guide's literal ENV categories
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   (no missing tool/socket/GPU/network, not gui/webgpu/webgl/wm/ml/simpleos)
   — filing as a tracked bug/perf-gap rather than silently skipping, per
   instruction to not bare-skip ambiguous cases.
@@ -76,3 +76,6 @@ headers), or land the native fast-path helpers already tracked for bcrypt.
 - `test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl`
 - `test/unit/lib/crypto/slh_dsa_128s_spec.spl`
 - `test/unit/lib/crypto/slh_dsa_192s_256s_spec.spl`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

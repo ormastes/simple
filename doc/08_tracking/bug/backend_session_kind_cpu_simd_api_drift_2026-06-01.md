@@ -1,7 +1,7 @@
 # Bug: BackendSessionKind CPU SIMD API Drift
 
 Date: 2026-06-01
-Status: open (triaged 2026-06-11)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/gpu/engine2d/backend_session_contract_spec.spl` now PASSes)
 
 ## Summary
 
@@ -69,3 +69,6 @@ The two runtime-family representations still differ by design shape
 class constructor), so the architecture/design step should still define the
 boundary contract. Current implementation work should treat this bug as
 monitored rather than actively reproducing.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/gpu/engine2d/backend_session_contract_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

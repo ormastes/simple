@@ -1,4 +1,5 @@
 # `context <obj>:` block body writes to an outer `var` are lost under `test`
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/feature/usage/structs_spec.spl` now PASSes)
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec evaluator) scoping for `context
@@ -105,3 +106,6 @@ Verified with:
 → `Passed: 20, Failed: 3`
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/structs_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 8, Failed: 2`
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/feature/usage/structs_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

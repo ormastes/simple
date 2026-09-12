@@ -1,4 +1,5 @@
 # `case Some(` on plain-nullable slots — classified sweep of src/compiler
+**Status:** OPEN (unverified 2026-09-12)
 
 Static analysis only. Nothing was edited, built, or bootstrapped.
 Baseline: working tree at the commit after 6d3856e6b4b.
@@ -384,3 +385,6 @@ The corrections are to *scope*: the defect is repo-wide, not 50.mir-local
 (50.mir is 36 of 218 B sites; 80.driver at 46 and 70.backend at 40 are larger),
 and 218 of 467 sites could not be classified either way — bucket C is as large
 as bucket B, so this sweep bounds the problem, it does not close it.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

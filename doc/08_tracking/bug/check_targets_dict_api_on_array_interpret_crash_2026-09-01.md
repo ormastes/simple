@@ -1,4 +1,5 @@
 # `check` crashed under interpret mode: dict API on a `[text]` array in expand_check_targets (RESOLVED 2026-09-01)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -73,3 +74,6 @@ Pure `.spl` fix, platform-agnostic; nothing Unix-side touched. The latent
 question — why the hybrid engine ACCEPTS `array[string] = bool` silently — is
 an engine-divergence issue worth its own look; this record fixes the caller,
 not the divergence.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

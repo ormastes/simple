@@ -10,7 +10,7 @@
   - `test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl`
     (owned by A0)
   - `doc/08_tracking/wm_false_success_baseline.txt`
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl` now PASSes)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   lane that discovered this; see below).
 - **Base for evidence:** `origin/main` = `71475ea79564d1ee4a07a339711cc0b113708483`
@@ -94,3 +94,6 @@ Whichever lane owns `src/lib/nogc_async_mut/wm/service.spl` (wm-core/A2)
 should close its predicate-4 gap and add its baseline accounting; whichever
 lane owns `wm_false_success_family_spec.spl` (A0) should decide how the
 non-vacuity floor is meant to resolve once the family is fully closed.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

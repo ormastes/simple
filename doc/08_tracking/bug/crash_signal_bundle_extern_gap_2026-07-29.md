@@ -1,6 +1,6 @@
 ---
 id: crash_signal_bundle_extern_gap_2026-07-29
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: medium
 discovered: 2026-07-29
 discovered_by: lane DS7 (mission-critical robustness plan, Batch D, crash-native)
@@ -115,3 +115,6 @@ Filed, not stubbed. Do not add a fake register/context field to
 `CrashBundleV1` to make it "look" like real signal capture — the honest
 minimal bundle (data model + panic/log-ring capture + SDN serialization) is
 what's reachable without the runtime work above.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

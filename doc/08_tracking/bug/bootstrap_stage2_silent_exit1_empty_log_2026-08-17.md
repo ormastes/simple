@@ -1,7 +1,7 @@
 # Bootstrap stage2: silent exit-1 with a 0-byte stage2-native-build.log
 
 - **Date:** 2026-08-17
-- **Status:** MITIGATED (diagnostic added); root output-buffering defect still open
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl` now PASSes)
 - **Status:** PARTIALLY FIXED 2026-08-17 (diagnosis path landed for real - the earlier MITIGATED claim was false, see the correction below); root output-buffering defect still open
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh`, `native-build` output behavior
 
@@ -144,3 +144,6 @@ file. The event-file sink remains optional; it no longer controls whether
 human-readable process output exists. The focused source contract pins both
 the flush ordering and the adjacent durable-file behavior in
 `test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

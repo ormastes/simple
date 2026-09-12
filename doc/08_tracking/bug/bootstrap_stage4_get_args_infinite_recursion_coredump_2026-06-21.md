@@ -86,3 +86,6 @@ not runnable. That doc's severity downgrade should be revisited.
 - `doc/08_tracking/bug/bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17.md`
 - `doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md` (blocked by this)
 - `doc/09_report/bootstrap_crash_report_2026_04_01.md` (LIM-010 history)
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # `inspect_debug_evidence_bundle_v1` fails on every call: `DebugReceiptV1` has no `receipt_id` field
+**Status:** OPEN (unverified 2026-09-12)
 
 ## RESOLVED 2026-09-05
 
@@ -103,3 +104,6 @@ Either give `central_debug_service_v1_record`'s return value a `receipt_id`
 field (and populate it, e.g. from the session/authorize receipt chain) or
 change `evidence_inspect_v1.spl:159` to read a field that actually exists.
 Re-run both specs above after the fix; both should go fully green.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

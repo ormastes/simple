@@ -3,7 +3,7 @@
 - **Date:** 2026-07-27
 - **Area:** pure-Simple parser / unary expressions
 - **Severity:** high — blocks the strict Stage 4 full-CLI bootstrap.
-- **Status:** OPEN.
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Reproduction
 
@@ -31,3 +31,6 @@ The repaired strict bootstrap from checkpoint
 `src/os/userlib/device.spl:26` and exposed four more prefix-address uses in the
 same file. A static scan found and normalized all 27 active uses in the
 Stage 4 userlib source lane before the final bounded retry.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

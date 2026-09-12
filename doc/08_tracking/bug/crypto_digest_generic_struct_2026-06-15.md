@@ -1,4 +1,5 @@
 # Bug: Generic struct type parameter not resolved in impl block
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** crypto_digest_generic_struct_2026-06-15
 **Date:** 2026-06-15
@@ -47,3 +48,6 @@ inside the impl body.
 
 Ensure type parameters declared on the struct head are propagated into the
 impl block's type environment before resolving member types and return types.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

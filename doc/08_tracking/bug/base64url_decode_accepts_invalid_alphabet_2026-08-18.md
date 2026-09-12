@@ -90,3 +90,6 @@ bytes-typed corpus would be needed for those and has not been written.
 Either way, do **not** adopt the C source's clamp-to-zero behaviour as the
 target — silently substituting `A` for arbitrary attacker bytes is the more
 dangerous of the two leniencies.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/common/base_encoding/base64/base64url_crosslang_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

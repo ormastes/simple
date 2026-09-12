@@ -1,4 +1,5 @@
 # Cross-Platform Bootstrap and Dynload Status (2026-07-10)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Contract
 
@@ -83,3 +84,6 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
   fixture successfully, then `bin/simple <refreshed-main.smf>` exited 1 with
   `file not found`. No fake or knowingly failing spec was committed; production
   SMF dispatch remains a concrete loader/runtime blocker.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

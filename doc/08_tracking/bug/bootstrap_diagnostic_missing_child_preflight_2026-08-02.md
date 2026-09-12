@@ -1,4 +1,5 @@
 # Bootstrap diagnostic sweep missing-child preflight
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Reproduction
 
@@ -17,3 +18,6 @@ pure-Simple child at `bin/simple` before launching parallel work.
 The harness now rejects a missing or non-executable `bin/simple` with exit 2
 before creating worker state. The integration test covers that exact fail-fast
 case and the adjacent admitted-child aggregation/cache-preservation path.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,4 +1,5 @@
 # Engine2D 2D performance bug register — reproduction + lint detectability
+**Status:** OPEN (unverified 2026-09-12)
 
 Filed 2026-09-03. One row per measured perf defect: how to reproduce it, and
 whether a lint can find it automatically.
@@ -103,3 +104,6 @@ Executable, in the repo:
 The resolution sweep for defect #4 is currently run by hand (commands in the
 table above); folding it into the compare gate as extra `evidence.env` rows is
 the obvious next step and is not yet done.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

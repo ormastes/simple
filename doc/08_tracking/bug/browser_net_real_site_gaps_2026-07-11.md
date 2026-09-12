@@ -1,6 +1,6 @@
 ---
 id: browser_net_real_site_gaps_2026-07-11
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: medium
 discovered: 2026-07-11
 discovered_by: Manual hardening pass against real sites (example.com, en.wikipedia.org,
@@ -151,3 +151,6 @@ Verified fetch matrix after fixes: `https://example.com/` (200, 559B,
 `FetchEngine`) logs `Cache hit` on the second call and returns identical
 byte length, with `credentials: "include"` exercising the (now working)
 cookie-attach path without crashing.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
