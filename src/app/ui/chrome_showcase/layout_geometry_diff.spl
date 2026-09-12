@@ -1,0 +1,562 @@
+# CSS-layout geometry differential: Chrome (reference) vs the pure-Simple web
+# renderer, keyed by an identical nth-path scheme on both sides.
+#
+# Chrome side is produced by scripts/check/check-chrome-layout-geometry-diff.shs
+# (a <script> appended to a copy of the page emits GEOM| lines into a <pre>,
+# harvested with --headless=new --dump-dom). Simple side is the Draw IR emitted
+# by web_render_backend("pure_simple", w, h).render_html_to_draw_ir(html).
+#
+# Verdict is the LAST line of stdout. 0 elements compared is ERROR, never PASS.
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
+use common.ui.draw_ir.{DrawIrCommand}
+use app.wm_compare_host.cli_util.{get_cli_args}
+use app.wm_compare_host.file_ops.{file_read_text, file_write}
+
+# Element tags the Simple layout tree does not materialise; the Chrome-side
+# walker skips exactly the same set so the ordinals line up.
+fn _layout_tag(tag: text) -> bool:
+    (
+        tag != "#text" and tag != "style" and tag != "script" and
+        tag != "title" and tag != "head" and tag != "meta" and
+        tag != "link" and tag != "base"
+    )
+
+struct GeomBox:
+    key: text
+    tag: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    features: text
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    var i = 0
+    while i < command.computed_style.len():
+        if command.computed_style[i].key == key:
+            return command.computed_style[i].value
+        i = i + 1
+    ""
+
+fn _to_i32(raw: text) -> i32:
+    if raw == "":
+        return 0
+    var s = raw
+    var neg = false
+    if s.starts_with("-"):
+        neg = true
+        s = s.substring(1, s.len())
+    var digits = ""
+    var i = 0
+    var stop = false
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if not stop:
+            if ch >= "0" and ch <= "9":
+                digits = digits + ch
+            elif ch == ".":
+                stop = true
+        i = i + 1
+    if digits == "":
+        return 0
+    val v = digits.to_i32()
+    if neg: 0 - v else: v
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# --- Chrome side -----------------------------------------------------------
+
+pub fn parse_chrome_geom(dump: text) -> [GeomBox]:
+    var out: [GeomBox] = []
+    val lines = dump.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("GEOM|"):
+            val parts = line.split("|")
+            if parts.len() >= 7:
+                var features = ""
+                var p = 7
+                while p < parts.len():
+                    if features != "":
+                        features = features + ";"
+                    features = features + parts[p]
+                    p = p + 1
+                out.push(GeomBox(
+                    key: parts[1], tag: parts[2],
+                    x: _to_i32(parts[3]), y: _to_i32(parts[4]),
+                    w: _to_i32(parts[5]), h: _to_i32(parts[6]),
+                    features: features))
+        i = i + 1
+    out
+
+# --- Simple side -----------------------------------------------------------
+
+fn _seen(ids: [text], id: text) -> bool:
+    var i = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return true
+        i = i + 1
+    false
+
+fn _index_of_id(ids: [text], id: text) -> i32:
+    var i = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _path_key(ids: [text], parents: [text], ordinals: [i32], body_id: text, start: i32) -> text:
+    if body_id == "":
+        return ""
+    if ids[start] == body_id:
+        return "path:"
+    var parts: [i32] = []
+    var current = start
+    var guard = 0
+    while current >= 0 and ids[current] != body_id and guard < 256:
+        parts.push(ordinals[current])
+        current = _index_of_id(ids, parents[current])
+        guard = guard + 1
+    if current < 0:
+        return ""
+    if ids[current] != body_id:
+        return ""
+    var path = "path:"
+    var p = parts.len() - 1
+    while p >= 0:
+        if p < parts.len() - 1:
+            path = path + "/"
+        path = path + parts[p].to_string()
+        p = p - 1
+    path
+
+val FEATURE_KEYS = [
+    "display", "position", "float", "flex-direction", "flex-wrap",
+    "justify-content", "align-items", "margin-left", "margin-top",
+    "padding-left", "padding-top", "border-left-width", "border-top-width",
+    "line-height", "font-size", "text-align", "vertical-align",
+    "white-space", "overflow", "box-sizing", "grid-template-columns"
+]
+
+fn _feature_text(c: DrawIrCommand) -> text:
+    var out = ""
+    var i = 0
+    while i < FEATURE_KEYS.len():
+        if out != "":
+            out = out + ";"
+        out = out + FEATURE_KEYS[i] + "=" + _style_value(c, FEATURE_KEYS[i])
+        i = i + 1
+    out
+
+# Rebuilds the nth-path key from the Draw IR parent chain. Draw IR carries
+# component_id/parent_id plus a `tag` computed-style prop, which is enough to
+# recover the element tree without touching the renderer internals.
+pub fn simple_geom_boxes(html: text, width: i32, height: i32) -> [GeomBox]:
+    var out: [GeomBox] = []
+    if html == "":
+        return out
+    val composition = web_render_backend("pure_simple", width, height).render_html_to_draw_ir(html)
+    if composition.batches.len() == 0:
+        return out
+    var ids: [text] = []
+    var parents: [text] = []
+    var tags: [text] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var ws: [i32] = []
+    var hs: [i32] = []
+    var feats: [text] = []
+    var b = 0
+    while b < composition.batches.len():
+        val commands = composition.batches[b].commands
+        var i = 0
+        while i < commands.len():
+            val c = commands[i]
+            val tag = _style_value(c, "tag")
+            if tag != "" and _layout_tag(tag) and not _seen(ids, c.component_id):
+                ids.push(c.component_id)
+                parents.push(c.parent_id)
+                tags.push(tag)
+                xs.push(c.x)
+                ys.push(c.y)
+                ws.push(c.width)
+                hs.push(c.height)
+                feats.push(_feature_text(c))
+            i = i + 1
+        b = b + 1
+    var ordinals: [i32] = []
+    var n = 0
+    while n < ids.len():
+        var ordinal = 0
+        var m = 0
+        while m < n:
+            if parents[m] == parents[n]:
+                ordinal = ordinal + 1
+            m = m + 1
+        ordinals.push(ordinal)
+        n = n + 1
+    var body_id = ""
+    var t = 0
+    while t < tags.len():
+        if tags[t] == "body" and body_id == "":
+            body_id = ids[t]
+        t = t + 1
+    var k = 0
+    while k < ids.len():
+        val key = _path_key(ids, parents, ordinals, body_id, k)
+        if key != "":
+            out.push(GeomBox(key: key, tag: tags[k], x: xs[k], y: ys[k],
+                             w: ws[k], h: hs[k], features: feats[k]))
+        k = k + 1
+    out
+
+# --- Diff ------------------------------------------------------------------
+
+struct GeomDiffRow:
+    key: text
+    tag: text
+    dx: i32
+    dy: i32
+    dw: i32
+    dh: i32
+    feature: text
+    chrome_features: text
+    inherited: bool
+
+struct GeomDiffResult:
+    compared: i32
+    mismatched: i32
+    root_mismatched: i32
+    inherited_mismatched: i32
+    missing_in_simple: i32
+    missing_in_chrome: i32
+    rows: [GeomDiffRow]
+    extra_keys: [text]
+
+fn _has(haystack: text, needle: text) -> bool:
+    haystack.contains(needle)
+
+# Classifies a mismatch into the CSS feature most likely responsible, reading
+# Chrome's computed style (the reference side) so a Simple-side style gap
+# cannot hide the cluster.
+pub fn classify_feature(chrome_features: text) -> text:
+    val f = chrome_features
+    # The PARENT's formatting context wins: an ol/li inside a flex container is
+    # a flex-item sizing bug, not a box-sizing bug, and its own display is
+    # block. Classifying on the box's own display first buckets every such row
+    # under the catch-all `* { box-sizing: border-box }` rule instead.
+    if _has(f, "parent-display=flex") or _has(f, "parent-display=inline-flex"):
+        return "flex-item"
+    if _has(f, "parent-display=grid") or _has(f, "parent-display=inline-grid"):
+        return "grid-item"
+    if _has(f, "parent-display=table-row") or _has(f, "parent-display=table"):
+        return "table-cell"
+    if _has(f, "display=grid") or _has(f, "display=inline-grid"):
+        return "grid"
+    if _has(f, "display=flex") or _has(f, "display=inline-flex"):
+        return "flex"
+    if _has(f, "display=table"):
+        return "table"
+    if _has(f, "position=absolute") or _has(f, "position=fixed") or _has(f, "position=sticky"):
+        return "position"
+    if _has(f, "float=left") or _has(f, "float=right"):
+        return "float"
+    if _has(f, "display=inline-block"):
+        return "inline-block"
+    if _has(f, "display=inline"):
+        return "inline"
+    if _has(f, "overflow=hidden") or _has(f, "overflow=auto") or _has(f, "overflow=scroll"):
+        return "overflow"
+    if _has(f, "white-space=pre") or _has(f, "white-space=nowrap"):
+        return "white-space"
+    # Last, deliberately: `* { box-sizing: border-box }` is near-universal in
+    # the catalog CSS, so this is a modifier, not a layout mode.
+    if _has(f, "box-sizing=border-box"):
+        return "box-sizing"
+    "block-flow"
+
+# "path:0/1/2" -> "path:0/1"; "path:0" -> "path:"; "path:" -> "".
+pub fn parent_key(key: text) -> text:
+    if key == "" or key == "path:":
+        return ""
+    var cut = -1
+    var i = 0
+    while i < key.len():
+        if key.substring(i, i + 1) == "/":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return "path:"
+    key.substring(0, cut)
+
+fn _find_key(boxes: [GeomBox], key: text) -> i32:
+    var i = 0
+    while i < boxes.len():
+        if boxes[i].key == key:
+            return i
+        i = i + 1
+    -1
+
+fn _index_of_text(keys: [text], key: text) -> i32:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+pub fn geometry_diff(chrome: [GeomBox], simple: [GeomBox], tolerance: i32) -> GeomDiffResult:
+    # Signed deltas for EVERY compared element, mismatched or not: a child that
+    # merely carries its parent's displacement is one bug, not two, and without
+    # this a single misplaced flex container is counted once per descendant and
+    # swamps the ranked feature table.
+    var ckeys: [text] = []
+    var sdx: [i32] = []
+    var sdy: [i32] = []
+    var sdw: [i32] = []
+    var sdh: [i32] = []
+    var rows: [GeomDiffRow] = []
+    var compared = 0
+    var mismatched = 0
+    var missing_in_simple = 0
+    var i = 0
+    while i < chrome.len():
+        val c = chrome[i]
+        val j = _find_key(simple, c.key)
+        if j < 0:
+            missing_in_simple = missing_in_simple + 1
+            rows.push(GeomDiffRow(key: c.key, tag: c.tag, dx: -1, dy: -1,
+                                  dw: -1, dh: -1, feature: "missing-in-simple",
+                                  chrome_features: c.features, inherited: false))
+        else:
+            val s = simple[j]
+            compared = compared + 1
+            ckeys.push(c.key)
+            sdx.push(c.x - s.x)
+            sdy.push(c.y - s.y)
+            sdw.push(c.w - s.w)
+            sdh.push(c.h - s.h)
+        i = i + 1
+    var root_mismatched = 0
+    var inherited_mismatched = 0
+    var n = 0
+    while n < ckeys.len():
+        val dx = _abs(sdx[n])
+        val dy = _abs(sdy[n])
+        val dw = _abs(sdw[n])
+        val dh = _abs(sdh[n])
+        if dx > tolerance or dy > tolerance or dw > tolerance or dh > tolerance:
+            mismatched = mismatched + 1
+            val p = _index_of_text(ckeys, parent_key(ckeys[n]))
+            # All four signed deltas equal to the parent's: the child is simply
+            # carried by the parent's error (an li inside a mis-sized flex item
+            # repeats both the offset AND the width), so it is the same bug.
+            val inherited = (
+                p >= 0 and sdx[p] == sdx[n] and sdy[p] == sdy[n] and
+                sdw[p] == sdw[n] and sdh[p] == sdh[n]
+            )
+            if inherited:
+                inherited_mismatched = inherited_mismatched + 1
+            else:
+                root_mismatched = root_mismatched + 1
+            val ci = _find_key(chrome, ckeys[n])
+            rows.push(GeomDiffRow(
+                key: ckeys[n], tag: chrome[ci].tag, dx: dx, dy: dy, dw: dw, dh: dh,
+                feature: classify_feature(chrome[ci].features),
+                chrome_features: chrome[ci].features, inherited: inherited))
+        n = n + 1
+    var extra_keys: [text] = []
+    var k = 0
+    while k < simple.len():
+        if _find_key(chrome, simple[k].key) < 0:
+            extra_keys.push(simple[k].key + "(" + simple[k].tag + ")")
+        k = k + 1
+    GeomDiffResult(compared: compared, mismatched: mismatched,
+                   root_mismatched: root_mismatched,
+                   inherited_mismatched: inherited_mismatched,
+                   missing_in_simple: missing_in_simple,
+                   missing_in_chrome: extra_keys.len(), rows: rows,
+                   extra_keys: extra_keys)
+
+pub fn diff_sdn(page: text, result: GeomDiffResult) -> text:
+    var out = "geometry_diff:\n  page: " + page + "\n"
+    out = out + "  compared: " + result.compared.to_string() + "\n"
+    out = out + "  mismatched: " + result.mismatched.to_string() + "\n"
+    out = out + "  root_mismatched: " + result.root_mismatched.to_string() + "\n"
+    out = out + "  inherited_mismatched: " + result.inherited_mismatched.to_string() + "\n"
+    out = out + "  missing_in_simple: " + result.missing_in_simple.to_string() + "\n"
+    out = out + "  missing_in_chrome: " + result.missing_in_chrome.to_string() + "\n"
+    out = out + "  extra_keys:\n"
+    var e = 0
+    while e < result.extra_keys.len():
+        out = out + "    - " + result.extra_keys[e] + "\n"
+        e = e + 1
+    out = out + "  rows:\n"
+    var i = 0
+    while i < result.rows.len():
+        val r = result.rows[i]
+        out = out + "    - key: " + r.key + "\n      tag: " + r.tag +
+              "\n      feature: " + r.feature +
+              "\n      dx: " + r.dx.to_string() +
+              "\n      dy: " + r.dy.to_string() +
+              "\n      dw: " + r.dw.to_string() +
+              "\n      dh: " + r.dh.to_string() +
+              "\n      inherited: " + r.inherited.to_text() +
+              "\n      chrome_features: \"" + r.chrome_features + "\"\n"
+        i = i + 1
+    out
+
+pub fn diff_md(page: text, result: GeomDiffResult) -> text:
+    var out = "# Geometry diff — " + page + "\n\n"
+    out = out + "- compared: " + result.compared.to_string() + "\n"
+    out = out + "- mismatched: " + result.mismatched.to_string() +
+          " (root " + result.root_mismatched.to_string() +
+          ", inherited " + result.inherited_mismatched.to_string() + ")\n"
+    out = out + "- missing in Simple: " + result.missing_in_simple.to_string() + "\n"
+    out = out + "- missing in Chrome (Simple-only boxes): " +
+          result.missing_in_chrome.to_string() + "\n"
+    var e = 0
+    while e < result.extra_keys.len() and e < 40:
+        out = out + "  - " + result.extra_keys[e] + "\n"
+        e = e + 1
+    out = out + "\n## Root mismatches (a child repeating its parent's offset is excluded)\n\n"
+    out = out + "| key | tag | feature | dx | dy | dw | dh |\n|---|---|---|---|---|---|---|\n"
+    var i = 0
+    var shown = 0
+    while i < result.rows.len() and shown < 200:
+        val r = result.rows[i]
+        # missing-in-simple rows are listed separately below: on a long page
+        # they outnumber the geometry mismatches 17:1 and would push every real
+        # delta out of the 200-row cap.
+        if not r.inherited and r.feature != "missing-in-simple":
+            shown = shown + 1
+            out = out + "| " + r.key + " | " + r.tag + " | " + r.feature + " | " +
+                  r.dx.to_string() + " | " + r.dy.to_string() + " | " +
+                  r.dw.to_string() + " | " + r.dh.to_string() + " |\n"
+        i = i + 1
+    out = out + "\n## Elements Chrome laid out that Simple emitted no box for (first 40)\n\n"
+    var m = 0
+    var listed = 0
+    while m < result.rows.len() and listed < 40:
+        if result.rows[m].feature == "missing-in-simple":
+            listed = listed + 1
+            out = out + "- " + result.rows[m].key + " (" + result.rows[m].tag + ")\n"
+        m = m + 1
+    out
+
+# --- selftest --------------------------------------------------------------
+
+# Three hand-written fixtures: identical geometry, one element shifted on y,
+# and one element present in Chrome but absent from Simple.
+pub fn selftest_report() -> text:
+    var failures = 0
+    var log = ""
+
+    val identical_chrome = parse_chrome_geom(
+        "GEOM|path:|body|0|0|900|600|display=block\n" +
+        "GEOM|path:0|div|10|10|100|50|display=block\n")
+    val identical_simple = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: "")
+    ]
+    val r1 = geometry_diff(identical_chrome, identical_simple, 1)
+    if r1.compared != 2 or r1.mismatched != 0 or r1.missing_in_simple != 0:
+        failures = failures + 1
+        log = log + "selftest identical: FAIL (compared=" + r1.compared.to_string() +
+              " mismatched=" + r1.mismatched.to_string() + ")\n"
+    else:
+        log = log + "selftest identical: PASS (2 compared, 0 mismatched)\n"
+
+    val shifted_simple = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 10, y: 24, w: 100, h: 50, features: "")
+    ]
+    val r2 = geometry_diff(identical_chrome, shifted_simple, 1)
+    if r2.compared != 2 or r2.mismatched != 1 or r2.rows.len() != 1:
+        failures = failures + 1
+        log = log + "selftest delta-y: FAIL (mismatched=" + r2.mismatched.to_string() + ")\n"
+    elif r2.rows[0].dy != 14:
+        failures = failures + 1
+        log = log + "selftest delta-y: FAIL (dy=" + r2.rows[0].dy.to_string() + ")\n"
+    else:
+        log = log + "selftest delta-y: PASS (1 mismatch, dy=14)\n"
+
+    val truncated_simple = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: "")
+    ]
+    val r3 = geometry_diff(identical_chrome, truncated_simple, 1)
+    if r3.missing_in_simple != 1 or r3.compared != 1:
+        failures = failures + 1
+        log = log + "selftest missing-element: FAIL (missing=" +
+              r3.missing_in_simple.to_string() + ")\n"
+    else:
+        log = log + "selftest missing-element: PASS (1 missing in Simple)\n"
+
+    # A child that only repeats its parent's offset is ONE bug, not two.
+    val nested_chrome = parse_chrome_geom(
+        "GEOM|path:|body|0|0|900|600|display=block\n" +
+        "GEOM|path:0|div|10|10|100|50|display=block\n" +
+        "GEOM|path:0/0|span|10|10|100|50|display=block\n")
+    val nested_simple = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 10, y: 40, w: 100, h: 50, features: ""),
+        GeomBox(key: "path:0/0", tag: "span", x: 10, y: 40, w: 100, h: 50, features: "")
+    ]
+    val r4 = geometry_diff(nested_chrome, nested_simple, 1)
+    if r4.mismatched != 2 or r4.root_mismatched != 1 or r4.inherited_mismatched != 1:
+        failures = failures + 1
+        log = log + "selftest inherited-delta: FAIL (root=" +
+              r4.root_mismatched.to_string() + " inherited=" +
+              r4.inherited_mismatched.to_string() + ")\n"
+    else:
+        log = log + "selftest inherited-delta: PASS (2 mismatched, 1 root, 1 inherited)\n"
+
+    if failures == 0:
+        log + "SELFTEST PASS — 4 fixture(s) checked"
+    else:
+        log + "SELFTEST FAIL — " + failures.to_string() + " of 4 fixture(s) failed"
+
+fn main():
+    val args = get_cli_args()
+    val selftest = selftest_report()
+    print(selftest)
+    if selftest.contains("SELFTEST FAIL"):
+        print("ERROR — nothing was checked (selftest failed)")
+        return
+    if args.len() == 0:
+        return
+    if args[0] == "selftest":
+        return
+    # diff <html> <chrome-geom> <out-prefix> [width] [height]
+    if args.len() < 4:
+        print("ERROR — nothing was checked (usage: diff <html> <chrome-geom> <out-prefix> [w] [h])")
+        return
+    val html_path = args[1]
+    val geom_path = args[2]
+    val out_prefix = args[3]
+    val width = if args.len() > 4: args[4].to_i32() else: 900
+    val height = if args.len() > 5: args[5].to_i32() else: 760
+    val html = file_read_text(html_path)
+    val dump = file_read_text(geom_path)
+    val chrome = parse_chrome_geom(dump)
+    val simple = simple_geom_boxes(html, width, height)
+    val result = geometry_diff(chrome, simple, 1)
+    file_write(out_prefix + ".sdn", diff_sdn(html_path, result))
+    file_write(out_prefix + ".md", diff_md(html_path, result))
+    print("chrome_boxes=" + chrome.len().to_string())
+    print("simple_boxes=" + simple.len().to_string())
+    print("compared=" + result.compared.to_string())
+    print("mismatched=" + result.mismatched.to_string())
+    print("root_mismatched=" + result.root_mismatched.to_string())
+    print("inherited_mismatched=" + result.inherited_mismatched.to_string())
+    print("missing_in_simple=" + result.missing_in_simple.to_string())
+    print("missing_in_chrome=" + result.missing_in_chrome.to_string())
+    if result.compared == 0:
+        print("ERROR — nothing was checked (0 element(s) compared for " + html_path + ")")
+    else:
+        print("PASS — " + result.compared.to_string() + " element(s) compared, " +
+              result.mismatched.to_string() + " mismatched")

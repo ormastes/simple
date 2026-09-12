@@ -1,0 +1,207 @@
+#!/bin/sh
+# CSS-layout geometry differential vs Chrome (BUG FINDER, not a regression gate).
+#
+# For each catalog page: get Chrome's per-element border-box geometry, get the
+# pure-Simple web renderer's per-element geometry, key both by an identical
+# nth-path scheme (ordinal among layout elements, relative to <body>), and flag
+# any |dx|,|dy|,|dw|,|dh| > 1 px, clustered by CSS feature.
+#
+# Chrome headless has no JS-eval flag, so the harvest works by writing a COPY of
+# each page under $BUILD_DIR with a walker <script> + <pre> appended before
+# </body> and reading the result back with --headless=new --dump-dom. The copy
+# lives beside the original (same directory) so relative CSS/img URLs resolve.
+# An <iframe> wrapper was rejected: file:// pages are opaque origins in Chrome,
+# so contentDocument is null without --allow-file-access-from-files.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> element(s) compared, <k> mismatched     exit 0
+#   FAIL  — ...                                          exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+# 0 elements compared, no Chrome, or 0 GEOM lines are ERROR, never PASS.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/chrome_layout_geometry_diff}"
+WIDTH="${GEOM_DIFF_WIDTH:-900}"
+HEIGHT="${GEOM_DIFF_HEIGHT:-760}"
+TIMEOUT_SECS="${GEOM_DIFF_TIMEOUT_SECS:-600}"
+CATALOG_DIR="examples/06_io/ui/web_catalog"
+PAGES="${GEOM_DIFF_PAGES:-overview html css-layout css-paint forms-media animation evidence tab-bar}"
+if [ -z "${SIMPLE_BIN:-}" ]; then
+    for b in build/cargo-r2/release/simple \
+             src/compiler_rust/target/bootstrap/simple \
+             "$HOME/simple/build/cargo-r2/release/simple" \
+             bin/release/*/simple; do
+        [ -x "$b" ] && { SIMPLE_BIN="$b"; break; }
+    done
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+DIFFER="src/app/ui/chrome_showcase/layout_geometry_diff.spl"
+
+mkdir -p "$BUILD_DIR"
+
+err() {
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+CHROME=""
+for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+         /usr/bin/google-chrome /usr/bin/google-chrome-stable \
+         /usr/bin/chromium /usr/bin/chromium-browser; do
+    [ -x "$c" ] && { CHROME="$c"; break; }
+done
+
+if [ "${1:-}" = "--selftest" ]; then
+    # The differ owns the three geometry fixtures (identical / one dy / missing
+    # element); running it here makes the selftest fatal for this script too.
+    [ -x "$SIMPLE_BIN" ] || err "no simple binary at $SIMPLE_BIN"
+    out="$("$SIMPLE_BIN" run "$DIFFER" selftest 2>/dev/null | grep '^SELFTEST' || true)"
+    echo "$out"
+    case "$out" in
+        "SELFTEST PASS"*) echo "PASS — 3 fixture(s) checked, 0 failed"; exit 0 ;;
+        *) echo "FAIL — differ selftest did not pass"; exit 1 ;;
+    esac
+fi
+
+[ -n "$CHROME" ] || err "no Chrome/Chromium found"
+CHROME_TIMEOUT=""
+if command -v timeout >/dev/null 2>&1; then
+    CHROME_TIMEOUT="timeout ${GEOM_DIFF_CHROME_TIMEOUT_SECS:-25}"
+elif command -v gtimeout >/dev/null 2>&1; then
+    CHROME_TIMEOUT="gtimeout ${GEOM_DIFF_CHROME_TIMEOUT_SECS:-25}"
+else
+    err "no timeout(1); Chrome headless does not self-exit after --dump-dom"
+fi
+[ -x "$SIMPLE_BIN" ] || err "no simple binary at $SIMPLE_BIN"
+[ -x "$DIFFER" ] || [ -f "$DIFFER" ] || err "differ missing: $DIFFER"
+
+# The walker. Mirrors _simple_web_layout_element + _simple_web_node_target_key
+# in src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl
+# (skip set and body-relative element ordinals) byte-for-byte.
+WALKER="$BUILD_DIR/walker.js"
+cat >"$WALKER" <<'JSEOF'
+(function () {
+  var SKIP = {STYLE:1, SCRIPT:1, TITLE:1, HEAD:1, META:1, LINK:1, BASE:1};
+  function layoutEl(el) { return el.nodeType === 1 && !SKIP[el.tagName]; }
+  function ordinal(el) {
+    var n = 0, c = el.parentNode.firstChild;
+    while (c) {
+      if (layoutEl(c)) { if (c === el) return n; n++; }
+      c = c.nextSibling;
+    }
+    return -1;
+  }
+  function key(el) {
+    var body = document.body;
+    if (el === body) return "path:";
+    var parts = [], cur = el;
+    while (cur && cur !== body) {
+      if (!cur.parentNode) return "";
+      var o = ordinal(cur);
+      if (o < 0) return "";
+      parts.push(o);
+      cur = cur.parentNode;
+    }
+    if (cur !== body) return "";
+    return "path:" + parts.reverse().join("/");
+  }
+  var FEATS = ["display","position","float","flex-direction","flex-wrap",
+    "justify-content","align-items","margin-left","margin-top","padding-left",
+    "padding-top","border-left-width","border-top-width","line-height",
+    "font-size","text-align","vertical-align","white-space","overflow",
+    "box-sizing","grid-template-columns"];
+  var pre = document.createElement("pre");
+  pre.id = "__geom__";
+  var lines = [], all = [document.body].concat(
+    Array.prototype.slice.call(document.body.querySelectorAll("*")));
+  for (var i = 0; i < all.length; i++) {
+    var el = all[i];
+    if (!layoutEl(el)) continue;
+    if (el.id === "__geom__") continue;
+    var k = key(el);
+    if (!k) continue;
+    var r = el.getBoundingClientRect();
+    var cs = getComputedStyle(el);
+    var f = [];
+    for (var j = 0; j < FEATS.length; j++) f.push(FEATS[j] + "=" + cs.getPropertyValue(FEATS[j]));
+    // parent-display is its own field: a mismatched box is very often an ITEM
+    // of a flex/grid/table parent, and classifying on the box's own display
+    // alone buckets every such row under box-sizing.
+    f.push("parent-display=" + (el.parentElement ? getComputedStyle(el.parentElement).display : ""));
+    lines.push(["GEOM", k, el.tagName.toLowerCase(),
+      Math.round(r.left + window.scrollX), Math.round(r.top + window.scrollY),
+      Math.round(r.width), Math.round(r.height)].concat(f).join("|"));
+  }
+  pre.textContent = lines.join("\n");
+  document.body.appendChild(pre);
+})();
+JSEOF
+
+TOTAL_COMPARED=0
+TOTAL_MISMATCH=0
+TOTAL_PAGES=0
+SUMMARY="$BUILD_DIR/summary.tsv"
+: >"$SUMMARY"
+
+for page in $PAGES; do
+    src="$CATALOG_DIR/$page.html"
+    [ -f "$src" ] || continue
+    probe="$CATALOG_DIR/__geomprobe_$page.html"
+    # Append the walker before </body> (last position => no ordinal shift).
+    awk -v js="$WALKER" '
+        BEGIN { while ((getline l < js) > 0) script = script l "\n" }
+        /<\/body>/ && !done { print "<script>" script "</script>"; done = 1 }
+        { print }
+        END { if (!done) print "<script>" script "</script>" }
+    ' "$src" >"$probe"
+    dom="$BUILD_DIR/$page.dom.html"
+    geom="$BUILD_DIR/$page.geom.txt"
+    profile="$BUILD_DIR/chrome-profile-$page"
+    rm -rf "$profile"
+    set +e
+    # Chrome 152 headless does NOT exit after --dump-dom on this host; it
+    # writes the DOM and then lingers, so the harvest must be time-bounded or
+    # the whole gate hangs on the first page. The DOM is already complete when
+    # the timeout fires.
+    $CHROME_TIMEOUT "$CHROME" --headless=new --disable-gpu --no-sandbox \
+        --user-data-dir="$profile" \
+        --window-size="$WIDTH,$HEIGHT" --virtual-time-budget=2000 \
+        --dump-dom "file://$ROOT_DIR/$probe" >"$dom" 2>"$BUILD_DIR/$page.chrome.log"
+    set -e
+    rm -f "$probe"
+    # Un-escape the <pre> text back to plain GEOM lines.
+    sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' "$dom" \
+        | grep '^GEOM|' >"$geom" || true
+    n_chrome="$(grep -c '^GEOM|' "$geom" 2>/dev/null || echo 0)"
+    if [ "$n_chrome" -eq 0 ]; then
+        echo "$page	0	0	chrome-empty" >>"$SUMMARY"
+        continue
+    fi
+    log="$BUILD_DIR/$page.diff.log"
+    set +e
+    timeout "$TIMEOUT_SECS" "$SIMPLE_BIN" run "$DIFFER" diff \
+        "$src" "$geom" "$BUILD_DIR/$page.geometry_diff" "$WIDTH" "$HEIGHT" \
+        >"$log" 2>"$BUILD_DIR/$page.diff.err"
+    set -e
+    compared="$(sed -n 's/^compared=//p' "$log" | tail -n 1)"
+    mismatched="$(sed -n 's/^mismatched=//p' "$log" | tail -n 1)"
+    [ -n "$compared" ] || compared=0
+    [ -n "$mismatched" ] || mismatched=0
+    TOTAL_COMPARED=$((TOTAL_COMPARED + compared))
+    TOTAL_MISMATCH=$((TOTAL_MISMATCH + mismatched))
+    TOTAL_PAGES=$((TOTAL_PAGES + 1))
+    echo "$page	$compared	$mismatched	ok" >>"$SUMMARY"
+done
+
+echo "pages=$TOTAL_PAGES"
+echo "summary=$SUMMARY"
+if [ "$TOTAL_COMPARED" -eq 0 ]; then
+    err "0 element(s) compared across $TOTAL_PAGES page(s)"
+fi
+# This is a BUG FINDER, not a regression ratchet: every catalog page currently
+# mismatches, so a nonzero k is the expected product, not a failure. PASS states
+# how many elements were actually compared; only a vacuous run is an ERROR.
+echo "PASS — $TOTAL_COMPARED element(s) compared, $TOTAL_MISMATCH mismatched"
