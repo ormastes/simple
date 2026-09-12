@@ -1,4 +1,5 @@
 # C/Pure-Simple native I/O parity blockers (2026-08-22)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Scope
 
@@ -68,3 +69,6 @@ The typed Simple surface allocates managed results while C uses explicit heap or
 stack storage. That is language/runtime cost, not identical allocator behavior;
 the harness claims identical observable work and reports RSS rather than
 describing the paths as raw-syscall parity.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,5 +1,7 @@
 # Stage4 redeploy blocker — seed `llvm-lib` method-call arity + extern-signature codegen bug (2026-07-06)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Context:** the ~130 source fixes on `main` are frozen behind a redeploy (a fresh
 self-hosted compiler build). This doc characterizes why the **seed `llvm-lib`** path
 fails, so it can be fixed. (The seed `cranelift` path is separately blocked by the
@@ -43,3 +45,7 @@ the extern signature registration for `rt_dir_create`.
 Hits a frozen MIR-empty bug ("MIR module has no functions" for the entry) — not a viable
 redeploy path on the deployed binary. So redeploy cannot bootstrap through the deployed
 binary either; it must go through a fixed seed backend.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

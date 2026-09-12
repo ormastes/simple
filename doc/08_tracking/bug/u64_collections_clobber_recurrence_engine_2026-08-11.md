@@ -1,5 +1,7 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-11
 - **Status (updated 2026-08-17):** ROOT CAUSE FOUND; tree is healthy
   (`collections.rs` 6200 lines, `HeapObjectType::UInt` consistent); the
@@ -188,3 +190,7 @@ git rev-parse <sha>:src/compiler_rust/runtime/src/value/collections.rs  # 95b6ac
 cd /home/ormastes/dev/pub/simple && git rev-list --count origin/main..HEAD   # 44
 git show HEAD:src/compiler_rust/runtime/src/value/collections.rs | wc -l     # 4211
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

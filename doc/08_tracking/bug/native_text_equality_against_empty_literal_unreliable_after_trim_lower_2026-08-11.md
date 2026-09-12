@@ -1,5 +1,7 @@
 # Native codegen: `x != ""` unreliable for text built via `.trim().lower()` chains
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 **RESOLVED 2026-08-11** — root-caused and fixed in the runtime across all six
 freestanding lanes. See "## Root cause (PROVEN)" and "## Fix" below, which
@@ -276,3 +278,7 @@ decision in this file's companion bug doc). Recommended follow-up:
 ## Evidence
 Full before/after serial tails and gate verdicts:
 `doc/08_tracking/bug/simpleos_baremetal_backend_resolve_empty_override_rt_process_run_trap_2026-08-11.md`
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

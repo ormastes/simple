@@ -106,3 +106,40 @@ by "the lane got further":
    single class.
 4. Police the `src/lib` vs `src/app` module twins the way test-tree divergence
    is policed, or de-duplicate them.
+
+## Re-audit 2026-09-12 (aarch64-apple-darwin, M4)
+
+Status of this record's own subject — the eight defects — is unchanged: all
+eight are fixed, and nothing in this re-audit found a ninth of that class.
+
+What has moved is the "lane not yet green through Stage 2" qualifier, which is
+what kept the record OPEN. The lane's *remaining* blockers were characterised in
+`bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md`
+as two independent items, A (the smoke driver hands the child procfs paths) and
+B (the Stage-2 binary SEGVs in `serialize_mir_function`). Re-audited here:
+
+- **Blocker A is CLOSED** as of `e1c40702a20` (2026-09-10), which added a
+  `darwin-pinned` capture kind to `candidate_frontend_admission.shs`. Verified on
+  this host by running its three shipped tests, all PASS — transcript in the
+  companion record's "Re-audit 2026-09-12" section.
+- **Blocker B was NOT re-reproduced in this session** — reproducing it requires a
+  Stage-2 binary, and the `--full-bootstrap --stop-after-stage2` run started for
+  that purpose spent its first 18m35s on a cold Rust seed build (246 crates,
+  `Finished \`bootstrap\` profile [optimized] target(s) in 18m 35s` in
+  `.simple/storage/build/bootstrap/logs/aarch64-apple-darwin/rust-seed-build.log`)
+  — a useful datum on its own, since it is the cost any macOS lane pays before
+  it can even attempt Stage 1. Whether Stage-2 admission then reproduces the SEGV
+  was not settled within this session.
+  Carrying the 2026-09-06 record's finding forward unverified: on that evidence
+  blocker B is now the single remaining gating defect between this host and a
+  Stage-2 admission. That is a citation, not a fresh measurement.
+
+So this record's recommended follow-up #1 ("wire a macOS seed-build gate") is
+still the right ask and is still unmet, but the cluster itself is no longer what
+stops the lane.
+
+Recommended follow-up #3 ("a lint for GNU-only constructs in `.shs`") gained
+fresh evidence for being worth doing: the 2026-09-06 lane hit `stat -Lc` and an
+unconditional `/proc/self/stat` read — the same GNU/Linux-only class as four of
+the eight here — in a tree that had already been swept once. A one-off sweep does
+not hold; only a gate does.

@@ -1,4 +1,5 @@
 # Bracket-slice byte-index survey — fix pass 1 (2026-07-29)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Follow-up to `doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md`.
 Fixes the 4 files that survey flagged as "missed-HIGH" (matched the HIGH-risk
@@ -155,3 +156,6 @@ This doc + `test_harness_execution_divergence_2026-07-29.md` +
 `string_multibyte_spec.spl` + `glob_multibyte_spec.spl`. `number.spl` and
 `comment_extractor.spl` unchanged (no bug found). No gate/budget files
 touched.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

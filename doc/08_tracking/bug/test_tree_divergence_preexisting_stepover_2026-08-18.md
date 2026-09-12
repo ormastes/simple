@@ -1,5 +1,7 @@
 # Pre-existing test-tree divergence stepped over by lane stage3-memguard (2026-08-18)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Landing `fix(bootstrap): report stage3 signal death as a kill` required the documented
 scoped-delta escape in `.claude/rules/vcs.md`, because `check-test-tree-divergence` is
 RED on `main` from earlier sessions. This file is the mandatory record of the
@@ -892,3 +894,7 @@ and set it per-worktree, or never set it at all.
     unit:test_runner/mode_filter_spec.spl
     unit:tools/cat_spec.spl
     unit:tools/simple_os_primary_spec.spl
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

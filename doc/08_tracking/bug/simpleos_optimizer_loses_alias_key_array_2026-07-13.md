@@ -1,4 +1,5 @@
 # SimpleOS optimizer passes tagged nil as `local_ids`
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -19,3 +20,6 @@ Routing typed `.len()` through `rt_array_len_safe` was rejected and reverted: it
 Two later GDB attempts reached the active user CR3, but execution breakpoints still did not trap reliably across the handoff. Static disassembly found a fixed analyzer stack, one constructor store for `local_ids`, balanced helper frames, and no callee-saved-register violation. The final ELF also proves the caller compares and reloads the same `rsp+0x298` slot into `RDI`, then the direct callee preserves that register through its low-value test and `local_count_index` call. All FAT Simple aliases match that ELF. The apparent call-boundary corruption is therefore contradicted by machine code.
 
 Do not patch call lowering or spend another live cycle on watchpoints. Next session must capture the actual caller-slot and callee-entry values through a numeric/global diagnostic that cannot fail silently, then reconcile the serial sequence before changing an owner. Do not re-add safe length, sentinel entries, tuple state, heap growth, or string-only runtime probes.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

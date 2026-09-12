@@ -1,4 +1,5 @@
 # `slh_dsa_wots.spl` retype — scoped archive-lane attempt #2 (2026-07-30)
+**Status:** OPEN (unverified 2026-09-12)
 
 Assignment: execute the scoped follow-up to the pass-13 blocked archive-lane
 attempt — use a scoped `native-build` invocation (avoiding the
@@ -119,3 +120,6 @@ fall back to a different validation strategy entirely for `src/os/crypto`
 (e.g. a from-scratch, hand-rolled minimal test harness that links only
 the exact functions needed, bypassing `native-build`'s whole-project
 model) rather than repeating variations on the same CLI invocation.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

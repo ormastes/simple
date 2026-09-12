@@ -1,4 +1,5 @@
 # Full bootstrap blocked: Rust inputs changed mid-build (concurrent sessions)
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-15. Session: sole temporary build owner attempting to replace the
 seed-masquerading `bin/simple` with a self-hosted binary.
@@ -44,3 +45,6 @@ mid-run; still prints the seed banner).
 Logs: rust-seed-build logs under
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/`; session logs in scratchpad
 `boot4.log`/`boot5.log`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

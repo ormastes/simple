@@ -1,4 +1,5 @@
 # Seed JIT miscompiles `spl_f64_to_bits` (float→bits) + interpreter traps on f64 div-by-zero
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Date:** 2026-07-23
 - **Component:** Rust bootstrap-seed `simple` binary (seed-only; not the self-hosted `bin/simple`)
@@ -147,3 +148,6 @@ Interpreter-run float models cannot rely on IEEE inf/NaN semantics for `/0`.
 Both workarounds are already applied by `src/lib/hardware/rv64gc_rtl/fpu.spl`
 and its probe `test/01_unit/lib/hardware/rv64gc_rtl/fpu_probe.spl`: the FPU model
 runs interpreter-only (Issue 1) and guards divisors before dividing (Issue 2).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

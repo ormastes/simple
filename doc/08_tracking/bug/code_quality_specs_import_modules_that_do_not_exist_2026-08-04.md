@@ -118,3 +118,6 @@ lands with this re-verification.
 STILL-OPEN. `ls src/lib/common/iterable.spl src/lib/common/set_utils.spl` ->
 both "No such file or directory". `test/system/code_quality/deprecated_removed_spec.spl`
 is still present and still imports them. The specs remain unloadable.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/system/code_quality/allow_suppressions_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # `build-core-c-bootstrap-runtime-capsule.shs` fails: `simple_contract_check` provider moved
 
 - **Filed:** 2026-07-29
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Script:** `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`
 - **Severity:** blocks the C-capsule lane for rebuilding `libsimple_runtime.a`
 
@@ -37,3 +37,6 @@ bug. Check the archive with `nm` before suspecting codegen.
 Add `runtime_contracts.c` (and audit for other moved providers) to the capsule
 script's compile list, then prove the gate both ways: capsule build succeeds
 from a clean tree, and deleting a provider makes it fail naming that provider.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

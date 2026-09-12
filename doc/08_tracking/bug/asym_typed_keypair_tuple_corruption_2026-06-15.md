@@ -1,4 +1,5 @@
 # Bug: asym_typed_keypair — tuple-element corruption risk on cross-module return
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** asym_typed_keypair_tuple_corruption_2026-06-15
 **Date:** 2026-06-15
@@ -23,3 +24,6 @@ same module as the core call — so the corruption window is closed.
 Fix the interpreter tuple-element accessor to correctly handle cross-module
 tuple return; then `Ed25519KeyPair` can be removed and the function signature
 simplified to return `(SecretKey, PublicKey)` directly.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

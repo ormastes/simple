@@ -65,6 +65,18 @@ P6 PPM). `SIMPLE_BIN=<path>` is required from a git worktree.
 Wire-in: `check-chrome-web-showcase-perf.shs --pixel-diff` (sets
 `chrome_vs_simple_pixel_diff_status=chrome-compared`).
 
+## RenderDoc capture diff (API-level sibling of the pixel diff)
+
+Pixel diff answers "do the frames match"; `src/app/ui/renderdoc_diff/` answers "which
+draw call diverged". Export both captures with
+`scripts/tool/renderdoc-export-events.shs` (schema `renderdoc-events/v1`; the only
+Python is the extended `renderdoc-qrenderdoc-python-smoke.py`), then
+`scripts/check/check-renderdoc-web-diff.shs` prints `renderdoc_diff_status=`,
+`renderdoc_diff_first_divergent=` and a class of `missing-draw|extra-draw|order|
+output-mismatch|size-mismatch|format-mismatch`. Captures come from the Linux lane;
+on macOS only `--selftest` (10 fixtures) runs. Guide:
+`doc/07_guide/app/ui/renderdoc_web_diff.md`.
+
 ## Update Rule
 
 Update this skill with new links, current ABI/symbol inventory, and handoff

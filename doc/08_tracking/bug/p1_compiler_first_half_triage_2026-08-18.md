@@ -1,4 +1,5 @@
 # P1 `compiler` rows, first half by id — session triage 2026-08-18
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/parser_trailing_operator_continuation_spec.spl -> 8 passed, 0 failed)
 
 Scope: the 29 lowest-id `compiler`/P1 rows in `doc/08_tracking/todo/todo_db.sdn`
 (ids 536..605). Worktree `/mnt/data/worktrees/p1-compiler-a`, `bin/simple` = the
@@ -109,3 +110,6 @@ Row 597 stays open; the next session should attack the hang (isolate one
 provider/consumer fixture, as the row already suggests) rather than chase
 assertion failures that were never observed.
 
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/parser_trailing_operator_continuation_spec.spl` on the deployed seed; the spec now passes in full (8/8), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Bug: `SymbolKind` enum-variant patterns never match through `HirLowering.symbols` — `rt_enum_discriminant` returns -1
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-07-29
 - **Severity:** medium (silent — any `case SymbolKind.X:` gate on a `Symbol` pulled out of `HirLowering.symbols.symbols` silently never fires)
 - **Area:** `SymbolTable`/`HirLowering` internals (`20.hir/hir_types.spl`, `20.hir/hir_lowering/*`), running under the seed's own execution of the self-hosted compiler's `.spl` source
@@ -524,3 +526,7 @@ standing instruction — not removed.
 
 No commit/push performed (per campaign rule); changes left in-tree for
 orchestrator review.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

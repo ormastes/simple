@@ -1,5 +1,7 @@
 # A user-defined `class Promise<T>` with a `static fn resolved(...)`/`rejected(...)` is shadowed by the builtin async `Promise` class name
 
+**Status:** OPEN (still reproduces, re-verified 2026-09-12)
+
 **Date:** 2026-07-20
 **Component:** Rust interpreter static-method dispatch for a locally-defined
 class whose name (`Promise`) collides with the interpreter's builtin
@@ -113,3 +115,7 @@ from user-Promise.
 Verified with:
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/futures_promises_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 6, Failed: 9`
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); still reproduces. Evidence: `bin/simple test test/feature/usage/futures_promises_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `15 total, 12 passed, 3 failed`, including `✗ resolves promise to value` and `✗ fulfills promise once` under "when working with promises", matching this record's symptom.

@@ -1,5 +1,7 @@
 # Web DrawIR 8K interpreter import-closure timeout — 2026-08-12
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. The retained Web/DrawIR 8K benchmark cannot currently produce an
@@ -55,3 +57,7 @@ Unexpected token: expected expression, found Newline
 The active uncommitted Vulkan-present lane splits the right-hand side of an
 assignment onto the next line there. This is now the first native gate. The
 benchmark has not executed and still provides no 8K timing row.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

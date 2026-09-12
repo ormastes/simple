@@ -1,4 +1,5 @@
 # Cross-module ByteSpan misreads small heap-built [u8] arrays (deployed interpreter)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Filed:** 2026-07-19 · **Status:** OPEN · **Area:** interpreter / cross-module struct fields
 **Found via:** every PNG chunk CRC from `png_encode.spl` was wrong while its
@@ -73,3 +74,6 @@ bootstrap redeploy; verify with `build/tmp/bspan/m_localvs.spl` (expect
 Pre-existing separate quirk (unchanged): `[u8]` passed to `[i64]` param
 misdecodes multiples of 8. The png_encode flat-fn workaround can be
 reverted after redeploy verification.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Nested value-struct scalar loss: minimal reproducer audit
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Narrowed; the proposed minimal compiler shape does not reproduce the loss.
@@ -47,3 +49,7 @@ layer at a time (registry owner, registry arrays, dispatch result, then kernel
 state) until the first failing shape is found. Only then claim and change the
 pure-Simple constructor/call/return owner. The focused probes above must remain
 green as adjacent regressions.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

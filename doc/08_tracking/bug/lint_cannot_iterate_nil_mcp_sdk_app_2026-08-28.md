@@ -1,5 +1,7 @@
 # `bin/simple lint` dies with `semantic: cannot iterate over this type: Nil` on `mcp_sdk/server/app.spl`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-28 · **Status:** OPEN (pre-existing, not caused by the 2026-08-28 MCP fixes) · **Severity:** tooling
 
 ## Symptom
@@ -31,3 +33,7 @@ introduce it.
   (`doc/08_tracking/bug/mcp_ctx_batch_execute_crash_hang_on_real_output_2026-08-28.md`):
   `values_for_iteration` fails closed on non-collection values; callers that
   can legitimately hold `Nil`/`StrBytes` need arms or guards.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

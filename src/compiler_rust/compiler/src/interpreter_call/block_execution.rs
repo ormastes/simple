@@ -2,8 +2,8 @@
 
 use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{
-    bind_pattern_value, handle_method_call_with_self_update, range_object_values, restore_pattern_scope,
-    save_pattern_scope,
+    bind_for_pattern_value, bind_pattern_value, handle_method_call_with_self_update,
+    range_object_values, restore_pattern_scope, save_pattern_scope,
 };
 use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -746,7 +746,6 @@ pub(super) fn exec_block_closure_into(
                     impl_methods,
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
-                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
                 // Loop variable is SCOPED TO THE LOOP — see the sibling site
                 // below and `exec_for` in interpreter_control.rs. This is the
                 // closure/block executor, which is the path an `it` block body
@@ -755,13 +754,13 @@ pub(super) fn exec_block_closure_into(
                 // variable" stayed red while a top-level repro passed.
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
                 let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &local_env);
-                'for_loop_own: for (index, val) in iter_values.into_iter().enumerate() {
-                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
-                        Value::Tuple(vec![Value::Int(index as i64), val])
-                    } else {
-                        val
-                    };
-                    bind_pattern_value(&for_stmt.pattern, bind_value, false, &mut local_env);
+                'for_loop_own: for val in iter_values.into_iter() {
+                    // A comma loop pattern is ALWAYS a tuple destructure,
+                    // whatever the iterable is; there is no enumerate
+                    // shorthand. See `bind_for_pattern_value` and
+                    // doc/08_tracking/bug/
+                    // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+                    bind_for_pattern_value(&for_stmt.pattern, val, &mut local_env);
                     match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         &mut local_env,
@@ -1629,18 +1628,17 @@ fn exec_block_closure_mut_inner(
             Node::For(for_stmt) => {
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
-                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
                 // Loop variable is SCOPED TO THE LOOP — sibling of the
                 // `'for_loop_own` site above; both are closure/block executors.
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
                 let for_saved_scope = save_pattern_scope(&for_stmt.pattern, local_env);
-                'for_loop: for (index, val) in iter_values.into_iter().enumerate() {
-                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
-                        Value::Tuple(vec![Value::Int(index as i64), val])
-                    } else {
-                        val
-                    };
-                    bind_pattern_value(&for_stmt.pattern, bind_value, false, local_env);
+                'for_loop: for val in iter_values.into_iter() {
+                    // A comma loop pattern is ALWAYS a tuple destructure,
+                    // whatever the iterable is; there is no enumerate
+                    // shorthand. See `bind_for_pattern_value` and
+                    // doc/08_tracking/bug/
+                    // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+                    bind_for_pattern_value(&for_stmt.pattern, val, local_env);
                     match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         local_env,

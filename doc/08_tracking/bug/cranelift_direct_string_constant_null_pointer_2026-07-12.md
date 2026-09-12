@@ -1,6 +1,6 @@
 ---
 id: cranelift_direct_string_constant_null_pointer_2026-07-12
-Status: OPEN (P1)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: blocking
 discovered: 2026-07-12
@@ -539,3 +539,6 @@ literals/variables/expressions reliably get an explicit `I64` local type from
   so the numeric-only coercion default catches it correctly. int-inline,
   int-param/return, str-inline/local, and str-param are all now verified
   correct on the LLC bootstrap path.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

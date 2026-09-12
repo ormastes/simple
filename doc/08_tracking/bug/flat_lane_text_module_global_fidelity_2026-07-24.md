@@ -1,4 +1,5 @@
 # Flat --entry-closure lane: text module-global values lose textness through function returns (prints pointer as number)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-24
 **Severity:** Medium (silent wrong output; no crash after the rt_env_get ABI fix)
@@ -65,3 +66,6 @@ called. Real support needs: statics storage for array globals (ptr slot,
 zeroinit) + a module-init `rt_array_new` store + receiver/read wiring.
 Repro: `src/app/staticrepro` (`_SR_ITEMS` push + for-in; prints the #143
 panic at runtime, builds clean).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

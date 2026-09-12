@@ -1,4 +1,5 @@
 # `hardware.rv32imac.*` modules gone; 6 specs orphaned (2026-08-18)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 OPEN — reported, NOT fixed. Deleting the specs needs approval.
@@ -79,3 +80,6 @@ compiler (the code is from 2026-03-15 and predates later grammar/stdlib changes)
 and may need import-path updates if `src/hardware/` is no longer a resolution root.
 
 Until then the 6 specs stay in place, unmodified. **Do not delete them.**
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

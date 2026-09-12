@@ -1,5 +1,7 @@
 # native (entry-closure): class static-method calls silently lower to 0; class constructors never emitted
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-23  **Status:** OPEN (worked around in apps; structs fine)
 - **Severity:** critical for any native app using `class` — silent nil at
   runtime, no compile error.
@@ -40,3 +42,7 @@ never `const 0`.
 Related: text.from_char_code static-call gap
 (text_static_method_hir_lowering_2026-07-23.md) — same
 "static call on type name" family.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

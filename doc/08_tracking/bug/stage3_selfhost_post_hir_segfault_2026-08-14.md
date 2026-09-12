@@ -1,5 +1,7 @@
 # Stage 3 self-host post-HIR segfault (2026-08-14)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 > Historical frontier record. The current dispatch authority is
 > `stage3_current_source_hir_rss_termination_2026-08-14.md`. In particular,
 > historical Stage 2 `e383...` predates the complete `d99deb3` snapshot runtime
@@ -559,3 +561,7 @@ Stage 3 log SHA-256 is
 No Stage 3/4 candidate or deployed CLI exists. The three-cycle cap is exhausted;
 the next fresh lane must expose and repair the first hidden frontend diagnostic
 before the 1-to-21 error expansion instead of repeating this transaction.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

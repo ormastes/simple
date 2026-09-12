@@ -1,5 +1,7 @@
 # `text.index_of` on a substring receiver reported as returning a bool
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 **Reported, NOT REPRODUCED on the binary available at the time of writing.**
@@ -149,3 +151,7 @@ Note the two remaining arguments *against* `index_of`, unchanged:
 Re-run the reproducer on a self-hosted pure-Simple binary produced by
 `bin/simple build bootstrap`, and either promote this to Open with that
 transcript or retract it.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

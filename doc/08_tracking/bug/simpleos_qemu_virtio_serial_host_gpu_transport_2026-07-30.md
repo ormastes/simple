@@ -1,4 +1,5 @@
 <!-- codex-design -->
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl -> 2 passed, 11 failed, still reproduces)
 
 # SimpleOS QEMU VirtIO-serial host-GPU transport gap
 
@@ -259,3 +260,6 @@ BLOCKED  SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_hos
 The interpreter spec was not retried because this checkout has no admitted
 `bin/simple`, and this delegated lane forbids bootstrap. This environmental
 blocker does not change the transport finding.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl` on the deployed seed; 11 of 13 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

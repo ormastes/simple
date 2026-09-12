@@ -78,3 +78,6 @@ compiler/interpreter stage (symbol resolution, type checking, diagnostics
 span tracking, module visibility, module graph construction respectively);
 none was attempted here, this is a test-file-only modernization batch. The
 spec scenarios above are the reproduction fixtures for each.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/02_integration/compiler/compiler_interpreter_integration_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

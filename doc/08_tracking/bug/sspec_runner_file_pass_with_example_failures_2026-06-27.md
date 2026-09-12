@@ -1,5 +1,7 @@
 # SSpec Runner Reports File PASS With Example Failures
 
+**Status:** RESOLVED (2026-09-12, re-verified: the fix described below is in effect — the repro command now reports `Failed: 6` and exits nonzero, not `PASS`/`exit_code=0`)
+
 Date: 2026-06-27
 
 ## Summary
@@ -75,3 +77,7 @@ Regression coverage:
 ```sh
 bin/simple test test/03_system/check/test_runner_single_example_failure_contract_spec.spl --mode=interpreter
 ```
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the fix already documented in this record is confirmed live. Evidence: `bin/simple test test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl --mode=interpreter` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `SPEC FILE VERDICT ... outcome=ERROR ... failed=6`, `Failed: 6`, exit 1 (not `PASS`/exit 0).

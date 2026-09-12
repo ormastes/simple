@@ -1,5 +1,7 @@
 # Stage4 (seed-compiled self-host) codegen hazards — `-c "print(1+1)"` crash chain
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Task #59. Each layer is a place where the **Rust seed's native (cranelift)
 codegen** mis-executes a construct that the seed itself accepts. Fixes so far
 were `.spl`-side restructures at the miscompiled site; the layer below is a
@@ -1957,3 +1959,7 @@ native-build would NOT exonerate the pure-Simple preprocessor. There is no
 verifiable fix to land here, so no `.spl` change was made for #4 (shipping an
 unverifiable source edit would be a cover-up). #4 stays OPEN pending a fresh
 self-hosted rebuild; re-test the arm64-first reproducer after redeploy.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

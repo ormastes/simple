@@ -1,7 +1,7 @@
 # Bug: `with resource as x:` invokes `__exit__`, but implicit-self field mutation inside `__exit__` doesn't stick
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/context_managers_spec.spl`)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** `with` statement's internal `__exit__` invocation (interpreter, not
   isolated to a specific source location in this pass), deployed seed at
   `bin/release/x86_64-unknown-linux-gnu/simple`
@@ -94,3 +94,7 @@ bin/release/x86_64-unknown-linux-gnu/simple run <direct-call comparison above>
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

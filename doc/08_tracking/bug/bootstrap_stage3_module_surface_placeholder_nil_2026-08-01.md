@@ -1,4 +1,5 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -98,3 +99,6 @@ The build now exits normally with 135 unique HIR semantic diagnostics later in
 the pipeline. Those errors are a separate Stage-3 closure/import-surface
 frontier and remain recorded in the session handoff. Final evidence is in
 `build/bootstrap/stage4-spdev-current/manual-stage3-cycle3/stage3-cycle3.log`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

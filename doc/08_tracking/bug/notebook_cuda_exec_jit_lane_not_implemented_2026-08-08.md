@@ -1,4 +1,5 @@
 # CudaExec cannot back `jit(remote(cuda(...)))` cells yet — no per-cell PTX compile path
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-08
 Found by: Task K5 (`CudaExec` notebook lane)
@@ -57,3 +58,6 @@ correctness defect. Only `KERNEL_PTX_PATH` (line 60), a checked-in fixed kernel
 artifact, ever executes.
 
 Not proven: no `Results:` line — CUDA hardware lanes were not exercised.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

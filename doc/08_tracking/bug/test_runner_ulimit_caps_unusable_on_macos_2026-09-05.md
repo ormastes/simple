@@ -1,5 +1,7 @@
 # Test runner's ulimit caps make `simple test <dir>` unusable on macOS (2026-09-05)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 PARTIALLY FIXED. Blocker (1) below is fixed in this working tree; blocker (2)
 is OPEN and still fails every spec. Blocks the acceptance checkbox
@@ -126,3 +128,69 @@ Blockers 3, then 2, then (already done) 1. Fixing 1 alone does not move the
 ## Related
 Matches the previously recorded "Memory limit 16GB lie" class -- a per-UID
 `ulimit` misfire being reported as a memory/compilation problem.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+---
+
+## Update 2026-09-12 (macOS arm64, `origin/main` @ `b9667d6584f`)
+
+**Blocker 1 (`ulimit -v` on Darwin) — confirmed FIXED and now observable.** Every
+bounded child spawn on this host prints the advisory line the record describes,
+and no `Invalid argument` failure remains:
+
+```
+[resource-scope] address-space cap of 2147483648 bytes NOT enforced:
+  RLIMIT_AS (`ulimit -v`) is unimplemented on this platform; cpu/pid/fd caps still apply
+```
+
+**Blocker 2 (`ulimit -u 64` is per-UID) — the hardcoded twin is FIXED here; the
+default is deliberately left alone.**
+
+What this change does: `run_test_file_safe_mode`
+(`src/app/test_runner_new/test_runner_execute.spl`) hardcoded `max_procs = 64`
+alongside `memory_bytes = 512MB`, `cpu_seconds = 30` and `max_fds = 256`, and
+**ignored `options.no_limits`** — while every other lane in that same file gates
+its caps on it (`if options.no_limits: 0 else: options.max_procs`, lines 168, 517,
+572). So the one documented escape hatch from a per-UID cap silently did nothing
+in safe mode. It now honours `--no-limits` like every sibling lane. This is the
+"hardcoded twin at `test_runner_execute.spl:682`" this record names.
+
+What this change does **not** do, on purpose: it does not raise the default (that
+weakens the fork-bomb bound the cap exists for) and it does not make the cap
+relative to the current UID's process count (the semantically correct fix, which
+needs a process-count probe on the spawn path). The record's original reasoning
+on both stands. What is no longer true is that a user hitting the per-UID wall has
+no escape in safe mode.
+
+**Repro status, stated honestly.** The record's own oracle — `simple test
+test/01_unit/app/office/sheets/`, 79 files — was **not** reproduced to completion
+here: this is a heavily shared host (load average 22, 20+ concurrent `simple`
+processes from peer sessions) and the run was abandoned after 5 of 79 files rather
+than left to distort the measurement. What *was* measured, on the pure-Simple
+runner from source with the Sep-12 seed and the **default** caps in force
+(`max_procs = 64`, no `--no-limits`):
+
+| target | rc | result |
+|---|---|---|
+| single red spec | 1 | `Results: 1 total, 0 passed, 1 failed` |
+| single green spec | 0 | `Results: 1 total, 1 passed, 0 failed` |
+| 2-file directory (incl. `math_bridge_spec.spl`, one of the 79) | **0** | `Results: 16 total, 16 passed, 0 failed` |
+
+`math_bridge_spec.spl` is the exact spec the record shows failing under the
+runner, and it passes here with the cap applied — so the `timeout: fork system
+call failed` shape did not reproduce on this host today. That is evidence the
+symptom is host- and load-dependent (RLIMIT_NPROC counts the UID's *existing*
+processes), **not** evidence that the per-UID cap is safe. A default of 64 is
+still only sound inside a container with a dedicated UID.
+
+**Status: PARTIALLY RESOLVED.** The `--no-limits` escape now works in safe mode.
+The per-UID default remains as filed and this record stays OPEN for it; the
+correct fix is still a relative cap (current UID process count + budget), and
+that still belongs to the test-runner owner as a policy change.
+
+Related: `doc/08_tracking/bug/macos_deployed_test_runner_load_only_greenwash_2026-09-12.md`
+(the deployed mac binaries do not execute `it` bodies at all, and the new gate
+`scripts/check/check-test-runner-executes-bodies.shs` that catches it).

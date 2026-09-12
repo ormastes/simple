@@ -1,5 +1,7 @@
 # Native RenderDoc Inspector `Else` Parse Failure
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Rust-seed parser source fix and focused regression are verified; real RenderDoc
@@ -37,3 +39,7 @@ error: compile failed: parse: in "src/app/test/renderdoc_replay_inspect.spl": Un
 - `parse_renderdoc_capture_xml` and `inspect_renderdoc_capture` are implemented in pure Simple.
 - The real repo RenderDoc 1.44 CLI successfully converts the canonical Vulkan `.rdc` to XML containing driver, chunks, buffers, shaders, pipelines, and dispatch actions.
 - Native unit execution of the inspector remains blocked; it is not accepted as verification evidence.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

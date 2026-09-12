@@ -1,4 +1,5 @@
 # SimpleOS backend render receipt producer/parser missing
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl -> 5 passed, 0 failed)
 
 - Status: open
 - Priority: P0
@@ -47,3 +48,6 @@ tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
   is corrected, but the hard three-cycle cap forbids another run this session.
 - Resume exactly:
   `SIMPLE_LIB=src <fresh-stage4> test test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl --mode=interpreter --clean`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl` on the deployed seed; the spec now passes in full (5/5), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

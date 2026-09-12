@@ -1,5 +1,7 @@
 # Startup-perf campaign — genuinely-open items (2026-08-18)
 
+Status: OPEN (unverified 2026-09-12)
+
 Combined tracking doc for the open tail of the 2026-08-17/18 startup-perf
 campaign. Plan: `doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md`.
 Closed items (interface_digest wiring `1310d879046`, seed env-cache, ExecIR

@@ -66,7 +66,7 @@ use super::{
 };
 
 // Import helpers for pattern binding
-use super::interpreter_helpers::{bind_pattern, iter_to_vec};
+use super::interpreter_helpers::{bind_for_pattern, bind_pattern, iter_to_vec};
 
 // Import from interpreter_call for exec_block_value (sibling module)
 use super::interpreter_call::exec_block_value;
@@ -3457,16 +3457,10 @@ fn exec_for_inner(
         iterable
     };
 
-    // Check if iterating over a Dict - auto_enumerate doesn't apply since
-    // dict iteration already returns (key, value) tuples
-    let is_dict_iteration = matches!(&iterable, Value::Dict(_));
-
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
-    // If auto_enumerate, wrap items with indices as tuples
-    // But NOT for dict iteration - dict items are already (key, value) tuples
-    for (index, item) in items.into_iter().enumerate() {
+    for item in items.into_iter() {
         check_interrupt!();
         check_execution_limit!();
         check_timeout!();
@@ -3474,16 +3468,15 @@ fn exec_for_inner(
         // For for~ (is_suspend), await each item if it's a Promise
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };
 
-        // Create the value to bind - either (index, item) tuple or just item
-        // For dict iteration, items are already (key, value) tuples, so don't wrap
-        let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
-            Value::Tuple(vec![Value::Int(index as i64), item])
-        } else {
-            item
-        };
-
-        // Use bind_pattern to handle all pattern types (identifier, tuple, etc.)
-        if !bind_pattern(&for_stmt.pattern, &bind_value, env) {
+        // A comma loop pattern is ALWAYS a tuple destructure, whatever the
+        // iterable is -- `for a, b in e:` is `for (a, b) in e:`, and the
+        // parser produces one `Pattern::Tuple` for both. There is no
+        // enumerate shorthand: enumerate intent is `for i, x in
+        // e.enumerate():`, which destructures the (index, item) pairs
+        // `.enumerate()` yields, with no second wrap. See
+        // doc/08_tracking/bug/
+        // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+        if !bind_for_pattern(&for_stmt.pattern, item, env) {
             // Pattern didn't match - skip this iteration
             continue;
         }
@@ -3596,7 +3589,6 @@ struct StringMatchCountForLoop {
 
 fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || !for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -3681,7 +3673,26 @@ fn parse_enumerated_int_array_for_loop(for_stmt: &ForStmt) -> Option<EnumeratedI
     let [Pattern::Identifier(index_var), Pattern::Identifier(item_var)] = patterns.as_slice() else {
         return None;
     };
-    let Expr::Identifier(array) = &for_stmt.iterable else {
+    // Keyed on an EXPLICIT `.enumerate()` call, which is the only spelling
+    // that means "index, item" now that the bare-comma enumerate shorthand is
+    // gone (doc/08_tracking/bug/
+    // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md).
+    // A bare `for i, x in arr:` is a tuple destructure and must NOT reach this
+    // fast path, or it would answer index/item while the general path answers
+    // element 0/element 1.
+    let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        ..
+    } = &for_stmt.iterable
+    else {
+        return None;
+    };
+    if method != "enumerate" || !args.is_empty() {
+        return None;
+    }
+    let Expr::Identifier(array) = receiver.as_ref() else {
         return None;
     };
     let [node] = for_stmt.body.statements.as_slice() else {
@@ -3746,7 +3757,6 @@ fn enumerated_int_array_operand_uses_item(operand: &EnumeratedIntArrayOperand) -
 
 fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -3909,7 +3919,6 @@ fn parse_single_static_char(expr: &Expr) -> Option<char> {
 
 fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4028,7 +4037,6 @@ fn try_exec_float_array_match_count_for_loop(
     env: &mut Env,
 ) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4191,7 +4199,6 @@ fn parse_static_float(expr: &Expr) -> Option<f64> {
 
 fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4308,7 +4315,6 @@ fn eval_float_for_operand(operand: &FloatForOperand, target: f64, loop_value: f6
 
 fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4472,7 +4478,6 @@ fn parse_static_int(expr: &Expr) -> Option<i64> {
 
 fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4593,7 +4598,6 @@ fn range_operand_uses_loop_var(operand: &RangeForOperand) -> bool {
 
 fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()

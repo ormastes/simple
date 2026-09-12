@@ -1,4 +1,5 @@
 # `alias X = Y` is spec-documented but silently degrades to a bare identifier (2026-09-01)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Summary
 
@@ -89,3 +90,6 @@ reference, accepted by the lexer, and silently dropped by the parser.
 
 - `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`
   — the x86_64 WM row this blocked.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

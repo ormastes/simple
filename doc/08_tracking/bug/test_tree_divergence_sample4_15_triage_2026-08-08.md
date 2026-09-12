@@ -1,5 +1,7 @@
 # Test-tree divergence — sample 4 (15 pairs), triage report
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Sampled the next 15 divergent pairs from `scripts/check/test_tree_divergence_baseline.txt`
 using `awk 'NR%65==15'` — a residue class distinct from the three prior sessions'
 samples (implicit first-15, offset 33/step 65, and `NR%65==50`). Cross-checked
@@ -89,3 +91,7 @@ shared-WC/clobber failure mode documented elsewhere in
 <sha>:<path>` for the purpose of confirming this sample's non-overlap; no
 attempt was made to restore those commits' actual file fixes into this
 working tree (out of scope for this task).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

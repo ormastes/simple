@@ -1,7 +1,7 @@
 # Bug (interpreter-path, unverified against compiled): `@decorator` wrapping and AOP `pc{}` weaving are no-ops under the tree-walking interpreter fallback
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/{decorators,aop,aop_pointcut}_spec.spl`, `collections_spec.spl` "Decorators" section)
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/feature/usage/aop_spec.spl` now PASSes)
 - **Area:** interpreter fallback path (`bin/simple test` / `bin/simple run` on the
   deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`, which falls back to
   tree-walking whenever JIT lowering fails — the default/only path available on
@@ -95,3 +95,6 @@ weaving genuinely only run under compiled mode, this bug's practical severity
 is "expected interpreter limitation, needs an explicit diagnostic" rather than
 "feature broken everywhere" — flagging for whoever verifies against a real
 compiled build.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/feature/usage/aop_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # interp: AOT source-compile pipeline stubbed / non-functional under seed interpreter
 
 - **id**: interp_aot_source_pipeline_stubbed_non_functional_2026-06-25
-- **status**: OPEN (partial fix landed)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **severity**: P2 (feature gap, not a crash on its own)
 - **date**: 2026-06-25
 
@@ -65,3 +65,6 @@ $SEED run src/compiler/80.driver/main.spl -c /tmp/hello.spl --target wasm32 -o /
 # before parse fix: "accessing field 'functions' on nil"
 # after parse fix:  reaches HIR/MIR stub -> empty module
 ```
+
+## Triage 2026-09-12
+Older than 45 days; the described HIR/MIR un-stub chain has no single cheap (<=3 min) repro. Closing per age policy; the detailed defect chain above is preserved for whoever reopens this. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

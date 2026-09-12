@@ -1,5 +1,7 @@
 # `*_log_modes_spec.spl`: nested `bin/simple run <app>/main.spl` subprocess returns empty stdout under `bin/simple test`, but the identical command succeeds run standalone
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-20
 **Component:** `bin/simple test` execution of specs that spawn
 `rt_process_run("/bin/sh", ["-c", "... bin/simple run <app>/main.spl <args>"])`
@@ -90,3 +92,6 @@ different observable symptom).
 
 Both spec files are correct as written (they reflect real, working CLI
 contracts, confirmed by manual reproduction) and were left unmodified.
+
+## Triage 2026-09-12
+Older than 45 days; affects a whole spec family, not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

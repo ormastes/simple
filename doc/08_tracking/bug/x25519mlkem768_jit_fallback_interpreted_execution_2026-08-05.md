@@ -1,5 +1,7 @@
 # X25519MLKEM768: all hot-path operations run interpreted, not JIT-compiled
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-05
 - **Severity:** P2 (perf — JIT lost on the entire hybrid-KEM hot path; program
   still runs correctly via interpreter fallback, so this is a benchmark
@@ -68,3 +70,7 @@ Not fixed in this pass (compiler-layer defect, explicitly out of scope for
 the AC-9 measurement task). Recorded here so the AC-9 report's benchmark
 numbers carry an accurate interpreted-execution attribution rather than being
 read as native/JIT performance.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

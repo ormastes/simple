@@ -1,5 +1,7 @@
 # String interpolation brace scanner breaks across concatenated string literals
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-03
 - **Severity:** P1 (wrong runtime string content — silent source-text leak)
 - **Found by:** dashboard HTML/CSS generation in examples/12_business/simple_erp/src/web/dashboard.spl
@@ -27,3 +29,7 @@ leakage of adjacent source lines into the string value.
 
 Keep `{`/`}` balanced within each single literal (e.g. one CSS rule per
 literal). Applied in dashboard.spl.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

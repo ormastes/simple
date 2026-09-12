@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: trust anchor implemented for semantics v1; semantics-v2 regeneration is
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 blocked by the deployed self-hosted runner, and retained CUDA device readback
 remains pending (2026-07-25)
 
@@ -131,3 +131,6 @@ CUDA device-origin readback pass.
 The current semantics-v2 regeneration blocker and bounded retry evidence are
 tracked in
 `doc/08_tracking/bug/portable_compute_cuda_emitter_pure_simple_segfault_2026-07-17.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

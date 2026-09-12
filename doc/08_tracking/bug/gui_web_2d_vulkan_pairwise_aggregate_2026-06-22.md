@@ -1,7 +1,7 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: pass for pairwise pixels; browser/RenderDoc completion still blocked
+- Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 
@@ -180,3 +180,6 @@ software, `cpu`, and `cpu_simd` aliases on the direct `cpu_mirror` path, leaving
 real GPU backend requests on the existing Engine2D path. Verification evidence:
 native probe exit `0`, `Engine2D.is_err` stderr count `0`, JSON pixels `768`,
 and GUI/Web/2D Vulkan pairwise mismatches all `0`.
+
+## Triage 2026-09-12
+Older than 45 days; re-running the GPU/Vulkan evidence gate (`scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`) is not a cheap (<=3 min) check on this host. Closing per age policy; the prior pass/fail split (pairwise pixels pass, browser/RenderDoc blocked) is preserved above. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Bug: Rust seed mangler emits bare extern for free function shared across sibling split-part modules re-exported through a facade
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-07-30
 - **Area:** `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`
 - **Class:** mangler bare-extern-on-re-export (same defect class as prior instances below)
@@ -184,3 +186,6 @@ mechanically enumerable (36 directories, bounded search). Shape (b) (package
 many `__init__.spl`-style package facades in the repo and most link fine, so a
 blanket rewrite would be unjustified churn. Not swept in this pass; left for a
 future targeted investigation if it recurs at the link stage.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

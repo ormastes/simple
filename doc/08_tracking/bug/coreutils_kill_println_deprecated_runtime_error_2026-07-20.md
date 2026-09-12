@@ -1,4 +1,5 @@
 # os/apps/coreutils/kill.spl: uses deprecated `println` extern, aborts at runtime
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/01_unit/os/apps/coreutils/kill_spec.spl` still FAILs — still reproduces)
 
 ## Symptom
 
@@ -55,3 +56,6 @@ a blind rename, exceeding the shard's "unambiguous one-line" src/** edit bar.
 
 - `test/01_unit/os/apps/coreutils/kill_spec.spl` (4 of 14 examples fail; the other
   10 pass — `parse_signal`/`parse_pid` unit tests that don't call `main_kill`)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/apps/coreutils/kill_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

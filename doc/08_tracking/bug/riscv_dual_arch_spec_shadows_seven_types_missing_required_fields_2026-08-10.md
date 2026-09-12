@@ -1,4 +1,5 @@
 # riscv_dual_arch_spec.spl shadows 7 kernel types — real fields/methods never exercised
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/unit/os/riscv_dual_arch_spec.spl -> 22 passed, 0 failed)
 
 ## Status (2026-08-10): converted to describe/it, real types wired in, now genuinely RED
 
@@ -122,3 +123,6 @@ Rewrite against the real `dual_arch_contract.spl` / `backend_test_verify.spl`
 / `fpga_orchestration.spl` types, filling all required fields, calling the
 real business-logic methods (not reimplementing them), and converting to
 `describe`/`it` so it participates in the daemon-run corpus and CI verdict.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/os/riscv_dual_arch_spec.spl` on the deployed seed; the spec now passes in full (22/22), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

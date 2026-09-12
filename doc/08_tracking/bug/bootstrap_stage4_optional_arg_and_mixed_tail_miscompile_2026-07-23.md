@@ -3,7 +3,7 @@
 - **Date:** 2026-07-23
 - **Component:** Rust seed `SIMPLE_BOOTSTRAP=1` native lane (stage4 full-CLI build)
 - **Severity:** critical (silently wrong code in the self-hosted AOT driver)
-- **Status:** open (seed defect; .spl call sites worked around, fix pinned by probes)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Defect 1 — optional in argument position never invokes the callee
 
@@ -84,3 +84,6 @@ was silent (rt_print rdi=0); after, it prints `x5=42`.
 
 Note: `native_cache` does not reliably invalidate on source edit — `rm -rf`
 the cache dir before any conclusion-bearing rebuild.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # BUG: `LlvmIRBuilder.emit_module_header()` ignores the triple passed to `create()`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-09
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -91,3 +93,6 @@ the interpreter.
 Not established whether the offset-shift bug affects `datalayout()` specifically
 or only the `env: text?` field named in that bug. If only `env`, the fix above
 is safe and cheap.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

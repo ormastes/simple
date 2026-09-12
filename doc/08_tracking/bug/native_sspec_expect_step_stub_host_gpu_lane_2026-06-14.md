@@ -1,5 +1,7 @@
 # Native SSpec host-GPU lane process SFFI crash
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Fixed locally. The native SSpec `expect`/`step` unresolved-symbol blocker is
@@ -55,3 +57,7 @@ host-GPU runtime queue emission plan.
 Add a tracked, canonical rebuild path for `src/runtime/libsimple_runtime.a` or
 move native test linking to a generated archive from `src/runtime/runtime_native.c`
 so fresh checkouts cannot accidentally use a stale untracked C runtime archive.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

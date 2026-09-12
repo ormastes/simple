@@ -1,4 +1,5 @@
 # `bin/simple build lint` routes to Rust-driver clippy — pure-Simple `cli_run_lint` never executes
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - Date: 2026-07-06
 - Severity: medium (policy violation + inert lint-time gates)
@@ -36,3 +37,6 @@ task #21) — the same delegation lane is involved.
 
 ## Workaround (current)
 Pre-commit hook enforcement + `sh scripts/check/check-ui-backend-isolation.shs` directly.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

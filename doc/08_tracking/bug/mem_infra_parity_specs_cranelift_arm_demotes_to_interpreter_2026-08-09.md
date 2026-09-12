@@ -1,4 +1,6 @@
 <!-- RESOLUTION APPENDED 2026-08-09; original report retained below. -->
+
+**Status:** OPEN (unverified 2026-09-12)
 # mem_infra parity specs: the "cranelift" arm never measured cranelift
 
 - **Filed:** 2026-08-09
@@ -379,3 +381,6 @@ exists; the correct next step is a native-linked (not `run`-based) harness.
 
 **DIAGNOSIS ONLY.** No edit made to either parity spec: changing an honest,
 explicitly-scoped-out spec would make it worse, not better.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

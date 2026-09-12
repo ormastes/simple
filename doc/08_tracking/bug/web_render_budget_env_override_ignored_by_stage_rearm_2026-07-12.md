@@ -2,6 +2,8 @@
 
 ## Status
 
+**Status:** RESOLVED (per body: "Fixed." and title says FIXED; not independently re-run in this pass, 2026-09-12)
+
 Fixed. `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`,
 `simple_web_layout_render_html_software_pixels` (~line 9334).
 
@@ -90,3 +92,7 @@ var themselves.
 Actually shortening the real compute time (e.g. an
 `extract_css_vw`/`build_ancestor_clip_cache`/paint-pass optimization for
 large canvases) is a separate, larger perf effort and out of scope here.
+
+## Triage 2026-09-12
+
+Corrected in the 2026-09-12 bug-db triage sweep (Rule E: body and title both already say FIXED; the bulk stale-close pass had wrongly applied CLOSED-STALE here — corrected to RESOLVED to match the record's own verdict). Not independently re-run in this pass. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

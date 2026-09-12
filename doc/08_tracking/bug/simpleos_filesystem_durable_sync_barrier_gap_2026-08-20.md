@@ -1,4 +1,5 @@
 # SimpleOS filesystem durable-sync barrier gap
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/storage/fs_recovery_conformance_spec.spl -> 5 passed, 1 failed, still reproduces)
 
 - Severity: P1 release blocker (REQ-4, REQ-5)
 - Owner: block-device/VFS durability owner
@@ -111,3 +112,6 @@ tree through real FAT32, DBFS, and NVFS sinks on `FileBlockDevice`. Until those
 owners exist and the required admitted-runtime and reset/remount campaigns pass,
 durability and cross-backend image construction remain unproved. No manual
 verification was run for this update.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/storage/fs_recovery_conformance_spec.spl` on the deployed seed; 1 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

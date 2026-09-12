@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=147
+ROW_FLOOR=225
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -633,6 +633,102 @@ must_contain     "LOADER28 env_value_nul_free scans bytes"         "$LEXSTRUCT" 
 must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" "if char_code(value[i:i + 1]) == 0:"
 must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
 must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
+
+# --- STRIDX 2026-09-12: interpreter substr / char_at / s[i] rescanned the whole
+# string per call (chars().collect(), chars().nth(), is_ascii()) -- 14.6x / 6.6x
+# at 4x n. Fix = the char_code_at ASCII memo (shared_text_is_ascii) applied to
+# all three; non-ASCII walks only start+len. Record:
+# doc/08_tracking/bug/interpreter_string_char_index_rescans_per_call_2026-09-12.md
+STRRS="$ROOT/src/compiler_rust/compiler/src/interpreter_method/string.rs"
+IDXRS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/collections.rs"
+must_contain     "STRIDX substr walks start+len, never collects"   "$STRRS" "s.chars().skip(start).take(length)"
+must_contain     "STRIDX char_at byte-indexes ASCII text"           "$STRRS" "(*b as char).to_string()"
+must_contain     "STRIDX s[i] uses the shared ASCII memo"           "$IDXRS" "shared_text_is_ascii(s)"
+# --- UTF16FUSE: utf16_to_utf8 single pass, no O(scalar-count) intermediates ---
+# doc/08_tracking/bug/utf16_to_utf8_intermediate_array_perf_2026-08-26.md.
+# The fix is 3.45x on 32,765 code units (in-process A/B, min of 3). Two
+# allocations per code unit are what it removed: the code-point array built by
+# utf16_decode_all, and the 1..4-element array utf8_encode_one returns. Either
+# one creeping back is the regression, so both are pinned negatively, plus the
+# fused loop bound positively.
+UTF16SPL="$ROOT/src/lib/common/encoding/utf16.spl"
+UTF16FIX="$ROOT/test/05_perf/text_i18n/utf16_to_utf8_direct_conversion_perf_spec.spl"
+must_contain     "UTF16FUSE single pass over units.len()"       "$UTF16SPL" "val n = units.len()"
+must_contain     "UTF16FUSE appends UTF-8 bytes directly"       "$UTF16SPL" "result.push(0xE0 | (codepoint >> 12))"
+must_not_contain "UTF16FUSE must not rebuild a codepoint array" "$UTF16SPL" "val codepoints = utf16_decode_all(units)"
+must_not_contain "UTF16FUSE must not re-import utf8_encode_one" "$UTF16SPL" "utf8_encode_one("
+must_contain     "UTF16FUSE fix-test keeps the decode oracle"   "$UTF16FIX" "utf8_encode_all(utf16_decode_all(units))"
+must_contain     "UTF16FUSE fix-test pins speedup vs the oracle" "$UTF16FIX" "expect(cleared * 2).to_be_greater_than(CONV_ROUNDS)"
+# --- interpreter dict mutator methods, identifier receiver (2026-09-12) -----
+# doc/08_tracking/bug/interpreter_dict_mutator_methods_clone_map_2026-09-12.md
+# `d.insert(k, v)` / `d.remove(k)` / `d.merge(o)` on a bare-identifier receiver
+# re-entered `evaluate_expr`, which dispatched into the purely functional
+# `handle_dict_methods` -- whose every mutator arm opens `let mut new_map =
+# map.clone()`. That whole-HashMap copy ran per call, so building or draining a
+# dict through the METHOD forms was O(N^2) while the bracket form `d[k] = v`
+# (which mutates through `Arc::make_mut` in node_exec.rs) was O(N).
+DICTPAT="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+DICTCOLL="$ROOT/src/compiler_rust/compiler/src/interpreter_method/collections.rs"
+must_contain     "DICTMUT one in-place kernel exists"              "$DICTCOLL" "pub(crate) fn apply_dict_mutation_in_place("
+must_contain     "DICTMUT functional arms route through it"        "$DICTCOLL" "apply_dict_mutation_in_place(method, &mut new_map, Some(key_val), Some(value))?"
+must_contain     "DICTMUT identifier path mutates through the Arc" "$DICTPAT" "let map = Arc::make_mut(arc);"
+must_contain     "DICTMUT identifier path calls the same kernel"   "$DICTPAT" "collections::apply_dict_mutation_in_place("
+must_not_contain "DICTMUT must not re-enter evaluate_expr per call" "$DICTPAT" "if let Value::Dict(new_dict) = &result {"
+must_contain     "DICTMUT COW is counted, not silent"              "$DICTPAT" "DICT_MUT_COW_ENTRIES_CLONED"
+must_contain     "DICTMUT scaling spec is present"                 "$ROOT/test/05_perf/interp/dict_mutator_scaling_spec.spl" "expect(large * 10 < small * 70).to_equal(true)"
+must_contain     "DICTMUT alias still copies on write"             "$DICTPAT" "fn genuinely_aliased_dict_still_copies_on_write("
+# --- identifier array mutator nested in an expression (2026-09-12) --------
+# doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+# `acc = acc + arr.pop()`, `f(arr.pop())`, `if arr.pop() % 2 == 0:` used to
+# fall through interpreter/expr/calls.rs's identifier branch to
+# evaluate_method_call_with_self_update, which evaluates the receiver to a
+# COPY before the mutator runs -- O(n) per call. The fix routes Array
+# identifier receivers through the SAME in-place kernel the statement fast
+# path (interpreter_helpers::patterns::handle_method_call_with_self_update)
+# already uses, gated on ARRAY_MUTATING_METHODS so a non-mutator (`arr.len()`)
+# still falls through unchanged (that gate is also what stops the two
+# functions from recursing into each other forever).
+CALLS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+PATTERNS="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+must_contain     "ARRAYMUTEXPR calls.rs gates on the shared mutator set"       "$CALLS" "crate::interpreter::interpreter_helpers::patterns::ARRAY_MUTATING_METHODS"
+must_contain     "ARRAYMUTEXPR calls.rs routes to the shared in-place kernel"  "$CALLS" "crate::interpreter::interpreter_helpers::patterns::handle_method_call_with_self_update("
+must_contain     "ARRAYMUTEXPR gate checks the receiver is an Array"          "$CALLS" "matches!(env.get(var_name), Some(Value::Array(_)))"
+must_contain     "ARRAYMUTEXPR mutator const made cross-module visible"       "$PATTERNS" "pub(crate) const ARRAY_MUTATING_METHODS"
+# --- PLACEMUT 2026-09-12: a mutating call through a nested place (self.inner.xs.push,
+# rows[i].push, self.d.insert, arr[i].inc(), self.inner.d[k] = v) evaluated the
+# receiver to a COPY and rebuilt the root, cloning the whole container per call
+# (ratios 8.5-25.6 at 4x n). Fix = one place-aware in-place kernel over
+# resolve_place + get_mut/make_mut per hop, wired from the statement and the
+# expression paths; 2-level index assignment mutates through the slot. Record:
+# doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md
+PATRS="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+PLACERS="$ROOT/src/compiler_rust/compiler/src/interpreter/place.rs"
+CALLSRS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+NODEXRS="$ROOT/src/compiler_rust/compiler/src/interpreter/node_exec.rs"
+must_contain     "PLACEMUT place-aware in-place kernel exists"    "$PATRS" "fn try_place_mutation_in_place("
+must_contain     "PLACEMUT slot walk uses make_mut per hop"        "$PLACERS" "fn place_slot_mut<"
+must_contain     "PLACEMUT expression path routes to the kernel"   "$CALLSRS" "patterns::try_place_mutation_in_place("
+must_contain     "PLACEMUT 2-level index assign mutates the slot"  "$NODEXRS" "let container_slot = match env.get_mut(root_name)"
+# --- 2026-09-12: loader unit identity — one physical file is ONE loader unit ---
+# `src/std` is a symlink to `lib` and `src/compiler/common` to `00.common`, and
+# the resolver emits both relative and absolute spellings, so a cache keyed by
+# the RAW path made each spelling its own unit: an extra read + full re-parse per
+# alias, and the same types registered twice into the lowerer. Measured on
+# `src/app/mcp/main.spl`: the HIR parse memo read 120 spellings for 117 physical
+# files (IMPORT_AST_PARSES 120 -> 117, 41,134 bytes). The interpreter's own cache
+# was already canonical and is NOT the defect. Pin every key site plus the gate.
+IMPLOAD="$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs"
+MANIFEST="$ROOT/src/compiler_rust/compiler/src/module_resolver/manifest.rs"
+UNITGATE="$ROOT/scripts/check/check-loader-unit-identity.shs"
+must_contain     "LOADERUNIT ast memo keyed canonically"        "$IMPLOAD" "let key = crate::interpreter::normalize_path_key(path);"
+must_not_contain "LOADERUNIT ast memo not keyed by raw path"    "$IMPLOAD" "IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned())"
+must_contain     "LOADERUNIT loaded-unit set keyed canonically" "$IMPLOAD" "let unit_key = crate::interpreter::normalize_path_key(&resolved.path);"
+must_not_contain "LOADERUNIT loaded_modules not keyed raw"      "$IMPLOAD" "self.loaded_modules.insert(resolved.path.clone());"
+must_contain     "LOADERUNIT cycle search compares identities"  "$IMPLOAD" "let repeated_key = crate::interpreter::normalize_path_key(repeated);"
+must_contain     "LOADERUNIT manifest cache keyed canonically"  "$MANIFEST" "let manifest_key = crate::interpreter::normalize_path_key(&init_path);"
+must_not_contain "LOADERUNIT manifest not keyed by raw path"    "$MANIFEST" "self.manifests.insert(init_path, manifest.clone());"
+must_contain     "LOADERUNIT gate exists and is fail-closed"    "$UNITGATE" "ERROR — nothing was checked"
+must_contain     "LOADERUNIT gate selftest is fatal"            "$UNITGATE" "if ! selftest; then"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

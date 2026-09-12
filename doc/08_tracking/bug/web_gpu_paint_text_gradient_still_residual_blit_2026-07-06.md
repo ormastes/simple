@@ -1,6 +1,6 @@
 # web GPU-paint: text / gradient / border still fall to residual CPU-blit
 
-- **status:** open (follow-up to the landed rect offload)
+- **status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **severity:** medium (correctness is fine — parity is bit-exact; this is an
   offload-coverage gap, not a rendering bug)
 - **area:** lib / gpu / browser_engine (web render lane)
@@ -66,3 +66,7 @@ extend `_web_gpu_solid_fill_ops` to emit it AND dispatch it in
 For a text+gradient fixture through `SIMPLE_WEB_GPU_PAINT=1` on Metal:
 `gradient=M>0`, per-run text ops dispatched, residual `blit_pixels` near zero,
 and `gpu_vs_cpu_oracle_mism=0` still holds.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

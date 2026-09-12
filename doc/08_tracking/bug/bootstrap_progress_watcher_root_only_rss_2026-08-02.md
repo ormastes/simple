@@ -1,4 +1,5 @@
 # Bootstrap progress watcher reports only wrapper RSS
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -41,3 +42,6 @@ descendant was still the per-file fingerprint/source-authority shell chain.
 That prebuild latency is separately measurable, but source and tool authority
 are admission inputs. It must not be shortened by dropping hashes or snapshots;
 this fix deliberately does not change it.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

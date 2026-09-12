@@ -1,7 +1,7 @@
 # Bug: `while val Pattern(x) = expr:` loop body cannot see `x` (`variable not found`)
 
 - **Date:** 2026-07-20
-- **Status:** OPEN — re-reproduced 2026-08-17 by execution (see "Re-verification
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   2026-08-17" at the bottom; scope now narrowed to the SSpec `it`-block path only)
 - **Status (original):** open (found triaging `test/feature/usage/pattern_matching_advanced_spec.spl`)
 - **Area:** `while val`/`while let` pattern-binding scope (interpreter or HIR
@@ -158,3 +158,7 @@ EXIT=1
 and the error string is unchanged (`variable \`value\` not found`), so the seed
 rebuild did not touch the SSpec `it`-block statement-executor path that this
 defect is localized to.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

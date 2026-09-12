@@ -1,5 +1,7 @@
 # X25519MLKEM768 CUDA kernel artifact — RESOLVED (physical evidence); a separate interpreter-extern gap now blocks the Simple spec
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-05
 Worktree: `/home/ormastes/dev/pub/simple/.claude/worktrees/x25519-paired-timing`
 Campaign: `.spipe/x25519mlkem768_acceleration/state.md`, AC-5 (CUDA lane)
@@ -197,3 +199,7 @@ present on this host).
   running the script above — gitignored build output, not source)
 - No changes to `src/lib/gc_async_mut/crypto_accel/*`, the Metal/Vulkan
   providers, or any compiler source.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

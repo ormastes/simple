@@ -1,5 +1,7 @@
 # image_builder: nvfs rootfs backend marker assertion fails (pre-existing)
 
+**Status:** OPEN (re-verified 2026-09-12: still reproduces, now worse)
+
 Date: 2026-06-28
 
 ## Summary
@@ -32,3 +34,6 @@ returns before writing), so the nvfs marker file is empty in block 3.
 - `build_install_image_with_rootfs(..., "nvfs")` writes a non-empty
   `SYS/ROOTFS.CFG` containing `rootfs_carrier=fat32` and `rootfs_backend=nvfs`,
   and block 3 passes — without regressing block 1/2.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: `bin/simple test test/01_unit/os/installer/image_builder_artifact_spec.spl` still fails, but now ALL 3 examples fail (not just block 3) with `semantic: function `_normalized_rootfs_backend` not found` — a compile-time regression on top of the originally-reported empty-marker issue. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

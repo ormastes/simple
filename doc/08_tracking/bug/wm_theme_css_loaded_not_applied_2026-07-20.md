@@ -1,7 +1,7 @@
 # Guest CSS theme loads (bytes=1276 loaded=1) but chrome colors never change
 
 - **ID:** wm_theme_css_loaded_not_applied_2026-07-20
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (CSS-file theming works host-side end-to-end; in-guest the load rung is proven but application is dead)
 - **Found by:** GRADIENT-DRAWIR lane Boot B, 2026-07-20
 
@@ -38,3 +38,7 @@ same CSS text through the same fns flips all 6 slots (proven 9351608392d).
 The guest wiring source in gui_entry_desktop.spl was lost to a parallel-
 session WC clobber after the evidence ELF was built; it must be re-applied
 (reconstruction + rebuild + one boot) before this bug's probe can run.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

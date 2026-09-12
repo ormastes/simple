@@ -1,5 +1,7 @@
 # Web renderer GPU offload / buffer residency audit — open items
 
+Status: OPEN (unverified 2026-09-12)
+
 Date: 2026-09-05. Audit of the web render path
 (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`
 -> `src/lib/gc_async_mut/gpu/engine2d/**`) for host/device boundary crossings

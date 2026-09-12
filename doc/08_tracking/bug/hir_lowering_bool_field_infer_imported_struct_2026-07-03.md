@@ -1,5 +1,7 @@
 # HIR lowering: cannot infer bool field type on imported struct (falls back to interpreter)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-03
 - **Severity:** P2 (perf — JIT lost, program still runs via interpreter fallback)
 - **Repro:** `bin/simple examples/12_business/simple_erp/src/business_suite.spl`
@@ -27,3 +29,6 @@ without complaint — the failure is specific to the `bool` field access.
 
 Cross-module struct field access with a `bool` field should lower to HIR like
 same-module access does; no interpreter fallback.
+
+## Triage 2026-09-12
+Re-verification attempted 2026-09-12 via the record's own repro (`bin/simple examples/12_business/simple_erp/src/business_suite.spl`); it crashed for an unrelated reason (`JIT panicked, falling back to interpreter: can't resolve symbol simple_contract_check`) rather than confirming or refuting the original bool-field HIR-lowering claim. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

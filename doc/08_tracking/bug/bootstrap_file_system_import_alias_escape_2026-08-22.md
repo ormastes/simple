@@ -1,4 +1,5 @@
 # Bootstrap file-system import alias escape
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Category
 
@@ -29,3 +30,6 @@ RSS. Logs, `/usr/bin/time -v` receipts, entry source, and isolated cache are in
 
 This is focused bootstrap-compatibility evidence, not a full compiler build or
 a Stage-4 acceptance result.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

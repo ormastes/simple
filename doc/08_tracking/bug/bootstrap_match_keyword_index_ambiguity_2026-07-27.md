@@ -3,7 +3,7 @@
 - **Date:** 2026-07-27
 - **Area:** pure-Simple parser / keyword identifiers
 - **Severity:** high — blocks the strict Stage 4 full-CLI bootstrap.
-- **Status:** OPEN.
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Reproduction
 
@@ -29,3 +29,6 @@ Stage 4 sources use non-keyword local names such as `match_result`.
 Strict bootstrap checkpoint `f461c1cb248150a116c05b95b42a0ba23b9a218c`
 failed in `src/std/nogc_sync_mut/compression/gzip/lz77.spl:105` while parsing
 `val distance = match[0]`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

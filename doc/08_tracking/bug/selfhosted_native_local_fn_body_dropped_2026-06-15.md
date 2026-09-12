@@ -1,7 +1,7 @@
 # Native rv64 entry-closure drops a file-local `fn` body → undefined symbol at link
 
 - **Id:** selfhosted_native_local_fn_body_dropped_2026-06-15
-- **Status:** Open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** P2 (forces a source workaround in the rv64 sshd lane; risks
   silent symbol drops in any native baremetal module with a wildcard import)
 - **Found:** 2026-06-15 (rv64 web-server gate verification; FR-5 of
@@ -133,3 +133,6 @@ Expectation per OBSERVED: interpreter mode passes both; only native A fails.
 - Discovered while diagnosing the rv64 web gate; tracked there as FR-5
   (`rv64_web_gate_arm64_import_leak_and_storage_2026-06-15`).
 - Build was NOT run while writing this doc (a build was already in progress).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

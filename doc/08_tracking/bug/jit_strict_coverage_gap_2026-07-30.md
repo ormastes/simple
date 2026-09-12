@@ -1,5 +1,7 @@
 # SIMPLE_JIT_STRICT coverage gap (2026-07-30, part 2 of the fail-open fix)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Follow-up to `doc/08_tracking/bug/jit_strict_fail_open_fix_2026-07-30.md`
 (part 1: the tag reached the catch site but nothing else was tagged). This
 pass asks the honest question that fix left open: **for the whole JIT
@@ -243,3 +245,6 @@ Raw probe fixtures: `/tmp/.../scratchpad/probe_hir_unknown_var.spl` (Fixture A),
 - No spec can serve as evidence for any of the above; only `simple run`
   transcripts can, because `simple test` forces interpreter mode
   unconditionally (§4a).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # `check-store-open-acid.shs` cannot run on macOS aarch64 — and the recorded blocker is not the one that fires here
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-17
 - Area: enterprise_store / native ACID evidence / pre-existing gate portability
 - Severity: medium — the AC-5/AC-6 native-ACID row is recorded as blocked on
@@ -447,3 +449,7 @@ stage 2 measures "the store module compiles standalone-native", which is a
 compiler-completeness property. Treating it as an AC-5/AC-6 blocker mis-attributes
 a compiler gap (`native_codegen_missing_slice_lowering_2026-08-21.md`) to the
 database work, and sends people to fix the wrong lane.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

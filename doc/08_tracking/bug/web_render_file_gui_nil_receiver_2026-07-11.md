@@ -2,6 +2,8 @@
 
 ## Status
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Open. Blocks `web_standards_showcase` standalone readiness.
 
 ## Reproduction
@@ -24,3 +26,7 @@ The active worktree already contains concurrent changes in `simple_web_html_layo
 - Unsupported elements produce explicit diagnostics rather than blank success or a crash.
 - The focused showcase test records visible content, backend provenance, dimensions, nonblank pixels, and real interaction state.
 - Public URL/WM/SimpleOS paths must reject white, striped, canned `about:network`, and degraded tag-stripped output as standards-render success.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

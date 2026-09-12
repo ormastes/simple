@@ -83,3 +83,6 @@ bin/simple test test/01_unit/os/port/nvfs_image_boot_open_agreement_spec.spl  # 
 No workaround was applied and the gate was NOT made to pass. Rewriting the
 mount path to avoid `match` would hide a compiler defect that affects every
 `Result<_, FsError>` consumer in the freestanding kernel, not just this lane.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/os/port/nvfs_image_boot_open_agreement_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

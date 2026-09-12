@@ -1,5 +1,7 @@
 # Stage-4 tools-only artifact boundary was documentation-only
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Preparatory implementation restored and reviewed; live migration/admission is
@@ -59,3 +61,7 @@ admitted pure-Simple Stage-3 compiler, successful atomic publication, both
 live tool smokes, and receipt revalidation against the exact manifest/journal.
 
 Provider token usage and comparable completed-bug average: unavailable.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

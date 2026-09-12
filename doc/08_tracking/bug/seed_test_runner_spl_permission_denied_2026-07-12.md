@@ -1,4 +1,5 @@
 # Seed Test Runner Executes Simple Source as a Host Program
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl -> 7 passed, 1 failed, still reproduces)
 
 ## Status
 
@@ -28,3 +29,6 @@ The daemon-client path fails identically with `test_runner_client.spl`.
 `test_daemon/light_daemon.spl` require a non-`.spl` existing `argv[0]` before
 using it as the compiler binary. The source-contract regression is
 `test/01_unit/app/test_runner_binary_source_guard_spec.spl`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl` on the deployed seed; 1 of 8 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

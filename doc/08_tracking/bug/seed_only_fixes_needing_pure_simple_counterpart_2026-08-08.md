@@ -1,4 +1,5 @@
 # Audit: seed-only fixes (2026-08-08 session) vs pure-Simple compiler counterpart
+**Status:** OPEN (unverified 2026-09-12)
 
 Per CLAUDE.md: `src/compiler_rust/` is bootstrap-seed-only; `src/compiler/`
 (numbered layers 00-99, pure Simple) is the real compiler. This audits five
@@ -113,3 +114,6 @@ is not a "mirror this fix" task since the fix's mechanism doesn't transfer.)
   in `src/compiler/10.frontend/core/interpreter/eval.spl`; today every
   decision-coverage row from the pure-Simple interpreter is filed under the
   literal `"eval"`. Scoped follow-up steps are listed under Finding 1.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

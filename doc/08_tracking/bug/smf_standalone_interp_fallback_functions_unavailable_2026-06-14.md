@@ -4,7 +4,7 @@
 - **Severity:** P2 (feature-scale gap; blocks SMF benchmark/run of any workload whose hot path
   uses string interpolation or other interp-routed constructs — e.g. the web http server)
 - **Found:** 2026-06-14, AC-5 web benchmark SMF emission (perf-opt umbrella).
-- **Status:** OPEN — honestly omitted; `web_bench_driver` graceful-skips the smf plane with a
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   printed reason (no fabricated rows). Script-plane rows still emit.
 
 ## Symptom
@@ -38,3 +38,6 @@ interpolation (`"HTTP/1.1 {status_code} {reason}\r\n"`), which correctly trigger
 
 Until one lands, SMF benchmark emission is limited to workloads whose hot path is natively
 compilable; interpolation-heavy ops (http serialize) stay honestly omitted.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — this is the fake-CPU evidence class that `check-riscv-rtl-truth.shs` exists to prevent
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Found via:** Lane R3 gate-honesty audit (`doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-28.md` §3)
 
 ## Symptom
@@ -42,3 +42,6 @@ The same script already implements elaborate + run under its non-`--analyze`
 phase. Either invoke that phase from the hardware-gates entrypoint, or rename
 the gate to `ghdl_analyze_rv32 (syntax only)` and stop counting it toward a
 hardware claim. Do not leave it counted as-is under its current name.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Stage4 module-surface owner-index copy retention
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in this change; fresh end-to-end Stage4 RSS measurement is pending the
@@ -59,3 +61,7 @@ procedural, not a quantitative acceptance threshold.
 - `simple check src/compiler` was attempted once and was inconclusive: spawned
   workers resolve the hard-coded isolated-worktree path `bin/simple`, which is
   absent. No source diagnostic preceded that infrastructure failure.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

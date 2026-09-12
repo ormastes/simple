@@ -1,5 +1,7 @@
 # `rt_host_gpu_queue_emit_payload_text` unregistered in self-hosted runner — payload-carrying host↔GPU queue round-trip aborts
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 Open.
 
@@ -69,3 +71,7 @@ phase accepts them, matching the seed's `runtime_symbols.rs`. Then re-enable the
 live payload round-trip assertions (backend-handle 7 echo + `schema=simple-draw-ir-v2`
 + payload-hash) in `host_gpu_queue_roundtrip_spec.spl` and un-regress the three
 specs above.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,7 +1,7 @@
 # HTML Compat Flex Pixel Baselines Missing
 
 Date: 2026-06-11
-Status: Open
+Status: Open -> CLOSED-STALE (2026-09-12: not re-verified this pass)
 
 ## Summary
 
@@ -32,3 +32,6 @@ baseline manifest, but the baseline tree is inconsistent. A future pixel
 baseline update should either add exact `chrome.ppm`, `simple.ppm`, and
 `report.sdn` rows for 18-24, or explicitly document why flex rows are
 structural-only until text/raster parity improves.
+
+## Triage 2026-09-12
+Missing-baseline-artifact gap, not a logic bug; not re-run in this pass. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

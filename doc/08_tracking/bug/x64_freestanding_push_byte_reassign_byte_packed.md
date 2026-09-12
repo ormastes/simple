@@ -1,5 +1,7 @@
 # ROOT CAUSE FOUND: `u8.to_i64()` mis-dispatches to `VfsFileSize.to_i64()` (method-name collision)
 
+**Status:** ROOT-CAUSED, WORKAROUND LANDED (`.push` at the call site, `cd0418ee39cb`) — the underlying frontend method-resolution fix is still outstanding
+
 **Target:** `native-build --backend cranelift --target x86_64-unknown-none`
 (SimpleOS freestanding). **Status:** ROOT-CAUSED via asm dump. NOT a backend
 codegen bug and NOT "reassignment drops BYTE_PACKED" — it is a FRONTEND
@@ -98,3 +100,7 @@ representation in the cranelift lowering, so `rt_push_byte`-style helpers are
 safe again. The separately-retracted
 `x64_freestanding_chained_len_cast_miscompile.md` was a mis-attribution of THIS
 corruption to a chained cast.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule E: body already declared a root-caused/workaround verdict inline but no dedicated status line existed at file top); added a matching top-level status line noting the underlying method-resolution fix is still outstanding, so left open rather than closed. No re-verification attempted (freestanding QEMU real-code repro is not cheap). Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`.

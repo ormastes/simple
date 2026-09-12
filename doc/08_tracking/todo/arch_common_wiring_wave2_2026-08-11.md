@@ -1,5 +1,7 @@
 # arch/common wiring — wave 2 disposition (2026-08-11)
 
+Status: OPEN (unverified 2026-09-12)
+
 `src/os/kernel/arch/common/` was authored on 2026-04-25 ("Wave 2 AC-3 helper
 extraction") and had **zero importers**. Commit `4758bcfd952` wired the first
 three (`entropy_mix`, `cstart_bridge`, `canary_state`). This record dispositions

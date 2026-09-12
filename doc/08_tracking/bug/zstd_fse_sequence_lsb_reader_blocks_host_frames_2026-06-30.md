@@ -1,6 +1,6 @@
 # zstd FSE sequence decoder uses non-standard LSB backward reader — blocks real host frames
 
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Date:** 2026-06-30
 - **Area:** `src/lib/common/compress/zstd_seq.spl`
 - **Severity:** Medium (blocks decoding of any real host-zstd compressed block that carries sequences)
@@ -77,3 +77,7 @@ fixture re-derivation rather than bundled with the literals fix.
   asserts).
 - Fresh-table literal decode (1- and 4-stream, FSE or direct weights) is correct
   and over-read/trailing-bit safe (matches host rejection on malformed frames).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -2,8 +2,44 @@
 
 **ID:** ast_env_var_quadratic_parse_2026-06-13  
 **Severity:** P1 — `check` on 400+ top-level functions times out (>300 s)  
-**Status:** Localized, fix proposed, not yet implemented  
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Re-verification 2026-09-12:** NOT RE-VERIFIABLE on this host — see below.  
 **Reported:** 2026-06-13
+
+
+## 2026-09-12 re-verification attempt — blocked, and why the obvious probe lies
+
+Attempted on `origin/main` = `7352f99898c` with
+`src/compiler_rust/target/release/simple` (51226288 bytes, 2026-09-12 10:01:32).
+
+`bin/simple check <file>` **never analyses the file** on this host:
+
+```
+ERROR: no admitted cached self-hosted check worker artifact is available
+```
+
+It still exits after ~1 s and still emits stdlib lint warnings, so it looks like
+it ran. Timings taken through it are therefore **vacuous** and must not be read
+as evidence the quadratic is gone. For the record, what that vacuous probe
+produces (trivial two-statement functions, fresh non-cached content):
+
+| functions | `check` wall |
+|---|---|
+| 100 | 1.08 s |
+| 200 | 1.06 s |
+| 400 | 0.88 s |
+| 800 | 1.07 s |
+
+Flat across an 8x range because no work is being done.
+
+`bin/simple run` is not a substitute either: the seed parses with its own Rust
+parser, not the pure-Simple frontend named in "Primary site"
+(`src/compiler/10.frontend/core/ast_stmt.spl`, `ast_part1.spl`, `ast_part2.spl`).
+That Rust path is linear here — 0.028 s at 100 functions to 0.049 s at 800 — and
+says nothing about the AST env-var store this record is about.
+
+Re-measuring this record needs a host with an admitted self-hosted check worker
+artifact. Left Open, unchanged otherwise.
 
 ---
 
@@ -150,3 +186,6 @@ Eliminating 6×O(N·S) `setenv` calls per parse and converting all reads to O(1)
 This is a **real latent quadratic** — it will become the bottleneck once the env-var issue is fixed and `infer_module` is actually wired up to the driver pipeline. Currently `infer_module` is defined (`inference_control.spl:594`) but **never called** from the check/compile driver path (`type_check_impl` is a documented stub no-op; `lower_and_check_impl` creates empty HIR shells for non-bootstrap single-file input). Not the active bottleneck today.
 
 Fix when it becomes active: replace the `[i64]` linear-scan containers (`to_generalize.contains`, `scheme.vars.contains`) with `Dict<i64, bool>` sets. Both `env_free_var_ids` and `generalize` become O(N·depth) rather than O(N²).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

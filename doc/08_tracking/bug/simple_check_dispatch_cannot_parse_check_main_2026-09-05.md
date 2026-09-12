@@ -1,5 +1,7 @@
 # `simple check` fails to parse its own entrypoint on every input (2026-09-05)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 OPEN. Blocks the acceptance checkbox
 `bin/simple check src/app/editor/ passes with zero HIR type-inference failures`
@@ -53,3 +55,7 @@ Find which parser the `check` dispatch arm invokes (it differs from the `run`
 path's) and why it rejects a colon that the normal parser accepts. Do not
 "fix" `src/app/check/main.spl` by rewriting source the normal parser already
 accepts -- that would move the defect, not repair it.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

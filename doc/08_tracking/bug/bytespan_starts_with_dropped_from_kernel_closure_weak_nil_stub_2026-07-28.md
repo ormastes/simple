@@ -1,4 +1,5 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Filed:** 2026-07-28
 - **Severity:** high (silent wrong answer, no diagnostic, in the WM render path)
@@ -219,3 +220,6 @@ change regresses. `rt_*` symbols are excluded by construction
 (`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

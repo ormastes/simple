@@ -1,5 +1,7 @@
 # MemoryLevelingManager missing `can_release` — kernel-build ABI mismatch (RESOLVED 2026-08-17)
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 Lane W16-A. Unblocks `scripts/check/check-enterprise-store-in-guest-ovmf.shs`
 (enterprise-store in-guest board-runnable gate).
 
@@ -62,3 +64,6 @@ Runner: Rust seed at
 ## Files changed
 
 - `src/os/kernel/memory/memory_leveling_manager.spl` — added `can_release`.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

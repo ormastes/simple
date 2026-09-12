@@ -1,5 +1,7 @@
 # H1 (streaming source reclaim) experiment — IN FLIGHT (earlier 'died' reading RETRACTED)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-03  **Status:** running
 
 > **RETRACTION.** An earlier revision of this file said the run 'died silently
@@ -81,3 +83,7 @@ raise site needs) or more RAM headroom. Until then the pre-registered alternativ
 hypothesis, on the independent evidence that `current_module_id` has exactly one
 writer (`module_lowering.spl:1151`, inside `lower_module`), so an empty value
 proves `lower_module` never ran on that instance.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

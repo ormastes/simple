@@ -1,5 +1,7 @@
 # Audit: native-codegen registry vs interpreter extern dispatch gap (2026-08-27)
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 Read-only audit. Nothing fixed. Worktree: detached `origin/main` @ `ed6545f2e3b`.
 
 ## Headline counts
@@ -189,3 +191,6 @@ So the failures are attributable to the missing registration, not to the harness
     defects. No attempt was made to classify the 675.
   - Registered/handled counts are name-set only; **signature/arity agreement was
     not checked**. A name present in both registries can still misbehave.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

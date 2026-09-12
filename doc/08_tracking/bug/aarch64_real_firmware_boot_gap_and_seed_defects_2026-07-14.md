@@ -1,4 +1,5 @@
 # aarch64 SimpleOS: real-firmware boot gap + 2 seed/driver defects (launch sanity, 2026-07-14)
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl` now PASSes)
 
 Found by Lane LAUNCH-OS-AARCH64 doing a real launch sanity check. The aarch64
 kernel boot gate (loader + FS-exec staging) reproduces GREEN
@@ -1233,3 +1234,6 @@ user`s stated top priority, and this fleet was instructed not to start VMs
 against it). Board-run is therefore BLOCKED, not passed. The EFI half of this
 doc remains superseded by
 `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

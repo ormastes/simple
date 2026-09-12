@@ -1,5 +1,7 @@
 # CORRECTION 2026-08-31 — this record's original framing was WRONG
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Three claims in the original text below are refuted by a follow-up trace. They are
 left in place, struck here rather than silently edited, because the wrong framing
 is instructive:
@@ -206,3 +208,7 @@ LOGICAL module names, so `module_logical_name_from_path` is on this path — two
 physical files that normalise to one logical name would also mark the second as
 already satisfied.
 
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

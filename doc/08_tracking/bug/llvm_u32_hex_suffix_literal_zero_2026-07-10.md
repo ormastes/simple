@@ -1,5 +1,7 @@
 # LLVM U32 Hex-Suffix Literal Lowers to Zero
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 RESOLVED — verified fixed at origin tip 8932fcb3a148
@@ -25,3 +27,7 @@ x86_64, AArch64, and RVV binaries.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe07_u32_hex_suffix_a.spl` (`val a: u32 = 0xFF010203u32` vs `val b: u32 = 4278256131 as u32`, both printed as i64). Oracle: `bin/simple run` → `4278256131` / `4278256131` (both equal). Native: `native-build --entry --clean` exit 0, binary built, run → `42782561314278256131` (both values concatenated, matches oracle). Hex-suffixed u32 literals now lower to correct value, matching decimal-cast equivalents.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

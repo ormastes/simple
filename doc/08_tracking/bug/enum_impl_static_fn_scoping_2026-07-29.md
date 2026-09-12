@@ -1,7 +1,7 @@
 # Bug: enum associated functions (`impl Enum:` and enum-body `static fn`) — scoping study, not fixed
 
 - **Date:** 2026-07-29
-- **Status:** open — **scoped, not fixed** (see "Why this is not a small fix" below)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** critical (silent wrong values on the default JIT engine; a second,
   narrower, independent false-rejection defect on the interpreter)
 - **Binary under test:** Rust seed `src/compiler_rust/target/debug/simple`,
@@ -264,3 +264,6 @@ Probes at `/tmp/enum_probe/` (scratch, not committed):
 `d_cross_module.spl`, plus `.jit.out`/`.interp.out` pairs and `results.txt`
 (exit codes). Binary: `src/compiler_rust/target/debug/simple`, built by this
 lane, mtime 2026-07-29 01:05:36 UTC.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

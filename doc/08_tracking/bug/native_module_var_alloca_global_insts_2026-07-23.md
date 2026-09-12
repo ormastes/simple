@@ -1,5 +1,7 @@
 # native (bootstrap): any function writing a module `var` produces invalid SSA (llc "multiple definition of local")
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-23  **Status:** FIXED
 - **Severity:** high — any entry-closure native function that BOTH writes a
   module-level `var` AND contains a multi-def local (an `if`-expression result,
@@ -35,3 +37,7 @@ CallIndirect exemption (#135).
 ## Verification
 `_mcp_init_tool_set` and every other module-var-writing closure function now
 lower cleanly (rMCP24). General fix — not MCP-specific.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

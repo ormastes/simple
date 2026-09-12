@@ -1,4 +1,5 @@
 # Bracket-slice byte-index survey — pass 5 (2026-07-29): base58_encode fixed; bencode decode path deferred
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Per the coordinator's explicit fallback ("if bencode decode explodes in
 scope, land base58 alone and doc the boundary"): base58_encode is fixed
@@ -163,3 +164,6 @@ either engine can be the wrong one depending on code shape.
 2 files changed: `base58.spl` (fix), 1 new spec, this doc. `bencode.spl`
 decode path unchanged (deferred, not silently dropped — scoped above).
 No gate/budget files touched.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

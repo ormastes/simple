@@ -1,4 +1,5 @@
 # Fix: Calc TUI raw-mode keys — real root cause was the interpreter-fallback extern dispatch table, not module imports
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** raw_mode_extern_registry_2026-07-03
 **Date:** 2026-07-03
@@ -192,3 +193,6 @@ externs `terminal.spl` actually declares (`() -> bool`, `() -> (i64, i64)`).
    key. If that surprises users, restore `ISIG` after `cfmakeraw()` and before
    `tcsetattr`. (The interpreter-path `native_enable_raw_mode`, gap 2, already
    made this same ISIG-disabling choice explicitly.)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

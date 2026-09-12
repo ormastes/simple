@@ -1,5 +1,7 @@
 # Vulkan Engine2D native JIT is missing `rt_struct_receiver_valid`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved for the named symbol (2026-08-15, see Resolution below): the JIT
@@ -132,3 +134,7 @@ Bridge implemented, verification pending. Deferred commands:
 cargo build --release --bin simple   # in src/compiler_rust
 sh scripts/check/check-vulkan-engine2d-readback.shs
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

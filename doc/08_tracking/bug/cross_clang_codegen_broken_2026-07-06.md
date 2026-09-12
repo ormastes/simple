@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-06
 **Area:** os/llvm_self_hosting, cross toolchain, SimpleOS Phase 4 (clang_static)
-Status: OPEN (P2) — UNVERIFIABLE HERE (no cross toolchain present)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Repro attempt 2026-08-17 (live, not inspection).** The repro's `$CC` does not
@@ -100,3 +100,6 @@ Rebuild the cross clang with assertions enabled to capture the failing
 backend assertion, or bisect the LLVM backend/target config for the
 `x86_64-unknown-simpleos` triple that diverges from the host build. Until
 then, all Phase 4 codegen must route through host clang.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

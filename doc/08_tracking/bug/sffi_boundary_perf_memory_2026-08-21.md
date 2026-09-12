@@ -1,4 +1,5 @@
 # SFFI boundary: per-call allocations and an unfreed runtime string (2026-08-21)
+**Status:** OPEN (unverified 2026-09-12)
 
 Audit of the SFFI/extern boundary for per-call allocation, leaks, zero-slack
 growth, and cross-boundary collection copies. The self-hosted compiler crosses
@@ -51,3 +52,6 @@ mechanism.
 - `cargo test -p simple-runtime --release --lib` — no new failures vs the 10-failure baseline.
 - Specs: `import_admission_critical`, `enum_payload_capture`, `multiline_lambda_body`, `non_optional_nil_return_contract`, `duplicate_typed_arg_signature_nil_miss`. **Scope caveat, stated rather than glossed:** `bin/simple` is the deployed JIT'd seed and was deliberately NOT redeployed, so these specs exercise a binary that does not contain these fixes. They are a tree-level regression check, not validation of this change; validation of the change itself is the cargo evidence above.
 - `sh scripts/check/check-non-optional-nil-return.shs` — PASS.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

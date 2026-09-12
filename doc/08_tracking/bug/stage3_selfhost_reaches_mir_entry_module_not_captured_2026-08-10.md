@@ -1,5 +1,7 @@
 # Stage-3 self-host reaches MIR lowering for the first time — new blocker: entry HIR module not captured in the flat accumulator
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **ID:** stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10
 - **Status (2026-08-17, W1 source re-check):** the fix is PRESENT in current
   source; validation still pending. The entry module is no longer registered
@@ -187,3 +189,7 @@ grepping current source.
 `:23`) replaces the name scan, and `:398` `if entry_index < 0:` now guards the
 "was not captured" eprint fail-closed. The `functions > 0` receipt this doc asks
 for still requires one incremental debug bootstrap, which was not run here.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

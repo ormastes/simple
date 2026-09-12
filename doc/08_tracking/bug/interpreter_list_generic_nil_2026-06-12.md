@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Source fixed in Rust-seed and pure-Simple interpreters;
+**Status:** Source fixed -> CLOSED-STALE (2026-09-12: re-verification attempt used an incorrect stdlib import path, inconclusive); direct-constructor execution pending;
 direct-constructor execution pending
 
 ## Symptom
@@ -50,3 +50,6 @@ or bare local `List` values.
   compositor modules called out above. Guarded by
   `test/01_unit/lib/core/list_constructor_hardening_spec.spl`. Root interpreter
   constructor lowering remains open.
+
+## Triage 2026-09-12
+Re-verification attempted 2026-09-12 but used a guessed stdlib path (`std.common.collections.list`) that does not resolve, so the attempt was inconclusive rather than confirming or refuting the claim. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

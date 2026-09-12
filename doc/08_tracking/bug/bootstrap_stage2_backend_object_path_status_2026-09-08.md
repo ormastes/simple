@@ -1,4 +1,5 @@
 # Bootstrap Stage 2 backend object-path failure
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -60,3 +61,6 @@ same file-writing path, then run one isolated cached sanity cycle.
 No admitted self-hosted runtime is available for compiling or executing the
 image-to-Markdown feature tests. This was the third and final bootstrap
 verification cycle for the feature session, so it was not retried.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

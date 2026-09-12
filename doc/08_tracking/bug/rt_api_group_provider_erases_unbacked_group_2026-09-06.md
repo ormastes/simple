@@ -1,4 +1,5 @@
 # Naming a provider DELETES an unbacked rt_* group instead of owning it
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Filed:** 2026-09-06
 - **Component:** `scripts/check/gen-api-registry.shs`, `scripts/check/check-rt-api-groups.shs`
@@ -86,3 +87,6 @@ functions. They were being counted as rt_* API symbols and as direct call
 sites. Allowlisting their file removed them, which happens to be the right
 answer, but the classifier should not have admitted them in the first place —
 a `__fallback` suffix on a Simple `fn` is not a runtime boundary.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

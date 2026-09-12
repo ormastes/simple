@@ -1,5 +1,7 @@
 # BUG: native-build ignored unknown options
 
+**Status:** RESOLVED (per record's own Fix and regression section)
+
 ## Reproduction
 
 Append `--entry-clousre` to an otherwise valid pure-Simple `native-build`
@@ -22,3 +24,6 @@ without invoking the compiler.
 
 A sole help flag exits 0. Any malformed argument list, including one that also
 contains help, exits 2 before the worker or output staging is reached.
+
+## Triage 2026-09-12
+Not independently re-run; formalizing the record's own described fix + added regression spec into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

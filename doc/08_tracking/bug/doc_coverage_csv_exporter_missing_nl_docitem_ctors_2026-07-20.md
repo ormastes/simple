@@ -1,4 +1,5 @@
 # doc_coverage csv_exporter: undefined `NL` import + DocItem missing create_class/create_enum
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/01_unit/app/doc_coverage/json_export_spec.spl` still FAILs — still reproduces)
 
 ## Symptom
 
@@ -107,3 +108,6 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 25 \
   still failing on root causes 2 and 3 above)
 - `test/01_unit/app/doc_coverage/json_export_spec.spl` (same import-path symptom,
   not in shard, untouched)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/doc_coverage/json_export_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

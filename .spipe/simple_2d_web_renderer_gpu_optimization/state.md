@@ -210,3 +210,38 @@ PASS both ways. Full writeup:
   = uncatchable abort on deployed binaries).
 - **result**: steady 900x760 frame 5,872 -> 3,199 ms (default) -> 23 ms
   (native); 1080p 33 ms. `readback_calls` 2->1, `unpack_iterations` 1,368,000->0.
+
+## 2026-09-12 — `metal_sffi_create_device(0)` returns 0 on Apple M4
+
+- **runtime_need**: a non-zero Metal device handle from
+  `metal_sffi_create_device(0)` under the fresh seed
+  `build/cargo-r2/release/simple`, so `metal_msl_pipeline_spec` and the Metal
+  readback/parity lanes can run on real hardware instead of staying red.
+- **facade_checked**: `src/lib/gc_async_mut/gpu/engine2d/metal_session.spl`
+  (fails closed on `device_count <= 0`, again on `device == 0`, and again on any
+  zero compute-pipeline handle -> `last_error = 7`);
+  `backend_metal.spl:426-438` (fails closed on `session.init()` false). All three
+  guards are present and correct — there is **no** facade fail-open, contrary to
+  the open thread in the lane 4 record. Extern registry checked too:
+  `rt_metal_create_device` IS registered
+  (`interpreter_extern/mod.rs:1136`, wrapper `gpu.rs:878`, codegen spec
+  `runtime_sffi.rs:1221`), so this is **not** the unregistered-extern silent-nil
+  class.
+- **chosen_path**: no Simple and no Rust change. The seed had been built
+  `--features vulkan,vulkan-graphics`, leaving the cargo `metal` feature OFF, so
+  every `rt_metal_*` entry point compiled to its
+  `#[cfg(not(all(target_os = "macos", feature = "metal")))]` arm returning 0
+  (`metal_graphics_runtime.rs:976-986`). Rebuilt the same target dir with
+  `--features vulkan,metal,simple-compiler/vulkan-graphics` (`vulkan-graphics`
+  belongs to `simple-compiler`, not to `simple-driver` which owns `--bin simple`,
+  so it needs the package prefix). Durable half: the feature list was codified
+  nowhere in the repo, so added `scripts/setup/build-gpu-seed.shs` which picks
+  the list by `uname -s` and fails closed if no binary is produced.
+- **rejected_shortcuts**: patching the facade to tolerate a zero device (would
+  convert a correct fail-closed guard into a fail-open and hide the real defect);
+  adding a `SIMPLE_METAL_*` env override (no such gate exists — the stub is
+  unconditional); editing `metal_graphics_runtime.rs` to call `metal_impl`
+  unconditionally (breaks every non-macOS and non-metal build); marking the
+  Metal specs skipped or in-development (they are correct device specs on a real
+  Apple M4); assuming a `metal-graphics` feature exists (it does not — `metal`
+  alone is the whole gate).

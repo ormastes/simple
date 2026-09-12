@@ -1,4 +1,5 @@
 # SimpleOS libc: float functions cannot be ported to pure Simple (f64 unreliable)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Date: 2026-06-28
 
@@ -45,3 +46,6 @@ value-semantics model).
   with KAT specs, then delete the C twins (keep-C-until-parity policy).
 - Syscall group: confirm each is a thin Simple-over-syscall wrapper or
   legitimately C; no pure-Simple obligation.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

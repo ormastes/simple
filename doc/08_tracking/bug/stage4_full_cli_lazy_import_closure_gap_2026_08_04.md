@@ -1,5 +1,7 @@
 # Stage 4 full CLI lazy-import closure gap
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Claimed after the first post-AST-slot Phase 4 cycle on 2026-08-04.
@@ -34,3 +36,7 @@ unresolved/stub symbols.
 - The next bounded exact Phase 4 cycle crosses all ten unresolved names.
 - The exact candidate must still pass the essential test, lint, and duplicate
   command smoke; mere HIR success is not completion.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

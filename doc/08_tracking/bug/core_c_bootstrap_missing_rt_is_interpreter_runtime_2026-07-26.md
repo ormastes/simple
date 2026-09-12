@@ -1,4 +1,5 @@
 # Core-C bootstrap bundle misses `rt_is_interpreter_runtime`
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -52,3 +53,6 @@ The prepared fix exports a native-false implementation from the existing
 2. `nm -u` shows no unresolved `rt_is_interpreter_runtime`.
 3. The native probe starts and reaches its staged-quads assertions.
 4. The trusted macOS Vulkan 2D harness builds with the same runtime lane.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

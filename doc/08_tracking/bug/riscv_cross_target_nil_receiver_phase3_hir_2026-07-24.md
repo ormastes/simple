@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Severity:** P0 — blocks ALL riscv cross-target builds (NVMe rv32 fw gate, SimpleOS rv32/rv64 kernels)
 - **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` deployed 2026-07-24 01:22
-- **Status:** OPEN — WC fix staged (stage4 strict-lane extern fixes in `src/compiler/50.mir/`), bootstrap redeploy in progress
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -44,3 +44,6 @@ green. Workaround: `NVME_RV32_BUILD_TIMEOUT_SECS=600`.
 1. riscv32 + riscv64 `-unknown-none` repro compiles clean.
 2. `NVME_RV32_BUILD_TIMEOUT_SECS=600 sh scripts/check/check-nvme-rv32-minimal-live.shs` → `ALL RV32 NVME FW CHECKS PASS`.
 3. Regression test to add: minimal cross-target compile smoke (rv32+rv64 `-unknown-none`) in the pre-deploy smoke matrix — this class (representation/decode soundness) has recurred; type-checked ≠ sound when enum/struct decode regresses.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

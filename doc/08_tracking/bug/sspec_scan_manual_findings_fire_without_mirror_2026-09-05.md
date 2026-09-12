@@ -1,5 +1,7 @@
 # `sspec-maintain scan` charges manual-content rules against a mirror that does not exist (2026-09-05)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom
 
 `sspec-maintain scan` applies the manual-content rules — `SSDOC-MNT-005`,
@@ -174,3 +176,7 @@ make both specs above go GREEN with their assertions unchanged. This bug
 record intentionally does NOT implement either fix — a scoring change here
 shifts every score in the repo and needs explicit human sign-off (test-runner
 gate default min score 80).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,5 +1,7 @@
 # Stage 3 SIGSEGV in `value_struct_layouts`: `module_surfaces_freeze` names are freed by the registry retention scope
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Filed:** 2026-09-06
 - **Severity:** P0 — the single blocker to a deployed self-hosted compiler; every
   Stage-3 self-host on aarch64 died here after ~69 minutes of clean HIR lowering.
@@ -195,3 +197,7 @@ enough for them and nothing covered the texts.
 - Evidence trail kept at `/home/yoon/segv-lane/unpack/wt1/{ProcMaps,ProcStatus}`;
   the 39 GB `CoreDump` was deleted after analysis and is re-derivable with
   `apport-unpack` from the original `.crash` in `/var/crash`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

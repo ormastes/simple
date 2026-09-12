@@ -1,4 +1,5 @@
 # `os.*` module JIT unresolved-symbol gate — root cause (2026-07-30)
+**Status:** OPEN (unverified 2026-09-12)
 
 Assignment: root-cause why every standalone probe against `os.crypto.*`
 triggers a module-wide "unresolved external symbol" JIT fallback,
@@ -161,3 +162,6 @@ unfixed and unblocked-in-practice: the structural cause is now
 understood and a concrete alternative lane is proposed, but that lane
 was not exercised to completion this pass, so the batch should proceed
 under it in a future pass rather than being declared unblocked here.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # GUI/Web/2D Completion Static Cache Isolation Timeout
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Mitigated.
@@ -61,3 +63,7 @@ Split the aggregate cache into two modes:
 
 The completion SSpec can then consume the read-only seeded cache without
 allowing concurrent runs to mutate shared evidence.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

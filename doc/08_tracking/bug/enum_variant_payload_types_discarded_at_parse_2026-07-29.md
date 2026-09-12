@@ -8,7 +8,7 @@
   (`10.frontend/core/parser_decls_types.spl`,
   `10.frontend/core/_ParserDecls/enum_module_body.spl`) and the flat-AST bridge
   (`10.frontend/_FlatAstBridge/module_assembly.spl`).
-- **Status:** OPEN — not fixed by this lane (out of ownership scope; would
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   require parser + decl-arena + bridge changes, none of which A4E is
   authorized to touch).
 
@@ -96,3 +96,6 @@ the ground truth above; its comment was updated to point at this bug doc
 instead of only describing the (now superseded) "lossy tag" theory. One spec
 example was added confirming the current, honest behavior (a clean/any enum
 emits nothing) so the gap stays test-visible instead of silently assumed.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Recent Bugs
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/02_integration/app/add_remove_log_modes_spec.spl -> 8 passed, 0 failed)
 
 **Generated:** 2026-09-07
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
@@ -1309,3 +1310,6 @@
 | capsule_immutability_check_fail_open_gnu_find_perm_2026-08-30 | P0 | fixed | Runtime-capsule and stage3-authority immutability checks used GNU-only find -perm /0222; on BSD find it errored to stderr and printed nothing, so the check was FAIL-OPEN | 2026-08-30 |
 | weak_symbol_detection_elf_only_nm_kinds_macho_2026-08-30 | P1 | fixed | Weak-symbol detection used ELF nm kind letters W and V; Mach-O prints weak definitions as T, so every weak fallback looked strong and the Stage-4 capsule guard rejected the build | 2026-08-30 |
 | process_group_setsid_absent_on_macos_2026-08-30 | P1 | fixed | setsid is util-linux and absent on macOS; used by two twin copies of io/process_ops.spl (src/lib and src/app) and by run-process-group-timeout.shs | 2026-08-30 |
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/add_remove_log_modes_spec.spl` on the deployed seed; the spec now passes in full (8/8), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

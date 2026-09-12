@@ -1,4 +1,5 @@
 # Stage 4 HIR Import Crash
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -170,3 +171,6 @@ core-C-bootstrap ABI (`Dict.has`, `rt_is_debug_mode_enabled`,
 `rt_array_extend_i64`, and `rt_option_map` are absent). That is not execution
 proof; TODO592 remains open for the fresh admitted self-hosted runner. No full
 Stage 4 was rerun.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

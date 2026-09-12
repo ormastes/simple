@@ -1,5 +1,7 @@
 # Web frame-reuse verification gaps
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Revision-only IPC is implemented but cannot yet be promoted as verified
@@ -29,3 +31,7 @@ make parser errors include source locations, then prove: full frame retained;
 matching revision-only reply accepted; stale/missing revision rejected; exact
 full/reuse IPC bytes counted; unchanged frame sends no DrawIR/images. These are
 mechanism receipts only—8K/80 additionally requires the campaign matrix row.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

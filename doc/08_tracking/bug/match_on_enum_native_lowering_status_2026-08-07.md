@@ -1,5 +1,7 @@
 # `match` on enum — per-engine status verified 2026-08-07 (partial fix, not fully stale)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **ID:** BUG-2026-08-07-enum-match-native-lowering-status
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
@@ -116,3 +118,6 @@ exempted (fixed) and payload-bearing still carries the fallback reason, which
 that require the interpreter". The doc status is accurate; no change made.
 Note: `compiler/src/codegen/**` and `compiler/src/mir/**` are owned by other
 workers in this pass, so no fix was attempted here.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

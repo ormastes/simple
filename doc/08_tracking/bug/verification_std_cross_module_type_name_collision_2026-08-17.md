@@ -1,5 +1,7 @@
 # Cross-module type-name collision: `ContractExpr`/`ContractExprKind` resolve to the wrong module
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-17. **Status:** FIXED 2026-08-17 (verified by execution — see "Verification 2026-08-17" at the bottom). The narrower interpreter hardening described under "Unblock condition" remains a separate, still-open hazard.
 
 ## Symptom
@@ -131,3 +133,7 @@ only.
 
 All 5 examples GREEN on the rebuilt seed (previously 2 of 5 RED). FIXED status
 re-confirmed by execution.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

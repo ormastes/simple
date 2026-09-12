@@ -1,5 +1,7 @@
 # Native Backend Probe Enum Comparison
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Resolved by routing comparisons through `backend_probe_initialized`, in the
@@ -21,3 +23,7 @@ Strict Vulkan creation now passes and selects `backend_name=vulkan`.
 
 The next blocker is the separate aggregate-return defect recorded in
 `native_engine2d_readback_aggregate_abi_2026-07-26.md`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # TODO: test_runner_execute -> composite -> gpu_lane eager imports cost ~40s of seed-interpreter load
 
+Status: OPEN (unverified 2026-09-12)
+
 Date: 2026-08-17. Lane: Phase D startup-perf (compile-path slice).
 Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, per `--version` banner).
 

@@ -138,7 +138,7 @@ pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
 /// hypothetical: emitting one `/link` per archive left the runtime archive
 /// unlinked and produced `LNK1120: 99 unresolved externals` (72 distinct
 /// `rt_*` symbols). Callers therefore accumulate these and emit a single
-/// trailing `/link` group; see `clang_cl_link_args` in `link_objects`.
+/// trailing `/link` group; see `msvc_link_args` in `link_objects`.
 ///
 /// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
 /// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
@@ -1066,7 +1066,13 @@ int main(int argc, char** argv) {
         std::fs::write(&init_cpp, &code).map_err(|e| format!("write init_all: {e}"))?;
 
         let init_o = temp_dir.join("_init_all.o");
-        let status = if is_clang_cl {
+        // `is_msvc`, not `is_clang_cl`: cl.exe shares clang-cl's driver CLI, and
+        // taking the GNU branch made it read `-o` as its deprecated `/o`, so the
+        // object was written to the CWD as `_init_all.obj` instead of to
+        // `temp_dir`. The link then failed with `LNK1181: cannot open input file
+        // ..._init_all.o`. The sibling main-stub compile above already gates on
+        // `is_msvc`, which is why only this object went missing.
+        let status = if is_msvc {
             let mut cmd = std::process::Command::new(&cxx);
             cmd.arg("/c")
                 .arg("/O2")
@@ -1478,9 +1484,15 @@ int main(int argc, char** argv) {
         // clang-cl linker arguments are accumulated and emitted ONCE, after
         // every compiler argument, because `/link` consumes the rest of the
         // command line (see clang_cl_whole_archive_arg).
-        let mut clang_cl_link_args: Vec<String> = Vec::new();
+        // Accumulates arguments destined for the trailing `/link` group. Named for
+        // the MSVC *driver* convention, not for clang-cl specifically: cl.exe
+        // and clang-cl share this CLI exactly. Routing real cl.exe through the
+        // GNU `-Wl,` spelling instead was the Stage 2 link failure -- cl parses
+        // `-Wl,...` as its `/W` warning-level option and rejects the remainder
+        // with `D8021: invalid numeric argument`.
+        let mut msvc_link_args: Vec<String> = Vec::new();
 
-        if is_clang_cl {
+        if is_msvc {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {
                 cmd.arg(init);
@@ -1579,16 +1591,11 @@ int main(int argc, char** argv) {
                     // here -- `/INCLUDE` on a name with no definition anywhere
                     // is a hard unresolved-external link error, which is why
                     // this is safe only because of that provenance.
-                    if is_clang_cl {
+                    if is_msvc {
                         for name in &init_names {
-                            clang_cl_link_args.push(format!("/INCLUDE:{name}"));
+                            msvc_link_args.push(format!("/INCLUDE:{name}"));
                         }
-                        clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
-                    } else if is_msvc {
-                        for name in &init_names {
-                            cmd.arg(format!("-Wl,/INCLUDE:{name}"));
-                        }
-                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
+                        msvc_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else {
                         cmd.arg("-Wl,--whole-archive")
                             .arg(&archive_path)
@@ -1746,10 +1753,8 @@ int main(int argc, char** argv) {
                         // including the escape hatch, so the two platforms now
                         // agree.
                         if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
-                            if is_clang_cl {
-                                clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
-                            } else if is_msvc {
-                                cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                            if is_msvc {
+                                msvc_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
                             } else {
                                 cmd.arg("-Wl,--whole-archive");
                                 cmd.arg(runtime_lib);
@@ -1780,10 +1785,8 @@ int main(int argc, char** argv) {
                             // with nm on the real archive (`T rt_api_surface_extract`,
                             // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
                             for root in &roots {
-                                if is_clang_cl {
-                                    clang_cl_link_args.push(format!("/INCLUDE:{root}"));
-                                } else if is_msvc {
-                                    cmd.arg(format!("-Wl,/INCLUDE:{root}"));
+                                if is_msvc {
+                                    msvc_link_args.push(format!("/INCLUDE:{root}"));
                                 } else {
                                     cmd.arg(format!("-Wl,-u,{root}"));
                                 }
@@ -1889,10 +1892,8 @@ int main(int argc, char** argv) {
                         // repo's known rt_unwrap_or_trap SEGV class. Undefined
                         // symbols must still fail the link, and they do --
                         // LNK1120 still fires.
-                        if is_clang_cl {
-                            clang_cl_link_args.push("/FORCE:MULTIPLE".to_string());
-                        } else if is_msvc {
-                            cmd.arg("-Wl,/FORCE:MULTIPLE");
+                        if is_msvc {
+                            msvc_link_args.push("/FORCE:MULTIPLE".to_string());
                         } else {
                             cmd.arg("-Wl,--allow-multiple-definition");
                         }
@@ -1961,7 +1962,7 @@ int main(int argc, char** argv) {
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && !Self::entry_objects_require_sqlite(object_paths)?;
-        if is_clang_cl {
+        if is_msvc {
             for lib in &link_config.libraries {
                 if Self::should_omit_platform_library(lib, omit_unwind, omit_sqlite) {
                     continue;
@@ -2070,7 +2071,7 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "windows")]
-        if is_clang_cl && !strict_no_stub_fallback {
+        if is_msvc && !strict_no_stub_fallback {
             // Into the accumulator, NOT its own `/link`: `/link` consumes the
             // rest of the command line, so a second group is handed to the
             // linker as an option, answered with `LNK4044: unrecognized option
@@ -2093,9 +2094,7 @@ int main(int argc, char** argv) {
             // on the non-force path above, and SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1
             // remains the escape hatch. `/FORCE:MULTIPLE,UNRESOLVED` stays --
             // that is what makes the stub-fallback path tolerant.
-            clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
-        } else if is_msvc && !strict_no_stub_fallback {
-            cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
+            msvc_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         }
 
         if self.config.strip {
@@ -2104,11 +2103,9 @@ int main(int argc, char** argv) {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
-            if is_clang_cl {
-                clang_cl_link_args.push("/DEBUG:NONE".to_string());
-                clang_cl_link_args.push("/OPT:REF,ICF".to_string());
-            } else if is_msvc {
-                cmd.arg("-Wl,/DEBUG:NONE").arg("-Wl,/OPT:REF,ICF");
+            if is_msvc {
+                msvc_link_args.push("/DEBUG:NONE".to_string());
+                msvc_link_args.push("/OPT:REF,ICF".to_string());
             } else {
                 cmd.arg("-Wl,--gc-sections").arg("-Wl,-s");
             }
@@ -2116,9 +2113,9 @@ int main(int argc, char** argv) {
 
         // Single `/link` group, last: everything after it belongs to the
         // linker, so this must follow every compiler argument above.
-        if is_clang_cl && !clang_cl_link_args.is_empty() {
+        if is_msvc && !msvc_link_args.is_empty() {
             cmd.arg("/link");
-            cmd.args(&clang_cl_link_args);
+            cmd.args(&msvc_link_args);
         }
 
         if self.config.verbose {

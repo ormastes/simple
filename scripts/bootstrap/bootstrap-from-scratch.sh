@@ -1020,6 +1020,11 @@ archive_suffix=".a"
 # Empty off Windows: the expansion below then contributes no arguments at all,
 # leaving the Linux/macOS/FreeBSD invocations byte-identical.
 bootstrap_windows_abi_env=""
+bootstrap_windows_cc_env=""
+bootstrap_windows_cxx_env=""
+bootstrap_windows_include_env=""
+bootstrap_windows_lib_env=""
+bootstrap_windows_libpath_env=""
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -2063,7 +2068,22 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
     # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
     # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
-    bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
+    # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
+    # UNQUOTED at every use site so its two space-free assignments become
+    # separate arguments, but cc_abs routinely contains spaces (the stock MSVC
+    # location is C:/Program Files/Microsoft Visual Studio/...). Appending it
+    # there word-split "CC=C:/Program Files/.../cl.exe" into "CC=C:/Program"
+    # and "Files/.../cl.exe", and the latter fails the NAME=value check in
+    # bootstrap_stage3_env_assignment_names -- a pre-exec refusal that produced
+    # no build log at all. Carry them as single quoted words instead.
+    bootstrap_windows_cc_env="CC=${cc_abs}"
+    bootstrap_windows_cxx_env="CXX=${cc_abs}"
+    # Same sandbox reason as CC/CXX, and each may legitimately contain spaces
+    # and is therefore carried as its own single quoted word. LIBPATH is often
+    # empty; it is still passed so the assignment-name list is stable.
+    bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
+    bootstrap_windows_lib_env="LIB=${LIB:-}"
+    bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
     CC=${cc_abs}
     CXX=${cc_abs}
     export CC CXX
@@ -2778,6 +2798,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
@@ -2849,6 +2874,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
@@ -2890,12 +2920,46 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}"
-    stage2_env_names=$(bootstrap_stage3_env_assignment_names "$@") || return 1
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || return 1
-    [ "${stage2_env_names}" = "${stage2_expected_env_names}" ] || return 1
+    # These three guards are the ONLY pre-exec refusal on this path, and they
+    # used to be bare `|| return 1`. A mismatch therefore produced no build log
+    # and no reason anywhere, and the script's own failure diagnosis correctly
+    # but uselessly reported "UNDIAGNOSABLE: no reason was recorded for the
+    # refusal" across 8 empty logs. Fail closed exactly as before, but say what
+    # differed -- a fail-closed check that cannot be diagnosed is a dead end.
+    stage2_env_names=$(bootstrap_stage3_env_assignment_names "$@") || {
+      echo "error: stage2 env assignment names could not be derived" >&2
+      return 1
+    }
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || {
+      echo "error: no canonical stage2 env name list for ${PLATFORM}" >&2
+      return 1
+    }
+    [ "${stage2_env_names}" = "${stage2_expected_env_names}" ] || {
+      echo "error: stage2 env assignment names do not match the canonical list for ${PLATFORM}" >&2
+      printf '  actual:   %s\n' "${stage2_env_names}" >&2
+      printf '  expected: %s\n' "${stage2_expected_env_names}" >&2
+      for stage2_env_name in ${stage2_expected_env_names}; do
+        case " ${stage2_env_names} " in
+          *" ${stage2_env_name} "*) ;;
+          *) printf '  missing:  %s\n' "${stage2_env_name}" >&2 ;;
+        esac
+      done
+      for stage2_env_name in ${stage2_env_names}; do
+        case " ${stage2_expected_env_names} " in
+          *" ${stage2_env_name} "*) ;;
+          *) printf '  unexpected: %s\n' "${stage2_env_name}" >&2 ;;
+        esac
+      done
+      return 1
+    }
     bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
     "${stage2_native_log}" \
@@ -3271,6 +3335,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     ${bootstrap_windows_abi_env} \
+    ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+    ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+    ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+    ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+    ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \

@@ -2,7 +2,7 @@
 
 - **ID:** test_spec_tracking_docgen_orphaned_2026-06-16
 - **Severity:** P2 (tooling — stale tracking artifact, silently misleading)
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** test runner / docgen
 
 ## Symptom
@@ -44,3 +44,7 @@ stat -c '%y' doc/08_tracking/test/test-spec.md          # UNCHANGED — not rege
 
 Note: `app/spipe_docgen` (the `spipe-docgen` subcommand) is a *different* generator
 — it emits per-spec BDD docs to `doc/06_spec/`, not the `08_tracking` tracking doc.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

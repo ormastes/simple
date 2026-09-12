@@ -115,8 +115,6 @@ pub struct ForStmt {
     pub simd_requested: bool,
     /// Suspension for loop (for~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
-    /// Enumerate shorthand: `for i, item in items:` auto-wraps items with indices
-    pub auto_enumerate: bool,
     /// Loop invariants for verification
     /// ```simple
     /// for i in 0..n:

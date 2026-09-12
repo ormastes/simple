@@ -4,7 +4,7 @@
 - **Area:** test runner / `std.spec` pending reporting
 - **Severity:** high — this is a **false-green** mechanism. Every spec that
   parks work behind `pending("...")` currently inflates the passed count.
-- **Status:** OPEN.
+- **Status:** OPEN (partially fixed, re-verified 2026-09-12 — see Triage note: per-file verdict now separates skipped, but the outer aggregate "Results" line still double-counts skipped into passed)
 
 ## Symptom
 
@@ -72,3 +72,7 @@ counter, but the runner path used by `bin/simple test` does not consume it and
 
 Fixing this changes the reported totals of the whole suite, so it needs to be
 done deliberately rather than as a side effect of un-parking one spec.
+
+## Triage 2026-09-12
+
+Re-verified 2026-09-12 (Rule B, still reproduces in a modified form): `bin/simple test src/lib/gc_async_mut/pure/test/tensor_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) shows the per-file `SPEC FILE VERDICT ... executed=30 passed=27 failed=0 skipped=3` line now correctly separates the 3 `pending(...)` markers out of `passed`, but the final aggregate line `Results: 30 total, 30 passed, 0 failed, 3 skipped` still double-counts those 3 into `passed` (30+0+3=33 != 30 total) — the false-green risk this record describes has moved from the per-file verdict to the run-level aggregate, not been eliminated. Kept OPEN.

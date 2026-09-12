@@ -1,5 +1,7 @@
 # native-build worker leaks unboundedly in the seed interpreter's execution phase
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 > **CORRECTED 2026-09-06 — read the addendum at the bottom before acting on
 > anything below it.** The attribution in this record ("values allocated by the
 > interpreted program are never reclaimed"; the `HEAP_ALLOCATION_REGISTRY` /
@@ -1279,3 +1281,6 @@ with real numbers but is unexercised, because in this tree the collision
 work is not a working set; it is a defect.**
 would land in mmap, and any real reclamation would let glibc reuse instead of
   **zero callers** — the phase-boundary snapshot facility is dead code. The
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Inline-assembly colon form drops operand contracts
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open compiler-language defect, found during the privileged CPU SFFI removal.
@@ -32,3 +34,7 @@ block.
 The grammar fix must be compile-time only. It must not add runtime wrapper
 calls, allocation, lookup, dispatch, or instruction count. Memory clobbers must
 remain compiler barriers without emitting additional hardware instructions.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

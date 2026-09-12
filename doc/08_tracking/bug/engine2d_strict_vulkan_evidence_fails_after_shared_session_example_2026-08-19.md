@@ -58,3 +58,6 @@ Bisect which sub-state of the WM example (shared vulkan offscreen, shared
 metal session, or text/font evidence) flips the strict evidence, then either
 reset that state on engine shutdown or make the evidence check ignore
 process-level leftovers it should not depend on.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/02_integration/rendering/engine2d_embedded_surface_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

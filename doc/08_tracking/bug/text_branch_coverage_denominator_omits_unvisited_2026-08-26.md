@@ -1,5 +1,7 @@
 # Text-wide branch coverage lacks a retained all-owner closure receipt
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Partially resolved infrastructure; text/i18n/rendering closure remains open and blocks the requested aggregate 100% branch-coverage claim.
@@ -20,3 +22,7 @@ Use the existing compiler manifest for Simple owners and add the missing text/i1
 
 - Owner: text/i18n integration lane, with compiler coverage/tooling and backend owners.
 - Unblock: one retained aggregate names every owned file and branch denominator, rejects missing/stale owners, shows 100% reachable outcomes or reviewed exclusions per owner, merges native Rust/C evidence, and binds forced backend identity.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

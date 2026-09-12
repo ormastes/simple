@@ -4,7 +4,7 @@
 - **Component:** `src/lib/hardware/rv64gc_rtl` core (instruction execution) — DTB
   tree-walk path; surfaces via OpenSBI `fw_jump` boot on `soc_top_64`
 - **Severity:** Medium (model-only; the synthesizable RTL path to the FPGA is separate)
-- **Status:** Open — root cause localized to the core's libfdt tree-walk execution
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Verified root cause (2026-07-23, after machine-ID CSR fix `7035b46`)
 
@@ -71,3 +71,6 @@ a driver that loads fw_jump.bin@0 + soc_virt.dtb@0x8000000 into a 256 MiB
 `soc_top_64_run`, and dumps trap state + pc when max_pc stalls. Symbol resolution:
 `riscv64-unknown-elf-addr2line -f -e
 build/os/rv64_soc/opensbi-src/build/platform/generic/firmware/fw_jump.elf <pc>`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

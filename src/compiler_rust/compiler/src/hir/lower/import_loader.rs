@@ -29,6 +29,13 @@ thread_local! {
     ///
     /// Per-PROCESS only -- a `src/lib/**` edit is still picked up by the next
     /// run, so the "edit stdlib, no build needed" property is unchanged.
+    ///
+    /// Keyed by `normalize_path_key` (the interpreter loader's canonical key),
+    /// NOT by the raw resolved path. The repo reaches one physical file through
+    /// several spellings -- `src/std` is a symlink to `lib`, `src/compiler/common`
+    /// to `00.common`, and the resolver emits both relative and absolute forms --
+    /// and a raw key made each spelling its own unit: an extra read + full
+    /// re-parse per alias, and the same types registered twice into the lowerer.
     static IMPORTED_MODULE_AST: std::cell::RefCell<
         std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<simple_parser::ast::Module>>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
@@ -36,7 +43,8 @@ thread_local! {
 
 /// Read + parse an imported module, memoized per process. See `IMPORTED_MODULE_AST`.
 pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
-    if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned()) {
+    let key = crate::interpreter::normalize_path_key(path);
+    if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(&key).cloned()) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
         return hit;
     }
@@ -53,7 +61,7 @@ pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync
         }
         Err(_) => None,
     };
-    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(path.to_path_buf(), parsed.clone()));
+    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(key, parsed.clone()));
     parsed
 }
 
@@ -708,10 +716,13 @@ impl Lowerer {
 
         let mut imported_count = 0;
         for sibling_path in sibling_files {
-            if self.loaded_modules.contains(&sibling_path) {
+            // Same unit identity as `load_imported_types`: one physical file is one
+            // entry, whichever spelling the package scan produced.
+            let sibling_key = crate::interpreter::normalize_path_key(&sibling_path);
+            if self.loaded_modules.contains(&sibling_key) {
                 continue;
             }
-            self.loaded_modules.insert(sibling_path.clone());
+            self.loaded_modules.insert(sibling_key);
 
             let mut source = crate::read_trace::rts(file!(), line!(), &sibling_path).map_err(|e| {
                 LowerError::ModuleResolution(format!("Failed to read sibling module file {:?}: {}", sibling_path, e))
@@ -874,7 +885,12 @@ impl Lowerer {
         // Resolve module path to filesystem location
         let resolved = self.resolve_imported_module_path(resolver, current_file, module_path, target)?;
 
-        let import_key = (resolved.path.clone(), Self::import_target_cache_key(target));
+        // Identity of the UNIT, not of the spelling that reached it: `src/std/x.spl`
+        // and `src/lib/x.spl` are one file, and so are the relative and absolute
+        // forms of either. `import_stack` and `current_file` deliberately keep the
+        // raw path -- they feed cycle reports and `base_dir` resolution.
+        let unit_key = crate::interpreter::normalize_path_key(&resolved.path);
+        let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
             return Ok(());
         }
@@ -895,17 +911,17 @@ impl Lowerer {
         // graph is permanently empty and the check is a guaranteed `Ok(())`.
         // This is where the real graph is walked, so this is where the cycle is
         // observable.
-        if self.loaded_modules.contains(&resolved.path) {
+        if self.loaded_modules.contains(&unit_key) {
             self.record_import_cycle(&resolved.path);
             return Ok(());
         }
-        self.loaded_modules.insert(resolved.path.clone());
+        self.loaded_modules.insert(unit_key.clone());
         self.import_stack.push(resolved.path.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
             let result = self.load_types_from_smf(&resolved.path, target);
             self.import_stack.pop();
-            self.loaded_modules.remove(&resolved.path);
+            self.loaded_modules.remove(&unit_key);
             if result.is_ok() {
                 self.loaded_import_targets.insert(import_key);
             }
@@ -960,7 +976,7 @@ impl Lowerer {
 
         self.current_file = previous_file;
         self.import_stack.pop();
-        self.loaded_modules.remove(&resolved.path);
+        self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
             self.loaded_import_targets.insert(import_key);
         }
@@ -976,7 +992,16 @@ impl Lowerer {
     /// once per import target group, and reporting it many times would bury the
     /// distinct cycles.
     pub(super) fn record_import_cycle(&mut self, repeated: &Path) {
-        let Some(start) = self.import_stack.iter().position(|p| p == repeated) else {
+        // `loaded_modules` is keyed by canonical realpath while the stack keeps the
+        // raw spellings the reports print, so the position search has to compare
+        // identities, not strings -- otherwise a cycle closed through an alias
+        // spelling would go unnamed.
+        let repeated_key = crate::interpreter::normalize_path_key(repeated);
+        let Some(start) = self
+            .import_stack
+            .iter()
+            .position(|p| crate::interpreter::normalize_path_key(p) == repeated_key)
+        else {
             // `repeated` is in `loaded_modules` but not on the ordered stack.
             // That happens for the sibling-package scan, which marks modules
             // visited without pushing them; there is no cycle to name.
@@ -1130,6 +1155,45 @@ mod tests {
     use crate::test_helpers::create_test_project;
     use simple_parser::Parser;
     use std::fs;
+
+    /// Two spellings of ONE physical file are ONE loader unit.
+    ///
+    /// The repo reaches the same stdlib file through a symlinked directory
+    /// (`src/std` -> `lib`, `src/compiler/common` -> `00.common`) and through
+    /// both relative and absolute spellings. Keying the parse memo by the raw
+    /// path made each spelling its own unit: one extra read + full re-parse per
+    /// alias, and a second registration of the same types into the lowerer.
+    /// Object identity is the observable -- one unit means one `Arc`.
+    #[test]
+    fn alias_spellings_of_one_file_are_one_parsed_unit() {
+        let dir = create_test_project();
+        let real_dir = dir.path().join("pkg");
+        fs::create_dir_all(&real_dir).expect("create pkg dir");
+        let m = real_dir.join("types.spl");
+        fs::write(&m, "pub struct Aliased:\n    id: i64\n").expect("write module");
+
+        // `src/std` -> `lib` in the repo; the same shape here.
+        let link_dir = dir.path().join("pkg_alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("pkg", &link_dir).expect("symlink alias dir");
+        #[cfg(not(unix))]
+        return;
+
+        crate::interpreter::clear_module_cache_selective();
+
+        let direct = parsed_imported_module(&m).expect("direct spelling parses");
+        let via_symlink = parsed_imported_module(&link_dir.join("types.spl")).expect("symlink spelling parses");
+        let via_dotdot = parsed_imported_module(&real_dir.join(".").join("types.spl")).expect("dot spelling parses");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&direct, &via_symlink),
+            "symlinked spelling must reuse the same parsed unit, not re-parse the file"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&direct, &via_dotdot),
+            "`.`-relative spelling must reuse the same parsed unit, not re-parse the file"
+        );
+    }
 
     #[test]
     fn lowers_field_access_through_reexported_use_shim() {

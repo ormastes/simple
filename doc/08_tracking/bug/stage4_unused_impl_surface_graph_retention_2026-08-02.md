@@ -1,5 +1,7 @@
 # Stage 4 promotes unused implementation metadata graphs
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status and claim
 
 FIXED — claimed by `stage4_perf_sol_high` on 2026-08-02. The change is scoped
@@ -65,3 +67,7 @@ No candidate Stage-4 build was run: the final correctness cycle is the single
 authorized Stage-4 cycle, and its compiler does not yet contain this fix. A
 future generation comparison must not attribute that external cycle's RSS to
 this change.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

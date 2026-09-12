@@ -302,3 +302,6 @@ discriminator; it is not about file count.
 
 Neither fix is landed here: both touch other sessions' active files, and blocker 2 needs an audit
 of how wide the two-registry gap is rather than a single symbol patched in isolation.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/mcdc_probe_protocol_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

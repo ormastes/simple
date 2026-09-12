@@ -1,4 +1,5 @@
 # SimpleOS x86-32 process mapping readiness blockers — 2026-08-24
+**Status:** OPEN (unverified 2026-09-12)
 
 The authenticated ELF32/i386 metadata path is present, but filesystem-launched
 x86-32 execution must remain blocked before loader authority consumption.
@@ -79,3 +80,6 @@ x86-32 execution must remain blocked before loader authority consumption.
 Until those owners join the scheduler transaction,
 `executable_target_dispatch_v1` must retain
 `process_image_builder_ready = false` for canonical architecture `x86`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

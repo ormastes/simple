@@ -82,3 +82,43 @@ Re-run the drag repro above; PASS criteria:
    `drag_before.png`/`drag_after.png` window bounding boxes);
 3. a CGEvent click on the "Run" button increments the on-frame `Clicks` counter
    (`SIMPLE_EVT_LOG` shows `[widget-showcase] input left_button …`).
+
+## 2026-09-12 (Lane 4) — still OPEN, but the recorded root-cause direction is now partly stale
+
+Read-only re-check on Apple M4 at `origin/main` = `b9667d6584f`. Not patched:
+the remaining work is in the Rust winit runtime, outside this lane's file scope.
+
+Two of the three things the "Root-cause direction" section proposes are already
+done, so a future session must not re-do them:
+
+- **Activation policy Regular is ALREADY set.**
+  `src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_thread.rs:408`
+  builds the event loop `.with_activation_policy(ActivationPolicy::Regular)`
+  (import at `:19`). The claim that "a plain
+  NSApplicationActivationPolicyProhibited-equivalent process owns the window" is
+  therefore no longer accurate as written. Whether it takes effect for a process
+  launched through the throwaway `.app` is unverified.
+- **The generated bundle plist is clean.** `scripts/gui/macos-gui-run.shs`
+  writes no `LSUIElement` and no `LSBackgroundOnly` key
+  (grep: zero hits), so the bundle is not asking to be a background app.
+
+What is still missing, and is the exact remaining edit:
+
+1. `NSApp.activate(ignoringOtherApps:)` after the first window is mapped —
+   `with_activation_policy` alone sets the policy but does not make the app
+   frontmost/key, which is what the drag and click repros need.
+2. LaunchServices registration. The bundle id is `com.simple.gui.run.$$` under
+   `/var/folders` and is never `lsregister`-ed, which is why computer-use
+   `request_access(["SimpleGui"])` answers `not_installed`. Deliberately NOT
+   added here: registering throwaway per-PID bundle ids pollutes the
+   LaunchServices database, so the fix belongs with a stable bundle id, not with
+   an `lsregister -f` call on a `$$`-suffixed bundle.
+
+The regression test in this record (drag delta, System Events window count,
+Clicks counter) is unchanged and remains the acceptance bar. It was not run this
+session: with the activation edit not made, a run could only re-confirm the
+recorded FAIL, and the session's GUI budget went to the launcher defects fixed in
+`doc/08_tracking/bug/macos_gui_run_sigpipe_141_and_stale_winit_marker_gate_2026-09-06.md`
+(RESOLVED), which had to land first — until this week the launcher exited 141
+after every successful launch, so the drag repro could not even report its own
+exit status honestly.

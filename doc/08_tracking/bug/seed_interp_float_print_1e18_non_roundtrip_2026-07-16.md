@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-16
 - **Component:** Rust seed interpreter float formatting (`bin/simple run`)
-- **Status:** OPEN (seed-side; not fixable from pure-Simple source)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Found by:** native-build correctness campaign, parity case `float_edges`
   in `scripts/check/check-native-seed-parity.shs`
 
@@ -39,3 +39,6 @@ shortest-round-trip.
 `-0.0NaN0.000000000000000001`) in `check-native-seed-parity.shs` on 2026-07-16.
 Fix belongs in the seed's f64-to-string (shortest round-trip, e.g. Ryu/`{}`
 formatting) when the seed is next rebuilt.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

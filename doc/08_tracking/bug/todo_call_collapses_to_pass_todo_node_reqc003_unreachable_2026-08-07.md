@@ -1,5 +1,7 @@
 # `todo(...)` parses into the same AST node as `pass_todo(...)`; REQC003's dedicated branch is unreachable from real source
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-07 · **Severity:** low (coverage gap, not silent-wrong-data — a
 weak `todo(...)` still gets flagged, just as REQC001 instead of REQC003)
 **Found by:** WP-7 of `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
@@ -98,3 +100,7 @@ applied unilaterally here.
 
 **Verdict: BLOCKED (real fix is in `10.frontend`, out of scope for this worker).**
 No code change made in this pass.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

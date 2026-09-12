@@ -1,7 +1,7 @@
 # expect(a == b).to_equal(false) comparison-matcher footgun
 
 **Date:** 2026-07-17
-**Status:** PHASE-1 SWEPT — parse-aware transformer rewrote 1,386 simple cases in 321 files (2026-07-17); ~1,360 complex lines remain flagged by the checker
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -67,3 +67,6 @@ deployed binary's rt_cli_arg_count gap; seed runner cannot compile the
 pure-Simple test-runner) — A/B confirmed the failure is byte-identical for
 origin and swept content, i.e. pre-existing and unrelated. Remaining
 ~1,360 complex lines: run the checker for the current list.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

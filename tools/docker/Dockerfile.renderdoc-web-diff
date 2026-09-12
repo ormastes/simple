@@ -1,0 +1,48 @@
+# Pinned image for the RenderDoc web differential capture lane.
+#
+# Contract, enforced by scripts/setup/prepare-renderdoc-web-diff-container.shs:
+#   * base is parameterized (ARG UBUNTU_BASE) and packages come from a pinned
+#     snapshot.ubuntu.com date (ARG UBUNTU_SNAPSHOT) -- not a rolling mirror;
+#   * mesa-vulkan-drivers IS REQUIRED here (lavapipe is the whole point). This
+#     is the opposite of Dockerfile.render-8k80-nvidia, which rejects Mesa
+#     because it wants the NVIDIA ICD injected by the container toolkit;
+#   * the repository is NEVER COPYed in -- it is bind-mounted read-only at /repo
+#     by the --run mode, so the image never carries a stale source snapshot.
+ARG UBUNTU_BASE=ubuntu:24.04
+FROM ${UBUNTU_BASE}
+
+ARG UBUNTU_SNAPSHOT=20260901T000000Z
+ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+
+LABEL org.simple-lang.lane="renderdoc-web-diff"
+LABEL org.simple-lang.driver-model="mesa-lavapipe-software-icd"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN printf 'deb [trusted=yes] https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT} noble main universe\n' \
+      > /etc/apt/sources.list.d/snapshot.list \
+    && printf 'deb [trusted=yes] https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT} noble-updates main universe\n' \
+      >> /etc/apt/sources.list.d/snapshot.list \
+    && rm -f /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        mesa-vulkan-drivers \
+        libvulkan1 \
+        vulkan-tools \
+        renderdoc \
+        xvfb \
+        ca-certificates \
+        curl \
+        fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /tmp/chrome.deb "${CHROME_DEB_URL}" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+    && rm -f /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Software Vulkan only; no GPU is assumed to exist.
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+WORKDIR /repo

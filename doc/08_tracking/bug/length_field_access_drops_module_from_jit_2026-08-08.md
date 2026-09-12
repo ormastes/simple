@@ -1,5 +1,7 @@
 # Field-style `.length` (and any unlowered field access on a builtin container) drops the whole module out of JIT
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-08
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -116,3 +118,6 @@ class cannot be bound even by fully-qualified import, so **no spec can guard
 it**. (Note: nothing binds at all — this is NOT a wrong-binding-to-a-same-named-
 symbol defect.) Its `Environment` is now structurally identical to the live
 `backend/env.spl` `Environment`, so deletion loses nothing.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

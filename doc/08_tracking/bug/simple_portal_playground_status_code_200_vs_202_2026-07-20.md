@@ -1,4 +1,5 @@
 # `simple_portal` server: authorized playground run returns `200 OK` instead of expected `202 Accepted`
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/app/simple_portal/simple_portal_server_spec.spl -> 8 passed, 1 failed, still reproduces)
 
 **Date:** 2026-07-20
 **Component:** `src/app/simple_portal/*` server (`/api/playground/run` route)
@@ -37,3 +38,6 @@ handler.
 Spec left unmodified — `202` vs `200` for an async-flavored playground-run
 endpoint is a real protocol-contract question, not an obvious rename;
 flagged for the `simple_portal` owner to confirm the intended status code.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/simple_portal/simple_portal_server_spec.spl` on the deployed seed; 1 of 9 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

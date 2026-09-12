@@ -1,7 +1,7 @@
 # char_from_code / text_dot_from_char_code drop all non-ASCII codepoints
 
 - **Filed:** 2026-07-20
-- **Status:** Unicode encoding fix present in source (2026-07-20); native ABI
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
   convergence is **held, not admitted** (reconciled 2026-08-16). Local commit
   `20b37d580c03` routes Rust codegen to the canonical symbol but is not on
   `origin/main`; the hosted-provider/legacy-alias correction described below
@@ -225,3 +225,6 @@ those inputs; they must not return NIL or silently truncate the scalar.
   scalars must produce an allocated empty text, and the legacy
   `text_dot_from_char_code` export must delegate to `rt_char_from_code` rather
   than becoming a second implementation.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

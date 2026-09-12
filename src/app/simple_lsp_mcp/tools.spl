@@ -9,6 +9,8 @@ use app.io.minimal_runtime_ops.{process_run, process_run_timeout, process_run_bo
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use .session_state.{lsp_record_location, lsp_resolve_requester}
+use .lsp_command_metrics.{lsp_note_command_start}
+use .lsp_query_inproc.{lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1}
 use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
@@ -35,6 +37,7 @@ fn command_failure(code: i64, stderr: text, stdout: text) -> text:
     prefix + ": " + detail
 
 fn run_command_text(binary: text, args: [text]) -> text:
+    lsp_note_command_start()
     val (stdout, stderr, code) = process_run_bounded(
         binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
@@ -42,7 +45,14 @@ fn run_command_text(binary: text, args: [text]) -> text:
         return clean
     command_failure(code, stderr, clean)
 
+# NOTE for lsp_command_bounded_spec: this function no longer starts a command
+# unconditionally. A query the server can answer from a workspace file it can
+# already read is answered IN PROCESS (zero child starts); everything else still
+# goes through the single bounded command owner below.
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
+    val inproc = lsp_query_inproc_dispatch_v1(subcmd, file, line0 + 1, char0 + 1)
+    if inproc.handled:
+        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:

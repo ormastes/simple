@@ -4,7 +4,7 @@
 - **Area:** `src/os/crypto/ed25519_ops.spl` (pure-Simple Ed25519 point arithmetic)
 - **Severity:** high (timing side-channel on the secret-scalar code path — the
   exact class of bug previously fixed and guarded against).
-- **Status:** OPEN — do NOT fix from a test-cluster triage pass; flagging with
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   full evidence for a follow-up implementation session.
 
 ## Symptom
@@ -109,3 +109,6 @@ resolves the T_SHA_ABC value mismatch, or whether they are independent.
 ## Affected specs
 
 - `test/unit/lib/crypto/ed25519_ct_property_spec.spl`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

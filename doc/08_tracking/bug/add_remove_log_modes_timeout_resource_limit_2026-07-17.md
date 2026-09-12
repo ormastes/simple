@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17  
 **Lane:** L5 (test/02_integration and test/integration)  
-**Status:** ROOT CAUSE IDENTIFIED - Interpreter load time with 600+ files under 120s runner limit
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 
 ## Symptom
 Test runner times out after 120 seconds when attempting to run `test/02_integration/app/add_remove_log_modes_spec.spl` and `test/integration/app/add_remove_log_modes_spec.spl`.
@@ -60,3 +60,6 @@ added for readers. Both files parse clean (fix --dry-run, 0 errors). Regular
 section runs will no longer die on this spec; the slow lane gives the 16
 interpreter spawns adequate budget. Durable improvement (retarget spec to
 compiled binaries once redeploy lands) remains listed above as option 1.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

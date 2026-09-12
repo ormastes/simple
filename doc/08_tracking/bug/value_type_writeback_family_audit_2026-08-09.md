@@ -1,5 +1,7 @@
 # Value-type write-back family audit (2026-08-09)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Follow-up sweep to `e5bc26ced33`, which fixed two defects in
 `src/compiler/70.backend/backend/env.spl` (doubly-indexed assignment target;
 descending inclusive range). This doc enumerates the two bug FAMILIES across
@@ -155,3 +157,7 @@ Completed 2026-08-10 in commit `0e8a8cc87bc94e22c90ceb7eaab1e50aec668083`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

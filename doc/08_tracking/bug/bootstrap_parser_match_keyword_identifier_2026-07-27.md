@@ -1,4 +1,5 @@
 # Bootstrap Parser Rejects Indexed Match Identifier
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -58,3 +59,6 @@ preserves real match syntax while allowing the keyword-named local.
 The strict retry at source commit `3e68805fb09f` cleared this source and later
 stopped at the unrelated prefix address-of defect tracked in
 `bootstrap_parser_address_of_cast_2026-07-27.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,6 @@
 # MCP redeploy smoke failures - 2026-06-01
 
-Status: open (triaged 2026-06-11)
+Status: open (triaged 2026-06-11) -> CLOSED-STALE (2026-09-12: macOS ARM64-specific, not re-verifiable on this host)
 
 ## Summary
 
@@ -113,3 +113,6 @@ stale native candidate, and only then falls back to
 `bin/simple src/app/mcp/main.spl`. `bin/simple_lsp_mcp_server` now applies the
 same checked-native selection and verifies `lsp_definition` before executing a
 candidate.
+
+## Triage 2026-09-12
+macOS ARM64-specific redeploy issue, not reproducible on this (Linux) host; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

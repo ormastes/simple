@@ -71,3 +71,6 @@ bin/simple test test/03_system/gui/web_css/web_css_visibility_containment_spec.s
 
 - `test/03_system/gui/web_css/web_css_visibility_containment_spec.spl`
   (`it "contain: size sizes the box independent of content"`, RED by design)
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/03_system/gui/web_css/web_css_visibility_containment_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Mirror BOTH-RED population: every failure traces to an already-documented landmine
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Lane MIRR2**, run inline by the orchestrator after two subagent attempts failed
 (the first deadlocked on a background monitor, the second was halted on an API
 quota).
@@ -111,3 +113,6 @@ sample it is a small number of engine defects projected across many specs. Fixin
 `.?` lowering alone would likely turn a large fraction of the ~200 projected
 BOTH-RED specs green. That is a far better investment than per-spec repair, and it
 argues for fixing the engine before spending any more lanes on mirror triage.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

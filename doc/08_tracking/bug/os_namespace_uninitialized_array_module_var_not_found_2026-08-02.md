@@ -1,4 +1,5 @@
 # `os.*` module-level uninitialized array `var` is unresolvable
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/os/os_storage_spec.spl -> 0 passed, 1 failed, still reproduces)
 
 Filed 2026-08-02. Base `a19ce60e1d`. Engine: Rust seed (`bin/simple`), interpreter path.
 
@@ -131,3 +132,6 @@ the kernel IPC layer sat behind one uninvoked function.
    does to validate.
 2. Re-run `os_storage_spec` wired up and confirm its 21 assertions pass.
 3. Do not mass-add initializers as a substitute for the fix.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/os/os_storage_spec.spl` on the deployed seed; 1 of 1 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

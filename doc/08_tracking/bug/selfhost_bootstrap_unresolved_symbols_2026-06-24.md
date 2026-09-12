@@ -1,4 +1,5 @@
 # Self-host bootstrap broken: stage4 (seed-built) has 548 unresolved symbols
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-06-24
 **Area:** bootstrap / self-hosting / native-build (cranelift) codegen
@@ -176,3 +177,6 @@ exit 0 even when it prints a diagnostic.
   `cargo +nightly --features wasm-wasi` (LLVM path) — see
   `wasm_cli_emit_no_artifact_2026-05-30.md` — but that is the Rust seed, not the
   pure-Simple compiler.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

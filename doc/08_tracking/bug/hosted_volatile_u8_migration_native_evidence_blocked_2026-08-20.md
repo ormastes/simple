@@ -1,5 +1,7 @@
 # Hosted volatile-u8 migration native evidence blocked — 2026-08-20
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 HOLD. Production-path correctness is implemented in isolated base
@@ -81,3 +83,7 @@ compiler/runtime and run each acceptance check once:
 
 Only an envelope containing all five green rows may say GO. Until then the
 verdict is HOLD.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

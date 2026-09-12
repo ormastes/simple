@@ -1,5 +1,7 @@
 # HTTP async SSR disconnect probe missing
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Implemented prerequisite. Async-handler lifecycle cancellation now observes a
@@ -66,3 +68,7 @@ normal driver iteration.
   non-consuming peek; existing lifecycle deadlines remain authoritative there.
 - A live delayed-SSR disconnect timing run still belongs to the admitted native
   web-server gate; this prerequisite no longer blocks that test.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

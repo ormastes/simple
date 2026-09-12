@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ; plan: doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ; architecture: doc/04_architecture/compiler/mdsoc_architecture_tobe.md ; design: doc/05_design/chromium_web_renderer_primitive_differential.md
+#
+# Pins the two classification rules of the RenderDoc web capture lane
+# (scripts/check/check-renderdoc-web-capture-lane.shs). The shell lane carries a
+# twin of these rules so a Linux runner needs no Simple binary; this spec is the
+# authority the twin must agree with.
+#
+# Runtime boundary decision (spipe.md § file/process/env I/O):
+#   runtime_need:      none -- both rules are pure text classification
+#   facade_checked:    n/a
+#   chosen_path:       pure-function
+#   rejected_shortcuts: shelling out to the .shs lane (needs RenderDoc, Chrome
+#                      and a Vulkan ICD, none of which exist on a dev Mac, so
+#                      the spec would be skipped exactly where it matters)
+
+use std.spec.step
+
+use std.spec.*
+use app.ui.renderdoc_capture_lane_receipt.{
+    classify_chrome_vulkan_log, classify_rdc_magic, receipt_verdict, receipt_exit_code}
+
+val CHROME_LOG_WITH_ANGLE = "[INFO:gpu_info_collector.cc(80)] GL_VENDOR: Google Inc. (Mesa)\n[INFO:gpu_info_collector.cc(81)] GL_RENDERER: ANGLE (Mesa, llvmpipe (LLVM 15.0.7), Vulkan 1.3.255)\n"
+val CHROME_LOG_WITHOUT_ANGLE = "[INFO:gpu_info_collector.cc(80)] GL_VENDOR: Google Inc. (Mesa)\n"
+val CHROME_LOG_ANGLE_FAILED = "GL_RENDERER: ANGLE (Mesa, llvmpipe, Vulkan 1.3)\n[ERROR] Exiting GPU process due to errors during initialization\n"
+val CHROME_LOG_REQUEST_NOT_FOUND = "Requested GL implementation (gl=none,angle=vulkan) not found in allowed implementations\n"
+
+describe "renderdoc capture lane receipt classification":
+    it "accepts a Chrome log that proves ANGLE initialised on Vulkan":
+        expect(classify_chrome_vulkan_log(CHROME_LOG_WITH_ANGLE)).to_equal("pass")  # oracle: positive ANGLE-on-Vulkan renderer line is the only proof accepted
+
+    it "reports vulkan-angle-unavailable when the ANGLE line is absent":
+        expect(classify_chrome_vulkan_log(CHROME_LOG_WITHOUT_ANGLE)).to_equal("vulkan-angle-unavailable")  # oracle: absence of proof is never a pass
+
+    it "reports vulkan-angle-unavailable for an empty log":
+        expect(classify_chrome_vulkan_log("")).to_equal("vulkan-angle-unavailable")  # oracle: no log at all cannot be a pass
+
+    it "lets an ANGLE failure marker override an earlier positive line":
+        expect(classify_chrome_vulkan_log(CHROME_LOG_ANGLE_FAILED)).to_equal("vulkan-angle-unavailable")  # oracle: GPU process init failure invalidates the renderer line
+
+    it "treats a refused angle=vulkan request as unavailable":
+        expect(classify_chrome_vulkan_log(CHROME_LOG_REQUEST_NOT_FOUND)).to_equal("vulkan-angle-unavailable")  # oracle: the repo's existing gui-web-2d marker
+
+    it "accepts only the RDOC capture magic":
+        expect(classify_rdc_magic("RDOC")).to_equal("pass")  # oracle: RenderDoc .rdc files begin with RDOC
+        expect(classify_rdc_magic("XXXX")).to_equal("fail")  # oracle: any other magic is not a capture
+        expect(classify_rdc_magic("")).to_equal("fail")  # oracle: a missing capture is a failure, not a skip
+
+    it "passes only when every checked page captured on both sides":
+        expect(receipt_verdict(2, 2, 0)).to_equal("PASS — 2 page(s) captured on both sides")  # oracle: PASS states the non-vacuous count
+
+    it "fails when any page failed":
+        expect(receipt_verdict(2, 1, 1).starts_with("FAIL —")).to_equal(true)  # oracle: a partial lane is not a pass
+
+    it "errors when nothing was checked":
+        expect(receipt_verdict(0, 0, 0)).to_equal("ERROR — nothing was checked")  # oracle: a zero-page run is ERROR, never PASS
+
+    it "maps each verdict to its exit code":
+        expect(receipt_exit_code(receipt_verdict(1, 1, 0))).to_equal(0)  # oracle: PASS exits 0
+        expect(receipt_exit_code(receipt_verdict(1, 0, 1))).to_equal(1)  # oracle: FAIL exits 1
+        expect(receipt_exit_code(receipt_verdict(0, 0, 0))).to_equal(2)  # oracle: ERROR exits 2

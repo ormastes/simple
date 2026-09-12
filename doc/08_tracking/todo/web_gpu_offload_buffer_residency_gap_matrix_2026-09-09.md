@@ -1,5 +1,7 @@
 # Web/2D GPU offload and residency gap matrix
 
+Status: OPEN (unverified 2026-09-12)
+
 Date: 2026-09-09. Static audit of the current pure-Simple web Draw IR and
 Engine2D Vulkan paths. No Chrome-library build or device benchmark was run in
 this lane.

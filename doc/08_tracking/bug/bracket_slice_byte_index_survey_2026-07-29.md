@@ -1,6 +1,6 @@
 # Bracket-slice (`s[i:j]`) byte-index survey — file classification, 2026-07-29
 
-**Status:** survey only, no fixes. **Component:** repo-wide, `src/`.
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Follows on from:** `doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md`
 § "bracket-slice (`s[i:j]`) survey gap" (enumerated **1,193 sites / 393 files**,
 top-concentration table + a domain-guess classification of ~20 files, not
@@ -364,3 +364,6 @@ which are their output after the manual corrections documented in
 ## Landing
 
 Survey doc only — this file. No source changes. No gate/budget files touched.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

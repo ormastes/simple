@@ -1,0 +1,173 @@
+#!/bin/sh
+# Provision a Linux host (GitHub Actions ubuntu-latest or a container) with the
+# three things the RenderDoc web capture lane needs and CANNOT fake:
+#
+#   * Mesa lavapipe  -- a software Vulkan ICD (llvmpipe). RenderDoc captures it
+#                       fine, which is what makes a GPU-less runner usable.
+#   * RenderDoc      -- distro package when present, else the repo's own
+#                       scripts/setup/build-renderdoc-linux-vulkan-only.shs.
+#   * Google Chrome  -- stable .deb, for the Vulkan-backed browser side.
+#
+# Fail-closed: every readiness key is present|missing, absence of a tool is
+# never laundered into presence, and the last stdout line is the verdict.
+#
+# Usage:
+#   sh scripts/setup/setup-renderdoc-linux-lavapipe.shs [--check] [--no-chrome]
+#
+# --check installs nothing and only reports readiness.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+CHECK_ONLY=0
+WANT_CHROME=1
+for arg in "$@"; do
+    case "$arg" in
+        --check) CHECK_ONLY=1 ;;
+        --no-chrome) WANT_CHROME=0 ;;
+        *) echo "usage: $0 [--check] [--no-chrome]" >&2; exit 2 ;;
+    esac
+done
+
+# Pinned apt package set. Versions are NOT pinned to literal strings here: the
+# ubuntu-latest image rolls, and a stale literal would make the lane
+# unrunnable rather than reproducible. The container twin
+# (scripts/setup/prepare-renderdoc-web-diff-container.shs) is where the
+# snapshot pin lives -- that is the reproducible surface.
+APT_PACKAGES="mesa-vulkan-drivers libvulkan1 vulkan-tools xvfb ca-certificates"
+CHROME_DEB_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+
+is_linux() { [ "$(uname -s)" = Linux ]; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+sudo_run() {
+    if [ "$(id -u)" = 0 ]; then
+        "$@"
+    elif have sudo; then
+        sudo -n "$@"
+    else
+        return 1
+    fi
+}
+
+install_packages() {
+    sudo_run apt-get update -qq || return 1
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive sudo_run apt-get install -y --no-install-recommends $APT_PACKAGES || return 1
+    # renderdoc is packaged on recent Ubuntu; a missing package is not fatal
+    # here because the repo can build its own Vulkan-only RenderDoc.
+    DEBIAN_FRONTEND=noninteractive sudo_run apt-get install -y --no-install-recommends renderdoc || true
+    return 0
+}
+
+install_chrome() {
+    have google-chrome && return 0
+    deb="$(mktemp -d)/chrome.deb"
+    if have curl; then
+        curl -fsSL -o "$deb" "$CHROME_DEB_URL" || return 1
+    elif have wget; then
+        wget -q -O "$deb" "$CHROME_DEB_URL" || return 1
+    else
+        return 1
+    fi
+    DEBIAN_FRONTEND=noninteractive sudo_run apt-get install -y "$deb" || return 1
+    return 0
+}
+
+build_renderdoc_if_needed() {
+    [ -x "$ROOT/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ] && return 0
+    have renderdoccmd && return 0
+    [ -f "$ROOT/scripts/setup/build-renderdoc-linux-vulkan-only.shs" ] || return 1
+    sh "$ROOT/scripts/setup/build-renderdoc-linux-vulkan-only.shs" || return 1
+    return 0
+}
+
+# The repo's capture helpers point VK_LAYER_PATH at a manifest they rewrite
+# from "$RDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json". The
+# distro package puts that file under /usr/share instead, so without this the
+# loader is pointed at an empty directory while VK_INSTANCE_LAYERS still
+# demands the layer -> VK_ERROR_LAYER_NOT_PRESENT and every capture dies.
+# Materialise a home tree with the expected layout over the distro files.
+materialize_renderdoc_home() {
+    home="$ROOT/build/tools/renderdoc"
+    [ -x "$home/bin/renderdoccmd" ] && return 0
+    cmd="$(command -v renderdoccmd 2>/dev/null || true)"
+    [ -n "$cmd" ] || return 1
+    lib="$(ls /usr/lib/*/librenderdoc.so /usr/lib/librenderdoc.so 2>/dev/null | sed -n 1p)"
+    layer="$(ls /usr/share/vulkan/implicit_layer.d/renderdoc_capture.json 2>/dev/null | sed -n 1p)"
+    [ -n "$lib" ] && [ -n "$layer" ] || return 1
+    mkdir -p "$home/bin" "$home/lib" "$home/etc/vulkan/implicit_layer.d"
+    ln -sf "$cmd" "$home/bin/renderdoccmd"
+    ln -sf "$lib" "$home/lib/librenderdoc.so"
+    # The helper rewrites the library path inside the manifest, so copy it.
+    cp -f "$layer" "$home/etc/vulkan/implicit_layer.d/renderdoc_capture.json"
+    return 0
+}
+
+renderdoc_status() {
+    if have renderdoccmd \
+        || [ -x "$ROOT/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ] \
+        || [ -x "$ROOT/build/tools/renderdoc/bin/renderdoccmd" ] \
+        || { [ "${RDOC_HOME:-}" != "" ] && [ -x "${RDOC_HOME}/bin/renderdoccmd" ]; }; then
+        echo present
+    else
+        echo missing
+    fi
+}
+
+lavapipe_status() {
+    have vulkaninfo || { echo missing; return; }
+    # Read the exit status into a variable on the line AFTER the invocation;
+    # a pipeline's $? belongs to grep, which has produced false greens here.
+    out="$(vulkaninfo --summary 2>/dev/null)"
+    rc=$?
+    [ "$rc" = 0 ] || { echo missing; return; }
+    if printf '%s\n' "$out" | grep -qiE 'llvmpipe|lavapipe'; then
+        echo present
+    else
+        echo missing
+    fi
+}
+
+chrome_status() {
+    if have google-chrome || have google-chrome-stable || have chromium-browser || have chromium; then
+        echo present
+    else
+        echo missing
+    fi
+}
+
+if [ "$CHECK_ONLY" = 0 ]; then
+    if ! is_linux; then
+        echo "renderdoc_lavapipe_setup_status=blocked reason=not-linux" >&2
+        echo "renderdoc_status=missing"
+        echo "lavapipe_status=missing"
+        echo "chrome_status=missing"
+        echo "ERROR — nothing was checked (setup requires Linux; host is $(uname -s))"
+        exit 2
+    fi
+    install_packages || echo "renderdoc_lavapipe_apt=failed" >&2
+    build_renderdoc_if_needed || echo "renderdoc_lavapipe_build=failed" >&2
+    materialize_renderdoc_home || echo "renderdoc_lavapipe_home=not-materialized" >&2
+    [ "$WANT_CHROME" = 1 ] && { install_chrome || echo "renderdoc_lavapipe_chrome=failed" >&2; }
+fi
+
+RD="$(renderdoc_status)"
+LP="$(lavapipe_status)"
+CH="$(chrome_status)"
+echo "renderdoc_status=$RD"
+echo "lavapipe_status=$LP"
+echo "chrome_status=$CH"
+
+checked=3
+missing=0
+for v in "$RD" "$LP" "$CH"; do
+    [ "$v" = present ] || missing=$((missing + 1))
+done
+if [ "$missing" -gt 0 ]; then
+    echo "FAIL — $checked readiness key(s) checked, $missing missing"
+    exit 1
+fi
+echo "PASS — $checked readiness key(s) checked, all present"
+exit 0

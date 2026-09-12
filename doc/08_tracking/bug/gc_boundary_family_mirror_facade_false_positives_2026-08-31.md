@@ -1,7 +1,7 @@
 # gc-warning: family-mirror re-export shims reported as layering violations
 
 - Filed: 2026-08-31
-- Status: PARTIALLY FIXED (pure-Simple rule fixed; seed emitter unfixed — see "Seed half")
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/common/crypto/bytes_to_hex_guard_spec.spl` now PASSes)
 - Component: `35.semantics/gc_boundary_check.spl`, seed `interpreter_module/{module_loader,path_resolution}.rs`
 
 ## Symptom (measured)
@@ -113,3 +113,6 @@ Until a seed is rebuilt, the observed count stays 30.
 | `[gc-warning]` (seed emitter, frozen) | 30 | 30 |
 | `[use-warning]` manifest symbol loss | 2 | 0 |
 | spec result | 3 total, 3 passed, 0 failed | 3 total, 3 passed, 0 failed |
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/crypto/bytes_to_hex_guard_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

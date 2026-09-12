@@ -2,7 +2,7 @@
 
 - **ID:** tuple_destructuring_does_not_bind_2026-07-27
 - **Reported by:** lane FSDICT (LLVM/rustc port specs), root-caused by lane TUPLE
-- **Status:** OPEN — diagnosis complete, fix NOT applied (live lane GFIX owns `src/compiler_rust/**`)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** HIGH (silent wrong behaviour on the default engine; misleading error on the interpreter)
 - **Compiler tree:** `src/compiler_rust/**` (Rust seed — what `bin/simple` currently is)
 
@@ -267,3 +267,7 @@ as a 3-tuple.
 
 `test/01_unit/compiler/tuple_destructuring_spec.spl` — locks in the working flat
 cases (t1-t4, t7) and documents the struct case as pending until the fix lands.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1,5 +1,7 @@
 # Test-tree divergence — sample 10 (15 pairs, `NR%65==10`)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Tenth sampling pass over `scripts/check/test_tree_divergence_baseline.txt`
 (956 lines), continuing the reconciliation series (samples 1-9 covered
 residues 0, offset-33-step-65, `%65==50`, `%65==15`, `%65==5`, `%65==45`,
@@ -115,3 +117,7 @@ actual implementation, over shadow's stale/wrong assertions):
   docstring says `a0` is explicitly NOT used for that (stack-based ABI).
 - **`app/todo/todo_parser_spec.spl`** — shadow's extra `use tooling.TodoItem.*`
   import didn't resolve, breaking an otherwise-trivial spec.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

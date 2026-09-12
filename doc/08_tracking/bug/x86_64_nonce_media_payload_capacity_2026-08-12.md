@@ -1,5 +1,7 @@
 # x86_64 nonce media exceeds configured FAT image capacity
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Source fix present; fresh build/live proof pending. The 2026-08-12 rebuild session exhausted three distinct capacity cycles
@@ -53,3 +55,7 @@ Start a guarded fresh session through:
 ```bash
 bin/codex exec -C /home/ormastes/dev/pub/simple 'Resume doc/08_tracking/bug/x86_64_nonce_media_payload_capacity_2026-08-12.md. Use the admitted pure-Simple compiler and current explicit-only payload selection. Run exactly one `sh scripts/check/rebuild-sosix-qemu-media.shs --run --rows x86_64`; if and only if it succeeds, run exactly one canonical Linux x86_64 matrix/QEMU row with a fresh nonce. Retain build, image, serial, hashes, and capacity receipt. Stop after either failure; do not resize or retry.'
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

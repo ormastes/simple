@@ -1,5 +1,7 @@
 # WM evidence lane: source-hash gate trips on a foreign session's bulk `src/lib` write
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 **FIXED 2026-08-09** in `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
@@ -166,3 +168,7 @@ is the very defect under repair.
 Of the six foreign-written files named in the Evidence section above, the two
 under `gpu/engine2d/` and `gpu/browser_engine/` are exactly the class the new set
 excludes; none of the six is reachable from the WM entry's import closure.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

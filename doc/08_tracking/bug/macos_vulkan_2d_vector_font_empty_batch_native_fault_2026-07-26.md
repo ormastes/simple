@@ -404,3 +404,36 @@ is produced and before/while pixel-bearing `SfntGlyfBitmap`, tuple, and
 `GlyphBitmap?` results are published. The next fix should preserve the
 owner-local parsing path and publish coverage through a raw scalar descriptor
 or owner-local void copy, without duplicating parse work in `get_glyph`.
+
+## 2026-09-12 (Lane 4) — scope correction; still OPEN, no new producer cycle spent
+
+Read-only re-check on Apple M4 at `origin/main` = `b9667d6584f`.
+
+**Scope correction.** `doc/03_plan/infra/macos_open_bugs_fix_lanes_2026-09-12.md`
+files this item under `src/os/compositor/host_compositor_core.spl`. That is wrong
+and would have sent a session to the wrong file: that path is named nowhere in
+this record, and the empty-batch path actually lives in
+`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl` plus the shared
+producers `src/lib/gc_sync_mut/text_layout/font_renderer.spl` and
+`src/lib/gc_async_mut/text_layout/font_renderer.spl` (`FontRenderBatch` /
+`_stage_batch`). `backend_vulkan_font*.spl` is owned by another agent (F21) as of
+this date and was not edited.
+
+**No cycle 22 was spent, deliberately.** Cycles 1-21 above established that the
+fault is in NATIVE codegen (nil receiver, aggregate/tuple return transport). This
+host can only run the interpreter — a native build is separately blocked by the
+macOS bootstrap lane — so an interpreter run here is not evidence either way, and
+citing an interpreter pass as "the fault is gone" would be false. The next
+session must start from cycle 21's stated next step (publish coverage through a
+raw scalar descriptor or owner-local void copy), on a host that can produce a
+native build.
+
+**Exact edit still owed, for whoever holds `backend_vulkan_font*.spl`** —
+acceptance item 4 of the gate above, which is fail-CLOSED behaviour and is
+independent of the producer hunt: an empty or inconsistent `FontRenderBatch` must
+return a NAMED failure propagated to the caller, without dereferencing a nil
+aggregate, and with evidence that no backend batch method was entered. Today the
+path emits the `[font-batch] degenerate ... quads=0` diagnostic and continues,
+which is why a producer defect surfaces as a native fault instead of a named
+error. Making that one edit would turn every future occurrence of this class into
+a legible failure rather than a 21-cycle investigation.

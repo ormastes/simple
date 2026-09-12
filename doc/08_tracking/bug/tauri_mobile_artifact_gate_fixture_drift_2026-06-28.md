@@ -2,6 +2,8 @@
 
 ## Status
 
+**Status:** RESOLVED (per body: "Fixed."; not independently re-run in this pass, 2026-09-12)
+
 Fixed.
 
 ## Context
@@ -43,3 +45,7 @@ stricter wrapper ordering:
    together so the detail-specific incomplete reason is reached.
 
 The production wrapper was not weakened.
+
+## Triage 2026-09-12
+
+Corrected in the 2026-09-12 bug-db triage sweep (Rule E: body already says FIXED; the bulk stale-close pass had wrongly applied CLOSED-STALE here — corrected to RESOLVED to match the record's own verdict). Not independently re-run in this pass. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

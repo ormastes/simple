@@ -1,5 +1,7 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Filed:** 2026-08-06
 - Status (re-measured 2026-09-06, **both halves**, and the old header was
   misleading in both directions):
@@ -173,3 +175,6 @@ Results: 7 total, 7 passed, 0 failed          # rc=0
 
 `match` on an `Option<Enum>` value now fires the correct arm. Closing as
 already fixed; no source change was made by this lane.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

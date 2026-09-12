@@ -1,4 +1,5 @@
 # RED spec triage — 2026-08-21
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/nogc_sync_mut/http/auth/digest_spec.spl -> 13 passed, 1 failed, still reproduces)
 
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed),
 59757000 bytes, 2026-08-21 03:26:53 UTC. `bin/simple test` runs the tree-walk
@@ -160,3 +161,6 @@ Proven pre-existing at HEAD via in-place `git show HEAD:<spec>` restore
   used to prove the runner reports RED. `Results: 1 total, 0 passed, 1 failed`.
   Left RED intentionally; sspec score 49 is expected for a probe fixture and it
   should be excluded from modernization batches (or the census should tag it).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/nogc_sync_mut/http/auth/digest_spec.spl` on the deployed seed; 1 of 14 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

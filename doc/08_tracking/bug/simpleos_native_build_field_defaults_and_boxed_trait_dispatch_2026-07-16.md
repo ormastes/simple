@@ -1,5 +1,7 @@
 # Bug: entry-closure cranelift — omitted `= nil` field defaults retain garbage; trait dispatch on boxed SoftwareBackend faults
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Status update (2026-07-16, full-fix-chain):** Symptom A ROOT-FIXED in `6b59a8c4bf7` —
   NOT entry-closure-specific: BOTH HIR struct-construction sites (brace form in
   `collections.rs::lower_struct_init`, paren form in `calls.rs` which lowered
@@ -66,3 +68,7 @@ Full kernel build + QEMU boot per
 `doc/08_tracking/bug/simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision_2026-07-16.md`
 recipe; watch serial after `launcher apps=15`. Last-known serial:
 `build/os/_wk/serial.log`; screendumps `build/os/_wk/shot25*.ppm` (0.00%).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

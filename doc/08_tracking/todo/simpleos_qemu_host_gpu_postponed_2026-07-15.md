@@ -1,5 +1,7 @@
 # SimpleOS QEMU host-GPU postponed work
 
+Status: OPEN (unverified 2026-09-12)
+
 Host-only work completed on 2026-07-15:
 
 - A diagnostic pure-Simple Stage 2/3 bootstrap succeeded; final source-matched admission remains postponed under TODO548.

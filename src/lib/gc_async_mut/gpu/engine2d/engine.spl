@@ -39,7 +39,9 @@ use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_accepted_compute_submits, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_rect_upload_last_mode, vulkan_rect_upload_last_reason}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_rect_upload_last_mode, vulkan_rect_upload_last_reason,
+    vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
+    vulkan_image_pack_counts, vulkan_image_pack_counts_reset}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
@@ -1372,6 +1374,36 @@ class Engine2D with DrawIrRenderTarget:
         any rect batch has uploaded.
         """
         "{vulkan_rect_upload_last_mode()} reason={vulkan_rect_upload_last_reason()}"
+
+    fn vulkan_image_upload_evidence() -> text:
+        """`"<mode> reason=<reason>"` for the LAST image-composite upload.
+
+        The image twin of `vulkan_rect_upload_evidence`, and for the same
+        reason: the typed `[u32]` lane and the packed byte lane must produce
+        byte-identical device memory, so pixels cannot witness which one ran.
+        `"u32 reason=typed-requested"` only when `SIMPLE_VK_IMAGE_UPLOAD=u32`
+        was set and the runtime accepted the words; `"bytes reason=..."`
+        otherwise, naming whether the typed lane was not requested or declined.
+        """
+        "{vulkan_image_upload_last_mode()} reason={vulkan_image_upload_last_reason()}"
+
+    fn vulkan_image_pack_evidence() -> text:
+        """`"packs=<n> byte_fallbacks=<n> scratch_resizes=<n>"` for the byte
+        image-upload lane, process-wide.
+
+        The oracle for the exact-size staging array: a byte-lane composite must
+        walk its image EXACTLY ONCE, so `byte_fallbacks` stays 0 no matter what
+        sizes precede it. Under the old high-water scratch a smaller image after
+        a larger one made `vulkan_sffi_copy_to_buffer_prefix` decline and packed
+        the image a second time, which this counter names directly -- pixels
+        cannot witness it, because the second pack produces identical bytes.
+        """
+        vulkan_image_pack_counts()
+
+    fn vulkan_image_pack_evidence_reset():
+        """Zero the byte-lane pack counters so one example can count its own
+        composites rather than every composite the process has ever done."""
+        vulkan_image_pack_counts_reset()
 
     me cancel_vulkan_present_source(framebuffer: i64, receipt: i64) -> bool:
         if val Some(vulkan) = self._vulkan_primitive_target():

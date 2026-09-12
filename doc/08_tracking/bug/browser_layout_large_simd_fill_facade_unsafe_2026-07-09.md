@@ -1,7 +1,7 @@
 # Browser Layout Large SIMD Fill Facade Unsafe
 
 - **Date:** 2026-07-09
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high
 - **Area:** Simple Web layout, CPU-SIMD, runtime facade
 
@@ -157,3 +157,6 @@ uninitialized storage and fills it by doubling initialized spans with
 `memcpy`. No packed-u32 framebuffer or new unsafe mutable ABI should be added
 until that source is present in a fresh self-hosted binary and measured. The
 owner facade remains the correct containment boundary.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

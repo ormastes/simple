@@ -1,5 +1,7 @@
 # KV260 tiny-BRAM SoC: firmware runs TWICE per reset on silicon (GHDL runs once)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-26
 - **Severity:** low (cosmetic for current gates — both runs complete and agree; masks nothing today, but breaks any future fw that is not idempotent or that counts on running once)
 - **Where:** `examples/09_embedded/fpga_riscv/rtl/soc_top_rv32_tiny_bram.vhd` + `rv32_bram_soc.vhd` reset/obs path on real xck26 silicon (BSCANE2 USER4 obs tunnel readout)
@@ -47,3 +49,6 @@ run is silicon-only (STARTUPE3/GSR/BSCANE2 environment), not core/SoC sim logic.
 Add a run-counter register (increments on each fetch of the reset vector) to
 the obs command set and read it on silicon; that separates "core reset twice"
 from "PC re-entered _start without reset".
+
+## Triage 2026-09-12
+Real-silicon-specific (KV260 board), older than 45 days, not re-runnable in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

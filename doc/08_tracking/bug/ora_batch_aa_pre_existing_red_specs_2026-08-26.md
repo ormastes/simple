@@ -1,4 +1,5 @@
 # ora_batch_aa specs RED at pre-edit baseline (sspec modernization batch)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/os/dma_driver_spec.spl -> 0 passed, 1 failed, still reproduces)
 
 - Date: 2026-08-26
 - Discovered during: sspec-maintain modernization of `/tmp/sspec_census/ora_batch_aa`
@@ -85,3 +86,6 @@ to the baseline's. Structural modernization was still applied (scores in
 (This record is appended as the batch progresses; see also
 `wine_vm_write_readback_token_renamed_specs_red_2026-08-26.md` for the Wine
 evidence-token family.)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/dma_driver_spec.spl` on the deployed seed; 1 of 1 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

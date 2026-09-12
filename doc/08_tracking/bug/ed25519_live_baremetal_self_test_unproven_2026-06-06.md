@@ -1,6 +1,6 @@
 # Ed25519 Live Baremetal Self-Test Fails Or Remains Unproven In SSHD QEMU Lane
 
-Status: Open.
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 
 Date: 2026-06-06
 
@@ -29,3 +29,6 @@ available and drives the RSA host-key path first.
 
 Add a dedicated baremetal Ed25519 KAT lane and only re-enable live Ed25519 advertisement
 after the KAT passes in QEMU/baremetal, not only in interpreter mode.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

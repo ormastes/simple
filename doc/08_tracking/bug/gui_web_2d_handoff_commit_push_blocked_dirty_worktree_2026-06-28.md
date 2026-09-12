@@ -1,5 +1,7 @@
 # GUI/Web/2D Handoff Commit Push Blocked By Dirty Worktree
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Date: 2026-06-28
 
 ## Summary
@@ -84,3 +86,6 @@ Vulkan/RenderDoc, macOS Metal/Xcode GPU Capture, Windows D3D12/PIX, iOS
 Tauri/WKWebView Metal, Android Tauri/WebView Vulkan, retained 4K/8K current
 source performance, full HTML/CSS inventory, production GUI/Web parity, and
 cross-platform freshness.
+
+## Triage 2026-09-12
+Point-in-time VCS/push state (jj revision pkmpz/9396eebc3b79) is not re-testable this far out; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

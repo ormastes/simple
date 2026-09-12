@@ -60,3 +60,6 @@ That does not say which MIR/HIR function or phase produced the bad receiver.
 ## Runtime verification (2026-07-17)
 
 No single deterministic repro exists for this issue as documented. Source grep confirms the "Done" items are present at tip: `SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1` rerun hint present at `src/app/cli/native_build_main.spl:213`, and `interp_call_dispatches_plain_io_externs` test exists at `interpreter_sffi.rs:837`. The "Remaining items" are open-ended and require a real failure to reproduce; status remains IN_PROGRESS.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/app/cli_native_build_main_contract_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

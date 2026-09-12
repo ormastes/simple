@@ -1,6 +1,6 @@
 # CPU SIMD mutable array extern wiring
 
-Status: Open.
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Date: 2026-05-31
 
@@ -36,3 +36,6 @@ the interpreter to resolve and execute the native C symbol.
 After that exists, route `fill_span` and `copy_span` through the native
 entrypoints when the host reports a matching SIMD tier, and keep the existing
 Simple loops as fallback/reference paths.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # Bug: bare trailing `-1` line folds into the previous line (silent wrong value)
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (silent miscompute, no diagnostic)
 - **Found by:** SimpleOS harden lane P7 (config_core extraction)
 
@@ -27,3 +27,6 @@ Lexer/parser newline handling: a leading `-` at statement position after a
 complete statement must start a new expression statement, or at minimum warn.
 Add regression fixture with the exact repro above. Fix in both compilers
 (seed + `src/compiler/` parser).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

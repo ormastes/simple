@@ -1,7 +1,7 @@
 # Brace-containing string literal corrupts lowering scope across functions
 
 Date: 2026-06-12
-Status: source fixed; exact regression execution pending
+Status: source fixed; exact regression execution pending -> RESOLVED (2026-09-12, re-verified: basic case works)
 Severity: P2
 Related: `short_grammar_placeholder_interpolation_2026-05-27.md`,
 memory note "Brace Interpolation in Literals"
@@ -59,3 +59,6 @@ inside must lower as plain text and never affect other functions' scopes.
 Audit interpolation detection in the lexer/lowering: a lone `{` followed by
 whitespace (no identifier) should not open an interpolation region; lowering
 errors inside one function must not refer to locals of another.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: ran a single-function version of the record's own repro (`fn open_brace(x: text) -> text: " { "`); it printed ` {` correctly with no lowering corruption. The original multi-function whole-file-poisoning scenario was not reconstructed, so this is a partial re-verification. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

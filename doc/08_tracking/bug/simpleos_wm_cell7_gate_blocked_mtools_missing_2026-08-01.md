@@ -1,5 +1,7 @@
 # Showcase cell #7 gate reaches branch 29/52 and fails closed on a missing `mcopy` (mtools) — 2026-08-01
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 OPEN. Host-provisioning gap in the gate's **verification** tooling, not a
@@ -242,3 +244,7 @@ Initial value is `reason=not-run` (line 782). QEMU is launched with OVMF pflash
   the gate's own configuration, gated in turn by the
   `config/freestanding_fabricated_stub_baseline.sdn` ratchet, which is what
   actually refuses new nil-returning stubs.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

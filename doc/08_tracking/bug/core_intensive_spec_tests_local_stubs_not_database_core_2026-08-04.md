@@ -137,3 +137,6 @@ Not repaired here. Un-commenting :5-6 makes the spec depend on
 `std.database.core` and `test.lib.database_fixtures`; whether those resolve is a
 separate question from this lane`s slice, and a failed un-comment would leave
 the file unloadable rather than merely vacuous. Recorded as verified-live.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/02_integration/compiler/core_intensive_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

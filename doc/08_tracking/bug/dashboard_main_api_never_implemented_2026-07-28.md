@@ -1,4 +1,5 @@
 # `app.dashboard.main` is a 14-line stub — both dashboard modules import an API that was never written
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -94,3 +95,6 @@ written logic, so it is filed as a gap rather than deleted.
 Two legitimate outcomes, both needing an owner: implement the
 `app.dashboard.main` table/constants API that these 27 KB were written against,
 or delete both modules as abandoned. Not guessed at here.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

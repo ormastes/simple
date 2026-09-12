@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-06
 **Area:** runtime, self-hosted interpreter extern marshalling, SimpleOS image build
-**Status:** ARCHITECTURAL-OPEN — final terminal-status pass 2026-08-10
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 re-confirms the 2026-08-09 finding: `rt_file_truncate` at
 `src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:1047` still
 has no visible 4 MiB clamp (`file.set_len(size)` uses the full 64-bit value),
@@ -89,3 +89,6 @@ Trace the `rt_file_truncate` extern signature/marshalling in the
 self-hosted interpreter, confirm where the length is clamped to 4 MiB,
 and widen it to the full 64-bit length the native `ftruncate`
 (`runtime_native.c:2644`) already accepts.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

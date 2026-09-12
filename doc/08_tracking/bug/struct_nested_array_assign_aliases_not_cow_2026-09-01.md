@@ -1,5 +1,7 @@
 # `var q: T = p` does NOT copy a struct's nested array — it aliases (Rust seed)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-01 · **Status:** OPEN · **Found by:** D4 per-codeword ECC work
 (`examples/09_embedded/simpleos_nvme_fw/fw/`)
 
@@ -478,3 +480,7 @@ need the files.
 If they are re-created for a fix, give them spec structure and a home outside
 `test/`, or the repo's idiom ratchet will reject them (measured: they fail
 `Code Idiom & Structural Ratchet Gates`).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

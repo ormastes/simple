@@ -1,5 +1,7 @@
 # BUG: `bin/simple run` (interpreter) loses cross-module DB Option/struct returns + field mutations
 
+**Status:** FIXED (2026-06-14, confirmed still accurate 2026-09-12 — see Status/Triage sections below)
+
 - **ID:** `interp_run_cross_module_db_option_mutation`
 - **Severity:** P1 (db unusable from a cross-module interpreter `run` driver; works in compiled `test`)
 - **Found:** 2026-06-13, perf-umbrella db benchmark driver (AC-5 emit).
@@ -75,3 +77,6 @@ Regression fixture: `test/fixtures/interp_nil_option/nil_option_eq.spl`.
 ## Status
 FIXED 2026-06-14 — interpreter `==`/`!=`/`is` now bridge the `nil` literal and
 `Option::None`. db RAM-insert workload runs in interpreter/script mode.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: the body's own `## Status: FIXED 2026-06-14` still matches the tree — `Value::is_nil_like` is present in `src/compiler_rust/compiler/src/value.rs` and used by `BinOp::Eq/NotEq/Is` in `src/compiler_rust/compiler/src/interpreter/expr/ops.rs`. No status-line change needed. Evidence: source grep above; seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

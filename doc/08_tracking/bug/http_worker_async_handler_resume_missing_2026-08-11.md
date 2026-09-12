@@ -1,5 +1,7 @@
 # HTTP worker cannot safely resume asynchronous SSR handlers
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Impact
 
 REQ-003/REQ-004 cannot be satisfied by attaching the canonical renderer directly to the current production HTTP worker. Matched routes currently use `inline_static_handler`; handler dispatch returns synchronous `HttpResponseData`, and the worker/connection state has no pending-response completion, cancellation, or timeout state. Calling the GC-profile semantic/layout -> `DrawIrComposition` -> Engine2D renderer inline would block unrelated connections.
@@ -14,3 +16,6 @@ Add a typed async handler lifecycle owned by the existing worker/connection path
 - Disconnect, timeout, queue-full, and shutdown scenarios reclaim the pending job exactly once.
 - Live SSR evidence traverses web semantic/layout, emits `DrawIrComposition`, lowers through Engine2D, and captures independent semantic and pixel/readback evidence.
 
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

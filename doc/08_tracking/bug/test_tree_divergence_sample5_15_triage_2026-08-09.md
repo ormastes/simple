@@ -1,5 +1,7 @@
 # Test-tree divergence: sample 5 (15 pairs) + Part A old pending items (2026-08-09)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Fifth sampling pass against `scripts/check/test_tree_divergence_baseline.txt`,
 continuing the reconciliation of `test/01_unit` (canonical) vs `test/unit`
 (shadow) and `test/02_integration` (canonical) vs `test/integration` (shadow).
@@ -109,3 +111,7 @@ assertion.
 
 Not committed/pushed — left for the user to review and land via git plumbing,
 per instructions.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

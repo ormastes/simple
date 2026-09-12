@@ -1,5 +1,7 @@
 # X25519MLKEM768 Vulkan SPIR-V artifact — RESOLVED (physical evidence, both devices, full stage sweep)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-05
 Worktree: `/home/ormastes/dev/pub/simple/.claude/worktrees/x25519-paired-timing`
 Campaign: `.spipe/x25519mlkem768_acceleration/state.md`, AC-5 (Vulkan lane)
@@ -225,3 +227,7 @@ is the only remaining hard toolchain dependency — everything else needed
 - No changes to `src/lib/gc_async_mut/crypto_accel/*`, the CUDA/Metal
   providers, or any compiler source. `vulkan_ntt_provider.spl` was read only,
   never edited by this session (its pre-existing diff predates this task).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

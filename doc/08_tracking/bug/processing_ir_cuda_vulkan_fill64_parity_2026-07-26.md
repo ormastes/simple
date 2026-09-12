@@ -1,6 +1,6 @@
 # ProcessingIR CUDA/Vulkan Fill64 Parity
 
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Host:** Linux x86_64 with CUDA and Vulkan devices
 
 ## Measured blockers
@@ -233,3 +233,6 @@ Retained build logs:
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

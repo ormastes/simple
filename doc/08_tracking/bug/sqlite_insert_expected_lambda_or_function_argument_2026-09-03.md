@@ -1,5 +1,7 @@
 # `sqlite_insert(...)` fails to compile: "expected lambda or function argument"
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-09-03
 - **Severity:** MEDIUM — blocks every SQLite write path on the Rust seed
 - **Binary:** Rust seed `bin/simple.exe`, `Simple Language v1.0.0-rc.1`
@@ -48,3 +50,7 @@ it is not caused by that restore.
 `context_sql_index_packs` and `context_sql_query_packs_by_source` reach
 `sqlite_insert` on their path-ingest branch and are expected to fail the same
 way. The read-side (`context_sql_get_pack`) is unaffected and runs clean.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

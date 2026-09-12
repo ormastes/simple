@@ -1,5 +1,7 @@
 # native-build front end is neither incremental nor parallel (2026-08-21)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom
 A self-hosted `native-build --entry-closure` stage build spends the bulk of its
 wall clock in phase 1/6 (`parse`), single-threaded, and **repeats all of it on
@@ -536,3 +538,6 @@ cache should come FIRST, ahead of moving the object-cache lookup earlier:
    riskiest of the three and, now that parse can be made ~25x cheaper, no longer
    the biggest win.
 
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

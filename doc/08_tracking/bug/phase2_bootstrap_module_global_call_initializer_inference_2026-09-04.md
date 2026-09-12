@@ -1,4 +1,5 @@
 # Phase 2 bootstrap cannot infer a module-global call initializer
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -30,3 +31,6 @@ build under strict no-stub mode and retain the existing cross-module exit-42
 identity behavior. Until then, the canonical module-global identity probe uses
 `val initialized_value: i64 = initialize_value()`; this does not change its
 runtime identity assertion.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

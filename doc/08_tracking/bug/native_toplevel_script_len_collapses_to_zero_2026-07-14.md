@@ -1,5 +1,7 @@
 # native-build: top-level script `.len()` const-folds to 0 (no `fn main`)
 
+**Status:** RESOLVED (per record's own **Resolved:** 2026-07-15, triage-confirmed 2026-07-17)
+
 **Severity:** high (silent-wrong)
 **Found:** 2026-07-14, exprdispatch2 lane
 **Resolved:** 2026-07-15 (triage-confirmed 2026-07-17: `toplevel_array_len` case verified present in `scripts/check/check-native-seed-parity.shs`)
@@ -45,3 +47,6 @@ case and reports `toplevel_array_len ... PASS` in the 39-case gate.
 
 `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry t.spl -o out --clean`
 with a brace-less top-level `[..]; .len()`; compare to `bin/simple run t.spl`.
+
+## Triage 2026-09-12
+Not independently re-run; formalizing the record's own Resolved field into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

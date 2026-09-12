@@ -1,5 +1,7 @@
 # Option payload extraction via `val x = match opt: Some(v): v` yields nil on freestanding native lane
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-04
 - Lane: freestanding x86_64-unknown-simpleos (cranelift native build, OVMF boot),
   stage3 self-hosted compiler `build/bootstrap/stage3/aarch64-apple-darwin/simple`
@@ -82,3 +84,7 @@ the source-shape fix per the CLAUDE.md rule: workaround landed AND compiler
 bug recorded — the value-position Option match lowering still needs a real
 compiler fix; until then this shape must not be reintroduced in
 freestanding-lane code).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

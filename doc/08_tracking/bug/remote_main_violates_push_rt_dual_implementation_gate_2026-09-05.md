@@ -1,4 +1,5 @@
 # `origin/main` violates its own blocking push gate — nobody can push cleanly
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -88,3 +89,6 @@ the next reader does not have to infer it. It does not discharge the debt above.
   routinely been made with `--no-verify`, which is how this class of debt
   accumulates unseen.
 - `doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md`
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

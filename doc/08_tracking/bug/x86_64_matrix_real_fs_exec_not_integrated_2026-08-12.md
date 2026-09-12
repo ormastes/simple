@@ -1,5 +1,7 @@
 # x86_64 matrix real filesystem execution is not integrated
 
+**Status:** OPEN (unverified 2026-09-12)
+
 The x86_64 repository already contains a real CPL3 execution mechanism:
 
 - `x86_64_fs_exec_spawn` stream-opens the selected FAT32 path;
@@ -408,3 +410,7 @@ nonce stdout, `FS_PROGRAM_END rc=37 reaped=true`, and final PASS markers. New
 package-probe entry from silently returning. Static wiring/listing and C syntax
 checks pass; a fresh admitted build and QEMU run are still required, so the row
 remains RED rather than promoted.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

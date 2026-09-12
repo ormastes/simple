@@ -1,5 +1,7 @@
 # Bug: string interpolation silently swallows CSS-like braces inconsistently
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-03
 - **Severity:** low-medium (confusing error, content-dependent)
 - **Area:** lexer/parser string interpolation
@@ -91,3 +93,7 @@ the tree. Existing UI/CSS-generating code does not hit this specific
 footgun today, but the raw-string or `{{ }}` requirement should be called
 out for any future code that builds CSS/JSON-shaped text via plain
 double-quoted string literals.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

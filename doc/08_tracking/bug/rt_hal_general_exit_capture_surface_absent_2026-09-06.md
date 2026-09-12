@@ -1,4 +1,5 @@
 # The RT/HAL general exit-capture surface asserted by its spec exists nowhere in `src/`
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/mir/rt_hal_general_exit_capture_source_spec.spl -> 0 passed, 3 failed, still reproduces)
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 16C (modernizing
@@ -51,3 +52,6 @@ tree before commit — untracked files in this shared checkout are periodically
 swept by peer sessions. Re-derived from the spec's own `# NOTE:` block, with
 the four-symbol absence re-verified independently, and committed alongside the
 spec.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/mir/rt_hal_general_exit_capture_source_spec.spl` on the deployed seed; 3 of 3 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

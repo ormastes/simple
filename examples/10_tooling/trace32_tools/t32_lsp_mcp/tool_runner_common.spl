@@ -1,0 +1,466 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP - Shared tool runner helpers
+#
+# Common utility functions used by tool_runner, tool_runner_parse,
+# tool_runner_validate, and cmm_lsp/tool_runner_analyze and tool_runner_commands.
+
+use t32_lsp_mcp.json_helpers
+
+fn json_char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn json_is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn json_find_value_start(json: text, key: text) -> i64:
+    val search = lsp_Q() + key + lsp_Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        var matches = true
+        var i = 0
+        while i < search.len():
+            if json.substring(offset + i, offset + i + 1) != search.substring(i, i + 1):
+                matches = false
+                break
+            i = i + 1
+        if not matches:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and json_is_ws(json_char_at(json, j)):
+            j = j + 1
+        if j < json.len() and json_char_at(json, j) == ":":
+            j = j + 1
+            while j < json.len() and json_is_ws(json_char_at(json, j)):
+                j = j + 1
+            return j
+        offset = offset + search.len()
+    return -1
+
+fn request_json_raw_field(json: text, key: text) -> text:
+    val start = json_find_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = json_char_at(json, start)
+    if first == lsp_Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = json_char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == lsp_Q():
+                return json.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    if first == lsp_LB() or first == lsp_SB_L():
+        var depth = 0
+        var i2 = start
+        var in_str = false
+        var esc = false
+        while i2 < json.len():
+            val ch = json_char_at(json, i2)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == lsp_Q():
+                    in_str = false
+            else:
+                if ch == lsp_Q():
+                    in_str = true
+                elif ch == lsp_LB() or ch == lsp_SB_L():
+                    depth = depth + 1
+                elif ch == lsp_RB() or ch == lsp_SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = json_char_at(json, end)
+        if ch == "," or ch == lsp_RB() or ch == lsp_SB_R() or json_is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    raw
+
+fn request_json_normalize(json: text) -> text:
+    lsp_unescape_json_string(json)
+
+fn request_json_text_field(json: text, key: text) -> text:
+    val raw = request_json_raw_field(json, key)
+    if raw == "null":
+        return ""
+    if raw.starts_with(lsp_Q()) and raw.ends_with(lsp_Q()) and raw.len() >= 2:
+        return lsp_unescape_json_string(raw.substring(1, raw.len() - 1))
+    raw
+
+fn request_json_arguments(body: text) -> text:
+    val normalized_body = request_json_normalize(body)
+    val params = request_json_raw_field(normalized_body, "params")
+    if params == "null":
+        return normalized_body
+    val args = request_json_raw_field(params, "arguments")
+    if args == "null" or args == "":
+        return normalized_body
+    args
+
+fn request_json_id(body: text) -> text:
+    val id = request_json_raw_field(request_json_normalize(body), "id")
+    if id == "":
+        return "null"
+    id
+
+fn request_json_source(args: text) -> text:
+    val markers = [
+        lsp_Q() + "source" + lsp_Q() + ":" + lsp_Q(),
+        lsp_Q() + "source" + lsp_Q() + ": " + lsp_Q(),
+        "\\\"source\\\":\\\"",
+        "\\\"source\\\": \\\""
+    ]
+    var mi = 0
+    while mi < markers.len():
+        val marker = markers[mi]
+        var offset = 0
+        while offset + marker.len() <= args.len():
+            if args.substring(offset, offset + marker.len()) == marker:
+                val start = offset + marker.len()
+                var end = start
+                var escaped = false
+                while end < args.len():
+                    val ch = args.substring(end, end + 1)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == lsp_Q():
+                        return lsp_unescape_json_string(args.substring(start, end))
+                    end = end + 1
+                return ""
+            offset = offset + 1
+        mi = mi + 1
+    val direct = request_json_text_field(args, "source")
+    if direct != "":
+        return direct
+    val normalized = request_json_normalize(args)
+    if normalized != args:
+        val nested = request_json_text_field(normalized, "source")
+        if nested != "":
+            return nested
+    request_json_string_field_fallback(args, "source")
+
+fn request_json_string_field_fallback(json: text, key: text) -> text:
+    val q = lsp_Q()
+    val markers = [
+        "\\\"" + key + "\\\":\\\"",
+        "\\\"" + key + "\\\": \\\"",
+        q + key + q + ":" + q,
+        q + key + q + ": " + q
+    ]
+    var mi = 0
+    while mi < markers.len():
+        val marker = markers[mi]
+        var offset = 0
+        while offset + marker.len() <= json.len():
+            if json.substring(offset, offset + marker.len()) == marker:
+                val start = offset + marker.len()
+                var end = start
+                var escaped = false
+                while end < json.len():
+                    val ch = json.substring(end, end + 1)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == q:
+                        if end == start:
+                            return ""
+                        return lsp_unescape_json_string(json.substring(start, end))
+                    end = end + 1
+                return ""
+            offset = offset + 1
+        mi = mi + 1
+    ""
+
+fn arg_field(args: text, key: text) -> text:
+    val direct = lsp_extract_field(args, key)
+    if direct != "":
+        return direct
+    val direct_raw = lsp_extract_field_raw(args, key)
+    if direct_raw != "null":
+        if direct_raw.starts_with(lsp_Q()) and direct_raw.ends_with(lsp_Q()) and direct_raw.len() >= 2:
+            return lsp_unescape_json_string(direct_raw.substring(1, direct_raw.len() - 1))
+        return direct_raw
+    val normalized = request_json_arguments(args)
+    if normalized != args:
+        val nested = lsp_extract_field(normalized, key)
+        if nested != "":
+            return nested
+        val nested_raw = lsp_extract_field_raw(normalized, key)
+        if nested_raw != "null":
+            if nested_raw.starts_with(lsp_Q()) and nested_raw.ends_with(lsp_Q()) and nested_raw.len() >= 2:
+                return lsp_unescape_json_string(nested_raw.substring(1, nested_raw.len() - 1))
+            return nested_raw
+    val fallback = request_json_string_field_fallback(args, key)
+    if fallback != "":
+        return fallback
+    if normalized != args:
+        return request_json_string_field_fallback(normalized, key)
+    ""
+
+fn runner_arg0_is_executable_path(arg0: text) -> bool:
+    arg0.contains("/") or arg0.contains("\\") or arg0.ends_with(".exe") or arg0.ends_with("t32_lsp_mcp_tool_runner")
+
+fn debug_args(args: [text]) -> text:
+    var out = "argc=" + str(args.len())
+    var i = 0
+    while i < args.len():
+        out = out + " argv[" + str(i) + "]=" + args[i]
+        i = i + 1
+    out
+
+fn is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val upper = ch.to_upper()
+    val lower = ch.to_lower()
+    if upper != lower:
+        return true
+    ch >= "0" and ch <= "9"
+
+fn line_text_for_position(lines: [text], target_line: i64) -> text:
+    if target_line >= 0 and target_line < lines.len():
+        return lines[target_line]
+    if target_line >= 1 and target_line <= lines.len():
+        return lines[target_line - 1]
+    ""
+
+fn extract_word_from_lines(lines: [text], target_line: i64, target_char: i64) -> text:
+    val line = line_text_for_position(lines, target_line)
+    if line == "":
+        return ""
+    var idx = target_char
+    if idx < 0:
+        idx = 0
+    if idx > line.len():
+        idx = line.len()
+    var start = idx
+    while start > 0 and is_ident_char(line.substring(start - 1, start)):
+        start = start - 1
+    var end = idx
+    while end < line.len() and is_ident_char(line.substring(end, end + 1)):
+        end = end + 1
+    if end <= start:
+        return ""
+    line.substring(start, end)
+
+fn parse_i64(s: text) -> i64:
+    if s == "":
+        return 0
+    var i = 0
+    var sign = 1
+    if s.starts_with("-"):
+        sign = -1
+        i = 1
+    var value = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            break
+        value = value * 10 + int(ch)
+        i = i + 1
+    value * sign
+
+fn check_gui_keywords(source: text) -> [text]:
+    val lower = source.to_lower()
+    val keywords = ["dialog.", "menu.", "screen.wait", "inkey", "enter "]
+    var found: [text] = []
+    var i = 0
+    while i < keywords.len():
+        if lower.contains(keywords[i]):
+            found.push(keywords[i])
+        i = i + 1
+    found
+
+fn check_has_command(source: text, cmd: text) -> bool:
+    val lower_source = source.to_lower()
+    val lower_cmd = cmd.to_lower()
+    lower_source.contains(lower_cmd)
+
+# --- Phase 5: Enhanced hover/completion helpers ---
+
+struct LiteSymbol:
+    name: text
+    kind: text
+    scope: text
+    line: i64
+    column: i64
+
+export LiteSymbol
+export lite_is_ident_char, lite_macro_scope, lite_extract_macros
+export scan_symbols_lite, get_cmm_keywords, cmm_keyword_description, is_cmm_keyword
+
+fn lite_is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val upper = ch.to_upper()
+    val lower = ch.to_lower()
+    if upper != lower:
+        return true
+    ch >= "0" and ch <= "9"
+
+fn lite_macro_scope(trimmed: text) -> text:
+    val lowered = trimmed.to_lower()
+    if lowered.starts_with("local "):
+        return "local"
+    if lowered.starts_with("global "):
+        return "global"
+    if lowered.starts_with("private "):
+        return "private"
+    ""
+
+fn lite_extract_macros(line: text) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < line.len():
+        if line.substring(i, i + 1) == "&":
+            var start = i + 1
+            var end = start
+            while end < line.len():
+                val ch = line.substring(end, end + 1)
+                if lite_is_ident_char(ch):
+                    end = end + 1
+                else:
+                    break
+            if end > start:
+                names.push(line.substring(start, end))
+                i = end
+                continue
+        i = i + 1
+    names
+
+fn scan_symbols_lite(source: text) -> [LiteSymbol]:
+    val lines = source.split("\n")
+    var syms: [LiteSymbol] = []
+    var li = 0
+    while li < lines.len():
+        val raw = lines[li]
+        val trimmed = raw.trim()
+        if trimmed != "" and not trimmed.starts_with(";"):
+            if trimmed.ends_with(":") and not trimmed.contains(" "):
+                val name = trimmed.substring(0, trimmed.len() - 1)
+                if name != "":
+                    syms.push(LiteSymbol(name: name, kind: "label", scope: "local", line: li + 1, column: 1))
+            val scope = lite_macro_scope(trimmed)
+            if scope != "":
+                val macros = lite_extract_macros(trimmed)
+                var mi = 0
+                while mi < macros.len():
+                    syms.push(LiteSymbol(name: macros[mi], kind: "macro", scope: scope, line: li + 1, column: 1))
+                    mi = mi + 1
+        li = li + 1
+    syms
+
+fn get_cmm_keywords() -> [text]:
+    var kws: [text] = []
+    kws.push("IF")
+    kws.push("ELSE")
+    kws.push("WHILE")
+    kws.push("RePeaT")
+    kws.push("GOTO")
+    kws.push("GOSUB")
+    kws.push("LOCAL")
+    kws.push("GLOBAL")
+    kws.push("PRIVATE")
+    kws.push("ENTRY")
+    kws.push("DO")
+    kws.push("ENDDO")
+    kws.push("RUN")
+    kws.push("END")
+    kws.push("STOP")
+    kws.push("RETURN")
+    kws.push("WAIT")
+    kws.push("DIALOG")
+    kws.push("ON")
+    kws.push("GLOBALON")
+    kws.push("PRINT")
+    kws.push("OPEN")
+    kws.push("CLOSE")
+    kws.push("READ")
+    kws.push("WRITE")
+    kws.push("CONTINUE")
+    kws
+
+fn cmm_keyword_description(kw: text) -> text:
+    val upper = kw.to_upper()
+    if upper == "IF":
+        return "Conditional branch"
+    if upper == "ELSE":
+        return "Alternative branch of IF"
+    if upper == "WHILE":
+        return "Loop while condition is true"
+    if upper == "REPEAT":
+        return "Repeat block until condition"
+    if upper == "GOTO":
+        return "Jump to label"
+    if upper == "GOSUB":
+        return "Call subroutine at label"
+    if upper == "LOCAL":
+        return "Declare local macro variable"
+    if upper == "GLOBAL":
+        return "Declare global macro variable"
+    if upper == "PRIVATE":
+        return "Declare private macro variable"
+    if upper == "ENTRY":
+        return "Declare script entry parameters"
+    if upper == "DO":
+        return "Execute another PRACTICE script"
+    if upper == "ENDDO":
+        return "End current PRACTICE script"
+    if upper == "RUN":
+        return "Start program execution on target"
+    if upper == "END":
+        return "Terminate block or script"
+    if upper == "STOP":
+        return "Stop program execution on target"
+    if upper == "RETURN":
+        return "Return from GOSUB subroutine"
+    if upper == "WAIT":
+        return "Wait for condition or timeout"
+    if upper == "DIALOG":
+        return "Define GUI dialog panel"
+    if upper == "ON":
+        return "Define event handler"
+    if upper == "GLOBALON":
+        return "Define global event handler"
+    if upper == "PRINT":
+        return "Print text to AREA window"
+    if upper == "OPEN":
+        return "Open file for reading or writing"
+    if upper == "CLOSE":
+        return "Close an open file"
+    if upper == "READ":
+        return "Read data from file"
+    if upper == "WRITE":
+        return "Write data to file"
+    if upper == "CONTINUE":
+        return "Continue to next loop iteration"
+    ""
+
+fn is_cmm_keyword(upper: text) -> bool:
+    val kws = get_cmm_keywords()
+    var i = 0
+    while i < kws.len():
+        if kws[i].to_upper() == upper.to_upper():
+            return true
+        i = i + 1
+    false

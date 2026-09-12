@@ -100,3 +100,6 @@ strict probe and reports the failure faithfully. On this host `opencl`, `metal`,
 `cuda` and `opengl` do not initialize while `vulkan`, `software` and `cpu` do.
 Fixed in the spec by asserting the resolver contract (`opencl` or the documented
 `software` fallback) instead of a backend the host may not provide.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

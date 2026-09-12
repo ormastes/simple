@@ -1,5 +1,7 @@
 # io_runtime process-owner aliases de-JIT the module
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open compiler/runtime performance blocker discovered during SFFI ownership
@@ -35,3 +37,7 @@ used path remains JIT-capable. Each declaration is explicitly unsafe-tagged and
 contracted, and each raw call is confined to one allocation-free lexical FFI
 scope. Remove those duplicates only after this bug has a regression test and
 the canonical-owner form remains JIT-compiled.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # SOSIX sync leg never released its ring slot on return
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-05 · **Status:** CLOSED (same day) · **Lane:** `.spipe/sosix_runtime_unification/state.md`
 
 ## Defect
@@ -29,3 +31,7 @@ in flight), which `fs_sync_spec` "reports a native wait timeout…" pins with
   "performs exactly one ring hop per unified read…" (64 consecutive sync reads on a
   capacity-1 ring through the real file driver; `occupancy == 0` after) and
   `file_driver_spec` round-trip (write then read on one ring).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

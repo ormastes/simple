@@ -1,4 +1,5 @@
 # Skia path_op boolean polygon ops: 2 of 6 examples fail
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/unit/lib/skia/path_op_spec.spl -> 6 passed, 0 failed)
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (pure computational geometry, not a rendering/pixel test)
@@ -49,3 +50,6 @@ the pattern used for `math3d_cos_taylor_precision_2026-07-20.md`) printing
 `u.contains(...)`/`u.bounds()` values directly to bisect which 2 of the 6
 actually fail and get concrete expected-vs-actual numbers before touching
 `boolean.spl`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/skia/path_op_spec.spl` on the deployed seed; the spec now passes in full (6/6), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

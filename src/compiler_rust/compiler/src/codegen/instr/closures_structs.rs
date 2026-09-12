@@ -162,6 +162,35 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // `.is_empty()` fell all the way through to suffix-based symbol
             // resolution instead of the safe tag-dispatching path.
             | ("len" | "length" | "keys" | "values" | "is_empty", 0)
+            // `items` returns an array of (key, value) tuples for a Dict,
+            // same shape as `keys`/`values` above and same runtime call
+            // (`rt_dict_entries`, see the dispatch arm below). Missing here
+            // meant a bare (erased-receiver) `d.items()` — e.g. inside an
+            // untyped fn parameter — fell through to suffix-based symbol
+            // resolution and raised "Function 'items' not found", even
+            // though a STATICALLY-typed `Dict<K,V>` receiver already
+            // resolved correctly via MIR lowering
+            // (mir/lower/lowering_expr_method.rs). See doc/08_tracking/bug/
+            // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+            //
+            // Deliberately `"items"` ONLY, not `"entries"`, even though both
+            // alias the same runtime call and `entries()` has the identical
+            // erased-receiver gap: a census
+            // (`grep -rnE '^\s*(pub\s+)?fn entries\s*\(\s*(self\s*)?\)' src
+            // test`) found NINE user-defined `entries()` methods on other
+            // types (Map, HashMap, BTree-style collections, PersistentMap/
+            // PersistentSortedMap/PersistentTrie, ConcurrentCollections,
+            // FileStateCache, PersistentDict) — the exact THEFT hazard this
+            // whole gate exists to avoid (see `push`/`get`/`starts_with`
+            // above): an erased receiver that is actually one of those types
+            // at runtime would get silently routed to `rt_dict_entries`
+            // (which no-ops to nil on a non-Dict tag) instead of that type's
+            // real `entries()`. `items()` has ZERO competing definitions
+            // anywhere in `src`/`test` (same census, no hits), so it carries
+            // no such risk. `entries()` on an erased receiver keeps its
+            // pre-existing "Function 'entries' not found" behavior — a
+            // known, unchanged gap, not a regression.
+            | ("items", 0)
             // Array mutators. Same hazard class as the collection idioms
             // above (doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md):
             // `push` is enumerated there as a confirmed erased-receiver THEFT
@@ -1320,6 +1349,18 @@ mod tests {
         assert!(is_bare_builtin_collection_method("keys", 0));
         assert!(is_bare_builtin_collection_method("values", 0));
         assert!(!is_bare_builtin_collection_method("keys", 1));
+        // `items()` joins `keys`/`values` (doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md,
+        // defect 2's erased-receiver half) — it has no user-defined
+        // competing method anywhere in the tree, so it carries no theft
+        // risk. `entries()` deliberately stays OUT of this gate: real
+        // user-defined `entries()` methods exist on other types (Map,
+        // HashMap, PersistentMap, etc.), so routing a bare `.entries()` here
+        // would risk silently stealing one of those calls. This assertion
+        // guards against that risk being reintroduced.
+        assert!(is_bare_builtin_collection_method("items", 0));
+        assert!(!is_bare_builtin_collection_method("items", 1));
+        assert!(!is_bare_builtin_collection_method("entries", 0));
     }
 
     /// A bare `text.starts_with(prefix)` must reach `rt_string_starts_with`
@@ -2306,6 +2347,16 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
+        // `d.items()` on an erased (bare) receiver: same runtime call the
+        // typed-receiver MIR lowering path already uses
+        // (mir/lower/lowering_expr_method.rs), returning an array of (key,
+        // value) tuples matching the interpreter's `items()`/`entries()`
+        // shape. `"entries"` is deliberately NOT added here — see the
+        // `is_bare_builtin_collection_method` gate above for why (real
+        // user-defined `entries()` methods on other types create a theft
+        // risk that `items()` does not have). See doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+        "items" => "rt_dict_entries",
         // `has` is the canonical Dict/Set membership idiom in Simple source;
         // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
         // String; anything else yields 0), so it is safe for untyped receivers.

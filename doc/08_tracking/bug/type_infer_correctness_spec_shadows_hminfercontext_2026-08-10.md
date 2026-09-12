@@ -1,5 +1,7 @@
 # type_infer_correctness_spec.spl shadows HmInferContext with a 1-field stand-in
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **STATUS: RESOLVED 2026-08-10 (spec) — but the rewrite is RED on two newly
 exposed product defects, deliberately left failing.**
 
@@ -86,3 +88,7 @@ Rewrite against the real `HmInferContext` struct in
 `src/compiler/30.types/type_infer_types.spl`, including at least one
 exercise of level-based generalization (`enter_level`/`exit_level` or
 equivalent) and the dimension solver, not just field presence.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

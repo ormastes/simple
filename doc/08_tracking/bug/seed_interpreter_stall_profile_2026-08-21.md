@@ -1,4 +1,5 @@
 # Seed interpreter stall — poor-man's profile (2026-08-21)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 PARTIALLY RESOLVED — 01a3fa7e90d added level-gated stall counters (profiling only, no behavior fix); root cause subsequently addressed by e73a0bec647 (CowEnv). OPEN: confirm the profiled stall fully clears against these counters on a fresh run.
@@ -107,3 +108,6 @@ compared across them. Re-run the counters on the big file once the tree lints.
 ## Baseline numbers (binary: /mnt/data/seedperf/simple.v2, shared loaded box)
 `lint test/fixtures/perf/nested_if_240.spl`: rc=0 wall=39.46 s rss=703576 KB;
 second run rc=0 wall=44.12 s rss=666740 KB.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

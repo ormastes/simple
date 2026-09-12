@@ -1,6 +1,6 @@
 # vmm_copyin_bytes_from_space returns empty `bytes` when a copy crosses two mapped pages
 
-**Status:** Open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Category:** GENUINE-BUG (interpreter/runtime — nested-loop array accumulation)
 **Discovered:** 2026-07-20 (whole-suite triage campaign, shard meas_01u_03)
 
@@ -131,3 +131,7 @@ implementation.
 ## Affected specs
 
 - `test/01_unit/os/kernel/memory/vmm_copyin_spec.spl` (1 of 7 examples: "copies a byte range that crosses two mapped readable pages")
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

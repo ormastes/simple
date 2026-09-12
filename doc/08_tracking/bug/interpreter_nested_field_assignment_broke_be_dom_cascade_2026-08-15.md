@@ -1,5 +1,7 @@
 # Interpreter nested-field-assignment rejection broke the BeDomNode CSS cascade
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-15. Status: WORKED AROUND in dom.spl; underlying interpreter
 limitation still open.
 
@@ -41,3 +43,6 @@ ClassInstance via set_field; inner Object mutate+write-back). Verified by the
 CUDA probe path repro (`self.session.module_cache = loaded` in
 backend_cuda.spl:428) and `engine2d_backend_matrix_spec.spl` going 7/16 -> 16/16.
 The dom.spl workaround can be unwound when convenient.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

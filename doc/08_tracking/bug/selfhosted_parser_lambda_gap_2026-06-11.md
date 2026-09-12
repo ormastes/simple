@@ -1,4 +1,5 @@
 # Bug: Self-Hosted Parser Cannot Parse Lambda Expressions in Call Arguments
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-06-11  
 **ID:** selfhosted_parser_lambda_gap_2026-06-11  
@@ -134,3 +135,6 @@ the known Rust-layer interpreter bottlenecks (debug_state mutex, Value::Str
 copies, extern dispatch). Also pre-existing and separate: multi-line
 named-arg struct literals inside parens emit parse errors for ','/':' tokens
 (t120 shows errors=true decls=15 yet terminates).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

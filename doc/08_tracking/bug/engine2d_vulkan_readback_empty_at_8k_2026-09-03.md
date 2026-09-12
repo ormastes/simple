@@ -1,4 +1,5 @@
 # Engine2D Vulkan readback returns 0 pixels at >= 7680x4320 in the showcase scene
+**Status:** OPEN (unverified 2026-09-12)
 
 Filed 2026-09-03. Status: OPEN, scene-dependent — see the contradiction below,
 which is the most useful part of this record.
@@ -60,3 +61,6 @@ env $E VK2D_W=7680 VK2D_H=4320 VK2D_RECTS=64 VK2D_FRAMES=8 \
 ```
 
 Related: `doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

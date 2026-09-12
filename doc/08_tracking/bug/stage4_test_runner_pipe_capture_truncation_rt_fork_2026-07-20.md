@@ -1,6 +1,8 @@
 # stage4 test-runner silently under-reports example counts — root cause: premature loop exit in `rt_fork_parent_wait_bounded` (runtime_fork.c)
 
-Status: **root cause PROVEN via strace evidence; fix WRITTEN and VERIFIED at
+**Status:** RESOLVED (2026-09-12, re-verified: end-to-end `bin/simple test test/01_unit/app/arch_check_spec.spl` now confirms `74 total, 74 passed`, the exact acceptance bar this record set)
+
+Status (as originally filed): **root cause PROVEN via strace evidence; fix WRITTEN and VERIFIED at
 the C-function level** (direct differential test of `rt_fork_parent_wait_bounded`
 against the unpatched vs. patched source, see "C-level differential-test
 verification" below). **NOT YET verified end-to-end** — no self-hosted
@@ -396,3 +398,7 @@ index 41cc9536cea..e310e0170b4 100644
      }
  
 ```
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed, using the record's own stated acceptance bar). Evidence: `bin/simple test test/01_unit/app/arch_check_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `SPEC FILE VERDICT ... executed=74 passed=74 failed=0`, `Results: 74 total, 74 passed, 0 failed`.

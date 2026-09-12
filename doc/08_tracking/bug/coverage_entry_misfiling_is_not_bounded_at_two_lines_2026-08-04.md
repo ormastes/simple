@@ -1,7 +1,7 @@
 # Coverage `<entry>` misfiling is not bounded at "<=2 lines (<=0.9%) per module" — it swallows method bodies too, up to 21 points
 
 - **Filed:** 2026-08-04
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_node_mutation_spec.spl` now PASSes)
 - **Direction:** under-reports. A published number is a floor, never flattering.
 - **Supersedes:** the RESIDUAL note in `src/app/test_runner_new/test_runner_single.spl`,
   which states the residual is "module-level recordable statements ... <=2 lines
@@ -103,3 +103,6 @@ read by `span_to_location`
 reached through the `impl` dispatch paths appear not to have an owner set, and
 line 375 being filed under both keys in one run suggests the owner is restored
 to `None` while a body is still executing rather than never being set at all.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_node_mutation_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

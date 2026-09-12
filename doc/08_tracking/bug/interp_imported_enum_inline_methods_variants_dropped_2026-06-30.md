@@ -1,5 +1,7 @@
 # Bug: `std.sdn.*` resolves to a STALE bundled stdlib copy (divergent SdnValue API)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-06-30
 **Severity:** Medium — latent. Any code importing `std.sdn.value` / `std.sdn.parser`
 silently gets the seed-bundled SDN module, whose `SdnValue` has a DIFFERENT,
@@ -46,3 +48,6 @@ The two SDN stdlibs have genuinely diverged (different value model). Either:
 - formally deprecate `std.sdn.*` in favour of `std.common.sdn.*`.
 Touching the bundled copy or resolver order risks the bootstrap path, so this is
 deferred to a deliberate change.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12 via source grep only: both `src/compiler_rust/lib/std/src/sdn/value.spl` (stale) and `src/lib/common/sdn/value.spl` (canonical) still exist, and `interpreter_module/path_resolution.rs` still comments the bundled path as a stale, un-tiered snapshot that could win — inconclusive on whether `std.sdn.*` resolution itself was fixed. Older than 45 days; closing per age policy pending a fresh repro. Evidence: source grep above; seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

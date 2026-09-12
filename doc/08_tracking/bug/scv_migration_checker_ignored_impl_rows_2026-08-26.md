@@ -1,4 +1,5 @@
 # SCV migration checker structurally ignored SCV-IMPL ledger rows (2026-08-26, FIXED same day)
+**Status:** OPEN (unverified 2026-09-12)
 
 **Found by:** W4 + Wave-1 closeout lane, while flipping the 8 Wave-1 rows.
 
@@ -25,3 +26,6 @@ WOTS key (leaf 40) and re-verified against
 **Defect-class note:** a fail-closed checker with a fail-open ROW FILTER is
 still fail-open for anything the filter does not name. Any future id family
 added to the ledger must ship with a matching selftest fixture.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

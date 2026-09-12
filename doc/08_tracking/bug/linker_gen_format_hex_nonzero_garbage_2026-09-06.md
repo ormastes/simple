@@ -1,5 +1,7 @@
 # linker_gen `format_hex` emits blank/control characters for any nonzero input
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-09-06
 **File:** `src/app/linker_gen/main.spl:127-140` (`format_hex`)
 **Reproduced by:** `test/03_system/feature/app/linker_gen_spec.spl` — "formats 1MB
@@ -74,3 +76,6 @@ Fix `format_hex` to build hex digit characters correctly regardless of
 `"0123456789ABCDEF"` string by `digit`), or fix `Char.to_int()` so digit
 characters return their ASCII code point consistently with letters — then
 remove the `# NOTE:` in the "formats 1MB as 0x100000" scenario.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

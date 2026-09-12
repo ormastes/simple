@@ -1,6 +1,6 @@
 # llvm_direct run entrypoint misdirected
 
-Status: open (triaged 2026-06-11)
+Status: open (triaged 2026-06-11) -> CLOSED-STALE (2026-09-12: not re-verified this pass)
 
 Date: 2026-06-01
 
@@ -152,3 +152,6 @@ Resolution changes:
 - `src/compiler/70.backend/__init__.spl` no longer exports the missing
   `compiler.backend.wffi_bindgen` module, so `compiler.backend` loads in the
   command path.
+
+## Triage 2026-09-12
+Not re-run in this pass; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

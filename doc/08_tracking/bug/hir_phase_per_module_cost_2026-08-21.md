@@ -1,5 +1,7 @@
 # HIR phase costs ~20x parse per module (full-registry rescans) — 2026-08-21
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 RESOLVED 2026-08-21 — a865dced154 memoizes frozen-registry owner scans in the package-dep and bootstrap-global resolvers. Evidence: per-module HIR lowering 0.28s -> 0.15s (61-module fixture), per commit message and hir_package_dependency_scan_memo_spec.spl.
 
@@ -625,3 +627,7 @@ is O(n) per call; it is ~300 small calls per registration.
   stops running interpreted at all, a per-function JIT fallback instead of
   whole-program, or a pre-resolved-slot interpreter. None of those is a
   minimal fix.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

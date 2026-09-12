@@ -6,7 +6,7 @@ default-LLVM + explicit-Cranelift forwarding proof added, execution pending.
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)
-**Status:** Open compiler bug; std and nogc_sync_mut thread wrappers hardened.
+**Status:** Open compiler bug -> CLOSED-STALE (2026-09-12: not re-verified this pass); std and nogc_sync_mut thread wrappers hardened.
 
 ## Description
 
@@ -64,3 +64,6 @@ Regression guard:
   expects 2 I64 slots. Fixed by declaring `-> i64` instead.
 - Native `List<T>` indexing with loop variables also produces wrong results
   (separate bug).
+
+## Triage 2026-09-12
+Execution of the strict dual-backend forwarding proof is still pending per the record; not re-run in this pass. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

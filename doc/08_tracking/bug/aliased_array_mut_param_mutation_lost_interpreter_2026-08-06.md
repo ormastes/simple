@@ -3,7 +3,7 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl` now PASSes)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to a specific function in the out-of-scope Rust seed (see "Not yet done" → now done,
   below); every reachable pure-Simple candidate interpreter was checked and does not share this
@@ -382,3 +382,6 @@ cannot move in either direction without someone being told.
   oracle, the probe, has been executed directly and does work. Do not treat the
   spec as passing until someone has seen a `Results: N total, N passed` line
   from it.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

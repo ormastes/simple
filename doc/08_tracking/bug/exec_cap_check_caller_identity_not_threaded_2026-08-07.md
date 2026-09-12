@@ -1,7 +1,7 @@
 # `exec_cap_check`'s scalar-caller ABI cannot carry a real `CapabilitySet` — every non-kernel caller is unconditionally denied, not "checked"
 
 **Date:** 2026-08-07
-Status: OPEN (P2)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl` now PASSes)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 proven — re-verified 2026-08-10: `bin/simple test
 test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl --no-cover-check` →
@@ -107,3 +107,6 @@ doc is about.
 File tracked; unblock when either (a) or (b) above lands and
 `exec_cap_check(caller, path)` is updated to build a real `CapabilitySet` for
 `caller` and delegate to `exec_cap_check_caps` instead of denying outright.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

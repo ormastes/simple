@@ -57,6 +57,25 @@ fn try_place_receiver_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    // In-place kernel first (2026-09-12): `self.inner.xs.push(x)`,
+    // `rows[i].push(x)`, `self.d.insert(k, v)` and `arr[i].inc()` mutate the leaf
+    // where it lives instead of evaluating the receiver to a COPY, running the
+    // functional builtin (which clones the whole container) and rebuilding the
+    // root through `updated_root` — O(container) per call. Same kernel the
+    // statement-position path in `interpreter_helpers/patterns.rs` uses, so the
+    // two spellings of the same call cannot diverge.
+    if let Some(result) = super::super::interpreter_helpers::patterns::try_place_mutation_in_place(
+        receiver,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )? {
+        return Ok(Some(result));
+    }
     let place = match super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)? {
         Some(place) => place,
         None => return Ok(None),
@@ -168,6 +187,50 @@ pub(super) fn eval_call_expr(
                         write_back_identifier_receiver(env, var_name, new_self);
                         return Ok(Some(result));
                     }
+                }
+                // ARRAY-MUT-EXPR (2026-09-12): expression-context twin of the
+                // statement fast path in interpreter_helpers::patterns (the
+                // Array identifier branch there, gated the same way on
+                // ARRAY_MUTATING_METHODS). `evaluate_method_call_with_self_update`
+                // just below evaluates the receiver to a COPY, so
+                // `handle_array_methods`'s pop/remove/insert arm clones the
+                // whole backing Vec on every call when the mutator is nested
+                // in a larger expression (`acc = acc + arr.pop()`,
+                // `f(arr.pop())`, `if arr.pop() % 2 == 0:`) — O(n) per call,
+                // O(n^2) per loop. The statement path doesn't have this
+                // defect because it mutates the SAME env slot's Arc in place
+                // via `Arc::make_mut`; route through that identical kernel
+                // instead of hand-writing a second copy of it. Gated on the
+                // mutator set (not just "is an Array"): a non-mutator
+                // (`arr.len()`) must fall through unchanged, since the
+                // patterns.rs Array branch itself recurses back into THIS
+                // function for any method outside that set, and an
+                // unconditional route here would loop forever. Dict is
+                // deliberately NOT included — patterns.rs's Dict branch has
+                // no in-place kernel of its own; it delegates to
+                // `evaluate_expr`, which lands back here, so routing Dict
+                // through the same call would recurse forever too.
+                // doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+                if matches!(env.get(var_name), Some(Value::Array(_)))
+                    && crate::interpreter::interpreter_helpers::patterns::ARRAY_MUTATING_METHODS
+                        .contains(&method.as_str())
+                {
+                    let (result, _updated_self) =
+                        crate::interpreter::interpreter_helpers::patterns::handle_method_call_with_self_update(
+                            expr,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                    // No further write-back needed: the kernel above already
+                    // mutated the env slot's Arc in place (local receiver) or
+                    // synced MODULE_GLOBALS itself (non-local receiver) —
+                    // exactly like its statement-context callers
+                    // (interpreter/node_exec.rs, interpreter/block_exec.rs)
+                    // consume it.
+                    return Ok(Some(result));
                 }
                 // Use the self-update variant to get both result and updated self
                 let (result, updated_self) = super::super::evaluate_method_call_with_self_update(

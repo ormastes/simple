@@ -1,6 +1,6 @@
 # CUDA resident-session design §5.3 needs 3 missing SFFI bindings: `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuDeviceGetAttribute`
 
-Status: OPEN (P2)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/03_system/gpu_lane/cuda_resident_session_spec.spl` now PASSes)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 SFFI bindings (`cuMemHostAlloc`/`cuMemHostGetDevicePointer`/
 `cuDeviceGetAttribute` and their `rt_cuda_*` extern counterparts) are still
@@ -131,3 +131,6 @@ refusal-gate examples RED (`6 examples, 2 failures`); reverting restored
 ```
 bin/simple test test/03_system/gpu_lane/cuda_resident_session_spec.spl
 ```
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/gpu_lane/cuda_resident_session_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

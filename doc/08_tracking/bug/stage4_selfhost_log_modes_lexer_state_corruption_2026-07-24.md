@@ -1,6 +1,6 @@
 # Stage 4 self-host corrupts lexer state at `log_modes.spl`
 
-- **Status:** open; exact-current full CLI blocked
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high
 - **First observed:** 2026-07-24 on macOS arm64
 - **Source revision:** `719f610e3c` plus documentation-only checkpoint
@@ -65,3 +65,7 @@ special case for `log_modes.spl` is not an accepted fix.
 Do not rerun the same full bootstrap in this session. The first result already
 localizes the current exact-source gate, and the WM host/QEMU evidence remains
 blocked until a test-capable exact-current CLI can be produced.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1,4 +1,5 @@
 # SimpleOS focused emit-object stage4 MIR diagnostic corruption
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Evidence
 
@@ -67,3 +68,6 @@ The failed experiment was reverted to the live-proven 16,384-page production bas
 The reviewed 32,768-page arena mapped successfully and reached the same CPL3 post-HIR nil-receiver trap. A second run with fail-only `_user_heap_bump` telemetry emitted no OOM marker. Therefore the immediate failure is not exhaustion of the bare-exec bump arena; the next diagnostic must distinguish a nonpositive `rt_alloc` request from a failure inside `simpleos_dlmalloc`.
 
 Evidence: `build/os/elfexec/emit_llvm_profile_run13.out` and `build/os/elfexec/emit_llvm_profile_run14.out`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

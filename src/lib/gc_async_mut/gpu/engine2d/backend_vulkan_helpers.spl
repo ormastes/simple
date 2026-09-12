@@ -6,7 +6,11 @@
 # Depends on: backend_vulkan.spl (VulkanBackend class)
 #             backend_vulkan_glsl.spl (shader sources, accessed via main init)
 
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
+    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
+    VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP, VK_T_SFFI_DESC,
+    VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
+    VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
@@ -85,6 +89,74 @@ val _VULKAN_ORDER_TRACE_ENABLED =
 # enough. See doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md.
 val _VULKAN_RECT_UPLOAD_U32_REQUESTED =
     (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "u32"
+
+# The same opt-in, for the IMAGE composite path, under its own flag so the two
+# populations can be measured independently. The image case is strictly better
+# than the rect one: `pixels` is ALREADY `[u32]`, so the typed lane does not
+# pack at all -- it hands the caller's own words straight to the runtime, which
+# widens each to four little-endian bytes exactly as `_prepare_image_upload`
+# does by hand. That removes `4 * pixel_count` interpreted array stores per
+# composite: 2.7M stores for one 900x760 full-surface image. Default OFF for
+# the same reason as the rect flag -- calling `rt_vulkan_copy_to_buffer_u32` on
+# a binary built before the extern existed aborts the whole process from inside
+# the interpreter's unknown-extern path, before any guard can decline.
+val _VULKAN_IMAGE_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_IMAGE_UPLOAD") ?? "") == "u32"
+
+var _vulkan_image_upload_last_mode: text = "unset"
+var _vulkan_image_upload_last_reason: text = "no-upload-yet"
+
+pub fn vulkan_image_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last image composite
+    upload actually used. `"unset"` before any composite has uploaded."""
+    _vulkan_image_upload_last_mode
+
+pub fn vulkan_image_upload_last_reason() -> text:
+    """`"typed-requested"`, `"typed-not-requested"` (default, byte path), or
+    `"typed-declined"` (u32 requested but the runtime refused the words)."""
+    _vulkan_image_upload_last_reason
+
+pub fn vulkan_image_upload_u32_requested() -> bool:
+    _VULKAN_IMAGE_UPLOAD_U32_REQUESTED
+
+pub fn vulkan_image_upload_note(mode: text, reason: text):
+    _vulkan_image_upload_last_mode = mode
+    _vulkan_image_upload_last_reason = reason
+
+# How many times the byte lane actually WALKED an image, split by which walk.
+# Module-global rather than per-backend because the oracle that needs them --
+# "one image, exactly one pack" -- reads them through the engine facade, which
+# does not expose the backend struct. They count walks, not attempts: a
+# composite that packs once and uploads once adds 1 to `packs` and 0 to
+# `byte_fallbacks`. Ungated by `SIMPLE_VK_TIMING`, unlike the `VK_T_*` buckets,
+# so a spec can assert on them in a default process.
+var _vulkan_image_pack_count: i64 = 0
+var _vulkan_image_byte_fallback_count: i64 = 0
+var _vulkan_image_scratch_resize_count: i64 = 0
+
+pub fn vulkan_image_pack_note_pack():
+    _vulkan_image_pack_count = _vulkan_image_pack_count + 1
+
+pub fn vulkan_image_pack_note_byte_fallback():
+    _vulkan_image_byte_fallback_count = _vulkan_image_byte_fallback_count + 1
+
+pub fn vulkan_image_pack_note_resize():
+    _vulkan_image_scratch_resize_count = _vulkan_image_scratch_resize_count + 1
+
+pub fn vulkan_image_pack_counts_reset():
+    _vulkan_image_pack_count = 0
+    _vulkan_image_byte_fallback_count = 0
+    _vulkan_image_scratch_resize_count = 0
+
+pub fn vulkan_image_pack_counts() -> text:
+    """`"packs=<n> byte_fallbacks=<n> scratch_resizes=<n>"` since process start
+    or the last `vulkan_image_pack_counts_reset()`.
+
+    `byte_fallbacks > 0` means some composite packed the image a SECOND time
+    because `vulkan_sffi_copy_to_buffer_prefix` declined the staging array. On
+    the exact-size scratch that must never happen for an admitted size.
+    """
+    "packs={_vulkan_image_pack_count} byte_fallbacks={_vulkan_image_byte_fallback_count} scratch_resizes={_vulkan_image_scratch_resize_count}"
 
 # Evidence of which payload shape the last `_enqueue_rect_batch_gpu` upload
 # actually took, and why -- read by tests/tooling that need to tell an
@@ -220,12 +292,25 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
 impl VulkanBackend:
 
     me _prepare_image_upload(pixels: [u32], count: i64) -> bool:
-        """Pack an image into reusable host staging without changing pixels.
+        """Pack an image into EXACT-SIZE reusable host staging.
 
         `vulkan_sffi_copy_to_buffer_prefix` snapshots the initialized prefix
         immediately into the destination Vulkan buffer. The pooled device
         source remains fenced independently, so this CPU scratch is safe to
         reuse by the next sequential draw.
+
+        The scratch is sized to `byte_count` EXACTLY, never grown to a
+        high-water mark. That is not a style choice: on the interpreter array
+        ABI the prefix facade admits an upload only when
+        `byte_count == data.len()` (`sffi_vulkan.spl`, and it cannot do better
+        -- the legacy extern derives the length from the array itself), so a
+        high-water scratch makes every composite after the first large one
+        decline the prefix and pack the WHOLE image a second time through
+        `_pixels_to_bytes`. Measured at 900x760: 262 of 264 composites paid
+        that second pack, 181 s of an 830 s frame. Reuse survives where it is
+        actually free -- a repeat of the same size hits the same array -- and
+        a size change now costs one runtime-side allocation instead of a
+        second interpreted walk of the image.
         """
         if count <= 0 or pixels.len().to_i64() != count:
             return false
@@ -235,9 +320,11 @@ impl VulkanBackend:
         if byte_count > VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES:
             self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
             return false
-        if self.image_upload_scratch.len().to_i64() < byte_count:
+        if self.image_upload_scratch.len().to_i64() != byte_count:
             self.image_upload_scratch = [0u8; byte_count]
             self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
+            vulkan_image_pack_note_resize()
+        vulkan_image_pack_note_pack()
         var i: i64 = 0
         while i < count:
             val pixel = pixels[i]
@@ -507,7 +594,9 @@ impl VulkanBackend:
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
         self.midframe_flush_count = self.midframe_flush_count + 1
+        val _t_flush = vulkan_timing_now_us()
         val flush_rc = self._flush_pending_compute_impl()
+        vulkan_timing_add(VK_T_FLUSH, _t_flush)
         if vulkan_order_trace_enabled():
             vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
         flush_rc
@@ -517,7 +606,10 @@ impl VulkanBackend:
         if cmd <= 0:
             return 1
         val has_font_work = self.pending_font_descriptors.len() > 0
-        if not vulkan_sffi_end_compute(cmd):
+        val _t_end = vulkan_timing_now_us()
+        val _ended = vulkan_sffi_end_compute(cmd)
+        vulkan_timing_add(VK_T_SFFI_END, _t_end)
+        if not _ended:
             if vulkan_order_trace_enabled():
                 vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()} err={vulkan_sffi_last_error()}")
             val discarded = vulkan_sffi_discard_command(cmd)
@@ -536,7 +628,9 @@ impl VulkanBackend:
             self._clear_pending_compute_state()
             return 0
 
+        val _t_submit = vulkan_timing_now_us()
         val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        vulkan_timing_add(VK_T_SFFI_SUBMIT, _t_submit)
         if fence <= 0 and vulkan_order_trace_enabled():
             vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
@@ -558,7 +652,9 @@ impl VulkanBackend:
             self.font_frame_submission_count = self.font_frame_submission_count + 1
             self.font_frame_fence_count = self.font_frame_fence_count + 1
 
+        val _t_wf = vulkan_timing_now_us()
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+        vulkan_timing_add(VK_T_SFFI_WAIT_FENCE, _t_wf)
         if not completion_waited and vulkan_order_trace_enabled():
             vulkan_order_trace("flush-fail stage=wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count}")
         if not completion_waited and not vulkan_sffi_wait_idle():
@@ -581,8 +677,17 @@ impl VulkanBackend:
             return 0
         if vulkan_order_trace_enabled():
             vulkan_order_trace("enqueue-entry pipe={pipe} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
+        # Per-op attribution (see `vulkan_timing_table`): every SFFI crossing on
+        # this path is timed separately, because "one dispatch" here is really
+        # begin + reap + descriptor + bind_pipeline + bind_descriptors +
+        # push_constants + dispatch, and the funnel total alone cannot say which
+        # of the seven is the cost.
+        val _t_enqueue = vulkan_timing_now_us()
         if self.pending_compute_command <= 0:
-            if not vulkan_sffi_reap_dependency_quarantine():
+            val _t_reap = vulkan_timing_now_us()
+            val _reaped = vulkan_sffi_reap_dependency_quarantine()
+            vulkan_timing_add(VK_T_SFFI_REAP, _t_reap)
+            if not _reaped:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("enqueue-fail stage=reap_dependency_quarantine pipe={pipe}")
                 return 0
@@ -590,7 +695,9 @@ impl VulkanBackend:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("enqueue-fail stage=fence_submission_supported pipe={pipe}")
                 return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("enqueue-fail stage=begin_compute pipe={pipe} rc={self.pending_compute_command}")
@@ -603,9 +710,12 @@ impl VulkanBackend:
                 desc = self.pending_compute_descriptors[i]
             i = i + 1
         if desc <= 0:
+            val _t_desc = vulkan_timing_now_us()
             desc = vulkan_sffi_create_descriptor_set(pipe)
-            if desc <= 0 or not vulkan_sffi_bind_buffer(
-                    desc, 0, self.d_framebuffer):
+            val _desc_bound = desc > 0 and vulkan_sffi_bind_buffer(
+                desc, 0, self.d_framebuffer)
+            vulkan_timing_add(VK_T_SFFI_DESC, _t_desc)
+            if not _desc_bound:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("enqueue-fail stage=descriptor pipe={pipe} desc={desc} fb={self.d_framebuffer}")
                 if desc > 0:
@@ -619,10 +729,18 @@ impl VulkanBackend:
             self.pending_compute_sources.push(0)
             self.pending_compute_count = self.pending_compute_count + 1
         val cmd = self.pending_compute_command
+        val _t_bp = vulkan_timing_now_us()
         val bound_pipeline = vulkan_sffi_bind_pipeline(cmd, pipe)
+        vulkan_timing_add(VK_T_SFFI_BIND_PIPE, _t_bp)
+        val _t_bd = vulkan_timing_now_us()
         val bound_descriptors = bound_pipeline and vulkan_sffi_bind_descriptors(cmd, desc)
+        vulkan_timing_add(VK_T_SFFI_BIND_DESC, _t_bd)
+        val _t_pc = vulkan_timing_now_us()
         val pushed = bound_descriptors and vulkan_sffi_push_constants(cmd, pipe, push_data)
+        vulkan_timing_add(VK_T_SFFI_PUSH, _t_pc)
+        val _t_dp = vulkan_timing_now_us()
         val ready = pushed and vulkan_sffi_dispatch(cmd, gx, gy, gz)
+        vulkan_timing_add(VK_T_SFFI_DISPATCH, _t_dp)
         if not ready:
             if vulkan_order_trace_enabled():
                 vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed} err={vulkan_sffi_last_error()}")
@@ -639,8 +757,10 @@ impl VulkanBackend:
             # outcome. What must not happen -- and no longer does -- is the
             # failure outliving the frame.
             val flushed = self._flush_pending_compute()
+            vulkan_timing_add(VK_T_ENQUEUE, _t_enqueue)
             return if flushed < 0: -1 else: 0
         self.frame_dispatch_count = self.frame_dispatch_count + 1
+        vulkan_timing_add(VK_T_ENQUEUE, _t_enqueue)
         1
 
     me _resolve_framebuffer_descriptor(pipe: i64) -> i64:
@@ -703,7 +823,9 @@ impl VulkanBackend:
             if (not vulkan_sffi_reap_dependency_quarantine() or
                 not vulkan_sffi_fence_submission_supported()):
                 return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
                 return 0
         val desc = self._resolve_framebuffer_descriptor(pipe)
@@ -918,7 +1040,9 @@ impl VulkanBackend:
             if (not vulkan_sffi_reap_dependency_quarantine() or
                 not vulkan_sffi_fence_submission_supported()):
                 return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
                 return 0
 
@@ -1046,7 +1170,9 @@ impl VulkanBackend:
                 not vulkan_sffi_fence_submission_supported()):
                 self._release_image_source(d_src)
                 return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
                 self._release_image_source(d_src)
                 return 0

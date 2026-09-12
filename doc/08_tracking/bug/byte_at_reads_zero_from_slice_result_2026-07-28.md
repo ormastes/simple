@@ -1,7 +1,7 @@
 # `byte_at()` reads zeros out of a `slice()` result
 
 **Date:** 2026-07-28
-**Status:** Open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Severity:** High — silent wrong data, no error
 **Area:** `std.tls.utilities.{byte_at, slice}`, interpreter (test-runner engine)
 
@@ -56,3 +56,6 @@ Root-cause the interaction between `slice`'s returned array representation and
 `byte_at`'s element read (suspected same family as the nested-array
 element-read shred), A/B it against the JIT and native engines, then drop the
 copy loop above.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

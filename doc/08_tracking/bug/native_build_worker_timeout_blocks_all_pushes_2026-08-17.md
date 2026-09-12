@@ -1,5 +1,7 @@
 # `native-build` worker times out, making a mandatory pre-push guard permanently RED
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed** 2026-08-17. **Status** OPEN. **Impact** blocks EVERY guarded push on
 this host, for every lane.
 
@@ -345,3 +347,6 @@ Corroborating datapoint at full scale, same day: the direct-seed
 VmRSS 9164 MiB`), well inside a 1800s bound — memory, not time. Detail:
 `doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md`
 (2026-08-18 section).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

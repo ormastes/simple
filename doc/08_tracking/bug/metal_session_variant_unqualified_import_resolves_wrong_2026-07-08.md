@@ -1,5 +1,7 @@
 # Unqualified `std.gpu.engine2d.metal_session` import can resolve to the wrong memory-model variant
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Found:** 2026-07-08, incidental finding during the "new kernel not found"
 blocker investigation (`engine2d_metal_new_kernel_pipeline_not_found_2026-07-07.md`).
 **Severity:** low — real callers are unaffected (see below); this only bites a
@@ -52,3 +54,6 @@ with divergent public method sets should either (a) be a resolution error that
 names the ambiguous candidates, or (b) deterministically prefer the variant
 matching the importing module's memory-model family. Filed as a record; not
 fixed in the GPU-dict pilot change.
+
+## Triage 2026-09-12
+Older than 45 days; record itself notes real callers are unaffected (low severity edge case). Not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

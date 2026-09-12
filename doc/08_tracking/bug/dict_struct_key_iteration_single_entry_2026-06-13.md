@@ -40,3 +40,6 @@ Found during `doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026
 W3.1. Likely related to struct-key hashing/equality in the interpreter dict
 implementation. A minimal repro should insert 3 entries keyed by a 2-field
 struct and count iteration visits.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/codegen/vhdl_kernel_entity_contract_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

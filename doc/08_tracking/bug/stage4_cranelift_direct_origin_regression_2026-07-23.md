@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Lane:** stage4 full-CLI binary, `native-build --backend cranelift` (cranelift-direct)
-**Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 session (2026-08-10). Diagnosing/bisecting this requires repeated stage4
 full-CLI native-build rebuilds with `--backend cranelift` (each probe rebuild
 is a stage4 cycle per the doc's own repro) and this session operates under a
@@ -61,3 +61,7 @@ simple native-build pm5.spl --backend cranelift -o /tmp/pm5.bin   # SEGVs
 - The campaign's batch-5 (value-position match/if result correctness) lands ON TOP
   of this regressed base: it strictly improves the lane (pm1/pm2/pm4 0 -> correct
   arm values) and does not touch the regressed behaviors.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1,5 +1,7 @@
 # BUG: x86_64 freestanding — `char_code_at` mis-decodes on dynamically-built text
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 Open. Found 2026-07-12 (Phase 2e Inc 2). Distinct from the frame-depth-sensitive
 `starts_with` bug in `x64_freestanding_text_char_at_starts_with.md` §Status point 3.
@@ -38,3 +40,7 @@ LLVM backend path (correct). Add the probe above as a regression gate once fixed
 ## Related
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`
 - `doc/08_tracking/bug/x64_freestanding_rt_string_to_int_stub.md`
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

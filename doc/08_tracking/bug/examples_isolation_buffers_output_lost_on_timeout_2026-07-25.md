@@ -1,7 +1,7 @@
 # `examples/**` isolation wrapper buffers child output and discards it when the run is killed — any slow example looks like a silent exit-0
 
 - **ID:** examples_isolation_buffers_output_lost_on_timeout_2026-07-25
-- **Status:** OPEN (root-caused, not fixed)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (masks evidence; makes failures indistinguishable from success)
 - **Found via:** `widget × host-WM` showcase-matrix cell producing 2 lines of
   output and exit 0.
@@ -116,3 +116,6 @@ diagnostics (e.g. `self.x = value` hints from
 25s. This matches the `2D × headless` cell's recorded "75k lines dominated by
 diagnostic spam" and is worth its own investigation: an advisory hint should not
 be emitted per-evaluation.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

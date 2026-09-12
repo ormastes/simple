@@ -1,5 +1,7 @@
 # `parse_child_example_summary` returns has_summary=0 on every run — a silently dead scraper (2026-08-08)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 OPEN. Filed, not fixed — found while root-causing
@@ -85,3 +87,7 @@ to skip the leading escape sequence — that helper is where to instrument first
 Note also that the runner already has a second, working path
 (`SPEC FILE VERDICT` / `warning: child exit 1 contradicted by a clean SPEC FILE
 VERDICT; trusting the verdict`), which is why a dead scraper is silent.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

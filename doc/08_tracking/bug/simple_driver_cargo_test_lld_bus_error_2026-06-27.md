@@ -1,6 +1,6 @@
 # simple-driver cargo test linker bus error
 
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: P2 resource/toolchain
 Date: 2026-06-27
 
@@ -29,3 +29,6 @@ Filtered Rust tests should either avoid linking unrelated test binaries or fail 
 - Prefer `CARGO_BUILD_JOBS=1 cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib` for compile verification of driver-library changes.
 - Investigate whether `simple-driver` integration tests can be split or filtered to avoid linking all heavy test binaries for a single unit-test filter.
 - Capture host memory and linker parallelism settings before retrying full Rust test linking.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

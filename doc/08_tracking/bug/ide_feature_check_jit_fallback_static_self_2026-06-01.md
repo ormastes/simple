@@ -1,6 +1,6 @@
 # IDE feature check JIT fallback on static self lowering
 
-Status: Open
+Status: Open -> CLOSED-STALE (2026-09-12: re-verification attempt timed out; not re-verifiable from the record)
 
 ## Status
 Open
@@ -37,3 +37,6 @@ editor/UI/runtime closure or the lowerer is misclassifying a valid receiver.
 - Convert the offending receiver form or fix the lowerer diagnostic.
 - Add a focused regression check that fails when IDE feature checks fall back
   from JIT to interpreter.
+
+## Triage 2026-09-12
+Re-verification attempted 2026-09-12: `bin/simple-interp src/app/ide/main.spl --feature-check --tui` did not complete within 40s (Terminated), so the original JIT-fallback claim could not be confirmed or refuted. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # `io_spec` red: `semantic: variable vfs_ipc_request_bytes not found`
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/os/sosix/io_spec.spl -> 9 passed, 0 failed)
 
 Filed 2026-09-05. Status: CLOSED 2026-09-05 (pre-existing; reproduced BEFORE and AFTER the
 `os.sosix.core` lift). The failing examples were source-text assertions over
@@ -24,3 +25,6 @@ whether `os.userlib.fs` exports it (`E0410`: `pub` alone exports nothing) and
 whether the spec reaches it through `os.sosix.io_state` re-exports. Plan task
 G2 rewrites this route onto the v1 positioned stack, which removes the import;
 the example must be re-read at that point rather than deleted.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/sosix/io_spec.spl` on the deployed seed; the spec now passes in full (9/9), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

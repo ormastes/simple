@@ -1,4 +1,5 @@
 # RV32 Sv32 user-entry and trap-return owner is missing
+**Status:** OPEN (unverified 2026-09-12)
 
 The nonce-bound RV32 ELF and exact mounted-byte admission are ready, but the
 repository cannot safely execute that image in U-mode yet.
@@ -99,3 +100,6 @@ ABI expects contiguous raw 16/80-byte buffers. Add kernel-only fixed packed
 storage with stable raw pointers and volatile wipe, or version the ABI to pass
 scalar words and serialize inside C. Do not use long-lived device-visible DMA
 storage for the secret and do not publish an anchor before this is resolved.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

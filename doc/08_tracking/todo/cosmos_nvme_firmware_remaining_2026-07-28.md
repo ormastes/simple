@@ -1,5 +1,7 @@
 # Cosmos NVMe Firmware Completion Status
 
+Status: CLOSED (2026-09-12, obsolete: every listed work item in this file is already recorded DONE; the plan it tracked has landed)
+
 The user-approved completion boundary is KV260/K26 emulation. Physical Cosmos+
 and UNO Q campaigns are postponed because the required hardware is unavailable;
 they remain future hardware qualification and must not be converted into host

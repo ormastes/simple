@@ -465,3 +465,6 @@ are untouched by the above and remain open as filed. Root cause C is **retired
 for the pure-Simple compiler** and **re-scoped to a seed MIR gap** (cross-owner).
 The `timer.spl` / `topology.spl` conversion is still correctly blocked: it is the
 seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/mir/inline_asm_output_writeback_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

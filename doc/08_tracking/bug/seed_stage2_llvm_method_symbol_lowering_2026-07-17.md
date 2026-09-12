@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Severity:** critical (the redeploy wall — blocks self-hosted bootstrap stage 2)
-**Status:** FIX IN REVIEW (lane S63, wt_s58) — stage-2 relink evidence pending
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -54,3 +54,6 @@ pattern) or earlier lowering.
   release path; refreshed/self-hosted redeploy depends on this fix.
 - `bootstrap_stage2_empty_mir_bodies_2026-07-05.md`,
   `selfhost_bootstrap_unresolved_symbols_2026-06-24.md` — earlier stage-2 walls.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

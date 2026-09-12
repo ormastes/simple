@@ -1,5 +1,7 @@
 # sspec-score-seed-lane.shs fails on this host: seed parser rejects a transitive import (2026-09-11)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 `sh scripts/check/sspec-score-seed-lane.shs <spec>` errors on every spec on
 this host (`.claude/worktrees/agent-a786cf790505813ca`, macOS aarch64):
 
@@ -49,3 +51,7 @@ pulls it in transitively — needs a real import trace, not guessed), or (b)
 deploy a current self-hosted `bin/release/<triple>/simple` on this host so the
 scorer can run via `simple sspec-maintain scan <spec>` directly instead of the
 seed-lane workaround.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

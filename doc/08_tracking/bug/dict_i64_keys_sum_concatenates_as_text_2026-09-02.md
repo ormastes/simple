@@ -1,4 +1,5 @@
 # `Dict<i64, _>.keys()` yields text-typed keys: `+` concatenates instead of adding
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-09-02 · **Status:** OPEN · **Severity:** high (silent wrong
 arithmetic — no error, no warning, a plausible-looking wrong number)
@@ -106,3 +107,6 @@ points at this record.
 Related specs:
 - `test/01_unit/compiler/50.mir/struct_collection_field_construction_contract_spec.spl`
 - `test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl`
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

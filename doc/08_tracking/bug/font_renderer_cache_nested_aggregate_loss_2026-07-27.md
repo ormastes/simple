@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** SimpleOS-WM QEMU (cranelift native), font metric resolution
-- **Status:** root-caused (read-only analysis); fix direction described; NOT blocking the now-green SimpleOS-WM cell
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Family:** cranelift native aggregate-return nil-receiver (`cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`)
 
 ## Symptom
@@ -65,3 +65,6 @@ Follow-up quality item; the SimpleOS-WM matrix cell already PASSES. The proper
 fix likely rides the cranelift aggregate-return fix (Codex #20 family) or a
 Simple-side flatten workaround; do NOT edit font_renderer.spl while rendering
 sessions are active without atomic-write coordination.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

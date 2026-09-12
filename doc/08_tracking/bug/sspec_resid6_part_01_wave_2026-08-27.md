@@ -1,5 +1,7 @@
 # sspec modernization residual wave resid6_part_01 — blocked and pre-existing-red specs
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-27
 - Batch: /tmp/sspec_census/resid6_part_01 (52 specs, all re-scored fresh after
   clearing `.simple/cache/sspec-maintain`). All started at effective 49
@@ -84,3 +86,7 @@ session_int_numeric_guard, arm64_payload_symbol_contract (26).
   `expect(1).to_equal(1)`.
 - `lib/std/language/mixin_static_poly_integration_spec.spl` — 8 describes of
   bare `expect true`, zero examples execute.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

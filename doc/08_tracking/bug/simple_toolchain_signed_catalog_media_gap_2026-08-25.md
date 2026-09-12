@@ -1,4 +1,5 @@
 # Simple toolchain signed-catalog media gap
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -96,3 +97,6 @@ adds all three rows before the catalog's sole seal operation. The ingestion
 entry remains package-private; ordinary boot does not require this optional
 media and the authenticated launch bridge remains dormant until boot supplies
 the real authority registry and parent task context.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Bootstrap Rust toolchain sysroot resolution
+**Status:** OPEN (unverified 2026-09-12)
 
 Owner: Astra bootstrap phase-check lane. Status: Phase 1 published; intermittent metadata failures remain under investigation before Stage 2 admission.
 
@@ -193,3 +194,6 @@ new bootstrap attempt; this host fix does not imply bootstrap success.
 The host loader now preserves declared PATH precedence while remaining
 idempotent; the MSVC chain oracle confirms rustc/cargo resolve from the rustup
 proxy and LLVM, VC, MSYS, and SDK directories retain their required order.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

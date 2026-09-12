@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Purpose: Pin the author-cascade memo added for
+doc/08_tracking/bug/web_style_cascade_apply_decls_reparses_per_node_2026-09-12.md
+— the memo must never let two nodes with the SAME matched rules but DIFFERENT
+inherited bases share a computed style, and the bucketed candidate index must
+keep CSS specificity and source-order semantics.
+Audience: browser-engine maintainers.
+
+Every oracle here is an absolute pixel value on a solid block, so a wrong
+computed style is a colour/geometry change a human can reproduce, not a
+relative comparison against the implementation under test.
+"""
+
+# @req: REQ-BROWSER-ENGINE-STYLE-CASCADE-MEMO-001 — the cascade memo must key on the parent's inherited identity.
+# @req: REQ-BROWSER-ENGINE-STYLE-CASCADE-MEMO-002 — bucketed candidate matching must preserve specificity and source order.
+# @req: REQ-BROWSER-ENGINE-STYLE-CASCADE-MEMO-003 — font metric resolution must be memoized within a document.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{
+    resolved_font_front_memo_hits
+}
+
+val RED: u32 = 0x00ff0000u32
+val WHITE: u32 = 0x00ffffffu32
+
+val PAGE_W: i32 = 400
+val PAGE_H: i32 = 400
+
+fn render(html: text) -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(html, PAGE_W, PAGE_H, "cpu_simd")
+
+fn px(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[y * PAGE_W + x] & 0x00ffffffu32
+
+fn page(style: text, body: text) -> text:
+    "<html><head><style>" + style + "</style></head>" +
+        "<body style=\"background:#ffffff;margin:0\">" + body + "</body></html>"
+
+# Two spans carry the IDENTICAL class and therefore the identical matched-rule
+# list; only their parents' font-size differs. `1.5em` resolves against the
+# INHERITED font-size, so the first span draws its text at 60px and the second
+# at 15px. A memo that forgot the parent hands the second span the first span's
+# computed style, and its text then spills past the narrow column below.
+val EM_RULE = ".t\{font-size:1.5em;color:#ff0000}"
+val EM_BODY = (
+    "<div style=\"font-size:40px;margin:0;height:150px\">" +
+        "<span class=\"t\">MMMM</span></div>" +
+    "<div style=\"font-size:10px;margin:0\"><span class=\"t\">MMMM</span></div>"
+)
+
+# Ink probe rather than one pixel: glyph coverage inside a column is what the
+# computed font-size decides, and the column bounds below are chosen so the
+# 15px run cannot reach them at all while the 60px run must.
+# Antialiased glyph edges are not exactly #ff0000 at small sizes, so the probe
+# accepts any strongly red pixel. The white page background is excluded by the
+# green/blue bounds, so this cannot report ink where none was painted.
+fn has_red(pixels: [u32], x0: i32, x1: i32, y0: i32, y1: i32) -> bool:
+    var y = y0
+    while y <= y1:
+        var x = x0
+        while x <= x1:
+            val p = px(pixels, x, y)
+            val r = (p >> 16) & 255u32
+            val g = (p >> 8) & 255u32
+            val b = p & 255u32
+            if r > 128u32 and g < 96u32 and b < 96u32:
+                return true
+            x = x + 1
+        y = y + 1
+    false
+
+describe "cascade memo — inherited base is part of the identity":
+    it "AC-1: the 40px parent's span draws 60px text past x=120":
+        val pixels = render(page(EM_RULE, EM_BODY))
+        expect(has_red(pixels, 120, PAGE_W - 1, 0, 149)).to_equal(true)
+
+    it "AC-1: the 10px parent's span stays narrow (memo must not share)":
+        val pixels = render(page(EM_RULE, EM_BODY))
+        expect(has_red(pixels, 0, 60, 150, PAGE_H - 1)).to_equal(true)
+        expect(has_red(pixels, 120, PAGE_W - 1, 150, PAGE_H - 1)).to_equal(false)
+
+describe "bucketed candidate index — specificity and source order":
+    it "AC-2: an #id rule beats a .class rule declared later in source":
+        val style = "#a\{background:#ff0000}.c\{background:#00ff00}"
+        val body = "<div id=\"a\" class=\"c\" style=\"width:200px;height:100px\"></div>"
+        expect(px(render(page(style, body)), 50, 50)).to_equal(RED)
+
+    it "AC-2: at equal specificity the later rule wins":
+        val style = ".c\{background:#00ff00}.c\{background:#ff0000}"
+        val body = "<div class=\"c\" style=\"width:200px;height:100px\"></div>"
+        expect(px(render(page(style, body)), 50, 50)).to_equal(RED)
+
+    it "AC-2: a .class rule beats a tag rule declared later in source":
+        val style = ".c\{background:#ff0000}div\{background:#00ff00}"
+        val body = "<div class=\"c\" style=\"width:200px;height:100px\"></div>"
+        expect(px(render(page(style, body)), 50, 50)).to_equal(RED)
+
+describe "font metric memo":
+    it "AC-3: repeated identical text runs resolve from the front memo":
+        val before_hits = resolved_font_front_memo_hits()
+        val body = (
+            "<p style=\"font-size:16px\">memo</p><p style=\"font-size:16px\">memo</p>" +
+            "<p style=\"font-size:16px\">memo</p><p style=\"font-size:16px\">memo</p>"
+        )
+        render(page("", body))
+        expect(resolved_font_front_memo_hits() > before_hits).to_equal(true)

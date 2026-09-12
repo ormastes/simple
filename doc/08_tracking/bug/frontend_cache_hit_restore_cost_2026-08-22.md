@@ -1,4 +1,5 @@
 # Front-end cache HIT restores cost most of a parse (interpreted per-line decode)
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-08-22  **Status:** FIXED (decoder inlining); native bulk decode still open
 - **Area:** `src/compiler/10.frontend/core/flat_pool_codec.spl` (`flat_pool_dec_*`)
@@ -48,3 +49,6 @@ measured 11.4 s for the i64 half alone) plus a truncated-inner-list case.
   frozen surfaces are not persisted (see `hir_shard_children_reparse_closure_2026-08-22.md`).
 - run11 parse shard 6/8 died silently; its claimed modules were orphaned and
   every HIR child re-parsed them (claims should be reclaimable).
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

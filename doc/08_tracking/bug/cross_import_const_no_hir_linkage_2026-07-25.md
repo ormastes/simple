@@ -1,6 +1,6 @@
 # BUG: an imported module-level const has no cross-module HIR linkage
 
-Status: OPEN (P2)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Re-verification (2026-08-10):** Reproduced fresh on
@@ -93,3 +93,6 @@ control that actually passes.
 3. Verify against a control that passes (`val BASE: i64 = 5` printed from
    `main` must build and print `5` before any cross-import A/B is meaningful —
    today it does not, so every such A/B is VOID, not negative).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

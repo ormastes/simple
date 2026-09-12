@@ -1,4 +1,5 @@
 # Showcase lane regressions and toolchain gaps (2026-07-18 verification sweep)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Found while re-verifying the 3 showcase apps × standalone/host-WM lanes on
 current main with the deployed `bin/simple` (v1.0.0-beta, self-hosted).
@@ -77,3 +78,6 @@ the freestanding lane, guest→WM content protocol is text-only
 file-based). Shortest credible path: after C8, stage the proven
 fs_exec_ring3 + WindowClient text app as `/sys/apps/graphics_2d_showcase.smf`
 to prove the pipeline, then design a pixel-frame IPC (`COMP_UPDATE_FRAME`).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

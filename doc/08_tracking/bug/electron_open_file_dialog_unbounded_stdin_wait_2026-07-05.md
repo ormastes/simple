@@ -1,4 +1,5 @@
 # Electron open_file_dialog blocks on stdin with no timeout and silently drops unrelated IPC
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 Open.
@@ -23,3 +24,6 @@ The moment something wires `open_file_dialog` into a live menu action or keyboar
 
 ## Next Step
 Route open-file-dialog requests through the async_handler reader (`ui.ipc/async_handler.spl`) with a deadline instead of a private stdin loop. Consolidate stdin reading to a single, properly-scoped reader with deadline support. Ensure all abandoned operations send explicit timeout errors back to callers.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # CORRECTION (2026-08-31, after this record was drafted)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **The parser gap described below is NOT a code defect. The fix is already in the
 tree, and every failure recorded here is a STALE BINARY.**
 
@@ -192,3 +194,34 @@ parses `inline.spl` fine.
 2. Teach the Rust seed's parser the suffixed `unsafe(...): <expr>` form so the seed can
    still build current source. Do **not** rewrite the 53 call sites to the block form —
    that normalizes a workaround over a compact form the language is supposed to accept.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+---
+
+## Verification 2026-09-12 (macOS arm64, `origin/main` @ `b9667d6584f`)
+
+**Defect 2 (inline `unsafe(...): <expr>` parse gap) — RESOLVED.** Re-verified by
+running the whole pure-Simple test runner from source with the Sep-12 seed
+(`build/cargo-r2/release/simple run src/app/test_runner_new/main.spl <spec>`).
+That pulls in `src/app/io/mod.spl`, the hub this record names as unparseable, and
+it now loads and runs to completion: a green calibration spec reports
+`Results: 1 total, 1 passed, 0 failed` (rc 0) and a deliberately red one reports
+`Results: 1 total, 0 passed, 1 failed` (rc 1). The 2026-08-31 correction at the
+top of this record predicted exactly this; it is now measured rather than
+inferred. No call site was rewritten to the block form.
+
+**Defect 1 (deploy slot) — STILL OPEN, and worse than recorded.** `bin/simple`
+now resolves to `src/compiler_rust/target/bootstrap.generations/502da3d0…/simple`
+(a Rust seed), and the two mac release slots are independently broken:
+`bin/release/macos-arm64/simple` (`v0.9.5`) is **load-only** — it exits 0 and
+prints "All tests passed" on a spec whose only example is
+`expect(1).to_equal(2)` — and `bin/release/aarch64-apple-darwin-macho/simple`
+**SIGSEGVs (rc 139)** during runner setup. Full evidence, and the new calibration
+gate that now catches this class,
+`scripts/check/check-test-runner-executes-bodies.shs`:
+`doc/08_tracking/bug/macos_deployed_test_runner_load_only_greenwash_2026-09-12.md`.
+
+Status: **PARTIALLY RESOLVED** — Defect 2 resolved in source; Defect 1 remains
+open pending a macOS full-CLI redeploy (blocked at bootstrap Stage 2).

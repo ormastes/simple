@@ -1,6 +1,6 @@
 # C Runtime Exclusion Analysis
 
-Status: Open — audit still tracks removable C runtime candidates and blocked removals.
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-05-18
 **Last audited:** 2026-05-30 (follow-up pass — hosted_cocoa/hosted_win32 classified as stale unbuilt C duplicates; active hosted ABI resolves through Rust stubs/real-gated crate)
@@ -264,3 +264,6 @@ symbols — they provide equivalent functionality at the stdlib layer.
 | random | `src/lib/common/random_pure.spl` | 21/21 |
 | time_utils | `src/lib/common/time_utils.spl` | 53/53 |
 | audio_effects | `src/lib/common/audio_effects.spl` | 7/7 |
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # `qualify_ignore` app CLI: `--fix` flag doesn't switch mode; JSON output stays `mode:"scan"`
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/app/qualify_ignore_log_modes_spec.spl -> 4 passed, 1 failed, still reproduces)
 
 **Date:** 2026-07-20
 **Component:** `src/app/qualify_ignore/main.spl` CLI flag handling
@@ -41,3 +42,6 @@ branch isn't wired to change the reported `mode`/perform the fix.
 
 Spec left unmodified — the assertion describes the intended `--fix`
 contract; this is a CLI implementation gap, not a stale test.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/qualify_ignore_log_modes_spec.spl` on the deployed seed; 1 of 5 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

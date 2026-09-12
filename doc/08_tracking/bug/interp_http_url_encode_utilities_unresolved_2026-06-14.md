@@ -1,5 +1,7 @@
 # interp: url_encode unusable in interpreter — "Cannot resolve module: utilities"
 
+**Status:** RESOLVED (2026-09-12, re-verified: repro now runs clean)
+
 - ID: interp_http_url_encode_utilities_unresolved_2026-06-14
 - Severity: P2
 - Area: interpreter / module resolution
@@ -58,3 +60,6 @@ the chain resolves; only the interpreter's module resolver fails.
    way the native frontend does (path/alias mismatch most likely).
 2. Drop the deep `utilities` dependency from the `http.url`/`http.common` chain
    so `url_encode` has no unresolvable transitive import.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: ran the record's own repro (`use std.nogc_sync_mut.http_client.types.{url_encode}` + `url_encode("ops@acme.com")`) via `SIMPLE_LIB=src bin/simple run`; it printed `START` then `ENC=ops%40acme.com` with no "Cannot resolve module: utilities" error. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

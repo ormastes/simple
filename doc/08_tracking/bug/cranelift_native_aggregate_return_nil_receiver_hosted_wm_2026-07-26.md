@@ -6,7 +6,7 @@
   (the hosted-WM production lane); compiler aggregate-return/Option lowering
 - **Severity:** high — blocks the host-WM showcase cells and any first frame of
   the hosted compositor. The SimpleOS guest compositor shares this pipeline.
-- **Status:** OPEN (systemic). Five consumer sites converted to the
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   owning-module accessor idiom (each verifiably moved the crash); the next
   site is inside the web render artifact pipeline, where aggregates are
   passed pervasively — chasing further sites is the wrong fix.
@@ -287,3 +287,6 @@ around a codegen defect.
 - `doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md` — different defect, same session, also nil-from-infrastructure
 - `.claude/memory` `reference_jit_option_i64_value3_none_collision` — earlier Option-decode defect in the JIT lane
 - Xvfb note: with `xvfb-run` the host-WM lane is NOT environment-blocked — hooks ready, WM launches, 5 windows created; the blocker is this defect.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

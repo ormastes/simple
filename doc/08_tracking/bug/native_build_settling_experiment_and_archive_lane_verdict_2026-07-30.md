@@ -1,5 +1,7 @@
 # Settling experiment + archive-lane final verdict (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Assignment: (1) settle whether the 07-29 6-CPU-hour rebuild arc was
 "blind but legitimate" or a real defect, by re-running with
 `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1` and watching the discovery curve;
@@ -173,3 +175,6 @@ confirms `timeout` wrapping the top-level `native-build` CLI is
 insufficient to bound the actual worker; future bounded attempts should
 either pass `--timeout` through to the tool itself or explicitly track
 and kill the worker PID, not just the wrapper.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
