@@ -285,6 +285,29 @@ class VulkanBackend:
     present_damage_rects: [i64]  # Validated flat x,y,w,h tuples owned by this backend
     present_damage_valid: bool
     host_mirror_valid: bool
+    # Live per-frame damage union, accumulated by the draw calls themselves.
+    # `frame_damage_full` is the FAIL-SAFE state: any device dispatch whose
+    # destination rectangle this backend cannot name marks the whole surface
+    # damaged, so an unhinted primitive can never produce a stale mirror.
+    # x1/y1 are EXCLUSIVE. See doc/08_tracking/bug/
+    # vulkan_damage_path_dead_interpreted_copy_2026-09-12.md.
+    frame_damage_valid: bool
+    frame_damage_full: bool
+    frame_damage_x0: i64
+    frame_damage_y0: i64
+    frame_damage_x1: i64
+    frame_damage_y1: i64
+    # Destination hint published by a draw call immediately before it dispatches;
+    # consumed (and cleared) by the dispatch funnel. Absent hint => full damage.
+    pending_damage_hint: bool
+    pending_damage_hx: i64
+    pending_damage_hy: i64
+    pending_damage_hw: i64
+    pending_damage_hh: i64
+    # Evidence counters: pixels in the damage union actually re-downloaded, and
+    # interpreted element writes spent patching the host mirror this frame.
+    damage_rect_px: i64
+    mirror_copy_iterations: i64
     # True when host_buf already holds THIS frame's device surface, so present()
     # must not download the whole framebuffer a second time. Set by the readback
     # that performed the download, cleared by every `dirty = true`. See
@@ -438,6 +461,19 @@ class VulkanBackend:
             present_damage_rects: [],
             present_damage_valid: false,
             host_mirror_valid: false,
+            frame_damage_valid: false,
+            frame_damage_full: false,
+            frame_damage_x0: 0,
+            frame_damage_y0: 0,
+            frame_damage_x1: 0,
+            frame_damage_y1: 0,
+            pending_damage_hint: false,
+            pending_damage_hx: 0,
+            pending_damage_hy: 0,
+            pending_damage_hw: 0,
+            pending_damage_hh: 0,
+            damage_rect_px: 0,
+            mirror_copy_iterations: 0,
             host_mirror_frame_fresh: false,
             last_host_checksum: 0,
             present_readback_bytes: 0,
@@ -748,6 +784,7 @@ impl RenderBackend for VulkanBackend:
         self.present_damage_rects = []
         self.present_damage_valid = false
         self.host_mirror_valid = false
+        self._clear_frame_damage()
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
         self.present_full_readback_count = 0
@@ -921,6 +958,7 @@ impl RenderBackend for VulkanBackend:
         self.present_damage_rects = []
         self.present_damage_valid = false
         self.host_mirror_valid = false
+        self._clear_frame_damage()
         self.w = 0
         self.h = 0
         self.mask_buf = []
@@ -933,6 +971,7 @@ impl RenderBackend for VulkanBackend:
         val total = _i64(self.w) * _i64(self.h)
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
+        self.hint_damage(0, 0, _i64(self.w), _i64(self.h))
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
         if dispatched > 0:
             self.dirty = true
@@ -944,12 +983,16 @@ impl RenderBackend for VulkanBackend:
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
                 self.host_mirror_frame_fresh = false
+                # A dispatch that failed leaves the device surface in an
+                # unknown state; the hinted rect no longer bounds the change.
+                self.note_damage_full()
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
         self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
@@ -981,6 +1024,7 @@ impl RenderBackend for VulkanBackend:
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
         if dispatched > 0:
             self.dirty = true
@@ -992,6 +1036,9 @@ impl RenderBackend for VulkanBackend:
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
                 self.host_mirror_frame_fresh = false
+                # A dispatch that failed leaves the device surface in an
+                # unknown state; the hinted rect no longer bounds the change.
+                self.note_damage_full()
 
     me draw_rect_list_filled(rects: [i32], colors: [u32]):
         """Paint N filled rects with ONE interpreter transit and one dispatch each.
@@ -1049,6 +1096,11 @@ impl RenderBackend for VulkanBackend:
         if enqueued > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
+            # The batch enqueues bypass `_dispatch_framebuffer_checked`, so the
+            # funnel never sees them. Widening to the whole surface is the
+            # fail-safe reading; a per-rect union here would be a second,
+            # independently-wrong damage accountant.
+            self.note_damage_full()
             self.mark_device_content_changed()
         if enqueued < count:
             # Replay only the tail; everything before `enqueued` is already
@@ -1085,6 +1137,7 @@ impl RenderBackend for VulkanBackend:
                 rx, ry, rw, rh, color, self.w, self.h,
                 self.clip_x, self.clip_y, self.clip_w, self.clip_h,
                 self.clip_enabled)
+            self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
             val rect_dispatched = self._dispatch_framebuffer_checked(
                 self.pipe_rect_filled, rect_pc,
                 (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1)
@@ -1175,6 +1228,7 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
         self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
 
     # Bitmap text goes through the font-atlas pipeline whenever that pipeline can
@@ -1190,6 +1244,7 @@ impl RenderBackend for VulkanBackend:
         if not self.initialized:
             self.dirty = true
             self.host_mirror_frame_fresh = false
+            self.note_damage_full()
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
@@ -1286,6 +1341,10 @@ impl RenderBackend for VulkanBackend:
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
+            # Image composite also bypasses the dispatch funnel, but its
+            # destination rect IS known exactly, so fold it rather than widen.
+            self.hint_damage(_i64(x), _i64(y), _i64(dst_w), _i64(dst_h))
+            self.consume_damage_hint()
             self.mark_device_content_changed()
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
                 self.mark_cpu_fallback("image-composite-cleanup-ineligible")
@@ -1592,6 +1651,147 @@ impl RenderBackend for VulkanBackend:
     me _clear_present_damage():
         self.present_damage_rects = []
         self.present_damage_valid = false
+        # Every caller of this is a frame boundary (present / device present /
+        # finalize), so the accumulated draw-call union retires with it.
+        self._clear_frame_damage()
+
+    me hint_damage(x: i64, y: i64, w: i64, h: i64):
+        """Publish the destination rect of the draw call about to dispatch.
+
+        The dispatch funnel consumes this; an absent hint is read as "this
+        primitive's footprint is unknown" and marks the whole surface damaged.
+        Fail-safe by construction: forgetting a hint costs speed, never
+        correctness."""
+        self.pending_damage_hint = true
+        self.pending_damage_hx = x
+        self.pending_damage_hy = y
+        self.pending_damage_hw = w
+        self.pending_damage_hh = h
+
+    me note_damage_full():
+        self.pending_damage_hint = false
+        self.frame_damage_valid = true
+        self.frame_damage_full = true
+
+    me consume_damage_hint():
+        """Fold the pending hint into the frame union, or widen to full."""
+        if not self.pending_damage_hint:
+            self.note_damage_full()
+            return
+        val hx = self.pending_damage_hx
+        val hy = self.pending_damage_hy
+        val hw = self.pending_damage_hw
+        val hh = self.pending_damage_hh
+        self.pending_damage_hint = false
+        if hw <= 0 or hh <= 0:
+            # A degenerate footprint paints nothing; leave the union untouched
+            # rather than widening it to the whole surface.
+            return
+        # Clip to the surface. A rect entirely outside it damages nothing.
+        var x0 = if hx < 0: 0 else: hx
+        var y0 = if hy < 0: 0 else: hy
+        var x1 = hx + hw
+        var y1 = hy + hh
+        if x1 > _i64(self.w): x1 = _i64(self.w)
+        if y1 > _i64(self.h): y1 = _i64(self.h)
+        if x1 <= x0 or y1 <= y0:
+            return
+        # An active clip can only SHRINK the painted area, so ignoring it keeps
+        # the union conservative (a superset), which is the safe direction.
+        if not self.frame_damage_valid or self.frame_damage_full:
+            if self.frame_damage_full:
+                return
+            self.frame_damage_valid = true
+            self.frame_damage_x0 = x0
+            self.frame_damage_y0 = y0
+            self.frame_damage_x1 = x1
+            self.frame_damage_y1 = y1
+            return
+        if x0 < self.frame_damage_x0: self.frame_damage_x0 = x0
+        if y0 < self.frame_damage_y0: self.frame_damage_y0 = y0
+        if x1 > self.frame_damage_x1: self.frame_damage_x1 = x1
+        if y1 > self.frame_damage_y1: self.frame_damage_y1 = y1
+
+    me _clear_frame_damage():
+        self.frame_damage_valid = false
+        self.frame_damage_full = false
+        self.frame_damage_x0 = 0
+        self.frame_damage_y0 = 0
+        self.frame_damage_x1 = 0
+        self.frame_damage_y1 = 0
+        self.pending_damage_hint = false
+
+    fn frame_damage_rect_px() -> i64:
+        """Pixels in this frame's damage union (evidence counter)."""
+        self.damage_rect_px
+
+    fn frame_mirror_copy_iterations() -> i64:
+        """Interpreted element writes spent patching the host mirror."""
+        self.mirror_copy_iterations
+
+    me _refresh_host_frame_damage() -> bool:
+        """Re-download ONLY this frame's damage union into the host mirror.
+
+        Returns false whenever the damage-scoped route is not applicable or
+        not profitable, so every caller keeps the full refresh as its fallback.
+
+        The row download uses the interpreter-legal scalars-in / array-out
+        primitive F8 added (`vulkan_sffi_readback_u32_alloc`), one native call
+        per damaged row: that is the only shape this lane marshals, and it is
+        what keeps the byte->u32 unpack out of interpreted code. The scatter
+        into `host_buf` is still an interpreted element write per damaged
+        pixel -- there is NO extern on this lane that takes a destination array
+        -- but it is bounded by the damage area instead of the surface, which
+        is the whole point. `mirror_copy_iterations` reports it honestly."""
+        if not self.host_mirror_valid or not self.frame_damage_valid:
+            return false
+        if self.frame_damage_full:
+            return false
+        val px_total = _i64(self.w) * _i64(self.h)
+        if self.host_buf.len().to_i64() != px_total:
+            return false
+        val x0 = self.frame_damage_x0
+        val y0 = self.frame_damage_y0
+        val rw = self.frame_damage_x1 - x0
+        val rh = self.frame_damage_y1 - y0
+        if rw <= 0 or rh <= 0:
+            return false
+        if rh > 16384:
+            return false
+        val area = rw * rh
+        # Below half the surface the per-row call overhead is repaid many times
+        # over; at or above it the single contiguous full download is cheaper.
+        if area * 2 >= px_total:
+            return false
+        var row: i64 = 0
+        var iterations: i64 = 0
+        while row < rh:
+            val src_px = (y0 + row) * _i64(self.w) + x0
+            val band = vulkan_sffi_readback_u32_alloc(
+                self.d_framebuffer, rw.to_i32(), src_px * 4)
+            if band.len().to_i64() != rw:
+                return false
+            var col: i64 = 0
+            while col < rw:
+                self.host_buf[src_px + col] = band[col]
+                col = col + 1
+            iterations = iterations + rw
+            row = row + 1
+        # The mirror identity must still describe the WHOLE surface. This is one
+        # native fold over device memory (no interpreted loop and no second
+        # unpack), so it stays honest without reintroducing the cost this path
+        # exists to remove. A lane without the native arm returns -1 and the
+        # caller falls back to the full refresh.
+        val checksum = vulkan_sffi_readback_u32_alloc_checksum(
+            self.d_framebuffer, self.w * self.h, 0)
+        if checksum < 0:
+            return false
+        self.last_host_checksum = checksum
+        self.damage_rect_px = area
+        self.mirror_copy_iterations = iterations
+        self.present_readback_bytes = area * 4
+        self.present_readback_rect_count = 1
+        true
 
     me _refresh_host_full() -> bool:
         val fb_size = _i64(self.w) * _i64(self.h) * 4
@@ -1626,6 +1826,10 @@ impl RenderBackend for VulkanBackend:
         self.present_readback_rect_count = 1
         self.present_full_readback_count += 1
         self.host_mirror_frame_fresh = true
+        # The whole surface now matches the device, so nothing is outstanding.
+        self.damage_rect_px = _i64(self.w) * _i64(self.h)
+        self.mirror_copy_iterations = 0
+        self._clear_frame_damage()
         true
 
     me _refresh_host_damage() -> bool:
@@ -1792,6 +1996,26 @@ impl RenderBackend for VulkanBackend:
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
+            self.damage_rect_px = 0
+            self.mirror_copy_iterations = 0
+            # Damage-scoped route FIRST: when a valid mirror from the previous
+            # frame survives and this frame's draw calls named a sub-rect, only
+            # that rect is re-downloaded. The mirror and the returned pixels
+            # share one array here exactly as the full arm below does (F8's
+            # readback/present/readback spec pins that consumers treat a
+            # readback as read-only), so no full-surface copy is needed.
+            if self._refresh_host_frame_damage():
+                self.host_mirror_frame_fresh = true
+                self._clear_frame_damage()
+                self.dirty = false
+                if self.cpu_fallback_used:
+                    return engine2d_readback(self.host_buf, "cpu_fallback")
+                return Engine2DReadback(
+                    pixels: self.host_buf, source: "device_readback",
+                    backend_handle: self.d_framebuffer,
+                    device_identity: self.session.device,
+                    pixel_count: self.host_buf.len().to_i64(),
+                    checksum: self.last_host_checksum)
             # Fill a local buffer in place; see _refresh_host_full for why the
             # destination is passed in rather than returned in a tuple.
             val bulk_px = vulkan_sffi_readback_u32_alloc(
@@ -1820,6 +2044,9 @@ impl RenderBackend for VulkanBackend:
                 self.host_mirror_valid = true
                 self.last_host_checksum = checksum
                 self.host_mirror_frame_fresh = true
+                # A full download re-establishes the whole surface.
+                self.damage_rect_px = _i64(self.w) * _i64(self.h)
+                self._clear_frame_damage()
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
             return Engine2DReadback(
@@ -1827,6 +2054,9 @@ impl RenderBackend for VulkanBackend:
                 backend_handle: self.d_framebuffer,
                 device_identity: self.session.device,
                 pixel_count: pixels.len().to_i64(), checksum: checksum)
+        # A clean frame downloads nothing and patches nothing.
+        self.damage_rect_px = 0
+        self.mirror_copy_iterations = 0
         var copy: [u32] = [0u32; self.w * self.h]
         # One native slot memcpy instead of an interpreted per-pixel loop. The
         # loop was ~482 ms per 7680x4320 frame — more than half the frame, and
@@ -2081,6 +2311,7 @@ impl Engine2DExtended for VulkanBackend:
         if not self.initialized:
             self.dirty = true
             self.host_mirror_frame_fresh = false
+            self.note_damage_full()
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
