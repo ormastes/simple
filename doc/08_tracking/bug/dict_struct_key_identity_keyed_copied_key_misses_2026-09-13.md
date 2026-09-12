@@ -76,6 +76,20 @@ temporary AND mention a `[SymbolId]`/`[LocalId]`/`[HirSymbol]`/`[BlockId]` array
 Every other struct-temporary sort found sorts `text` or ints (`driver_types.spl:356` sorts
 `function.type_bindings.keys()`, which are text, and text keys hash structurally).
 
+**That audit is narrower than the defect, and the gap is stated rather than implied.** It
+covers only the SORT shape. A struct-typed **field read** copies too: the same candidate
+binary shows an 8-word nil-guarded copy at `0x3677588`-`0x36775ec` whose result is re-tagged
+`orr x9, x0, #1`, i.e. reading a struct field out of a struct hands back a fresh object. So
+
+```
+val k = func.symbol      # fresh allocation, not the object stored in the dict
+module.functions[k]      # nil
+```
+
+misses natively for exactly the same reason, and that shape is **unaudited** — it is the most
+likely form of a next site. Any audit that closes this bug has to cover struct field reads,
+struct returns and struct arguments, not just array-element sorts.
+
 ## How to close this
 
 Either give struct keys structural hashing + equality in both runtimes, or refuse them: make
