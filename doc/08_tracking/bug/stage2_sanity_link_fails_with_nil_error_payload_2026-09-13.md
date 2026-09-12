@@ -523,3 +523,35 @@ Two probes that did NOT settle it, recorded so they are not repeated:
 Recommended next step, unchanged in kind from the sibling's successful one but
 now aimed at a named target: replay `stage2-command.transcript` with
 `SIMPLE_TRACE_FIELD_GET=1` and read `[FIELD-TRACE]` for `mold.spl`.
+
+### Caveat on the leading hypothesis above — it does not yet close
+
+The § CORRECTION section offers "`which_result` is bound to a process EXIT
+STATUS" as the leading explanation for the integer 0. That hypothesis has an
+internal tension which must be resolved before anyone acts on it:
+
+`Some(which_result)` is only reached when `which_result.len() > 0` was **true**.
+`rt_len` of a plain integer 0 is not > 0 — measured on this lane, `.len()` of a
+nil is `-1`, and an integer receiver is not a length-bearing value either. So a
+bare exit status would have taken the `else: nil` branch and produced
+`Err("No linker found.")`, which is NOT what the trace shows.
+
+Three shapes survive, and they need different evidence:
+
+1. **Mistyped receiver.** `which_result` is bound to something whose `.len()`
+   answers a garbage value > 0 while its integer projection is 0 — the
+   `get_field_info(TypeId::ANY, ...)` LOCAL-BEST class F54 fixed for a different
+   route. `SIMPLE_TRACE_FIELD_GET=1` on the transcript replay discriminates this
+   one, and it is the only one the recommended next step covers.
+2. **`Some(x)` payload slot.** The Optional is constructed with the payload read
+   from the wrong slot at closure scale, so a correct `which_result` becomes a 0
+   inside the box. This is the task's original "payload slot" hypothesis
+   reappearing one wrapper further out, and a FIELD-TRACE will NOT show it —
+   it needs the instruction-level read.
+3. **Tail-position `if/else` value.** The function's result is the value of a
+   tail `if/else` expression; the wrong branch value being yielded would produce
+   exactly this. Also invisible to FIELD-TRACE.
+
+So: run the FIELD-TRACE replay first because it is cheap and rules out (1), but
+do not read a clean FIELD-TRACE as exoneration — (2) and (3) are still live and
+need the same instruction-level method that settled the receipt-size defect.
