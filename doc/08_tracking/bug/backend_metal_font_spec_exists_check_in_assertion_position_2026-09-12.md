@@ -62,10 +62,18 @@ and changed nothing, which is what pointed at `bdd.rs`.
 
 ## Fix
 
-`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_font_spec.spl:107-125`
-— bind each optional to a `val` and assert on the recovered payload with `??`,
-and keep one explicit `.?` presence oracle so the contract is stated rather than
-avoided. No production code changed: none was wrong.
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_font_spec.spl` — bind
+each optional to a `val` and assert on the recovered payload with `??`. No
+production code changed: none was wrong.
+
+**Credit / concurrency note.** A sibling lane root-caused and fixed this same
+scenario independently while this lane was working on it, and landed first. On
+rebase their version was kept verbatim and this lane's edit to that file was
+dropped rather than clobbering theirs (anti-revert protocol, `.claude/rules/vcs.md`).
+The two diagnoses agree exactly — their comment likewise says `f(...).?` in
+argument position is a nil-CHECK, not an unwrap. What this lane contributes that
+is not in `main` is the two contract specs below, which pin the semantics so the
+next author cannot rediscover it the same way.
 
 ## Evidence after the fix
 
