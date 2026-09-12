@@ -1,0 +1,84 @@
+"""
+## Purpose and audience
+Unit coverage of the shared Atlassian deployment-shape helpers for DevHub
+maintainers: the Cloud vs Server / Data Center REST roots for Jira, Confluence
+and Bitbucket, the Bitbucket (project key, repo slug) URL placement, and the
+basic/bearer auth-header selection. Network-free — pure helpers only.
+## Operator workflow
+Run `bin/simple run test/01_unit/app/devhub/atlassian_site_spec.spl` from the
+repo root after touching `src/app/devhub/atlassian_site.spl` or any adapter
+that consumes it.
+## Compatibility and limitations
+The Cloud expectations here are the byte-identical URLs the adapters emitted
+before deployment shapes were configurable; a change to them is a provider
+contract change, not a refactor. The DC expectations pin Jira REST v2,
+Confluence `/rest/api` and Bitbucket Server `/rest/api/1.0/projects/{KEY}/repos/{slug}`.
+## Verification guidance and troubleshooting
+A failure here means a path shape drifted — check `atlassian_site.spl` first;
+the adapters only concatenate what these helpers return.
+"""
+
+use app.devhub.atlassian_site.{
+    AtlassianSite,
+    ATLASSIAN_CLOUD,
+    ATLASSIAN_DATACENTER,
+    ATLASSIAN_AUTH_BASIC,
+    ATLASSIAN_AUTH_BEARER,
+    atlassian_normalize_deployment,
+    atlassian_normalize_auth,
+    atlassian_auth_header,
+    jira_rest_root,
+    jira_search_url,
+    confluence_rest_root,
+    bitbucket_api_root,
+    bitbucket_owner_url,
+    bitbucket_repo_url,
+    bitbucket_pr_collection_url,
+    bitbucket_page_query,
+}
+
+
+describe "Atlassian deployment shapes":
+    it "builds Cloud and Data Center URLs for Jira, Confluence and Bitbucket, including (project key, repo slug)":
+        # @req REQ-DEVHUB-ATLASSIAN-SHAPE-001
+        step("Verify: unset / alias deployment values normalize; unknown stays Cloud")
+        expect(atlassian_normalize_deployment("")).to_equal(ATLASSIAN_CLOUD)
+        expect(atlassian_normalize_deployment("dc")).to_equal(ATLASSIAN_DATACENTER)
+        expect(atlassian_normalize_deployment("Server")).to_equal(ATLASSIAN_DATACENTER)
+        expect(atlassian_normalize_deployment("typo")).to_equal(ATLASSIAN_CLOUD)
+
+        step("Verify: Jira Cloud keeps REST v3 + /search/jql; DC uses REST v2 + /search under a context path")
+        val jira_cloud = AtlassianSite.create("https://acme.atlassian.net/", "")
+        expect(jira_rest_root(jira_cloud)).to_equal("https://acme.atlassian.net/rest/api/3")
+        expect(jira_search_url(jira_cloud)).to_equal("https://acme.atlassian.net/rest/api/3/search/jql")
+        val jira_dc = AtlassianSite.create("https://jira.corp.example/jira", "datacenter")
+        expect(jira_rest_root(jira_dc)).to_equal("https://jira.corp.example/jira/rest/api/2")
+        expect(jira_search_url(jira_dc)).to_equal("https://jira.corp.example/jira/rest/api/2/search")
+
+        step("Verify: Confluence Cloud keeps /wiki/api/v2; DC switches to /rest/api")
+        expect(confluence_rest_root(AtlassianSite.create("https://acme.atlassian.net/wiki", ""))).to_equal("https://acme.atlassian.net/wiki/api/v2")
+        expect(confluence_rest_root(AtlassianSite.create("https://wiki.corp.example/confluence", "dc"))).to_equal("https://wiki.corp.example/confluence/rest/api")
+
+        step("Verify: Bitbucket Cloud (workspace, slug) is byte-identical to the previous hardcoded shape")
+        val bb_cloud = AtlassianSite.create("", "")
+        expect(bitbucket_api_root(bb_cloud)).to_equal("https://api.bitbucket.org/2.0")
+        expect(bitbucket_owner_url(bb_cloud, "acme")).to_equal("https://api.bitbucket.org/2.0/repositories/acme")
+        expect(bitbucket_repo_url(bb_cloud, "acme", "widgets")).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets")
+        expect(bitbucket_pr_collection_url(bb_cloud, "acme", "widgets")).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests")
+        expect(bitbucket_page_query(bb_cloud, 30)).to_equal("pagelen=30")
+
+        step("Verify: Bitbucket Server places (PROJECT_KEY, slug) under /rest/api/1.0/projects/{KEY}/repos/{slug}")
+        val bb_dc = AtlassianSite.create("https://git.corp.example/bitbucket/", "server")
+        expect(bitbucket_api_root(bb_dc)).to_equal("https://git.corp.example/bitbucket/rest/api/1.0")
+        expect(bitbucket_owner_url(bb_dc, "PROJ")).to_equal("https://git.corp.example/bitbucket/rest/api/1.0/projects/PROJ/repos")
+        expect(bitbucket_repo_url(bb_dc, "PROJ", "widgets")).to_equal("https://git.corp.example/bitbucket/rest/api/1.0/projects/PROJ/repos/widgets")
+        expect(bitbucket_pr_collection_url(bb_dc, "PROJ", "widgets")).to_equal("https://git.corp.example/bitbucket/rest/api/1.0/projects/PROJ/repos/widgets/pull-requests")
+        expect(bitbucket_page_query(bb_dc, 30)).to_equal("limit=30")
+
+        step("Verify: auth scheme selection — bearer/PAT vs basic, fail-closed on missing inputs")
+        expect(atlassian_normalize_auth("", ATLASSIAN_AUTH_BEARER)).to_equal(ATLASSIAN_AUTH_BEARER)
+        expect(atlassian_normalize_auth("PAT", ATLASSIAN_AUTH_BASIC)).to_equal(ATLASSIAN_AUTH_BEARER)
+        expect(atlassian_auth_header(ATLASSIAN_AUTH_BEARER, "", "tok-1")).to_equal("Bearer tok-1")
+        expect(atlassian_auth_header(ATLASSIAN_AUTH_BASIC, "alice@example.com", "tok-1")).to_equal("Basic YWxpY2VAZXhhbXBsZS5jb206dG9rLTE=")
+        expect(atlassian_auth_header(ATLASSIAN_AUTH_BASIC, "", "tok-1")).to_equal("")
+        expect(atlassian_auth_header(ATLASSIAN_AUTH_BEARER, "", "")).to_equal("")

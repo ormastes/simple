@@ -1,7 +1,7 @@
 # GUI macOS SMF dynlib hot-call evidence missing
 
 Date: 2026-06-01
-Status: open (triaged 2026-06-11) -> CLOSED-STALE (2026-09-12: macOS arm64 evidence gap not re-verifiable from the record)
+Status: open (triaged 2026-06-11; erroneously auto-closed 2026-09-12, reopened same day — see Reconciliation note below)
 
 ## Summary
 
@@ -168,5 +168,21 @@ Remaining blocker: run the macOS release gate on real macOS arm64 and record a
 passing transcript whose `GUI_DYNLIB_PERF` row reports the SMF/SFFI hot-call
 path with `p99_us < 1000`.
 
-## Triage 2026-09-12
+## Triage 2026-09-12 (superseded same day, see below)
 Older than 45 days; the missing macOS arm64 dylib evidence is not reproducible on this (Linux) host. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Reconciliation 2026-09-12 (Lane 6, round-2 macOS fix pass)
+The 2026-09-12 age-policy closure above was WRONG and is reverted: the bug's
+acceptance target is macOS arm64 `.dylib` evidence specifically, and the
+closure was made from a Linux aarch64 host that cannot produce that evidence
+by construction — "not reproducible on this host" is not the same as "fixed"
+or "no longer applicable". `bug_db.sdn` was never updated to match the
+closure (it still carries `open`/P3 at `doc/08_tracking/bug/bug_db.sdn:1739`,
+row `gui_smf_dynlib_hot_call_runtime_missing_2026-06-01`), which is the status
+conflict flagged in
+`doc/03_plan/infra/macos_open_bugs_fix_lanes_round2_2026-09-12.md` lane 6.
+Resolution: this record is REOPENED to agree with `bug_db.sdn` (status: open,
+P3). No macOS arm64 `.dylib` SMF hot-call evidence has been produced in this
+pass either (no macOS release-gate run was performed in this lane); the
+remaining blocker is unchanged from the "Update: 2026-06-02 release-lane
+evidence state" section above.

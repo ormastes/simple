@@ -1,11 +1,43 @@
+# Writing to an inherited fd by path. Linux spells that /proc/self/fd/N; every
+# host without procfs (macOS, the BSDs) spells it /dev/fd/N. Unlike the READ
+# views further down -- where /dev/fd's dup-not-reopen semantics silently breaks
+# repeated reads, see
+# doc/08_tracking/bug/bootstrap_stage3_proc_fd_protocol_has_no_darwin_equivalent_2026-09-12.md
+# -- a single append-style write is unaffected by a shared offset, so this one
+# is a safe direct substitution.
+bootstrap_stage3_phase_status_path() {
+    if [ -r /proc/self/stat ]; then
+        printf '/proc/self/fd/%s\n' "$1"
+    else
+        printf '/dev/fd/%s\n' "$1"
+    fi
+}
+
 bootstrap_stage3_manifest_phase_emit() {
     [ "${BOOTSTRAP_STAGE3_PHASE_STATUS_FD:-}" = 159 ] || return 0
-    { printf '%s' "$1" >'/proc/self/fd/159'; } 2>/dev/null || :
+    { printf '%s' "$1" >"$(bootstrap_stage3_phase_status_path 159)"; } 2>/dev/null || :
+}
+
+# The caller's own pid. Linux reads field 1 of /proc/self/stat, which is the
+# pid of the process actually doing the read; elsewhere POSIX `$$` is the same
+# value, because $$ names the ORIGINAL shell and is not re-expanded in a
+# subshell. (`$PPID` of a single external command is NOT an equivalent: measured
+# on /bin/sh here, `$(sh -c 'echo $PPID')` returns the command-substitution
+# subshell -- 48559 against a real $$ of 48549 -- so it must not be used.) The
+# positive-integer check at the call site is the fail-closed arm for both
+# sources and is deliberately unchanged.
+bootstrap_stage3_own_pid() {
+    if [ -r /proc/self/stat ]; then
+        IFS=' ' read -r bootstrap_stage3_local_pid bootstrap_stage3_local_stat_rest \
+            </proc/self/stat || return 1
+    else
+        bootstrap_stage3_local_pid=$$
+        bootstrap_stage3_local_stat_rest=
+    fi
 }
 
 bootstrap_stage3_verify_manifest_impl() {
-    IFS=' ' read -r bootstrap_stage3_local_pid bootstrap_stage3_local_stat_rest \
-        </proc/self/stat || return 1
+    bootstrap_stage3_own_pid || return 1
     case "$bootstrap_stage3_local_pid" in
         ''|0|*[!0-9]*) return 1 ;;
     esac

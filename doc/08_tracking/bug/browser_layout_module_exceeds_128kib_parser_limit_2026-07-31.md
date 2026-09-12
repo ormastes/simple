@@ -67,3 +67,22 @@ touching it must be sequenced after that lane. Status stays
 change per file (verified by total-byte-count non-decrease, per the warning
 above about a prior split that silently dropped 663 lines) — not something to
 attempt inside a mixed bug-sweep pass. No code changed by this note.
+
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_module_split_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_module_split_spec.spl outcome=ERROR declared>=2 executed=2 passed=1 failed=1 skipped=0 dropped=0
+```
+
+1 of 2 examples red: `expected 169194 to be less than 131072`. The module is
+still 169 KiB against the 128 KiB parser input limit — the split was never
+completed. The sibling example ("keeps the original module as the public
+facade") passes, so the facade half of the plan landed and the actual split did
+not. Fixing this is a module-decomposition task on a 169 KiB file, past this
+lane's box.

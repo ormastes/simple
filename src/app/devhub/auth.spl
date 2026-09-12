@@ -4,60 +4,57 @@
 # Delegates Jira auth to acli
 
 use std.nogc_sync_mut.env.{env_get}
-use std.common.base_encoding.base64.{base64_encode}
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
 use app.devhub.errors.{ItfError}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, jira_rest_root, confluence_rest_root}
+
+
+fn jira_site(config: ItfConfig) -> AtlassianSite:
+    """The configured Jira deployment (jira.url + jira.deployment)."""
+    AtlassianSite.create(config.jira_url, config.jira_deployment)
+
+
+fn confluence_site(config: ItfConfig) -> AtlassianSite:
+    """The configured Confluence deployment (confluence.url + confluence.deployment)."""
+    AtlassianSite.create(config.confluence_url, config.confluence_deployment)
+
+
+fn jira_auth_scheme(config: ItfConfig) -> text:
+    """jira.auth normalized: basic (default, Cloud email:api_token) or bearer
+    (Data Center personal access token)."""
+    atlassian_normalize_auth(config.jira_auth, ATLASSIAN_AUTH_BASIC)
 
 
 fn jira_auth_header(config: ItfConfig) -> text:
-    """Build Authorization header value for the Jira REST v3 API (used by
-    `itf api --jira`). Jira Cloud uses the same Basic auth shape as
-    Confluence: base64(email:api_token)."""
+    """Build Authorization header value for the Jira REST API (used by
+    `itf api --jira`). Cloud (default) uses Basic base64(email:api_token);
+    with `jira.auth: bearer` the token is sent as a Data Center PAT."""
     val token = resolve_auth_token(config, "jira")
-    if token == "":
-        return ""
-    if config.jira_email == "":
-        return ""
-    val credentials = "{config.jira_email}:{token}"
-    val encoded = base64_encode(credentials)
-    "Basic {encoded}"
+    atlassian_auth_header(jira_auth_scheme(config), config.jira_email, token)
 
 
 fn jira_api_base(config: ItfConfig) -> text:
-    """Get Jira REST v3 API base URL (used by `itf api --jira`)."""
-    val url = config.jira_url
-    if url == "":
-        return ""
-    if url.ends_with("/"):
-        return "{url}rest/api/3"
-    "{url}/rest/api/3"
+    """Get the Jira REST API base URL (used by `itf api --jira`): REST v3 on
+    Cloud, REST v2 on Server / Data Center."""
+    jira_rest_root(jira_site(config))
 
 
 fn confluence_auth_header(config: ItfConfig) -> text:
-    """Build Authorization header value for Confluence REST API.
+    """Build Authorization header value for the Confluence REST API.
 
-    Confluence Cloud uses Basic auth: base64(email:api_token)
+    Cloud (default) uses Basic base64(email:api_token); with
+    `confluence.auth: bearer` the token is sent as a Data Center PAT.
     """
     val token = resolve_auth_token(config, "confluence")
-    if token == "":
-        return ""
-    val user = config.confluence_user
-    if user == "":
-        return ""
-    val credentials = "{user}:{token}"
-    val encoded = base64_encode(credentials)
-    "Basic {encoded}"
+    atlassian_auth_header(atlassian_normalize_auth(config.confluence_auth, ATLASSIAN_AUTH_BASIC), config.confluence_user, token)
 
 
 fn confluence_api_base(config: ItfConfig) -> text:
-    """Get Confluence REST v2 API base URL."""
-    val url = config.confluence_url
-    if url == "":
-        return ""
-    # Ensure URL ends without trailing slash
-    if url.ends_with("/"):
-        return "{url}api/v2"
-    "{url}/api/v2"
+    """Get the Confluence REST API base URL: `/api/v2` on Cloud (the
+    configured URL already carries `/wiki`), `/rest/api` on Server / Data
+    Center (which has no v2 API — see confluence_rest_root for the named
+    resource-path gap)."""
+    confluence_rest_root(confluence_site(config))
 
 
 fn check_confluence_auth(config: ItfConfig) -> bool:

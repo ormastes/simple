@@ -179,6 +179,41 @@ extern fn rt_stdout_flush()
 @unsafe(reason: "raw file sha256 ABI for immutable compatibility artifacts", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
 
+# Read the object size DIRECTLY rather than through `FileFingerprint.size`.
+#
+# Measured 2026-09-12 on a Stage-2-compiled compiler (macOS aarch64): reading
+# the `i64` field `.size` off an optional-bound `FileFingerprint` --
+#
+#     val object_fp = FileFingerprint.from_file(object_path)
+#     if val fp = object_fp:
+#         ... "{fp.size}" ...
+#
+# -- yields a TAGGED HEAP POINTER instead of the byte count. The capsule
+# receipt for a 632-byte object recorded 54090898177 (0xc98119b01), and a
+# second read of the SAME file in the SAME process produced 53657761281 where
+# the first produced 53657758209 -- 0xc7e407601 vs 0xc7e406a01, two boxes 3072
+# bytes apart. Because the receipt is WRITTEN from one such read and VERIFIED
+# by recomputing it, the two disagreed while being the same LENGTH, which is
+# the `receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648` that
+# blocked every macOS Stage 2.
+#
+# `.content_hash` through the identical binding looked correct, which is what
+# made this hard to see -- but a `text` field IS a pointer, so a boxed read of
+# it is indistinguishable from a correct one. Only the `i64` field exposed the
+# defect.
+#
+# This is the same class as the `case Ok(source): source.content` misread
+# already documented in `driver_native_disk_source_identity` below, and the
+# same remedy: go to the runtime for the value instead of through the bound
+# payload. The underlying codegen defect is NOT fixed here --
+# doc/08_tracking/bug/bootstrap_stage2_native_capsule_receipt_mismatch_equal_byte_counts_2026-09-12.md
+# -- and it will misread any other scalar field read the same way.
+#
+# The runtime returns -1 when the file cannot be stat'd; callers must treat a
+# negative result as a failure, never as a size.
+@unsafe(reason: "raw file size ABI; struct-field read of the same value is miscompiled under Stage-2 native codegen", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
+
 val NATIVE_MODULE_CACHE_SHADOW_RECEIPT_VERSION: text = "native-module-cache-shadow-receipt-v1"
 val NATIVE_MODULE_CACHE_SHADOW_MISMATCH_LIMIT: i64 = 64
 
@@ -498,12 +533,14 @@ fn driver_materialize_phase2_native_v1(
             val _published_deleted = file_delete(expected_capsule.object_path)
             print "[M3] reject native reason=phase3-published-digest-mismatch path={item.artifact_path}"
             return (false, item.artifact_path)
-        val materialized = FileFingerprint(
-            path: expected_capsule.object_path,
-            content_hash: item.artifact_digest,
-            modified_time: 0,
-            size: published.content.len())
-        val receipt = "native-capsule-result-v1\n{expected_capsule.capsule_identity}\n{expected_capsule.object_path}\n{materialized.size}\n{materialized.content_hash}\n"
+        # Read the two receipt values from LOCALS, never back out of a
+        # FileFingerprint. The `.size` read is miscompiled under Stage-2 native
+        # codegen (see the `rt_file_size` note at the top of this file), and the
+        # verifier this receipt must match now composes its expected text from
+        # the same two locals, so both sides agree by construction.
+        val materialized_size = published.content.len()
+        val materialized_hash = item.artifact_digest
+        val receipt = "native-capsule-result-v1\n{expected_capsule.capsule_identity}\n{expected_capsule.object_path}\n{materialized_size}\n{materialized_hash}\n"
         val receipt_path = expected_capsule.object_path + ".capsule-receipt"
         val receipt_admission = phase_compatibility_destination_io_v1(
             manifest.phase3_cache_root, receipt_path)
@@ -883,17 +920,53 @@ pub fn driver_native_capsule_result_reason_v1(
         return "receipt-missing:{receipt_path}"
     val object_fp = FileFingerprint.from_file(capsule.object_path)
     if not object_fp.?: return "object-fingerprint-failed:{capsule.object_path}"
+    # Size comes from the runtime, NOT from `fp.size` -- see the note on the
+    # `rt_file_size` declaration at the top of this file. The hash still comes
+    # from the fingerprint, because that is what the frozen side computed.
+    val object_size = rt_file_size(capsule.object_path)
+    if object_size < 0:
+        return "object-size-unreadable:{capsule.object_path}"
     var expected = ""
     if val fp = object_fp:
-        expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+        expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{object_size}\n{fp.content_hash}\n"
     val actual = _sffi_file_read_text(receipt_path) ?? ""
     if actual != expected:
         # Report LENGTHS, not the two blobs: the receipt is ~1.3 KB and the
         # difference is what matters. A length pair that is equal while the texts
         # differ localises the mismatch to content; an unequal pair localises it
         # to truncation on read.
-        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}"
+        #
+        # Lengths ALONE were not enough, and that cost a full Stage-2 lane a day.
+        # Measured 2026-09-12 on macOS the verdict read
+        # `receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648` --
+        # true, and actionable by nobody. The receipt is five fixed lines
+        # (header / capsule-identity / object-path / size / content-hash), so
+        # naming the first differing LINE names the failing FIELD directly,
+        # which a byte offset does not. The real culprit was line 4, the size,
+        # which held a heap address rather than a byte count. Values are quoted
+        # so an equal-length difference is visible.
+        val first_difference = _driver_receipt_first_difference_v1(expected, actual)
+        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}:{first_difference}"
     ""
+
+fn _driver_receipt_first_difference_v1(expected: text, actual: text) -> text:
+    """Name the first receipt LINE that differs, with both values.
+
+    The receipt's line index is its field name, so this is the diagnostic an
+    operator can act on. Returns a `line-count` verdict instead when the two
+    texts differ only in how many lines they carry.
+    """
+    val expected_lines = expected.split("\n")
+    val actual_lines = actual.split("\n")
+    var index = 0
+    while index < expected_lines.len() and index < actual_lines.len():
+        if expected_lines[index] != actual_lines[index]:
+            val line_number = index + 1
+            val expected_value = expected_lines[index]
+            val actual_value = actual_lines[index]
+            return "first-diff-line={line_number}:expected={expected_value}:actual={actual_value}"
+        index = index + 1
+    "first-diff-line-count:expected={expected_lines.len()}:actual={actual_lines.len()}"
 
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
     driver_native_capsule_result_reason_v1(capsule) == ""
@@ -2218,9 +2291,25 @@ fn _compile_frozen_module_capsule(
             if not object_fp.?:
                 return _aot_compile_failure(name, "capsule-object-fingerprint-failed")
             val receipt_path = capsule.object_path + ".capsule-receipt"
+            # Size comes from the runtime, NOT from `fp.size`. Reading that
+            # `i64` field off an optional-bound FileFingerprint returns a
+            # tagged heap pointer under Stage-2 native codegen, and a fresh one
+            # per read, so the receipt written here could never match the
+            # receipt recomputed by the verifier -- see the note on the
+            # `rt_file_size` declaration at the top of this file.
+            #
+            # Fail closed on a value that cannot be a byte count: the runtime
+            # reports a failed stat as -1, which `FileFingerprint.from_file`
+            # passes through unchecked, so a vanished or unreadable object
+            # would otherwise be recorded as a size of -1 and only surface far
+            # away as an opaque `receipt-content-mismatch`.
+            val object_size = rt_file_size(object_path)
+            if object_size < 0:
+                return _aot_compile_failure(name,
+                    "capsule-object-size-unreadable:{object_path}")
             var receipt = ""
             if val fp = object_fp:
-                receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+                receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{object_size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
                 return _aot_compile_failure(name, "capsule-receipt-write-failed")
             # Do not trust the write's own bool. A `file_write_text` name

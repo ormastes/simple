@@ -386,3 +386,19 @@ three 1,048,576-pixel repacks removed, one per restore. `continuity=2`
 no longer spec-only. `pack_full == 2` is still not reached: 2 resets remain (the
 two cold first-sightings) plus the sub-batch partition's share of the 10 full
 decisions.
+
+## Atlas upload-once + degenerate-dispatch fix (2026-09-12, same binary 39528776/1789199850)
+
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_2D_BACKEND=vulkan SIMPLE_VK_READBACK=native`
+`SIMPLE_VK_{IMAGE,RECT,FONT}_UPLOAD=u32`, 900x760, 2 frames, via
+`scripts/check/check-web-vulkan-gpu-boundary-audit.shs`.
+
+| page | uploads/frame | upload_ms | submits/frame | fence_waits | frame_digest | verdict |
+|---|---|---|---|---|---|---|
+| overview before | 23 | 43 | 1 | 1 | a15c50cd | PASS |
+| overview after | 13 | 19 | 1 | 1 | a15c50cd | PASS |
+| css-layout before | 47 | 57 | 3 | 3 | 743c2081 | FAIL |
+| css-layout after | 25 | 32 | 1 | 1 | 743c2081 | PASS |
+
+Digests unchanged on both pages. Detail and mechanism:
+`doc/08_tracking/bug/vulkan_font_atlas_reupload_per_run_and_css_layout_submits_2026-09-12.md`.
