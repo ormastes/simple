@@ -60,9 +60,19 @@ counters!(
     // import-resolution probe file reads (see module_cache::probe_source_cached)
     PROBE_SOURCE_READS,
     PROBE_SOURCE_HITS,
-    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
+    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module):
+    // parses/hits ATTRIBUTED TO THE HIR LANE, i.e. the fills that lane caused.
     IMPORT_AST_PARSES,
     IMPORT_AST_HITS,
+    // cross-lane source+AST cache (module_cache::shared_source). PARSES counts
+    // physical files read+parsed once for every lane; HITS counts every lookup
+    // served from it. The interpreter counters below split its own consumption:
+    // AST_REUSE borrowed the shared parse, PARSES had to parse its own source
+    // because host `@cfg` stripping changed the bytes.
+    SHARED_SRC_PARSES,
+    SHARED_SRC_HITS,
+    INTERP_MODULE_AST_REUSE,
+    INTERP_MODULE_PARSES,
     // place-receiver mutation (`self.inner.xs.push(x)`, `rows[i].push(x)`,
     // `self.d.insert(k, v)`, `arr[i].inc()`) — the in-place kernel in
     // interpreter_helpers/patterns.rs::try_place_mutation_in_place.

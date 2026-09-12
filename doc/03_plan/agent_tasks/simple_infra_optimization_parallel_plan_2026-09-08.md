@@ -1411,10 +1411,104 @@ original commit messages and their evidence are carried verbatim, with
 | `for k, v in d.items()` destructures; `Dict.items` bound under JIT | L2 (correctness) | wave PR (this branch) | PR open; design conflict recorded (bare comma: seed enumerate vs pure-Simple destructure) | `dict_items_for_loop_spec.spl` 5/5 |
 | Seed follows pure-Simple: bare comma in `for` = tuple destructure always; enumerate spelled `.enumerate()`; call-site census + migration | L1 (bootstrap parity) | branch `work/for-comma-destructure` | in progress (user decision (a) on 2026-09-12) | `test/04_smoke/compiler_unparenthesized_tuple_for*.spl` RED → GREEN target |
 | Gate-sync: required CI job green on `main` again (hot-loop baseline +3/−1 with plan note, chrome shim parity row, two bootstrap-tier ledger rows identical to Codex's `codex/push-gate-ledger-fix-20260912`) | L0 | branch `work/gate-sync-2026-09-12` | pushing; lands FIRST, the eight PRs above rebase onto it | `required_ci_job_red_on_main_hotloop_and_parity_2026-09-12.md` |
-| Guard wiring where missing (orphaned guards since 2026-08-15 wired or opted out with a reason; `push-no-direct-rt` manifest/hook agreement) | L0/L11 | branch `work/guard-wiring-2026-09-12` | in progress | `check-guard-wiring.shs` baseline must ratchet down |
-| Sanctioned bootstrap on current `main` (`bootstrap-from-scratch.sh`), pure-Simple fixes only, honest receipt | L1 | branch `work/bootstrap-2026-09-12` | in progress | stage table with artifact sha256 + non-vacuity, or the exact blocker |
+| Guard wiring where missing (orphaned guards since 2026-08-15 wired or opted out with a reason; `push-no-direct-rt` manifest/hook agreement) — **K** | L0/L11 | PR **#579** | **LANDED** 2026-09-12 (merged `b9667d6584f`) | 116 orphaned guards wired advisory; `check-guard-wiring.shs` unwired baseline ratcheted **725 → 607** |
+| Sanctioned bootstrap on current `main` (`bootstrap-from-scratch.sh`), pure-Simple fixes only, honest receipt — **M** | L1 | PR **#575** | **LANDED** 2026-09-12 | two pure-Simple defects that broke the Stage 2 link fixed; linker-deferred-method record filed |
+| Todo-DB triage: close stale todos, sync statuses, reseal crc32 | L11 | PR **#576** | **LANDED** 2026-09-12 | `doc/08_tracking/todo/todo_db.sdn` resealed; bug-db half split out to #578 |
+| Bug-record triage: bug shards + `bug_db.sdn` sync (the bug half of #576) | L11 | PR **#578** | **LANDED** 2026-09-12 | shard/`bug_db.sdn` disagreements reconciled |
+| **L5 generated/deployed binary closure** — measurer + per-(entry, lane) ratchet (A), MCP entry (B), LSP-MCP entry (C), check/lint entries (D), seed cross-lane parsed-source cache (E), deployed-closure manifest + dedup gate (F), spec-runner startup closure (G) | L5 | branch `work/l5-integration-2026-09-12`, 9 commits | integrated, not pushed | per-entry both-lane table immediately below this table; `check-entry-closure-ratchet.shs --all` **PASS — 20 pairs, 0 grown**; `cargo check --release --bin simple` rc=0 |
 | Plan leftovers with no owner (L9 G3/G4 runtime primitive, L4 bounded caches, L5 MCP/LSP closure delta, L11 traceability for this wave's specs) | L4/L5/L9/L11 | branch `work/plan-elg-leftovers` | triage then ≤3 items | `N_triage.md` then per-item records |
 | EGL fan-out — Environment-optimized dynamic Libraries, packages 2/4/5/7 (packages 1/6/8 arrive merged in the core base `bd8df49e8d4`; L7/L8 stay with Codex `codex/gl-production-current-main-sol-20260912`) | EGL | ten agents N, P, Q, R, S, T, U, V, W, X, core agents (packages 2/4/5/7) work off the core base `bd8df49e8d4`, one `work/egl-<topic>` worktree each | fanned out 2026-09-12; TDD red-first, agents do not commit | `EGL_BRIEF.md`; `doc/03_plan/agent_tasks/environment_optimized_dynamic_libraries.md` follow-up sections take a dated receipt per completed item |
+
+
+### L5 entry-closure delta — all ten entries, both lanes (2026-09-12)
+
+Re-measured by the integrator on the integrated branch with L5-A's
+`scripts/perf/measure-entry-closure.shs`, `--samples 0 --verify-cold`, hermetic
+`HOME`, `SIMPLE_EXECUTION_MODE`/`SIMPLE_TEST_MODE` cleared, binary
+`/home/yoon/dev/simple-wave/src/compiler_rust/target/release/simple`
+(51,308,600 B, sha256 `ef528c608113173c0c1aef6edb10ac17f9bf68886f34e05aff21a39c67515562`).
+"Before" is `config/perf/entry_closure_baselines.sdn`, the wave baseline.
+Only the PHYSICAL pair is ratcheted; `spl_opens` and `unit_spellings` move with
+the seed's cross-lane read behaviour (L5-E), not with an entry's imports.
+
+| entry | lane | files before | after | Δ files | bytes before | after | Δ bytes | owner |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `cli-version` | default | 0 | 0 | — | 0 | 0 | — | native, nothing to load |
+| `cli-version` | interpreter | 0 | 0 | — | 0 | 0 | — | native, nothing to load |
+| `cli-help` | default | 0 | 0 | — | 0 | 0 | — | native, nothing to load |
+| `cli-help` | interpreter | 0 | 0 | — | 0 | 0 | — | native, nothing to load |
+| `mcp-help` | default | 131 | **47** | **−64.1%** | 1,323,864 | **404,093** | **−69.5%** | B |
+| `mcp-help` | interpreter | 131 | **46** | **−64.9%** | 1,323,864 | **378,501** | **−71.4%** | B |
+| `mcp-info-call` | default | 131 | **80** | **−38.9%** | 1,323,864 | **643,244** | **−51.4%** | B |
+| `mcp-info-call` | interpreter | 131 | **80** | **−38.9%** | 1,323,864 | **643,244** | **−51.4%** | B |
+| `lspmcp-help` | default | 38 | 38 | +0.0% | 325,005 | 326,336 | +0.4% | C — **miss**, see below |
+| `lspmcp-help` | interpreter | 38 | **6** | **−84.2%** | 325,005 | **41,252** | **−87.3%** | C |
+| `lspmcp-3frame` | default | 38 | 38 | +0.0% | 325,005 | 326,336 | +0.4% | C — **miss**, see below |
+| `lspmcp-3frame` | interpreter | 38 | **6** | **−84.2%** | 325,005 | **41,252** | **−87.3%** | C |
+| `query-help` | default | 125 | 125 | +0.0% | 1,262,376 | 1,262,376 | +0.0% | no L5 owner (L3 landed earlier) |
+| `query-help` | interpreter | 107 | 107 | +0.0% | 1,140,426 | 1,140,426 | +0.0% | no L5 owner |
+| `check-help` | default | 132 | **27** | **−79.5%** | 1,302,861 | **220,550** | **−83.1%** | D |
+| `check-help` | interpreter | 114 | **27** | **−76.3%** | 1,180,911 | **220,550** | **−81.3%** | D |
+| `lint-one-file` | default | 387 | 309 | −20.2% | 4,307,651 | 3,767,766 | −12.5% | D — **miss**, see below |
+| `lint-one-file` | interpreter | 291 | 291 | +0.0% | 3,645,845 | 3,645,816 | −0.0% | D — **miss**, see below |
+| `test-one-spec` | default | 352 | 270 | −23.3% | 3,004,187 | 2,734,137 | −9.0% | G — **miss**, see below |
+| `test-one-spec` | interpreter | 352 | 270 | −23.3% | 3,004,187 | 2,734,137 | −9.0% | G — **miss**, see below |
+
+**Honest misses, none of them averaged away.**
+
+- **`lint-one-file` (D, both lanes, target −25%).** Two blockers, both outside
+  the row and both filed. (1) `lint_entry.spl` was REVERTED: leaf-importing it
+  makes the whole lint/fmt/fix program stop JIT-compiling —
+  `[jit-fallback] unresolved external symbol 'io_runtime_cwd': whole module
+  dropped to the interpreter` — because
+  `src/lib/nogc_sync_mut/sffi/system.spl:8` aliases
+  `use std.io_runtime.{cwd as io_runtime_cwd}` and only the `std.io` hub was
+  co-compiling that symbol into the same JIT module; under
+  `SIMPLE_JIT_STRICT=1`, `simple lint --help` then exits 1 with NO output.
+  (2) Even with that swap the entry has a structural floor of 301 files /
+  3,388,952 bytes: 8 of the 10 `compiler.tools.lint._LintMain.*` submodules
+  each pull the full 290-file / 3,316,828-byte cluster on their own, so
+  splitting the `compiler.tools.lint.main` facade buys nothing. The landed
+  −20.2% is one dead hub import
+  (`src/compiler/35.semantics/resource_families.spl:5`), nothing more.
+- **`test-one-spec` (G, target −25%).** The integrator's re-measurement is
+  270 / 2,734,137 in BOTH lanes — **−23.3% / −9.0%, short of the target on
+  both axes.** L5-G reported 184 / 1,757,778 from a direct shell run; that
+  number did NOT reproduce here from a direct shell run, and 270 is within one
+  file of the 269 the ratchet independently measured and of the 269 G itself
+  measured when the measurer ran nested under `bin/simple test`. The entry is
+  bimodal on the shared session-daemon path (G measured 352 vs 332 pre-fix for
+  the same lane), so 184 is currently an unreproduced best case and is not
+  quoted as the result. The import work is real and landed: neither the 270-
+  nor the 184-file run opens any of `io/{tcp,udp,buffer,event_loop}.spl`.
+- **`lspmcp-*` default lane (C).** Does not move, by mechanism, not by
+  omission: the front end whole-module-compiles every top-level function in
+  `main.spl` before running any of them (the pristine tree already emits
+  `[CODEGEN-STUB-FALLBACK] body compilation failed for
+  'handle_resource_templates_list'` on a bare `--help`), so a function-local
+  `use` — which changes name scoping, not compile-time reachability — cannot
+  shrink it. The two physical-file lists were diffed byte-for-byte and are
+  equal at 38. The +1,331 bytes are the deferral's own weight: `main.spl` is
+  itself in the closure and deferring `.tools` costs seven dispatch wrappers.
+  Those two DEFAULT rows were recentred with a recorded reason; the two
+  interpreter rows keep the pre-wave baseline.
+- **In-process MCP tools (B).** `_dispatch_in_process` is a single ~190-line
+  if-chain over nine handler families, so any in-process tool still loads all
+  nine: `tools/call simple_read` measures 128 / 1,299,669, −2.3% / −1.8%.
+  Splitting that chain per family is a code move, not an import move, and was
+  out of scope for an imports-only row. Open follow-up.
+- **`spl_opens ≤ 1.2 × physical_files` (E).** Not met and not reachable from
+  that row. Of the 444 remaining opens for `mcp-help`, 49 are
+  `module_resolver/var_overlay.rs:110` re-reading one 1,309-byte file for want
+  of a memo and the rest are the JIT lane's `pipeline/module_loader.rs` read
+  sites, which have no parse memo. Both owners are outside L5-E's file list.
+  What the row DID deliver is its stated acceptance: files read at two or more
+  sites 117 → 0, one parse per physical file across both lanes.
+- **Deployed closure (F).** The dedup gate is honestly RED on this host's
+  deployment: 8 files, 255,668,551 closure bytes, **100,186,384 duplicated** —
+  two physical copies of the 50,093,192-byte primary sharing one sha256 on
+  distinct inodes instead of being hardlinked. That is the defect the gate
+  exists to name, which is why it landed advisory.
 
 Observed and recorded, not fixed by this wave: `push-no-direct-rt` measures
 6334 against the 6072 tracked baseline already at `7352f99898c` — but it IS

@@ -35,9 +35,26 @@ set -u
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 binary=${SIMPLE_BINARY:-bin/simple}
 entry=${1:-src/app/mcp/main.spl}
-# Both unit caches must be reached: the HIR lowerer's parse memo and the
-# interpreter's module cache. Fewer sites means the run never got there.
-MIN_SITES=${LOADER_MIN_SITES:-2}
+# Non-vacuity floor on loader READ SITES. A trace with zero sites never reached
+# the loader, so there is nothing to check and the answer is ERROR.
+#
+# This defaulted to 2 until 2026-09-12, on the reasoning that BOTH unit caches
+# had to be reached: the HIR lowerer's parse memo and the interpreter's module
+# cache. That reasoning is now wrong in the one direction that matters. With
+# the cross-lane parsed-source cache (module_cache.rs PARSED_SOURCE_CACHE) both
+# lanes read through ONE shared site, and the only thing still holding the
+# count at 2 is module_resolver/var_overlay.rs:110, which re-reads a single
+# 1,309-byte file 49 times for want of a memo. Give that site its memo and the
+# count drops to 1 -- on a strictly HEALTHIER tree -- and a floor of 2 would
+# answer `ERROR — nothing was checked`, i.e. punish the fix.
+#
+# The real non-vacuity signal is SCAN_READS > 0, which is asserted separately
+# and unconditionally below: a trace that carries reads has exercised the
+# loader by construction, however few sites those reads came from. So the floor
+# is 1 and the gate stays fail-closed on 0. A caller that genuinely wants the
+# old two-lane assertion -- pinning a pre-cache binary, say -- sets
+# LOADER_MIN_SITES=2 explicitly, and gets exactly the previous behaviour.
+MIN_SITES=${LOADER_MIN_SITES:-1}
 [ "$entry" = "--selftest" ] && entry=src/app/mcp/main.spl
 
 # Emit one "SPELLING <site> <raw path>" record per distinct (site, spelling) the
@@ -186,7 +203,7 @@ if [ "${SCAN_READS:-0}" -eq 0 ]; then
     exit 2
 fi
 if [ "${SCAN_SITES:-0}" -lt "$MIN_SITES" ]; then
-    echo "ERROR — nothing was checked (only ${SCAN_SITES:-0} loader site(s) traced for $entry, need $MIN_SITES; the loader closure was not exercised)"
+    echo "ERROR — nothing was checked (only ${SCAN_SITES:-0} loader site(s) traced for $entry, need $MIN_SITES; a count of 0 means the loader was never reached, while a count below an explicitly-raised LOADER_MIN_SITES means this run does not match the multi-site shape the caller asked for)"
     exit 2
 fi
 if [ "${SCAN_OFFENDERS:-0}" -ne 0 ]; then
