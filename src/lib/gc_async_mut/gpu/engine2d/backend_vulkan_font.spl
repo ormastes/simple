@@ -852,6 +852,22 @@ impl VulkanBackend:
 
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
                                   batch: FontRenderBatch, clock: FrameClock) -> VulkanFontCompositeEvidence:
+        # The host mirror is stale for the whole of this call and is revalidated
+        # ONLY on a path that provably leaves it describing the atlas: a
+        # successful upload, or a cache hit that proves the atlas did not move.
+        #
+        # This must happen BEFORE the early returns below, not inside the dirty
+        # branch. A batch rejected up there (glyph cap, invalid quad, invalid
+        # destination, pipeline not ready, ...) still carries `dirty_rects` for
+        # glyphs the producer HAS already rasterized into the atlas; leaving the
+        # mirror marked valid across such a return makes the next batch apply
+        # only ITS OWN dirty cells to a mirror that is already missing the
+        # rejected batch's, and the missing glyph cells then render stale.
+        # Measured: with the invalidation inside the dirty branch the 900x760
+        # frame checksum moved (2936851417192293 -> 2936851411469080) while
+        # 300x253, which happens to reject nothing, stayed byte-identical.
+        val mirror_was_valid = self.font_atlas_host_valid
+        self.font_atlas_host_valid = false
         if self.font_oracle_mode:
             val evidence_flush = self._flush_pending_compute()
             if evidence_flush <= 0:
@@ -955,8 +971,7 @@ impl VulkanBackend:
         if self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity:
             val dirty_upload_started = clock.now_micros() * 1000
             # Incremental repack. The mirror may be reused only when it is
-            # coherent (`font_atlas_host_valid`, cleared below for the duration
-            # of this upload and by every early return above), describes the
+            # coherent as of function entry (`mirror_was_valid`), describes the
             # SAME owner, and this batch names the cells it changed. Anything
             # else repacks all 1,048,576 pixels, which is the behaviour this
             # branch always had.
@@ -970,12 +985,11 @@ impl VulkanBackend:
             # host bytes are still an accurate copy of the same atlas, so
             # repacking them would be pure waste.
             val atlas_owner = font_render_batch_atlas_owner_identity(batch)
-            val can_increment = (self.font_atlas_host_valid and
+            val can_increment = (mirror_was_valid and
                 atlas_owner != "" and
                 self.font_atlas_host_identity == atlas_owner and
                 self.font_atlas_host_bytes.len().to_i64() == atlas_bytes and
                 batch.dirty_rects.len() > 0)
-            self.font_atlas_host_valid = false
             var mirror_ready = false
             if can_increment:
                 mirror_ready = self._repack_atlas_dirty_cells(batch)
@@ -1007,6 +1021,11 @@ impl VulkanBackend:
             self.font_atlas_owner_identity = owner_identity
             self.font_atlas_upload_count = self.font_atlas_upload_count + 1
             self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
+        else:
+            # Cache hit: same generation AND same owner identity, so the atlas
+            # content did not move and the mirror still describes it. This is
+            # the one path that may restore the flag without re-uploading.
+            self.font_atlas_host_valid = mirror_was_valid
         if pipeline.artifact_mode == "precompiled-spirv" or pipeline.artifact_mode == "runtime-glsl":
             val _t_packed = vulkan_timing_now_us()
             val packed = vulkan_font_packed_params(batch, origin_x, origin_y, width, height)
