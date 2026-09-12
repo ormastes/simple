@@ -63,3 +63,23 @@ in one day, and they must not be conflated:
 
 Found by: unified 2D campaign, web-gap lane; confirmed independently by the
 coordinator (fail 2/6 then pass 6/6 with no code change).
+
+## Note 2026-09-12 — one more spec now arms the override
+
+- Status: OPEN (2026-09-12) — mechanism unchanged, coverage of the override widened by one spec
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+The 2026-08-10 re-verification above lists the specs that actually raise
+`SIMPLE_WEB_RENDER_BUDGET_MS` as `merged_cascade_decl_quota_spec.spl` and
+`chrome_stage_comparison_receipts_spec.spl`. Add a third:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_cpu_simd_paint_spec.spl`,
+which compares the public engine2d lane against the software oracle byte-for-byte
+and therefore cannot tolerate either side's deadline tripping. It now arms the env
+override at 600000 and passes the same 600000 explicitly as the oracle's
+`budget_ms` argument, because the two lanes take their budget through different
+channels and raising only one still leaves the comparison load-dependent.
+
+This does not fix the underlying defect: the wall-clock deadline is still armed
+and unraised for ordinary pixel specs, and it is still per-spec opt-in rather than
+a harness default. Recorded so the eventual fix knows which specs already
+compensate by hand.
