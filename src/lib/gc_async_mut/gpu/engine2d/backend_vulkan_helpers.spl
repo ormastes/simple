@@ -748,6 +748,12 @@ impl VulkanBackend:
         `untagged`, which is how the two font-lane sites
         (`backend_vulkan_font.spl:1112,1182`, owned elsewhere) are told apart
         from this file's sites without editing that file.
+
+        The engine's two pre-readback flushes (`engine.spl` `read_pixels` /
+        `read_pixels_with_source`) used to reach the untagged entry point and
+        were therefore mis-read as font-lane submits; they now tag themselves
+        `engine.read_pixels` / `engine.read_pixels_with_source`
+        (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
         """
         self.pending_flush_site = site
         self._flush_pending_compute()
@@ -1397,7 +1403,12 @@ impl VulkanBackend:
         1
 
     me _flush_for_host_fallback(reason: text) -> bool:
-        val status = self._flush_pending_compute_at("_flush_for_host_fallback")
+        # The reason rides the trace tag: this is the ONE site that can turn a
+        # one-submit frame into two (it submits the batch so the host can read
+        # the surface back mid-frame), and `_flush_for_host_fallback` alone did
+        # not say WHICH host round-trip did it
+        # (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
+        val status = self._flush_pending_compute_at("_flush_for_host_fallback:{reason}")
         if status == 1:
             return true
         self.mark_cpu_fallback(reason)
