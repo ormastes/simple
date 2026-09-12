@@ -75,9 +75,18 @@ metrics). Filed separately:
 
 ## Sabotage triple
 
-1. Baseline: the spec passes, 4 examples 0 failures.
-2. Revert only the half-leading branch in `align_inline_line_baselines` (force
-   `node_is_half_leaded` to `false`): AC-3 fails — the measured offset is 0, not
-   3. Separately reverting `out_bh[c] = inline_content_h` fails AC-2 with
-   `expected "18" to equal "24"`.
-3. Restore: the spec passes again.
+Measured 2026-09-12 on `build/cargo-r2/release/simple` (39178424 1789197971).
+
+1. Baseline: `4 examples, 0 failures`.
+2. Force `node_is_half_leaded` to `false` (replace its `display == "inline"`
+   term with `false`), leaving the height half of the fix in place.
+   `4 examples, 2 failures`, verbatim:
+   - `AC-3 ... expected 0 to equal 3` — the element is back on the line's top edge
+   - `AC-4` fails (its y equals the paragraph's y again)
+   AC-1 and AC-2 still pass, which is the point of splitting the two halves:
+   the height rule and the placement rule are independently load-bearing.
+3. Restore: `4 examples, 0 failures`.
+
+Regression check on the two specs F20 landed over the same code —
+`flex_wrap_auto_width_item_spec.spl` and `form_control_ua_font_spec.spl` —
+both `4 examples, 0 failures` after this change.

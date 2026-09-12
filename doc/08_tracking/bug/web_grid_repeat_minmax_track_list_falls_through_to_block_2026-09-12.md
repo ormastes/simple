@@ -55,8 +55,12 @@ reject-and-block-layout path, which is unchanged behaviour, not a new gap):
 
 ## Sabotage triple
 
-1. Baseline: the spec passes, 4 examples 0 failures.
-2. Revert only the `val raw = grid_expand_track_functions(raw_declaration)` line
-   to `val raw = raw_declaration`: AC-1 fails —
-   `expected "48" to equal "108"` — the items stack again.
-3. Restore: the spec passes again.
+Measured 2026-09-12 on `build/cargo-r2/release/simple` (39178424 1789197971).
+
+1. Baseline: `4 examples, 0 failures`.
+2. Revert only `val raw = grid_expand_track_functions(raw_declaration)` to
+   `val raw = raw_declaration`. Three of four fail, verbatim:
+   - `AC-1 ... expected 72 to equal 0` (item 2 is 72 px below item 1, i.e. stacked)
+   - `AC-2 ... expected 900 to equal 292` (each item fills the container)
+   - `AC-3 ... expected 0 to equal 608` (every item starts at x=0)
+3. Restore: `4 examples, 0 failures`.

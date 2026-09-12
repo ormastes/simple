@@ -52,7 +52,15 @@ The non-wrapping branch was never affected — it already called
 
 ## Sabotage triple
 
-1. Baseline: the spec passes, 4 examples 0 failures.
-2. Revert only the growth block (`base_w_wrap = base_w_wrap + grow_after -
-   grow_before`) to a no-op: AC-1 fails — `expected "444" to equal "180"`.
-3. Restore: the spec passes again.
+Measured 2026-09-12 on `build/cargo-r2/release/simple` (39178424 1789197971).
+
+1. Baseline: `4 examples, 0 failures`.
+2. Neutralise only `base_w_wrap = base_w_wrap + grow_after - grow_before`
+   (multiply the delta by 0). `4 examples, 3 failures`, verbatim:
+   - `AC-1 ... expected 180 to equal 444` (the item stays at its flex basis)
+   - `AC-2` fails (the item IS 180)
+   - `AC-3 ... expected 192 to equal 456` (the second card is displaced by the
+     same 264 px)
+   AC-4 still passes — the items were always on one line; only their size was
+   wrong, which is exactly the defect's shape.
+3. Restore: `4 examples, 0 failures`.
