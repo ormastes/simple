@@ -3,7 +3,9 @@
 
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error,
+    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
+    vulkan_timing_note, VK_T_FONT_COMPOSITE, VK_T_FONT_ATLAS_BUILD}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
@@ -668,7 +670,12 @@ impl VulkanBackend:
             self.font_atlas_cpu_glyph_height == key_height and
             self.font_atlas_cpu_pixels.len() > 0):
             return self.font_atlas_cpu_pixels
+        # The memo above should make this run once per (scale, glyph_height);
+        # timing it is how a cache that silently stopped hitting becomes visible
+        # as N builds instead of 1.
+        val _t_atlas = vulkan_timing_now_us()
         val built = vulkan_bitmap_font_atlas_pixels(scale, glyph_height_px)
+        vulkan_timing_add(VK_T_FONT_ATLAS_BUILD, _t_atlas)
         self.font_atlas_cpu_build_count = self.font_atlas_cpu_build_count + 1
         self.font_atlas_cpu_scale = key_scale
         self.font_atlas_cpu_glyph_height = key_height
@@ -789,6 +796,9 @@ impl VulkanBackend:
         val started_ns = clock.now_micros() * 1000
         var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
         val total_ns = vulkan_font_elapsed_ns(started_ns, clock.now_micros() * 1000)
+        # Reuse the composite's own clock rather than starting a second one:
+        # this path is already measured, it just never reached the lane census.
+        vulkan_timing_note(VK_T_FONT_COMPOSITE, total_ns / 1000)
         evidence.elapsed_ns = vulkan_font_timed_ns(total_ns, evidence.evidence_overhead_ns)
         evidence.atlas_upload_count = self.font_atlas_upload_count
         evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
