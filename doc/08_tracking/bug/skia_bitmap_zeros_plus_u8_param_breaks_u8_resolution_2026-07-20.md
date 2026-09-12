@@ -1,6 +1,6 @@
 # `Bitmap.zeros(...)` call + a `u8`-typed function param in the same file breaks all `u8` resolution
 
-- **Status:** OPEN
+- **Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** compiler semantic analysis — primitive-type symbol resolution,
   interaction between `std.skia.backend.cpu.raster_prims.Bitmap` static
@@ -83,3 +83,32 @@ compiler defect triggered by this specific type combination, reproduced
 independently outside the test harness via plain `bin/simple run`. Not
 attempted here — root-causing requires reading the compiler's semantic
 analysis / symbol-table source, out of scope for a spec-only triage pass.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+The record's minimal repro, copied verbatim into a scratch file and run:
+
+```
+$ bin/simple run skia_repro.spl
+4
+```
+
+It prints `bmp.width` and exits cleanly — no `semantic: variable \`u8\` not
+found`. A `u8`-typed parameter declared alongside a `Bitmap.zeros(...)` call no
+longer breaks `u8` resolution in the file.
+
+The spec the record says fails all 4 `apply_mask_filter` examples is green, and
+is not vacuous — it references `apply_mask_filter` 14 times across the file:
+
+```
+$ bin/simple test test/unit/lib/skia/mask_filter_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0 skipped=0 dropped=0
+```
+
+No code change made. Closing.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 0689d5244b3, spec test/unit/lib/skia/mask_filter_spec.spl

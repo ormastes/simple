@@ -1,7 +1,7 @@
 # `EnumName.Variant(named_args)` construction unresolved under `bin/simple test` (via transitively-called free fn)
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** CLOSED (2026-09-12) — fixed in source (import pinned to the common tier); spec green on seed `3d120a6f`
 - **Area:** SSpec `test` evaluator (Rust seed interpreter), same family as the
   documented test-path-vs-run-path divergence in
   `generic_class_static_method_unresolved_under_test_2026-07-20.md` /
@@ -70,3 +70,38 @@ A `bin/simple run`-based repro was attempted but hit an unrelated error
 reaching the `SecurityEvent.CapabilityDenied` construction line, so a clean
 run-vs-test A/B on this exact construction was not completed. The `test`-path
 failure itself is directly reproduced and unambiguous.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+```
+$ bin/simple test test/02_integration/app/ui.web/capability_gating_spec.spl --no-session-daemon
+  ✓ default-deny policy denies InputInject
+  ✓ granting InputInject allows it
+SPEC FILE VERDICT: ... outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+```
+
+This is not merely "stopped reproducing" — the defect was **fixed in source**
+and the fix is self-documenting. `src/lib/common/ui/capability_policy.spl:8-17`
+now carries an explicit note that `std.security.types` is ambiguous (both
+`src/lib/common/security/types.spl` and `src/lib/nogc_sync_mut/security/types.spl`
+declare `enum SecurityEvent`, and same-named enums from different modules
+collapse in the global registry), so the import is pinned:
+
+```simple
+use std.common.security.types.{SecurityEvent, AuditEntry, AuditConfig}
+```
+
+and `log_denial` (`:252-256`) constructs `SecurityEvent.CapabilityDenied(
+capability:, window_id:)` unchanged. So the root cause was not the `test`
+evaluator failing to resolve a variant construction, as the record's "Area"
+line guessed — it was an ambiguous module path resolving to the sibling
+`SecurityEvent` that has no `CapabilityDenied` variant. Worth carrying forward
+to the two sibling records this one cites, which may share that cause.
+
+Closing.
+
+- Status: CLOSED (2026-09-12) — fixed in source, verified on seed sha256 3d120a6f, 53bb6a16a5e, spec test/02_integration/app/ui.web/capability_gating_spec.spl
