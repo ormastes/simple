@@ -93,6 +93,41 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
 }
 
 #if defined(_WIN32)
+/* Create a directory without the MAX_PATH ceiling. See the call site for why.
+ * The path separator and the extended-length prefix are built from the numeric
+ * code point (92) rather than written literally, purely to keep this source
+ * free of escape sequences. */
+static BOOL rt_secure_create_directory_long(const char* path,
+                                            SECURITY_ATTRIBUTES* attributes) {
+    static const wchar_t sep = (wchar_t)92;
+    wchar_t wide[32768], full[32768], prefixed[32768];
+    wchar_t* scan;
+    DWORD n;
+    size_t len;
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) == 0) {
+        return CreateDirectoryA(path, attributes);
+    }
+    for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+    n = GetFullPathNameW(wide, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) {
+        return CreateDirectoryA(path, attributes);
+    }
+    /* Already extended-length, or a UNC path: hand it over unchanged. */
+    if (full[0] == sep && full[1] == sep) {
+        return CreateDirectoryW(full, attributes);
+    }
+    len = wcslen(full);
+    if (len + 5 >= sizeof(prefixed) / sizeof(prefixed[0])) {
+        return CreateDirectoryA(path, attributes);
+    }
+    prefixed[0] = sep; prefixed[1] = sep; prefixed[2] = L'?'; prefixed[3] = sep;
+    memcpy(prefixed + 4, full, (len + 1) * sizeof(wchar_t));
+    return CreateDirectoryW(prefixed, attributes);
+}
+#endif
+
+#if defined(_WIN32)
 /* Canonical implementation of the secure-staging pair (this file's own header
  * says "implemented once, in C"). Every Windows failure mode returned an empty
  * string, so the AOT diagnostic-staging caller could only ever say "diagnostic
@@ -125,7 +160,17 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     SddlFn convert = advapi ? (SddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
     if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes); LocalFree(descriptor); FreeLibrary(advapi);
+    /* CreateDirectoryA is capped at MAX_PATH, and for a DIRECTORY the usable
+     * limit is MAX_PATH-12 (248) because Windows reserves room for an 8.3 name
+     * plus a separator. The bootstrap's staging parent --
+     * <repo>/.simple/storage/build/bootstrap/stage3/<triple>/stage2-home/
+     * .cache/simple/v1/projects/<64-hex>/native-build/ -- lands at 258 chars,
+     * so this returned ERROR_FILENAME_EXCED_RANGE (206) and the empty result
+     * surfaced four layers up as "diagnostic staging unavailable", failing
+     * Stage 2 sanity. The wide API with the extended-length prefix lifts the
+     * limit to ~32767. */
+    BOOL created = rt_secure_create_directory_long(path, &attributes);
+    LocalFree(descriptor); FreeLibrary(advapi);
     if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
