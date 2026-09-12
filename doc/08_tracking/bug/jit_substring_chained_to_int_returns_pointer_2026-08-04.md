@@ -1,6 +1,6 @@
 # JIT: `text.substring(n).to_int()` chained returns the raw text pointer, silently
 
-**Status:** OPEN
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end.
 **Found:** 2026-08-04
 
 ## Symptom
@@ -193,3 +193,35 @@ likely covers this is already in tree and cited in
 `codegen/instr/closures_structs.rs::builtin_method_result_type`, which records a
 result TYPE for chained builtins so `to_int` no longer defaults its receiver to
 I64.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+The record's own reproducer, chained and `val`-bound side by side:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run sub.spl
+chained=800 s=[800] len=3 viaval=800
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run sub.spl
+chained=800 s=[800] len=3 viaval=800
+```
+
+The chained form no longer returns a pointer, and chained and bound agree.
+**Not reproducible** — status CLOSED.
+
+Regression guard: `test/01_unit/bugs/jit_substring_chained_to_int_spec.spl`
+(6 examples). It asserts the **chained** form — the `val`-bound form was
+correct while the defect was live, so a guard written that way would be
+vacuous — and separately pins that the two forms agree, which is what makes a
+future divergence attributable to the chaining rather than to parsing. Also
+covers the two-argument `substring(a, b)` and `to_i64` as well as `to_int`.
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/jit_substring_chained_to_int_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: substituting a pointer-magnitude value for the expected
+integers turns the file RED —
+`outcome=ERROR declared>=6 executed=6 passed=3 failed=3 skipped=0 dropped=0`.
