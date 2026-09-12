@@ -125,12 +125,39 @@ radius declined exactly as the host twin declines it, device-vs-host byte
 equality for the glass material (the generalization spec, adjacent code path),
 and **zero framebuffer readbacks during the glass pass**.
 
+## Sabotage proof (run, not merely described)
+
+Making `_draw_blur_rect_device` return `false` on its first line and re-running
+the spec gives exactly the discrimination the counter exists for:
+
+```
+  ✓ blurs a rect on the device byte-identically to the CPU backend
+  ✓ applies the glass material on the device byte-identically to its CPU twin
+  ✗ counts the blur as device work and records no CPU fallback
+    expected glass-device-unavailable to equal
+  7 examples, 1 failure
+```
+
+Both parity claims stay GREEN — they must, since the host twin is the oracle —
+while the device counter goes red and the fallback reason appears. That pair is
+what separates "the device did the work" from "something painted the right
+pixels"; pixels alone could never have told them apart. Reverting restores 7/7.
+
 ## Pre-existing reds, re-checked on pristine `origin/main`
 
 Both are unrelated to these files and unchanged by this branch:
 
-* `backend_vulkan_image_exact_scratch_spec.spl` — 3/6 passing (F31 recorded
-  5/6; it has degraded further on `main` since, independently of this lane).
+* `backend_vulkan_image_exact_scratch_spec.spl` — 3/6 under the audited env,
+  **5/6 with `SIMPLE_VK_IMAGE_UPLOAD=u32` unset**, which is where F31's 5/6
+  came from. Two of the three failures are an artefact of the env, not a
+  defect: that spec counts HOST packs (`packs=`), and the typed u32 upload
+  lane deliberately performs no host packing at all, so the counter it asserts
+  on is dead by design on that lane. The third failure reproduces on both
+  lanes — `expected packs=1 ... to equal packs=3` on the repeat-same-size
+  case, i.e. the image-key cache skipping repeat uploads — and is likewise not
+  caused by this change. Recorded rather than fixed: the spec's env assumption
+  belongs to the typed-upload lane's owner, and the cache interaction is a
+  separate question from either kernel here.
 * `vulkan_resident_2d_spec.spl` — 4/11 passing.
 
 Not fixed here: neither is caused by `draw_blur_rect`, the glass material, or
