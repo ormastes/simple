@@ -52,7 +52,11 @@ thread_local! {
 }
 
 /// True when `s` contains no byte >= 0x80. Memoized per string allocation.
-fn shared_text_is_ascii(s: &Arc<String>) -> bool {
+///
+/// `pub(crate)` (not just module-private) so `interpreter::expr::collections`'s
+/// `indexed_string_char` (the `s[i]` path) can share this memo instead of
+/// re-running its own `s.is_ascii()` scan per call -- see that file.
+pub(crate) fn shared_text_is_ascii(s: &Arc<String>) -> bool {
     ASCII_MEMO.with(|cell| {
         let mut m = cell.borrow_mut();
         let (slots, next) = &mut *m;
