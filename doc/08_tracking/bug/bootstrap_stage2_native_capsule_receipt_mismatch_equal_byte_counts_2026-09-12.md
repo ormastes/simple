@@ -181,6 +181,26 @@ error: stage2 env assignment names do not match the canonical list for aarch64-a
 PR #674 forwards the variable but `bootstrap_stage3_stage2_canonical_env_names`
 was not extended, so the two disagree. Drop the variable to run the lane.
 
+**FIXED** — `bootstrap_stage3_stage2_canonical_env_names`
+(`scripts/check/lib/bootstrap-stage3/authority.shs`) now conditionally emits
+`SIMPLE_NATIVE_INCREMENTAL` immediately after `SIMPLE_FRONTEND_CACHE_DIR`,
+gated on `[ -n "${SIMPLE_NATIVE_INCREMENTAL:-}" ]` — the same condition
+`bootstrap_run_stage2_native` uses (`${SIMPLE_NATIVE_INCREMENTAL:+...}`) to
+decide whether to forward the assignment at all, and at the same position in
+the assignment order. This keeps the check fail-closed in both directions: an
+unconditional addition would have made every run with the var *unset* fail as
+"missing", and leaving it out entirely reproduces this defect for every run
+with the var *set*. No other stage-2 env var needed the same treatment — the
+`--cache-dir` flag mentioned in the original defect report is a CLI argument
+to `native-build`, not part of the `env -i` allowlist this check covers.
+Verified without running a bootstrap: `sh
+scripts/check/check-stage2-env-canonical-native-incremental.shs` exercises
+`bootstrap_stage3_env_assignment_names` /
+`bootstrap_stage3_stage2_canonical_env_names` directly for (1) var unset, (2)
+`SIMPLE_NATIVE_INCREMENTAL=1` set — the exact regression fixture for this
+defect — and (3) an unrelated unknown env name, confirming the allowlist still
+rejects it. All three PASS.
+
 ### Regression scaffolding added
 
 - `test/01_unit/compiler/codegen/optional_bound_struct_scalar_field_spec.spl`
