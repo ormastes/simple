@@ -20,7 +20,7 @@ Observed entries = after `bin/simple run src/app/mcp/main.spl --help`, read from
 | 1 | `PARSED_SOURCE_CACHE` | `module_cache.rs:94` | canonical `PathBuf` | `SharedSource` = `Arc<String>` source + `Arc<Module>` AST | none | none | see §4 | **yes** |
 | 2 | `PROBE_SOURCE_CACHE` | `module_cache.rs:52` | `(PathBuf, u64)` | `Option<Arc<String>>` whole probe source | none | none | see §4 | **yes** |
 | 3 | `PATH_KEY_CACHE` | `module_cache.rs:225` | `PathBuf` | `PathBuf` | none | none | see §4 | **yes** |
-| 4 | `FILTERED_DICT_CACHE` | `module_cache.rs:227` | `usize` (address of the source dict) | `(Arc<HashMap>, Arc<HashMap>)` | none | none | see §4 | no — §3 |
+| 4 | `FILTERED_DICT_CACHE` | `module_cache.rs:227` | `usize` (address of the source dict) | `(Arc<HashMap>, Arc<HashMap>)` | none | none | see §4 | **yes** — §3 |
 | 5 | `MODULE_EXPORTS_CACHE` | `module_cache.rs:238` | `PathBuf` | module exports `Value` | none | whole-cache `clear_module_cache*` only | see §4 | no — §2 |
 | 6 | `MODULE_EXPORT_OWNERS` | `module_cache.rs:239` | `usize` (exports dict address) | `Arc<str>` owner id | none | as above | — | no — §2, §3 |
 | 7 | `MODULE_CLASSES_CACHE` | `module_cache.rs:241` | `PathBuf` | `HashMap<String, Arc<ClassDef>>` | none | as above | see §4 | no — §2 |
@@ -69,20 +69,34 @@ reaches, and they already have a coarse release path (`clear_module_cache`,
 individually evictable needs a re-entrancy-safe module-unload contract, which is
 a different piece of work.
 
-## 3. Why `FILTERED_DICT_CACHE` (and the `usize`-keyed owner maps) are NOT bounded
+## 3. The three `usize`-keyed caches, and why only one of them can be bounded
 
-`FILTERED_DICT_CACHE` is keyed by the **address** of the source dict
-(`Arc::as_ptr as usize`). That key is only unique because the cache retains the
-source `Arc`, which keeps the allocation alive and therefore keeps the address
-from being reused. Evicting an entry frees the allocation, a later dict can be
-allocated at the same address, and the next lookup is a **false hit returning
-another module's filtered dict**.
+All three are keyed by a **raw address** (`Arc::as_ptr as usize`). Evicting an
+entry can free that allocation, a later object can land on the same address, and
+a lookup then finds an entry that describes something else. Whether that is a
+wrong answer depends on one detail, and the three differ on it:
 
-So for this cache, retention is load-bearing for correctness and a naive bound
-would introduce a silent wrong-answer bug. Bounding it requires re-keying off a
-stable identity first. The same argument applies to `MODULE_EXPORT_OWNERS`
-(row 6) and `FUNCTION_MODULE_OWNER` (row 15). Filed as
-`doc/08_tracking/bug/pointer_keyed_caches_cannot_be_bounded_2026-09-12.md`.
+- **`FILTERED_DICT_CACHE` re-validates and is therefore safe to bound.** Its hit
+  path is `get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(...))` —
+  a recycled address fails `ptr_eq`, which is a **miss and a rebuild**, never a
+  false hit. It is bounded here. Its pin predicate covers both maps: an entry
+  whose source or filtered map is still referenced elsewhere is exactly an entry
+  whose eviction would free nothing, since the allocation survives through that
+  other reference.
+- **`MODULE_EXPORT_OWNERS` (row 6) and `FUNCTION_MODULE_OWNER` (row 15) cannot
+  be.** Neither retains the allocation its key names, and neither re-checks
+  anything on a hit: `module_exports_owner` returns whatever
+  `MODULE_EXPORT_OWNERS[Arc::as_ptr(dict)]` holds. Their keys are unique only
+  because a *different* cache (`MODULE_EXPORTS_CACHE`, `MODULE_FUNCTIONS_CACHE`)
+  retains the object for the life of the process. Bounding either of those two
+  caches — or these side tables — without adding a re-validation step would turn
+  an address recycle into a silent wrong owner. Filed as
+  `doc/08_tracking/bug/pointer_keyed_caches_cannot_be_bounded_2026-09-12.md`.
+
+An earlier draft of this section claimed `FILTERED_DICT_CACHE` could not be
+bounded either. That was wrong — it missed the `ptr_eq` re-check — and is
+recorded here rather than quietly deleted, because the distinction between "raw
+address key" and "raw address key that re-validates" is the whole argument.
 
 ## 4. The bound
 
@@ -93,12 +107,13 @@ predicate `fn(&V) -> bool`.
 | property | mechanism |
 |---|---|
 | retention limit | `limit` entries; `0` means unbounded |
-| config | `PARSED_SOURCE_CACHE_MAX_DEFAULT` / `PROBE_SOURCE_CACHE_MAX_DEFAULT` / `PATH_KEY_CACHE_MAX_DEFAULT` consts, overridden by `SIMPLE_PARSED_SOURCE_CACHE_MAX`, `SIMPLE_PROBE_SOURCE_CACHE_MAX`, `SIMPLE_PATH_KEY_CACHE_MAX` |
+| config | `PARSED_SOURCE_CACHE_MAX_DEFAULT` (4096) / `PROBE_SOURCE_CACHE_MAX_DEFAULT` (4096) / `PATH_KEY_CACHE_MAX_DEFAULT` (16384) / `FILTERED_DICT_CACHE_MAX_DEFAULT` (2048) consts, overridden by `SIMPLE_PARSED_SOURCE_CACHE_MAX`, `SIMPLE_PROBE_SOURCE_CACHE_MAX`, `SIMPLE_PATH_KEY_CACHE_MAX`, `SIMPLE_FILTERED_DICT_CACHE_MAX` |
 | an unparseable env value | falls back to the default — a typo must not silently remove a bound |
 | cannot evict a borrowed entry | every value handed out is a clone whose payload is `Arc`-shared with the cached copy, so `Arc::strong_count > 1` decides "still borrowed". `SharedSource` checks **both** its `Arc`s (source and AST/error text) |
 | failed release | when every over-limit candidate is pinned, the cache **stays over its limit**, bumps `pinned_skips` and stops. An entry is never dropped while borrowed, and never left dangling |
 | counters | `*_EVICTIONS`, `*_PINNED_SKIPS`, `*_RETAINED_MAX` in `perf_counters.rs`, reported under `SIMPLE_PERF_COUNTERS=1` |
 | cargo-test access | `BoundedCache::set_limit` + `CacheStats`, because env-derived limits latch in a process-global `OnceLock` and cargo runs tests in parallel in one process |
+| cost | victim selection is an O(len) scan, and it runs only on an insert that is *over* the limit. On the normal path the defaults exceed the observed high-water, so the scan never runs and the added cost of the bound is one `len()` comparison per fill |
 
 Defaults are chosen **above** the observed high-water of a full
 `src/app/mcp/main.spl --help` run, so a default-configured process evicts

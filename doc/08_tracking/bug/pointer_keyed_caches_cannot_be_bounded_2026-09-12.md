@@ -1,4 +1,4 @@
-# Pointer-keyed seed caches cannot be retention-bounded without re-keying
+# Address-keyed owner side tables re-check nothing and cannot be retention-bounded
 
 - Status: OPEN (2026-09-12)
 - Area: `src/compiler_rust/compiler/src/module_cache.rs`,
@@ -7,54 +7,57 @@
 
 ## Summary
 
-Three process-global seed caches are keyed by a **raw address**
-(`Arc::as_ptr as usize` / `&FunctionDef as usize`):
+Two process-global seed side tables are keyed by a **raw address** and neither
+retains the allocation that address names, nor re-validates it on a hit:
 
-| cache | file:line | key |
-|---|---|---|
-| `FILTERED_DICT_CACHE` | `module_cache.rs:227` | address of the source dict `HashMap` |
-| `MODULE_EXPORT_OWNERS` | `module_cache.rs:239` | address of the exports dict |
-| `FUNCTION_MODULE_OWNER` | `interpreter_state.rs:472` | address of a `FunctionDef` |
+| table | file:line | key | written by |
+|---|---|---|---|
+| `MODULE_EXPORT_OWNERS` | `module_cache.rs:239` | `Arc::as_ptr(dict) as usize` | `cache_module_exports` (`:525`) |
+| `FUNCTION_MODULE_OWNER` | `interpreter_state.rs:472` | address of a `FunctionDef` | `tag_function_module_owner` |
 
-Those keys are unique only because the cache **retains** something that keeps
-the allocation alive (`FILTERED_DICT_CACHE` stores the source `Arc<HashMap>`
-alongside the filtered one, precisely for this). Retention is therefore
-load-bearing for correctness, not just for speed.
+`module_exports_owner` (`module_cache.rs:539`) is the whole read path:
 
-The consequence is that the obvious memory fix — cap the entry count and evict
-the least-recently-used entry — **introduces a silent wrong-answer bug**: the
-evicted entry's allocation is freed, a later allocation can land at the same
-address, and the next lookup is a false hit that returns another module's
-filtered dict / another module's owner id. No error, no panic, wrong value.
+```rust
+MODULE_EXPORT_OWNERS.with(|cache| cache.borrow().get(&(Arc::as_ptr(dict) as usize)).cloned())
+```
 
-This is why lane L4 bounded `PARSED_SOURCE_CACHE`, `PROBE_SOURCE_CACHE` and
-`PATH_KEY_CACHE` and deliberately left these three unbounded. They remain
-unbounded-growth caches in a long-lived process.
+There is no `ptr_eq` re-check and no retained `Arc`. These keys are unique only
+because a **different** cache — `MODULE_EXPORTS_CACHE` / `MODULE_FUNCTIONS_CACHE`
+— holds the object for the life of the process.
 
-## Repro (reasoning, not yet a failing test)
+The consequence is a coupling that is invisible at both call sites: giving
+`MODULE_EXPORTS_CACHE` or `MODULE_FUNCTIONS_CACHE` any release path (a retention
+bound, an unload, an LRU) frees the address, a later allocation can land on it,
+and the next `module_exports_owner` call returns **another module's owner id**.
+No error, no panic, wrong value.
 
-No failing test is attached, because writing one requires the bound that must
-not be added. The hazard is structural and can be read directly:
+Contrast `FILTERED_DICT_CACHE` (`module_cache.rs:227`), which is keyed the same
+way but *does* re-check — its hit path is
+`get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(...))` — so a
+recycled address is a miss and a rebuild. That is why lane L4 was able to bound
+`FILTERED_DICT_CACHE` and could not extend a bound to these two or to the
+definition caches they depend on.
 
-1. `module_cache.rs:759 filter_functions_from_value` keys the memo on
-   `Arc::as_ptr(&map) as usize`.
-2. The memo's value tuple's first element is the source `Arc<HashMap<...>>` —
-   the only thing keeping that address reserved.
-3. Drop that tuple and the address is returnable by the allocator.
-4. `HashMap` allocations of the same layout are extremely common on this path,
-   so reuse is likely, not theoretical.
+## Repro (reasoning, not a failing test)
+
+No failing test is attached, because reproducing it requires adding the release
+path that must not be added until this is fixed. The hazard is structural and
+reads directly off the source:
+
+1. `cache_module_exports` stores `Arc::as_ptr(dict) as usize -> owner`, keeping
+   no reference of its own.
+2. The dict stays alive only via `MODULE_EXPORTS_CACHE`, which today is never
+   released except by a whole-cache `clear_module_cache*`.
+3. `module_exports_owner` looks the address up and returns whatever it finds.
+4. Any future partial release of `MODULE_EXPORTS_CACHE` makes step 3 a lookup on
+   a possibly-recycled address.
 
 ## Fix direction
 
-Re-key off a stable identity before bounding:
-
-- `FILTERED_DICT_CACHE`: key on the owning module's canonical path (the same
-  `normalize_path_key` the sibling caches use) rather than the dict address.
-- `MODULE_EXPORT_OWNERS` / `FUNCTION_MODULE_OWNER`: carry the owner id inside
-  the value/def rather than in a side table keyed by address.
-
-Both are behaviour-visible refactors of the interpreter's ownership plumbing and
-were out of scope for the memory-lifecycle lane.
+Either re-validate like `FILTERED_DICT_CACHE` does (store the `Arc` alongside
+the owner and `ptr_eq` on the hit path), or — better — carry the owner id inside
+the value/def instead of in an address-keyed side table. The second removes the
+coupling rather than documenting it.
 
 ## Related
 
