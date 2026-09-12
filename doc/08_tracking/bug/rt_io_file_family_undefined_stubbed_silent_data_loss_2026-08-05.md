@@ -114,3 +114,52 @@ FFI enum-crossing defect it claimed to test. Its header also asserted that an
 interpreter run is "vacuous for this defect"; in fact the interpreter fails
 closed with `unknown extern function`, which is the single clearest signal
 available. Both of its conclusions were false.
+
+## Re-check 2026-09-12 — not reproducible; the family has since been implemented
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+The record's central claim — "none is defined in `src/compiler_rust/runtime/**`,
+`src/runtime/*.c`, `build.rs` codegen, or the interpreter's extern registry" — no
+longer holds. The family now has real C definitions:
+
+```
+$ grep -n '^[A-Za-z_].*rt_io_file_\(open\|write\|read_all\|close\|exists\|delete\)(' src/runtime/runtime_native.c
+9981:int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode) {
+10002:bool rt_io_file_close(int64_t fd) {
+10014:int64_t rt_io_file_read_all(int64_t fd) {
+10136:int64_t rt_io_file_write(int64_t fd, const uint8_t* data_ptr, uint64_t data_len) {
+10304:bool rt_io_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+10317:bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+```
+
+plus a seed interpreter extern registry entry
+(`src/compiler_rust/compiler/src/interpreter_extern/io_file.rs`, 67 references).
+
+Behavioural check — `File.write` really writes:
+
+```simple
+use std.nogc_sync_mut.io.file.{File}
+fn main():
+    val r = File.write("<scratch>/written.txt", "hello-from-simple")
+    print("write done")
+```
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run e_file.spl
+write done
+$ ls -la <scratch>/written.txt
+-rw-rw-r-- 1 yoon yoon 17 ... written.txt
+```
+
+17 bytes on disk — the exact payload length, not a zero-length file. The silent
+data loss does not reproduce.
+
+Scope of this re-check, stated honestly: it exercised the seed interpreter lane
+(`bin/simple run`). The record's `nm`-on-`libsimple_runtime.a` evidence for the
+native/JIT lane was not re-run here, because no self-hosted native lane is
+deployed in this worktree. The C definitions above are what a native link would
+resolve against, so the fabricated-stub path has no undefined symbol left to
+fabricate for this family.
+
+- Status: CLOSED (2026-09-12) — not reproducible on 3d120a6f
