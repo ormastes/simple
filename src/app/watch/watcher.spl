@@ -16,6 +16,26 @@ struct FileSnapshot:
 fn snapshot_new() -> FileSnapshot:
     FileSnapshot(entries: [])
 
+# Paths a poll snapshot must never carry: build output, VCS metadata and editor
+# scratch files. Without this the watcher walks target/ and .git/, which on a
+# large tree dominates the poll cost and reports churn nobody asked to watch.
+# Directory patterns match a whole path COMPONENT, so src/targeting/ is kept.
+fn watch_path_is_excluded(path: text) -> bool:
+    if path.ends_with(".swp") or path.ends_with(".tmp"):
+        return true
+    for part in path.split("/"):
+        if part == "target" or part == ".git":
+            return true
+    false
+
+# Drop every excluded path, preserving the order of the rest.
+fn watch_filter_paths(paths: [text]) -> [text]:
+    var kept: [text] = []
+    for p in paths:
+        if not watch_path_is_excluded(p):
+            kept.push(p)
+    kept
+
 # Collect modification times for all files with given extension under a path
 fn collect_snapshot(path: text, ext: text) -> FileSnapshot:
     var entries: [(text, i64)] = []
@@ -24,7 +44,7 @@ fn collect_snapshot(path: text, ext: text) -> FileSnapshot:
 
     val files = rt_dir_walk(path)
     for file in files:
-        if file.ends_with(ext):
+        if file.ends_with(ext) and not watch_path_is_excluded(file):
             val mtime = rt_file_modified_time(file)
             entries.push((file, mtime))
     FileSnapshot(entries: entries)
