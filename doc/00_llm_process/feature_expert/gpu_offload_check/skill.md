@@ -466,6 +466,54 @@ census: `doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md`.
   the boundary is already node-scaled (identical counts at 900x760 and 4K); only
   `readback_bytes` scales with pixels.
 
+## CPU<->GPU boundary audit gate — invariants, env, pinned kernels (2026-09-12)
+
+`scripts/check/check-web-vulkan-gpu-boundary-audit.shs` PASS requires, per
+frame: `submits_per_frame=1`, `readbacks_per_frame=1`,
+`host_pixel_iterations=0`, no `atlas_full_repacks` outside the first frame, and
+a `backend_reported=vulkan` with `SIMPLE_VK_TIMING` armed (a disarmed timing
+env or a non-vulkan backend both ERROR, never PASS — see the fail-closed rules
+above). All read from the `sffi_*` vk-timing buckets, never pooled-slot fields.
+Opt-in env (each an uncatchable interpreter abort if the extern is unknown, so
+none is default): `SIMPLE_VK_READBACK=native`, `SIMPLE_VK_IMAGE_UPLOAD=u32`,
+`SIMPLE_VK_RECT_UPLOAD=u32`, `SIMPLE_VK_FONT_UPLOAD=u32`.
+
+Pinned GLSL->SPIR-V kernels, one gate each (fail-closed; no
+`glslangValidator` = ERROR, `.spv` never committed): `rect_batch`
+(`check-rect-batch-spirv-pinned.shs`), `blit` (`check-blit-spirv-pinned.shs`),
+`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `glass_material`
+(`check-glass-material-spirv-pinned.shs`). After editing a `.comp` shader,
+regen via `scripts/tool/gen-rect-batch-spirv.shs` (or the kernel's equivalent)
+before re-running its pin gate.
+
+`scripts/setup/build-gpu-seed.shs --verify` builds/verifies the Vulkan-feature
+seed these lanes need (plain `bin/simple` under `src/compiler_rust` lacks
+Vulkan features — not permission to substitute a Rust-seed run for a real
+renderer-perf measurement, see the admission traps above).
+
+4K numbers (2026-09-12, `doc/10_metrics/ui/web_4k_showcase_after_gpu_boundary_fixes_macos_2026-09-12.md`):
+overview lane PASSes at all three sizes (steady 902/933/979ms,
+`submits_per_frame=1`); the css-layout lane FAILs at all three sizes
+(`submits_per_frame=3`) — the boundary fix is not uniform across pages.
+
+Per-codepoint advance contract (`doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`):
+`Engine2D.draw_text_with_advances_*` staged one text quad per UTF-8 BYTE
+against a per-CODEPOINT advance array, so a single multi-byte char (e.g. an em
+dash) desynced staging and blacked out the whole page. FIXED in text staging
+2026-09-12; a producer-side (browser-engine) fail-safe guard accepting both
+arities is still in place as containment and is a follow-up removal, not a bug.
+
+Lessons from today's bug records (measure before believing the brief):
+`gpu_seed_feature_set_drift_2026-09-12.md` — a seed built without the exact
+feature flags a lane expects silently degrades rather than erroring; verify
+`--features` at build time, not from memory of a prior build.
+`macos_deployed_test_runner_load_only_greenwash_2026-09-12.md` — a "PASS" from
+a load-only deployed test runner is not evidence of a real run; check which
+binary actually executed. `vk2d_bench_hardcoded_block_reason_2026-09-11.md`
+lineage: a hardcoded status string looked like a real verdict until someone
+read the computation behind it — the same trap this section's boundary-audit
+gate is designed to avoid by reading real vk-timing buckets, never a name.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,
