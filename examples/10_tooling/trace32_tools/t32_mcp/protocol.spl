@@ -1,0 +1,673 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP Protocol — I/O, initialize, tools list, schemas
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+#
+# JSON helpers from t32_mcp/json_helpers.spl (inlined, _jh_ prefixed internals).
+# Transport implemented here via stdin_read_char and direct fd-backed stdout sinks.
+# This avoids loading the entire src/lib/ module tree (8GB+ RSS).
+
+use t32_mcp.json_helpers.{
+    Q, LB, RB, SB_L, SB_R,
+    escape_json, js, jp, jo1, jo2, jo3, jo4,
+    jsonrpc_result, jsonrpc_error
+}
+
+extern fn stdin_read_char() -> text
+extern fn stdout_write(data: text) -> i64
+extern fn rt_stdout_flush() -> i64
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+fn t32_stderr(message: text):
+    stderr_write("[t32-mcp] " + message + "\n")
+    stderr_flush()
+
+fn t32_protocol_debug_enabled() -> bool:
+    (rt_env_get("T32_MCP_DEBUG_LOG") ?? "1") != "0"
+
+fn t32_protocol_debug(message: text):
+    if t32_protocol_debug_enabled():
+        t32_stderr("proto: " + message)
+
+fn t32_protocol_trace(message: text):
+    val debug_path = rt_env_get("T32_MCP_DEBUG_FILE") ?? ""
+    if debug_path != "":
+        rt_file_append_text(debug_path, "protocol: " + message + "\n")
+
+# --- Protocol I/O (inlined, zero imports) ---
+
+fn t32_mcp_read_line() -> text:
+    var line = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            return line
+        line = line + ch
+        if ch == "\n":
+            t32_protocol_debug("read_line via stdin chars len=" + str(line.len()))
+            return line
+
+fn t32_mcp_read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+fn t32_read_stdin_message() -> text:
+    var content_length = 0
+    while true:
+        var line = t32_mcp_read_line()
+        if line.len() == 0:
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\r\n"):
+            line = strip_last(strip_last(line))
+        elif line.ends_with("\n"):
+            line = strip_last(line)
+        elif line.ends_with("\r"):
+            line = strip_last(line)
+        t32_protocol_debug("line starts literal={?} " + str(line.starts_with("{")) + " helper={?} " + str(line.starts_with(LB())) + " line=<" + line + ">")
+        if line.starts_with(LB()):
+            T32_USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    t32_mcp_read_chars(content_length)
+
+fn t32_write_stdout_message(body: text):
+    t32_protocol_trace("write_stdout_message body_bytes=" + str(body.len()))
+    if T32_USE_JSON_LINES:
+        t32_protocol_trace("write_stdout_message mode=json-lines")
+        print_raw(body + t32_nl())
+    else:
+        val byte_count = t32_text_byte_len(body)
+        val header = "Content-Length: " + str(byte_count) + "\r" + t32_nl() + "\r" + t32_nl()
+        t32_protocol_trace("write_stdout_message mode=framed")
+        print_raw(header + body)
+
+# --- Method detection (string contains — avoids extract_field resolution issues) ---
+
+fn t32_has_method(msg: text, name: text) -> bool:
+    return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+fn t32_extract_request_id(msg: text) -> text:
+    # Extract numeric JSON-RPC id using only .contains() (avoids broken substring ==)
+    val prefix = "\"id\":"
+    val prefix_sp = "\"id\": "
+    var pfx = prefix
+    if msg.contains(prefix_sp):
+        pfx = prefix_sp
+    elif not msg.contains(prefix):
+        return "null"
+    # Build id digit-by-digit using .contains() checks
+    var result = ""
+    var searching = true
+    while searching:
+        searching = false
+        var d = 0
+        while d <= 9:
+            val candidate = result + str(d)
+            val with_comma = pfx + candidate + ","
+            val with_close = pfx + candidate + "}"
+            val with_space = pfx + candidate + " "
+            if msg.contains(with_comma) or msg.contains(with_close) or msg.contains(with_space):
+                return candidate
+            # Check if candidate is a prefix of a longer number
+            var has_more = false
+            var e = 0
+            while e <= 9:
+                if msg.contains(pfx + candidate + str(e)):
+                    has_more = true
+                    break
+                e = e + 1
+            if has_more:
+                result = candidate
+                searching = true
+                break
+            d = d + 1
+    if result != "":
+        return result
+    # Check for "null" id
+    if msg.contains(pfx + "null"):
+        return "null"
+    return "null"
+
+# --- JSON-RPC helpers (inlined) ---
+
+fn t32_make_json_result(id: text, result: text) -> text:
+    t32_protocol_debug("make_json_result payload_len=" + str(result.len()) + " id=<" + id + ">")
+    jsonrpc_result(id, result)
+
+fn t32_make_error(id: text, code: i64, message: text) -> text:
+    jsonrpc_error(id, code, message)
+
+# --- T32-specific tool result helpers (migrated from json_helpers.spl) ---
+
+fn t32_tool_output_has_key(output: text, key: text) -> bool:
+    output.contains(Q() + key + Q() + ":")
+
+fn t32_unknown_gui_status_json() -> text:
+    var gui = LB()
+    gui = gui + jp("message_line", js(""))
+    gui = gui + "," + jp("message_type", js("info"))
+    gui = gui + "," + jp("cursor", js(""))
+    gui = gui + "," + jp("debug", js(""))
+    gui = gui + "," + jp("debugger_activity", js(""))
+    gui = gui + "," + jp("trace", js(""))
+    gui = gui + "," + jp("mode", js(""))
+    gui = gui + "," + jp("system", js(""))
+    gui = gui + "," + jp("task", js(""))
+    gui = gui + "," + jp("cores", js(""))
+    gui = gui + "," + jp("target", js(""))
+    gui = gui + "," + jp("monitor", js(""))
+    gui = gui + "," + jp("target_state", js("unknown"))
+    gui = gui + RB()
+    gui
+
+fn t32_normalize_tool_output(output: text) -> text:
+    val trimmed = output.trim()
+    var normalized = trimmed
+    if trimmed.starts_with(LB()) and trimmed.ends_with(RB()):
+        normalized = trimmed
+    elif trimmed.starts_with(SB_L()) and trimmed.ends_with(SB_R()):
+        normalized = jo1(jp("items", trimmed))
+    else:
+        normalized = jo1(jp("value", js(trimmed)))
+    if t32_tool_output_has_key(normalized, "gui_status"):
+        return normalized
+    var body = normalized
+    if body.starts_with(LB()) and body.ends_with(RB()):
+        body = body.substring(1, body.len() - 1)
+    var parts: [text] = []
+    if body != "":
+        parts.push(body)
+    parts.push(jp("gui_status", t32_unknown_gui_status_json()))
+    parts.push(jp("status_bar", jo2(jp("message", js("")), jp("type", js("info")))))
+    parts.push(jp("target_state", js("unknown")))
+    LB() + parts.join(",") + RB()
+
+fn t32_make_tool_result(id: text, output: text) -> text:
+    val normalized = t32_normalize_tool_output(output)
+    val escaped = escape_json(normalized)
+    val quoted = Q() + escaped + Q()
+    val content = SB_L() + jo2(jp("type", js("text")), jp("text", quoted)) + SB_R()
+    val result = jo1(jp("content", content))
+    jsonrpc_result(id, result)
+
+fn t32_make_tool_error(id: text, code: i64, msg: text) -> text:
+    val err_payload = jo1(jp("error", jo2(jp("code", str(code)), jp("message", js(msg)))))
+    val normalized = t32_normalize_tool_output(err_payload)
+    val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(normalized))) + SB_R()
+    var err_result = LB() + jp("content", content) + "," + jp("isError", "true") + RB()
+    jsonrpc_result(id, err_result)
+
+# --- T32-specific validation helpers (migrated from json_helpers.spl) ---
+
+fn t32_char_at(s: text, index: i64) -> text:
+    s.substring(index, index + 1)
+
+fn t32_validate_identifier(name: text) -> bool:
+    """Validate that a string is a safe T32 identifier (no injection).
+    Allows alphanumeric, underscores, and dots. Rejects empty, spaces,
+    semicolons, quotes, backticks, dollar signs, pipes, and other shell metacharacters."""
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        val ch = t32_char_at(name, i)
+        if ch == " " or ch == "\t" or ch == ";" or ch == "|" or ch == "&":
+            return false
+        if ch == "`" or ch == "'" or ch == "\"":
+            return false
+        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_all_digits(s: text) -> bool:
+    """Check if a string contains only ASCII digits."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_hex_address(s: text) -> bool:
+    """Check if a string is a valid hex address (0x prefix optional, T32 dot terminator allowed)."""
+    if s.len() == 0:
+        return false
+    var start = 0
+    var input = s
+    # Strip trailing dot (T32 address notation)
+    if input.ends_with("."):
+        input = input.substring(0, input.len() - 1)
+    # Strip 0x/0X prefix
+    if input.starts_with("0x") or input.starts_with("0X"):
+        start = 2
+    if start >= input.len():
+        return false
+    var i = start
+    while i < input.len():
+        val ch = t32_char_at(input, i)
+        val is_digit = (ch >= "0" and ch <= "9")
+        val is_upper = (ch >= "A" and ch <= "F")
+        val is_lower = (ch >= "a" and ch <= "f")
+        if not is_digit and not is_upper and not is_lower:
+            return false
+        i = i + 1
+    return true
+
+fn t32_has_shell_meta(s: text) -> bool:
+    """Check if a string contains any shell metacharacters."""
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch == ";" or ch == "|" or ch == "&" or ch == "`":
+            return true
+        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
+            return true
+        i = i + 1
+    return false
+
+fn t32_shell_escape(s: text) -> text:
+    """Escape a string for safe use in shell commands by wrapping in single quotes.
+    Embedded single quotes are escaped as '\\''."""
+    var result = "'"
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch == "'":
+            result = result + "'\\''"
+        else:
+            result = result + ch
+        i = i + 1
+    result = result + "'"
+    return result
+
+# --- Shell and file helpers (migrated from json_helpers.spl) ---
+
+fn t32_text_byte_len(s: text) -> i64:
+    return s.len()
+
+fn t32_shell_cmd(command: text) -> (text, i64):
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    (stdout, code)
+
+fn t32_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn t32_file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content) ?? false
+
+# --- ASCII digit check for Content-Length parsing ---
+
+fn t32_is_ascii_digits(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+# --- Initialize response ---
+
+fn t32_make_init_response(id: text) -> text:
+    var tools_cap = jo1(jp("listChanged", "true"))
+    t32_protocol_debug("tools_cap len=" + str(tools_cap.len()))
+    var resources_cap = jo2(jp("subscribe", "false"), jp("listChanged", "true"))
+    t32_protocol_debug("resources_cap len=" + str(resources_cap.len()))
+    var caps = jo2(
+        jp("tools", tools_cap),
+        jp("resources", resources_cap)
+    )
+    t32_protocol_debug("caps len=" + str(caps.len()))
+    val server_info = jo3(
+        jp("name", js(t32_server_name())),
+        jp("version", js(t32_server_version())),
+        jp("instructions", js("TRACE32 debug session control via MCP protocol. 35 tools for session management, window capture, action invocation, field manipulation, headless setup, command database, CMM validation, async jobs, and dialog interaction."))
+    )
+    t32_protocol_debug("server_info len=" + str(server_info.len()))
+    val result = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("serverInfo", server_info)
+    )
+    t32_protocol_debug("init payload len=" + str(result.len()))
+    jsonrpc_result(id, result)
+
+# --- Tools list (35 T32 tools) ---
+
+fn t32_make_tools_list(id: text) -> text:
+    var tool_parts: [text] = []
+
+    # Session tools (9)
+    tool_parts.push(t32_make_tool_schema("t32_sessions_list", "List all TRACE32 sessions"))
+    tool_parts.push(t32_make_tool_schema("t32_session_open", "Open new TRACE32 session (connect to PowerView instance)"))
+    tool_parts.push(t32_make_tool_schema("t32_session_resume", "Resume/switch to existing session"))
+    tool_parts.push(t32_make_tool_schema("t32_session_close", "Close TRACE32 session"))
+    tool_parts.push(t32_make_tool_schema("t32_core_list", "List cores in current session"))
+    tool_parts.push(t32_make_tool_schema("t32_core_select", "Select active core in multi-core session"))
+    tool_parts.push(t32_make_tool_schema("t32_cmd_run", "Run raw PRACTICE command on TRACE32"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_run", "Run CMM script on TRACE32"))
+    tool_parts.push(t32_make_tool_schema("t32_eval", "Evaluate TRACE32 expression"))
+
+    # Window tools (5)
+    tool_parts.push(t32_make_tool_schema("t32_window_list", "List available TRACE32 windows from catalog"))
+    tool_parts.push(t32_make_tool_schema("t32_window_open", "Open a TRACE32 window"))
+    tool_parts.push(t32_make_tool_schema("t32_window_capture", "Capture TRACE32 window content as text"))
+    tool_parts.push(t32_make_tool_schema("t32_window_describe", "Describe window actions and fields"))
+    tool_parts.push(t32_make_tool_schema("t32_screenshot", "Take screenshot of TRACE32 window"))
+
+    # Action/Field tools (6)
+    tool_parts.push(t32_make_tool_schema("t32_action_invoke", "Invoke a window action"))
+    tool_parts.push(t32_make_tool_schema("t32_field_get", "Get field value via T32 EVAL (pc, sp, register.NAME, var.NAME, memory.ADDR)"))
+    tool_parts.push(t32_make_tool_schema("t32_field_set", "Set field value via T32 command (pc, sp, register.NAME, var.NAME, memory.ADDR)"))
+    tool_parts.push(t32_make_tool_schema("t32_history_tail", "Get recent command history"))
+    tool_parts.push(t32_make_tool_schema("t32_resources_list", "List available TRACE32 MCP resources"))
+    tool_parts.push(t32_make_tool_schema("t32_resource_read", "Read a specific TRACE32 resource by URI"))
+
+    # Headless/AREA/Command tools (3)
+    tool_parts.push(t32_make_tool_schema("t32_setup_headless", "One-shot headless setup: SCREEN.OFF + AREA.Create + AREA.Select + SYStem.Option SemiHost ON + error handler"))
+    tool_parts.push(t32_make_tool_schema("t32_area_read", "Read AREA buffer content via WinPrint.AREA, optionally clear"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_commands", "Query PRACTICE command database (120+ commands) by group or search"))
+
+    # Gap closure tools (4)
+    tool_parts.push(t32_make_tool_schema("t32_session_info", "Get detailed session metadata including core list and connection state"))
+    tool_parts.push(t32_make_tool_schema("t32_action_list", "List available actions, optionally filtered by window key"))
+    tool_parts.push(t32_make_tool_schema("t32_status_snapshot", "Get current target CPU run state (running/stopped/unknown)"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_validate", "Validate CMM script for headless safety (blocking pattern detection)"))
+
+    # Job tools (4)
+    tool_parts.push(t32_make_tool_schema("t32_job_list", "List async jobs, optionally filtered by session"))
+    tool_parts.push(t32_make_tool_schema("t32_job_get", "Get status and details of an async job"))
+    tool_parts.push(t32_make_tool_schema("t32_job_cancel", "Cancel a running or queued async job"))
+    tool_parts.push(t32_make_tool_schema("t32_job_result", "Get the result of a completed async job"))
+
+    # Dialog tools (4)
+    tool_parts.push(t32_make_tool_schema("t32_dialog_parse", "Parse CMM source for dialog elements, labels, and widget types"))
+    tool_parts.push(t32_make_tool_schema("t32_dialog_get", "Read dialog element state by label (boolean/string/value)"))
+    tool_parts.push(t32_make_tool_schema("t32_dialog_set", "Set/disable/enable dialog element by label"))
+    tool_parts.push(t32_make_tool_schema("t32_dialog_click", "Check dialog element exists then execute button handler"))
+
+    # Error check (1)
+    tool_parts.push(t32_make_tool_schema("t32_error_check", "Check TRACE32 error state — message area, stderr, practice state"))
+
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    t32_protocol_debug("tools payload len=" + str(result.len()))
+    jsonrpc_result(id, result)
+
+# --- Tool schema builder ---
+
+fn t32_make_tool_schema(name: text, description: text) -> text:
+    var props = LB() + RB()
+    var req = "[]"
+
+    # Session tools
+    if name == "t32_sessions_list":
+        props = LB() + RB()
+    elif name == "t32_session_open":
+        var p = LB()
+        p = p + jp("host", jo2(jp("type", js("string")), jp("description", js("TRACE32 host (e.g. localhost)"))))
+        p = p + "," + jp("port", jo2(jp("type", js("string")), jp("description", js("TRACE32 API port (e.g. 20000)"))))
+        p = p + "," + jp("name", jo2(jp("type", js("string")), jp("description", js("INTERCOM name of the instance"))))
+        p = p + "," + jp("architecture", jo2(jp("type", js("string")), jp("description", js("Target architecture (e.g. ARM, RISCV, TC3xx)"))))
+        p = p + "," + jp("proxy_core", jo2(jp("type", js("string")), jp("description", js("Route all commands through this proxy T32 INTERCOM instance"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("host") + "," + js("port") + "]"
+    elif name == "t32_session_resume":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID to resume")))))
+        req = "[" + js("session_id") + "]"
+    elif name == "t32_session_close":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID to close")))))
+        req = "[" + js("session_id") + "]"
+    elif name == "t32_core_list":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)")))))
+    elif name == "t32_core_select":
+        props = jo2(
+            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)")))),
+            jp("core_id", jo2(jp("type", js("string")), jp("description", js("Core ID to select"))))
+        )
+        req = "[" + js("core_id") + "]"
+    elif name == "t32_cmd_run":
+        var p = LB()
+        p = p + jp("command", jo2(jp("type", js("string")), jp("description", js("PRACTICE command to execute"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + "," + jp("force", jo2(jp("type", js("string")), jp("description", js("If 'true', bypass blocking pattern detection and execute anyway"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after execution; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("command") + "]"
+    elif name == "t32_cmm_run":
+        var p = LB()
+        p = p + jp("script", jo2(jp("type", js("string")), jp("description", js("CMM script path or inline script"))))
+        p = p + "," + jp("wait", jo2(jp("type", js("string")), jp("description", js("If 'true', poll PRACTICE.STATE() until script completes"))))
+        p = p + "," + jp("timeout", jo2(jp("type", js("string")), jp("description", js("Poll timeout in ms (default 30000)"))))
+        p = p + "," + jp("capture_area", jo2(jp("type", js("string")), jp("description", js("If 'true', capture AREA buffer output after script completes"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + "," + jp("force", jo2(jp("type", js("string")), jp("description", js("If 'true', bypass blocking pattern detection and execute anyway"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after execution; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("script") + "]"
+    elif name == "t32_eval":
+        var p = LB()
+        p = p + jp("expression", jo2(jp("type", js("string")), jp("description", js("TRACE32 expression to evaluate"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after evaluation; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("expression") + "]"
+
+    # Window tools
+    elif name == "t32_window_list":
+        props = LB() + RB()
+    elif name == "t32_window_open":
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to open (e.g. data_list, register)"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after opening; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("window") + "]"
+    elif name == "t32_window_capture":
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to capture"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after capture; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("window") + "]"
+    elif name == "t32_window_describe":
+        props = jo1(jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to describe")))))
+        req = "[" + js("window") + "]"
+    elif name == "t32_screenshot":
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to screenshot"))))
+        p = p + "," + jp("output_path", jo2(jp("type", js("string")), jp("description", js("Output file path for screenshot"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after screenshot; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("window") + "]"
+
+    # Action/Field tools
+    elif name == "t32_action_invoke":
+        var p = LB()
+        p = p + jp("action_key", jo2(jp("type", js("string")), jp("description", js("Action key to invoke"))))
+        p = p + "," + jp("args", jo2(jp("type", js("string")), jp("description", js("Optional arguments for action"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after invocation; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("action_key") + "]"
+    elif name == "t32_field_get":
+        var p = LB()
+        p = p + jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to get"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after get; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("field_key") + "]"
+    elif name == "t32_field_set":
+        var p = LB()
+        p = p + jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to set"))))
+        p = p + "," + jp("value", jo2(jp("type", js("string")), jp("description", js("New value for the field"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after setting; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("field_key") + "," + js("value") + "]"
+    elif name == "t32_history_tail":
+        props = jo1(jp("count", jo2(jp("type", js("string")), jp("description", js("Number of history entries to return (default 20)")))))
+    elif name == "t32_resources_list":
+        props = LB() + RB()
+    elif name == "t32_resource_read":
+        props = jo1(jp("uri", jo2(jp("type", js("string")), jp("description", js("Resource URI to read")))))
+        req = "[" + js("uri") + "]"
+
+    # Headless/AREA/Command tools
+    elif name == "t32_setup_headless":
+        props = jo3(
+            jp("area_name", jo2(jp("type", js("string")), jp("description", js("AREA buffer name (default MCP_OUT)")))),
+            jp("semihost", jo2(jp("type", js("string")), jp("description", js("If 'false', skip SYStem.Option SemiHost ON (default true)")))),
+            jp("error_handler", jo2(jp("type", js("string")), jp("description", js("If 'false', skip ON ERROR handler setup (default true)"))))
+        )
+    elif name == "t32_area_read":
+        props = jo2(
+            jp("area_name", jo2(jp("type", js("string")), jp("description", js("AREA buffer name (default MCP_OUT)")))),
+            jp("clear", jo2(jp("type", js("string")), jp("description", js("If 'true', clear AREA after reading"))))
+        )
+    elif name == "t32_cmm_commands":
+        props = jo2(
+            jp("group", jo2(jp("type", js("string")), jp("description", js("Filter by command group (e.g. Data, Break, FLASH)")))),
+            jp("search", jo2(jp("type", js("string")), jp("description", js("Search substring in command name or description"))))
+        )
+
+    # Gap closure tools
+    elif name == "t32_session_info":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)")))))
+    elif name == "t32_action_list":
+        props = jo1(jp("window_key", jo2(jp("type", js("string")), jp("description", js("Filter actions to this window key (optional, lists all if omitted)")))))
+    elif name == "t32_status_snapshot":
+        props = LB() + RB()
+    elif name == "t32_cmm_validate":
+        props = jo2(
+            jp("source", jo2(jp("type", js("string")), jp("description", js("CMM script source text or file path to validate")))),
+            jp("mode", jo2(jp("type", js("string")), jp("description", js("Validation mode: check (default), report, or suggest"))))
+        )
+        req = "[" + js("source") + "]"
+
+    # Job tools
+    elif name == "t32_job_list":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Filter by session ID (optional, lists all if omitted)")))))
+    elif name == "t32_job_get":
+        props = jo1(jp("job_id", jo2(jp("type", js("string")), jp("description", js("Job ID to query")))))
+        req = "[" + js("job_id") + "]"
+    elif name == "t32_job_cancel":
+        props = jo1(jp("job_id", jo2(jp("type", js("string")), jp("description", js("Job ID to cancel")))))
+        req = "[" + js("job_id") + "]"
+    elif name == "t32_job_result":
+        props = jo1(jp("job_id", jo2(jp("type", js("string")), jp("description", js("Job ID to get result for")))))
+        req = "[" + js("job_id") + "]"
+
+    # Dialog tools
+    elif name == "t32_dialog_parse":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text or file path to parse for dialog elements")))))
+        req = "[" + js("source") + "]"
+    elif name == "t32_dialog_get":
+        var p = LB()
+        p = p + jp("label", jo2(jp("type", js("string")), jp("description", js("Dialog element label name"))))
+        p = p + "," + jp("type", jo2(jp("type", js("string")), jp("description", js("Value type: boolean, string, or value (auto-detect if omitted)"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("label") + "]"
+    elif name == "t32_dialog_set":
+        var p = LB()
+        p = p + jp("label", jo2(jp("type", js("string")), jp("description", js("Dialog element label name"))))
+        p = p + "," + jp("action", jo2(jp("type", js("string")), jp("description", js("Action: set/select (default), deselect, disable, or enable"))))
+        p = p + "," + jp("mode", jo2(jp("type", js("string")), jp("description", js("Completion mode: sync (default, waits for PRACTICE idle) or async"))))
+        p = p + "," + jp("timeout_ms", jo2(jp("type", js("string")), jp("description", js("Sync wait timeout in milliseconds (default 5000)"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("label") + "]"
+    elif name == "t32_dialog_click":
+        var p = LB()
+        p = p + jp("label", jo2(jp("type", js("string")), jp("description", js("Button label name to click/execute"))))
+        p = p + "," + jp("capture_area", jo2(jp("type", js("string")), jp("description", js("If 'true', capture AREA buffer output after button handler executes"))))
+        p = p + "," + jp("mode", jo2(jp("type", js("string")), jp("description", js("Completion mode: sync (default, waits for PRACTICE idle) or async"))))
+        p = p + "," + jp("timeout_ms", jo2(jp("type", js("string")), jp("description", js("Sync wait timeout in milliseconds (default 5000)"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("label") + "]"
+
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    if req != "[]":
+        schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+
+    # Annotations
+    var read_only = "false"
+    var destructive = "false"
+    var idempotent = "true"
+    if (name == "t32_sessions_list" or name == "t32_core_list" or
+        name == "t32_window_list" or name == "t32_window_capture" or
+        name == "t32_window_describe" or name == "t32_field_get" or
+        name == "t32_history_tail" or name == "t32_eval" or
+        name == "t32_resources_list" or name == "t32_resource_read" or
+        name == "t32_area_read" or name == "t32_cmm_commands" or
+        name == "t32_session_info" or name == "t32_action_list" or
+        name == "t32_status_snapshot" or name == "t32_cmm_validate" or
+        name == "t32_job_list" or name == "t32_job_get" or
+        name == "t32_job_result" or
+        name == "t32_dialog_parse" or name == "t32_dialog_get" or
+        name == "t32_error_check"):
+        read_only = "true"
+    if name == "t32_session_close":
+        destructive = "true"
+    if (name == "t32_cmd_run" or name == "t32_cmm_run" or
+        name == "t32_action_invoke" or name == "t32_dialog_click"):
+        idempotent = "false"
+
+    var annotations = LB()
+    annotations = annotations + jp("readOnlyHint", read_only)
+    annotations = annotations + "," + jp("destructiveHint", destructive)
+    annotations = annotations + "," + jp("idempotentHint", idempotent)
+    annotations = annotations + "," + jp("openWorldHint", "false")
+    annotations = annotations + RB()
+
+    var tool_obj = jo4(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", schema),
+        jp("annotations", annotations)
+    )
+    tool_obj
