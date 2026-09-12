@@ -16,7 +16,7 @@ use simple_parser::Parser;
 use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 
 const STDLIB_FAMILY_DIRS: &[&str] = &[
     "nogc_async_mut",
@@ -745,7 +745,7 @@ impl ModuleResolver {
                     for root in stdlib_roots {
                         if p_is_dir(&root) {
                             if stdlib_segments.is_empty() {
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) = resolve_stdlib_namespace_from_root(&candidate, path) {
                                         return Ok(resolved);
                                     }
@@ -761,7 +761,7 @@ impl ModuleResolver {
                                         }
                                     }
                                 }
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) =
                                         resolve_stdlib_from_root(self, &candidate, stdlib_segments, path)
                                     {
