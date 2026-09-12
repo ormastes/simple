@@ -72,13 +72,24 @@ NON-monotonically with identical `pack_full=8 pack_incremental=13` throughout:
 | + invalidate at function entry | 2936851404759230 |
 | + require generation continuity (strictly stricter) | 2936851411469080 |
 
-A strictly stricter variant returning to a looser variant's value, with the
-pack counts never moving, is not explicable by the guard conditions. A repeat
-run of one variant WAS byte-identical, so the render is deterministic for at
-least that variant. The cause is under diagnosis with a mirror self-check
-(`SIMPLE_VK_FONT_SELFCHECK=1`) that compares the mirror against a full pack of
-the same atlas after every incremental repack and reports whether any
-mismatching pixel lies inside a reported dirty rect.
+| + a READ-ONLY self-check (same product logic as the row above) | **2936851417192293** |
+
+**Resolved: the page renders non-deterministically at 900x760, and the repack is
+correct.** The last row runs the mirror actively (13 incremental repacks) and
+reproduces the no-mirror baseline exactly; a change cannot both alter pixels and
+reproduce the unaltered pixels. And the mirror is verified directly rather than
+by checksum — `SIMPLE_VK_FONT_SELFCHECK=1` compares it against a full pack of the
+same atlas after every incremental repack:
+
+```
+font_mirror_selfcheck checks=13 bad_calls=0 bad_bytes=0 first=[]
+```
+
+The per-composite decision log confirms the guard: every incremental repack has
+`host_gen == gen - 1` and `owner_match=true`; every full repack is caused by
+`owner_match=false`, a real font-face change. Filed:
+`doc/08_tracking/bug/web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md`.
+**Use the self-check, not the frame checksum, as the oracle at this size.**
 
 cpu_simd control, same page/size/binary: **25,xxx ms** (see below). Vulkan went
 from 2.7x that to 1.44x.

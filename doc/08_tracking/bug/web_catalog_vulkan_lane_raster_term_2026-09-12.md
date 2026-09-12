@@ -10,16 +10,23 @@ and `composite_font_batch` is **27.3 s of it across 5 calls**, of which
 is 8.2 s — two O(atlas) interpreted walks over a fixed 1024x1024 (4 MB) atlas,
 re-run in full on every dirty batch. The SFFI upload they feed is 44 ms.
 
-**Fix, and its OPEN pixel question:** `backend_vulkan_font.spl` keeps a host
-byte mirror and repacks only `batch.dirty_rects`. At 300x253 that is
-47,646 -> 35,389 ms (-25.7%) with the **PPM byte-identical** and the checksum
-unchanged. **At 900x760 the frame checksum MOVES off the no-mirror baseline**
-and three guard variants produced two values non-monotonically while the pack
-counts never changed — see the metrics doc's variant table. Until that is
-explained the incremental repack is NOT established as pixel-safe at 900x760,
-and this record must not be read as claiming it is. Spec:
+**Fixed.** `backend_vulkan_font.spl` keeps a host byte mirror and repacks only
+`batch.dirty_rects`. At 300x253: 47,646 -> 35,389 ms (-25.7%), PPM
+byte-identical, checksum unchanged. Pixel safety is established by a direct
+oracle rather than by a checksum: `SIMPLE_VK_FONT_SELFCHECK=1` compares the
+mirror against a full pack of the same atlas after every incremental repack and
+reports `checks=13 bad_calls=0 bad_bytes=0` on the 900x760 page. Spec:
 `test/02_integration/gpu/vulkan_font_atlas_incremental_repack_spec.spl` (10/10,
 incl. a sabotage triple and the stale-mirror case).
+
+**The 900x760 frame checksum is NOT a valid oracle on this page** — it takes
+three different values across runs with the product logic held fixed, including
+a run with the mirror active that reproduced the no-mirror baseline exactly.
+Filed separately:
+`doc/08_tracking/bug/web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md`.
+**That also undermines the stated reason F14's corner coalescing was held back**
+(see below): the checksum it "moved" to, `2936851411469080`, is one of the three
+this page produces on its own with no coalescing in the tree.
 
 **CORRECTION — the "~0.6 s per 1x1 alpha blend" figure below is WRONG.**
 Measured directly: 76 one-pixel composites cost **99 ms TOTAL (1.3 ms each)**,
