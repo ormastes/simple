@@ -95,3 +95,32 @@ commit.
 
 The "Fix direction" above is unchanged and still owned by whoever landed the
 262 sites; what changes is that nothing is silently skipped today.
+
+## Still red one day later, and confirmed not lane-caused (BOOT-6, 2026-09-13)
+
+On `work/bootstrap-full-4-2026-09-12` at `4e8e6426a3c` (base `7b93832c115`):
+
+```
+FAIL — forbidden direct rt_* count 6328 exceeds baseline 6072 (roots=src, src=6328),
+       extern_decls=6646; top offenders: src/compiler/35.semantics/rt_criticality_validation.spl:155
+       src/compiler/70.backend/backend/llvm_backend.spl:83 src/os/apps/sshd/ssh_session.spl:63
+       src/lib/nogc_sync_mut/io/tcp.spl:62 src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl:59
+```
+
+6328 vs the 6334 recorded above — the same top-five offenders, so this is the
+same unrepaired debt, not a new one.
+
+**Zero-delta proof for this lane**, using the guard's own call-site regex
+(`RT_RE='^[^#]*\brt_[a-z0-9_]*\('`, which by construction ignores comments)
+against committed content at both endpoints:
+
+| file | base `7b93832c115` | head `4e8e6426a3c` |
+|---|---|---|
+| `src/compiler/70.backend/backend/llvm_backend_tools.spl` | 58 | **58** |
+| `src/compiler/80.driver/driver_aot_native_output.spl` | 10 | **10** |
+
+Those are the only two `src/` files BOOT-6 touched, and neither moves. The one
+added line mentioning `rt_` is a comment, which `^[^#]*` excludes anyway. So the
+red is inherited, and BOOT-6 reports this gate as FAIL-with-zero-delta rather
+than claiming a pass or regenerating the baseline — regenerating would erase
+256 sites of real debt, which is exactly what the ratchet exists to prevent.
