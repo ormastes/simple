@@ -197,6 +197,24 @@ fn _vulkan_scaled_image_args_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i3
 # Vulkan Backend
 # ============================================================================
 
+# One parked host byte mirror of a font atlas, keyed on the atlas OWNER identity
+# (the font face) and the atlas generation those bytes incorporate. Nothing here
+# is device state: the bytes are a copy of `batch.atlas_pixels`, so a parked slot
+# stays valid across device buffer rewrites and is invalidated only by a
+# generation gap, which the incremental repack already requires to be exactly +1.
+class VulkanFontAtlasMirror:
+    identity: text
+    generation: i64
+    # This owner's own atlas sequence as of `bytes`. The GLOBAL `generation` is
+    # bumped by every owner, so it cannot express continuity across an
+    # interleave; `owner_sequence` advances by exactly 1 per dirty batch for
+    # THIS owner and is what the incremental path tests. -1 = the producer
+    # published none and the global +1 rule applies instead.
+    owner_sequence: i64 = -1
+    bytes: [u8]
+
+val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 4
+
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
 
@@ -279,6 +297,14 @@ class VulkanBackend:
     font_atlas_host_bytes: [u8]
     font_atlas_host_identity: text
     font_atlas_host_valid: bool
+    # Parked mirrors for atlas owners that are not currently active. Two font
+    # identities on one page used to evict each other's mirror on every switch,
+    # so BOTH paid a full 1,048,576-pixel repack per batch (measured: every
+    # owner switch was a `pack_full`). Parking the outgoing owner's bytes and
+    # swapping the incoming owner's back in makes an alternating A,B,A,B page
+    # repack only its dirty cells. Bounded LRU: index 0 is the least recently
+    # used and is evicted first.
+    font_atlas_mirror_slots: [VulkanFontAtlasMirror]
     # The atlas generation the mirror actually incorporated. Generations come
     # from ONE global counter bumped once per dirty batch, so `batch
     # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
@@ -286,6 +312,57 @@ class VulkanBackend:
     # batches this backend never saw at all, which no flag inside the composite
     # can observe. Any gap forces a full repack, which is always safe.
     font_atlas_host_generation: i64
+    # The per-owner atlas sequence the mirror bytes incorporate; parked and
+    # restored with them. -1 = unknown / producer publishes none.
+    font_atlas_host_owner_sequence: i64 = -1
+    # PER-OWNER DEVICE ATLAS SLOTS (F32).
+    #
+    # There used to be exactly ONE device atlas buffer (`d_font_atlas`). Every
+    # font run whose atlas content moved therefore had to flush the pending
+    # command buffer before its host write, because the dispatches already
+    # recorded in that command buffer read the very bytes the write was about
+    # to replace -- a genuine read-after-write hazard. With one buffer the
+    # cheapest honest cap was `1 + font runs`, and the catalog page measured 17
+    # submits / 17 fence waits per frame against an invariant of 1.
+    #
+    # A round-robin ring does not fix this (run 3 finds both slots referenced
+    # and flushes anyway, landing at ~runs/2). What fixes it is keying the slot
+    # on the ATLAS OWNER and exploiting the two facts F16/F24 already
+    # established:
+    #   * an owner whose parked atlas is restored unchanged (`ALREADY_TRUTH`)
+    #     needs NO device write at all -- its slot still holds exactly those
+    #     bytes -- so an alternating A,B,A,B page costs zero uploads and zero
+    #     flushes after the first pass over each owner;
+    #   * an `INCREMENTAL` batch writes only cells this batch inserted. Every
+    #     cell an already-recorded dispatch reads keeps byte-identical content,
+    #     so the write is not a hazard and needs no flush either.
+    # A flush is then required only for a FULL repack (cells may have moved)
+    # into a slot a recorded dispatch still references, and only when no
+    # unreferenced slot is free to take the write instead.
+    #
+    # Parallel arrays rather than a struct array: the tables are tiny (bounded
+    # by VULKAN_FONT_ATLAS_SLOT_MAX) and every other pooled resource in this
+    # backend is already shaped this way.
+    font_atlas_slot_handles: [i64]
+    font_atlas_slot_owners: [text]
+    # The owner's published `atlas_owner_sequence` the slot's bytes incorporate.
+    # -1 = unknown (producer publishes none), which never matches and so always
+    # forces a write -- fail-closed.
+    font_atlas_slot_sequences: [i64]
+    # Bound by a dispatch recorded into the CURRENT, not-yet-submitted command
+    # buffer. Cleared wholesale by `_clear_pending_compute_state`, which runs at
+    # the end of every flush path including the failure ones.
+    font_atlas_slot_referenced: [bool]
+    # Index into the tables above of the slot `d_font_atlas` currently aliases.
+    # -1 = none bound yet.
+    font_atlas_active_slot: i64 = -1
+    # Counters, for the audit gate and the bug record. `hits` are runs that
+    # needed no device write at all; `inplace` are writes that skipped a flush
+    # because they were incremental; `forced` are the flushes that genuinely
+    # remained.
+    font_atlas_slot_hits: i64
+    font_atlas_slot_inplace_writes: i64
+    font_atlas_slot_forced_flushes: i64
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -481,7 +558,17 @@ class VulkanBackend:
             font_atlas_host_bytes: [],
             font_atlas_host_identity: "",
             font_atlas_host_valid: false,
+            font_atlas_mirror_slots: [],
             font_atlas_host_generation: -1,
+            font_atlas_host_owner_sequence: -1,
+            font_atlas_slot_handles: [],
+            font_atlas_slot_owners: [],
+            font_atlas_slot_sequences: [],
+            font_atlas_slot_referenced: [],
+            font_atlas_active_slot: -1,
+            font_atlas_slot_hits: 0,
+            font_atlas_slot_inplace_writes: 0,
+            font_atlas_slot_forced_flushes: 0,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -994,8 +1081,20 @@ impl RenderBackend for VulkanBackend:
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
+        # Free every per-owner slot. `d_font_atlas` aliases whichever slot was
+        # active, so it must NOT be freed a second time below.
+        for slot_handle in self.font_atlas_slot_handles:
+            if slot_handle != 0:
+                vulkan_sffi_free_buffer(slot_handle)
+        val atlas_was_slotted = self.font_atlas_slot_handles.len() > 0
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
         if self.d_font_atlas != 0:
-            vulkan_sffi_free_buffer(self.d_font_atlas)
+            if not atlas_was_slotted:
+                vulkan_sffi_free_buffer(self.d_font_atlas)
             self.d_font_atlas = 0
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
@@ -1005,6 +1104,8 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_host_identity = ""
         self.font_atlas_host_valid = false
         self.font_atlas_host_generation = -1
+        self.font_atlas_host_owner_sequence = -1
+        self.font_atlas_mirror_slots = []
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -2921,6 +3022,15 @@ pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
 
 var _vk_font_pack_full: i64 = 0
 var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_per_owner_mirror_enabled() -> bool:
+    """Per-owner atlas mirrors, on by default; `0` restores the single mirror.
+
+    The off position exists as a MEASUREMENT CONTROL: it lets the same binary
+    and the same tree produce the pre-change pack counts, so a before/after
+    comparison cannot be contaminated by a rebuild.
+    """
+    (env_get("SIMPLE_VK_FONT_PER_OWNER_MIRROR") ?? "") != "0"
 
 pub fn vulkan_font_pack_note(incremental: bool):
     """Record whether an atlas upload repacked the whole atlas or only the

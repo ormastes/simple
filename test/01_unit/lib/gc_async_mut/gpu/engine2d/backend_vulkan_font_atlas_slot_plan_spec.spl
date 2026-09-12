@@ -1,0 +1,212 @@
+"""Device-free oracle for the per-owner device atlas slot plan (F32).
+
+The invariant under test is a SUBMIT COUNT: a page frame that paints N text
+runs across two font owners must submit exactly once. Before F32 the font lane
+owed `1 + font runs` submits, because one shared device atlas buffer meant every
+host write raced the dispatches already recorded against it, and the only sound
+answer was to flush first. The catalog page measured 17 submits / 17 fence waits
+per frame against an invariant of 1.
+
+`vulkan_font_atlas_slot_plan` is the whole decision, lifted out of the composite
+so it can be exercised without a Vulkan device: which of the four outcomes a run
+takes is what determines whether a submit happens. Counting flush verdicts over
+a scripted run sequence is therefore a real counter oracle, not a proxy -- the
+composite performs exactly one `_flush_pending_compute` per
+`VK_FONT_SLOT_FLUSH_THEN_WRITE` and none for the other three.
+
+Deliberately NOT covered here: that the pixels are right. That is the live
+device lane's job (`vulkan_font_atlas_incremental_repack_spec`, the audit gate's
+PPM comparison, and `SIMPLE_VK_FONT_SELFCHECK=1`). This file pins the count.
+"""
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
+    vulkan_font_atlas_slot_plan, vulkan_font_atlas_slot_depth,
+    VK_FONT_SLOT_REUSE_NO_WRITE, VK_FONT_SLOT_WRITE_IN_PLACE,
+    VK_FONT_SLOT_WRITE_FRESH, VK_FONT_SLOT_FLUSH_THEN_WRITE,
+    VULKAN_FONT_ATLAS_SLOT_MAX,
+    VK_FONT_MIRROR_FULL, VK_FONT_MIRROR_INCREMENTAL, VK_FONT_MIRROR_ALREADY_TRUTH}
+
+# A scripted font run: which owner, what the producer published, and what the
+# mirror can vouch for.
+class SlotRun:
+    owner: text
+    sequence: i64
+    continuity: i64
+
+# Replays a frame's runs against a slot table of `depth` and returns how many
+# times the plan demanded a flush. This mirrors the composite's bookkeeping
+# exactly: a slot is marked referenced once a dispatch reading it is recorded,
+# and every flush clears every referenced flag.
+fn replay_frame(runs: [SlotRun], depth: i64) -> i64:
+    var owners: [text] = []
+    var sequences: [i64] = []
+    var referenced: [bool] = []
+    # F24's mirror park, modelled faithfully: `host_sequence_before` is the
+    # sequence THIS OWNER's mirror was last folded to, because the composite
+    # calls `_font_mirror_activate` (which swaps the owner's parked bytes back
+    # in) before reading `font_atlas_host_owner_sequence`. Modelling it as a
+    # single global "previous run's sequence" is what a naive reading gives, and
+    # it wrongly charges an alternating page one flush per switch.
+    var mirror_owners: [text] = []
+    var mirror_sequences: [i64] = []
+    var flushes: i64 = 0
+    for run in runs:
+        var host_sequence_before: i64 = -1
+        var m: i64 = 0
+        while m < mirror_owners.len().to_i64():
+            if mirror_owners[m] == run.owner:
+                host_sequence_before = mirror_sequences[m]
+            m = m + 1
+        var slot_index: i64 = -1
+        var i: i64 = 0
+        while i < owners.len().to_i64():
+            if owners[i] == run.owner:
+                slot_index = i
+            i = i + 1
+        # `_font_atlas_spare_slot_index`: room for a new slot, else an
+        # unreferenced one, else nothing.
+        var spare: i64 = -1
+        if owners.len().to_i64() < depth:
+            spare = -2
+        else:
+            var j: i64 = 0
+            while j < referenced.len().to_i64():
+                if not referenced[j] and spare == -1:
+                    spare = j
+                j = j + 1
+        val slot_sequence = if slot_index >= 0: sequences[slot_index] else: -1
+        val slot_referenced = slot_index >= 0 and referenced[slot_index]
+        var plan = vulkan_font_atlas_slot_plan(
+            slot_index >= 0, slot_sequence, host_sequence_before, run.sequence,
+            slot_referenced, run.continuity, spare != -1)
+        var target = slot_index
+        if plan == VK_FONT_SLOT_FLUSH_THEN_WRITE:
+            flushes = flushes + 1
+            # The flush releases the command buffer, so nothing is referenced.
+            var k: i64 = 0
+            while k < referenced.len().to_i64():
+                referenced[k] = false
+                k = k + 1
+            if slot_index < 0:
+                spare = if owners.len().to_i64() < depth: -2 else: 0
+        if plan == VK_FONT_SLOT_WRITE_FRESH or (plan == VK_FONT_SLOT_FLUSH_THEN_WRITE and slot_index < 0):
+            if spare == -2:
+                owners = owners.push("")
+                sequences = sequences.push(-1)
+                referenced = referenced.push(false)
+                target = owners.len().to_i64() - 1
+            else:
+                target = spare
+        if plan != VK_FONT_SLOT_REUSE_NO_WRITE:
+            owners[target] = run.owner
+            sequences[target] = run.sequence
+        referenced[target] = true
+        # The mirror now incorporates this batch, for this owner.
+        var found_mirror = false
+        var mi: i64 = 0
+        while mi < mirror_owners.len().to_i64():
+            if mirror_owners[mi] == run.owner:
+                mirror_sequences[mi] = run.sequence
+                found_mirror = true
+            mi = mi + 1
+        if not found_mirror:
+            mirror_owners = mirror_owners.push(run.owner)
+            mirror_sequences = mirror_sequences.push(run.sequence)
+    flushes
+
+describe "vulkan font atlas slot plan":
+
+    it "reuses a slot that already holds this owner at this sequence":
+        # The ALREADY_TRUTH case F24's park produces on an A,B,A,B page: the
+        # device copy was never touched, so there is nothing to write.
+        expect(vulkan_font_atlas_slot_plan(true, 7, 7, 7, true, VK_FONT_MIRROR_ALREADY_TRUTH, false))
+            .to_equal(VK_FONT_SLOT_REUSE_NO_WRITE)  # oracle: REQ-VK-FONT-SLOT-001
+
+    it "writes in place when the batch only appends cells the slot lacks":
+        # slot holds sequence 7, mirror was at 7, batch is 8 and INCREMENTAL:
+        # every cell a recorded dispatch reads keeps its value.
+        expect(vulkan_font_atlas_slot_plan(true, 7, 7, 8, true, VK_FONT_MIRROR_INCREMENTAL, false))
+            .to_equal(VK_FONT_SLOT_WRITE_IN_PLACE)  # oracle: REQ-VK-FONT-SLOT-002
+
+    it "refuses the in-place shortcut when the slot is behind the mirror":
+        # slot at 5 but the mirror was at 7: the intervening batches are not in
+        # the device copy, so this write is NOT a pure append. Referenced, so a
+        # spare is required and none exists.
+        expect(vulkan_font_atlas_slot_plan(true, 5, 7, 8, true, VK_FONT_MIRROR_INCREMENTAL, false))
+            .to_equal(VK_FONT_SLOT_FLUSH_THEN_WRITE)  # oracle: REQ-VK-FONT-SLOT-003
+
+    it "takes an unreferenced slot rather than flushing on a full repack":
+        expect(vulkan_font_atlas_slot_plan(true, 5, 7, 9, true, VK_FONT_MIRROR_FULL, true))
+            .to_equal(VK_FONT_SLOT_WRITE_FRESH)  # oracle: REQ-VK-FONT-SLOT-004
+
+    it "flushes for a relocating write with no spare slot":
+        expect(vulkan_font_atlas_slot_plan(true, 5, 7, 9, true, VK_FONT_MIRROR_FULL, false))
+            .to_equal(VK_FONT_SLOT_FLUSH_THEN_WRITE)  # oracle: REQ-VK-FONT-SLOT-005
+
+    it "never flushes for a slot nothing recorded reads":
+        expect(vulkan_font_atlas_slot_plan(true, 5, 7, 9, false, VK_FONT_MIRROR_FULL, false))
+            .to_equal(VK_FONT_SLOT_WRITE_IN_PLACE)  # oracle: REQ-VK-FONT-SLOT-006
+
+    it "allocates rather than flushing for an owner with no slot yet":
+        expect(vulkan_font_atlas_slot_plan(false, -1, -1, 3, false, VK_FONT_MIRROR_FULL, true))
+            .to_equal(VK_FONT_SLOT_WRITE_FRESH)  # oracle: REQ-VK-FONT-SLOT-007
+
+    it "treats an unpublished sequence as no match, never as a reuse":
+        # -1 is what the backend uses when the producer publishes no per-owner
+        # sequence. Fail-closed: it must not satisfy the equality test.
+        expect(vulkan_font_atlas_slot_plan(true, -1, -1, -1, true, VK_FONT_MIRROR_ALREADY_TRUTH, false))
+            .to_equal(VK_FONT_SLOT_FLUSH_THEN_WRITE)  # oracle: REQ-VK-FONT-SLOT-008
+
+describe "font frame submit count":
+
+    it "submits once for a frame of eight runs across two font owners":
+        # The shape F30 measured: two owners alternating, each run appending a
+        # few glyph cells to its own atlas. With per-owner slots every run is
+        # either a reuse or an in-place append, so the frame owes NO mid-frame
+        # flush -- the single end-of-frame submit is the whole cost.
+        var runs: [SlotRun] = []
+        var seq_a: i64 = 100
+        var seq_b: i64 = 200
+        var n: i64 = 0
+        while n < 4:
+            runs = runs.push(SlotRun(owner: "face-a", sequence: seq_a, continuity: VK_FONT_MIRROR_INCREMENTAL))
+            runs = runs.push(SlotRun(owner: "face-b", sequence: seq_b, continuity: VK_FONT_MIRROR_INCREMENTAL))
+            seq_a = seq_a + 1
+            seq_b = seq_b + 1
+            n = n + 1
+        expect(runs.len()).to_equal(8)  # oracle: REQ-VK-FONT-SLOT-009
+        expect(replay_frame(runs, VULKAN_FONT_ATLAS_SLOT_MAX)).to_equal(0)  # oracle: REQ-VK-FONT-SLOT-010
+
+    it "reproduces the pre-fix cost at depth 1, proving the slots are the cause":
+        # MEASUREMENT CONTROL. One shared slot is exactly the old design: each
+        # owner switch finds the sole slot referenced with no spare, so every
+        # run but the first pays a flush. This is the `1 + font runs` cap the
+        # bug record names, and it is what SIMPLE_VK_FONT_ATLAS_SLOTS=1 restores.
+        var runs: [SlotRun] = []
+        var seq_a: i64 = 100
+        var seq_b: i64 = 200
+        var n: i64 = 0
+        while n < 4:
+            runs = runs.push(SlotRun(owner: "face-a", sequence: seq_a, continuity: VK_FONT_MIRROR_INCREMENTAL))
+            runs = runs.push(SlotRun(owner: "face-b", sequence: seq_b, continuity: VK_FONT_MIRROR_INCREMENTAL))
+            seq_a = seq_a + 1
+            seq_b = seq_b + 1
+            n = n + 1
+        val depth_one_flushes = replay_frame(runs, 1)
+        expect(depth_one_flushes > 0).to_equal(true)  # oracle: REQ-VK-FONT-SLOT-011
+        expect(depth_one_flushes > replay_frame(runs, VULKAN_FONT_ATLAS_SLOT_MAX)).to_equal(true)  # oracle: REQ-VK-FONT-SLOT-012
+
+    it "charges exactly one flush to a run that overflows every slot":
+        # Three owners against a two-slot table, all referenced: the third run
+        # has nowhere to go and must flush -- once, not once per run, because
+        # the flush frees every slot for the rest of the frame.
+        val runs = [
+            SlotRun(owner: "face-a", sequence: 1, continuity: VK_FONT_MIRROR_FULL),
+            SlotRun(owner: "face-b", sequence: 2, continuity: VK_FONT_MIRROR_FULL),
+            SlotRun(owner: "face-c", sequence: 3, continuity: VK_FONT_MIRROR_FULL)]
+        expect(replay_frame(runs, 2)).to_equal(1)  # oracle: REQ-VK-FONT-SLOT-013
+
+    it "honours only legal slot depths from the measurement-control env var":
+        # A typo must degrade to the default, never silently to one slot.
+        expect(vulkan_font_atlas_slot_depth() >= 1).to_equal(true)  # oracle: REQ-VK-FONT-SLOT-014
+        expect(vulkan_font_atlas_slot_depth() <= VULKAN_FONT_ATLAS_SLOT_MAX).to_equal(true)  # oracle: REQ-VK-FONT-SLOT-015

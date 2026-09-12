@@ -14,11 +14,26 @@ use app.wm_compare_host.file_ops.{file_read_text, file_write}
 
 # Element tags the Simple layout tree does not materialise; the Chrome-side
 # walker skips exactly the same set so the ordinals line up.
+# Boxes that participate in the shared nth-path key scheme. The Chrome side is
+# a `document.querySelectorAll('*')` walk, so it sees ELEMENTS only — a box the
+# Simple renderer emits for something that is not an element must therefore be
+# excluded here, or the two sides number their children differently.
+#
+# `::marker` is exactly that case and it is not cosmetic: the pure-Simple
+# renderer emits a marker box as the FIRST child of every `<li>`, so Chrome's
+# `li > *:nth(0)` (the real first element) was being compared against Simple's
+# marker box, and every later sibling was off by one too. On the catalog's
+# feature-inventory pages that is ~100 `<li>` elements, each contributing 2-3
+# false mismatches, which is why the differ reported a `<code>` element as
+# 119 px too wide and 85 px too tall when the actual element differs by 5 px.
+# The marker boxes are still reported under "Simple-only boxes", so removing
+# them from the key scheme hides nothing.
 fn _layout_tag(tag: text) -> bool:
     (
         tag != "#text" and tag != "style" and tag != "script" and
         tag != "title" and tag != "head" and tag != "meta" and
-        tag != "link" and tag != "base"
+        tag != "link" and tag != "base" and
+        not tag.starts_with("::")
     )
 
 struct GeomBox:
@@ -530,6 +545,21 @@ fn main():
     if args.len() == 0:
         return
     if args[0] == "selftest":
+        return
+    # simple-geom <html> [width] [height] — dump the Simple side only, in the
+    # same GEOM| shape Chrome's walker emits, so a per-element delta can be
+    # read with its SIGN (the diff rows carry |delta| by design).
+    if args[0] == "simple-geom":
+        if args.len() < 2:
+            print("ERROR — nothing was checked (usage: simple-geom <html> [w] [h])")
+            return
+        val sg_w = if args.len() > 2: args[2].to_i32() else: 900
+        val sg_h = if args.len() > 3: args[3].to_i32() else: 760
+        val sg_boxes = simple_geom_boxes(file_read_text(args[1]), sg_w, sg_h)
+        for b in sg_boxes:
+            print("GEOM|" + b.key + "|" + b.tag + "|" + b.x.to_string() + "|" +
+                  b.y.to_string() + "|" + b.w.to_string() + "|" + b.h.to_string())
+        print("simple_boxes=" + sg_boxes.len().to_string())
         return
     # diff <html> <chrome-geom> <out-prefix> [width] [height]
     if args.len() < 4:
