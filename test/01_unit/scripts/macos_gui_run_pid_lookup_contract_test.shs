@@ -1,0 +1,120 @@
+#!/bin/sh
+# Contract harness for scripts/gui/macos-gui-run.shs.
+#
+# Bug: doc/08_tracking/bug/macos_gui_run_sigpipe_141_and_stale_winit_marker_gate_2026-09-06.md
+#
+# Prints absolute tokens on stdout; the owning spec asserts on those tokens.
+# Every function under test is EXTRACTED VERBATIM from the tracked launcher, so
+# this harness cannot pass against a paraphrase of the real text.
+#
+# Tokens:
+#   EXTRACT_PID_OK=YES    the pid function body was really extracted
+#   PID_RC=<n> PID=<n>    status and pid from the real function under pipefail
+#   EXTRACT_WINIT_OK=YES  the winit probe bodies were really extracted
+#   WITHOUT_DYLIB=YES|NO  marker-free candidate, no libspl_winit on the path
+#   WITH_DYLIB=YES|NO     same candidate once libspl_winit.dylib is resolvable
+#   BAKED=YES|NO          strict-evidence probe (baked symbols only)
+#   SABOTAGE_RC=<n>       the old `ps | awk '...exit'` shape, same harness
+
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../../.." && pwd)
+launcher="$repo_root/scripts/gui/macos-gui-run.shs"
+[ -f "$launcher" ] || { echo "ERROR=launcher-missing"; exit 2; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# A fake `ps` whose FIRST line is the match and which then writes 20000 more
+# lines: the exact shape that lets an early-exiting consumer close the pipe
+# while the producer is still writing.
+mkdir -p "$work/bin"
+cat > "$work/bin/ps" <<'FAKEPS'
+#!/bin/sh
+echo "4242 /fake/app/Contents/MacOS/SimpleGui run x.spl"
+i=0
+while [ $i -lt 20000 ]; do
+  echo "$i /usr/bin/other --flag"
+  i=$((i + 1))
+done
+FAKEPS
+chmod +x "$work/bin/ps"
+
+sed -n '/^find_exact_app_pid() {/,/^}/p' "$launcher" > "$work/pidfn.sh"
+extract_pid=$(wc -l < "$work/pidfn.sh" | tr -d " ")
+[ "$extract_pid" -ge 10 ] || { echo "FAIL: pid function extraction was vacuous ($extract_pid lines)"; exit 1; }
+echo "EXTRACT_PID_OK=YES"
+
+{
+  echo 'set -euo pipefail'
+  echo 'app_executable=/fake/app/Contents/MacOS/SimpleGui'
+  cat "$work/pidfn.sh"
+  echo 'p=$(find_exact_app_pid)'
+  echo 'rc=$?'
+  echo 'echo "PID_RC=$rc PID=$p"'
+} > "$work/pidrun.sh"
+
+pid_out=$(PATH="$work/bin:$PATH" bash "$work/pidrun.sh" 2>&1) || pid_out="PID_RC=$? PID="
+echo "$pid_out"
+
+# Sabotage: the exact pre-fix shape. It must NOT report PID_RC=0, or this
+# harness is not discriminating.
+{
+  echo 'set -euo pipefail'
+  echo 'app_executable=/fake/app/Contents/MacOS/SimpleGui'
+  echo 'sabotaged() {'
+  echo '  ps -axo pid=,command= | awk -v executable="$app_executable" '"'"'{'
+  echo '    pid = $1; $1 = ""; sub(/^[[:space:]]+/, "")'
+  echo '    if ($0 == executable || index($0, executable " ") == 1) { print pid; exit }'
+  echo '  }'"'"
+  echo '}'
+  echo 'p=$(sabotaged)'
+  echo 'echo "SAB_PID=$p"'
+} > "$work/sabrun.sh"
+if PATH="$work/bin:$PATH" bash "$work/sabrun.sh" >/dev/null 2>&1; then sab_rc=0; else sab_rc=$?; fi
+echo "SABOTAGE_RC=$sab_rc"
+
+# Winit capability probes.
+sed -n '/^winit_dylib_available() {/,/^}/p' "$launcher" > "$work/winitfn.sh"
+sed -n '/^has_baked_winit_marker() {/,/^}/p' "$launcher" >> "$work/winitfn.sh"
+sed -n '/^has_winit_marker() {/,/^}/p' "$launcher" >> "$work/winitfn.sh"
+extract_winit=$(wc -l < "$work/winitfn.sh" | tr -d ' ')
+[ "$extract_winit" -ge 10 ] || { echo "FAIL: winit probe extraction was vacuous ($extract_winit lines)"; exit 1; }
+echo "EXTRACT_WINIT_OK=YES"
+
+mkdir -p "$work/repo/build/sffi"
+printf 'not-a-winit-binary\n' > "$work/cand"
+
+{
+  echo "repo_root=$work/repo"
+  echo "unset SIMPLE_SPL_WINIT_PATH DYLD_LIBRARY_PATH 2>/dev/null || true"
+  cat "$work/winitfn.sh"
+  echo "b=NO; has_winit_marker $work/cand && b=YES; echo \"WITHOUT_DYLIB=\$b\""
+  echo ": > $work/repo/build/sffi/libspl_winit.dylib"
+  echo "a=NO; has_winit_marker $work/cand && a=YES; echo \"WITH_DYLIB=\$a\""
+  echo "k=NO; has_baked_winit_marker $work/cand && k=YES; echo \"BAKED=\$k\""
+} > "$work/winitrun.sh"
+
+winit_out=$(bash "$work/winitrun.sh" 2>&1) || true
+echo "$winit_out"
+
+# Self-assertion. Contract harnesses in this directory are also executed
+# directly by sweeps, where a script that always exits 0 is a vacuous pass.
+case "$pid_out" in
+  *"PID_RC=0 PID=4242"*) ;;
+  *) echo "FAIL: pid lookup did not return 4242 with rc=0"; exit 1 ;;
+esac
+[ "$sab_rc" != 0 ] || { echo "FAIL: sabotage control passed -- harness is not discriminating"; exit 1; }
+case "$winit_out" in
+  *"WITHOUT_DYLIB=NO"*) ;;
+  *) echo "FAIL: marker-free candidate admitted with no libspl_winit present"; exit 1 ;;
+esac
+case "$winit_out" in
+  *"WITH_DYLIB=YES"*) ;;
+  *) echo "FAIL: dlopen route refused while libspl_winit was present"; exit 1 ;;
+esac
+case "$winit_out" in
+  *"BAKED=NO"*) ;;
+  *) echo "FAIL: strict baked-symbol probe admitted a marker-free file"; exit 1 ;;
+esac
+echo "CONTRACT=PASS"

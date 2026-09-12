@@ -102,6 +102,23 @@ fn _rects(count: i32, fb_w: i32, fb_h: i32) -> [Vk2dRect]:
         i = i + 1
     out
 
+# How many extra, untimed frames the divergence check renders. Four is enough
+# to expose an alternating two-buffer present (the shape originally suspected
+# here) while costing four readbacks on top of a 300-frame measurement.
+val PARITY_FRAMES: i64 = 4
+
+# A stride fold over the surface. Deliberately a rolling hash and not XOR: XOR
+# over an even number of equal samples is 0, which is the exact blindness this
+# counter replaces. A flat-coloured region would cancel itself under XOR too.
+fn parity_fold(pixels: [u32]) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    val n = pixels.len()
+    while i < n:
+        acc = (acc * 31 + (pixels[i].to_i32().to_i64() & 0xFFFFFFFF)) % 2147483647
+        i = i + 64
+    acc
+
 class Vk2dBench:
     var engine: Engine2D
     var w: i32
@@ -148,6 +165,11 @@ class Vk2dBench:
         # for a frame that opened two submissions. This delta is the claim
         # "one submit per frame" actually makes.
         val submits_before = self.engine.vulkan_accepted_compute_submit_count()
+        # `checksum=` below keeps its frozen sampled-u32-xor-stride-4096
+        # semantics: the C reference bench computes it identically and the
+        # comparison gate requires the two to match byte for byte. Divergence
+        # detection is a SEPARATE counter (see the parity pass after t1), not a
+        # change to this checksum.
         var latencies_us: [i64] = []
         val t0 = time_now_unix_micros()
         var frame = 0
@@ -173,6 +195,44 @@ class Vk2dBench:
             latencies_us.push(p2 - p0)
             frame = frame + 1
         val t1 = time_now_unix_micros()
+        # Sampled here, NOT at output-interpolation time: the parity pass below
+        # opens real submissions, and counting those would inflate
+        # accepted_submits_per_frame for the timed region they did not belong to.
+        val submits_after = self.engine.vulkan_accepted_compute_submit_count()
+
+        # Per-frame divergence check. The bench used to fold frames with
+        # an XOR of each frame's fold into the running checksum. The scene is
+        # fixed, so every frame folds
+        # to the same acc and XOR over an even frame count prints 0 no matter
+        # what was rendered -- 9/9 runs alternated 0 / -15461356 purely on frame
+        # parity, and a "checksum stable" gate could not see it. A cancelling
+        # accumulator cannot report divergence, so it is replaced by an explicit
+        # count: latch the first fold, then report how many later frames differ.
+        # Deliberately OUTSIDE the timed region (t0..t1) and bounded, so it
+        # perturbs no reported latency.
+        var frame_mismatches: i64 = 0
+        var parity_frames: i64 = 0
+        var parity_latched: i64 = 0
+        var parity_have_latch = false
+        var parity = 0
+        while parity < PARITY_FRAMES:
+            self.engine.clear(0xFF141414u32)
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if not self.engine.finalize_compute_frame_no_readback():
+                return "simple-vulkan-2d status=blocked reason=parity-device-finalize-failed frame={parity}"
+            val fold = parity_fold(self.engine.read_pixels_with_source().pixels)
+            parity_frames = parity_frames + 1
+            if not parity_have_latch:
+                parity_latched = fold
+                parity_have_latch = true
+            elif fold != parity_latched:
+                frame_mismatches = frame_mismatches + 1
+            parity = parity + 1
+
         # Insertion sort keeps the benchmark self-contained and runs only over
         # the small sample vector after measurement.
         var i: i64 = 1
@@ -222,7 +282,7 @@ class Vk2dBench:
         var status_kv = "status={verdict.status}"
         if verdict.reason != "":
             status_kv = "{status_kv} reason={verdict.reason}"
-        "simple-vulkan-2d {status_kv} w={self.w} h={self.h} rects={rects.len()} warmups={warmup_count} samples={frames} ring=1 max_frames_in_flight=1 unconditional_submit_wait=true submits_per_frame={verdict.submits_per_frame} timed_buffer_allocation_count=-1 retained_buffer_bytes=-1 teardown_released_bytes=-1 timed_full_frame_upload_count=-1 upload_bytes=-1 timed_readback_bytes=0 capture_count={capture_count} capture_readback_bytes={capture_bytes} capture_source={capture_source} fence_completions={completion_count} completion_polls=0 cpu_completion_wait_count={frames} event_generations={frames} damage_area_pixels={self.w.to_i64() * self.h.to_i64() * frames.to_i64()} p50_ns={p50_ns} p95_ns={p95_ns} ms={ms} fps~={fps_num} draw_us={draw_us} finalize_us={finalize_us} device={self.engine.vulkan_device_name()} driver={self.engine.vulkan_driver_identity()} accepted_submits_per_frame={(self.engine.vulkan_accepted_compute_submit_count() - submits_before) * 1000 / frames.to_i64()} dispatches_per_frame={self.engine.vulkan_last_frame_dispatch_count() - 1} rect_batch_fallback={_fallback_or_none(self.engine.vulkan_rect_batch_fallback_reason())} checksum={checksum}"
+        "simple-vulkan-2d {status_kv} w={self.w} h={self.h} rects={rects.len()} warmups={warmup_count} samples={frames} ring=1 max_frames_in_flight=1 unconditional_submit_wait=true submits_per_frame={verdict.submits_per_frame} timed_buffer_allocation_count=-1 retained_buffer_bytes=-1 teardown_released_bytes=-1 timed_full_frame_upload_count=-1 upload_bytes=-1 timed_readback_bytes=0 capture_count={capture_count} capture_readback_bytes={capture_bytes} capture_source={capture_source} fence_completions={completion_count} completion_polls=0 cpu_completion_wait_count={frames} event_generations={frames} damage_area_pixels={self.w.to_i64() * self.h.to_i64() * frames.to_i64()} p50_ns={p50_ns} p95_ns={p95_ns} ms={ms} fps~={fps_num} draw_us={draw_us} finalize_us={finalize_us} device={self.engine.vulkan_device_name()} driver={self.engine.vulkan_driver_identity()} accepted_submits_per_frame={(submits_after - submits_before) * 1000 / frames.to_i64()} dispatches_per_frame={self.engine.vulkan_last_frame_dispatch_count() - 1} rect_batch_fallback={_fallback_or_none(self.engine.vulkan_rect_batch_fallback_reason())} parity_frames={parity_frames} frame_mismatches={frame_mismatches} checksum={checksum}"
 
 fn _fallback_or_none(reason: text) -> text:
     """Report the rect-batch fallback reason, or `none` when the lane installed.
