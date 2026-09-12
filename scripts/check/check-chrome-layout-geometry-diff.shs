@@ -61,7 +61,7 @@ if [ "${1:-}" = "--selftest" ]; then
     out="$("$SIMPLE_BIN" run "$DIFFER" selftest 2>/dev/null | grep '^SELFTEST' || true)"
     echo "$out"
     case "$out" in
-        "SELFTEST PASS"*) echo "PASS — 3 fixture(s) checked, 0 failed"; exit 0 ;;
+        "SELFTEST PASS"*) echo "PASS — 4 fixture(s) checked, 0 failed"; exit 0 ;;
         *) echo "FAIL — differ selftest did not pass"; exit 1 ;;
     esac
 fi
@@ -146,10 +146,18 @@ TOTAL_PAGES=0
 SUMMARY="$BUILD_DIR/summary.tsv"
 : >"$SUMMARY"
 
+SKIPPED_PAGES=0
 for page in $PAGES; do
-    src="$CATALOG_DIR/$page.html"
-    [ -f "$src" ] || continue
-    probe="$CATALOG_DIR/__geomprobe_$page.html"
+    # A page entry containing "/" is taken as a path, so the fixtures under
+    # test/fixtures/**/web* and examples/06_io/ui/*.html run through the same
+    # tool without a second harness.
+    case "$page" in
+        */*) src="$page"; page="$(basename "$page" .html)" ;;
+        *)   src="$CATALOG_DIR/$page.html" ;;
+    esac
+    [ -f "$src" ] || { SKIPPED_PAGES=$((SKIPPED_PAGES + 1)); continue; }
+    # Beside the original so relative CSS/img URLs still resolve.
+    probe="$(dirname -- "$src")/__geomprobe_$page.html"
     # Append the walker before </body> (last position => no ordinal shift).
     awk -v js="$WALKER" '
         BEGIN { while ((getline l < js) > 0) script = script l "\n" }
@@ -178,6 +186,7 @@ for page in $PAGES; do
     n_chrome="$(grep -c '^GEOM|' "$geom" 2>/dev/null || echo 0)"
     if [ "$n_chrome" -eq 0 ]; then
         echo "$page	0	0	chrome-empty" >>"$SUMMARY"
+        SKIPPED_PAGES=$((SKIPPED_PAGES + 1))
         continue
     fi
     log="$BUILD_DIR/$page.diff.log"
@@ -190,6 +199,9 @@ for page in $PAGES; do
     mismatched="$(sed -n 's/^mismatched=//p' "$log" | tail -n 1)"
     [ -n "$compared" ] || compared=0
     [ -n "$mismatched" ] || mismatched=0
+    # A differ that timed out prints no compared= line; that is a page NOT
+    # checked, never a clean page.
+    [ "$compared" -gt 0 ] || SKIPPED_PAGES=$((SKIPPED_PAGES + 1))
     TOTAL_COMPARED=$((TOTAL_COMPARED + compared))
     TOTAL_MISMATCH=$((TOTAL_MISMATCH + mismatched))
     TOTAL_PAGES=$((TOTAL_PAGES + 1))
@@ -204,4 +216,8 @@ fi
 # This is a BUG FINDER, not a regression ratchet: every catalog page currently
 # mismatches, so a nonzero k is the expected product, not a failure. PASS states
 # how many elements were actually compared; only a vacuous run is an ERROR.
+if [ "$SKIPPED_PAGES" -gt 0 ]; then
+    echo "PASS — $TOTAL_COMPARED element(s) compared, $TOTAL_MISMATCH mismatched ($SKIPPED_PAGES page(s) not compared)"
+    exit 0
+fi
 echo "PASS — $TOTAL_COMPARED element(s) compared, $TOTAL_MISMATCH mismatched"
