@@ -1,0 +1,83 @@
+"""RenderDoc capture diff CLI (MDSOC+ outer layer).
+
+    bin/simple run src/app/ui/renderdoc_diff/main.spl <a.events.json> <b.events.json> --out <dir>
+
+Side A is the reference (Chrome, Vulkan-backed) and side B the Simple web renderer,
+by convention; the diff itself is symmetric apart from which side owns `missing-draw`
+versus `extra-draw`. Writes `<dir>/diff.sdn` and `<dir>/diff.md`, prints the verdict
+last, and exits 0 PASS / 1 FAIL / 2 ERROR.
+"""
+
+use std.io_runtime.{file_read, file_write, file_exists, dir_create_all}
+use std.sffi.cli.{cli_get_args, cli_exit}
+use app.ui.renderdoc_diff.events.{RdocEvent, RdocEventSet, rdoc_events_parse}
+use app.ui.renderdoc_diff.align.{rdoc_diff, rdoc_diff_verdict}
+use app.ui.renderdoc_diff.report.{rdoc_diff_sdn, rdoc_diff_md}
+
+fn _empty_set(err: text) -> RdocEventSet:
+    var none: [RdocEvent] = []
+    RdocEventSet(schema: "", capture: "", events: none, error: err)
+
+fn rdoc_diff_load(path: text) -> RdocEventSet:
+    """Read and parse one events.json; a missing or empty file is an ERROR-class set."""
+    if not file_exists(path):
+        return _empty_set("no such events file " + path)
+    val src = file_read(path)
+    if src == "":
+        return _empty_set("empty events file " + path)
+    rdoc_events_parse(src)
+
+fn _is_events_path(arg: text) -> bool:
+    if arg.len() < 12:
+        return false
+    arg.substring(arg.len() - 12, arg.len()) == ".events.json"
+
+fn main():
+    val argv = cli_get_args()
+    var path_a = ""
+    var path_b = ""
+    var out_dir = "build/renderdoc/diff"
+    var i = 0
+    while i < argv.len():
+        val arg = argv[i]
+        if arg == "--out":
+            if i + 1 < argv.len():
+                out_dir = argv[i + 1]
+            i = i + 2
+            continue
+        if _is_events_path(arg):
+            if path_a == "":
+                path_a = arg
+            else:
+                if path_b == "":
+                    path_b = arg
+        i = i + 1
+    if path_a == "" or path_b == "":
+        print("usage: renderdoc_diff <a.events.json> <b.events.json> --out <dir>")
+        print("RENDERDOC DIFF: ERROR — nothing was checked (two *.events.json paths required)")
+        cli_exit(2)
+        return
+    val a = rdoc_diff_load(path_a)
+    val b = rdoc_diff_load(path_b)
+    val diff = rdoc_diff(a, b)
+    dir_create_all(out_dir)
+    file_write(out_dir + "/diff.sdn", rdoc_diff_sdn(a, b, diff))
+    file_write(out_dir + "/diff.md", rdoc_diff_md(a, b, diff))
+    var d = 0
+    while d < diff.divergences.len():
+        val row = diff.divergences[d]
+        print("divergence event=" + row.event_id.to_text() + " class=" + row.divergence_class
+            + " type=" + row.event_type + " detail=" + row.detail)
+        d = d + 1
+    print("renderdoc_diff_aligned=" + diff.aligned.to_text())
+    print("renderdoc_diff_divergent=" + diff.divergent.to_text())
+    print("renderdoc_diff_first_divergent=" + diff.first_divergent.to_text())
+    print("renderdoc_diff_report=" + out_dir + "/diff.md")
+    print(rdoc_diff_verdict(diff))
+    if diff.error != "":
+        cli_exit(2)
+        return
+    if diff.divergent > 0:
+        cli_exit(1)
+        return
+    cli_exit(0)

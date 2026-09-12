@@ -1,0 +1,107 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use app.ui.renderdoc_diff.events.{rdoc_events_parse}
+use app.ui.renderdoc_diff.align.{rdoc_diff, rdoc_diff_verdict}
+use app.ui.renderdoc_diff.thumb.{rdoc_base64_decode, rdoc_thumb_mismatch_pct}
+
+val FIXTURES: text = "test/fixtures/renderdoc_diff/"
+
+fn _verdict(name: text) -> text:
+    val a = rdoc_events_parse(file_read(FIXTURES + name + "_a.events.json"))
+    val b = rdoc_events_parse(file_read(FIXTURES + name + "_b.events.json"))
+    rdoc_diff_verdict(rdoc_diff(a, b))
+
+fn _first_class(name: text) -> text:
+    val a = rdoc_events_parse(file_read(FIXTURES + name + "_a.events.json"))
+    val b = rdoc_events_parse(file_read(FIXTURES + name + "_b.events.json"))
+    rdoc_diff(a, b).first_divergent_class
+
+fn _first_id(name: text) -> i64:
+    val a = rdoc_events_parse(file_read(FIXTURES + name + "_a.events.json"))
+    val b = rdoc_events_parse(file_read(FIXTURES + name + "_b.events.json"))
+    rdoc_diff(a, b).first_divergent
+
+describe "RenderDoc capture diff":
+
+    it "parses the v1 schema and buckets ordinals per event type":
+        val a = rdoc_events_parse(file_read(FIXTURES + "identical_a.events.json"))
+
+        expect(a.error).to_equal("")
+        expect(a.schema).to_equal("renderdoc-events/v1")
+        expect(a.events.len()).to_equal(4)
+        expect(a.events[0].event_type).to_equal("clear")
+        expect(a.events[0].ordinal).to_equal(0)
+        expect(a.events[1].ordinal).to_equal(0)
+        expect(a.events[2].ordinal).to_equal(1)
+        expect(a.events[1].target_width).to_equal(1920)
+        expect(a.events[2].vertex_count).to_equal(1024)
+
+    it "rejects an unknown schema rather than reporting zero events":
+        val bad = rdoc_events_parse("{\"schema\":\"renderdoc-events/v9\",\"events\":[]}")
+
+        expect(bad.error).to_equal("unsupported schema renderdoc-events/v9")
+
+    it "aligns identical captures with no divergence":
+        expect(_verdict("identical")).to_equal("RENDERDOC DIFF: PASS — 4 event(s) aligned, 0 divergent")
+
+    it "names the dropped event id when one side is missing a draw":
+        expect(_first_class("missing_draw")).to_equal("missing-draw")
+        expect(_first_id("missing_draw")).to_equal(14)
+
+    it "reports an unmatched extra draw on side b":
+        expect(_first_class("extra_draw")).to_equal("extra-draw")
+        expect(_first_id("extra_draw")).to_equal(15)
+
+    it "classifies two swapped draws as order, not as a size difference":
+        # The swapped pair also differs in render-target dimensions. Alignment keys on
+        # those dimensions, so each draw finds its true counterpart at a different
+        # ordinal and the class is `order`. A dims-blind alignment pairs them by
+        # position and misreports `size-mismatch` - that is the sabotage this pins.
+        expect(_first_class("order")).to_equal("order")
+        expect(_first_id("order")).to_equal(12)
+
+    it "classifies an equal-geometry draw with different pixels as output-mismatch":
+        expect(_first_class("output_mismatch")).to_equal("output-mismatch")
+        expect(_first_id("output_mismatch")).to_equal(14)
+
+    it "classifies a differing render-target size as size-mismatch":
+        expect(_first_class("size_mismatch")).to_equal("size-mismatch")
+        expect(_first_id("size_mismatch")).to_equal(20)
+
+    it "classifies a differing attachment format as format-mismatch":
+        expect(_first_class("format_mismatch")).to_equal("format-mismatch")
+        expect(_first_id("format_mismatch")).to_equal(30)
+
+    it "treats zero events on either side as ERROR, never as a pass":
+        expect(_verdict("empty")).to_equal(
+            "RENDERDOC DIFF: ERROR — nothing was checked (one or both sides carry 0 events)")
+
+    it "decodes thumbnail base64 to byte values and compares whole RGBA pixels":
+        # "AAECAwQFBgc=" is the bytes 0..7, i.e. exactly two RGBA8 pixels.
+        val bytes = rdoc_base64_decode("AAECAwQFBgc=")
+
+        expect(bytes.len()).to_equal(8)
+        expect(bytes[0]).to_equal(0)
+        expect(bytes[7]).to_equal(7)
+        # One differing byte inside a pixel makes that WHOLE pixel differ: 1 of 2 = 50%,
+        # which a base64-character comparison would not produce.
+        expect(rdoc_thumb_mismatch_pct("AAECAwQFBgc=", "AAECAwQFBgg=")).to_equal(50)
+        expect(rdoc_thumb_mismatch_pct("AAECAwQFBgc=", "AAECAwQFBgc=")).to_equal(0)
+        expect(rdoc_thumb_mismatch_pct("", "AAECAwQFBgc=")).to_equal(-1)
+
+    it "reports a thumbnail pixel mismatch percentage when thumbs are present":
+        val a = rdoc_events_parse(file_read(FIXTURES + "output_mismatch_a.events.json"))
+        val b = rdoc_events_parse(file_read(FIXTURES + "output_mismatch_b.events.json"))
+        val diff = rdoc_diff(a, b)
+
+        expect(diff.thumbs_present).to_equal(true)
+        expect(diff.divergences[0].thumb_mismatch_pct).to_equal(25)
+
+    it "counts events per type on both sides":
+        val a = rdoc_events_parse(file_read(FIXTURES + "missing_draw_a.events.json"))
+        val b = rdoc_events_parse(file_read(FIXTURES + "missing_draw_b.events.json"))
+        val diff = rdoc_diff(a, b)
+
+        expect(diff.type_counts[1].event_type).to_equal("draw")
+        expect(diff.type_counts[1].count_a).to_equal(2)
+        expect(diff.type_counts[1].count_b).to_equal(1)
