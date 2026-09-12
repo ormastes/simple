@@ -4,8 +4,9 @@
 - **Area:** AES-256 key schedule / CTR-mode implementation exercised via
   `test/unit/lib/crypto/aes_ctr_nist_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatch, curve/mode-specific).
-- **Status:** OPEN. **Do not touch the expected vector** — NIST SP 800-38A
-  F.5.5/F.5.6 values are canonical.
+- **Status:** RESOLVED (2026-09-12) — the implementation was never wrong; the
+  spec's stored `_expected_ct_aes256()` constant was not the NIST value.
+  Spec: `test/01_unit/lib/crypto/aes_ctr_nist_spec.spl` (+ `test/unit` mirror).
 
 ## Symptom
 
@@ -55,3 +56,56 @@ Do not touch the expected NIST SP 800-38A F.5.5/F.5.6 byte arrays.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/unit/lib/crypto/aes_ctr_nist_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check and resolution 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (seed, sha256 prefix
+`3d120a6f`), `Simple Language v1.0.0-rc.1`.
+
+RED (before):
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 300 bin/simple test \
+  test/01_unit/lib/crypto/aes_ctr_nist_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/lib/crypto/aes_ctr_nist_spec.spl outcome=ERROR \
+  declared>=4 executed=4 passed=2 failed=2 skipped=0 dropped=0
+```
+
+### The premise of the original triage was false
+
+The record said "do not touch the expected vector — NIST values are canonical".
+That is true of the *NIST* values, but the array stored in the spec was **not**
+the NIST value. Independent check against OpenSSL:
+
+```
+K=603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4
+IV=f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+PT=6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710
+printf "$PT" | xxd -r -p | openssl enc -aes-256-ctr -K $K -iv $IV -nopad | xxd -p -c 16
+  601ec313775789a5b7a7f504bbf3d228
+  f443e3ca4d62b59aca84e990cacaf5c5
+  2b0930daa23de94ce87017ba2d84988d
+  dfc9c58db67aada613c2dd08457941a6
+```
+
+`aes_ctr_encrypt` produced exactly these 64 bytes. The spec's constant carried
+`...cabf3622 / e89c399ff0f198c6d40a31db156cabfe / ca84e9935a647eafad94da3a3df8a4b5`
+for blocks 2-4, which matches no NIST vector; its block 3 even embeds the IV
+bytes `f0f1`. Hence the "diverges partway through byte 29" symptom: the two
+arrays agree only up to where the fabricated constant stopped tracking NIST.
+
+`src/lib/common/aes/modes.spl` was **not** modified — there was nothing wrong
+with it. Only the spec constant and its header comment were corrected, in both
+live test trees (`test/01_unit/` and the `test/unit/` mirror; the pre-existing
+one-blank-line divergence between them, baselined at
+`scripts/check/test_tree_divergence_baseline.txt:672`, is preserved).
+
+GREEN (after):
+
+```
+SPEC FILE VERDICT: test/01_unit/lib/crypto/aes_ctr_nist_spec.spl outcome=OK \
+  declared>=4 executed=4 passed=4 failed=0 skipped=0 dropped=0
+SPEC FILE VERDICT: test/unit/lib/crypto/aes_ctr_nist_spec.spl outcome=OK \
+  declared>=4 executed=4 passed=4 failed=0 skipped=0 dropped=0
+```
