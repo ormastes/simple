@@ -466,3 +466,63 @@ New datum for the link-nil record: the `[linker-wrapper]` print now fires and th
 command it names is a bare `0` with an EMPTY trail — so `find_linker_path()`'s Ok
 payload is being read out of the wrong slot and yielding a zero word. Same family
 as the receipt-size defect, different route, still open.
+
+## Run 15 (2026-09-13) — comparator fix proven end to end; link-nil survives, and is re-diagnosed
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root `.simple/storage/build/bootstrap-run15`, worktree
+`agent-aa71ab0be877cf286`, at `origin/main` 7dd8b7f509e plus two local commits
+(LLVM unwrap routing + Stage 3 comparator restore).
+
+**Run with the STOCK Homebrew-first PATH and no `BOOTSTRAP_STAGE3_COMPARE_TOOL`
+override** — deliberately, because that is the configuration every previous run
+had to work around. The comparator bind passed and the run reached the Rust seed
+build, which is the first end-to-end proof of
+`bootstrap_stage3_comparator_rejects_homebrew_cmp_symlink_2026-09-13.md`'s fix
+on a real lane. (That bug turned out not to be unfixed at all: PR #670 landed
+the fix and a later stale-snapshot commit reverted the `authority.shs` half while
+leaving its four self-test fixtures in place. See that record § RESOLVED.)
+
+Seed rebuilt from this tree (`Compiling simple-compiler`, `Compiling
+simple-driver` in `rust-seed-build.log`), all four cargo invocations clean.
+Stage 1 admitted; Stage 2 built clean; Stage 2 **not admitted**; Stage 3 not
+attempted; nothing deployed.
+
+Stages reached: Stage 1 admitted; Stage 2 built, not admitted.
+
+Verdict verbatim:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+error: Stage 2 bootstrap compiler sanity failed
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Rejected candidate:
+`.simple/storage/build/bootstrap-run15/stage2/aarch64-apple-darwin/simple.rejected`
+(139326920 bytes).
+
+**Byte-for-byte the run-14 outcome, and that is the finding.** This run carried a
+real, independently verified seed fix (LLVM `.unwrap()` was routed to
+`rt_enum_payload`, which returns NIL for a flat nullable) and the site did not
+move. The seed the script built was confirmed to carry that fix BEFORE reading
+the verdict, by running the 1-unit repro against the run's own
+`rust-authority-*/target/aarch64-apple-darwin/bootstrap/simple` — so this is not
+a stale seed or a cargo-profile difference.
+
+The re-diagnosis, which is the durable output of this run: **the `0` in the
+`[linker-wrapper]` print is the INTEGER ZERO, not a nil** (a nil prints as a
+blank line on this lane — measured). So `linker_result` was a well-formed
+`Ok(0)` all along, and the defect is upstream, in `find_mold_path` /
+`find_lld_path` / `find_ld_path` returning integer 0 at 877 units. Also
+established: `is_err=false` never proved the Result was well formed —
+`rt_enum_check_discriminant` answers false for a non-`Err` receiver of ANY
+shape, and three runs mis-read that line as success. Full argument, the two
+probes that did NOT isolate it, and the recommended next step (transcript replay
+with `SIMPLE_TRACE_FIELD_GET=1`, reading `[FIELD-TRACE]` for `mold.spl`):
+`doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`
+§ CORRECTION, run 15.

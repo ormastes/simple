@@ -403,8 +403,123 @@ any new verdict carrying those messages in that light.
 - `rt_unwrap_or_value` / `rt_unwrap_or_trap` treat a **flat nil** as a present
   value (not a boxed None), so `val n: text? = nil; n.unwrap_or("/fallback")`
   returns empty rather than the fallback. Pre-existing in the shared helpers and
-  identical on the Cranelift path; out of scope, filed separately.
+  identical on the Cranelift path AND the tree-walk interpreter (measured); out
+  of scope here. Filed as
+  `doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md`.
 - `val a: text? = "..."` then `a.expect("msg")` is refused at the semantic layer
   as ``cannot resolve method call `str.expect`: receiver is a builtin type`` —
   the declared `?` is dropped from the local's type. `.unwrap()` compiles only
-  because it has a bare-name redirect. Separate defect, not a blocker.
+  because it has a bare-name redirect (`expect` appears in none of the three
+  LLVM redirect tables — verified by grep). Filed as
+  `doc/08_tracking/bug/declared_optional_local_loses_question_mark_expect_refused_2026-09-13.md`.
+
+## CORRECTION, run 15 (2026-09-13): the LLVM unwrap fix is REAL but is NOT this blocker
+
+The section immediately above claims the LLVM `.unwrap()` -> `rt_enum_payload`
+routing was this blocker's root cause. **That claim is wrong and is retracted
+here.** The routing defect is real, verified, and fixed — but run 15 carried the
+fix and this site failed **byte-for-byte identically**.
+
+Run 15: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
+virgin evidence root `.simple/storage/build/bootstrap-run15`, stock
+Homebrew-first PATH (no `/usr/bin` workaround). Stage 1 admitted; Stage 2 built
+clean; sanity FAILED. Verdict verbatim:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+error: Stage 2 bootstrap compiler sanity failed
+```
+
+Rejected candidate:
+`.simple/storage/build/bootstrap-run15/stage2/aarch64-apple-darwin/simple.rejected`
+(139326920 bytes). The seed the script itself built was verified to carry the
+unwrap fix before the verdict landed, by running the 1-unit repro against
+`.../bootstrap-run15/rust-authority-*/target/aarch64-apple-darwin/bootstrap/simple`:
+it prints `[/local/lit]`, so this is not a stale-seed or cargo-profile artifact.
+
+### What run 15 actually establishes — and it narrows the search sharply
+
+Direct replay on the rejected candidate (~40 s, no bootstrap lane), trace tail:
+
+```
+[LINKER] calling find_linker...
+[LINKER] find_linker returned, is_err=false
+[LINKER] linker_info unwrapped
+0                                   <-- bare print of linker_path
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+0
+                                    <-- trail: empty
+```
+
+**`0` is the INTEGER ZERO, not a nil.** This is the measurement that overturns
+the previous reading. On this same native lane a nil prints as a BLANK LINE
+(measured directly: a flat-optional `unwrap` returning nil printed an empty
+line, and an interpolation carrying nil collapses entirely). A bare `0` is
+therefore a live integer value, not an absent one. The earlier "NIL's sentinel
+3 read through an int decode gives `3 >> 3 == 0`" consistency check was an
+invention and is withdrawn.
+
+Follow the value back with that:
+
+1. Before the fix, the print came from `rt_enum_payload(linker_result)`. That
+   helper returns NIL — a blank line — for any receiver that is not a boxed
+   heap Enum. It printed `0`, so `linker_result` **was** a well-formed boxed
+   enum whose payload is the integer 0.
+2. After the fix, `rt_unwrap_or_trap` takes the `Ok` arm and returns that same
+   payload: `0`. Identical output, for the correct reason. The fix changed
+   nothing here because there was never anything wrong with the unwrap at this
+   site.
+3. So `Ok(x)` was CONSTRUCTED with `x = 0` inside `find_linker_path`, i.e. one
+   of `find_mold_path` / `find_lld_path` / `find_ld_path` returned integer 0,
+   and `Some(0)` / `.?` / `.unwrap()` all carried it faithfully:
+   `rt_is_none(0)` is FALSE (integer 0 boxes to bit pattern `0x0`, which is not
+   the nil sentinel `3` — see the long comment at `objects.rs:528`), so `p.?`
+   took the true branch on a zero.
+
+**`is_err=false` never proved the Result was well formed.** `is_ok`/`is_err`
+compile to `rt_enum_check_discriminant`, which answers false for a non-`Err`
+receiver of any shape. Three runs read that line as evidence that
+`find_linker_path` succeeded; it is not, and future readings of this trace
+should not treat it as such.
+
+### Where the next session should look
+
+The defect is in `find_mold_path` / `find_lld_path` / `find_ld_path`
+(`src/compiler/70.backend/linker/mold.spl:29,75,87`) returning integer 0 at
+877 units. All three have the same shape:
+
+```
+val which_result = shell_output("which <tool> 2>/dev/null")
+if which_result.len() > 0:
+    Some(which_result)
+else:
+    nil
+```
+
+Integer 0 is also a process EXIT STATUS, which makes the leading hypothesis that
+`which_result` is bound to the wrong member of whatever `shell_output` produces
+once the receiver's type is lost at closure scale — the same **family** as the
+receipt-size defect F54 fixed (`static_call_return_type_name` /
+`get_field_info(TypeId::ANY, ...)`'s LOCAL-BEST smallest-index scan), reached by
+a route that function does not cover, since `shell_output(...)` is a free-function
+call and not a `Type.method(...)` static. **Not proven** — it needs the
+instruction-level or `[FIELD-TRACE]` evidence that settled the sibling.
+
+Two probes that did NOT settle it, recorded so they are not repeated:
+- A 1-unit and a 2-unit (cross-module) reproduction of the exact
+  `shell_output` -> `.len()` -> `Some` -> `Ok` -> `unwrap` chain **cannot model
+  this**: in a small binary `shell_output` is an UNBACKED extern and returns nil
+  (`raw len: -1`), so the chain correctly yields `Err`. The defect needs the
+  full closure.
+- Re-running the rejected candidate with `SIMPLE_LINKER=/usr/bin/ld` to bypass
+  `find_*_path` does not isolate it either: it fails EARLIER, with
+  `backend object-path status 1`, i.e. into
+  `stage2_sanity_bootstrap1_backend_object_path_status_1_2026-09-13.md`.
+
+Recommended next step, unchanged in kind from the sibling's successful one but
+now aimed at a named target: replay `stage2-command.transcript` with
+`SIMPLE_TRACE_FIELD_GET=1` and read `[FIELD-TRACE]` for `mold.spl`.
