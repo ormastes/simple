@@ -1,0 +1,124 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+# @timeout_secs 1800
+"""
+## Purpose and audience
+A HARD SMF-compile failure must degrade a spec file to the interpreter, exactly
+like the SOFT "N function(s) contain constructs that require the interpreter"
+failure already did — and the degrade must be recorded on the file's
+`SPEC FILE VERDICT:` line.
+
+Audience: owners of `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`
+(`run_test_file_native`), `src/app/test_runner_new/test_runner_main.spl`
+(`emit_spec_file_verdicts`) and `src/app/test_daemon/light_protocol.spl`
+(`ran_verdict_line`).
+
+## Why this spec exists (REPRODUCER)
+Measured 2026-09-12 on seed sha256 `3d120a6f`: `bin/simple test <directory>`
+runs every spec through an MC/DC standalone-SMF compile first. When that
+compile failed SOFT the runner degraded the file to the interpreter and the
+file passed; when it failed HARD — `Undefined("undefined identifier: X")` or
+`HIR lowering: Unsupported feature` — it did not, and the file reported
+`executed=1 passed=0 failed=1`, losing EVERY example in it. Three same-day bug
+records share that shape:
+`doc/08_tracking/bug/macro_contracts_module_unresolvable_in_compiled_spec_lane_2026-09-12.md`,
+`doc/08_tracking/bug/gpu_lighting3d_spec_asserts_stale_light_buf_field_2026-09-12.md`,
+and the devhub `print_raw` record.
+
+## Compatibility and limitations
+This spec drives the REAL runner over the fixture directory
+`test/fixtures/runner_degrade/` in a child process, so it is slow (minutes) and
+declares `# @timeout_secs 1800`. It asserts only on `SPEC FILE VERDICT:` lines,
+never on wall-clock. It FAILS CLOSED: a child that captured no verdict lines at
+all is a FAILURE, never a pass — a vacuous run must never look green.
+
+## Verification guidance and troubleshooting
+`b_hard_compile_error_spec.spl` calls `print_raw`, which the interpreter
+provides and the self-hosted HIR lowering does not, so its SMF compile fails
+hard and deterministically. If that builtin ever becomes compilable the fixture
+stops reproducing and this spec's `degraded=` assertions turn RED — replace the
+fixture's hard-error mechanism, do not delete the assertion.
+"""
+use std.spec.step
+
+use std.spec.*
+
+use std.io_runtime.{process_run_timeout}
+
+val FIXTURE_DIR: text = "test/fixtures/runner_degrade/"
+
+# One child run, shared by every example below: the runner is far too expensive
+# to spawn per example. `sh -c` redirects the whole (very noisy) run to a temp
+# file and greps only the verdict lines back to stdout, so a truncated capture
+# cannot silently drop them. The inner run must not inherit the OUTER runner's
+# per-spec environment: SIMPLE_TEST_RESULT_FILE would make the inner children
+# overwrite THIS spec's own structured evidence file.
+fn capture_fixture_verdict_lines() -> text:
+    val script = "log=$(mktemp); " +
+        "env -u SIMPLE_TEST_RESULT_FILE -u SIMPLE_EXECUTION_MODE " +
+        "-u SIMPLE_TIMEOUT_SECONDS -u SIMPLE_MCDC_MODE " +
+        "bin/simple test " + FIXTURE_DIR + " > \"$log\" 2>&1; " +
+        "grep '^SPEC FILE VERDICT:' \"$log\"; rm -f \"$log\""
+    val (out, err, code) = process_run_timeout("sh", ["-c", script], 1500000)
+    out
+
+fn verdict_line_for(lines: text, spec_name: text) -> text:
+    var found = ""
+    for line in lines.split("\n"):
+        if line.contains("SPEC FILE VERDICT:") and line.contains(spec_name):
+            found = line.trim()
+    found
+
+val VERDICT_LINES: text = capture_fixture_verdict_lines()
+
+describe "hard SMF-compile failures degrade to the interpreter":
+    # @manual scenario evidence
+    describe "the child run produced evidence at all", :
+        it "captured at least one SPEC FILE VERDICT line", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("fail closed when the child runner captured nothing")
+            # FAIL CLOSED: 0 captured bytes is absence of evidence, not a pass.
+            expect(VERDICT_LINES.contains("SPEC FILE VERDICT:")).to_be_true()
+
+        it "captured a verdict line for each of the three fixtures", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("every fixture file must be represented in the capture")
+            expect(verdict_line_for(VERDICT_LINES, "a_clean_spec.spl") != "").to_be_true()
+            expect(verdict_line_for(VERDICT_LINES, "b_hard_compile_error_spec.spl") != "").to_be_true()
+            expect(verdict_line_for(VERDICT_LINES, "c_real_failure_spec.spl") != "").to_be_true()
+
+    describe "the control fixture is unchanged", :
+        it "reports OK with both examples executed", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("a spec with no hard compile error keeps its existing verdict")
+            val line = verdict_line_for(VERDICT_LINES, "a_clean_spec.spl")
+            expect(line).to_contain("outcome=OK")
+            expect(line).to_contain("executed=2")
+            expect(line).to_contain("passed=2")
+            expect(line).to_contain("failed=0")
+
+    describe "a hard compile error no longer loses the file", :
+        it "executes every example in the uncompilable spec", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("all three examples of the hard-compile-error fixture must run")
+            val line = verdict_line_for(VERDICT_LINES, "b_hard_compile_error_spec.spl")
+            expect(line).to_contain("outcome=OK")
+            expect(line).to_contain("executed=3")
+            expect(line).to_contain("passed=3")
+            expect(line).to_contain("failed=0")
+
+        it "records on the verdict line that the file degraded and why", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("the verdict line must name the degrade and its cause")
+            val line = verdict_line_for(VERDICT_LINES, "b_hard_compile_error_spec.spl")
+            expect(line).to_contain("degraded=smf-compile-error")
+            expect(line).to_contain("print_raw")
+
+    describe "the degrade is fail-closed", :
+        it "keeps a genuinely failing spec failed", :
+            # @req REQ-TESTRUNNER-SMF-COMPILE-DEGRADE
+            step("degrading must never convert a real failure into a pass")
+            val line = verdict_line_for(VERDICT_LINES, "c_real_failure_spec.spl")
+            expect(line).to_contain("outcome=ERROR")
+            expect(line).to_contain("failed=1")
+            expect(line).to_not_contain("passed=1 failed=0")
