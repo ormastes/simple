@@ -3,7 +3,7 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 **Date:** 2026-08-09 (rewritten same day after measurement disproved the first version)
-Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+Status: OPEN (reopened 2026-09-12 — an earlier same-day closure was based on only 1 of the 3 named specs; see Correction below)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** silent wrong-body dispatch; the same-signature class can make importing specs **vacuous**
 
@@ -211,3 +211,40 @@ LLVM / self-hosted binary / other architecture), and it did not audit whether
 the spec's assertions still cover the original symptom as tightly as when the
 record was written. If a residual lane is known to be uncovered, reopen with
 the lane named rather than relying on this line.
+
+
+## Correction 2026-09-12 — REOPENED, the earlier same-day closure was wrong
+
+The closure recorded above rested on **one** of the three specs this record
+names. Running the other two shows the defect is live:
+
+```
+test/01_unit/lib/io/binary_io_spec.spl
+  ✗ writes and reads little-endian values with nonzero high bytes
+      expected 0 to equal 333
+SPEC FILE VERDICT: test/01_unit/lib/io/binary_io_spec.spl outcome=ERROR \
+  declared>=1 executed=1 passed=0 failed=1 skipped=0 dropped=0
+
+test/01_unit/lib/io/mod_stub_no_duplicate_definitions_spec.spl  -> OK 3/3
+test/01_unit/compiler/cache/action_key_spec.spl                 -> OK 32/32
+```
+
+`expected 0 to equal 333` is the misdispatch's signature, not an unrelated
+failure: a read that should return 333 returns the zero/empty value of the
+*other* overload. The compiler says so itself on nearly every run in this tree:
+
+```
+warning: public function `file_read_text_at` has 2 co-compiled definitions with
+2 differing signatures ((text,i64,i64)->Result<text,text> vs
+(text,i64,i64)->Optional(text)); JIT call sites resolve by exact arg-type match
+(mangled `$dupN` variants), falling back to the last definition when types are
+ambiguous — a fallback hit may still dispatch to the wrong one.
+[compiler_cross_module_private_symbol_collision]
+```
+
+That warning fired in four unrelated spec runs during this triage pass, and
+`binary_io_spec` is the one that reads a value back through that exact helper.
+
+Status returned to OPEN. Lesson for the next triage pass, recorded because it
+nearly shipped as a false close: a record that names N specs is only re-checked
+by running all N. One green spec out of three proves nothing about the other two.
