@@ -364,3 +364,72 @@ came from `probe.sh`, not `run.sh`.)
 No fix is applied. Nothing here is confirmed enough to patch, and the two
 surviving candidate sites are in the Rust seed and in F17's file, both outside
 this lane.
+
+## ROOT CAUSE FOUND (2026-09-12, F19): a write race INSIDE one font dispatch
+
+The "two surviving candidate sites are in the Rust seed" conclusion above is
+superseded. The mechanism is in the packed font kernel, is visible by reading it,
+and is now confirmed by a host-side census.
+
+**The kernel.** `src/lib/common/gpu/font_atlas_composite.spl:266` — the PACKED
+(batched) font composite, the one the Vulkan lane actually dispatches:
+
+```
+uint pixel = gl_GlobalInvocationID.x, glyph = gl_GlobalInvocationID.y;
+...
+uint d=dst[di],da=d>>24u,dwgt=da*(255u-sa)/255u,oa=sa+dwgt;
+...
+dst[di]=(oa<<24u)|(r<<16u)|(g<<8u)|b;
+```
+
+One invocation per **(pixel, glyph)** pair, and the blend is a plain
+**non-atomic read-modify-write** on `dst[di]`. Two glyphs in the SAME dispatch
+whose destination rects share a pixel are therefore two concurrent invocations
+that read the same word, blend independently, and both write back: one blend is
+silently dropped, and WHICH one depends on GPU scheduling. That is exactly the
+signature this record documents — a graded per-texel error on thin stems where
+two runs produce two DIFFERENT wrong values (139 and 226) around a CPU oracle of
+124, rather than one stable wrong value.
+
+**Confirmed, not inferred.** `SIMPLE_VK_FONT_OVERLAP=1` (added with this record)
+counts ordered quad pairs with intersecting destination rects, per batch, on the
+host. Measured on `css-layout.html`, same binary (`39368072 1789171430`):
+
+| size | batches | quads | **overlapping pairs** | max in one batch |
+|---|---|---|---|---|
+| 900x760 | 23 | 496 | **19** | 4 |
+| 300x253 | 5 | 59 | **0** | 0 |
+
+**The census matches the symptom exactly.** 900x760 has overlapping pairs and is
+the size this record found non-deterministic; 300x253 has NONE and is the size
+this record and F17 both use as a byte-stable oracle. That correlation is the
+strongest available evidence short of the fix: the two sizes differ in precisely
+the way the mechanism predicts.
+
+**Dispatch-to-dispatch is NOT the race.** Checked rather than assumed:
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs:5340-5359` emits a
+`vkCmdPipelineBarrier` (SHADER_WRITE -> SHADER_READ|SHADER_WRITE|HOST_READ,
+COMPUTE -> COMPUTE|HOST) after EVERY `vkCmdDispatch`. Successive dispatches in
+one command buffer are therefore correctly ordered. This matters twice: it
+excludes the wider hypothesis, and it means the fix below is sound — sub-batches
+dispatched separately are already separated by a barrier.
+
+## The fix, and why it is cheap here
+
+Partition each batch into sub-batches such that no two quads in ONE dispatch
+overlap, dispatching them in order. Assignment must be
+`bucket(q) = 1 + max(bucket(p))` over all EARLIER overlapping `p` (not first-fit):
+with quads A, B, C where B overlaps A and C overlaps B but not A, first-fit puts
+C in bucket 0 and dispatches it BEFORE B, inverting painter order. The `1 + max`
+rule preserves it.
+
+Cost is negligible at the measured density: 19 overlapping pairs across 23
+batches, at most 4 in any one batch, so the split adds at most a couple of
+dispatches per batch to the 23 already issued, each already barrier-separated.
+One submit per frame is unaffected — this adds dispatches within the existing
+command buffer, not submits.
+
+**Not yet implemented.** The diagnosis, the census instrument, the barrier
+finding and the partition rule are recorded here; the partition itself is the
+next change, and its proof is: two 900x760 renders byte-identical, and pixel
+(89,392) reading the CPU oracle value 124 on both.
