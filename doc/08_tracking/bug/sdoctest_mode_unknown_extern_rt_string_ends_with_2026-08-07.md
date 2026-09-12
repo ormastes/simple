@@ -1,6 +1,6 @@
 # `bin/simple test --sdoctest <file>.md` fails on every input: `unknown extern function: rt_string_ends_with`
 
-**Status:** Fixed (2026-08-17) — root cause confirmed and closed; the originally
+**Status:** CLOSED (2026-09-12) — fix re-verified on seed sha256 `3d120a6f` in BOTH lanes. Originally: Fixed (2026-08-17) — root cause confirmed and closed; the originally
 reported SURFACE had already stopped reproducing for an unrelated reason, see
 "Re-verification 2026-08-17" below before reading the rest of this doc.
 **Found while:** implementing L1 (notebook document model + SDoctest exporter,
@@ -143,3 +143,36 @@ and comparing arms is what separated the two.
 Method note for anyone re-running this: the probe must run with the repo root as
 cwd. From `/tmp` it fails with "stdlib import `std.text` resolves from the
 project stdlib roots only", which is a resolution error, not this defect.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+The 2026-08-17 entry is careful to say the surface passing is not the fix, and
+that the real test is calling the extern **by name** under each execution lane.
+Done exactly that:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run ends.spl   ->  ends=true no=false
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run ends.spl   ->  ends=true no=false
+```
+
+where `ends.spl` declares `extern fn rt_string_ends_with(s: text, suffix: text)
+-> bool` and calls it directly (not via `text.ends_with`, which the builtin
+method table can answer without reaching the extern — the decay path the record
+warns about). The interpreter lane, which is the one that used to answer
+`semantic: unknown extern function: rt_string_ends_with`, now returns the
+correct booleans.
+
+The tracking spec is green as well:
+
+```
+$ bin/simple test test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=OK declared>=12 executed=12 passed=12 failed=0 skipped=0 dropped=0
+```
+
+Closing.
+
+- Status: CLOSED (2026-09-12) — fix re-verified on seed sha256 3d120a6f, da07dff5184, spec test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl

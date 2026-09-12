@@ -1,5 +1,5 @@
 # HandleArena spec fails on anonymous-tuple `.0`/`.1` field access
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/unit/lib/engine/resource_handle_spec.spl -> 5 passed, 3 failed, still reproduces)
+**Status:** RESOLVED (2026-09-12) — spec fixed, 8/8 green; the reported anonymous-tuple `.0`/`.1` defect no longer reproduces
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (likely interpreter/compiler tuple-return defect, not a lib API gap)
@@ -46,3 +46,48 @@ fix; out of scope").
 
 ## Triage 2026-09-12
 Rule B: ran `bin/simple test test/unit/lib/engine/resource_handle_spec.spl` on the deployed seed; 3 of 8 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+RED (before):
+```
+$ bin/simple test test/unit/lib/engine/resource_handle_spec.spl --no-session-daemon
+SPEC FILE VERDICT: ... outcome=ERROR declared>=8 executed=8 passed=5 failed=3 skipped=0 dropped=0
+```
+
+**The original diagnosis is refuted.** Every example that destructures the
+anonymous `(i64, i64)` tuple returned by `HandleArena.insert()` — `handle.0` /
+`handle.1` — now PASSES. The 3 remaining failures were the exact complement:
+`returns nil for invalid index`, `returns nil for out-of-range index`,
+`old handle returns nil after slot reuse` — the three examples that never touch
+`.0`/`.1`. They failed as *vacuous expects*:
+
+```
+✗ returns nil for invalid index
+  vacuous expect: expect(Option::None) was never consumed by a matcher
+  (2 non-bool expect(s), 1 matcher(s) ran).
+```
+
+Cause: the spec wrote `expect(result).to_be_nil` as a bare property. The matcher
+is a call — `expect(x).to_be_nil()` (`test/README.md:145`, and every other spec
+in the tree uses parentheses). A property tail asserts nothing, and the harness's
+vacuity guard correctly failed it rather than passing silently.
+
+Fix: `.to_be_nil` -> `.to_be_nil()` at 4 sites, applied identically to both
+tracked copies of the spec (`test/unit/...` and `test/01_unit/...`, which were
+byte-identical before and after, so no new test-tree divergence).
+
+GREEN (after):
+```
+SPEC FILE VERDICT: test/unit/lib/engine/resource_handle_spec.spl    outcome=OK declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+SPEC FILE VERDICT: test/01_unit/lib/engine/resource_handle_spec.spl outcome=OK declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+```
+
+No change to `src/lib/nogc_sync_mut/engine/resource/handle.spl` was needed; the
+implementation was correct as the record already said.
+
+- Status: RESOLVED (2026-09-12) — 80553f06c63, spec test/01_unit/lib/engine/resource_handle_spec.spl (+ test/unit mirror)
