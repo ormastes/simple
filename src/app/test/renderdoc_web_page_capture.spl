@@ -1,0 +1,60 @@
+# RenderDoc frame-capture of the PURE-SIMPLE web renderer on the Vulkan
+# Engine2D backend, for the web differential capture lane
+# (scripts/check/check-renderdoc-web-capture-lane.shs).
+#
+# Why this exists rather than reusing examples/06_io/ui/web_render_page_ppm.spl:
+# `renderdoccmd capture` alone captures nothing for an OFFSCREEN renderer --
+# there is no present, so there is no frame for F12 to grab. A .rdc appears only
+# when the program brackets its work with the in-application rt_renderdoc_*
+# trigger, exactly as src/app/test/renderdoc_vulkan_capture.spl does for the
+# engine smoke scene. This is that same bracket around a real catalog page.
+#
+# Inputs are env vars, not argv, so the capture runs under the repo's existing
+# rdoc_capture_simple_vulkan helper without changing its call shape:
+#   RDOC_HTML_PATH  page to render (required)
+#   PAGE_W / PAGE_H resolution (default 900x760)
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use app.io.env_ops.{env_get}
+use std.io_runtime.{read_file, file_exists}
+use app.test.renderdoc_runtime_ops.{
+    renderdoc_available, renderdoc_capture_file_path_template_from_env,
+    renderdoc_configure_capture_file_path_template_from_env,
+    renderdoc_is_frame_capturing, renderdoc_start_capture,
+    renderdoc_end_capture, renderdoc_num_captures}
+
+fn _int_env(key: text, fallback: i32) -> i32:
+    val v = env_get(key) ?? ""
+    if v == "":
+        return fallback
+    v.to_i32()
+
+fn main():
+    val page = env_get("RDOC_HTML_PATH") ?? ""
+    if page == "" or not file_exists(page):
+        print("renderdoc_web_capture=0 reason=missing-html-path path={page}\n")
+        return
+    val w = _int_env("PAGE_W", 900)
+    val h = _int_env("PAGE_H", 760)
+    print("renderdoc_web_page={page} size={w}x{h}\n")
+    print("renderdoc_available={renderdoc_available()}\n")
+
+    val capture_template = renderdoc_capture_file_path_template_from_env()
+    if capture_template != "":
+        val template_set = renderdoc_configure_capture_file_path_template_from_env()
+        print("renderdoc_capture_template={capture_template}\n")
+        print("renderdoc_capture_template_set={template_set}\n")
+
+    # The offscreen Vulkan renderer never presents, so a wildcard (device-less)
+    # start/end pair is the only trigger that brackets the frame.
+    val started = renderdoc_start_capture()
+    print("renderdoc_start={started}\n")
+    print("renderdoc_capturing_after_start={renderdoc_is_frame_capturing()}\n")
+
+    val html = read_file(page)
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "vulkan")
+
+    print("renderdoc_capturing_before_end={renderdoc_is_frame_capturing()}\n")
+    val ended = renderdoc_end_capture()
+    print("renderdoc_end={ended} pixels={pixels.len()} num_captures={renderdoc_num_captures()}\n")
