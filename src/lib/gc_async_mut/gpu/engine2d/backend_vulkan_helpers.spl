@@ -585,6 +585,70 @@ impl VulkanBackend:
             self.pending_compute_sources[slot] = 0
             slot = slot + 1
         self.pending_compute_count = 0
+        # The command buffer is gone, so no atlas slot is read by anything
+        # unsubmitted any more. This runs on EVERY flush return path, including
+        # the failure ones -- clearing the flags there too is the conservative
+        # direction: it can only make a later write look free when the
+        # dispatches that would have read it were discarded or quarantined.
+        var atlas_slot: i64 = 0
+        while atlas_slot < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[atlas_slot] = false
+            atlas_slot = atlas_slot + 1
+
+    me _font_atlas_slot_index(owner: text) -> i64:
+        """Index of the device atlas slot holding `owner`'s pixels, or -1."""
+        if owner == "":
+            return -1
+        var i: i64 = 0
+        while i < self.font_atlas_slot_owners.len().to_i64():
+            if self.font_atlas_slot_owners[i] == owner and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_spare_slot_index() -> i64:
+        """A slot index a relocating write may take without flushing.
+
+        Returns -2 when the table has room for a NEW slot, a valid index when
+        an existing unreferenced slot can be recycled, and -1 when neither is
+        possible (the caller must then flush).
+        """
+        if self.font_atlas_slot_handles.len().to_i64() < vulkan_font_atlas_slot_depth():
+            return -2
+        var i: i64 = 0
+        while i < self.font_atlas_slot_referenced.len().to_i64():
+            if not self.font_atlas_slot_referenced[i] and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_bind_slot(index: i64) -> bool:
+        """Make slot `index` the one subsequent descriptors bind."""
+        if index < 0 or index >= self.font_atlas_slot_handles.len().to_i64():
+            return false
+        if self.font_atlas_slot_handles[index] == 0:
+            return false
+        self.d_font_atlas = self.font_atlas_slot_handles[index]
+        self.font_atlas_active_slot = index
+        true
+
+    me _font_atlas_mark_slot_referenced():
+        """Record that a dispatch reading the active slot is now in the buffer."""
+        val index = self.font_atlas_active_slot
+        if index >= 0 and index < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[index] = true
+
+    me _font_atlas_release_slots():
+        """Free every device atlas slot. Used when the atlas DIMENSIONS move."""
+        for handle in self.font_atlas_slot_handles:
+            if handle != 0:
+                vulkan_sffi_free_buffer(handle)
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
+        self.d_font_atlas = 0
 
     me discard_stale_pending_compute() -> bool:
         """Drop a pending compute batch left over from a PREVIOUS frame.
@@ -1853,3 +1917,95 @@ fn vulkan_font_mirror_continuity(mirror_coherent: bool, owner_identity: text,
     if host_generation >= 0 and batch_generation == host_generation + 1 and dirty_cells > 0:
         return VK_FONT_MIRROR_INCREMENTAL
     VK_FONT_MIRROR_FULL
+
+# ---------------------------------------------------------------------------
+# Per-owner device atlas slots (F32)
+# ---------------------------------------------------------------------------
+
+# How many device atlas buffers this backend will hold at once. A page with two
+# font owners needs two; the cap exists so a pathological page cannot allocate
+# one 4 MiB buffer per face. When the table is full an unreferenced slot is
+# recycled, and only when even that is impossible does a flush happen.
+val VULKAN_FONT_ATLAS_SLOT_MAX: i64 = 4
+
+fn vulkan_font_atlas_slot_depth() -> i64:
+    """Live slot depth, so before/after evidence comes from ONE binary.
+
+    MEASUREMENT CONTROL: `SIMPLE_VK_FONT_ATLAS_SLOTS=1` collapses the table to a
+    single slot, which reproduces the pre-F32 behaviour exactly -- one device
+    atlas shared by every owner, so any owner switch finds the sole slot
+    referenced with no spare and takes `FLUSH_THEN_WRITE`. A before/after pair
+    captured this way cannot be contaminated by a rebuild or a tree difference.
+    Values outside 1..VULKAN_FONT_ATLAS_SLOT_MAX are ignored rather than
+    honoured, so a typo degrades to the default instead of to one slot.
+    """
+    val raw = env_get("SIMPLE_VK_FONT_ATLAS_SLOTS") ?? ""
+    if raw == "":
+        return VULKAN_FONT_ATLAS_SLOT_MAX
+    # Literal comparison rather than a parse: the legal range is 1..4, and a
+    # string compare cannot disagree with a parser about what "01" or "4 " mean.
+    if raw == "1": return 1
+    if raw == "2": return 2
+    if raw == "3": return 3
+    if raw == "4": return 4
+    VULKAN_FONT_ATLAS_SLOT_MAX
+
+# The device already holds exactly these bytes: bind and record, no host write,
+# no flush.
+val VK_FONT_SLOT_REUSE_NO_WRITE: i64 = 0
+# Write this owner's slot where it stands. Safe without a flush because every
+# byte a recorded dispatch reads keeps its value (incremental append), or
+# because nothing recorded reads this slot at all.
+val VK_FONT_SLOT_WRITE_IN_PLACE: i64 = 1
+# Write a slot no recorded dispatch references (a newly allocated one, or a
+# recycled unreferenced one). Never a hazard.
+val VK_FONT_SLOT_WRITE_FRESH: i64 = 2
+# The only remaining case: a relocating write into a slot a recorded dispatch
+# reads, with no spare slot to take it. This is the genuine hazard and the one
+# flush the lane still owes.
+val VK_FONT_SLOT_FLUSH_THEN_WRITE: i64 = 3
+
+fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
+                               host_sequence_before: i64, batch_sequence: i64,
+                               slot_referenced: bool, continuity: i64,
+                               free_slot_available: bool) -> i64:
+    """Decide what a font run must do to the device atlas, device-free.
+
+    Split out of the composite so the submit-count invariant is testable
+    without a Vulkan device. Every branch is fail-closed: an unknown sequence
+    (-1, the value used when the producer publishes none) matches nothing and
+    therefore never takes a no-write or in-place path.
+
+    The two cheap outcomes rest on facts F16/F24 established, not on hope:
+
+      * `REUSE_NO_WRITE` needs the slot to hold this same owner at this exact
+        published sequence. The producer bumps `atlas_owner_sequence` on every
+        mutation and re-seeds it off a globally monotone counter after a wipe
+        (so a wiped atlas can never present a sequence a stale slot still
+        holds). Equal sequence therefore means equal bytes.
+
+      * `WRITE_IN_PLACE` on an INCREMENTAL batch needs the slot to hold exactly
+        the sequence the mirror was at BEFORE this batch was folded in
+        (`host_sequence_before`), with the batch at +1. The dirty rects then
+        name the only cells that differ, and those cells are new, so no
+        recorded dispatch reads them. Every other cell is written back with the
+        value it already had.
+
+    A FULL repack may relocate cells, so it takes a slot nothing references --
+    a fresh one when available, otherwise a flush.
+    """
+    if not slot_found:
+        # A slot this owner does not have yet cannot be read by anything
+        # already recorded, so allocating or recycling one is always free.
+        return if free_slot_available: VK_FONT_SLOT_WRITE_FRESH else: VK_FONT_SLOT_FLUSH_THEN_WRITE
+    if batch_sequence >= 0 and slot_sequence >= 0 and slot_sequence == batch_sequence:
+        return VK_FONT_SLOT_REUSE_NO_WRITE
+    if (continuity == VK_FONT_MIRROR_INCREMENTAL and batch_sequence >= 0 and
+        host_sequence_before >= 0 and slot_sequence >= 0 and
+        slot_sequence == host_sequence_before and batch_sequence == host_sequence_before + 1):
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if not slot_referenced:
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if free_slot_available:
+        return VK_FONT_SLOT_WRITE_FRESH
+    VK_FONT_SLOT_FLUSH_THEN_WRITE
