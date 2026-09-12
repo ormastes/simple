@@ -892,8 +892,38 @@ pub fn driver_native_capsule_result_reason_v1(
         # difference is what matters. A length pair that is equal while the texts
         # differ localises the mismatch to content; an unequal pair localises it
         # to truncation on read.
-        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}"
+        #
+        # Lengths ALONE were not enough, and that cost a full Stage-2 lane a day.
+        # Measured 2026-09-12 on macOS the verdict read
+        # `receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648` --
+        # true, and actionable by nobody. The receipt is five fixed lines
+        # (header / capsule-identity / object-path / size / content-hash), so
+        # naming the first differing LINE names the failing FIELD directly,
+        # which a byte offset does not. The real culprit was line 4, the size,
+        # which held a heap address rather than a byte count. Values are quoted
+        # so an equal-length difference is visible.
+        val first_difference = _driver_receipt_first_difference_v1(expected, actual)
+        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}:{first_difference}"
     ""
+
+fn _driver_receipt_first_difference_v1(expected: text, actual: text) -> text:
+    """Name the first receipt LINE that differs, with both values.
+
+    The receipt's line index is its field name, so this is the diagnostic an
+    operator can act on. Returns a `line-count` verdict instead when the two
+    texts differ only in how many lines they carry.
+    """
+    val expected_lines = expected.split("\n")
+    val actual_lines = actual.split("\n")
+    var index = 0
+    while index < expected_lines.len() and index < actual_lines.len():
+        if expected_lines[index] != actual_lines[index]:
+            val line_number = index + 1
+            val expected_value = expected_lines[index]
+            val actual_value = actual_lines[index]
+            return "first-diff-line={line_number}:expected={expected_value}:actual={actual_value}"
+        index = index + 1
+    "first-diff-line-count:expected={expected_lines.len()}:actual={actual_lines.len()}"
 
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
     driver_native_capsule_result_reason_v1(capsule) == ""
@@ -2220,6 +2250,22 @@ fn _compile_frozen_module_capsule(
             val receipt_path = capsule.object_path + ".capsule-receipt"
             var receipt = ""
             if val fp = object_fp:
+                # `FileFingerprint.from_file` passes `rt_file_size`'s result
+                # through unchecked, and the runtime reports a failed stat as
+                # -1, so a vanished or unreadable object would otherwise be
+                # recorded as a size of -1 and only discovered later, when the
+                # Stage-2 sanity gate recomputed the field and reported an
+                # opaque `receipt-content-mismatch`. Refuse to WRITE a value
+                # that cannot be a byte count.
+                #
+                # This does NOT catch the 2026-09-12 macOS defect, which
+                # recorded the POSITIVE 54090898177 (a heap address) for a
+                # 632-byte object; that was a dual `rt_file_size` extern
+                # declaration and is fixed at the declaration in
+                # src/lib/nogc_sync_mut/fs.spl.
+                if fp.size < 0:
+                    return _aot_compile_failure(name,
+                        "capsule-object-size-implausible:{fp.size}")
                 receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
                 return _aot_compile_failure(name, "capsule-receipt-write-failed")

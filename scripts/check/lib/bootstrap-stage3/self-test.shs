@@ -35,6 +35,70 @@ bootstrap_stage3_provenance_self_test() {
         "$bootstrap_stage3_test_root/canonical/real" \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp"
+
+    # Comparator binding fixtures. The first one is the macOS regression: a
+    # package-manager `cmp` shim is ALWAYS a symlink, and requiring
+    # candidate == canonical refused to bind on every such host, killing the
+    # bootstrap before Stage 1. The suite only ever saw a direct `cmp` before,
+    # which is exactly why that shipped. See
+    # doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md
+    bootstrap_stage3_test_cmp_root="$bootstrap_stage3_test_root/comparator"
+    mkdir -p "$bootstrap_stage3_test_cmp_root/real" \
+        "$bootstrap_stage3_test_cmp_root/bin" \
+        "$bootstrap_stage3_test_cmp_root/empty" \
+        "$bootstrap_stage3_test_cmp_root/wrap" || return 1
+    bootstrap_stage3_test_cmp_src=$(command -v cmp 2>/dev/null) || return 1
+    bootstrap_stage3_test_cmp_src=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_test_cmp_src") || return 1
+    cp "$bootstrap_stage3_test_cmp_src" \
+        "$bootstrap_stage3_test_cmp_root/real/cmp" || return 1
+    ln -s ../real/cmp "$bootstrap_stage3_test_cmp_root/bin/cmp" || return 1
+
+    # 1/4 a symlinked cmp on PATH binds, and binds to the PHYSICAL target.
+    bootstrap_stage3_test_cmp_expect=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_test_cmp_root/real/cmp") || return 1
+    bootstrap_stage3_test_cmp_bound=$(
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/bin:$PATH"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1 || exit 1
+        printf '%s\n' "$BOOTSTRAP_STAGE3_COMPARE_TOOL"
+    ) || return 1
+    [ "$bootstrap_stage3_test_cmp_bound" = \
+        "$bootstrap_stage3_test_cmp_expect" ] || return 1
+
+    # 2/4 no comparator at all is ERROR (2), never a pass.
+    (
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/empty"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
+
+    # 3/4 a shell-script wrapper is REFUSED, not receipted: the trust model is a
+    # byte-hash pin of the bound file, and a wrapper's own bytes do not
+    # determine what actually runs, so hashing it would pin nothing.
+    printf '#!/bin/sh\nexec %s "$@"\n' "$bootstrap_stage3_test_cmp_src" \
+        >"$bootstrap_stage3_test_cmp_root/wrap/cmp" || return 1
+    chmod +x "$bootstrap_stage3_test_cmp_root/wrap/cmp" || return 1
+    (
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/wrap:$PATH"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
+
+    # 4/4 an explicit pin that the ambient cmp shadows is still refused, so
+    # accepting a symlink has not weakened the shadowing check.
+    (
+        BOOTSTRAP_STAGE3_COMPARE_TOOL="$bootstrap_stage3_test_cmp_root/real/cmp"
+        export BOOTSTRAP_STAGE3_COMPARE_TOOL
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
     bootstrap_stage3_test_write_driver_manifest() {
         printf '%s\n' '[package]' 'name = "driver"' 'version = "0.0.0"' \
             '[dependencies]' \
@@ -901,4 +965,5 @@ poison"; then
 "$bootstrap_stage3_test_root/canonical/parent-link/input"
     [ "$(bootstrap_stage3_canonical_file "$bootstrap_stage3_test_alias")" != \
         "$bootstrap_stage3_test_alias" ] || return 1
+
 }
