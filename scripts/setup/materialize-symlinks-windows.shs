@@ -246,6 +246,12 @@ public static class MaterializerApi {
         using (var hash = System.Security.Cryptography.SHA256.Create())
             PolicyHash = BitConverter.ToString(hash.ComputeHash(PolicyBytes)).Replace("-", "").ToLowerInvariant();
         if (PolicyHash != Environment.GetEnvironmentVariable("MATERIALIZER_POLICY_SHA256")) throw new IOException("receipt.policy-digest-mismatch");
+        // Process.StandardInput is built with Console.InputEncoding and sets
+        // AutoFlush, whose immediate flush emits that encoding's preamble. The
+        // default here is UTF-8 *with* BOM, so git's first read is EF BB BF and
+        // every object id is answered "missing". Force a preamble-free encoding
+        // before the child's stdin writer is ever constructed.
+        Console.InputEncoding = new UTF8Encoding(false);
         var start = new System.Diagnostics.ProcessStartInfo("git", "cat-file --batch");
         start.WorkingDirectory = Environment.GetEnvironmentVariable("MATERIALIZER_ROOT");
         start.UseShellExecute = false; start.CreateNoWindow = true;
@@ -269,7 +275,13 @@ public static class MaterializerApi {
         if (!System.Text.RegularExpressions.Regex.IsMatch(oid, "\\A(?:[0-9a-f]{40}|[0-9a-f]{64})\\z")) throw new IOException("git.object-id");
         byte[] bytes;
         if (!Blobs.TryGetValue(oid, out bytes)) {
-            Git.StandardInput.WriteLine(oid); Git.StandardInput.Flush();
+            // Request as raw ASCII: StandardInput's default writer emits a UTF-8
+            // BOM (EF BB BF), which git reads as part of the object name and
+            // answers "missing" for, and whose high bytes then trip the header
+            // guard below.
+            var req = System.Text.Encoding.ASCII.GetBytes(oid + "\n");
+            Git.StandardInput.BaseStream.Write(req, 0, req.Length);
+            Git.StandardInput.BaseStream.Flush();
             var header = new StringBuilder(); var one = new byte[1];
             while (true) {
                 GitRead(one, 0, 1); if (one[0] == 10) break;
