@@ -189,3 +189,34 @@ the full Simple driver. Repairing it needs a bootstrap redeploy, which is
 tracked separately in
 `bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md`.
 Promotion of this guard from ADVISORY to MANDATORY still waits on that.
+
+### Test-tree divergence step-over (recorded per `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence.shs` is RED on `origin/main` and has been for some
+time, so this change landed on a scoped-delta PASS. vcs.md requires the
+pre-existing offender list to be recorded rather than stepped over silently:
+
+```
+$ sh scripts/check/check-test-tree-divergence-delta.shs origin/main <tip>
+check-test-tree-divergence-delta: base verdict: check-test-tree-divergence:
+  FAIL — 3943 diverged vs 965 baselined (3081 new, 103 fixed-but-still-baselined);
+  26 mirror-only (25 unallowlisted, 0 stale-allowlist); half-landed: skipped (no --base)
+check-test-tree-divergence-delta: PASS — 3209 pre-existing offender(s),
+  0 introduced by this range
+```
+
+Offender list as saved by the helper: 3943 lines,
+sha256 `078e4b91199ac97d46f66cbf99996e12cb78f56311cae7078372e483c3c4daf8`.
+Categories, none of them introduced here: 3081 new-vs-baseline divergences, 103
+baselined pairs that are now identical (stale baseline), 25 unallowlisted
+mirror-only files.
+
+**Scope note, stated rather than glossed:** the guard was run over
+`origin/main..aba44d099fb`. The branch tip was afterwards amended to
+`6aac1321a0c`, and that amend touched **exactly two files**, both under
+`doc/08_tracking/bug/` (`git diff --stat aba44d099fb 6aac1321a0c` → 2 files
+changed). It touches no path under `test/`, so the offender list and the delta
+verdict are unchanged by it. This change introduces no test-tree divergence of
+its own: it adds no file under `test/` at all — its two new regression fixtures
+live inside `check-stage-binaries-runnable.shs`'s own `--selftest`, which is the
+form the testing rule prescribes for a `.shs` gate.
