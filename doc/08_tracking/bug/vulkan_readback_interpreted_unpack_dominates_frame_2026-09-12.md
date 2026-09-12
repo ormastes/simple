@@ -73,7 +73,8 @@ ran and the full-surface path always did.
   exactly — scalars in, array out, the only shape this lane marshals — reading
   the interpreter's own dlopen Vulkan state (`VK_STATE`, `buffer.mapped`). The
   checksum uses the identical `sum % 2147483647` fold, so the value stays
-  lane-independent. No runtime-crate, codegen or `runtime_symbols.rs`
+  lane-independent.
+
   Because `gpu_sffi_uses_interpreter_array_abi()` is a RUNTIME predicate
   (`rt_is_interpreter_runtime()`, `sffi_dispatch.spl:49`), native codegen still
   emits the call site even where it never executes, so the symbols are also
