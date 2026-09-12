@@ -2904,6 +2904,7 @@ int64_t rt_install_crash_handler(void) {
 int64_t rt_install_crash_handler(void) { return 0; }
 #endif
 
+#ifndef _WIN32
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
     struct sigaction sa;
@@ -2913,6 +2914,13 @@ int64_t rt_signal_install(int64_t signal_num) {
     if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
     return 1;
 }
+#else
+/* Windows has no sigaction/sigemptyset, so this function had never compiled
+ * there. Report "not installed" exactly as rt_install_crash_handler already
+ * does under the same guard a few lines above, rather than pretending a
+ * handler was registered. */
+int64_t rt_signal_install(int64_t signal_num) { (void)signal_num; return 0; }
+#endif
 
 int64_t rt_signal_check(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
