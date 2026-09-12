@@ -1570,6 +1570,31 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # The candidate-frontend admission knobs, captured for the same reason as
+  # sanity_cc above: the scrub below `unset`s every name `env` reports, and
+  # `unset` removes the VALUE, not just the export attribute. These six are
+  # read by candidate_frontend_capture_setup / candidate_frontend_bounded_probe
+  # AFTER the scrub (candidate_frontend_admission.shs:112, :237-240), so under
+  # the top-level `set -eu` an operator who EXPORTS one of them does not raise
+  # the budget -- the expansion aborts the sanity subshell outright. Leaving
+  # them unexported instead (the plain shell assignments at :1517-1523) is what
+  # made the defaults survive, which in turn made the knobs unreachable from
+  # outside: measured 2026-09-12, a Stage-2 candidate_frontend_smoke died with
+  # `hello-world-positional-build failed (raw rc=124)` because the whole-probe
+  # budget is 180s while the LINK phase alone took 273.8s at host load 47
+  # (bounded receipt: `phase=link state=succeeded elapsed_ms=299399
+  # dt_ms=273785`). Capturing restores the operator's ability to say
+  # COMPILER_BUILD_TIMEOUT_SECONDS=1200 without changing any default or any
+  # verdict. Restored UNEXPORTED below, deliberately: the scrub exists to hand
+  # the candidate a clean environment, and candidate_frontend_capture_setup
+  # exports what the probe child actually needs itself (:109-110). No SIMPLE_*
+  # name is captured here -- those are semantic inputs to the build identity
+  # and must stay scrubbed.
+  sanity_candidate_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS:-}
+  sanity_candidate_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  sanity_candidate_exec_timeout=${COMPILER_EXEC_TIMEOUT_SECONDS:-}
+  sanity_candidate_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS:-}
+  sanity_candidate_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1637,6 +1662,28 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_cxx}" ]; then
     CXX=${sanity_cxx}
     export CXX
+  fi
+  # Restore the admission knobs captured above. Unexported on purpose (see the
+  # capture comment). Every one of these names is read unconditionally further
+  # down, so a missing restore is a `set -u` abort, never a silent default --
+  # CANDIDATE_FRONTEND_ROOT is restored from sanity_repo_root rather than from
+  # its own pre-scrub value so an operator export cannot redirect the gate at
+  # a different tree than the one being bootstrapped.
+  CANDIDATE_FRONTEND_ROOT=${sanity_repo_root}
+  if [ -n "${sanity_candidate_probe_timeout}" ]; then
+    COMPILER_PROBE_TIMEOUT_SECONDS=${sanity_candidate_probe_timeout}
+  fi
+  if [ -n "${sanity_candidate_build_timeout}" ]; then
+    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_candidate_build_timeout}
+  fi
+  if [ -n "${sanity_candidate_exec_timeout}" ]; then
+    COMPILER_EXEC_TIMEOUT_SECONDS=${sanity_candidate_exec_timeout}
+  fi
+  if [ -n "${sanity_candidate_kill_grace}" ]; then
+    COMPILER_CHECK_KILL_GRACE_SECONDS=${sanity_candidate_kill_grace}
+  fi
+  if [ -n "${sanity_candidate_max_log_bytes}" ]; then
+    CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_candidate_max_log_bytes}
   fi
   sanity_evidence_stem="${evidence_path:-${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/bootstrap-sanity}"
   evidence_tmp="${sanity_evidence_stem}.tmp.$$"
