@@ -1020,8 +1020,17 @@ archive_suffix=".a"
 # Empty off Windows: the expansion below then contributes no arguments at all,
 # leaving the Linux/macOS/FreeBSD invocations byte-identical.
 bootstrap_windows_abi_env=""
+<<<<<<< origin/main
 bootstrap_windows_cc_env=""
 bootstrap_windows_cxx_env=""
+||||||| 3d9ce964388
+=======
+bootstrap_windows_cc_env=""
+bootstrap_windows_cxx_env=""
+bootstrap_windows_include_env=""
+bootstrap_windows_lib_env=""
+bootstrap_windows_libpath_env=""
+>>>>>>> HEAD
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -2065,6 +2074,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
     # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
     # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
+<<<<<<< origin/main
     # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
     # UNQUOTED at every use site so its two space-free assignments become
     # separate arguments, but cc_abs routinely contains spaces (the stock MSVC
@@ -2075,6 +2085,26 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     # no build log at all. Carry them as single quoted words instead.
     bootstrap_windows_cc_env="CC=${cc_abs}"
     bootstrap_windows_cxx_env="CXX=${cc_abs}"
+||||||| 3d9ce964388
+    bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
+=======
+    # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
+    # UNQUOTED at every use site so its two space-free assignments become
+    # separate arguments, but cc_abs routinely contains spaces (the stock MSVC
+    # location is C:/Program Files/Microsoft Visual Studio/...). Appending it
+    # there word-split "CC=C:/Program Files/.../cl.exe" into "CC=C:/Program"
+    # and "Files/.../cl.exe", and the latter fails the NAME=value check in
+    # bootstrap_stage3_env_assignment_names -- a pre-exec refusal that produced
+    # no build log at all. Carry them as single quoted words instead.
+    bootstrap_windows_cc_env="CC=${cc_abs}"
+    bootstrap_windows_cxx_env="CXX=${cc_abs}"
+    # Same sandbox reason as CC/CXX, and each may legitimately contain spaces
+    # and is therefore carried as its own single quoted word. LIBPATH is often
+    # empty; it is still passed so the assignment-name list is stable.
+    bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
+    bootstrap_windows_lib_env="LIB=${LIB:-}"
+    bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
+>>>>>>> HEAD
     CC=${cc_abs}
     CXX=${cc_abs}
     export CC CXX
@@ -2789,8 +2819,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
+<<<<<<< origin/main
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+||||||| 3d9ce964388
+=======
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+>>>>>>> HEAD
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
@@ -2862,8 +2901,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       ${bootstrap_windows_abi_env} \
+<<<<<<< origin/main
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+||||||| 3d9ce964388
+=======
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+>>>>>>> HEAD
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
@@ -2905,8 +2953,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
+<<<<<<< origin/main
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+||||||| 3d9ce964388
+=======
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+>>>>>>> HEAD
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}"
@@ -3317,8 +3374,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     ${bootstrap_windows_abi_env} \
+<<<<<<< origin/main
     ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
     ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+||||||| 3d9ce964388
+=======
+    ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+    ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
+    ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+    ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+    ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+>>>>>>> HEAD
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \
