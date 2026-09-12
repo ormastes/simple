@@ -72,6 +72,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -264,6 +265,23 @@ class VulkanBackend:
     font_atlas_generation: i64
     font_atlas_owner_identity: text
     font_atlas_payload_sha256: text
+    # Host byte mirror of the device font atlas, kept so a dirty batch repacks
+    # only the glyph cells it actually inserted instead of all 1,048,576 atlas
+    # pixels. `font_atlas_host_valid` is cleared at the START of every upload
+    # and set again only once that upload has SUCCEEDED, so a composite that
+    # returns early (glyph cap, invalid quad, failed upload) leaves the mirror
+    # stale and forces the next one to repack in full -- which is what makes
+    # the incremental path sound without assuming batches arrive unbroken.
+    font_atlas_host_bytes: [u8]
+    font_atlas_host_identity: text
+    font_atlas_host_valid: bool
+    # The atlas generation the mirror actually incorporated. Generations come
+    # from ONE global counter bumped once per dirty batch, so `batch
+    # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
+    # batch slipped between this one and the mirror's last update -- including
+    # batches this backend never saw at all, which no flag inside the composite
+    # can observe. Any gap forces a full repack, which is always safe.
+    font_atlas_host_generation: i64
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -447,6 +465,10 @@ class VulkanBackend:
             font_atlas_generation: -1,
             font_atlas_owner_identity: "",
             font_atlas_payload_sha256: "",
+            font_atlas_host_bytes: [],
+            font_atlas_host_identity: "",
+            font_atlas_host_valid: false,
+            font_atlas_host_generation: -1,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -902,6 +924,11 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
         self.font_atlas_payload_sha256 = ""
+        # The device buffer is gone, so the mirror no longer describes anything.
+        self.font_atlas_host_bytes = []
+        self.font_atlas_host_identity = ""
+        self.font_atlas_host_valid = false
+        self.font_atlas_host_generation = -1
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -1003,7 +1030,19 @@ impl RenderBackend for VulkanBackend:
         self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
+        # this way rather than by start/stop pairs at every `return` because the
+        # body has six exits and a missed one would silently under-report.
+        if not vulkan_timing_enabled():
+            self._draw_rect_filled_impl(x, y, w, h, color)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_rect_filled_impl(x, y, w, h, color)
+        vulkan_timing_add(VK_T_RECT, _t)
+
+    me _draw_rect_filled_impl(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
+        _vk_stat_rect(w, h, color_a(color) < 255, self.mask_buf.len() > 0 and color_a(color) >= 255)
         if color_a(color) < 255:
             val pixel_count = _i64(w) * _i64(h)
             if pixel_count <= 0:
@@ -1072,6 +1111,7 @@ impl RenderBackend for VulkanBackend:
         reproduce it.
         """
         if self.completion_unknown: return
+        _vk_stat_rect_list_op()
         val count = colors.len().to_i64()
         if count <= 0: return
         if rects.len().to_i64() != count * 4: return
@@ -1248,6 +1288,15 @@ impl RenderBackend for VulkanBackend:
     # runs unchanged. `last_text_path` / `last_text_fallback_reason` always say
     # which of the two actually happened.
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        if not vulkan_timing_enabled():
+            self._draw_text_impl(x, y, text_val, color, font_size)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_text_impl(x, y, text_val, color, font_size)
+        vulkan_timing_add(VK_T_TEXT, _t)
+
+    me _draw_text_impl(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        _vk_stat_text_op()
         if self.completion_unknown:
             self.last_text_path = VULKAN_TEXT_PATH_NOT_DRAWN
             self.last_text_fallback_reason = "completion-unknown"
@@ -1267,6 +1316,14 @@ impl RenderBackend for VulkanBackend:
         self.draw_image_blend(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me _draw_image_composite_native(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
+        if not vulkan_timing_enabled():
+            return self._draw_image_composite_native_impl(x, y, dst_w, dst_h, src_w, src_h, pixels, opacity_milli, composite_mode, require_wholly_bounded)
+        val _t = vulkan_timing_now_us()
+        val rc = self._draw_image_composite_native_impl(x, y, dst_w, dst_h, src_w, src_h, pixels, opacity_milli, composite_mode, require_wholly_bounded)
+        vulkan_timing_add(VK_T_IMAGE_COMPOSITE, _t)
+        rc
+
+    me _draw_image_composite_native_impl(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
             return 0
         if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
@@ -1317,8 +1374,14 @@ impl RenderBackend for VulkanBackend:
         val scratch_prepared = self._prepare_image_upload(pixels, pixel_count)
         var upload_ok = scratch_prepared
         if scratch_prepared:
+            # Timed separately from the composite total: this hands the WHOLE
+            # `image_upload_scratch` array across the SFFI boundary and only
+            # then says "use the first `src_size` bytes", so its cost tracks the
+            # scratch's high-water mark, not this image's size.
+            val _t_up = vulkan_timing_now_us()
             upload_ok = vulkan_sffi_copy_to_buffer_prefix(
                 d_src, self.image_upload_scratch, src_size, 0)
+            vulkan_timing_add(VK_T_UPLOAD, _t_up)
             if upload_ok and scratch_reused:
                 # Count only successful prefix uploads that avoided allocating
                 # the legacy exact-size payload, not merely packing attempts.
@@ -1391,6 +1454,7 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return
+        _vk_stat_image_op(w, h, false)
         val native_status = self._draw_image_native(x, y, w, h, pixels)
         if native_status > 0:
             return
@@ -2008,7 +2072,12 @@ impl RenderBackend for VulkanBackend:
         self._clear_present_damage()
 
     me read_pixels() -> [u32]:
-        self.read_pixels_with_source().pixels
+        if not vulkan_timing_enabled():
+            return self.read_pixels_with_source().pixels
+        val _t = vulkan_timing_now_us()
+        val out = self.read_pixels_with_source().pixels
+        vulkan_timing_add(VK_T_READBACK, _t)
+        out
 
     fn sample_host_mirror(indices: [i64]) -> [u32]:
         """Copy bounded evidence samples while the physical owner is known.
@@ -2026,6 +2095,7 @@ impl RenderBackend for VulkanBackend:
         samples
 
     me read_pixels_with_source() -> Engine2DReadback:
+        vulkan_stat_note_readback(_i64(self.w) * _i64(self.h))
         if vulkan_order_trace_enabled():
             vulkan_order_trace("readback-entry dirty={self.dirty} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} fb={self.d_framebuffer}")
         if self.completion_unknown:
@@ -2233,7 +2303,16 @@ impl RenderBackend for VulkanBackend:
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not vulkan_timing_enabled():
+            self._draw_image_blend_impl(x, y, w, h, pixels)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_image_blend_impl(x, y, w, h, pixels)
+        vulkan_timing_add(VK_T_IMAGE_BLEND, _t)
+
+    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return
+        _vk_stat_image_op(w, h, true)
         val native_status = self._draw_image_blend_native(x, y, w, h, pixels, 1000)
         if native_status > 0:
             return
@@ -2381,3 +2460,363 @@ impl Engine2DExtended for VulkanBackend:
         if text_buf.is_empty():
             return
         self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
+
+# ---------------------------------------------------------------------------
+# Draw-kind census (process-global, instrumentation only)
+# ---------------------------------------------------------------------------
+# Counts what each Vulkan draw entry point actually DID, split by the branch it
+# took, so a page probe can attribute a frame instead of guessing. Module-level
+# rather than per-backend fields because a probe reads them without holding the
+# backend, and exactly one Vulkan surface is live on the page lane.
+#
+# The load-bearing split is `rect_alpha_blend`: `draw_rect_filled` turns ANY
+# colour with alpha < 255 into a full `draw_image_blend`, which on this lane is a
+# staging upload + dispatch + fence. `rect_alpha_1x1` counts the degenerate
+# single-pixel case that anti-aliased shape decomposition emits.
+
+var _vk_stat_rect_opaque: i64 = 0
+var _vk_stat_rect_alpha_blend: i64 = 0
+var _vk_stat_rect_alpha_1x1: i64 = 0
+var _vk_stat_rect_masked: i64 = 0
+var _vk_stat_rect_list: i64 = 0
+var _vk_stat_image_blend: i64 = 0
+var _vk_stat_image_blend_small: i64 = 0
+var _vk_stat_image: i64 = 0
+var _vk_stat_text: i64 = 0
+
+pub fn vulkan_draw_census_reset():
+    _vk_stat_rect_opaque = 0
+    _vk_stat_rect_alpha_blend = 0
+    _vk_stat_rect_alpha_1x1 = 0
+    _vk_stat_rect_masked = 0
+    _vk_stat_rect_list = 0
+    _vk_stat_image_blend = 0
+    _vk_stat_image_blend_small = 0
+    _vk_stat_image = 0
+    _vk_stat_text = 0
+
+pub fn vulkan_draw_census_line() -> text:
+    ("rect_opaque={_vk_stat_rect_opaque}" +
+     " rect_alpha_blend={_vk_stat_rect_alpha_blend}" +
+     " rect_alpha_1x1={_vk_stat_rect_alpha_1x1}" +
+     " rect_masked={_vk_stat_rect_masked}" +
+     " rect_list={_vk_stat_rect_list}" +
+     " image_blend={_vk_stat_image_blend}" +
+     " image_blend_le16px={_vk_stat_image_blend_small}" +
+     " image={_vk_stat_image}" +
+     " text={_vk_stat_text}")
+
+fn _vk_stat_rect(w: i32, h: i32, alpha: bool, masked: bool):
+    if masked:
+        _vk_stat_rect_masked = _vk_stat_rect_masked + 1
+    elif alpha:
+        _vk_stat_rect_alpha_blend = _vk_stat_rect_alpha_blend + 1
+        if w == 1 and h == 1:
+            _vk_stat_rect_alpha_1x1 = _vk_stat_rect_alpha_1x1 + 1
+    else:
+        _vk_stat_rect_opaque = _vk_stat_rect_opaque + 1
+
+fn _vk_stat_image_op(w: i32, h: i32, blend: bool):
+    if blend:
+        _vk_stat_image_blend = _vk_stat_image_blend + 1
+        if w * h <= 16:
+            _vk_stat_image_blend_small = _vk_stat_image_blend_small + 1
+    else:
+        _vk_stat_image = _vk_stat_image + 1
+
+fn _vk_stat_text_op():
+    _vk_stat_text = _vk_stat_text + 1
+
+fn _vk_stat_rect_list_op():
+    _vk_stat_rect_list = _vk_stat_rect_list + 1
+
+# Full-surface readbacks and checksum walks are O(framebuffer) EACH, so a frame
+# that performs several is superlinear in page content even when its draw count
+# is small. These are cumulative for the process, unlike the frame-scoped
+# `present_*_count` fields, which a frame boundary resets before a probe can
+# read them.
+var _vk_stat_readbacks: i64 = 0
+var _vk_stat_readback_pixels: i64 = 0
+
+pub fn vulkan_stat_note_readback(pixel_count: i64):
+    _vk_stat_readbacks = _vk_stat_readbacks + 1
+    _vk_stat_readback_pixels = _vk_stat_readback_pixels + pixel_count
+
+pub fn vulkan_readback_census_line() -> text:
+    "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"
+
+pub fn vulkan_readback_census_reset():
+    _vk_stat_readbacks = 0
+    _vk_stat_readback_pixels = 0
+
+# ---------------------------------------------------------------------------
+# Per-op wall-clock attribution (process-global, instrumentation only)
+# ---------------------------------------------------------------------------
+# The draw-kind census above answers "how many ops", which was enough to find
+# the 1x1-composite population but NOT enough to explain the residual: at
+# 300x253 the Vulkan lane costs 68 s against 25 s for cpu_simd on the same page,
+# and 187 counted ops cannot account for a 43 s delta at any plausible per-
+# dispatch cost. So this records WHERE the wall clock goes, split by call kind
+# AND by SFFI sub-step, with count / total / max per bucket.
+#
+# Gated: every probe is `if vulkan_timing_enabled()`, resolved from the
+# environment ONCE at module init and never per call, so an unarmed frame pays
+# one already-resolved bool test per op and no clock syscall at all.
+#
+# Module-global rather than per-backend fields for the same reason the draw
+# census is: a page probe and a spec both read these without holding the
+# backend, and the per-instance counters were measured reading back zero
+# (`submits=0` against 111 drawn rects) because the pooled slot a probe can
+# reach is not always the instance that drew.
+
+val VK_T_COUNT: i64 = 30
+
+val VK_T_RECT: i64 = 0
+val VK_T_RECT_LIST: i64 = 1
+val VK_T_IMAGE: i64 = 2
+val VK_T_IMAGE_BLEND: i64 = 3
+val VK_T_IMAGE_COMPOSITE: i64 = 4
+val VK_T_TEXT: i64 = 5
+val VK_T_TEXT_BG: i64 = 6
+val VK_T_READBACK: i64 = 7
+val VK_T_PRESENT: i64 = 8
+val VK_T_ENQUEUE: i64 = 9
+val VK_T_FLUSH: i64 = 10
+val VK_T_SFFI_BEGIN: i64 = 11
+val VK_T_SFFI_REAP: i64 = 12
+val VK_T_SFFI_DESC: i64 = 13
+val VK_T_SFFI_BIND_PIPE: i64 = 14
+val VK_T_SFFI_BIND_DESC: i64 = 15
+val VK_T_SFFI_PUSH: i64 = 16
+val VK_T_SFFI_DISPATCH: i64 = 17
+val VK_T_SFFI_END: i64 = 18
+val VK_T_SFFI_SUBMIT: i64 = 19
+val VK_T_SFFI_WAIT_FENCE: i64 = 20
+val VK_T_UPLOAD: i64 = 21
+val VK_T_FONT_COMPOSITE: i64 = 22
+val VK_T_FONT_ATLAS_BUILD: i64 = 23
+# Sub-steps of `composite_font_batch`, which the first attribution run measured
+# at 27.3 s across 5 calls on a 300x253 page -- 58% of the whole frame.
+val VK_T_FONT_ATLAS_PACK: i64 = 24
+val VK_T_FONT_ATLAS_UPLOAD: i64 = 25
+val VK_T_FONT_ATLAS_DIGEST: i64 = 26
+val VK_T_FONT_PACKED_PARAMS: i64 = 27
+val VK_T_FONT_QUAD_VALIDATE: i64 = 28
+val VK_T_FONT_OWNER_IDENTITY: i64 = 29
+
+var _vk_timing_armed: bool = false
+var _vk_timing_resolved: bool = false
+
+var _vk_t_us: [i64] = [0; 30]
+var _vk_t_n: [i64] = [0; 30]
+var _vk_t_max: [i64] = [0; 30]
+
+pub fn vulkan_timing_enabled() -> bool:
+    """True when `SIMPLE_VK_TIMING=1`. The environment is read exactly once."""
+    if not _vk_timing_resolved:
+        val v = env_get("SIMPLE_VK_TIMING") ?? ""
+        _vk_timing_armed = v == "1" or v == "true"
+        _vk_timing_resolved = true
+    _vk_timing_armed
+
+pub fn vulkan_timing_now_us() -> i64:
+    if not vulkan_timing_enabled():
+        return 0
+    default_frame_clock().now_micros()
+
+pub fn vulkan_timing_add(bucket: i64, started_us: i64):
+    """Fold one completed op into `bucket`. No-op unless timing is armed."""
+    if not vulkan_timing_enabled():
+        return
+    if bucket < 0 or bucket >= VK_T_COUNT:
+        return
+    val elapsed = default_frame_clock().now_micros() - started_us
+    if elapsed < 0:
+        return
+    _vk_t_us[bucket] = _vk_t_us[bucket] + elapsed
+    _vk_t_n[bucket] = _vk_t_n[bucket] + 1
+    if elapsed > _vk_t_max[bucket]:
+        _vk_t_max[bucket] = elapsed
+
+pub fn vulkan_timing_note(bucket: i64, elapsed_us: i64):
+    """Fold a pre-measured duration into `bucket`, for a caller that already
+    holds a start/finish pair (e.g. the font composite's own evidence clock)."""
+    if not vulkan_timing_enabled():
+        return
+    if bucket < 0 or bucket >= VK_T_COUNT or elapsed_us < 0:
+        return
+    _vk_t_us[bucket] = _vk_t_us[bucket] + elapsed_us
+    _vk_t_n[bucket] = _vk_t_n[bucket] + 1
+    if elapsed_us > _vk_t_max[bucket]:
+        _vk_t_max[bucket] = elapsed_us
+
+pub fn vulkan_timing_reset():
+    vulkan_font_dirty_reset()
+    var i: i64 = 0
+    while i < VK_T_COUNT:
+        _vk_t_us[i] = 0
+        _vk_t_n[i] = 0
+        _vk_t_max[i] = 0
+        i = i + 1
+
+fn _vk_timing_name(bucket: i64) -> text:
+    if bucket == VK_T_RECT: return "rect"
+    if bucket == VK_T_RECT_LIST: return "rect_list"
+    if bucket == VK_T_IMAGE: return "image"
+    if bucket == VK_T_IMAGE_BLEND: return "image_blend"
+    if bucket == VK_T_IMAGE_COMPOSITE: return "image_composite"
+    if bucket == VK_T_TEXT: return "text"
+    if bucket == VK_T_TEXT_BG: return "text_bg"
+    if bucket == VK_T_READBACK: return "readback"
+    if bucket == VK_T_PRESENT: return "present"
+    if bucket == VK_T_ENQUEUE: return "enqueue"
+    if bucket == VK_T_FLUSH: return "flush"
+    if bucket == VK_T_SFFI_BEGIN: return "sffi_begin_compute"
+    if bucket == VK_T_SFFI_REAP: return "sffi_reap_quarantine"
+    if bucket == VK_T_SFFI_DESC: return "sffi_descriptor"
+    if bucket == VK_T_SFFI_BIND_PIPE: return "sffi_bind_pipeline"
+    if bucket == VK_T_SFFI_BIND_DESC: return "sffi_bind_descriptors"
+    if bucket == VK_T_SFFI_PUSH: return "sffi_push_constants"
+    if bucket == VK_T_SFFI_DISPATCH: return "sffi_dispatch"
+    if bucket == VK_T_SFFI_END: return "sffi_end_compute"
+    if bucket == VK_T_SFFI_SUBMIT: return "sffi_submit_and_wait"
+    if bucket == VK_T_SFFI_WAIT_FENCE: return "sffi_wait_fence"
+    if bucket == VK_T_UPLOAD: return "sffi_upload"
+    if bucket == VK_T_FONT_COMPOSITE: return "font_composite"
+    if bucket == VK_T_FONT_ATLAS_BUILD: return "font_atlas_cpu_build"
+    if bucket == VK_T_FONT_ATLAS_PACK: return "font_atlas_pack_u32_to_u8"
+    if bucket == VK_T_FONT_ATLAS_UPLOAD: return "font_atlas_sffi_upload"
+    if bucket == VK_T_FONT_ATLAS_DIGEST: return "font_atlas_payload_sha256"
+    if bucket == VK_T_FONT_PACKED_PARAMS: return "font_packed_params"
+    if bucket == VK_T_FONT_QUAD_VALIDATE: return "font_quad_validate"
+    if bucket == VK_T_FONT_OWNER_IDENTITY: return "font_owner_identity"
+    "bucket{bucket}"
+
+# Why the font-atlas upload cache missed, per composite. The timing table says
+# the 4 MB repack+redigest ran 5 times on a page whose atlas should be built
+# once; these counters separate "the atlas genuinely changed" (new glyphs were
+# rasterized between batches) from "the cache key is unstable" (same atlas,
+# different identity), because the correct fix differs in each case.
+var _vk_font_dirty_gen: i64 = 0
+var _vk_font_dirty_identity: i64 = 0
+var _vk_font_dirty_dims: i64 = 0
+var _vk_font_composites: i64 = 0
+var _vk_font_gen_trace: text = ""
+
+pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
+                              dims_changed: bool, generation: i64):
+    if not vulkan_timing_enabled():
+        return
+    _vk_font_composites = _vk_font_composites + 1
+    if gen_changed: _vk_font_dirty_gen = _vk_font_dirty_gen + 1
+    if identity_changed: _vk_font_dirty_identity = _vk_font_dirty_identity + 1
+    if dims_changed: _vk_font_dirty_dims = _vk_font_dirty_dims + 1
+    if _vk_font_composites <= 16:
+        _vk_font_gen_trace = _vk_font_gen_trace + " {generation}"
+
+var _vk_font_pack_full: i64 = 0
+var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_pack_note(incremental: bool):
+    """Record whether an atlas upload repacked the whole atlas or only the
+    cells the batch inserted. Always counted, not just when timing is armed:
+    a spec asserts on these without wanting the clock overhead."""
+    if incremental:
+        _vk_font_pack_incremental = _vk_font_pack_incremental + 1
+    else:
+        _vk_font_pack_full = _vk_font_pack_full + 1
+
+pub fn vulkan_font_pack_full_count() -> i64:
+    _vk_font_pack_full
+
+pub fn vulkan_font_pack_incremental_count() -> i64:
+    _vk_font_pack_incremental
+
+pub fn vulkan_font_pack_reset():
+    _vk_font_pack_full = 0
+    _vk_font_pack_incremental = 0
+
+# Mirror self-check (SIMPLE_VK_FONT_SELFCHECK=1). After an incremental repack,
+# the mirror is compared byte-for-byte against a full pack of the same atlas --
+# the ground truth. This is the only way to tell the three candidate causes of a
+# moved frame apart: a mismatch INSIDE a reported dirty rect means the repack
+# loop is wrong; a mismatch OUTSIDE every dirty rect means the producer changes
+# cells it does not report; zero mismatches means the divergence is downstream
+# of the mirror entirely. Costs a full pack per incremental repack, so it is
+# opt-in and never on in a timed run.
+var _vk_font_mirror_checks: i64 = 0
+var _vk_font_mirror_bad_calls: i64 = 0
+var _vk_font_mirror_bad_bytes: i64 = 0
+var _vk_font_mirror_first: text = ""
+var _vk_font_decisions: text = ""
+
+pub fn vulkan_font_selfcheck_enabled() -> bool:
+    (env_get("SIMPLE_VK_FONT_SELFCHECK") ?? "") == "1"
+
+pub fn vulkan_font_mirror_note(mismatched_bytes: i64, detail: text):
+    _vk_font_mirror_checks = _vk_font_mirror_checks + 1
+    if mismatched_bytes > 0:
+        _vk_font_mirror_bad_calls = _vk_font_mirror_bad_calls + 1
+        _vk_font_mirror_bad_bytes = _vk_font_mirror_bad_bytes + mismatched_bytes
+        if _vk_font_mirror_first == "":
+            _vk_font_mirror_first = detail
+
+pub fn vulkan_font_decision_note(detail: text):
+    """One line per composite recording every `can_increment` input and the
+    decision, so a full<->incremental swap is visible without re-deriving it."""
+    if _vk_font_decisions.len() < 4000:
+        _vk_font_decisions = _vk_font_decisions + "\n    " + detail
+
+pub fn vulkan_font_mirror_line() -> text:
+    ("font_mirror_selfcheck checks={_vk_font_mirror_checks}" +
+     " bad_calls={_vk_font_mirror_bad_calls}" +
+     " bad_bytes={_vk_font_mirror_bad_bytes}" +
+     " first=[{_vk_font_mirror_first}]" +
+     " decisions:{_vk_font_decisions}")
+
+pub fn vulkan_font_mirror_reset():
+    _vk_font_mirror_checks = 0
+    _vk_font_mirror_bad_calls = 0
+    _vk_font_mirror_bad_bytes = 0
+    _vk_font_mirror_first = ""
+    _vk_font_decisions = ""
+
+pub fn vulkan_font_dirty_line() -> text:
+    ("font_atlas_dirty composites={_vk_font_composites}" +
+     " gen_changed={_vk_font_dirty_gen}" +
+     " identity_changed={_vk_font_dirty_identity}" +
+     " dims_changed={_vk_font_dirty_dims}" +
+     " generations=[{_vk_font_gen_trace} ]" +
+     " pack_full={_vk_font_pack_full} pack_incremental={_vk_font_pack_incremental}" +
+     (if _vk_font_mirror_checks > 0 or _vk_font_decisions != "": "\n  " + vulkan_font_mirror_line() else: ""))
+
+pub fn vulkan_font_dirty_reset():
+    vulkan_font_pack_reset()
+    vulkan_font_mirror_reset()
+    _vk_font_dirty_gen = 0
+    _vk_font_dirty_identity = 0
+    _vk_font_dirty_dims = 0
+    _vk_font_composites = 0
+    _vk_font_gen_trace = ""
+
+pub fn vulkan_timing_count(bucket: i64) -> i64:
+    if bucket < 0 or bucket >= VK_T_COUNT: return 0
+    _vk_t_n[bucket]
+
+pub fn vulkan_timing_total_us(bucket: i64) -> i64:
+    if bucket < 0 or bucket >= VK_T_COUNT: return 0
+    _vk_t_us[bucket]
+
+pub fn vulkan_timing_table() -> text:
+    """Multi-line `bucket n total_ms max_ms` table, or one line when disarmed."""
+    if not vulkan_timing_enabled():
+        return "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
+    var out = "vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line()
+    var i: i64 = 0
+    while i < VK_T_COUNT:
+        if _vk_t_n[i] > 0:
+            val total_ms = _vk_t_us[i] / 1000
+            val max_ms = _vk_t_max[i] / 1000
+            out = out + "\n  {_vk_timing_name(i)} {_vk_t_n[i]} {total_ms} {max_ms}"
+        i = i + 1
+    out
