@@ -916,7 +916,7 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
 # `mcdc_skip_reason` is always populated so callers/reporters can surface that
 # instrumentation was skipped for this spec, per-spec, rather than implying it
 # was collected.
-fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text) -> TestFileResult:
+fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text, degrade_token: text = "") -> TestFileResult:
     val binary = find_simple_binary()
     val timeout_ms = options.timeout * 1000
     var run_args: [text] = ["run", file_path]
@@ -945,7 +945,8 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         resource_usage: evidenced.resource_usage, resource_class: evidenced.resource_class,
         cohort_id: evidenced.cohort_id, budget_status: evidenced.budget_status,
         anomaly_status: evidenced.anomaly_status,
-        mcdc_skip_reason: reason
+        mcdc_skip_reason: reason,
+        degraded_reason: degrade_token
     )
 
 # --- coverage fail-closed gate (2026-08-31) -------------------------------
@@ -987,6 +988,59 @@ fn first_line(text_value: text) -> text:
         if first_non_noise == "":
             first_non_noise = trimmed
     first_non_noise
+
+# --- SMF-compile degrade token (2026-09-12) --------------------------------
+# The `degraded=` value recorded on a file's `SPEC FILE VERDICT:` line when its
+# standalone-SMF compile failed and the file was run on the interpreter
+# instead. A degrade that is not stated on the verdict line is invisible to
+# every sweep that parses those lines, which is how three same-day bug records
+# (macro_contracts / gpu_lighting3d / devhub print_raw) each read as an
+# ordinary red rather than "this file never compiled".
+#
+# Two kinds, deliberately distinguished rather than merged:
+#   smf-interpreter-only-constructs  the SOFT failure the runner already
+#                                    degraded on ("N function(s) contain
+#                                    constructs that require the interpreter")
+#   smf-compile-error                every OTHER compile failure -- the HARD
+#                                    ones (`Undefined(...)`,
+#                                    `HIR lowering: Unsupported feature`) that
+#                                    used to lose the whole file
+#
+# Pure, so the token can be pinned by a spec without driving a real compile.
+pub fn smf_compile_degrade_token(compile_output: text) -> text:
+    val kind = if compile_output.contains("cannot compile to standalone SMF"):
+            "smf-interpreter-only-constructs"
+        else:
+            "smf-compile-error"
+    val diagnostic = verdict_degrade_token_field(first_line(compile_output))
+    if diagnostic == "": kind else: kind + ":" + diagnostic
+
+# A verdict line is whitespace-separated `key=value` tokens, so the diagnostic
+# must carry no spaces and no quotes or a reader splitting on whitespace sees a
+# truncated value followed by garbage tokens. Long diagnostics are trimmed from
+# the FRONT, never the back: the cause ("undefined identifier: print_raw") is
+# at the END of a compile diagnostic, behind a temp path that can be longer
+# than the whole budget on its own.
+val _DEGRADE_TOKEN_MAX: i64 = 160
+
+fn verdict_degrade_token_field(diagnostic: text) -> text:
+    # A compile diagnostic reads
+    #   error: compile failed (<temp path>): semantic: <temp path>: <cause>
+    # so more than two thirds of it is a wrapped-copy temp path that is
+    # different on every run and says nothing. Keep only what follows the LAST
+    # source path, which is the cause for both the hard
+    # (`Undefined("undefined identifier: print_raw")`) and the soft
+    # (`cannot compile to standalone SMF: N function(s) ...`) forms. When the
+    # shape is unrecognised the whole line is kept rather than guessed at.
+    val marker = ".spl: "
+    val cause = if diagnostic.contains(marker):
+            diagnostic[diagnostic.last_index_of(marker) + marker.len():diagnostic.len()]
+        else:
+            diagnostic
+    val flat = cause.trim().replace(" ", "_").replace("\t", "_").replace("\"", "")
+    if flat.len() <= _DEGRADE_TOKEN_MAX:
+        return flat
+    "~" + flat[flat.len() - _DEGRADE_TOKEN_MAX:flat.len()]
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -1041,12 +1095,47 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # salvaged here -- and record truthfully that MC/DC instrumentation
         # was skipped for this spec rather than silently reporting a green
         # run with implied (but never collected) coverage evidence.
+        #
+        # WIDENED 2026-09-12 from "interpreter-only constructs" to EVERY
+        # compile failure on this lane. The old condition also required
+        # `uncompilable_construct`, so a SOFT failure degraded and ran while a
+        # HARD one -- `semantic: Undefined("undefined identifier: X")`,
+        # `HIR lowering: Unsupported feature` -- fell through to the
+        # "Compilation failed" return below and reported
+        # `executed=1 passed=0 failed=1`, losing EVERY example in the file.
+        # Three same-day bug records share exactly that shape
+        # (macro_contracts_module_unresolvable_in_compiled_spec_lane,
+        # gpu_lighting3d_spec_asserts_stale_light_buf_field, devhub
+        # print_raw). The distinction never held: both are properties of the
+        # standalone-SMF compile of a WRAPPED copy, neither is evidence about
+        # the spec's assertions, and the runner compiles at all here only
+        # because MC/DC asked it to -- the spec itself was never asked to be
+        # natively compilable.
+        #
+        # This cannot hide a real failure. The fallback runs the ORIGINAL,
+        # unwrapped spec through the interpreter and reports ITS real
+        # pass/fail; a spec that is genuinely broken (bad syntax, unresolvable
+        # import, failing assertion) fails there too and that failure is the
+        # verdict. `make_result_from_output` separately refuses to synthesise a
+        # pass from output with no parseable summary, so a file that produces
+        # nothing stays red.
+        #
+        # Scope is deliberately unchanged in both other directions: an explicit
+        # `--coverage` run still fails closed below (a degrade there would be
+        # unevidenced coverage), and a non-MC/DC `--mode=native`/`--mode=compile`
+        # run still reports the compile failure, because THERE compiling is the
+        # thing the operator asked for.
         val wrapper_active = cleanup_path != ""
         val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
-        if mcdc_enabled and not options.coverage and uncompilable_construct:
+        if mcdc_enabled and not options.coverage:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-            val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
-            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason)
+            val diagnostic = first_line(compile_output)
+            val reason = if uncompilable_construct:
+                    "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + diagnostic
+                else:
+                    "MC/DC instrumentation skipped: spec failed to compile to standalone SMF; degraded to plain interpreter execution, which reports this file's REAL pass/fail. Compiler diagnostic: " + diagnostic
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason,
+                smf_compile_degrade_token(compile_output))
         # FAIL CLOSED (2026-08-31): a coverage run whose instrumented wrapper
         # will not compile has NOT executed what the operator asked for. The
         # old behaviour ran the unwrapped spec on the interpreter and returned
@@ -1083,7 +1172,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             # pass/fail, so this cannot mask a genuine defect.
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
-            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason,
+                smf_compile_degrade_token(compile_output))
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
@@ -1282,3 +1372,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
 export mcdc_manifest_transport_args
+export smf_compile_degrade_token
