@@ -1,7 +1,7 @@
 # Stage 2's Stage-3 route now reaches native_compile and SEGVs in `serialize_mir_function`
 
-- Status: CAUSE MEASURED / FIXED at the call site (BOOT-8, 2026-09-13) — awaiting the
-  admission run that proves it. Was: OPEN.
+- Status: **CLOSED / FIXED** (BOOT-8, 2026-09-13), proven by `build/bootstrap-boot8a`.
+  Was: OPEN.
 - Found: bootstrap lane BOOT-7, `work/bootstrap-full-5-2026-09-12` at `592041db98a`
 - Severity: **the current `--stop-after-stage2` admission blocker**, and the successor to
   site 7 (`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, fixed).
@@ -170,3 +170,38 @@ x21  0x3      x24  0x0
 Same function, same caller chain, same faulting value `x21 = 3` — only the pc offset within
 the function differs, as it must between two different binaries. The phase-2 guard was
 standing in front of this crash, not preventing it.
+
+## Closed on a measured run — `build/bootstrap-boot8a`, 08:11:19 -> 08:33:13 (22m)
+
+Same canonical command as BOOT-7 (`bootstrap-from-scratch.sh --full-bootstrap --backend=llvm
+--mode=dynload --jobs=10 --stop-after-stage2`), `--output=build/bootstrap-boot8a`, from
+`272482747da`. New Stage-2 candidate sha256 `95763bffee64a74e...`, 152199352 B.
+
+The SEGV is gone. `serialize_mir_function` does not appear anywhere in the logs, and the route's
+failure changed kind, verbatim:
+
+```
+| error: stage2 failed the positional pure-Simple Stage-3 route (status 124)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+`status 124` is `timeout`'s time-limit exit, not `139`. Stage-2 sanity stayed green on the new
+candidate (`status=pass`, `frontend_smoke_status=0`, `frontend_smoke_bootstrap0_raw_status=0`,
+`frontend_smoke_bootstrap1_ran=true`, `frontend_smoke_bootstrap1_raw_status=0`,
+`frontend_smoke_bootstrap_mode_status=0`, `sha_stable_status=0`, `checks_run=5`).
+
+### Proven in the codegen that matters, not only in a probe lane
+
+`native_capsule_sorted_symbol_ids_v1` in the new candidate (`0x3846d88`..`0x3847020`) contains
+**zero `bl rt_alloc`**; BOOT-7's had one at `0x3846e44` inside the swap. (The two `rt_alloc` at
+`0x3847048`/`0x38470b4` belong to the next function, which starts at `0x3847024`.) The swap block
+is `rt_array_get` + `rt_value_unbox_int` then `into_runtime_value` + `rt_index_set` — ints only —
+and the rebuild loop is `rt_array_get` -> `rt_array_push` with no `rt_alloc` between, which is the
+load-bearing fact: `result.push(keys[index])` does not copy under seed-LLVM codegen either. The
+caller's loop head is unchanged and still copy-free between the two `rt_index_get`s
+(`0x384c180`..`0x384c1a0`); the `rt_alloc` at `0x384c1ac` is the expected `val function =` copy,
+which now runs on a real struct.
+
+The successor is filed separately:
+`stage2_stage3_route_native_compile_timeout_2026-09-13.md` (site 9).
