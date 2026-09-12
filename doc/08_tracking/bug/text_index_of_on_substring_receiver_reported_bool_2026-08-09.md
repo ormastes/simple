@@ -192,3 +192,5 @@ GREEN test/unit/lib/common/text_index_of_temp_receiver_spec.spl    outcome=OK de
 Discrimination check (the spec is not vacuous): flipping the expected
 `sub_offset` from 11 to 12 in a scratch copy fails exactly one example —
 `outcome=ERROR declared>=4 executed=4 passed=3 failed=1`.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 44f08f49d0a, spec test/01_unit/lib/common/text_index_of_temp_receiver_spec.spl (+ test/unit mirror)

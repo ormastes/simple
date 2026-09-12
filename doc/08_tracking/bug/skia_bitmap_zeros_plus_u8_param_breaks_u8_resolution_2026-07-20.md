@@ -110,3 +110,5 @@ SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0 skipp
 ```
 
 No code change made. Closing.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 0689d5244b3, spec test/unit/lib/skia/mask_filter_spec.spl

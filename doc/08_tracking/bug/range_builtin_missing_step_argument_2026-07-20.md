@@ -91,3 +91,5 @@ SPEC FILE VERDICT: test/03_system/feature/usage/loops_spec.spl outcome=OK declar
 ```
 
 No code change made. Closing.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, a263a85e45e, spec test/03_system/feature/usage/loops_spec.spl

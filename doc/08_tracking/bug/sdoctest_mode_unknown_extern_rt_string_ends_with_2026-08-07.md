@@ -174,3 +174,5 @@ SPEC FILE VERDICT: ... outcome=OK declared>=12 executed=12 passed=12 failed=0 sk
 ```
 
 Closing.
+
+- Status: CLOSED (2026-09-12) — fix re-verified on seed sha256 3d120a6f, da07dff5184, spec test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl

@@ -136,3 +136,5 @@ the same binary (no spec was edited):
 The 4 still-red examples are unrelated pre-existing gaps in the HTML renderer
 and the ODF float formatter, not this defect — filed separately as
 `doc/08_tracking/bug/office_html_render_and_odf_float_format_gaps_2026-09-12.md`.
+
+- Status: RESOLVED (2026-09-12) — c9a6f858bc7, spec test/01_unit/app/office/odf_ooxml_spec.spl

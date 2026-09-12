@@ -103,3 +103,5 @@ both would fail.
 
 The four `BLOCKED:` hardware-gated examples were left exactly as the 2026-08-09
 disposition note demands.
+
+- Status: RESOLVED (2026-09-12) — 1485de62b91, spec test/01_unit/app/serial_mcp/serial_mcp_spec.spl (+ test/unit mirror)

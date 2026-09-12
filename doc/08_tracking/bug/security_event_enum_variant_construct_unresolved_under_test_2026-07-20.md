@@ -103,3 +103,5 @@ line guessed — it was an ambiguous module path resolving to the sibling
 to the two sibling records this one cites, which may share that cause.
 
 Closing.
+
+- Status: CLOSED (2026-09-12) — fixed in source, verified on seed sha256 3d120a6f, 53bb6a16a5e, spec test/02_integration/app/ui.web/capability_gating_spec.spl

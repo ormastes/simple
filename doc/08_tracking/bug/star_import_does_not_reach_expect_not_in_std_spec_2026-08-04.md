@@ -186,3 +186,5 @@ example — `outcome=ERROR declared>=3 executed=3 passed=2 failed=1`. A
 non-resolving or no-op `expect_not` would have stayed green.
 
 No code change made. Closing.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, be72ceb26c6, spec test/01_unit/std/spec_expect_bool_shortcut_spec.spl

@@ -89,3 +89,5 @@ SPEC FILE VERDICT: test/01_unit/lib/engine/resource_handle_spec.spl outcome=OK d
 
 No change to `src/lib/nogc_sync_mut/engine/resource/handle.spl` was needed; the
 implementation was correct as the record already said.
+
+- Status: RESOLVED (2026-09-12) — 80553f06c63, spec test/01_unit/lib/engine/resource_handle_spec.spl (+ test/unit mirror)

@@ -78,3 +78,5 @@ SPEC FILE VERDICT: test/01_unit/lib/common/roundtrip_spec.spl outcome=OK declare
 ```
 
 Record said "5/6 tests fail"; now 6/6 pass. No code change made. Closing.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 0ce26e5c97a, spec test/01_unit/lib/common/roundtrip_spec.spl
