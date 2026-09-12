@@ -254,3 +254,90 @@ independent ranking produced by the Draw-IR geometry differ
 (`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`), whose
 items 3 (flex item main size) and 5 (inline-block button) are the two closed
 here.
+
+## Round 3 — 2026-09-12 (grid `repeat()`/`minmax()`, flex-wrap grow, inline content area)
+
+Tool: `scripts/check/check-chrome-layout-geometry-diff.shs` run with
+`GEOM_DIFF_HEIGHT=20000` so the differ sees the WHOLE page. At the default
+760 px it only ever saw ~6 % of a long document (the Draw IR viewport clip
+recorded as Bug 0 in
+`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`), which is
+why the round-2 ranking measured on 18-27 elements per page is superseded here.
+Interpreter `build/cargo-r2/release/simple` (`39178424 1789197971`), Chrome
+152.0.7977.83 headless. The Chrome `GEOM|` harvest is byte-identical across all
+three columns — only the Simple side and the differ change.
+
+### The three columns, and why there are three
+
+`check-chrome-layout-geometry-diff.shs` numbered `::marker` pseudo boxes as
+elements, so on every `<li>` Chrome's first real child was compared against
+Simple's marker box and each `<li>` produced 2-3 fabricated mismatch rows
+(`doc/08_tracking/bug/web_layout_geometry_differ_counts_marker_boxes_as_elements_2026-09-12.md`).
+Fixing that changes what is measured, so the pre-fix numbers are NOT comparable
+to the post-fix numbers. Column **A** is the differ as F22 left it; column **B**
+is the corrected differ over the SAME pre-round-3 layout code, and is the only
+honest baseline; column **C** is round 3. **Read B → C.**
+
+| page | A cmp/mism | B cmp/mism | C cmp/mism | B sum abs-delta | C sum abs-delta | change |
+|---|---|---|---|---|---|---|
+| overview | 18 / 5 | 18 / 5 | 18 / 5 | 245 | **202** | -17.6 % |
+| html | 202 / 195 | 253 / 247 | 253 / 247 | 165,523 | **164,002** | -0.9 % |
+| css-layout | 372 / 370 | 376 / 374 | 376 / **364** | 414,505 | **366,839** | **-11.5 %** |
+| css-paint | 469 / 468 | 468 / 467 | 468 / 467 | 1,062,483 | **1,061,919** | -0.1 % |
+| forms-media | 102 / 99 | 102 / 99 | 102 / 99 | 57,778 | **57,674** | -0.2 % |
+| animation | 81 / 79 | 81 / 79 | 81 / 79 | 13,263 | **13,171** | -0.7 % |
+| evidence | 4 / 0 | 4 / 0 | 4 / 0 | 0 | 0 | — |
+| tab-bar | 9 / 7 | 9 / 7 | 9 / 7 | 119 | 119 | — |
+| **TOTAL** | 1257 / 1223 | 1311 / 1278 | 1311 / **1268** | 1,713,916 | **1,663,926** | **-2.9 %** |
+
+`sum abs-delta` is the sum of `|dx|+|dy|+|dw|+|dh|` over ROOT (non-inherited)
+mismatch rows, missing-element rows excluded. Median per-row magnitude moved the
+same way: css-layout 1169 → 1057, overview 45 → 38, animation 146 → 142.
+**No page regressed on either metric.**
+
+### The targets were NOT met, and the count metric cannot show them being met
+
+Round 3 was set a target of css-layout ≤ 15 % mismatched and html ≤ 10 %.
+Measured: css-layout **96.8 %**, html **97.6 %**. That is not close, and the
+gap is not one more fix away — the metric itself saturates:
+
+- A long page's mismatch count is dominated by **sibling cascade**. One early
+  block-flow error shifts every element below it, and each of those is counted
+  as its own root mismatch. The differ's `inherited` filter only recognises a
+  child repeating its PARENT's exact four deltas, not a sibling inheriting a
+  shifted flow position, so a single 120 px error near the top of `css-layout`
+  marked ~350 downstream elements mismatched.
+- The grid fix removed exactly that 120 px error and the count fell by only 10,
+  because other, smaller flow errors above the same elements remain.
+
+So on these pages the count is close to binary and **magnitude is the
+discriminating column**. Reaching a low mismatch RATE needs every flow error
+above the fold fixed at once — principally block auto-height on wrapped `<li>`
+runs, `<br>` line boxes, and the inline x-advance metrics — not three of them.
+
+### What round 3 closed, with Chrome-exact evidence
+
+| defect | before | after | Chrome |
+|---|---|---|---|
+| `.grid` three columns (`repeat(3, minmax(0,1fr))`) | 3 rows of 900 px, container 168 px tall | 292 / 292 / 292 at x 0 / 304 / 608, container 48 px | identical |
+| `.flex` cards (`flex: 1 1 180px`) | 180 px, second card at x=192 | 444 px, second card at x=456 | identical |
+| inline `<strong>`/`<em>`/`<a>` box | y = line top, h = 24 (line-height) | y = line top + 3, h = 18 | y +3, h 18 |
+
+Specs pinning each: `test/01_unit/browser_engine/{grid_repeat_minmax_track_list,
+flex_wrap_grow_distribution,inline_content_area_half_leading}_spec.spl`,
+`4 examples, 0 failures` each, sabotage triples in the matching bug records.
+
+### Ranked remainder (from column C, root rows)
+
+1. **Block auto-height inside `<li>`** — the inline run before a nested `<p>` is
+   2-3 line-heights where Chrome has 1, so every inventory `<li>` is ~40-60 px
+   tall too much and the page accumulates thousands of px. This is the single
+   largest remaining contributor on css-layout / css-paint / html.
+2. **Inline-run x advance** — plain text over-measured ~25 %, bold not measured
+   as bold. The whole remaining overview mismatch set (5 of 5).
+   `doc/08_tracking/bug/web_inline_run_x_advance_font_metrics_2026-09-12.md`.
+3. **Table row/cell heights** — 10 `table-cell` + 1 `table` root rows on
+   css-paint, unchanged from round 2.
+4. **`<br>` line boxes** — 24 px against Chrome's 18, same cause as the inline
+   content-area fix but on the forced-break path, which takes `style_line_h`
+   directly.

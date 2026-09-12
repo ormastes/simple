@@ -45,7 +45,22 @@ emission, so this differ, the catalog pixel gate, and any scrolled render are al
 blind to ~94 % of a long page. Until it is fixed no geometry gate over the
 catalog can be considered non-vacuous.
 
+**Workaround in use since 2026-09-12, not a fix:** run the differ with
+`GEOM_DIFF_HEIGHT=20000`. That makes it see the whole document (1257 elements
+compared across the 8 pages, against 158 at 760 px), which is what the round-3
+measurements in `chrome_vs_simple_catalog_diff_macos_2026-09-12.md` use. The
+viewport clip in Draw IR emission itself is untouched and still open, so a real
+render at a real viewport height is still blind to everything below the fold.
+
 ## Ranked CSS-feature bug list (root mismatches, all 8 pages)
+
+**Superseded 2026-09-12.** This ranking was measured at 760 px — i.e. over the
+~6 % of each page Bug 0 lets through, 158 elements in total. The ranking
+re-derived at `GEOM_DIFF_HEIGHT=20000` over 1257 elements is in
+`chrome_vs_simple_catalog_diff_macos_2026-09-12.md` § Round 3, and ranks items
+differently. Round 3 closed this table's items 3 (flex item main size), 5's
+vertical half (inline box height/offset) and 6 (grid). Retained below for
+history — do not cite it as current.
 
 There is deliberately no `box-sizing` bucket: `* { box-sizing: border-box }` is
 near-universal in the catalog CSS, so classifying on it captured the largest
@@ -69,8 +84,20 @@ flex container is counted once per descendant and dominates every bucket.
 ## Simple-only boxes
 
 Simple emits `::marker` boxes as real children of `<li>` (4 on overview) and a
-duplicate `path:` body box. These do not shift ordinals today (markers are last
-children) but will the moment a marker is emitted first; worth a key-scheme note
-rather than a fix.
+duplicate `path:` body box.
+
+**Superseded 2026-09-12 — the premise below was already false when written.**
+This paragraph originally read *"These do not shift ordinals today (markers are
+last children) but will the moment a marker is emitted first; worth a key-scheme
+note rather than a fix."* The marker IS emitted first, so every `<li>`'s
+children were already misnumbered: Chrome's first real child was compared
+against Simple's marker box, and each `<li>` contributed 2-3 fabricated mismatch
+rows — a `<code>` element was reported 119 px too wide and 85 px too tall when
+it actually differs by 5 px and 1 px. `_layout_tag` now excludes any `::`
+pseudo tag from the KEY SCHEME; the boxes are still listed here, so nothing is
+hidden. Counts measured before and after that correction are not comparable;
+see the round-3 section of `chrome_vs_simple_catalog_diff_macos_2026-09-12.md`,
+which carries both.
+`doc/08_tracking/bug/web_layout_geometry_differ_counts_marker_boxes_as_elements_2026-09-12.md`
 
 Raw data: `build/chrome_layout_geometry_diff/<page>.geometry_diff.{sdn,md}`.
