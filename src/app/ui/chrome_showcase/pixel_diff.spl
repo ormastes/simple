@@ -1,0 +1,213 @@
+# Pure-Simple pixel differ for the Chrome-vs-Simple catalog comparison.
+#
+# Compares a Chrome headless screenshot (PNG) against a Simple web-renderer
+# frame (binary P6 PPM) and prints one machine-readable line per page plus a
+# fail-closed verdict. No external image tool is used: PNG is decoded by
+# `common.image.png_decode` and PPM by `common.image.ppm_decode`.
+#
+# Usage:
+#   simple run src/app/ui/chrome_showcase/pixel_diff.spl <dir> <page> [page...]
+#   simple run src/app/ui/chrome_showcase/pixel_diff.spl --pair <a.png> <b.ppm>
+#
+# For each <page> it reads <dir>/<page>.chrome.png and <dir>/<page>.simple.ppm.
+# A pixel counts as a mismatch when any channel differs by more than TOLERANCE.
+
+use std.sffi.cli.{cli_get_args}
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use common.image.png_decode.{decode_png_to_argb}
+use common.image.ppm_decode.{decode_ppm_to_argb}
+
+val TOLERANCE: i32 = 8
+
+struct DiffResult:
+    ok: bool
+    reason: text
+    pixels: i64
+    mismatch: i64
+    mismatch_pct_x100: i64
+    max_delta: i32
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn _chan_delta(a: u32, b: u32) -> i32:
+    val dr = _abs((((a >> 16) & 0xFFu32) as i32) - (((b >> 16) & 0xFFu32) as i32))
+    val dg = _abs((((a >> 8) & 0xFFu32) as i32) - (((b >> 8) & 0xFFu32) as i32))
+    val db = _abs(((a & 0xFFu32) as i32) - ((b & 0xFFu32) as i32))
+    var m = dr
+    if dg > m:
+        m = dg
+    if db > m:
+        m = db
+    m
+
+pub fn diff_argb(a: [u32], aw: i32, ah: i32, b: [u32], bw: i32, bh: i32) -> DiffResult:
+    if aw != bw or ah != bh:
+        return DiffResult(ok: false, reason: "dimension mismatch " + aw.to_string() + "x" + ah.to_string() +
+            " vs " + bw.to_string() + "x" + bh.to_string(), pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
+    val n = (aw as i64) * (ah as i64)
+    if n <= 0:
+        return DiffResult(ok: false, reason: "empty image", pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
+    var mismatch: i64 = 0
+    var max_delta = 0
+    var i: i64 = 0
+    while i < n:  # cpu-lane-loop-ok: one iteration per compared pixel
+        val d = _chan_delta(a[i], b[i])
+        if d > max_delta:
+            max_delta = d
+        if d > TOLERANCE:
+            mismatch = mismatch + 1
+        i = i + 1
+    DiffResult(
+        ok: true, reason: "", pixels: n, mismatch: mismatch,
+        mismatch_pct_x100: (mismatch * 10000) / n, max_delta: max_delta)
+
+fn _pct_text(x100: i64) -> text:
+    val whole = x100 / 100
+    val frac = x100 - whole * 100
+    val frac_text = if frac < 10: "0" + frac.to_string() else: frac.to_string()
+    whole.to_string() + "." + frac_text
+
+fn _u32_le(d: [u8], o: i64) -> i64:
+    (d[o] as i64) | ((d[o + 1] as i64) << 8) | ((d[o + 2] as i64) << 16) | ((d[o + 3] as i64) << 24)
+
+fn _i32_le(d: [u8], o: i64) -> i64:
+    val v = _u32_le(d, o)
+    if v >= 2147483648: v - 4294967296 else: v
+
+# Uncompressed 24/32-bit BMP reader. Chrome writes PNG; a host converter
+# (sips / magick / pngtopnm) turns that into BMP when the pure-Simple PNG
+# decoder cannot read a particular stream. Kept deliberately small: only the
+# BI_RGB shapes those converters emit are accepted, anything else is an error.
+fn _decode_bmp(d: [u8]) -> Result<([u32], i32, i32), text>:
+    if d.len() < 54 or d[0] != 66u8 or d[1] != 77u8:
+        return Err("not a BMP")
+    val off = _u32_le(d, 10)
+    val w = _i32_le(d, 18)
+    val raw_h = _i32_le(d, 22)
+    val bpp = (d[28] as i64) | ((d[29] as i64) << 8)
+    if bpp != 24 and bpp != 32:
+        return Err("unsupported BMP depth " + bpp.to_string())
+    val bottom_up = raw_h > 0
+    val h = if bottom_up: raw_h else: 0 - raw_h
+    if w <= 0 or h <= 0:
+        return Err("empty BMP")
+    val bytes_per = bpp / 8
+    val row_bytes = ((w * bytes_per + 3) / 4) * 4
+    var out: [u32] = [0u32; w * h]
+    var y: i64 = 0
+    while y < h:  # cpu-lane-loop-ok: one iteration per BMP row
+        val sy = if bottom_up: h - 1 - y else: y
+        val base = off + sy * row_bytes
+        var x: i64 = 0
+        while x < w:  # cpu-lane-loop-ok: one iteration per BMP column
+            val b = base + x * bytes_per
+            if b + 2 >= d.len():
+                return Err("BMP data is truncated")
+            out[y * w + x] = ((d[b + 2] as u32) << 16) | ((d[b + 1] as u32) << 8) | (d[b] as u32)
+            x = x + 1
+        y = y + 1
+    Ok((out, w as i32, h as i32))
+
+fn _load_reference(path: text) -> Result<([u32], i32, i32), text>:
+    if not file_exists(path):
+        return Err("missing " + path)
+    val bytes = file_read_bytes(path)
+    if path.ends_with(".bmp"):
+        return _decode_bmp(bytes)
+    if path.ends_with(".ppm"):
+        val p = decode_ppm_to_argb(bytes)?
+        return Ok((p.pixels, p.width, p.height))
+    val decoded = decode_png_to_argb(bytes)
+    if val Err(e) = decoded:
+        return Err(e)
+    val img = decoded.unwrap()
+    Ok((img.pixels, img.width, img.height))
+
+fn _load_ppm(path: text) -> Result<([u32], i32, i32), text>:
+    if not file_exists(path):
+        return Err("missing " + path)
+    val img = decode_ppm_to_argb(file_read_bytes(path))?
+    Ok((img.pixels, img.width, img.height))
+
+pub fn compare_pair(png_path: text, ppm_path: text) -> DiffResult:
+    val loaded_a = _load_reference(png_path)
+    if val Err(e) = loaded_a:
+        return DiffResult(ok: false, reason: e, pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
+    val loaded_b = _load_ppm(ppm_path)
+    if val Err(e2) = loaded_b:
+        return DiffResult(ok: false, reason: e2, pixels: 0, mismatch: 0, mismatch_pct_x100: 0, max_delta: 0)
+    val a = loaded_a.unwrap()
+    val b = loaded_b.unwrap()
+    diff_argb(a.0, a.1, a.2, b.0, b.1, b.2)
+
+fn _emit(page: text, r: DiffResult) -> bool:
+    if not r.ok:
+        print("page=" + page + " status=error reason=" + r.reason)
+        return false
+    print(
+        "page=" + page +
+        " pixels=" + r.pixels.to_string() +
+        " mismatch_px=" + r.mismatch.to_string() +
+        " mismatch_pct=" + _pct_text(r.mismatch_pct_x100) +
+        " max_delta=" + r.max_delta.to_string())
+    true
+
+fn main():
+    val args = cli_get_args()
+    var pages: [text] = []
+    var dir = ""
+    var pair_png = ""
+    var pair_ppm = ""
+    var i = 0
+    while i < args.len():  # cpu-lane-loop-ok: one iteration per CLI argument
+        val a = args[i]
+        if a == "--pair":
+            if i + 2 < args.len():
+                pair_png = args[i + 1]
+                pair_ppm = args[i + 2]
+            i = i + 3
+        elif a.ends_with(".spl"):
+            i = i + 1
+        elif dir == "":
+            dir = a
+            i = i + 1
+        else:
+            pages = pages + [a]
+            i = i + 1
+    if pair_png != "":
+        val r = compare_pair(pair_png, pair_ppm)
+        if not _emit("pair", r):
+            print("ERROR — nothing was checked (" + r.reason + ")")
+            return
+        print("PASS — 1 page(s) compared, worst=" + _pct_text(r.mismatch_pct_x100))
+        return
+    if dir == "" or pages.len() == 0:
+        print("ERROR — nothing was checked (no pages given)")
+        return
+    var worst: i64 = 0
+    var compared = 0
+    var failed = 0
+    var j = 0
+    while j < pages.len():  # cpu-lane-loop-ok: one iteration per requested page
+        val page = pages[j]
+        # Prefer a host-converted BMP when one exists; the raw Chrome PNG
+        # otherwise.
+        val bmp = dir + "/" + page + ".chrome.bmp"
+        val reference = if file_exists(bmp): bmp else: dir + "/" + page + ".chrome.png"
+        val r = compare_pair(reference, dir + "/" + page + ".simple.ppm")
+        if _emit(page, r):
+            compared = compared + 1
+            if r.mismatch_pct_x100 > worst:
+                worst = r.mismatch_pct_x100
+        else:
+            failed = failed + 1
+        j = j + 1
+    if compared == 0:
+        print("ERROR — nothing was checked (0 pages compared)")
+    elif failed > 0:
+        print("FAIL — " + compared.to_string() + " page(s) compared, " +
+            failed.to_string() + " unreadable, worst=" + _pct_text(worst))
+    else:
+        print("PASS — " + compared.to_string() + " page(s) compared, worst=" + _pct_text(worst))

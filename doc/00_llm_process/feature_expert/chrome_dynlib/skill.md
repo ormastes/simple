@@ -53,6 +53,18 @@ unavailable on macOS -> `vulkan-angle-unavailable` (resume on Linux); zero-copy
 GPU handover deferred. Verdicts: `passed`/`failed`/`environment-blocked`/
 `could-not-complete-in-time`; Chrome availability alone is never Vulkan proof.
 
+## Pixel diff vs real Chrome (2026-09-12)
+
+`sh scripts/check/check-chrome-catalog-pixel-diff.shs [--out DIR] [--selftest]`
+drives Chrome headless + the pure-Simple web lane over
+`examples/06_io/ui/web_catalog/*.html`, prints
+`page= chrome_ms= simple_ms= mismatch_pct= max_delta=` per page and a
+`PASS/FAIL/ERROR` verdict (0 pages = ERROR; no Chrome = ERROR naming the paths).
+Differ: `src/app/ui/chrome_showcase/pixel_diff.spl` (pure Simple; PNG, BMP and
+P6 PPM). `SIMPLE_BIN=<path>` is required from a git worktree.
+Wire-in: `check-chrome-web-showcase-perf.shs --pixel-diff` (sets
+`chrome_vs_simple_pixel_diff_status=chrome-compared`).
+
 ## Update Rule
 
 Update this skill with new links, current ABI/symbol inventory, and handoff

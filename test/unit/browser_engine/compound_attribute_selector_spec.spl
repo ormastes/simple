@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Prove that a compound attribute selector ("[a][b]") requires EVERY
+bracket group to match, not just the first one.
+Audience: browser-engine maintainers.
+
+Regression for the defect that blanked 7 of the 8 shared catalog tabs: the
+matcher read only the first "[" ... "]" pair, so
+`[role="tabpanel"][hidden] { display: none }` hid the VISIBLE panel.
+See doc/08_tracking/bug/web_compound_attribute_selector_first_group_only_2026-09-12.md
+"""
+
+# @req: REQ-BROWSER-ENGINE-COMPOUND-ATTR-SELECTOR-001 — every bracket group of a compound attribute selector must match.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+# Absolute pixel oracle: the panel is a solid #ff0000 block at (0,0)-(200,100)
+# on a white body, so (50, 50) is red when the panel paints and white when a
+# rule wrongly hid it.
+val PANEL_RED: u32 = 0x00ff0000u32
+val PAGE_WHITE: u32 = 0x00ffffffu32
+
+fn px_at(html: text, x: i32, y: i32) -> u32:
+    val w = 300
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, 200, "cpu_simd")
+    pixels[y * w + x] & 0x00ffffffu32
+
+fn page(style: text, body: text) -> text:
+    "<html><head><style>" + style + "</style></head><body style=\"background:#ffffff\">" + body + "</body></html>"
+
+val PANEL = "<section role=\"tabpanel\" style=\"background:#ff0000;width:200px;height:100px\"></section>"
+val HIDE_RULE = "[role=\"tabpanel\"][hidden]\{display:none}"
+
+describe "compound attribute selector — all groups must match":
+    it "AC-1: [role=tabpanel][hidden] leaves an un-hidden panel visible":
+        expect(px_at(page(HIDE_RULE, PANEL), 50, 50)).to_equal(PANEL_RED)
+
+    it "AC-1: [role=tabpanel][hidden] still hides a panel that IS hidden":
+        val hidden_panel = "<section role=\"tabpanel\" hidden style=\"background:#ff0000;width:200px;height:100px\"></section>"
+        expect(px_at(page(HIDE_RULE, hidden_panel), 50, 50)).to_equal(PAGE_WHITE)
+
+describe "compound attribute selector — [a][b] needs both attributes":
+    it "AC-2: matches only when BOTH attributes are present":
+        val both = "<div data-a=\"1\" data-b=\"2\" style=\"width:200px;height:100px\"></div>"
+        val rule = "[data-a][data-b]\{background:#ff0000}"
+        expect(px_at(page(rule, both), 50, 50)).to_equal(PANEL_RED)
+
+    it "AC-2: does NOT match when only the first attribute is present":
+        val only_a = "<div data-a=\"1\" style=\"width:200px;height:100px\"></div>"
+        val rule = "[data-a][data-b]\{background:#ff0000}"
+        expect(px_at(page(rule, only_a), 50, 50)).to_equal(PAGE_WHITE)
