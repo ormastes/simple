@@ -22,119 +22,18 @@ bootstrap_stage3_hash_file() {
     fi
 }
 
-# Resolve a file path through any chain of symlinks to the physical file it
-# names. `readlink -f` is GNU-only (macOS/BSD readlink has no -f), so walk the
-# chain explicitly: read one link at a time, resolve a RELATIVE target against
-# the directory of the LINK (not the caller's cwd), and stop at the first
-# non-symlink. Bounded at 32 hops so a symlink cycle terminates instead of
-# spinning. The final physical path is canonicalised with the existing
-# `bootstrap_stage3_canonical_path` helper (`cd -P` + basename), which is this
-# repo's portable realpath.
-bootstrap_stage3_resolve_symlinks() {
-    bootstrap_stage3_resolve_current=$1
-    case "$bootstrap_stage3_resolve_current" in
-        /*) ;;
-        *) return 1 ;;
-    esac
-    bootstrap_stage3_resolve_hops=0
-    while [ -L "$bootstrap_stage3_resolve_current" ]; do
-        bootstrap_stage3_resolve_hops=$((bootstrap_stage3_resolve_hops + 1))
-        [ "$bootstrap_stage3_resolve_hops" -le 32 ] || return 1
-        bootstrap_stage3_resolve_target=$(
-            readlink -- "$bootstrap_stage3_resolve_current"
-        ) || return 1
-        [ -n "$bootstrap_stage3_resolve_target" ] || return 1
-        case "$bootstrap_stage3_resolve_target" in
-            /*) bootstrap_stage3_resolve_current=$bootstrap_stage3_resolve_target ;;
-            *)
-                bootstrap_stage3_resolve_dir=$(
-                    dirname -- "$bootstrap_stage3_resolve_current"
-                ) || return 1
-                bootstrap_stage3_resolve_current="$bootstrap_stage3_resolve_dir/$bootstrap_stage3_resolve_target"
-                ;;
-        esac
-    done
-    [ -f "$bootstrap_stage3_resolve_current" ] || return 1
-    bootstrap_stage3_canonical_path "$bootstrap_stage3_resolve_current"
-}
-
-# Bind ONE canonical comparator executable and pin its bytes by hash.
-#
-# The candidate may itself be a symlink -- a package-manager shim such as
-# Homebrew's /opt/homebrew/bin/cmp -> ../Cellar/diffutils/<v>/bin/cmp is
-# ALWAYS a symlink, and the old `candidate = canonical` requirement therefore
-# refused to bind on every stock macOS host with `diffutils` installed, killing
-# the bootstrap before Stage 1 (see
-# doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md).
-# The anti-alias property that check was reaching for is supplied by
-# BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256, which pins the CONTENT of the resolved
-# file: an aliased NAME cannot change which bytes run. So resolve the alias
-# instead of rejecting it, and bind the PHYSICAL target.
-#
-# Still refused, each with a stated reason on stderr (the old bare `return 2`
-# surfaced downstream as the misleading "Rust runtime authority changed during
-# private admission"):
-#   * no comparator on PATH, or the named one is absent/unresolvable;
-#   * a target that is not a regular executable file;
-#   * a script wrapper (`#!` magic) -- the trust model is a byte-hash pin of the
-#     bound file, and a wrapper's own bytes do not determine what actually runs,
-#     so hashing it would pin nothing. Refused, not receipted;
-#   * an ambient `cmp` resolving elsewhere than an explicitly pinned
-#     BOOTSTRAP_STAGE3_COMPARE_TOOL (a shadowed comparator).
-bootstrap_stage3_compare_refuse() {
-    echo "error: Stage 3 comparator refused: $1" >&2
-    return 2
-}
-
+# Bind one canonical, non-symlinked comparator executable and its hash.
 bootstrap_stage3_compare_bind() {
-    bootstrap_stage3_compare_pinned=${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}
-    bootstrap_stage3_compare_candidate=$bootstrap_stage3_compare_pinned
+    bootstrap_stage3_compare_candidate=${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}
     if [ -z "$bootstrap_stage3_compare_candidate" ]; then
-        bootstrap_stage3_compare_candidate=$(command -v cmp 2>/dev/null) || true
+        bootstrap_stage3_compare_candidate=$(command -v cmp 2>/dev/null) || return 2
     fi
-    [ -n "$bootstrap_stage3_compare_candidate" ] ||
-        bootstrap_stage3_compare_refuse "no cmp on PATH" || return 2
-    bootstrap_stage3_compare_canonical=$(bootstrap_stage3_resolve_symlinks \
-        "$bootstrap_stage3_compare_candidate") ||
-        bootstrap_stage3_compare_refuse \
-            "cannot resolve to a regular file: $bootstrap_stage3_compare_candidate" ||
-        return 2
-    [ -x "$bootstrap_stage3_compare_canonical" ] ||
-        bootstrap_stage3_compare_refuse \
-            "not executable: $bootstrap_stage3_compare_canonical" || return 2
-    bootstrap_stage3_compare_magic=""
-    read -r bootstrap_stage3_compare_magic \
-        <"$bootstrap_stage3_compare_canonical" 2>/dev/null ||
-        bootstrap_stage3_compare_magic=""
-    case "$bootstrap_stage3_compare_magic" in
-        '#!'*)
-            bootstrap_stage3_compare_refuse \
-                "script wrapper (#! magic); its own bytes do not determine what runs: $bootstrap_stage3_compare_canonical"
-            return 2
-            ;;
-    esac
-    # Shadowing is decided ONCE, here. `compare_files` must never re-resolve the
-    # ambient `cmp`: doing so made the documented BOOTSTRAP_STAGE3_COMPARE_TOOL
-    # knob useless, because every comparison re-read PATH and rejected the pin.
-    if [ -n "$bootstrap_stage3_compare_pinned" ]; then
-        bootstrap_stage3_compare_ambient=$(command -v cmp 2>/dev/null) || true
-        if [ -n "${bootstrap_stage3_compare_ambient:-}" ]; then
-            bootstrap_stage3_compare_ambient=$(bootstrap_stage3_resolve_symlinks \
-                "$bootstrap_stage3_compare_ambient") ||
-                bootstrap_stage3_compare_ambient=""
-            if [ -n "$bootstrap_stage3_compare_ambient" ] &&
-                [ "$bootstrap_stage3_compare_ambient" != \
-                    "$bootstrap_stage3_compare_canonical" ]; then
-                bootstrap_stage3_compare_refuse \
-                    "ambient cmp ${bootstrap_stage3_compare_ambient} shadows pinned ${bootstrap_stage3_compare_canonical}" ||
-                    return 2
-            fi
-        fi
-    fi
+    bootstrap_stage3_compare_canonical=$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_compare_candidate") || return 2
+    [ "$bootstrap_stage3_compare_candidate" = \
+        "$bootstrap_stage3_compare_canonical" ] || return 2
     bootstrap_stage3_compare_hash=$(bootstrap_stage3_hash_file \
-        "$bootstrap_stage3_compare_canonical") ||
-        bootstrap_stage3_compare_refuse \
-            "cannot hash: $bootstrap_stage3_compare_canonical" || return 2
+        "$bootstrap_stage3_compare_canonical") || return 2
     BOOTSTRAP_STAGE3_COMPARE_TOOL="$bootstrap_stage3_compare_canonical"
     BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256="$bootstrap_stage3_compare_hash"
     export BOOTSTRAP_STAGE3_COMPARE_TOOL \
@@ -149,11 +48,13 @@ bootstrap_stage3_compare_files() {
     [ -f "$1" ] && [ -f "$2" ] || return 2
     [ -n "${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}" ] ||
         bootstrap_stage3_compare_bind || return $?
-    # Use the BOUND path. Do not re-resolve the ambient `cmp` here: shadowing is
-    # decided once in `compare_bind`, and re-reading PATH on every comparison is
-    # what made the BOOTSTRAP_STAGE3_COMPARE_TOOL pin unusable on macOS.
-    [ -x "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
-    [ "$(bootstrap_stage3_resolve_symlinks \
+    bootstrap_stage3_compare_ambient=$(command -v cmp 2>/dev/null) ||
+        return 2
+    bootstrap_stage3_compare_ambient=$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_compare_ambient") || return 2
+    [ "$bootstrap_stage3_compare_ambient" = \
+        "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
+    [ "$(bootstrap_stage3_canonical_file \
         "$BOOTSTRAP_STAGE3_COMPARE_TOOL")" = \
         "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
     [ "$(bootstrap_stage3_hash_file \
@@ -478,32 +379,13 @@ bootstrap_stage3_args_sha256() {
 
 bootstrap_stage3_stage2_canonical_env_names() {
     [ "$#" -eq 1 ] || return 1
-    printf '%s' 'RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
-    # SIMPLE_NATIVE_INCREMENTAL is forwarded into the stage-2 child env only
-    # when the caller actually set it (see the `${SIMPLE_NATIVE_INCREMENTAL:+...}`
-    # conditional assignment in bootstrap_run_stage2_native, bootstrap-from-scratch.sh),
-    # so it must be conditional here too -- an unconditional entry would make
-    # every run with the var unset fail as "missing", and an absent entry
-    # would make every run with the var set fail as "unexpected". Same
-    # position as the actual assignment order: immediately after
-    # SIMPLE_FRONTEND_CACHE_DIR, before the platform-specific block.
-    if [ -n "${SIMPLE_NATIVE_INCREMENTAL:-}" ]; then
-        printf ' %s' 'SIMPLE_NATIVE_INCREMENTAL'
-    fi
-    # SIMPLE_DARWIN_CLANG / SIMPLE_DARWIN_LD pin the absolute, xcrun-resolved
-    # link tools so the stage-2 child never has to find them through PATH (the
-    # `darwin-link-tool-unresolved` Stage 2 sanity failure of 2026-09-12). They
-    # are emitted unconditionally on darwin triples and never elsewhere, which
-    # is exactly what `bootstrap_darwin_link_env` does in
-    # bootstrap_run_stage2_native -- it is set once, at platform detection, and
-    # is empty off darwin so the expansion contributes no arguments at all.
-    # Position matches the assignment order: after the conditional
-    # SIMPLE_NATIVE_INCREMENTAL, before the windows block.
-    case "$1" in
-        *-apple-darwin*|*-darwin*)
-            printf ' %s' 'SIMPLE_DARWIN_CLANG SIMPLE_DARWIN_LD'
-            ;;
-    esac
+    # PATH is in the allowlist because the backend resolves its LLVM tools by
+    # name at run time -- find_tool_portable runs `where llc` on Windows and
+    # `command -v` elsewhere. Under `env -i` with no PATH that lookup finds
+    # nothing, the LLVM object stage returns 'llc not found', and Stage 2
+    # sanity fails. Same reasoning as CC/CXX and INCLUDE/LIB below: a tool
+    # this stage must execute cannot be reached without it.
+    printf '%s' 'PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *windows-gnu*)
             printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR'

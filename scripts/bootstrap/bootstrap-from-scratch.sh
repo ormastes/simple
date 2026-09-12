@@ -1059,50 +1059,6 @@ if [ "${os}" = "windows" ]; then
   fi
 fi
 
-# Darwin link-tool pinning (2026-09-12).
-#
-# WHY. On macOS the pure-Simple linker wrapper resolved its link tool with
-# `/usr/bin/which <command>` and returned the empty string on any non-zero
-# exit, which the callers turn into the opaque token
-# `darwin-link-tool-unresolved`
-# (src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl). That made
-# the whole native link depend on whatever PATH the child happened to inherit
-# and on `which` behaving, and it produced no diagnostic naming what was tried.
-# Stage 2 sanity died exactly there on 2026-09-12 (run 5, see
-# doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md).
-#
-# WHAT. Resolve the canonical Xcode/CLT tools ONCE here, at admission, through
-# `xcrun --find` (the documented, PATH-independent locator), pin their absolute
-# paths into the run's provenance, and forward the paths to every child through
-# the explicit env allowlist. The compiler reads the pinned path first and then
-# never needs PATH at all. Fail closed: no xcrun, or an unresolvable clang/ld,
-# is an error HERE rather than a mystery fifteen minutes later.
-bootstrap_darwin_link_env=""
-bootstrap_darwin_clang=""
-bootstrap_darwin_ld=""
-if [ "${os}" = "macos" ] || [ "${os}" = "darwin" ]; then
-  [ -x /usr/bin/xcrun ] || {
-    echo "error: /usr/bin/xcrun is required to pin the macOS link tools" >&2
-    exit 1
-  }
-  bootstrap_darwin_clang=$(/usr/bin/xcrun --find clang 2>/dev/null) ||
-    bootstrap_darwin_clang=""
-  bootstrap_darwin_ld=$(/usr/bin/xcrun --find ld 2>/dev/null) ||
-    bootstrap_darwin_ld=""
-  if [ -z "${bootstrap_darwin_clang}" ] || [ ! -x "${bootstrap_darwin_clang}" ]; then
-    echo "error: xcrun --find clang did not resolve an executable (xcode-select --install)" >&2
-    exit 1
-  fi
-  if [ -z "${bootstrap_darwin_ld}" ] || [ ! -x "${bootstrap_darwin_ld}" ]; then
-    echo "error: xcrun --find ld did not resolve an executable (xcode-select --install)" >&2
-    exit 1
-  fi
-  bootstrap_darwin_link_env="SIMPLE_DARWIN_CLANG=${bootstrap_darwin_clang} SIMPLE_DARWIN_LD=${bootstrap_darwin_ld}"
-  SIMPLE_DARWIN_CLANG="${bootstrap_darwin_clang}"
-  SIMPLE_DARWIN_LD="${bootstrap_darwin_ld}"
-  export SIMPLE_DARWIN_CLANG SIMPLE_DARWIN_LD
-fi
-
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -1614,41 +1570,6 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
-  # The candidate-frontend admission knobs, captured for the same reason as
-  # sanity_cc above: the scrub below `unset`s every name `env` reports, and
-  # `unset` removes the VALUE, not just the export attribute. These six are
-  # read by candidate_frontend_capture_setup / candidate_frontend_bounded_probe
-  # AFTER the scrub (candidate_frontend_admission.shs:112, :237-240), so under
-  # the top-level `set -eu` an operator who EXPORTS one of them does not raise
-  # the budget -- the expansion aborts the sanity subshell outright. Leaving
-  # them unexported instead (the plain shell assignments at :1517-1523) is what
-  # made the defaults survive, which in turn made the knobs unreachable from
-  # outside: measured 2026-09-12, a Stage-2 candidate_frontend_smoke died with
-  # `hello-world-positional-build failed (raw rc=124)` because the whole-probe
-  # budget is 180s while the LINK phase alone took 273.8s at host load 47
-  # (bounded receipt: `phase=link state=succeeded elapsed_ms=299399
-  # dt_ms=273785`). Capturing restores the operator's ability to say
-  # COMPILER_BUILD_TIMEOUT_SECONDS=1200 without changing any default or any
-  # verdict. Restored UNEXPORTED below, deliberately: the scrub exists to hand
-  # the candidate a clean environment, and candidate_frontend_capture_setup
-  # exports what the probe child actually needs itself (:109-110). No SIMPLE_*
-  # name is captured here -- those are semantic inputs to the build identity
-  # and must stay scrubbed.
-  sanity_candidate_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS:-}
-  sanity_candidate_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
-  sanity_candidate_exec_timeout=${COMPILER_EXEC_TIMEOUT_SECONDS:-}
-  sanity_candidate_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS:-}
-  sanity_candidate_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-}
-  # Same reasoning as sanity_cc/sanity_cxx: this function scrubs the entire
-  # environment, so the xcrun-pinned darwin link tools resolved at admission
-  # would be gone from the smoke child -- the very child whose link failed with
-  # `darwin-link-tool-unresolved` on 2026-09-12. Extending only the stage-2
-  # BUILD child's canonical env list would have left this child exactly as
-  # blind as before.
-  sanity_darwin_clang=${SIMPLE_DARWIN_CLANG:-}
-  sanity_darwin_ld=${SIMPLE_DARWIN_LD:-}
-  sanity_sdkroot=${SDKROOT:-}
-  sanity_developer_dir=${DEVELOPER_DIR:-}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1717,44 +1638,6 @@ bootstrap_stage_sanity() (
     CXX=${sanity_cxx}
     export CXX
   fi
-  # Restore the admission knobs captured above. Unexported on purpose (see the
-  # capture comment). Every one of these names is read unconditionally further
-  # down, so a missing restore is a `set -u` abort, never a silent default --
-  # CANDIDATE_FRONTEND_ROOT is restored from sanity_repo_root rather than from
-  # its own pre-scrub value so an operator export cannot redirect the gate at
-  # a different tree than the one being bootstrapped.
-  CANDIDATE_FRONTEND_ROOT=${sanity_repo_root}
-  if [ -n "${sanity_candidate_probe_timeout}" ]; then
-    COMPILER_PROBE_TIMEOUT_SECONDS=${sanity_candidate_probe_timeout}
-  fi
-  if [ -n "${sanity_candidate_build_timeout}" ]; then
-    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_candidate_build_timeout}
-  fi
-  if [ -n "${sanity_candidate_exec_timeout}" ]; then
-    COMPILER_EXEC_TIMEOUT_SECONDS=${sanity_candidate_exec_timeout}
-  fi
-  if [ -n "${sanity_candidate_kill_grace}" ]; then
-    COMPILER_CHECK_KILL_GRACE_SECONDS=${sanity_candidate_kill_grace}
-  fi
-  if [ -n "${sanity_candidate_max_log_bytes}" ]; then
-    CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_candidate_max_log_bytes}
-  fi
-  if [ -n "${sanity_darwin_clang}" ]; then
-    SIMPLE_DARWIN_CLANG=${sanity_darwin_clang}
-    export SIMPLE_DARWIN_CLANG
-  fi
-  if [ -n "${sanity_darwin_ld}" ]; then
-    SIMPLE_DARWIN_LD=${sanity_darwin_ld}
-    export SIMPLE_DARWIN_LD
-  fi
-  if [ -n "${sanity_sdkroot}" ]; then
-    SDKROOT=${sanity_sdkroot}
-    export SDKROOT
-  fi
-  if [ -n "${sanity_developer_dir}" ]; then
-    DEVELOPER_DIR=${sanity_developer_dir}
-    export DEVELOPER_DIR
-  fi
   sanity_evidence_stem="${evidence_path:-${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/bootstrap-sanity}"
   evidence_tmp="${sanity_evidence_stem}.tmp.$$"
   frontend_log="${sanity_evidence_stem}.frontend-driver.log"
@@ -1762,30 +1645,7 @@ bootstrap_stage_sanity() (
   frontend_bootstrap0_status_path="${sanity_evidence_stem}.frontend-bootstrap-0.status.env"
   frontend_bootstrap1_log="${sanity_evidence_stem}.frontend-bootstrap-1.log"
   frontend_bootstrap1_status_path="${sanity_evidence_stem}.frontend-bootstrap-1.status.env"
-  # Make the smoke child's environment OBSERVABLE. Until 2026-09-12 the env
-  # this subshell hands the candidate was recorded nowhere -- the `*.bounded.env`
-  # files next to the evidence are bounded-process LOG metadata, not env dumps --
-  # so a link that failed for want of a tool on PATH could only be guessed at.
-  # This is the last shell before the perl launcher's `exec`, which inherits
-  # %ENV verbatim, so what is written here IS the child's effective environment.
-  # Values are printed only for the link-relevant names; everything else is
-  # recorded by NAME alone, so no secret-bearing value can leak into evidence.
-  # Fail closed: an unwritable evidence directory is an error, not a silent skip.
   bootstrap_stage2_sanity_output_preflight "${evidence_path}" || return 1
-  sanity_env_dump="${sanity_evidence_stem}.env.txt"
-  sanity_env_dump_tmp="${sanity_env_dump}.tmp.$$"
-  {
-    echo "schema=simple-bootstrap-sanity-child-env-v1"
-    for sanity_dump_name in PATH SDKROOT DEVELOPER_DIR CC CXX LD \
-      SIMPLE_DARWIN_CLANG SIMPLE_DARWIN_LD HOME TMPDIR; do
-      eval "sanity_dump_value=\${${sanity_dump_name}:-}"
-      printf '%s=%s\n' "${sanity_dump_name}" "${sanity_dump_value}"
-    done
-    echo "--- names-only ---"
-    env | sed 's/=.*//' | sort
-  } >"${sanity_env_dump_tmp}" || return 1
-  mv "${sanity_env_dump_tmp}" "${sanity_env_dump}" || return 1
-  echo "  Stage sanity: child env recorded at ${sanity_env_dump}"
   rm -f "${evidence_tmp}" "${frontend_log}" \
     "${frontend_bootstrap0_log}" "${frontend_bootstrap0_status_path}" \
     "${frontend_bootstrap1_log}" "${frontend_bootstrap1_status_path}"
@@ -2937,7 +2797,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
-      ${bootstrap_darwin_link_env} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
@@ -3014,7 +2873,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_CACHE_DIR=${stage3_cache_absolute}" \
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
-      ${bootstrap_darwin_link_env} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
@@ -3044,19 +2902,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # attempt before entering the runner so failure diagnostics cannot attribute
   # stale compiler output to this invocation.
   rm -f "${stage2_native_log}"
-  # The stage-2 child is launched with an EXPLICIT env allowlist, not the
-  # caller's environment, so anything absent from the list below is silently
-  # dropped. That is why a lane exporting SIMPLE_NATIVE_INCREMENTAL=1 and then
-  # looking for the `[native-incremental] N reused / M rebuilt` receipt in
-  # stage2-native-build.log found nothing (measured 2026-09-12): the variable
-  # never reached the process that prints it. The receipt is gated on it by
-  # `incremental_hardening_requested`
-  # (src/compiler_rust/compiler/src/pipeline/native_project/mod.rs), and that
-  # gate is DIAGNOSTIC ONLY -- the dependency-aware cache key is unconditional
-  # -- so forwarding it changes what is reported, never what is built. It is
-  # forwarded only when the caller actually set it, so the default is unchanged.
   bootstrap_run_stage2_native() {
     set -- \
+      "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
@@ -3072,8 +2920,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
-      ${SIMPLE_NATIVE_INCREMENTAL:+"SIMPLE_NATIVE_INCREMENTAL=${SIMPLE_NATIVE_INCREMENTAL}"} \
-      ${bootstrap_darwin_link_env} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
@@ -3152,26 +2998,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
-  # Do NOT collapse the comparator's two failure classes into one sentence.
-  # `bootstrap_stage3_require_equal` returns 1 for genuine content drift and 2
-  # for "comparator unavailable or an operand could not be read". On 2026-09-12
-  # (run 4) an evidence root inherited from an earlier run had its
-  # runtime-admitted.txt deleted from OUTSIDE the lane; the comparator correctly
-  # reported status=2, and this line then misattributed a MISSING OPERAND as a
-  # changed runtime authority, sending the investigation after a compiler defect
-  # that did not exist. Name the class that actually fired.
-  bootstrap_stage3_runtime_after_stage2_status=0
   bootstrap_stage3_require_equal "Rust runtime authority after Stage 2" \
     "${runtime_admitted_snapshot}" \
-    "${stage3_provenance_dir}/runtime-after-stage2.txt" ||
-    bootstrap_stage3_runtime_after_stage2_status=$?
-  if [ "${bootstrap_stage3_runtime_after_stage2_status}" -eq 1 ]; then
+    "${stage3_provenance_dir}/runtime-after-stage2.txt" || {
     echo "error: frozen runtime authority changed during Stage 2" >&2
     exit 1
-  elif [ "${bootstrap_stage3_runtime_after_stage2_status}" -ne 0 ]; then
-    echo "error: frozen runtime authority could not be COMPARED after Stage 2 (status=${bootstrap_stage3_runtime_after_stage2_status}: comparator unavailable, or an operand is missing/unreadable). This is not evidence that anything changed; the usual cause is a reused evidence output root whose provenance files were removed from outside the lane. Use a virgin output root." >&2
-    exit 1
-  fi
+  }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
@@ -3503,7 +3335,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
-    ${bootstrap_darwin_link_env} \
     ${bootstrap_windows_abi_env} \
     ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
     ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
