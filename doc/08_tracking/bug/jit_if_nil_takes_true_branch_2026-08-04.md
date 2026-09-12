@@ -1,6 +1,6 @@
 # JIT: `if nil:` takes the TRUE branch — a nil condition is truthy under Cranelift, falsy under the interpreter (2026-08-04)
 
-**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-17, still reproduces, and
+**Status:** CLOSED (2026-09-12) — not reproducible on the deployed seed; see "Re-check 2026-09-12" at the end. (Was: ARCHITECTURAL-OPEN, re-verified 2026-08-17.)
 the class is WIDER than this title says)
 **Found:** 2026-08-04
 
@@ -374,3 +374,39 @@ rather than worked around by reshuffling the spec's text.
 **Landing note:** the new spec exists only under `test/01_unit/`, with no
 `test/unit/` mirror, so `scripts/check/check-test-tree-divergence.shs` may want
 a baseline row when this lands.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+All **seven** condition forms enumerated by the 2026-08-17 widened sweep were
+re-probed in one file, on both lanes:
+
+```
+$ bin/simple run nilforms.spl
+if=F not=T and=F or=F while=0 call=F callsome=T
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run nilforms.spl
+if=F not=T and=F or=F while=0 call=F callsome=T
+```
+
+Every form is correct and the two engines agree: `nil` is falsy in condition
+position (`if nil:` -> false branch, `while nil:` -> 0 iterations, `not nil`
+-> true, `nil and true` -> false, `false or nil` -> false, a call returning a
+nil optional -> false, a call returning a present optional -> true).
+
+**Not reproducible** — status CLOSED. The pure-Simple lowering fixes recorded
+above (the `lower_cond_operand` chokepoint) plus later seed work have landed in
+the deployed binary.
+
+Regression guard: `test/01_unit/bugs/jit_nil_condition_truthiness_spec.spl`
+(7 examples, one per form).
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/jit_nil_condition_truthiness_spec.spl outcome=OK declared>=7 executed=7 passed=7 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: flipping the two statement-position assertions to the
+documented buggy values (`if nil:` takes the true branch, `while nil:` spins)
+turns the file RED —
+`outcome=ERROR declared>=7 executed=7 passed=5 failed=2 skipped=0 dropped=0`.
