@@ -5,6 +5,22 @@ fn _apply_decls_without_grid(
     st: Style, decls: text, decl_tbl: [text], em_base: i32,
     logical_writing_mode: text, apply_display: bool
 ) -> Style:
+    # Counter wrapper (level-gated, default off): `probe` time here is the WHOLE
+    # declaration-application call, of which `dispatch` time is the fast-path
+    # subset -- subtract to get the 283-property full-probe body's own cost.
+    if _wsc_armed():
+        val t0 = _wsc_now_us()
+        val applied = _apply_decls_without_grid_inner(
+            st, decls, decl_tbl, em_base, logical_writing_mode, apply_display)
+        _wsc_add_probe(_wsc_now_us() - t0)
+        return applied
+    _apply_decls_without_grid_inner(
+        st, decls, decl_tbl, em_base, logical_writing_mode, apply_display)
+
+fn _apply_decls_without_grid_inner(
+    st: Style, decls: text, decl_tbl: [text], em_base: i32,
+    logical_writing_mode: text, apply_display: bool
+) -> Style:
     if decls.len() == 0:
         return st
     # Per-rule declaration quota: a rule carrying more than the cap is dropped
@@ -16,7 +32,15 @@ fn _apply_decls_without_grid(
     # Ordering comparisons below use entry indices from `decl_tbl_last_index`,
     # which rank identically to the byte offsets `decl_last_pos` used to return.
     if _decl_tbl_all_dispatch_handled(decl_tbl):
+        if _wsc_armed():
+            val d0 = _wsc_now_us()
+            val dispatched = _apply_decls_dispatch(st, decl_tbl, em_base, apply_display)
+            _wsc_add_dispatch(_wsc_now_us() - d0)
+            return dispatched
         return _apply_decls_dispatch(st, decl_tbl, em_base, apply_display)
+    # One O(E) pass; every absent-property probe below is then O(1) instead of a
+    # backwards scan of the whole merged table. See decl_tbl_presence.
+    val decl_present = decl_tbl_presence(decl_tbl)
     var bg_v = st.bg
     var background_gradient_from_v = st.background_gradient_from
     var background_gradient_to_v = st.background_gradient_to
@@ -209,8 +233,8 @@ fn _apply_decls_without_grid(
     var object_fit_v = st.object_fit
     var object_position_v = st.object_position
     var bold_v = st.bold
-    val font_decl = decl_tbl_get(decl_tbl, "font")
-    val font_pos = decl_tbl_last_index(decl_tbl, "font")
+    val font_decl = decl_tbl_get_p(decl_tbl, decl_present, "font")
+    val font_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font")
     if font_decl.len() > 0:
         val font_raw = font_decl.trim()
         val font_norm = font_raw.lower()
@@ -237,19 +261,19 @@ fn _apply_decls_without_grid(
             val parsed_line_height = parse_line_height_value(line_part)
             if parsed_line_height != 0:
                 line_height_v = parsed_line_height
-    val font_family_decl = decl_tbl_get(decl_tbl, "font-family").trim()
-    if font_family_decl != "" and decl_tbl_last_index(decl_tbl, "font-family") > font_pos:
+    val font_family_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-family").trim()
+    if font_family_decl != "" and decl_tbl_last_index_p(decl_tbl, decl_present, "font-family") > font_pos:
         font_family_v = font_family_decl
-    val bg = decl_tbl_get(decl_tbl, "background-color")
-    val bgs = decl_tbl_get(decl_tbl, "background")
-    val bg_image = decl_tbl_get(decl_tbl, "background-image")
-    val bg_repeat = decl_tbl_get(decl_tbl, "background-repeat")
-    val bg_size = decl_tbl_get(decl_tbl, "background-size")
-    val bg_position = decl_tbl_get(decl_tbl, "background-position")
-    val bg_attachment = decl_tbl_get(decl_tbl, "background-attachment")
-    val bg_pos = decl_tbl_last_index(decl_tbl, "background-color")
-    val bgs_pos = decl_tbl_last_index(decl_tbl, "background")
-    val bg_image_pos = decl_tbl_last_index(decl_tbl, "background-image")
+    val bg = decl_tbl_get_p(decl_tbl, decl_present, "background-color")
+    val bgs = decl_tbl_get_p(decl_tbl, decl_present, "background")
+    val bg_image = decl_tbl_get_p(decl_tbl, decl_present, "background-image")
+    val bg_repeat = decl_tbl_get_p(decl_tbl, decl_present, "background-repeat")
+    val bg_size = decl_tbl_get_p(decl_tbl, decl_present, "background-size")
+    val bg_position = decl_tbl_get_p(decl_tbl, decl_present, "background-position")
+    val bg_attachment = decl_tbl_get_p(decl_tbl, decl_present, "background-attachment")
+    val bg_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-color")
+    val bgs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background")
+    val bg_image_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-image")
     if bg_pos >= 0 or bgs_pos >= 0:
         if bgs_pos > bg_pos:
             # `background` resets every background longhand before parsing its
@@ -458,12 +482,12 @@ fn _apply_decls_without_grid(
                 background_gradient_is_radial_v = false
                 background_image_uri_v = ""
                 bg_layers_raw_v = bg_image
-    val bg_repeat_pos = decl_tbl_last_index(decl_tbl, "background-repeat")
+    val bg_repeat_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-repeat")
     if bg_repeat.len() > 0 and bg_repeat_pos > bgs_pos:
         val repeat_lower = bg_repeat.trim().lower()
         if repeat_lower == "no-repeat" or repeat_lower == "repeat" or repeat_lower == "repeat-x" or repeat_lower == "repeat-y":
             background_repeat_v = repeat_lower
-    val bg_size_pos = decl_tbl_last_index(decl_tbl, "background-size")
+    val bg_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-size")
     if bg_size.len() > 0 and bg_size_pos > bgs_pos:
         val size_trimmed = bg_size.trim()
         val first_space = find_from(size_trimmed, " ", 0)
@@ -479,7 +503,7 @@ fn _apply_decls_without_grid(
                 background_size_h_px_v = sh
         else:
             background_size_h_px_v = 0
-    val bg_position_pos = decl_tbl_last_index(decl_tbl, "background-position")
+    val bg_position_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-position")
     if bg_position.len() > 0 and bg_position_pos > bgs_pos:
         val pos_trimmed = bg_position.trim()
         val first_space = find_from(pos_trimmed, " ", 0)
@@ -491,17 +515,17 @@ fn _apply_decls_without_grid(
             background_position_y_px_v = _background_position_value(second_pos, false)
         else:
             background_position_y_px_v = -1050
-    val bg_clip = decl_tbl_get(decl_tbl, "background-clip")
-    if bg_clip.len() > 0 and decl_tbl_last_index(decl_tbl, "background-clip") > bgs_pos:
+    val bg_clip = decl_tbl_get_p(decl_tbl, decl_present, "background-clip")
+    if bg_clip.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "background-clip") > bgs_pos:
         val bg_clip_norm = bg_clip.trim().lower()
         if bg_clip_norm == "border-box" or bg_clip_norm == "padding-box" or bg_clip_norm == "content-box":
             background_clip_v = bg_clip_norm
-    val bg_origin = decl_tbl_get(decl_tbl, "background-origin")
-    if bg_origin.len() > 0 and decl_tbl_last_index(decl_tbl, "background-origin") > bgs_pos:
+    val bg_origin = decl_tbl_get_p(decl_tbl, decl_present, "background-origin")
+    if bg_origin.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "background-origin") > bgs_pos:
         val bg_origin_norm = bg_origin.trim().lower()
         if bg_origin_norm == "border-box" or bg_origin_norm == "padding-box" or bg_origin_norm == "content-box":
             background_origin_v = bg_origin_norm
-    if bg_attachment.len() > 0 and decl_tbl_last_index(decl_tbl, "background-attachment") > bgs_pos:
+    if bg_attachment.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "background-attachment") > bgs_pos:
         val bg_attachment_norm = bg_attachment.trim().lower()
         if bg_attachment_norm == "scroll" or bg_attachment_norm == "fixed" or bg_attachment_norm == "local":
             background_attachment_v = bg_attachment_norm
@@ -534,13 +558,13 @@ fn _apply_decls_without_grid(
             background_gradient_angle_deg_v = 180
             background_gradient_is_radial_v = false
             bg_layers_raw_v = two_url_plan
-    val col = decl_tbl_get(decl_tbl, "color")
+    val col = decl_tbl_get_p(decl_tbl, decl_present, "color")
     if col.len() > 0:
         val cv = parse_color(col)
         if cv != 0u32:
             fg_v = cv
-    val fs = decl_tbl_get(decl_tbl, "font-size")
-    val fs_pos = decl_tbl_last_index(decl_tbl, "font-size")
+    val fs = decl_tbl_get_p(decl_tbl, decl_present, "font-size")
+    val fs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-size")
     if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
         val fsl = fs.trim().lower()
         if fsl.ends_with("rem"):
@@ -562,23 +586,23 @@ fn _apply_decls_without_grid(
             val v = parse_int(fs)
             if v > 0:
                 font_size_v = v
-    val font_size_adjust_decl = decl_tbl_get(decl_tbl, "font-size-adjust")
+    val font_size_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-size-adjust")
     if font_size_adjust_decl.len() > 0:
         val font_size_adjust_norm = font_size_adjust_decl.trim().lower()
         if font_size_adjust_norm == "none" or font_size_adjust_norm == "from-font" or parse_int(font_size_adjust_norm) >= 0:
             font_size_adjust_v = font_size_adjust_norm
-    val font_palette_decl = decl_tbl_get(decl_tbl, "font-palette")
+    val font_palette_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-palette")
     if font_palette_decl.len() > 0:
         val font_palette_norm = font_palette_decl.trim().lower()
         if font_palette_norm == "normal" or font_palette_norm == "light" or font_palette_norm == "dark":
             font_palette_v = font_palette_norm
-    val font_feature_settings_decl = decl_tbl_get(decl_tbl, "font-feature-settings")
+    val font_feature_settings_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-feature-settings")
     if font_feature_settings_decl.len() > 0:
         val font_feature_settings_norm = font_feature_settings_decl.trim().lower()
         if font_feature_settings_norm.len() > 0:
             font_feature_settings_v = font_feature_settings_norm
-    val line_height = decl_tbl_get(decl_tbl, "line-height")
-    val line_height_pos = decl_tbl_last_index(decl_tbl, "line-height")
+    val line_height = decl_tbl_get_p(decl_tbl, decl_present, "line-height")
+    val line_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "line-height")
     if line_height.len() > 0 and (font_pos < 0 or line_height_pos > font_pos):
         val parsed_line_height = parse_line_height_value(line_height)
         if parsed_line_height != 0:
@@ -593,9 +617,9 @@ fn _apply_decls_without_grid(
             writing_mode_v
     )
     val logical_inline_is_height = sizing_writing_mode != "horizontal-tb"
-    val width_raw = decl_tbl_get(decl_tbl, "width")
+    val width_raw = decl_tbl_get_p(decl_tbl, decl_present, "width")
     val width = css_math_primary(width_raw)
-    val width_pos = decl_tbl_last_index(decl_tbl, "width")
+    val width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "width")
     if width.len() > 0:
         if width.ends_with("%"):
             # Percentage width: store as a negative sentinel (resolved against the
@@ -610,16 +634,16 @@ fn _apply_decls_without_grid(
             width_v = if wv > 0: 0 - wv else: 0
         else:
             width_v = parse_int(width)
-    val height = decl_tbl_get(decl_tbl, "height")
-    val height_pos = decl_tbl_last_index(decl_tbl, "height")
+    val height = decl_tbl_get_p(decl_tbl, decl_present, "height")
+    val height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "height")
     if height.len() > 0:
         if height.ends_with("%"):
             val hp = parse_int(height)
             height_v = if hp > 0: 0 - hp else: 0
         else:
             height_v = parse_int(height)
-    val inline_size = decl_tbl_get(decl_tbl, "inline-size")
-    val inline_size_pos = decl_tbl_last_index(decl_tbl, "inline-size")
+    val inline_size = decl_tbl_get_p(decl_tbl, decl_present, "inline-size")
+    val inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inline-size")
     if inline_size.len() > 0:
         val isp = parse_int(inline_size)
         val inline_size_v = if inline_size.ends_with("%") and isp > 0: 0 - isp else: isp
@@ -627,8 +651,8 @@ fn _apply_decls_without_grid(
             height_v = inline_size_v
         elif not logical_inline_is_height and inline_size_pos > width_pos:
             width_v = inline_size_v
-    val block_size = decl_tbl_get(decl_tbl, "block-size")
-    val block_size_pos = decl_tbl_last_index(decl_tbl, "block-size")
+    val block_size = decl_tbl_get_p(decl_tbl, decl_present, "block-size")
+    val block_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "block-size")
     if block_size.len() > 0:
         val bsp = parse_int(block_size)
         val block_size_v = if block_size.ends_with("%") and bsp > 0: 0 - bsp else: bsp
@@ -636,7 +660,7 @@ fn _apply_decls_without_grid(
             width_v = block_size_v
         elif not logical_inline_is_height and block_size_pos > height_pos:
             height_v = block_size_v
-    val aspect_ratio = decl_tbl_get(decl_tbl, "aspect-ratio")
+    val aspect_ratio = decl_tbl_get_p(decl_tbl, decl_present, "aspect-ratio")
     if aspect_ratio.len() > 0:
         val ar_num = parse_aspect_ratio_numerator(aspect_ratio)
         val ar_den = parse_aspect_ratio_denominator(aspect_ratio)
@@ -645,11 +669,11 @@ fn _apply_decls_without_grid(
                 height_v = (width_v * ar_den) / ar_num
             elif height_v > 0 and width_v == 0:
                 width_v = (height_v * ar_num) / ar_den
-    val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
+    val box_sizing = decl_tbl_get_p(decl_tbl, decl_present, "box-sizing")
     if box_sizing.len() > 0:
         border_box_v = box_sizing == "border-box"
     val border_radius_shorthand = parse_border_radius_shorthand(
-        decl_tbl_get(decl_tbl, "border-radius"))
+        decl_tbl_get_p(decl_tbl, decl_present, "border-radius"))
     if border_radius_shorthand.valid:
         border_radius_px_v = border_radius_shorthand.top_left_px
     val resolved_radii = resolve_authored_border_radii(
@@ -660,12 +684,12 @@ fn _apply_decls_without_grid(
         border_radius_tr_px_v = resolved_radii.top_right_px
         border_radius_br_px_v = resolved_radii.bottom_right_px
         border_radius_bl_px_v = resolved_radii.bottom_left_px
-    val min_width = decl_tbl_get(decl_tbl, "min-width")
-    val min_width_pos = decl_tbl_last_index(decl_tbl, "min-width")
+    val min_width = decl_tbl_get_p(decl_tbl, decl_present, "min-width")
+    val min_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-width")
     if min_width.len() > 0:
         min_width_v = parse_int(min_width)
-    val max_width = decl_tbl_get(decl_tbl, "max-width")
-    val max_width_pos = decl_tbl_last_index(decl_tbl, "max-width")
+    val max_width = decl_tbl_get_p(decl_tbl, decl_present, "max-width")
+    val max_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-width")
     if max_width.len() > 0:
         max_width_v = parse_int(max_width)
     # min()/max()/clamp() on `width` desugar to the clamp slots (see
@@ -676,20 +700,20 @@ fn _apply_decls_without_grid(
         max_width_v = width_implied_max
     if width_implied_min > 0 and min_width_v <= 0:
         min_width_v = width_implied_min
-    val min_height = decl_tbl_get(decl_tbl, "min-height")
-    val min_height_pos = decl_tbl_last_index(decl_tbl, "min-height")
+    val min_height = decl_tbl_get_p(decl_tbl, decl_present, "min-height")
+    val min_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-height")
     if min_height.len() > 0:
         if min_height.contains("vh"):
             min_height_vh_v = true
         else:
             min_height_vh_v = false
             min_height_v = parse_int(min_height)
-    val max_height = decl_tbl_get(decl_tbl, "max-height")
-    val max_height_pos = decl_tbl_last_index(decl_tbl, "max-height")
+    val max_height = decl_tbl_get_p(decl_tbl, decl_present, "max-height")
+    val max_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-height")
     if max_height.len() > 0:
         max_height_v = parse_int(max_height)
-    val min_inline_size = decl_tbl_get(decl_tbl, "min-inline-size")
-    val min_inline_size_pos = decl_tbl_last_index(decl_tbl, "min-inline-size")
+    val min_inline_size = decl_tbl_get_p(decl_tbl, decl_present, "min-inline-size")
+    val min_inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-inline-size")
     if min_inline_size.len() > 0:
         if logical_inline_is_height and min_inline_size_pos > min_height_pos:
             if min_inline_size.contains("vh"):
@@ -699,15 +723,15 @@ fn _apply_decls_without_grid(
                 min_height_v = parse_int(min_inline_size)
         elif not logical_inline_is_height and min_inline_size_pos > min_width_pos:
             min_width_v = parse_int(min_inline_size)
-    val max_inline_size = decl_tbl_get(decl_tbl, "max-inline-size")
-    val max_inline_size_pos = decl_tbl_last_index(decl_tbl, "max-inline-size")
+    val max_inline_size = decl_tbl_get_p(decl_tbl, decl_present, "max-inline-size")
+    val max_inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-inline-size")
     if max_inline_size.len() > 0:
         if logical_inline_is_height and max_inline_size_pos > max_height_pos:
             max_height_v = parse_int(max_inline_size)
         elif not logical_inline_is_height and max_inline_size_pos > max_width_pos:
             max_width_v = parse_int(max_inline_size)
-    val min_block_size = decl_tbl_get(decl_tbl, "min-block-size")
-    val min_block_size_pos = decl_tbl_last_index(decl_tbl, "min-block-size")
+    val min_block_size = decl_tbl_get_p(decl_tbl, decl_present, "min-block-size")
+    val min_block_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-block-size")
     if min_block_size.len() > 0:
         if logical_inline_is_height and min_block_size_pos > min_width_pos:
             min_width_v = parse_int(min_block_size)
@@ -717,14 +741,14 @@ fn _apply_decls_without_grid(
             else:
                 min_height_vh_v = false
                 min_height_v = parse_int(min_block_size)
-    val max_block_size = decl_tbl_get(decl_tbl, "max-block-size")
-    val max_block_size_pos = decl_tbl_last_index(decl_tbl, "max-block-size")
+    val max_block_size = decl_tbl_get_p(decl_tbl, decl_present, "max-block-size")
+    val max_block_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-block-size")
     if max_block_size.len() > 0:
         if logical_inline_is_height and max_block_size_pos > max_width_pos:
             max_width_v = parse_int(max_block_size)
         elif not logical_inline_is_height and max_block_size_pos > max_height_pos:
             max_height_v = parse_int(max_block_size)
-    val flex = decl_tbl_get(decl_tbl, "flex")
+    val flex = decl_tbl_get_p(decl_tbl, decl_present, "flex")
     if flex.len() > 0:
         val flex_grow_raw = parse_nth_int(flex, 0)
         if flex_grow_raw >= 0:
@@ -735,25 +759,25 @@ fn _apply_decls_without_grid(
         val flex_basis_raw = parse_nth_int(flex, 2)
         if flex_basis_raw > 0:
             flex_basis_px_v = flex_basis_raw
-    val flex_grow_decl = decl_tbl_get(decl_tbl, "flex-grow")
+    val flex_grow_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-grow")
     if flex_grow_decl.len() > 0:
         val grow_v = parse_int(flex_grow_decl)
         if grow_v > 0:
             flex_grow_v = grow_v
-    val flex_shrink_decl = decl_tbl_get(decl_tbl, "flex-shrink")
+    val flex_shrink_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-shrink")
     if flex_shrink_decl.len() > 0:
         val shrink_v = parse_int(flex_shrink_decl)
         if shrink_v >= 0:
             flex_shrink_v = shrink_v
-    val flex_basis_decl = decl_tbl_get(decl_tbl, "flex-basis")
+    val flex_basis_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-basis")
     if flex_basis_decl.len() > 0:
         val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
         if basis_v >= 0:
             flex_basis_px_v = basis_v
-    val order_decl = decl_tbl_get(decl_tbl, "order")
+    val order_decl = decl_tbl_get_p(decl_tbl, decl_present, "order")
     if order_decl.len() > 0:
         order_v = parse_int(order_decl)
-    val float_decl = decl_tbl_get(decl_tbl, "float").trim()
+    val float_decl = decl_tbl_get_p(decl_tbl, decl_present, "float").trim()
     if float_decl.len() > 0:
         if float_decl == "left":
             float_mode_v = 1
@@ -781,24 +805,24 @@ fn _apply_decls_without_grid(
             display_v = "block"
     # list-style / list-style-type (bug browser_engine_no_list_marker_boxes_
     # 2026-08-19). Scope: only the `none` vs visible distinction is modelled.
-    val list_style_type_decl = decl_tbl_get(decl_tbl, "list-style-type").trim().lower()
-    val list_style_decl = decl_tbl_get(decl_tbl, "list-style").trim().lower()
+    val list_style_type_decl = decl_tbl_get_p(decl_tbl, decl_present, "list-style-type").trim().lower()
+    val list_style_decl = decl_tbl_get_p(decl_tbl, decl_present, "list-style").trim().lower()
     if list_style_type_decl.len() > 0:
         list_style_none_v = list_style_type_decl == "none"
     elif list_style_decl.len() > 0:
         list_style_none_v = list_style_decl.contains("none")
-    val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
+    val overflow_decl = decl_tbl_get_p(decl_tbl, decl_present, "overflow")
     if overflow_decl.len() > 0:
         overflow_hidden_v = overflow_decl == "hidden"
         overflow_auto_y_v = (
             overflow_decl == "auto" or overflow_decl == "scroll"
         )
         overflow_scroll_y_v = overflow_decl == "scroll"
-    val overflow_x_decl = decl_tbl_get(decl_tbl, "overflow-x")
+    val overflow_x_decl = decl_tbl_get_p(decl_tbl, decl_present, "overflow-x")
     if overflow_x_decl.len() > 0:
         if overflow_x_decl == "hidden":
             overflow_hidden_v = true
-    val overflow_y_decl = decl_tbl_get(decl_tbl, "overflow-y")
+    val overflow_y_decl = decl_tbl_get_p(decl_tbl, decl_present, "overflow-y")
     if overflow_y_decl.len() > 0:
         if overflow_y_decl == "hidden":
             overflow_hidden_v = true
@@ -806,12 +830,12 @@ fn _apply_decls_without_grid(
             overflow_y_decl == "auto" or overflow_y_decl == "scroll"
         )
         overflow_scroll_y_v = overflow_y_decl == "scroll"
-    val contain_decl = decl_tbl_get(decl_tbl, "contain")
+    val contain_decl = decl_tbl_get_p(decl_tbl, decl_present, "contain")
     if contain_decl.len() > 0:
         val contain_norm = contain_decl.trim().lower()
         if contain_norm.contains("paint") or contain_norm == "content" or contain_norm == "strict":
             overflow_hidden_v = true
-    val color_scheme_decl = decl_tbl_get(decl_tbl, "color-scheme")
+    val color_scheme_decl = decl_tbl_get_p(decl_tbl, decl_present, "color-scheme")
     if color_scheme_decl.len() > 0:
         val color_scheme_norm = color_scheme_decl.trim().lower()
         if color_scheme_norm.contains("dark"):
@@ -819,7 +843,7 @@ fn _apply_decls_without_grid(
                 bg_v = argb(17, 24, 39)
             if fg_v == argb(0, 0, 0):
                 fg_v = argb(248, 250, 252)
-    val scrollbar_color_decl = decl_tbl_get(decl_tbl, "scrollbar-color")
+    val scrollbar_color_decl = decl_tbl_get_p(decl_tbl, decl_present, "scrollbar-color")
     if scrollbar_color_decl.len() > 0:
         val scrollbar_color_norm = scrollbar_color_decl.trim().lower()
         if scrollbar_color_norm != "auto":
@@ -830,54 +854,54 @@ fn _apply_decls_without_grid(
                 if thumb_color != 0u32 and track_color != 0u32:
                     scrollbar_thumb_color_v = thumb_color
                     scrollbar_track_color_v = track_color
-    val text_overflow_decl = decl_tbl_get(decl_tbl, "text-overflow")
+    val text_overflow_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-overflow")
     if text_overflow_decl.len() > 0:
         val text_overflow_norm = text_overflow_decl.trim().lower()
         text_overflow_ellipsis_v = text_overflow_norm == "ellipsis"
-    val visibility_decl = decl_tbl_get(decl_tbl, "visibility")
+    val visibility_decl = decl_tbl_get_p(decl_tbl, decl_present, "visibility")
     if visibility_decl.len() > 0:
         if visibility_decl == "hidden":
             visibility_hidden_v = true
         elif visibility_decl == "visible":
             visibility_hidden_v = false
-    val content_visibility_decl = decl_tbl_get(decl_tbl, "content-visibility")
+    val content_visibility_decl = decl_tbl_get_p(decl_tbl, decl_present, "content-visibility")
     if content_visibility_decl.len() > 0:
         val content_visibility_norm = content_visibility_decl.trim().lower()
         if content_visibility_norm == "hidden":
             content_visibility_hidden_v = true
         elif content_visibility_norm == "visible" or content_visibility_norm == "auto":
             content_visibility_hidden_v = false
-    val color_adjust_decl = decl_tbl_get(decl_tbl, "color-adjust")
+    val color_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "color-adjust")
     if color_adjust_decl.len() > 0:
         val color_adjust_norm = color_adjust_decl.trim().lower()
         if color_adjust_norm == "economy" or color_adjust_norm == "exact":
             color_adjust_v = color_adjust_norm
-    val forced_color_adjust_decl = decl_tbl_get(decl_tbl, "forced-color-adjust")
+    val forced_color_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "forced-color-adjust")
     if forced_color_adjust_decl.len() > 0:
         val forced_color_adjust_norm = forced_color_adjust_decl.trim().lower()
         if forced_color_adjust_norm == "auto" or forced_color_adjust_norm == "none" or forced_color_adjust_norm == "preserve-parent-color":
             forced_color_adjust_v = forced_color_adjust_norm
-    val print_color_adjust_decl = decl_tbl_get(decl_tbl, "print-color-adjust")
+    val print_color_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "print-color-adjust")
     if print_color_adjust_decl.len() > 0:
         val print_color_adjust_norm = print_color_adjust_decl.trim().lower()
         if print_color_adjust_norm == "economy" or print_color_adjust_norm == "exact":
             print_color_adjust_v = print_color_adjust_norm
-    val orphans_decl = decl_tbl_get(decl_tbl, "orphans")
+    val orphans_decl = decl_tbl_get_p(decl_tbl, decl_present, "orphans")
     if orphans_decl.len() > 0:
         val orphans_parsed = parse_int(orphans_decl)
         if orphans_parsed > 0:
             orphans_v = orphans_parsed
-    val widows_decl = decl_tbl_get(decl_tbl, "widows")
+    val widows_decl = decl_tbl_get_p(decl_tbl, decl_present, "widows")
     if widows_decl.len() > 0:
         val widows_parsed = parse_int(widows_decl)
         if widows_parsed > 0:
             widows_v = widows_parsed
-    val will_change_decl = decl_tbl_get(decl_tbl, "will-change")
+    val will_change_decl = decl_tbl_get_p(decl_tbl, decl_present, "will-change")
     if will_change_decl.len() > 0:
         val will_change_norm = will_change_decl.trim().lower()
         if will_change_norm == "auto" or will_change_norm == "scroll-position" or will_change_norm == "contents" or will_change_norm.contains("transform") or will_change_norm.contains("opacity") or will_change_norm.contains("left") or will_change_norm.contains("top"):
             will_change_v = will_change_norm
-    val position_decl = decl_tbl_get(decl_tbl, "position")
+    val position_decl = decl_tbl_get_p(decl_tbl, decl_present, "position")
     if position_decl.len() > 0:
         if position_decl == "relative":
             position_relative_v = true
@@ -908,12 +932,12 @@ fn _apply_decls_without_grid(
             position_absolute_v = false
             position_sticky_v = false
             position_fixed_v = false
-    val left_decl = decl_tbl_get(decl_tbl, "left")
-    val left_pos = decl_tbl_last_index(decl_tbl, "left")
+    val left_decl = decl_tbl_get_p(decl_tbl, decl_present, "left")
+    val left_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "left")
     if left_decl.len() > 0:
         left_px_v = parse_int(left_decl)
-    val top_decl = decl_tbl_get(decl_tbl, "top")
-    val top_pos = decl_tbl_last_index(decl_tbl, "top")
+    val top_decl = decl_tbl_get_p(decl_tbl, decl_present, "top")
+    val top_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "top")
     if top_decl.len() > 0:
         if top_decl.trim().lower() == "auto":
             top_px_v = if position_sticky_v:
@@ -922,16 +946,16 @@ fn _apply_decls_without_grid(
                 0
         else:
             top_px_v = parse_int(top_decl)
-    val right_decl = decl_tbl_get(decl_tbl, "right")
-    val right_pos = decl_tbl_last_index(decl_tbl, "right")
+    val right_decl = decl_tbl_get_p(decl_tbl, decl_present, "right")
+    val right_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "right")
     if right_decl.len() > 0:
         right_px_v = parse_int(right_decl)
-    val bottom_decl = decl_tbl_get(decl_tbl, "bottom")
-    val bottom_pos = decl_tbl_last_index(decl_tbl, "bottom")
+    val bottom_decl = decl_tbl_get_p(decl_tbl, decl_present, "bottom")
+    val bottom_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "bottom")
     if bottom_decl.len() > 0:
         bottom_px_v = parse_int(bottom_decl)
-    val inset_decl = decl_tbl_get(decl_tbl, "inset")
-    val inset_pos = decl_tbl_last_index(decl_tbl, "inset")
+    val inset_decl = decl_tbl_get_p(decl_tbl, decl_present, "inset")
+    val inset_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset")
     if inset_decl.len() > 0:
         val inset_top = parse_nth_box_int(inset_decl, 0)
         val inset_right = parse_nth_box_int(inset_decl, 1)
@@ -947,8 +971,8 @@ fn _apply_decls_without_grid(
             bottom_px_v = inset_bottom
         if inset_pos > left_pos:
             left_px_v = inset_left
-    val inset_block = decl_tbl_get(decl_tbl, "inset-block")
-    val inset_block_pos = decl_tbl_last_index(decl_tbl, "inset-block")
+    val inset_block = decl_tbl_get_p(decl_tbl, decl_present, "inset-block")
+    val inset_block_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block")
     if inset_block.len() > 0:
         val ib0 = parse_nth_box_int(inset_block, 0)
         val ib1 = parse_nth_box_int(inset_block, 1)
@@ -958,8 +982,8 @@ fn _apply_decls_without_grid(
             )
         if inset_block_pos > bottom_pos:
             bottom_px_v = ib1
-    val inset_inline = decl_tbl_get(decl_tbl, "inset-inline")
-    val inset_inline_pos = decl_tbl_last_index(decl_tbl, "inset-inline")
+    val inset_inline = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline")
+    val inset_inline_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline")
     if inset_inline.len() > 0:
         val ii0 = parse_nth_box_int(inset_inline, 0)
         val ii1 = parse_nth_box_int(inset_inline, 1)
@@ -967,33 +991,33 @@ fn _apply_decls_without_grid(
             left_px_v = ii0
         if inset_inline_pos > right_pos:
             right_px_v = ii1
-    val inset_block_start = decl_tbl_get(decl_tbl, "inset-block-start")
-    if inset_block_start.len() > 0 and decl_tbl_last_index(decl_tbl, "inset-block-start") > top_pos:
+    val inset_block_start = decl_tbl_get_p(decl_tbl, decl_present, "inset-block-start")
+    if inset_block_start.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block-start") > top_pos:
         top_px_v = sticky_top_inset_value(
             inset_block_start, parse_int(inset_block_start),
             position_sticky_v
         )
-    val inset_block_end = decl_tbl_get(decl_tbl, "inset-block-end")
-    if inset_block_end.len() > 0 and decl_tbl_last_index(decl_tbl, "inset-block-end") > bottom_pos:
+    val inset_block_end = decl_tbl_get_p(decl_tbl, decl_present, "inset-block-end")
+    if inset_block_end.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block-end") > bottom_pos:
         bottom_px_v = parse_int(inset_block_end)
-    val inset_inline_start = decl_tbl_get(decl_tbl, "inset-inline-start")
-    if inset_inline_start.len() > 0 and decl_tbl_last_index(decl_tbl, "inset-inline-start") > left_pos:
+    val inset_inline_start = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline-start")
+    if inset_inline_start.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline-start") > left_pos:
         left_px_v = parse_int(inset_inline_start)
-    val inset_inline_end = decl_tbl_get(decl_tbl, "inset-inline-end")
-    if inset_inline_end.len() > 0 and decl_tbl_last_index(decl_tbl, "inset-inline-end") > right_pos:
+    val inset_inline_end = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline-end")
+    if inset_inline_end.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline-end") > right_pos:
         right_px_v = parse_int(inset_inline_end)
-    val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
+    val z_index_decl = decl_tbl_get_p(decl_tbl, decl_present, "z-index")
     if z_index_decl.len() > 0:
         z_index_v = parse_int(z_index_decl)
-    val opacity_decl = decl_tbl_get(decl_tbl, "opacity")
+    val opacity_decl = decl_tbl_get_p(decl_tbl, decl_present, "opacity")
     if opacity_decl.len() > 0:
         opacity_pct_v = parse_opacity_pct(opacity_decl)
-    val filter_decl = decl_tbl_get(decl_tbl, "filter")
+    val filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "filter")
     if filter_decl.len() > 0:
         val filter_opacity_pct = parse_filter_opacity_pct(filter_decl)
         if filter_opacity_pct >= 0:
             opacity_pct_v = (opacity_pct_v * filter_opacity_pct) / 100
-    val clip_decl = decl_tbl_get(decl_tbl, "clip")
+    val clip_decl = decl_tbl_get_p(decl_tbl, decl_present, "clip")
     if clip_decl.len() > 0:
         val clip_right = parse_clip_rect_value(clip_decl, 1)
         val clip_bottom = parse_clip_rect_value(clip_decl, 2)
@@ -1003,7 +1027,7 @@ fn _apply_decls_without_grid(
             width_v = clipped_w
         if clip_bottom > 0 and height_v > 0 and clip_bottom < height_v:
             height_v = clip_bottom
-    val transform_decl = decl_tbl_get(decl_tbl, "transform")
+    val transform_decl = decl_tbl_get_p(decl_tbl, decl_present, "transform")
     if transform_decl.len() > 0:
         if (
             position_sticky_v and
@@ -1032,7 +1056,7 @@ fn _apply_decls_without_grid(
                 val old_width = width_v
                 width_v = height_v
                 height_v = old_width
-    val translate_decl = decl_tbl_get(decl_tbl, "translate")
+    val translate_decl = decl_tbl_get_p(decl_tbl, decl_present, "translate")
     if translate_decl.len() > 0:
         if (
             position_sticky_v and
@@ -1050,7 +1074,7 @@ fn _apply_decls_without_grid(
                 left_px_v = left_px_v + individual_translate_x
                 top_px_v = top_px_v + individual_translate_y
                 position_relative_v = true
-    val scale_decl = decl_tbl_get(decl_tbl, "scale")
+    val scale_decl = decl_tbl_get_p(decl_tbl, decl_present, "scale")
     if scale_decl.len() > 0:
         val scale_pct = parse_scale_pct(scale_decl)
         if scale_pct != 100:
@@ -1058,39 +1082,39 @@ fn _apply_decls_without_grid(
                 width_v = (width_v * scale_pct) / 100
             if height_v > 0:
                 height_v = (height_v * scale_pct) / 100
-    val rotate_decl = decl_tbl_get(decl_tbl, "rotate")
+    val rotate_decl = decl_tbl_get_p(decl_tbl, decl_present, "rotate")
     if rotate_decl.len() > 0:
         if parse_rotate_quarter_turn(rotate_decl) and width_v > 0 and height_v > 0:
             val old_width = width_v
             width_v = height_v
             height_v = old_width
-    val transform_origin_decl = decl_tbl_get(decl_tbl, "transform-origin")
+    val transform_origin_decl = decl_tbl_get_p(decl_tbl, decl_present, "transform-origin")
     if transform_origin_decl.len() > 0:
         transform_origin_v = transform_origin_decl.trim().lower()
-    val transform_box_decl = decl_tbl_get(decl_tbl, "transform-box")
+    val transform_box_decl = decl_tbl_get_p(decl_tbl, decl_present, "transform-box")
     if transform_box_decl.len() > 0:
         val transform_box_norm = transform_box_decl.trim().lower()
         if transform_box_norm == "content-box" or transform_box_norm == "border-box" or transform_box_norm == "fill-box" or transform_box_norm == "stroke-box" or transform_box_norm == "view-box":
             transform_box_v = transform_box_norm
-    val transform_style_decl = decl_tbl_get(decl_tbl, "transform-style")
+    val transform_style_decl = decl_tbl_get_p(decl_tbl, decl_present, "transform-style")
     if transform_style_decl.len() > 0:
         val transform_style_norm = transform_style_decl.trim().lower()
         if transform_style_norm == "flat" or transform_style_norm == "preserve-3d":
             transform_style_v = transform_style_norm
-    val object_fit_decl = decl_tbl_get(decl_tbl, "object-fit")
+    val object_fit_decl = decl_tbl_get_p(decl_tbl, decl_present, "object-fit")
     if object_fit_decl.len() > 0:
         val object_fit_norm = object_fit_decl.trim().lower()
         if object_fit_norm == "fill" or object_fit_norm == "contain" or object_fit_norm == "cover" or object_fit_norm == "none" or object_fit_norm == "scale-down":
             object_fit_v = object_fit_norm
-    val image_rendering_decl = decl_tbl_get(decl_tbl, "image-rendering")
+    val image_rendering_decl = decl_tbl_get_p(decl_tbl, decl_present, "image-rendering")
     if image_rendering_decl.len() > 0:
         val image_rendering_norm = image_rendering_decl.trim().lower()
         if image_rendering_norm == "auto" or image_rendering_norm == "smooth" or image_rendering_norm == "crisp-edges" or image_rendering_norm == "pixelated":
             image_rendering_v = image_rendering_norm
-    val object_position_decl = decl_tbl_get(decl_tbl, "object-position")
+    val object_position_decl = decl_tbl_get_p(decl_tbl, decl_present, "object-position")
     if object_position_decl.len() > 0:
         object_position_v = object_position_decl.trim().lower()
-    val flex_direction_decl = decl_tbl_get(decl_tbl, "flex-direction")
+    val flex_direction_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-direction")
     if flex_direction_decl.len() > 0:
         if flex_direction_decl == "column":
             flex_direction_v = "column"
@@ -1098,11 +1122,11 @@ fn _apply_decls_without_grid(
             flex_direction_v = "row-reverse"
         else:
             flex_direction_v = "row"
-    val flex_wrap_decl = decl_tbl_get(decl_tbl, "flex-wrap")
+    val flex_wrap_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-wrap")
     if flex_wrap_decl.len() > 0:
         if flex_wrap_decl == "wrap" or flex_wrap_decl == "wrap-reverse" or flex_wrap_decl == "nowrap":
             flex_wrap_v = flex_wrap_decl
-    val flex_flow_decl = decl_tbl_get(decl_tbl, "flex-flow")
+    val flex_flow_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-flow")
     if flex_flow_decl.len() > 0:
         if css_word_contains(flex_flow_decl, "row-reverse"):
             flex_direction_v = "row-reverse"
@@ -1116,12 +1140,12 @@ fn _apply_decls_without_grid(
             flex_wrap_v = "wrap"
         elif css_word_contains(flex_flow_decl, "nowrap"):
             flex_wrap_v = "nowrap"
-    val justify_content_decl = decl_tbl_get(decl_tbl, "justify-content")
+    val justify_content_decl = decl_tbl_get_p(decl_tbl, decl_present, "justify-content")
     if justify_content_decl.len() > 0:
         val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
         if supports_content_distribution_alignment(normalized_justify_content):
             justify_content_v = normalized_justify_content
-    val place_content_decl = decl_tbl_get(decl_tbl, "place-content")
+    val place_content_decl = decl_tbl_get_p(decl_tbl, decl_present, "place-content")
     if place_content_decl.len() > 0:
         val normalized_place_content = normalize_overflow_box_alignment(place_content_decl)
         if supports_content_distribution_alignment(normalized_place_content):
@@ -1136,158 +1160,158 @@ fn _apply_decls_without_grid(
                     align_content_v = place_align
                 if supports_content_distribution_alignment(place_justify):
                     justify_content_v = place_justify
-    val ta = decl_tbl_get(decl_tbl, "text-align")
+    val ta = decl_tbl_get_p(decl_tbl, decl_present, "text-align")
     if ta.len() > 0:
         text_align_v = ta
-    val text_align_all_decl = decl_tbl_get(decl_tbl, "text-align-all")
+    val text_align_all_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-align-all")
     if text_align_all_decl.len() > 0:
         val text_align_all_norm = text_align_all_decl.trim().lower()
         if text_align_all_norm == "left" or text_align_all_norm == "right" or text_align_all_norm == "center" or text_align_all_norm == "start" or text_align_all_norm == "end" or text_align_all_norm == "justify":
             text_align_v = text_align_all_norm
-    val text_align_last_decl = decl_tbl_get(decl_tbl, "text-align-last")
+    val text_align_last_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-align-last")
     if text_align_last_decl.len() > 0:
         val text_align_last_norm = text_align_last_decl.trim().lower()
         if text_align_last_norm == "auto" or text_align_last_norm == "left" or text_align_last_norm == "right" or text_align_last_norm == "center" or text_align_last_norm == "start" or text_align_last_norm == "end":
             text_align_last_v = text_align_last_norm
-    val text_justify_decl = decl_tbl_get(decl_tbl, "text-justify")
+    val text_justify_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-justify")
     if text_justify_decl.len() > 0:
         val text_justify_norm = text_justify_decl.trim().lower()
         if text_justify_norm == "auto" or text_justify_norm == "none" or text_justify_norm == "inter-word" or text_justify_norm == "inter-character" or text_justify_norm == "distribute":
             text_justify_v = text_justify_norm
-    val text_transform_decl = decl_tbl_get(decl_tbl, "text-transform")
+    val text_transform_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-transform")
     if text_transform_decl.len() > 0:
         val text_transform_norm = text_transform_decl.trim().lower()
         if text_transform_norm == "uppercase" or text_transform_norm == "lowercase" or text_transform_norm == "capitalize" or text_transform_norm == "none":
             text_transform_v = text_transform_norm
-    val text_indent_decl = decl_tbl_get(decl_tbl, "text-indent")
+    val text_indent_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-indent")
     if text_indent_decl.len() > 0:
         text_indent_px_v = parse_int(text_indent_decl)
-    val letter_spacing_decl = decl_tbl_get(decl_tbl, "letter-spacing")
+    val letter_spacing_decl = decl_tbl_get_p(decl_tbl, decl_present, "letter-spacing")
     if letter_spacing_decl.len() > 0:
         letter_spacing_px_v = parse_int(letter_spacing_decl)
-    val word_spacing_decl = decl_tbl_get(decl_tbl, "word-spacing")
+    val word_spacing_decl = decl_tbl_get_p(decl_tbl, decl_present, "word-spacing")
     if word_spacing_decl.len() > 0:
         word_spacing_px_v = parse_int(word_spacing_decl)
-    val font_style_decl = decl_tbl_get(decl_tbl, "font-style")
-    val font_style_pos = decl_tbl_last_index(decl_tbl, "font-style")
+    val font_style_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-style")
+    val font_style_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-style")
     if font_style_decl.len() > 0 and (font_pos < 0 or font_style_pos > font_pos):
         val font_style_norm = font_style_decl.trim().lower()
         font_style_italic_v = font_style_norm == "italic" or font_style_norm == "oblique"
-    val font_kerning_decl = decl_tbl_get(decl_tbl, "font-kerning")
+    val font_kerning_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-kerning")
     if font_kerning_decl.len() > 0:
         val font_kerning_norm = font_kerning_decl.trim().lower()
         if font_kerning_norm == "auto" or font_kerning_norm == "normal" or font_kerning_norm == "none":
             font_kerning_v = font_kerning_norm
-    val font_optical_sizing_decl = decl_tbl_get(decl_tbl, "font-optical-sizing")
+    val font_optical_sizing_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-optical-sizing")
     if font_optical_sizing_decl.len() > 0:
         val font_optical_sizing_norm = font_optical_sizing_decl.trim().lower()
         if font_optical_sizing_norm == "auto" or font_optical_sizing_norm == "none":
             font_optical_sizing_v = font_optical_sizing_norm
-    val font_language_override_decl = decl_tbl_get(decl_tbl, "font-language-override")
+    val font_language_override_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-language-override")
     if font_language_override_decl.len() > 0:
         val font_language_override_norm = font_language_override_decl.trim()
         val font_language_override_lower = font_language_override_norm.lower()
         if font_language_override_lower == "normal" or font_language_override_norm.starts_with("\"") or font_language_override_norm.starts_with("'"):
             font_language_override_v = font_language_override_norm
-    val font_variation_settings_decl = decl_tbl_get(decl_tbl, "font-variation-settings")
+    val font_variation_settings_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variation-settings")
     if font_variation_settings_decl.len() > 0:
         val font_variation_settings_norm = font_variation_settings_decl.trim()
         val font_variation_settings_lower = font_variation_settings_norm.lower()
         if font_variation_settings_lower == "normal" or font_variation_settings_norm.starts_with("\"") or font_variation_settings_norm.starts_with("'"):
             font_variation_settings_v = font_variation_settings_norm
-    val font_variant_decl = decl_tbl_get(decl_tbl, "font-variant")
+    val font_variant_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant")
     if font_variant_decl.len() > 0:
         val font_variant_norm = font_variant_decl.trim().lower()
         if font_variant_norm.len() > 0:
             font_variant_v = font_variant_norm
-    val font_variant_alternates_decl = decl_tbl_get(decl_tbl, "font-variant-alternates")
+    val font_variant_alternates_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-alternates")
     if font_variant_alternates_decl.len() > 0:
         val font_variant_alternates_norm = font_variant_alternates_decl.trim().lower()
         if font_variant_alternates_norm == "normal" or font_variant_alternates_norm == "historical-forms" or font_variant_alternates_norm.contains("("):
             font_variant_alternates_v = font_variant_alternates_norm
-    val font_variant_caps_decl = decl_tbl_get(decl_tbl, "font-variant-caps")
+    val font_variant_caps_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-caps")
     if font_variant_caps_decl.len() > 0:
         val font_variant_caps_norm = font_variant_caps_decl.trim().lower()
         if font_variant_caps_norm == "normal" or font_variant_caps_norm == "small-caps" or font_variant_caps_norm == "all-small-caps" or font_variant_caps_norm == "petite-caps" or font_variant_caps_norm == "all-petite-caps" or font_variant_caps_norm == "unicase" or font_variant_caps_norm == "titling-caps":
             font_variant_caps_v = font_variant_caps_norm
-    val font_variant_east_asian_decl = decl_tbl_get(decl_tbl, "font-variant-east-asian")
+    val font_variant_east_asian_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-east-asian")
     if font_variant_east_asian_decl.len() > 0:
         val font_variant_east_asian_norm = font_variant_east_asian_decl.trim().lower()
         if font_variant_east_asian_norm == "normal" or font_variant_east_asian_norm == "ruby" or font_variant_east_asian_norm.starts_with("jis") or font_variant_east_asian_norm.contains("width") or font_variant_east_asian_norm.contains("simplified") or font_variant_east_asian_norm.contains("traditional"):
             font_variant_east_asian_v = font_variant_east_asian_norm
-    val font_variant_emoji_decl = decl_tbl_get(decl_tbl, "font-variant-emoji")
+    val font_variant_emoji_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-emoji")
     if font_variant_emoji_decl.len() > 0:
         val font_variant_emoji_norm = font_variant_emoji_decl.trim().lower()
         if font_variant_emoji_norm == "normal" or font_variant_emoji_norm == "text" or font_variant_emoji_norm == "emoji" or font_variant_emoji_norm == "unicode":
             font_variant_emoji_v = font_variant_emoji_norm
-    val font_variant_ligatures_decl = decl_tbl_get(decl_tbl, "font-variant-ligatures")
+    val font_variant_ligatures_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-ligatures")
     if font_variant_ligatures_decl.len() > 0:
         val font_variant_ligatures_norm = font_variant_ligatures_decl.trim().lower()
         if font_variant_ligatures_norm == "normal" or font_variant_ligatures_norm == "none" or font_variant_ligatures_norm.contains("ligatures"):
             font_variant_ligatures_v = font_variant_ligatures_norm
-    val font_variant_numeric_decl = decl_tbl_get(decl_tbl, "font-variant-numeric")
+    val font_variant_numeric_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-numeric")
     if font_variant_numeric_decl.len() > 0:
         val font_variant_numeric_norm = font_variant_numeric_decl.trim().lower()
         if font_variant_numeric_norm == "normal" or font_variant_numeric_norm == "ordinal" or font_variant_numeric_norm == "slashed-zero" or font_variant_numeric_norm.contains("-nums") or font_variant_numeric_norm.contains("fractions"):
             font_variant_numeric_v = font_variant_numeric_norm
-    val font_variant_position_decl = decl_tbl_get(decl_tbl, "font-variant-position")
+    val font_variant_position_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-variant-position")
     if font_variant_position_decl.len() > 0:
         val font_variant_position_norm = font_variant_position_decl.trim().lower()
         if font_variant_position_norm == "normal" or font_variant_position_norm == "sub" or font_variant_position_norm == "super":
             font_variant_position_v = font_variant_position_norm
-    val font_stretch_decl = decl_tbl_get(decl_tbl, "font-stretch")
+    val font_stretch_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-stretch")
     if font_stretch_decl.len() > 0:
         val font_stretch_norm = font_stretch_decl.trim().lower()
         if font_stretch_norm == "normal" or font_stretch_norm == "ultra-condensed" or font_stretch_norm == "extra-condensed" or font_stretch_norm == "condensed" or font_stretch_norm == "semi-condensed" or font_stretch_norm == "semi-expanded" or font_stretch_norm == "expanded" or font_stretch_norm == "extra-expanded" or font_stretch_norm == "ultra-expanded":
             font_stretch_v = font_stretch_norm
-    val font_width_decl = decl_tbl_get(decl_tbl, "font-width")
+    val font_width_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-width")
     if font_width_decl.len() > 0:
         val font_width_norm = font_width_decl.trim().lower()
         if font_width_norm == "normal" or font_width_norm == "ultra-condensed" or font_width_norm == "extra-condensed" or font_width_norm == "condensed" or font_width_norm == "semi-condensed" or font_width_norm == "semi-expanded" or font_width_norm == "expanded" or font_width_norm == "extra-expanded" or font_width_norm == "ultra-expanded":
             font_width_v = font_width_norm
-    val font_synthesis_decl = decl_tbl_get(decl_tbl, "font-synthesis")
+    val font_synthesis_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-synthesis")
     if font_synthesis_decl.len() > 0:
         val font_synthesis_norm = font_synthesis_decl.trim().lower()
         if font_synthesis_norm == "none" or font_synthesis_norm == "weight" or font_synthesis_norm == "style" or font_synthesis_norm == "small-caps" or font_synthesis_norm == "position" or font_synthesis_norm.contains(" "):
             font_synthesis_v = font_synthesis_norm
-    val font_synthesis_small_caps_decl = decl_tbl_get(decl_tbl, "font-synthesis-small-caps")
+    val font_synthesis_small_caps_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-synthesis-small-caps")
     if font_synthesis_small_caps_decl.len() > 0:
         val font_synthesis_small_caps_norm = font_synthesis_small_caps_decl.trim().lower()
         if font_synthesis_small_caps_norm == "auto" or font_synthesis_small_caps_norm == "none":
             font_synthesis_small_caps_v = font_synthesis_small_caps_norm
-    val font_synthesis_position_decl = decl_tbl_get(decl_tbl, "font-synthesis-position")
+    val font_synthesis_position_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-synthesis-position")
     if font_synthesis_position_decl.len() > 0:
         val font_synthesis_position_norm = font_synthesis_position_decl.trim().lower()
         if font_synthesis_position_norm == "auto" or font_synthesis_position_norm == "none":
             font_synthesis_position_v = font_synthesis_position_norm
-    val font_synthesis_style_decl = decl_tbl_get(decl_tbl, "font-synthesis-style")
+    val font_synthesis_style_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-synthesis-style")
     if font_synthesis_style_decl.len() > 0:
         val font_synthesis_style_norm = font_synthesis_style_decl.trim().lower()
         if font_synthesis_style_norm == "auto" or font_synthesis_style_norm == "none":
             font_synthesis_style_v = font_synthesis_style_norm
-    val font_synthesis_weight_decl = decl_tbl_get(decl_tbl, "font-synthesis-weight")
+    val font_synthesis_weight_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-synthesis-weight")
     if font_synthesis_weight_decl.len() > 0:
         val font_synthesis_weight_norm = font_synthesis_weight_decl.trim().lower()
         if font_synthesis_weight_norm == "auto" or font_synthesis_weight_norm == "none":
             font_synthesis_weight_v = font_synthesis_weight_norm
-    val direction_decl = decl_tbl_get(decl_tbl, "direction")
+    val direction_decl = decl_tbl_get_p(decl_tbl, decl_present, "direction")
     if direction_decl.len() > 0:
         val direction_norm = direction_decl.trim().lower()
         if direction_norm == "rtl":
             direction_rtl_v = true
         elif direction_norm == "ltr":
             direction_rtl_v = false
-    val text_orientation_decl = decl_tbl_get(decl_tbl, "text-orientation")
+    val text_orientation_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-orientation")
     if text_orientation_decl.len() > 0:
         val text_orientation_norm = text_orientation_decl.trim().lower()
         if text_orientation_norm == "mixed" or text_orientation_norm == "upright" or text_orientation_norm == "sideways":
             text_orientation_v = text_orientation_norm
-    val text_combine_upright_decl = decl_tbl_get(decl_tbl, "text-combine-upright")
+    val text_combine_upright_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-combine-upright")
     if text_combine_upright_decl.len() > 0:
         val text_combine_upright_norm = text_combine_upright_decl.trim().lower()
         if text_combine_upright_norm == "none" or text_combine_upright_norm == "all" or text_combine_upright_norm.starts_with("digits"):
             text_combine_upright_v = text_combine_upright_norm
-    val text_shadow_decl = decl_tbl_get(decl_tbl, "text-shadow")
+    val text_shadow_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-shadow")
     if text_shadow_decl.len() > 0:
         val text_shadow_norm = text_shadow_decl.trim().lower()
         if text_shadow_norm == "none":
@@ -1302,7 +1326,7 @@ fn _apply_decls_without_grid(
                 text_shadow_x_px_v = shadow_x
                 text_shadow_y_px_v = shadow_y
                 text_shadow_color_v = if shadow_color != 0u32: shadow_color else: st.fg
-    val text_decoration_decl = decl_tbl_get(decl_tbl, "text-decoration")
+    val text_decoration_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration")
     if text_decoration_decl.len() > 0:
         val text_decoration_norm = text_decoration_decl.trim().lower()
         if text_decoration_norm == "none":
@@ -1321,7 +1345,7 @@ fn _apply_decls_without_grid(
             val text_decoration_decl_color = parse_color_any(text_decoration_norm)
             if text_decoration_decl_color != 0u32:
                 text_decoration_color_v = text_decoration_decl_color
-    val text_decoration_line = decl_tbl_get(decl_tbl, "text-decoration-line")
+    val text_decoration_line = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration-line")
     if text_decoration_line.len() > 0:
         val text_decoration_line_norm = text_decoration_line.trim().lower()
         if text_decoration_line_norm == "none":
@@ -1335,17 +1359,17 @@ fn _apply_decls_without_grid(
                 text_decoration_overline_v = true
             if text_decoration_line_norm.contains("line-through"):
                 text_decoration_line_through_v = true
-    val text_decoration_color = decl_tbl_get(decl_tbl, "text-decoration-color")
+    val text_decoration_color = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration-color")
     if text_decoration_color.len() > 0:
         val text_decoration_color_parsed = parse_color_any(text_decoration_color)
         if text_decoration_color_parsed != 0u32:
             text_decoration_color_v = text_decoration_color_parsed
-    val text_decoration_style = decl_tbl_get(decl_tbl, "text-decoration-style")
+    val text_decoration_style = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration-style")
     if text_decoration_style.len() > 0:
         val text_decoration_style_norm = text_decoration_style.trim().lower()
         if text_decoration_style_norm == "solid" or text_decoration_style_norm == "double" or text_decoration_style_norm == "dashed" or text_decoration_style_norm == "dotted" or text_decoration_style_norm == "wavy":
             text_decoration_style_v = text_decoration_style_norm
-    val text_decoration_thickness = decl_tbl_get(decl_tbl, "text-decoration-thickness")
+    val text_decoration_thickness = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration-thickness")
     if text_decoration_thickness.len() > 0:
         val text_decoration_thickness_norm = text_decoration_thickness.trim().lower()
         if text_decoration_thickness_norm == "auto" or text_decoration_thickness_norm == "from-font":
@@ -1354,69 +1378,69 @@ fn _apply_decls_without_grid(
             val parsed_thickness = parse_int(text_decoration_thickness_norm)
             if parsed_thickness > 0:
                 text_decoration_thickness_px_v = parsed_thickness
-    val text_underline_offset = decl_tbl_get(decl_tbl, "text-underline-offset")
+    val text_underline_offset = decl_tbl_get_p(decl_tbl, decl_present, "text-underline-offset")
     if text_underline_offset.len() > 0:
         val text_underline_offset_norm = text_underline_offset.trim().lower()
         if text_underline_offset_norm == "auto":
             text_underline_offset_px_v = 0
         else:
             text_underline_offset_px_v = parse_int(text_underline_offset_norm)
-    val text_underline_position = decl_tbl_get(decl_tbl, "text-underline-position")
+    val text_underline_position = decl_tbl_get_p(decl_tbl, decl_present, "text-underline-position")
     if text_underline_position.len() > 0:
         val text_underline_position_norm = text_underline_position.trim().lower()
         if text_underline_position_norm == "auto" or text_underline_position_norm == "under" or text_underline_position_norm == "left" or text_underline_position_norm == "right":
             text_underline_position_v = text_underline_position_norm
-    val white_space = decl_tbl_get(decl_tbl, "white-space")
+    val white_space = decl_tbl_get_p(decl_tbl, decl_present, "white-space")
     if white_space.len() > 0:
         white_space_nowrap_v = white_space == "nowrap" or white_space == "pre"
-    val overflow_wrap_decl = decl_tbl_get(decl_tbl, "overflow-wrap")
+    val overflow_wrap_decl = decl_tbl_get_p(decl_tbl, decl_present, "overflow-wrap")
     if overflow_wrap_decl.len() > 0:
         val overflow_wrap_norm = overflow_wrap_decl.trim().lower()
         if overflow_wrap_norm == "normal" or overflow_wrap_norm == "break-word" or overflow_wrap_norm == "anywhere":
             overflow_wrap_v = overflow_wrap_norm
-    val word_wrap_decl = decl_tbl_get(decl_tbl, "word-wrap")
+    val word_wrap_decl = decl_tbl_get_p(decl_tbl, decl_present, "word-wrap")
     if word_wrap_decl.len() > 0:
         val word_wrap_norm = word_wrap_decl.trim().lower()
         if word_wrap_norm == "normal" or word_wrap_norm == "break-word" or word_wrap_norm == "anywhere":
             overflow_wrap_v = word_wrap_norm
-    val line_break_decl = decl_tbl_get(decl_tbl, "line-break")
+    val line_break_decl = decl_tbl_get_p(decl_tbl, decl_present, "line-break")
     if line_break_decl.len() > 0:
         val line_break_norm = line_break_decl.trim().lower()
         if line_break_norm == "auto" or line_break_norm == "loose" or line_break_norm == "normal" or line_break_norm == "strict" or line_break_norm == "anywhere":
             line_break_v = line_break_norm
-    val hyphens_decl = decl_tbl_get(decl_tbl, "hyphens")
+    val hyphens_decl = decl_tbl_get_p(decl_tbl, decl_present, "hyphens")
     if hyphens_decl.len() > 0:
         val hyphens_norm = hyphens_decl.trim().lower()
         if hyphens_norm == "none" or hyphens_norm == "manual" or hyphens_norm == "auto":
             hyphens_v = hyphens_norm
-    val word_break_decl = decl_tbl_get(decl_tbl, "word-break")
+    val word_break_decl = decl_tbl_get_p(decl_tbl, decl_present, "word-break")
     if word_break_decl.len() > 0:
         val word_break_norm = word_break_decl.trim().lower()
         if word_break_norm == "normal" or word_break_norm == "break-all" or word_break_norm == "keep-all" or word_break_norm == "break-word":
             word_break_v = word_break_norm
-    val cursor_decl = decl_tbl_get(decl_tbl, "cursor")
+    val cursor_decl = decl_tbl_get_p(decl_tbl, decl_present, "cursor")
     if cursor_decl.len() > 0:
         val cursor_norm = cursor_decl.trim().lower()
         if cursor_norm.len() > 0:
             cursor_v = cursor_norm
-    val resize_decl = decl_tbl_get(decl_tbl, "resize")
+    val resize_decl = decl_tbl_get_p(decl_tbl, decl_present, "resize")
     if resize_decl.len() > 0:
         val resize_norm = resize_decl.trim().lower()
         if resize_norm == "none" or resize_norm == "both" or resize_norm == "horizontal" or resize_norm == "vertical" or resize_norm == "block" or resize_norm == "inline":
             resize_v = resize_norm
-    val table_layout_decl = decl_tbl_get(decl_tbl, "table-layout")
+    val table_layout_decl = decl_tbl_get_p(decl_tbl, decl_present, "table-layout")
     if table_layout_decl.len() > 0:
         val table_layout_norm = table_layout_decl.trim().lower()
         if table_layout_norm == "auto" or table_layout_norm == "fixed":
             table_layout_v = table_layout_norm
-    val border_collapse_decl = decl_tbl_get(decl_tbl, "border-collapse")
+    val border_collapse_decl = decl_tbl_get_p(decl_tbl, decl_present, "border-collapse")
     if border_collapse_decl.len() > 0:
         val border_collapse_norm = border_collapse_decl.trim().lower()
         if border_collapse_norm == "collapse" or border_collapse_norm == "separate":
             border_collapse_v = border_collapse_norm
         elif border_collapse_norm == "initial":
             border_collapse_v = "separate"
-    val border_spacing_decl = decl_tbl_get(decl_tbl, "border-spacing")
+    val border_spacing_decl = decl_tbl_get_p(decl_tbl, decl_present, "border-spacing")
     if border_spacing_decl.len() > 0:
         val border_spacing_norm = border_spacing_decl.trim().lower()
         if border_spacing_norm == "initial":
@@ -1443,19 +1467,19 @@ fn _apply_decls_without_grid(
                 if spacing_x >= 0 and spacing_y >= 0:
                     border_spacing_x_px_v = spacing_x
                     border_spacing_y_px_v = spacing_y
-    val caption_side_decl = decl_tbl_get(decl_tbl, "caption-side")
+    val caption_side_decl = decl_tbl_get_p(decl_tbl, decl_present, "caption-side")
     if caption_side_decl.len() > 0:
         val caption_side_norm = caption_side_decl.trim().lower()
         if caption_side_norm == "top" or caption_side_norm == "bottom":
             caption_side_v = caption_side_norm
         elif caption_side_norm == "initial":
             caption_side_v = "top"
-    val vertical_align_decl = decl_tbl_get(decl_tbl, "vertical-align")
+    val vertical_align_decl = decl_tbl_get_p(decl_tbl, decl_present, "vertical-align")
     if vertical_align_decl.len() > 0:
         val vertical_align_norm = vertical_align_decl.trim().lower()
         if vertical_align_norm == "baseline" or vertical_align_norm == "sub" or vertical_align_norm == "super" or vertical_align_norm == "top" or vertical_align_norm == "text-top" or vertical_align_norm == "middle" or vertical_align_norm == "bottom" or vertical_align_norm == "text-bottom":
             vertical_align_v = vertical_align_norm
-    val caret_color_decl = decl_tbl_get(decl_tbl, "caret-color")
+    val caret_color_decl = decl_tbl_get_p(decl_tbl, decl_present, "caret-color")
     if caret_color_decl.len() > 0:
         val caret_color_norm = caret_color_decl.trim().lower()
         if caret_color_norm == "auto" or caret_color_norm == "currentcolor":
@@ -1464,7 +1488,7 @@ fn _apply_decls_without_grid(
             val caret_color_parsed = parse_color_any(caret_color_norm)
             if caret_color_parsed != 0u32:
                 caret_color_v = caret_color_parsed
-    val accent_color_decl = decl_tbl_get(decl_tbl, "accent-color")
+    val accent_color_decl = decl_tbl_get_p(decl_tbl, decl_present, "accent-color")
     if accent_color_decl.len() > 0:
         val accent_color_norm = accent_color_decl.trim().lower()
         if accent_color_norm == "auto":
@@ -1473,12 +1497,12 @@ fn _apply_decls_without_grid(
             val accent_color_parsed = parse_color_any(accent_color_norm)
             if accent_color_parsed != 0u32:
                 accent_color_v = accent_color_parsed
-    val tab_size_decl = decl_tbl_get(decl_tbl, "tab-size")
+    val tab_size_decl = decl_tbl_get_p(decl_tbl, decl_present, "tab-size")
     if tab_size_decl.len() > 0:
         val tab_size_parsed = parse_int(tab_size_decl)
         if tab_size_parsed > 0:
             tab_size_v = tab_size_parsed
-    val unicode_bidi_decl = decl_tbl_get(decl_tbl, "unicode-bidi")
+    val unicode_bidi_decl = decl_tbl_get_p(decl_tbl, decl_present, "unicode-bidi")
     if unicode_bidi_decl.len() > 0:
         val unicode_bidi_norm = unicode_bidi_decl.trim().lower()
         if unicode_bidi_norm == "normal" or unicode_bidi_norm == "embed" or unicode_bidi_norm == "bidi-override" or unicode_bidi_norm == "isolate" or unicode_bidi_norm == "isolate-override" or unicode_bidi_norm == "plaintext":
@@ -1630,31 +1654,31 @@ fn _apply_decls_without_grid(
         ) > animation_pos
     ):
         animation_play_state_v = parse_animation_play_state(animation_play_state_decl)
-    val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
+    val align_items_decl = decl_tbl_get_p(decl_tbl, decl_present, "align-items")
     if align_items_decl.len() > 0:
         align_items_v = align_items_decl
-    val place_items_decl = decl_tbl_get(decl_tbl, "place-items")
+    val place_items_decl = decl_tbl_get_p(decl_tbl, decl_present, "place-items")
     if place_items_decl.len() > 0:
         val normalized_place_items = normalize_overflow_box_alignment(place_items_decl)
         val place_items_parts = normalized_place_items.split(" ")
         if place_items_parts.len() > 0:
             align_items_v = place_items_parts[0]
-    val align_self_decl = decl_tbl_get(decl_tbl, "align-self")
+    val align_self_decl = decl_tbl_get_p(decl_tbl, decl_present, "align-self")
     if align_self_decl.len() > 0:
         align_self_v = align_self_decl
-    val place_self_decl = decl_tbl_get(decl_tbl, "place-self")
+    val place_self_decl = decl_tbl_get_p(decl_tbl, decl_present, "place-self")
     if place_self_decl.len() > 0:
         val normalized_place_self = normalize_overflow_box_alignment(place_self_decl)
         val place_self_parts = normalized_place_self.split(" ")
         if place_self_parts.len() > 0:
             align_self_v = place_self_parts[0]
-    val align_content_decl = decl_tbl_get(decl_tbl, "align-content")
+    val align_content_decl = decl_tbl_get_p(decl_tbl, decl_present, "align-content")
     if align_content_decl.len() > 0:
         val normalized_align_content = normalize_overflow_box_alignment(align_content_decl)
         if supports_align_content_alignment(normalized_align_content):
             align_content_v = normalized_align_content
-    val fw = decl_tbl_get(decl_tbl, "font-weight")
-    val fw_pos = decl_tbl_last_index(decl_tbl, "font-weight")
+    val fw = decl_tbl_get_p(decl_tbl, decl_present, "font-weight")
+    val fw_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-weight")
     if fw.len() > 0 and (font_pos < 0 or fw_pos > font_pos):
         if fw == "normal" or fw == "400":
             bold_v = false
@@ -1681,17 +1705,17 @@ fn _apply_decls_without_grid(
             gap_v = gv
             row_gap_v = gv
             column_gap_v = gv
-    val row_gap = decl_tbl_get(decl_tbl, "row-gap")
+    val row_gap = decl_tbl_get_p(decl_tbl, decl_present, "row-gap")
     if row_gap.len() > 0:
         val rgv = parse_int(row_gap)
         if rgv >= 0:
             row_gap_v = rgv
-    val column_gap = decl_tbl_get(decl_tbl, "column-gap")
+    val column_gap = decl_tbl_get_p(decl_tbl, decl_present, "column-gap")
     if column_gap.len() > 0:
         val cgv = parse_int(column_gap)
         if cgv >= 0:
             column_gap_v = cgv
-    val border = decl_tbl_get(decl_tbl, "border")
+    val border = decl_tbl_get_p(decl_tbl, decl_present, "border")
     if border.len() > 0:
         val style = css_border_style_token(border)
         if style != "":
@@ -1717,7 +1741,7 @@ fn _apply_decls_without_grid(
             border_t_v = 0
             border_r_v = 0
             border_b_v = 0
-    val border_width = decl_tbl_get(decl_tbl, "border-width")
+    val border_width = decl_tbl_get_p(decl_tbl, decl_present, "border-width")
     if border_width.len() > 0:
         val bw0 = parse_nth_int(border_width, 0)
         val bw1 = parse_nth_int(border_width, 1)
@@ -1736,7 +1760,7 @@ fn _apply_decls_without_grid(
                 border_b_v = bw2
             if bw3 >= 0:
                 border_l_v = bw3
-    val border_color = decl_tbl_get(decl_tbl, "border-color")
+    val border_color = decl_tbl_get_p(decl_tbl, decl_present, "border-color")
     if border_color.len() > 0:
         val bcv = parse_color_any(border_color)
         if bcv != 0u32:
@@ -1745,7 +1769,7 @@ fn _apply_decls_without_grid(
             border_color_t_v = bcv
             border_color_r_v = bcv
             border_color_b_v = bcv
-    val border_left = decl_tbl_get(decl_tbl, "border-left")
+    val border_left = decl_tbl_get_p(decl_tbl, decl_present, "border-left")
     if border_left.len() > 0:
         val style = css_border_style_token(border_left)
         if style != "":
@@ -1756,7 +1780,7 @@ fn _apply_decls_without_grid(
         val blc = parse_color_any(border_left)
         if blc != 0u32:
             border_color_l_v = blc
-    val border_top = decl_tbl_get(decl_tbl, "border-top")
+    val border_top = decl_tbl_get_p(decl_tbl, decl_present, "border-top")
     if border_top.len() > 0:
         val btw = parse_int(border_top)
         if btw >= 0:
@@ -1764,7 +1788,7 @@ fn _apply_decls_without_grid(
         val btc = parse_color_any(border_top)
         if btc != 0u32:
             border_color_t_v = btc
-    val border_right = decl_tbl_get(decl_tbl, "border-right")
+    val border_right = decl_tbl_get_p(decl_tbl, decl_present, "border-right")
     if border_right.len() > 0:
         val style = css_border_style_token(border_right)
         if style != "":
@@ -1775,7 +1799,7 @@ fn _apply_decls_without_grid(
         val brc = parse_color_any(border_right)
         if brc != 0u32:
             border_color_r_v = brc
-    val border_bottom = decl_tbl_get(decl_tbl, "border-bottom")
+    val border_bottom = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom")
     if border_bottom.len() > 0:
         val bbw = parse_int(border_bottom)
         if bbw >= 0:
@@ -1783,7 +1807,7 @@ fn _apply_decls_without_grid(
         val bbc = parse_color_any(border_bottom)
         if bbc != 0u32:
             border_color_b_v = bbc
-    val border_block = decl_tbl_get(decl_tbl, "border-block")
+    val border_block = decl_tbl_get_p(decl_tbl, decl_present, "border-block")
     if border_block.len() > 0:
         val bbw = parse_int(border_block)
         if bbw >= 0:
@@ -1796,7 +1820,7 @@ fn _apply_decls_without_grid(
         if border_style_disables_paint(border_block):
             border_t_v = 0
             border_b_v = 0
-    val border_block_start = decl_tbl_get(decl_tbl, "border-block-start")
+    val border_block_start = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start")
     if border_block_start.len() > 0:
         val bbsw = parse_int(border_block_start)
         if bbsw >= 0:
@@ -1806,7 +1830,7 @@ fn _apply_decls_without_grid(
             border_color_t_v = bbsc
         if border_style_disables_paint(border_block_start):
             border_t_v = 0
-    val border_block_end = decl_tbl_get(decl_tbl, "border-block-end")
+    val border_block_end = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end")
     if border_block_end.len() > 0:
         val bbew = parse_int(border_block_end)
         if bbew >= 0:
@@ -1816,7 +1840,7 @@ fn _apply_decls_without_grid(
             border_color_b_v = bbec
         if border_style_disables_paint(border_block_end):
             border_b_v = 0
-    val border_inline = decl_tbl_get(decl_tbl, "border-inline")
+    val border_inline = decl_tbl_get_p(decl_tbl, decl_present, "border-inline")
     if border_inline.len() > 0:
         val style = css_border_style_token(border_inline)
         if style != "":
@@ -1833,7 +1857,7 @@ fn _apply_decls_without_grid(
         if border_style_disables_paint(border_inline):
             border_l_v = 0
             border_r_v = 0
-    val border_inline_start = decl_tbl_get(decl_tbl, "border-inline-start")
+    val border_inline_start = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start")
     if border_inline_start.len() > 0:
         val style = css_border_style_token(border_inline_start)
         if style != "":
@@ -1846,7 +1870,7 @@ fn _apply_decls_without_grid(
             border_color_l_v = bisc
         if border_style_disables_paint(border_inline_start):
             border_l_v = 0
-    val border_inline_end = decl_tbl_get(decl_tbl, "border-inline-end")
+    val border_inline_end = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end")
     if border_inline_end.len() > 0:
         val style = css_border_style_token(border_inline_end)
         if style != "":
@@ -1859,95 +1883,95 @@ fn _apply_decls_without_grid(
             border_color_r_v = biec
         if border_style_disables_paint(border_inline_end):
             border_r_v = 0
-    val border_left_width = decl_tbl_get(decl_tbl, "border-left-width")
+    val border_left_width = decl_tbl_get_p(decl_tbl, decl_present, "border-left-width")
     if border_left_width.len() > 0:
         border_l_v = parse_int(border_left_width)
-    val border_top_width = decl_tbl_get(decl_tbl, "border-top-width")
+    val border_top_width = decl_tbl_get_p(decl_tbl, decl_present, "border-top-width")
     if border_top_width.len() > 0:
         border_t_v = parse_int(border_top_width)
-    val border_right_width = decl_tbl_get(decl_tbl, "border-right-width")
+    val border_right_width = decl_tbl_get_p(decl_tbl, decl_present, "border-right-width")
     if border_right_width.len() > 0:
         border_r_v = parse_int(border_right_width)
-    val border_bottom_width = decl_tbl_get(decl_tbl, "border-bottom-width")
+    val border_bottom_width = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-width")
     if border_bottom_width.len() > 0:
         border_b_v = parse_int(border_bottom_width)
-    val border_left_color = decl_tbl_get(decl_tbl, "border-left-color")
+    val border_left_color = decl_tbl_get_p(decl_tbl, decl_present, "border-left-color")
     if border_left_color.len() > 0:
         val blcv = parse_color_any(border_left_color)
         if blcv != 0u32:
             border_color_l_v = blcv
-    val border_top_color = decl_tbl_get(decl_tbl, "border-top-color")
+    val border_top_color = decl_tbl_get_p(decl_tbl, decl_present, "border-top-color")
     if border_top_color.len() > 0:
         val btcv = parse_color_any(border_top_color)
         if btcv != 0u32:
             border_color_t_v = btcv
-    val border_right_color = decl_tbl_get(decl_tbl, "border-right-color")
+    val border_right_color = decl_tbl_get_p(decl_tbl, decl_present, "border-right-color")
     if border_right_color.len() > 0:
         val brcv = parse_color_any(border_right_color)
         if brcv != 0u32:
             border_color_r_v = brcv
-    val border_bottom_color = decl_tbl_get(decl_tbl, "border-bottom-color")
+    val border_bottom_color = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-color")
     if border_bottom_color.len() > 0:
         val bbcv = parse_color_any(border_bottom_color)
         if bbcv != 0u32:
             border_color_b_v = bbcv
-    val border_block_width = decl_tbl_get(decl_tbl, "border-block-width")
+    val border_block_width = decl_tbl_get_p(decl_tbl, decl_present, "border-block-width")
     if border_block_width.len() > 0:
         val bbw0 = parse_nth_box_int(border_block_width, 0)
         val bbw1 = parse_nth_box_int(border_block_width, 1)
         border_t_v = bbw0
         border_b_v = bbw1
-    val border_block_start_width = decl_tbl_get(decl_tbl, "border-block-start-width")
+    val border_block_start_width = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-width")
     if border_block_start_width.len() > 0:
         border_t_v = parse_int(border_block_start_width)
-    val border_block_end_width = decl_tbl_get(decl_tbl, "border-block-end-width")
+    val border_block_end_width = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-width")
     if border_block_end_width.len() > 0:
         border_b_v = parse_int(border_block_end_width)
-    val border_inline_width = decl_tbl_get(decl_tbl, "border-inline-width")
+    val border_inline_width = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-width")
     if border_inline_width.len() > 0:
         val biw0 = parse_nth_box_int(border_inline_width, 0)
         val biw1 = parse_nth_box_int(border_inline_width, 1)
         border_l_v = biw0
         border_r_v = biw1
-    val border_inline_start_width = decl_tbl_get(decl_tbl, "border-inline-start-width")
+    val border_inline_start_width = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start-width")
     if border_inline_start_width.len() > 0:
         border_l_v = parse_int(border_inline_start_width)
-    val border_inline_end_width = decl_tbl_get(decl_tbl, "border-inline-end-width")
+    val border_inline_end_width = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end-width")
     if border_inline_end_width.len() > 0:
         border_r_v = parse_int(border_inline_end_width)
-    val border_block_color = decl_tbl_get(decl_tbl, "border-block-color")
+    val border_block_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-color")
     if border_block_color.len() > 0:
         val bbcv = parse_color_any(border_block_color)
         if bbcv != 0u32:
             border_color_t_v = bbcv
             border_color_b_v = bbcv
-    val border_block_start_color = decl_tbl_get(decl_tbl, "border-block-start-color")
+    val border_block_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-color")
     if border_block_start_color.len() > 0:
         val bbscv = parse_color_any(border_block_start_color)
         if bbscv != 0u32:
             border_color_t_v = bbscv
-    val border_block_end_color = decl_tbl_get(decl_tbl, "border-block-end-color")
+    val border_block_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-color")
     if border_block_end_color.len() > 0:
         val bbecv = parse_color_any(border_block_end_color)
         if bbecv != 0u32:
             border_color_b_v = bbecv
-    val border_inline_color = decl_tbl_get(decl_tbl, "border-inline-color")
+    val border_inline_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-color")
     if border_inline_color.len() > 0:
         val bicv = parse_color_any(border_inline_color)
         if bicv != 0u32:
             border_color_l_v = bicv
             border_color_r_v = bicv
-    val border_inline_start_color = decl_tbl_get(decl_tbl, "border-inline-start-color")
+    val border_inline_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start-color")
     if border_inline_start_color.len() > 0:
         val biscv = parse_color_any(border_inline_start_color)
         if biscv != 0u32:
             border_color_l_v = biscv
-    val border_inline_end_color = decl_tbl_get(decl_tbl, "border-inline-end-color")
+    val border_inline_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end-color")
     if border_inline_end_color.len() > 0:
         val biecv = parse_color_any(border_inline_end_color)
         if biecv != 0u32:
             border_color_r_v = biecv
-    val border_style = decl_tbl_get(decl_tbl, "border-style")
+    val border_style = decl_tbl_get_p(decl_tbl, decl_present, "border-style")
     if border_style.len() > 0:
         val left_style = css_border_style_side(border_style, 3)
         val right_style = css_border_style_side(border_style, 1)
@@ -1961,37 +1985,37 @@ fn _apply_decls_without_grid(
             border_t_v = 0
             border_r_v = 0
             border_b_v = 0
-    val border_left_style = decl_tbl_get(decl_tbl, "border-left-style")
+    val border_left_style = decl_tbl_get_p(decl_tbl, decl_present, "border-left-style")
     if border_left_style.len() > 0:
         val style = css_border_style_token(border_left_style)
         if style != "":
             border_style_l_v = style
         if border_style_disables_paint(border_left_style):
             border_l_v = 0
-    val border_top_style = decl_tbl_get(decl_tbl, "border-top-style")
+    val border_top_style = decl_tbl_get_p(decl_tbl, decl_present, "border-top-style")
     if border_top_style.len() > 0 and border_style_disables_paint(border_top_style):
         border_t_v = 0
-    val border_right_style = decl_tbl_get(decl_tbl, "border-right-style")
+    val border_right_style = decl_tbl_get_p(decl_tbl, decl_present, "border-right-style")
     if border_right_style.len() > 0:
         val style = css_border_style_token(border_right_style)
         if style != "":
             border_style_r_v = style
         if border_style_disables_paint(border_right_style):
             border_r_v = 0
-    val border_bottom_style = decl_tbl_get(decl_tbl, "border-bottom-style")
+    val border_bottom_style = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-style")
     if border_bottom_style.len() > 0 and border_style_disables_paint(border_bottom_style):
         border_b_v = 0
-    val border_block_style = decl_tbl_get(decl_tbl, "border-block-style")
+    val border_block_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-style")
     if border_block_style.len() > 0 and border_style_disables_paint(border_block_style):
         border_t_v = 0
         border_b_v = 0
-    val border_block_start_style = decl_tbl_get(decl_tbl, "border-block-start-style")
+    val border_block_start_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-style")
     if border_block_start_style.len() > 0 and border_style_disables_paint(border_block_start_style):
         border_t_v = 0
-    val border_block_end_style = decl_tbl_get(decl_tbl, "border-block-end-style")
+    val border_block_end_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-style")
     if border_block_end_style.len() > 0 and border_style_disables_paint(border_block_end_style):
         border_b_v = 0
-    val border_inline_style = decl_tbl_get(decl_tbl, "border-inline-style")
+    val border_inline_style = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-style")
     if border_inline_style.len() > 0:
         val left_style = css_border_style_side(border_inline_style, 3)
         val right_style = css_border_style_side(border_inline_style, 1)
@@ -2002,14 +2026,14 @@ fn _apply_decls_without_grid(
         if border_style_disables_paint(border_inline_style):
             border_l_v = 0
             border_r_v = 0
-    val border_inline_start_style = decl_tbl_get(decl_tbl, "border-inline-start-style")
+    val border_inline_start_style = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start-style")
     if border_inline_start_style.len() > 0:
         val style = css_border_style_token(border_inline_start_style)
         if style != "":
             border_style_l_v = style
         if border_style_disables_paint(border_inline_start_style):
             border_l_v = 0
-    val border_inline_end_style = decl_tbl_get(decl_tbl, "border-inline-end-style")
+    val border_inline_end_style = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end-style")
     if border_inline_end_style.len() > 0:
         val style = css_border_style_token(border_inline_end_style)
         if style != "":
@@ -2020,7 +2044,7 @@ fn _apply_decls_without_grid(
         border_l_v = 0
     if border_style_r_v == "none" or border_style_r_v == "hidden":
         border_r_v = 0
-    val outline = decl_tbl_get(decl_tbl, "outline")
+    val outline = decl_tbl_get_p(decl_tbl, decl_present, "outline")
     if outline.len() > 0:
         val ow = parse_supported_outline_shorthand_width_px(outline)
         if ow >= 0:
@@ -2030,24 +2054,24 @@ fn _apply_decls_without_grid(
             outline_color_v = oc
         if border_style_disables_paint(outline):
             outline_w_v = 0
-    val outline_width = decl_tbl_get(decl_tbl, "outline-width")
+    val outline_width = decl_tbl_get_p(decl_tbl, decl_present, "outline-width")
     if outline_width.len() > 0:
         outline_w_v = parse_int(outline_width)
-    val outline_color = decl_tbl_get(decl_tbl, "outline-color")
+    val outline_color = decl_tbl_get_p(decl_tbl, decl_present, "outline-color")
     if outline_color.len() > 0:
         val ocv = parse_color_any(outline_color)
         if ocv != 0u32:
             outline_color_v = ocv
-    val outline_offset = decl_tbl_get(decl_tbl, "outline-offset")
+    val outline_offset = decl_tbl_get_p(decl_tbl, decl_present, "outline-offset")
     if outline_offset.len() > 0:
         outline_offset_px_v = parse_int(outline_offset)
-    val outline_style = decl_tbl_get(decl_tbl, "outline-style")
+    val outline_style = decl_tbl_get_p(decl_tbl, decl_present, "outline-style")
     if outline_style.len() > 0:
         if border_style_disables_paint(outline_style):
             outline_w_v = 0
         elif outline_w_v == 0:
             outline_w_v = 1
-    val box_shadow_decl = decl_tbl_get(decl_tbl, "box-shadow")
+    val box_shadow_decl = decl_tbl_get_p(decl_tbl, decl_present, "box-shadow")
     if box_shadow_decl.len() > 0:
         val box_shadow_norm = box_shadow_decl.trim().lower()
         if box_shadow_norm == "none":
@@ -2079,8 +2103,8 @@ fn _apply_decls_without_grid(
                     box_shadow_blur_px_v = 0
                     box_shadow_alpha_v = 255
                     box_shadow_color_v = if shadow_color != 0u32: shadow_color else: argb(0, 0, 0)
-    val backdrop_filter_decl = decl_tbl_get(decl_tbl, "backdrop-filter")
-    val webkit_backdrop_filter_decl = decl_tbl_get(decl_tbl, "-webkit-backdrop-filter")
+    val backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "backdrop-filter")
+    val webkit_backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "-webkit-backdrop-filter")
     if backdrop_filter_decl.len() > 0:
         val backdrop_filter_norm = backdrop_filter_decl.trim().lower()
         backdrop_filter_raw_v = if backdrop_filter_norm == "none": "" else: backdrop_filter_norm
@@ -2091,12 +2115,12 @@ fn _apply_decls_without_grid(
     # every longhand/logical block below is gated on its last-declared entry
     # index. Per side, the latest declaration wins — a `margin` shorthand
     # authored AFTER `margin-left` must not lose to it (and vice versa).
-    val margin_sh_pos = decl_tbl_last_index(decl_tbl, "margin")
+    val margin_sh_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin")
     var margin_l_pos = margin_sh_pos
     var margin_r_pos = margin_sh_pos
     var margin_t_pos = margin_sh_pos
     var margin_b_pos = margin_sh_pos
-    val margin = decl_tbl_get(decl_tbl, "margin")
+    val margin = decl_tbl_get_p(decl_tbl, decl_present, "margin")
     if margin.len() > 0:
         # Token-aware shorthand so per-side "auto" (centering) and "%" survive.
         val mtoks = ws_tokens(margin.trim().lower())
@@ -2130,8 +2154,8 @@ fn _apply_decls_without_grid(
             margin_r_v = if r_tok == "auto": 0 else: margin_token_px(r_tok)
             margin_b_v = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
             margin_l_v = if l_tok == "auto": 0 else: margin_token_px(l_tok)
-    val ml = decl_tbl_get(decl_tbl, "margin-left")
-    val ml_pos = decl_tbl_last_index(decl_tbl, "margin-left")
+    val ml = decl_tbl_get_p(decl_tbl, decl_present, "margin-left")
+    val ml_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-left")
     if ml.len() > 0 and ml_pos > margin_l_pos:
         margin_l_pos = ml_pos
         if ml == "auto":
@@ -2140,8 +2164,8 @@ fn _apply_decls_without_grid(
         else:
             margin_l_v = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
             margin_l_auto_v = false
-    val margin_inline = decl_tbl_get(decl_tbl, "margin-inline")
-    val margin_inline_pos = decl_tbl_last_index(decl_tbl, "margin-inline")
+    val margin_inline = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline")
+    val margin_inline_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline")
     if margin_inline.len() > 0:
         val apply_mi_l = margin_inline_pos > margin_l_pos
         val apply_mi_r = margin_inline_pos > margin_r_pos
@@ -2168,8 +2192,8 @@ fn _apply_decls_without_grid(
                 margin_r_pos = margin_inline_pos
                 if mi1_value >= 0:
                     margin_r_v = mi1_value
-    val margin_inline_start = decl_tbl_get(decl_tbl, "margin-inline-start")
-    val mis_pos = decl_tbl_last_index(decl_tbl, "margin-inline-start")
+    val margin_inline_start = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline-start")
+    val mis_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline-start")
     if margin_inline_start.len() > 0 and mis_pos > margin_l_pos:
         margin_l_pos = mis_pos
         if margin_inline_start == "auto":
@@ -2178,8 +2202,8 @@ fn _apply_decls_without_grid(
         else:
             margin_l_v = if margin_inline_start.ends_with("%"): 0 - parse_int(margin_inline_start) else: parse_int(margin_inline_start)
             margin_l_auto_v = false
-    val margin_inline_end = decl_tbl_get(decl_tbl, "margin-inline-end")
-    val mie_pos = decl_tbl_last_index(decl_tbl, "margin-inline-end")
+    val margin_inline_end = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline-end")
+    val mie_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline-end")
     if margin_inline_end.len() > 0 and mie_pos > margin_r_pos:
         margin_r_pos = mie_pos
         if margin_inline_end == "auto":
@@ -2188,8 +2212,8 @@ fn _apply_decls_without_grid(
         else:
             margin_r_v = if margin_inline_end.ends_with("%"): 0 - parse_int(margin_inline_end) else: parse_int(margin_inline_end)
             margin_r_auto_v = false
-    val margin_block = decl_tbl_get(decl_tbl, "margin-block")
-    val margin_block_pos = decl_tbl_last_index(decl_tbl, "margin-block")
+    val margin_block = decl_tbl_get_p(decl_tbl, decl_present, "margin-block")
+    val margin_block_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block")
     if margin_block.len() > 0:
         val apply_mb_t = margin_block_pos > margin_t_pos
         val apply_mb_b = margin_block_pos > margin_b_pos
@@ -2216,8 +2240,8 @@ fn _apply_decls_without_grid(
                 margin_b_pos = margin_block_pos
                 if mb1_value >= 0:
                     margin_b_v = mb1_value
-    val margin_block_start = decl_tbl_get(decl_tbl, "margin-block-start")
-    val mbs_pos = decl_tbl_last_index(decl_tbl, "margin-block-start")
+    val margin_block_start = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-start")
+    val mbs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-start")
     if margin_block_start.len() > 0 and mbs_pos > margin_t_pos:
         margin_t_pos = mbs_pos
         if margin_block_start == "auto":
@@ -2226,8 +2250,8 @@ fn _apply_decls_without_grid(
         else:
             margin_t_v = parse_int(margin_block_start)
             margin_t_auto_v = false
-    val margin_block_end = decl_tbl_get(decl_tbl, "margin-block-end")
-    val mbe_pos = decl_tbl_last_index(decl_tbl, "margin-block-end")
+    val margin_block_end = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-end")
+    val mbe_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-end")
     if margin_block_end.len() > 0 and mbe_pos > margin_b_pos:
         margin_b_pos = mbe_pos
         if margin_block_end == "auto":
@@ -2236,8 +2260,8 @@ fn _apply_decls_without_grid(
         else:
             margin_b_v = parse_int(margin_block_end)
             margin_b_auto_v = false
-    val mt = decl_tbl_get(decl_tbl, "margin-top")
-    val mt_pos = decl_tbl_last_index(decl_tbl, "margin-top")
+    val mt = decl_tbl_get_p(decl_tbl, decl_present, "margin-top")
+    val mt_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-top")
     if mt.len() > 0 and mt_pos > margin_t_pos:
         margin_t_pos = mt_pos
         if mt == "auto":
@@ -2246,8 +2270,8 @@ fn _apply_decls_without_grid(
         else:
             margin_t_v = margin_token_vh_px(mt)
             margin_t_auto_v = false
-    val mr = decl_tbl_get(decl_tbl, "margin-right")
-    val mr_pos = decl_tbl_last_index(decl_tbl, "margin-right")
+    val mr = decl_tbl_get_p(decl_tbl, decl_present, "margin-right")
+    val mr_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-right")
     if mr.len() > 0 and mr_pos > margin_r_pos:
         margin_r_pos = mr_pos
         if mr == "auto":
@@ -2256,8 +2280,8 @@ fn _apply_decls_without_grid(
         else:
             margin_r_v = if mr.ends_with("%"): 0 - parse_int(mr) else: parse_int(mr)
             margin_r_auto_v = false
-    val mb = decl_tbl_get(decl_tbl, "margin-bottom")
-    val mb_pos = decl_tbl_last_index(decl_tbl, "margin-bottom")
+    val mb = decl_tbl_get_p(decl_tbl, decl_present, "margin-bottom")
+    val mb_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-bottom")
     if mb.len() > 0 and mb_pos > margin_b_pos:
         margin_b_pos = mb_pos
         if mb == "auto":

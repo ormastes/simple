@@ -1,6 +1,11 @@
 # The style cascade re-parses declaration text per node: 86% of the cold document pipeline (2026-09-12)
 
-Status: OPEN, filed with the loop named. Not fixed here — see "Why not fixed".
+Status: **ATTRIBUTION CORRECTED AND PARTLY FIXED (2026-09-12).** The loop named
+below is real but is NOT the cost centre: level-gated counters over the same page
+measure the whole author cascade at 1,029 ms and `apply_decls`' full-probe body
+at **165 ms** of a 30,041 ms style stage, against **26,887 ms** in per-`#text`
+font metric resolution. See the correction section at the bottom and
+`doc/10_metrics/ui/web_style_cascade_after_memo_macos_2026-09-12.md`.
 Platform: macOS 25.5.0 / Apple M4, `SIMPLE_EXECUTION_MODE=interpreter`.
 Measured: `doc/10_metrics/ui/web_catalog_cold_render_profile_macos_2026-09-12.md`.
 
@@ -57,3 +62,68 @@ takes `pres_decls`, which for most nodes is empty — a length check before the
 call would skip a ~176-field unpack/repack for every node with no presentational
 attributes. That one IS small, but it was not measured separately here, so the
 saving is unquantified and it is not claimed.
+
+## Correction and what actually landed (2026-09-12)
+
+The "27.8 ms of style cascade per node" figure is a stage total divided by node
+count; it was never an attribution, and reading it as one pointed two rounds of
+work at the wrong leaf. Direct counters (`SIMPLE_WEB_STYLE_COUNTERS=1`, printed
+as `[web-phase] style_counters` / `[web-phase] font_measure`, both level-gated
+and default off) give the split on css-layout.html at 900x760, untruncated (no
+`budget-break` in the log):
+
+| leaf | calls | ms | share |
+|---|---|---|---|
+| per-`#text` font metric resolution | 146 | 26,887 | 90% |
+| ... `measure_text_advances` inside it | 146 (2,601 chars) | 24,141 | 80% |
+| author cascade total | — | 1,029 | 3% |
+| `decl_table_build` | 2,190 | 461 | 1.5% |
+| `selector_group_matches_node_parts` | 1,045 | 283 | 0.9% |
+| `apply_decls` full-probe body | 44 | 165 | 0.5% |
+
+Root cause of the real hotspot: the module-level ASCII glyph-advance cache in
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl` held exactly ONE
+`(face identity, font_size)` pair and reset its 95-entry table whenever either
+changed. A page that mixes heading/body/code sizes interleaves those text nodes,
+so the single slot thrashed and nearly every character paid the
+SFFI-dylib-without-blob backend's full pixel rasterize just to read `.advance` —
+9.3 ms per character.
+
+Landed here:
+
+1. **Advance cache holds 8 `(identity, size)` buckets** instead of one
+   (`font_renderer.spl`). 24,141 ms -> 5,346 ms for the same 2,601 characters.
+   32 buckets was measured and made no difference, so 8 is kept.
+2. **Author-cascade memo** keyed on `(parent inherited identity, tag, em_base,
+   writing mode, presentational decls, accumulated decls)`, with field-for-field
+   copy in and out so a hit never aliases a cached `Style`
+   (`simple_web_html_layout_renderer_core.spl`, `_style.spl`). 96% hit rate; it
+   removes the cascade cost the record predicted, which turned out to be small.
+   The parent identity in the key is load-bearing and is the sabotage target of
+   `test/unit/browser_engine/style_cascade_memo_spec.spl`.
+3. **Font-metric front memo** on the full argument tuple, ahead of the
+   classification/shaping work whose existing identity-keyed cache is reachable
+   only when a language-selected asset exists. Draw-IR compose 3,439 -> 233 ms.
+4. **Presence set over the declaration table** so an absent-property probe is
+   O(1) instead of a backwards scan of the merged table.
+5. **Two always-on "default off" probes gated**: `_WM_TRACE` was hardcoded
+   `true` (4 prints per font resolution) and `SIMPLE_TRACE_FONT_STYLE` was tested
+   with `!= nil`, which `env_get` never returns (up to 7 prints per node).
+6. **Metadata text is not measured**: a `#text` child of `style`/`script`/
+   `title`/`head`/`meta`/`link`/`base`/`template` is never painted.
+   `noscript` is deliberately excluded — this engine runs no scripts, so its
+   content renders.
+
+Net on css-layout.html: style 29,379 -> 11,591 ms (2.5x), pipeline to
+compose_shaping 34,232 -> 13,722 ms. All EIGHT shared catalog pages render
+byte-identical before/after (mismatch=0 each), so every change above is
+pixel-neutral.
+
+**Still open — the honest remainder.** The target was style <= 2,500 ms and this
+does not reach it. `measure_text_advances` is still 5,346 ms for 2,601 characters
+(2.05 ms/char) with a warm advance cache. The two named candidates, neither
+attempted: `horizontal_kern` runs once per character PAIR and has no cache at
+all, and the dylib-without-selected-blob backend still has no metrics-only entry
+point, so a cold character costs a full pixel rasterize. Both live in
+`font_renderer.spl`.
+
