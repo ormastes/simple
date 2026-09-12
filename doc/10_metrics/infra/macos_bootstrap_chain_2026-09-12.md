@@ -278,3 +278,48 @@ that run-10 binary IS the standalone codegen reproducer, sha256
 `agent-a87b4c8362f754818`. It is **not tracked in git**; if that worktree is
 reclaimed, rerun the command above — the defect has reproduced on every run so
 far, so a fresh Stage 2 is a reliable source of a fresh reproducer.
+
+## Run 11 (2026-09-13) — root cause of the link-nil found WITHOUT a lane run; lane then blocked earlier
+
+Worktree `agent-a085dd4a2e26111ba`, branch
+`work/macos-stage2-link-nil-dynload-codegen-2026-09-13`, base `a19a9dff461`.
+
+**Method change that mattered.** Instead of a ~90-minute lane, the rejected run-10
+candidate (`agent-a87b4c8362f754818/.simple/storage/build/bootstrap/stage2/
+aarch64-apple-darwin/simple.rejected`) was run DIRECTLY on the smoke program with
+`SIMPLE_COMPILER_TRACE=1` and the pinned darwin tools — ~40 s, and it reproduced the
+failure exactly. (`SIMPLE_PACKAGE_INDEX_COLD_INIT=1` plus a private `HOME` is required
+outside the lane, or it dies at `scv-authority-missing` before the frontend.)
+
+**Result: the failing site is named.** Trace reaches `[LINKER] linker_info unwrapped`,
+emits a BLANK LINE, then returns. The blank is the `[linker-wrapper]` diagnostic itself —
+an interpolation carrying a nil collapses in full, tag included. `find_linker()` returned
+`Result<(text, LinkerType), text>` and `linker_info[0]` is nil, so
+`darwin_resolve_link_tool` returns `""` and the Err payload is nil. Run 10's conclusion
+that "the prints did not run" was a false negative from grepping for the tag; the same
+blank is at line 42 of run 10's own preserved log. Full elimination and fix in
+`doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`;
+`native_tuple_return_of_texts_yields_nil_2026-09-13.md` is REOPENED (its closure rested
+on the same false negative).
+
+**Fix committed** (`1d89ffc75ad`): `find_linker_path() -> Result<text, text>` +
+`linker_type_for_path()`, `find_requested_linker` likewise; the unresolved-error builder
+prints the literal line first and each value bare. Spec
+`test/01_unit/compiler/native/linker_resolution_no_tuple_spec.spl`.
+
+**Verification BLOCKED, and not by this change.** The Stage 2 rerun from a virgin root
+died in ~4 minutes at the very first step — the Rust seed build — with
+`error: rust-seed-build failed with exit 101`: 11 `rt_process_*` symbols are defined in
+BOTH the Rust runtime (`process_observation_v4_twins.rs`, landed `920b7c2dcb3`) and the C
+runtime (`runtime_process_owned.c`), and macOS `ld` rejects the duplicates because the C
+archive is `-force_load`ed. **Stages reached: 0.** No Stage 2 candidate, no sanity
+verdict, no Stage 3. Filed:
+`doc/08_tracking/bug/macos_seed_build_duplicate_rt_process_twin_symbols_2026-09-13.md`.
+The link-nil fix is therefore committed on diagnosis + elimination, NOT on an end-to-end
+green lane; re-run this lane once the seed builds again.
+
+Pre-push guards on this range, all foreground with `timeout 900`: conflict-markers PASS
+(7 files), tree-size PASS (base 136748 files), guard-wiring PASS (1692 guards, 0 new
+unwired), no-revert PASS (7 files, 0 reverts), divergence-delta PASS — 3217 pre-existing
+offender(s), 0 introduced by this range (base verdict 3945 diverged vs 965 baselined;
+recorded here as the delta escape requires).
