@@ -50,7 +50,7 @@ A `Task` type-name collision surfaced by whole-program co-compilation in the
 native lane. At least three unrelated `Task` declarations exist:
 
 - `src/lib/scv/lifecycle/model.spl:153` — `struct Task` (no `priority` field)
-- `src/lib/nogc_async_mut/async/task.spl:35` — a `Task` that does have `priority`
+- `src/lib/nogc_async_mut/async/task.spl:24` — `class Task` that DOES have a `priority: i32` field (line 35)
 - `src/lib/nogc_async_mut/async/runtime.spl:32` — `struct Task<T>`
 
 This is the same family as the `compiler_cross_module_private_symbol_collision`
