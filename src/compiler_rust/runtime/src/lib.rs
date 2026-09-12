@@ -65,6 +65,7 @@ pub mod debug;
 pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
+pub mod gpu_provider_twins;
 pub mod host_gpu_lane;
 pub mod memory;
 pub mod mem_snapshot;
@@ -89,6 +90,7 @@ pub mod monoio_waker;
 pub mod vulkan;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
+pub mod x86_simd_probe;
 
 /// Stable metadata queried by the core runtime before it admits this artifact
 /// as a dynamically loaded GPU provider. Operation tables are backend-specific
