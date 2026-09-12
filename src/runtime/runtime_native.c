@@ -9837,14 +9837,39 @@ int64_t rt_log_is_enabled(int64_t level, const uint8_t* scope_ptr, uint64_t scop
 
 bool rt_munmap(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
+#if defined(_WIN32)
+    /* Pairs with rt_mmap_raw above, which reserves with VirtualAlloc rather
+     * than a file mapping; MEM_RELEASE frees the whole reservation and
+     * requires a zero size. */
+    (void)size;
+    return VirtualFree((void*)(intptr_t)addr, 0, MEM_RELEASE) != 0;
+#else
     return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
+#endif
 }
 bool rt_msync(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
+#if defined(_WIN32)
+    /* rt_mmap_raw refuses fd != -1 on Windows, so every mapping reachable here
+     * is private anonymous memory with no file behind it to flush. Validate the
+     * arguments as the POSIX branch does and report success. */
+    return true;
+#else
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
+#endif
 }
 bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (addr <= 0 || size <= 0) return false;
+#if defined(_WIN32)
+    /* Advice is a hint everywhere. Windows offers no VirtualAlloc equivalent
+     * for these five, so honour the contract that matters to callers: reject an
+     * unknown advice code exactly as the POSIX branch does, accept a known one.
+     */
+    switch (advice) {
+        case 0: case 1: case 2: case 3: case 4: return true;
+        default: return false;
+    }
+#else
     int native_advice;
     switch (advice) {
         case 0: native_advice = MADV_NORMAL; break;
@@ -9855,6 +9880,7 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
         default: return false;
     }
     return madvise((void*)(intptr_t)addr, (size_t)size, native_advice) == 0;
+#endif
 }
 
 /* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
@@ -9865,6 +9891,44 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
 int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+#if defined(_WIN32)
+    /* LockFileEx over the descriptor's underlying HANDLE is the Windows
+     * equivalent of flock, and keeps this function's contract intact: the
+     * returned descriptor is still consumed exactly once by rt_file_unlock.
+     * LOCKFILE_EXCLUSIVE_LOCK alone blocks; adding LOCKFILE_FAIL_IMMEDIATELY
+     * gives the LOCK_NB poll the timeout path needs. The whole file is locked
+     * (MAXDWORD:MAXDWORD), matching flock's whole-file semantics. */
+    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (fd < 0) return -1;
+    HANDLE handle = (HANDLE)_get_osfhandle(fd);
+    if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
+    OVERLAPPED overlapped;
+    if (timeout_secs <= 0) {
+        memset(&overlapped, 0, sizeof(overlapped));
+        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
+                       MAXDWORD, MAXDWORD, &overlapped)) {
+            return (int64_t)fd;
+        }
+        _close(fd);
+        return -1;
+    }
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_secs * 1000ULL;
+    for (;;) {
+        memset(&overlapped, 0, sizeof(overlapped));
+        if (LockFileEx(handle,
+                       LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                       MAXDWORD, MAXDWORD, &overlapped)) {
+            return (int64_t)fd;
+        }
+        DWORD error = GetLastError();
+        if (error != ERROR_LOCK_VIOLATION && error != ERROR_IO_PENDING) {
+            _close(fd);
+            return -1;
+        }
+        if (GetTickCount64() >= deadline) { _close(fd); return -1; }
+        Sleep(50); /* 50ms, matching the POSIX branch's poll interval */
+    }
+#else
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
@@ -9889,13 +9953,26 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
         struct timespec sleep_for = {0, 50000000L}; /* 50ms */
         nanosleep(&sleep_for, NULL);
     }
+#endif
 }
 bool rt_file_unlock(int64_t handle) {
     int fd = (int)handle;
     if (fd < 0) return false;
+#if defined(_WIN32)
+    HANDLE native = (HANDLE)_get_osfhandle(fd);
+    bool unlocked = false;
+    if (native != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped;
+        memset(&overlapped, 0, sizeof(overlapped));
+        unlocked = UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlapped) != 0;
+    }
+    bool closed = _close(fd) == 0;
+    return unlocked && closed;
+#else
     bool unlocked = flock(fd, LOCK_UN) == 0;
     bool closed = close(fd) == 0;
     return unlocked && closed;
+#endif
 }
 
 /* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
