@@ -211,8 +211,6 @@ extern fn rt_file_hash_sha256(path: text) -> text
 #
 # The runtime returns -1 when the file cannot be stat'd; callers must treat a
 # negative result as a failure, never as a size.
-@unsafe(reason: "raw file size ABI; struct-field read of the same value is miscompiled under Stage-2 native codegen", capabilities: [ffi])
-extern fn rt_file_size(path: text) -> i64
 
 # 2^40. No object file this compiler emits approaches a terabyte, so a "size"
 # at or above this bound is a tagged heap pointer, never a byte count -- the
@@ -226,7 +224,7 @@ pub fn driver_native_capsule_receipt_size_reason_v1(
     invariant that failed.
 
     Fail-closed plausibility gate for receipt line 4. Both receipt sites now
-    take the size from `rt_file_size` rather than from `FileFingerprint.size`,
+    take the size from `file_size_raw` (the typed std alias over the runtime stat) rather than from `FileFingerprint.size`,
     so `runtime_size` is the value that gets written; `field_size` is the
     struct-field read of the SAME quantity, passed in purely as a canary. When
     the two disagree the codegen defect this routes around is live again, and
@@ -566,7 +564,7 @@ fn driver_materialize_phase2_native_v1(
             return (false, item.artifact_path)
         # Read the two receipt values from LOCALS, never back out of a
         # FileFingerprint. The `.size` read is miscompiled under Stage-2 native
-        # codegen (see the `rt_file_size` note at the top of this file), and the
+        # codegen (see the `file_size_raw` note at the top of this file), and the
         # verifier this receipt must match now composes its expected text from
         # the same two locals, so both sides agree by construction.
         val materialized_size = published.content.len()
@@ -952,9 +950,9 @@ pub fn driver_native_capsule_result_reason_v1(
     val object_fp = FileFingerprint.from_file(capsule.object_path)
     if not object_fp.?: return "object-fingerprint-failed:{capsule.object_path}"
     # Size comes from the runtime, NOT from `fp.size` -- see the note on the
-    # `rt_file_size` declaration at the top of this file. The hash still comes
+    # `file_size_raw` note at the top of this file. The hash still comes
     # from the fingerprint, because that is what the frozen side computed.
-    val object_size = rt_file_size(capsule.object_path)
+    val object_size = file_size_raw(capsule.object_path)
     if object_size < 0:
         return "object-size-unreadable:{capsule.object_path}"
     var expected = ""
@@ -2333,14 +2331,14 @@ fn _compile_frozen_module_capsule(
             # tagged heap pointer under Stage-2 native codegen, and a fresh one
             # per read, so the receipt written here could never match the
             # receipt recomputed by the verifier -- see the note on the
-            # `rt_file_size` declaration at the top of this file.
+            # `file_size_raw` note at the top of this file.
             #
             # Fail closed on a value that cannot be a byte count: the runtime
             # reports a failed stat as -1, which `FileFingerprint.from_file`
             # passes through unchecked, so a vanished or unreadable object
             # would otherwise be recorded as a size of -1 and only surface far
             # away as an opaque `receipt-content-mismatch`.
-            val object_size = rt_file_size(object_path)
+            val object_size = file_size_raw(object_path)
             if object_size < 0:
                 return _aot_compile_failure(name,
                     "capsule-object-size-unreadable:{object_path}")
