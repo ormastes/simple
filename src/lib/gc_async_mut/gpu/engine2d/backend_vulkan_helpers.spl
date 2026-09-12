@@ -123,6 +123,41 @@ pub fn vulkan_image_upload_note(mode: text, reason: text):
     _vulkan_image_upload_last_mode = mode
     _vulkan_image_upload_last_reason = reason
 
+# How many times the byte lane actually WALKED an image, split by which walk.
+# Module-global rather than per-backend because the oracle that needs them --
+# "one image, exactly one pack" -- reads them through the engine facade, which
+# does not expose the backend struct. They count walks, not attempts: a
+# composite that packs once and uploads once adds 1 to `packs` and 0 to
+# `byte_fallbacks`. Ungated by `SIMPLE_VK_TIMING`, unlike the `VK_T_*` buckets,
+# so a spec can assert on them in a default process.
+var _vulkan_image_pack_count: i64 = 0
+var _vulkan_image_byte_fallback_count: i64 = 0
+var _vulkan_image_scratch_resize_count: i64 = 0
+
+pub fn vulkan_image_pack_note_pack():
+    _vulkan_image_pack_count = _vulkan_image_pack_count + 1
+
+pub fn vulkan_image_pack_note_byte_fallback():
+    _vulkan_image_byte_fallback_count = _vulkan_image_byte_fallback_count + 1
+
+pub fn vulkan_image_pack_note_resize():
+    _vulkan_image_scratch_resize_count = _vulkan_image_scratch_resize_count + 1
+
+pub fn vulkan_image_pack_counts_reset():
+    _vulkan_image_pack_count = 0
+    _vulkan_image_byte_fallback_count = 0
+    _vulkan_image_scratch_resize_count = 0
+
+pub fn vulkan_image_pack_counts() -> text:
+    """`"packs=<n> byte_fallbacks=<n> scratch_resizes=<n>"` since process start
+    or the last `vulkan_image_pack_counts_reset()`.
+
+    `byte_fallbacks > 0` means some composite packed the image a SECOND time
+    because `vulkan_sffi_copy_to_buffer_prefix` declined the staging array. On
+    the exact-size scratch that must never happen for an admitted size.
+    """
+    "packs={_vulkan_image_pack_count} byte_fallbacks={_vulkan_image_byte_fallback_count} scratch_resizes={_vulkan_image_scratch_resize_count}"
+
 # Evidence of which payload shape the last `_enqueue_rect_batch_gpu` upload
 # actually took, and why -- read by tests/tooling that need to tell an
 # extern-unavailable byte fallback apart from an explicit-request byte
@@ -257,12 +292,25 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
 impl VulkanBackend:
 
     me _prepare_image_upload(pixels: [u32], count: i64) -> bool:
-        """Pack an image into reusable host staging without changing pixels.
+        """Pack an image into EXACT-SIZE reusable host staging.
 
         `vulkan_sffi_copy_to_buffer_prefix` snapshots the initialized prefix
         immediately into the destination Vulkan buffer. The pooled device
         source remains fenced independently, so this CPU scratch is safe to
         reuse by the next sequential draw.
+
+        The scratch is sized to `byte_count` EXACTLY, never grown to a
+        high-water mark. That is not a style choice: on the interpreter array
+        ABI the prefix facade admits an upload only when
+        `byte_count == data.len()` (`sffi_vulkan.spl`, and it cannot do better
+        -- the legacy extern derives the length from the array itself), so a
+        high-water scratch makes every composite after the first large one
+        decline the prefix and pack the WHOLE image a second time through
+        `_pixels_to_bytes`. Measured at 900x760: 262 of 264 composites paid
+        that second pack, 181 s of an 830 s frame. Reuse survives where it is
+        actually free -- a repeat of the same size hits the same array -- and
+        a size change now costs one runtime-side allocation instead of a
+        second interpreted walk of the image.
         """
         if count <= 0 or pixels.len().to_i64() != count:
             return false
@@ -272,9 +320,11 @@ impl VulkanBackend:
         if byte_count > VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES:
             self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
             return false
-        if self.image_upload_scratch.len().to_i64() < byte_count:
+        if self.image_upload_scratch.len().to_i64() != byte_count:
             self.image_upload_scratch = [0u8; byte_count]
             self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
+            vulkan_image_pack_note_resize()
+        vulkan_image_pack_note_pack()
         var i: i64 = 0
         while i < count:
             val pixel = pixels[i]

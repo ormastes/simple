@@ -84,3 +84,123 @@ parity budget), and the remaining O(atlas) walks — digest 8.3 s, 2 full repack
 Pooled-slot counters (`dispatches_frame=1 submits=0` vs 111 drawn rects) read a
 backend that did not draw — use the module-global `vulkan_timing_*` /
 `vulkan_font_pack_*`.
+
+## F19 (2026-09-12): the double pack, the atlas digest, and the font race
+
+Same binary throughout, bracketed identical (`stat -f '%z %m'` =
+`39368072 1789171430`), same page, serial runs.
+
+### 1. Default BYTE path — the double pack is gone (helps every old binary)
+
+`_prepare_image_upload` sized `image_upload_scratch` to a high-water mark while
+`vulkan_sffi_copy_to_buffer_prefix` admits a prefix only when
+`byte_count == data.len()`, so 262 of 264 composites were refused and packed a
+SECOND time. Exact-size staging (900x760, `SIMPLE_VK_IMAGE_UPLOAD` unset):
+
+| bucket | n | before | after |
+|---|---|---|---|
+| **frame** | | **830,186** | **571,045 (-31.2%)** |
+| image_composite | 264 | 573,780 | **343,784 (-40.1%)** |
+| **image_exact_size_byte_fallback** | 262 | **180,995** | **0 (never fires)** |
+| rect / image_blend | 550/262 | 288,153/287,818 | 173,099/172,817 |
+
+This is the lane the typed flag cannot reach, and 259 s came off it.
+Detail: `doc/08_tracking/bug/vulkan_image_upload_scratch_double_pack_2026-09-12.md`.
+
+### 2. `font_composite` attributed, and its top term removed
+
+The F17 table above named `font_composite` (70,708 ms) as dominant. It is TWO
+O(atlas) interpreted walks and nothing else — the 1024x1024 atlas is 4 MB
+whatever the glyph count:
+
+| bucket | n | before | after |
+|---|---|---|---|
+| **font_composite** | 23 | **70,708** | **29,419 (-58.4%)** |
+| **font_atlas_payload_sha256** | 21 | **37,650 (53%)** | **137 (-99.6%)** |
+| font_atlas_pack_u32_to_u8 | 21 | 32,672 (46%) | 28,932 |
+| font_atlas_sffi_upload | 21 | 211 | 175 |
+| font_packed_params | 23 | 52 | — |
+| font_quad_validate | 23 | 16 | — |
+
+**Everything the brief anticipated as a cost is 280 ms, 0.4%** — per-run params
+packing (52 ms), glyph quad packing, the descriptor/params pool and per-run
+submit. A `SIMPLE_VK_FONT_UPLOAD=u32` typed lane was therefore scoped and
+**deliberately not built**: it would target 52 ms. That is a finding, not an
+omission.
+
+The digest was EVIDENCE — every consumer asserts its shape (`.len() == 64`,
+`lower_hex_sha256_valid`); the re-upload decision is made by
+`(atlas_generation, owner_identity)`, and the generation bumps only when
+`dirty.len() > 0` (`font_renderer.spl:2293-2298`), i.e. only on a real glyph
+insert. Folding that pair through the same `sha256_u8_hex` envelope keeps every
+assertion holding at O(1). `SIMPLE_VK_FONT_DIGEST=payload` restores the walk.
+
+At 300x253: `font_atlas_payload_sha256` **8,234 -> 32 ms**, frame
+**33,403 -> 20,678 ms**, and the frame checksum is **byte-identical**
+(`-6077680819631676143`) — the deterministic oracle, so this is pixel-neutrality
+measured rather than assumed.
+
+### 3. The 900x760 nondeterminism has a root cause
+
+`SIMPLE_VK_FONT_OVERLAP=1` counts intersecting destination-rect quad pairs per
+batch: **900x760 = 19 pairs (max 4 in one batch); 300x253 = 0**. The packed font
+kernel (`font_atlas_composite.spl:266`) runs one invocation per (pixel, glyph)
+and blends with a NON-ATOMIC read-modify-write on `dst[di]`, so overlapping
+quads in one dispatch race. The census correlates exactly with which size is
+non-deterministic. Dispatch-to-dispatch is excluded: a `vkCmdPipelineBarrier`
+follows every `vkCmdDispatch` (`interpreter_extern/gpu.rs:5340-5359`).
+Recorded in `web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md`.
+
+### Target: MISSED, and the arithmetic says why
+
+The brief set ≤ 150,000 ms at 900x760. Measured clean (no census
+instrument): **191,872 ms**, from F17's 259,523 — a 26% reduction. With the
+font race fix also applied (below) it is **215,249 ms**, because removing the
+nondeterminism costs ~24 s. The remaining `font_composite` is 28,932 ms of full atlas repacks
+driven by `identity_changed=8` — the page alternates between two font identities
+and the backend keeps ONE host mirror, so each flip repacks 4 MB. A per-owner
+mirror would remove it, leaving a floor near **166,000 ms**.
+
+That floor is not Vulkan work. The document pipeline is 29,451 ms (style cascade
+alone 25,229) and the rest is the host rasterization of the full-layout surface
+that `simple_web_html_engine2d_presenter.spl:597` then uploads and reads straight
+back — the GPU is a pass-through. Reaching 150 s means not rasterizing on the
+host, which is a different and much larger change. The cpu_simd bar on this page
+is 263,636 ms; the Vulkan lane is now well under it.
+
+### 4. The font race fix, and what it costs
+
+The partition described in §3 is implemented. Two 900x760 renders are now
+**byte-identical** (`cmp` clean, checksum `8316155370661695245`) where before
+they differed, and **pixel (89,392) reads 124 — the CPU oracle value — in both**,
+where before it read 139 in one run and 226 in another. 300x253 is `cmp` clean
+against F17's reference PPM. Submits per frame: **22, unchanged**.
+
+| | F17 | + image/digest fixes | + race fix |
+|---|---|---|---|
+| **frame 900x760** | 259,523 | **191,872** | **196,121 / 194,530** |
+| font_composite | 70,708 | 29,459 | 29,529 |
+| pack_full | 8 | 8 | 8 |
+| 900x760 reproducible | no | no | **yes** |
+
+**The race fix costs ~4 s** — the split adds a few dispatches to a command
+buffer whose dispatches are already barrier-separated, and the overlap scan is
+cheap at these glyph counts.
+
+An intermediate version cost 24 s and the counters said why: the sub-batch
+helper let `atlas_owner_generation` and `render_config_identity` default, so
+every sub-batch read as a new atlas owner and forced a full repack (`pack_full`
+8 -> 14, `font_atlas_pack_u32_to_u8` 28,949 -> 50,487 ms). Carrying every field
+restored it. Recorded because the failure was invisible except in `pack_full`:
+no error, no pixel change, just triple the cost.
+
+### Final honest position on the target
+
+**≤150,000 ms: MISSED.** 196,121 ms with everything applied, from F17's
+259,523 — a 24% reduction, and reproducible for the first time. The one named
+remaining Vulkan term is 29,021 ms of full atlas repacks
+(`identity_changed=8`: two alternating font identities share ONE host mirror; a
+per-owner mirror removes it), which would leave ~167,000 ms. That floor is host
+rasterization plus the 29,451 ms document pipeline, not GPU work — the presenter
+rasterizes the page on the CPU and uses the GPU as a pass-through. The cpu_simd
+bar on this page is 263,636 ms.
