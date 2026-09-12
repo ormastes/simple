@@ -644,10 +644,17 @@ void main() {
     }
     uint d = fb.data[dst_idx];
     uint inv = 255u - sa;
-    uint out_a = sa + ((d >> 24u) * inv) / 255u;
-    uint out_r = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * inv)) / 255u;
-    uint out_g = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * inv)) / 255u;
-    uint out_b = (((s & 255u) * sa) + ((d & 255u) * inv)) / 255u;
+    // Frozen CPU parity: src/lib/**/engine2d/color.spl blend(). Composite in
+    // premultiplied space and unpremultiply by the resulting out_a. dst_weight
+    // is dst's premultiplied contribution on the same 0..255 basis as sa, and
+    // is reused for the alpha accumulation AND every channel numerator --
+    // using `inv` in the channel numerators (the pre-unpremultiply formula)
+    // disagrees with the CPU for any dst alpha < 255.
+    uint dst_weight = ((d >> 24u) * inv) / 255u;
+    uint out_a = sa + dst_weight;
+    uint out_r = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dst_weight)) / out_a;
+    uint out_g = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dst_weight)) / out_a;
+    uint out_b = (((s & 255u) * sa) + ((d & 255u) * dst_weight)) / out_a;
     fb.data[dst_idx] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;
 }
 """
