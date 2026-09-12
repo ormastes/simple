@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Purpose: Pin the three round-4 layout fixes against a Chrome-derived box oracle
+— (1) a plain inline text run is measured with the resolved font metrics rather
+than a flat per-character estimate, (2) a run containing a non-ASCII codepoint
+occupies ONE line box rather than one per UTF-8 byte, and (3) a `<br>` reports
+its font content area, half-leaded in the line it terminates.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+test/fixtures/browser_engine/layout/round4_probe.html at 900x20000, body
+margin 0, font 16px/1.5 sans-serif):
+  p1   0 16  900 24     s1  112 19 50 18    e1 171 19 68 18   a1 293 19 108 18
+  brbox 0 56 900 48     br1  27 59  0 18    br2 25 83  0 18
+  ul1  0 120 900 104    li1  40 120 860 64  lp1 40 160 860 24 li2 40 200 860 24
+Every figure asserted below is Chrome's within the +/-1 px comparison tolerance
+the geometry differ uses. Deliberately NOT asserted, because they are still
+open and are recorded as such:
+  - `<strong>` WIDTH (Chrome 50, Simple 43): the bold face's advances are never
+    selected — `resolve_font_metrics_with_language` takes no weight argument.
+    doc/08_tracking/bug/web_inline_bold_face_advances_never_selected_2026-09-12.md
+  - `<li>` HEIGHT (Chrome 64, Simple 80): the last child's bottom margin does
+    not collapse out of the list item.
+  - table/cell geometry: still full-width blocks, unchanged this round.
+"""
+
+# @req: REQ-BROWSER-ENGINE-INLINE-ADVANCE-001 — inline runs use resolved font metrics; non-ASCII runs are one line box; <br> is a half-leaded content area.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 2%
+use std.spec.*
+use std.nogc_sync_mut.fs.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val PAGE: text = read_file("test/fixtures/browser_engine/layout/round4_probe.html")
+val HEAD: text = "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">"
+
+fn field(id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, VW, VH, id, name)
+
+fn block_height(inner: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + "<div id=\"x\">" + inner + "</div></body></html>", VW, VH, "x", "h")
+
+describe "round-4 inline advance, non-ASCII line boxes and <br> content area":
+    it "AC-1: the first inline run ends where Chrome ends it (was ~25% too wide)":
+        # Chrome puts <strong> at x=113; the flat advance put it at 140.
+        expect(field("s1", "x")).to_equal("112")
+
+    it "AC-2: a run holding one non-ASCII codepoint is ONE line box, not one per byte":
+        # "—" is 3 UTF-8 bytes; the byte/codepoint unit mix wrapped it to h=72.
+        expect(block_height("&mdash;")).to_equal("24")
+        expect(block_height("&mdash; partial")).to_equal("24")
+        expect(block_height("caf&eacute; partial")).to_equal("24")
+
+    it "AC-3: that fix restores the list item's own flow, matching Chrome":
+        expect(field("ul1", "h")).to_equal("104")
+        expect(field("lp1", "y")).to_equal("160")
+        expect(field("li2", "y")).to_equal("200")
+
+    it "AC-4: <br> is the 18 px content area, half-leaded in its 24 px line":
+        expect(field("br1", "h")).to_equal("18")
+        expect(field("br2", "h")).to_equal("18")
+        expect(field("br1", "y")).to_equal("59")
+        expect(field("br2", "y")).to_equal("83")
+
+    it "AC-5: the block holding the <br>s is unchanged at Chrome's 48 px":
+        expect(field("brbox", "h")).to_equal("48")
