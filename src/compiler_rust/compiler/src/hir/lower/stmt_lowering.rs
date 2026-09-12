@@ -145,8 +145,75 @@ impl Lowerer {
             .global_fn_return_types
             .as_ref()?
             .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared).map(|(name, _)| name)
+    }
+
+    /// Like `static_call_return_type_name`, but also reports whether the
+    /// declared return type WRAPPED the struct (`-> T?`, `-> mut T`, `-> *T`).
+    ///
+    /// The distinction is load-bearing and the caller must honour it: for an
+    /// unwrapped `-> T` the binding's TypeId may be upgraded to T outright, but
+    /// for `-> T?` the VALUE is an optional, so typing the local as bare `T`
+    /// makes every field read address the payload's slots through the wrapper
+    /// and return garbage. A wrapped return therefore contributes the NAME only.
+    fn static_call_return_type_name_parts(&self, init: &Expr) -> Option<(String, bool)> {
+        let (type_name, method) = match init {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Path(segments) if segments.len() == 2 => (segments[0].clone(), segments[1].clone()),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.clone(), method.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        let declared = self
+            .global_fn_return_types
+            .as_ref()?
+            .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared)
+    }
+
+    /// The struct NAME a declared return type names, looking through the
+    /// wrappers that carry a payload of that type.
+    ///
+    /// `Type::Optional` had no arm here and fell to `_ => None`, so EVERY
+    /// `static fn ... -> T?` constructor silently lost its name. That is the
+    /// whole `FileFingerprint.from_file(path) -> FileFingerprint?` family: the
+    /// `val object_fp = FileFingerprint.from_file(...)` binding recorded no
+    /// `static_call_type_hints` row, so the later `if val fp = object_fp:`
+    /// binding had no name to inherit either, and `fp.size` reached
+    /// `get_field_info(TypeId::ANY, "size")`. That function's LOCAL-BEST scan
+    /// picks the SMALLEST index among every struct in `module.types` declaring
+    /// the name and returns Ok, so no receiver-aware fallback and no trace ever
+    /// ran. Measured in the 834-unit Stage 2 closure (2026-09-13):
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7 in
+    /// driver_aot_native_output.spl` — byte offset 0 instead of 24, returning
+    /// the struct's `path` text POINTER (34363944961 = 0x8_0010_2001) where a
+    /// 632-byte file size belonged. 15 structs in the tree declare `size` as
+    /// their FIRST field, so the decoy only enters `module.types` once the
+    /// closure is big enough — which is exactly why the 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Unwrapping is limited to payload-preserving wrappers (`T?`, `mut T`,
+    /// pointers): each names exactly one underlying struct, so the name is the
+    /// receiver's own and never a guess. Tuples, unions, arrays and functions
+    /// stay `None` — they name no single struct.
+    pub(crate) fn declared_type_struct_name(declared: &ast::Type) -> Option<(String, bool)> {
         match declared {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => (!name.is_empty()).then(|| name.clone()),
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
+                (!name.is_empty()).then(|| (name.clone(), false))
+            }
+            ast::Type::Optional(inner)
+            | ast::Type::Capability { inner, .. }
+            | ast::Type::Pointer { inner, .. } => {
+                Self::declared_type_struct_name(inner).map(|(name, _)| (name, true))
+            }
             _ => None,
         }
     }
@@ -246,6 +313,7 @@ impl Lowerer {
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
+                self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
                 let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
                 for (name, previous) in previous_bindings {
@@ -435,9 +503,15 @@ impl Lowerer {
                 // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
                 if ty == TypeId::ANY {
                     if let Some(init) = &let_stmt.value {
-                        if let Some(hint) = self.static_call_return_type_name(init) {
+                        if let Some((hint, wrapped)) = self.static_call_return_type_name_parts(init) {
+                            // A WRAPPED return (`-> T?`) contributes the name
+                            // only: the value is an optional, so upgrading the
+                            // local's TypeId to bare `T` would make every field
+                            // read address the payload's slots through the
+                            // wrapper. Unwrapped `-> T` keeps the existing
+                            // TypeId upgrade.
                             match self.module.types.lookup(&hint) {
-                                Some(resolved) if resolved != TypeId::ANY => ty = resolved,
+                                Some(resolved) if !wrapped && resolved != TypeId::ANY => ty = resolved,
                                 _ => {
                                     ctx.static_call_type_hints.insert(name.clone(), hint);
                                 }
@@ -684,6 +758,7 @@ impl Lowerer {
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     // 5. Generate payload extraction stmts through the same owner
                     // used by match arms, including multi-field array typing.
@@ -822,6 +897,7 @@ impl Lowerer {
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     let mut then_block =
                         self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
@@ -1431,6 +1507,58 @@ impl Lowerer {
     /// both canonical boxed Option values and the raw migration form.
     /// Match-arm identifiers intentionally continue to bind their full subject
     /// through `build_pattern_binding_stmts` below.
+    /// Carry the SUBJECT's authored struct name onto pattern bindings whose
+    /// TypeId erased to ANY.
+    ///
+    /// `if val fp = object_fp:` registers `fp` with `ctx.add_local(name, ty, ..)`
+    /// — a TypeId and nothing else. When that TypeId is ANY (the payload type was
+    /// lost cross-unit), the binding carries NO name at all: not a
+    /// `type_name_hint` (that is set only for parameters) and no
+    /// `static_call_type_hints` row (that is keyed by the SUBJECT's name,
+    /// `object_fp`, never the binding's). So every later receiver-aware recovery
+    /// — `expr/access.rs`'s ambiguous-field guard and its by-name fallbacks —
+    /// asks `try_resolve_receiver_struct_name_from_expr(fp)`, gets None, and
+    /// declines. `get_field_info(TypeId::ANY, field)` then reaches its LOCAL-BEST
+    /// scan, which picks the SMALLEST index among every struct in `module.types`
+    /// that declares the name, and returns Ok — so no fallback and no trace ever
+    /// runs.
+    ///
+    /// Measured consequence (2026-09-13): in the 834-unit Stage 2 closure,
+    /// `fp.size` on a `FileFingerprint` (`size` at index 3) lowered to
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7`, i.e. byte offset 0,
+    /// and returned the struct's `path` text POINTER instead of the file size —
+    /// 34363944961 (0x8_0010_2001) for a 632-byte object. 15 structs in the tree
+    /// declare `size` as their FIRST field (FileStat, GcObjectHeader, TypeLayout,
+    /// BlockHeader, ...), so the decoy only enters `module.types` once the
+    /// closure is large enough — which is exactly why 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Recording the name into `static_call_type_hints` reuses the EXISTING
+    /// consumer (`expr/access.rs`'s Identifier arm) rather than adding a second
+    /// mechanism. Purely additive and fail-soft: a hint that names nothing simply
+    /// fails the subsequent lookup and leaves today's behaviour untouched. Only
+    /// bindings already erased to ANY are touched, so an authored type is never
+    /// overridden.
+    fn propagate_pattern_binding_type_name_hint(
+        &mut self,
+        subject_expr: &Expr,
+        bindings: &[(String, TypeId)],
+        ctx: &mut FunctionContext,
+    ) {
+        if !bindings.iter().any(|(_, ty)| *ty == TypeId::ANY) {
+            return;
+        }
+        let Some(struct_name) = self.try_resolve_receiver_struct_name_from_expr(subject_expr, ctx) else {
+            return;
+        };
+        for (name, ty) in bindings {
+            if *ty == TypeId::ANY {
+                ctx.static_call_type_hints.insert(name.clone(), struct_name.clone());
+            }
+        }
+    }
+
     pub(crate) fn build_if_let_binding_stmts(
         &mut self,
         pattern: &Pattern,

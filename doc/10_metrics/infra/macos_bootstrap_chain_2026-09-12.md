@@ -410,3 +410,59 @@ path/sha to record; nothing was deployed. **This is the first end-to-end verific
 is that the failure RECURRED, byte-for-byte the same nil-payload message** — that record
 should move from "committed but unverified" to "verified still failing".
 
+
+## Run 13 (2026-09-13) — reproducer + the trace that settled the codegen defect
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin evidence
+root, worktree `agent-aa45d51377e3a4e99`, at `origin/main` 42347f19a51.
+Stage 1 admitted; Stage 2 built 877 units clean; receipt-size canary fired
+(`field=31758752897:runtime=632`, x3); smoke build failed at the link-nil site.
+Identical outcome to runs 10 and 12.
+
+Stages reached: Stage 1 admitted; Stage 2 built, not admitted; Stage 3 not attempted.
+
+Two blockers hit before the run would start, both worth knowing:
+- `error: Rust inputs changed during full bootstrap` — a tracked-file edit made
+  WHILE a bootstrap runs kills it, during the seed build, long before admission.
+- `error: Rust runtime authority private-admission origin comparator unavailable
+  or I/O failed ... status=2` — `/opt/homebrew/bin/cmp` shadows `/usr/bin/cmp`
+  and is a SYMLINK, so `bootstrap_stage3_compare_bind` fails its
+  `candidate == canonical` check. Fix: put `/usr/bin` FIRST on PATH and leave
+  `BOOTSTRAP_STAGE3_COMPARE_TOOL` unset, so auto-bind derives both the path and
+  its sha256. Setting that variable by hand without
+  `BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256` fails a different check in the same function.
+
+**The trace is not visible through the script.** `bootstrap-from-scratch.sh`
+sanitises the stage environment to a canonical env-name list, so
+`SIMPLE_TRACE_FIELD_GET=1 sh scripts/bootstrap/bootstrap-from-scratch.sh ...`
+emits zero trace lines. Replaying the Stage 2 `native-build` verbatim from
+`stage3/<platform>/stage2-command.transcript` is what makes it observable, and it
+is also a much better iteration loop: ~8.5 min per compile against ~35 min for a
+full run, with no admission machinery in the way.
+
+## Run 14 (2026-09-13) — receipt-size defect CLEARED; link-nil is the sole blocker
+
+Same command, virgin evidence root
+(`--output=.simple/storage/build/bootstrap-run14`), carrying the seed fix
+(`-> T?` constructors no longer lose their struct name — see
+`doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md`
+§ RESOLVED). Stage 1 admitted; Stage 2 built 877 units clean, 492.5s compile +
+10.4s link.
+
+**First run in this chain where the receipt-size canary never fired** — no
+`[receipt-size-canary]`, no `capsule-receipt-size-implausible`, no
+`receipt-content-mismatch`.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted. Verdict verbatim:
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+New datum for the link-nil record: the `[linker-wrapper]` print now fires and the
+command it names is a bare `0` with an EMPTY trail — so `find_linker_path()`'s Ok
+payload is being read out of the wrong slot and yielding a zero word. Same family
+as the receipt-size defect, different route, still open.
