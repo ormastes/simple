@@ -1,6 +1,6 @@
 # Stage 2 passes sanity, then fails the positional pure-Simple Stage-3 route with `scv-authority-missing`
 
-- Status: OPEN (2026-09-13) — **site 6**, the blocker immediately after site 5
+- Status: FIX APPLIED, proof pending (2026-09-13) — `check-bootstrap-stage2-struct-receiver.shs` now exports `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` next to the fresh per-probe `SIMPLE_NATIVE_BUILD_CACHE_DIR`, exactly what the driver's own error text asks for on a cold index; the proof is the next Stage-2 admission run
 - Found: bootstrap lane BOOT-6, `work/bootstrap-full-4-2026-09-12` at `b5e0c16549f`
 - Severity: **the current `--stop-after-stage2` admission blocker on Linux aarch64.**
   Unlike sites 1-5 it is NOT a compile defect: the compiler compiles.
