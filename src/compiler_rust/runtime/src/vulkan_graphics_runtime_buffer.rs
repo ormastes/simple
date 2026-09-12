@@ -3,8 +3,8 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffe
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
 use crate::value::{
-    byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
-    word_array_le_bytes, HeapObjectType, RuntimeArray, RuntimeValue,
+    byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_byte_array_new,
+    rt_byte_array_new_len, word_array_le_bytes, HeapObjectType, RuntimeArray, RuntimeValue,
 };
 
 // Raw-ABI transfer ceiling. Sized from the two DEFAULT render targets, not
@@ -741,6 +741,95 @@ pub extern "C" fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offs
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_read_buffer_bytes(_handle: i64, _byte_count: i64, _offset: i64) -> RuntimeValue {
     rt_byte_array_new(0)
+}
+
+/// Return a bounded Vulkan buffer range as a `[u32]` word array.
+///
+/// The natively-linked lane normally fills a caller-owned destination via
+/// `rt_vulkan_readback_u32_checksum`, which is cheaper still. This sibling
+/// exists because that shape PASSES a runtime array and so cannot cross the
+/// interpreter boundary; the interpreter reimplements this symbol against its
+/// own dlopen Vulkan state (`interpreter_extern/gpu.rs`). Defined here so a
+/// native or JIT build of the same Simple source links: the facade's arm is
+/// chosen by the runtime predicate `rt_is_interpreter_runtime()`, so the call
+/// site is emitted on every lane even where it never executes.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i64) -> RuntimeValue {
+    if handle <= 0 || pixel_count <= 0 || offset < 0 {
+        return rt_array_new(0);
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return rt_array_new(0);
+    };
+    if byte_count > MAX_RAW_TRANSFER_BYTES {
+        return rt_array_new(0);
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return rt_array_new(0);
+    };
+    match offset.checked_add(byte_count) {
+        Some(end) if end as u64 <= buf.size() => {}
+        _ => return rt_array_new(0),
+    }
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
+        return rt_array_new(0);
+    };
+    let array = rt_array_new(pixel_count as u64);
+    for chunk in downloaded.chunks_exact(4) {
+        let px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        rt_array_push(array, RuntimeValue::from_int(i64::from(px)));
+    }
+    array
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_readback_u32_array(_handle: i64, _pixel_count: i64, _offset: i64) -> RuntimeValue {
+    rt_array_new(0)
+}
+
+/// Identity checksum over the same range `rt_vulkan_readback_u32_array` returns.
+///
+/// The SAME `sum % 2147483647` fold `rt_vulkan_readback_u32_checksum` uses, so
+/// the value is lane-independent. -1 on any validation failure (a valid
+/// checksum is >= 0).
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_readback_u32_array_checksum(handle: i64, pixel_count: i64, offset: i64) -> i64 {
+    if handle <= 0 || pixel_count <= 0 || offset < 0 {
+        return -1;
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return -1;
+    };
+    if byte_count > MAX_RAW_TRANSFER_BYTES {
+        return -1;
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return -1;
+    };
+    match offset.checked_add(byte_count) {
+        Some(end) if end as u64 <= buf.size() => {}
+        _ => return -1,
+    }
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
+        return -1;
+    };
+    let mut checksum: i64 = 0;
+    for chunk in downloaded.chunks_exact(4) {
+        let px = i64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        checksum = (checksum + px) % 2_147_483_647;
+    }
+    checksum
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_readback_u32_array_checksum(_handle: i64, _pixel_count: i64, _offset: i64) -> i64 {
+    -1
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

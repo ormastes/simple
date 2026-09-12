@@ -851,3 +851,131 @@ fn simple_web_style_hot_is_display_none(hot: ComputedStyleHot) -> bool:
     # by the flow pass exactly like display:none and positioned afterwards by
     # the ::marker post-pass in layout() (list marker boxes, 2026-08-19).
     hot.display == "none" or hot.display == "marker"
+
+# ---------------------------------------------------------------------------
+# CSS math functions on lengths: min() / max() / clamp()
+#
+# The width model stores ONE i32 per box (positive = px, negative = percent
+# sentinel resolved against the containing block at layout time), so a mixed
+# `min(1100px, 100%)` cannot be represented directly. It is desugared instead,
+# which is exactly equivalent under CSS sizing:
+#     width: min(Apx, B%)        ==  width: B%;   max-width: Apx
+#     width: max(Apx, B%)        ==  width: B%;   min-width: Apx
+#     width: clamp(lo, mid, hi)  ==  width: mid;  min-width: lo; max-width: hi
+# All-px and all-percent argument lists are folded directly.
+# Before this existed the whole function text fell through to parse_int(), which
+# read the first number and overflowed the containing block.
+# ---------------------------------------------------------------------------
+
+fn css_math_fn_name(value: text) -> text:
+    val v = value.trim().lower()
+    if v.starts_with("min(") and v.ends_with(")"):
+        return "min"
+    if v.starts_with("max(") and v.ends_with(")"):
+        return "max"
+    if v.starts_with("clamp(") and v.ends_with(")"):
+        return "clamp"
+    ""
+
+fn css_math_args(value: text) -> [text]:
+    val v = value.trim()
+    val open = text_index_of(v, "(")
+    if open < 0:
+        return []
+    var out: [text] = []
+    var depth = 0
+    var start = open + 1
+    var i = open
+    while i < v.len():  # cpu-lane-loop-ok: scans ONE declaration value, bounded by its length
+        val c = v.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return out + [v.substring(start, i).trim()]
+        elif c == "," and depth == 1:
+            out = out + [v.substring(start, i).trim()]
+            start = i + 1
+        i = i + 1
+    out
+
+fn _css_math_is_percent(arg: text) -> bool:
+    arg.ends_with("%")
+
+fn _css_math_px(arg: text) -> i32:
+    parse_int(arg)
+
+# The value the width/height slot should take, with the math function resolved
+# away. Returns the input unchanged when it carries no CSS math function.
+pub fn css_math_primary(value: text) -> text:
+    val name = css_math_fn_name(value)
+    if name == "":
+        return value
+    val args = css_math_args(value)
+    if args.len() == 0:
+        return value
+    if name == "clamp":
+        return if args.len() >= 2: args[1] else: args[0]
+    # min()/max(): a percent argument becomes the width; an all-px list folds.
+    var percent_arg = ""
+    var best_px = 0
+    var seen_px = false
+    var i = 0
+    while i < args.len():  # cpu-lane-loop-ok: at most a handful of arguments
+        val a = args[i]
+        if _css_math_is_percent(a):
+            if percent_arg == "":
+                percent_arg = a
+        else:
+            val p = _css_math_px(a)
+            if not seen_px:
+                best_px = p
+                seen_px = true
+            elif name == "min" and p < best_px:
+                best_px = p
+            elif name == "max" and p > best_px:
+                best_px = p
+        i = i + 1
+    if percent_arg != "":
+        return percent_arg
+    if seen_px:
+        return best_px.to_string() + "px"
+    value
+
+# Implied max-width (px) from `min(...)`, 0 when there is none. `min(Apx, B%)`
+# can never exceed Apx, so Apx becomes the upper clamp.
+pub fn css_math_implied_max_px(value: text) -> i32:
+    if css_math_fn_name(value) == "min":
+        return _css_math_first_px(css_math_args(value))
+    if css_math_fn_name(value) == "clamp":
+        val args = css_math_args(value)
+        return if args.len() >= 3 and not _css_math_is_percent(args[2]): _css_math_px(args[2]) else: 0
+    0
+
+# Implied min-width (px) from `max(...)` / `clamp(...)`, 0 when there is none.
+pub fn css_math_implied_min_px(value: text) -> i32:
+    if css_math_fn_name(value) == "max":
+        return _css_math_first_px(css_math_args(value))
+    if css_math_fn_name(value) == "clamp":
+        val args = css_math_args(value)
+        return if args.len() >= 1 and not _css_math_is_percent(args[0]): _css_math_px(args[0]) else: 0
+    0
+
+fn _css_math_first_px(args: [text]) -> i32:
+    # Only meaningful when the list mixes a px bound with a percent value; an
+    # all-px list has already been folded by css_math_primary.
+    var has_percent = false
+    var i = 0
+    while i < args.len():  # cpu-lane-loop-ok: at most a handful of arguments
+        if _css_math_is_percent(args[i]):
+            has_percent = true
+        i = i + 1
+    if not has_percent:
+        return 0
+    var j = 0
+    while j < args.len():  # cpu-lane-loop-ok: at most a handful of arguments
+        if not _css_math_is_percent(args[j]):
+            return _css_math_px(args[j])
+        j = j + 1
+    0

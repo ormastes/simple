@@ -1,0 +1,50 @@
+"""
+## Purpose and audience
+Purpose: Prove that a border-radius corner is anti-aliased by pixel coverage —
+a pixel on the arc takes an intermediate value while pixels well inside and well
+outside stay exact.
+Audience: browser-engine and Engine2D maintainers.
+
+This file covers the framebuffer painter
+(`fb_rounded_rect_corners_opacity_clip`), which used a hard
+`dx*dx + dy*dy <= r*r` in/out test and produced a stair-stepped corner with no
+intermediate value anywhere. The Engine2D painter is covered by the sibling
+`border_radius_antialias_engine2d_spec.spl`, which is RED and in-development:
+that fix is blocked on a coordinated CPU/Metal/Vulkan shared-raster change.
+See doc/08_tracking/bug/web_border_radius_corner_not_antialiased_2026-09-12.md
+"""
+
+# @req: REQ-BROWSER-ENGINE-BORDER-RADIUS-AA-001 — rounded corners are coverage anti-aliased.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 3%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    fb_rounded_rect_corners_opacity_clip, ClipRect
+}
+
+describe "framebuffer rounded corner is coverage anti-aliased":
+    it "AC-4: the fb_ painter ramps the same way on a bare buffer":
+        val w = 40
+        val h = 40
+        var buf: [u32] = [0x00ffffffu32; w * h]
+        val clip = ClipRect(x0: 0, y0: 0, x1: w, y1: h)
+        # Black 30x30 box at (4, 4) with a 16px top-left radius: arc centre
+        # (4 + 16 - 1, 4 + 16 - 1) = (19, 19).
+        val out = fb_rounded_rect_corners_opacity_clip(
+            buf, w, h, 4, 4, 30, 30, 16, 0, 0, 0, 0x00000000u32, 100, clip)
+        # Well inside the arc: exact fill. Corner tip: untouched background.
+        expect((out[19 * w + 19] & 0x00ffffffu32)).to_equal(0x00000000u32)
+        expect((out[4 * w + 4] & 0x00ffffffu32)).to_equal(0x00ffffffu32)
+        # The arc itself must carry a ramp: count pixels in the corner tile
+        # that are neither exact fill nor exact background. A hard in/out test
+        # produces exactly zero of them.
+        var ramp = 0
+        var j = 4
+        while j < 20:
+            var i = 4
+            while i < 20:
+                val g = ((out[j * w + i] >> 16) & 0xFFu32) as i32
+                if g > 0 and g < 255:
+                    ramp = ramp + 1
+                i = i + 1
+            j = j + 1
+        assert_true(ramp >= 8)
