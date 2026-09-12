@@ -277,9 +277,12 @@ provider tokens. This preserves current routing-only behavior.
 `environment_variant_native_task_bridge_v1` is the native capability
 consumption seam. It reprojects provider, resource and terminal completion
 tokens before comparing backend/session/generation, exact provider artifact,
-device, canonical resource-lease identity, invocation, output range and
-readback length. The task owner calls that seam using its retained task record;
-a caller-shaped bridge receipt alone is never accepted as authority.
+device, canonical resource-lease identity, invocation, and readback length
+against the retained task's output capacity. Standalone admission repeats task
+layout, effect, numerical,
+lease-capacity and enabled-device-capacity checks rather than trusting prior
+task preparation. The task owner calls that seam using its retained task
+record; a caller-shaped bridge receipt alone is never accepted as authority.
 
 Device-program images remain a separate capability. The runtime exports a
 typed image-authority projection, but every word currently returns zero because
@@ -289,6 +292,11 @@ the image gate, completion remains routing evidence only, and
 must bind retained bytes and program identity to the same provider generation;
 it must not be enabled by changing a Boolean without that issuer and its
 negative-control evidence.
+
+The current native completion projection binds resource, correlation and
+readback length but not the submitted output offset/range or exact image token.
+That join remains an activation prerequisite in the GPU qualification TODO;
+the physical-execution gate cannot open before it is owner-issued and tested.
 
 ## Parser SIMD artifact qualification refinement
 

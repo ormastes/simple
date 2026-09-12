@@ -9,6 +9,8 @@ must remain unavailable until all of the following are present:
 - an authenticated, retained owner for the exact device-program image bytes;
 - a runtime-owned exact device-program image token (the current typed image
   projection intentionally returns no authority words);
+- terminal completion authority that retains that exact image identity and the
+  submitted output offset/range, not only resource/correlation/byte length;
 - a Vulkan parser kernel whose readback is compared with the CPU oracle;
 - missing-feature, wrong-image, capacity+1, cancellation, device-loss,
   uncertain-submit, stale-generation, and replacement negative controls;

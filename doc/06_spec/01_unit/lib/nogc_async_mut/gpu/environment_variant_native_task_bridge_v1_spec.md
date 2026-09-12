@@ -21,6 +21,11 @@ Native backend identifiers larger than the registry's unsigned 32-bit width
 are rejected before conversion. A runtime-owned resource one byte smaller than
 the bounded task arena is rejected rather than rounded or widened.
 
+The standalone admission boundary independently compares the task's resource
+layout, required effects, numerical contract, and arena capacity against the
+retained image, lease, and enabled-device limits. It does not rely on a caller
+having passed through task preparation first.
+
 ## Scenario: reject invalid live handles
 
 Given a zero provider/session handle, resource-lease projection returns

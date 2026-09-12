@@ -45,6 +45,28 @@ fn task() -> GpuBoundedTaskV1:
         required_effect_bits: 1u64, numerical_contract_id: 2u32,
         cpu_fallback_semantically_allowed: true)
 
+fn task_contract(layout: u64, effects: u64, numerical: u32) -> GpuBoundedTaskV1:
+    GpuBoundedTaskV1(
+        descriptor_size: GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1,
+        schema_version: GPU_ENVIRONMENT_TASK_SCHEMA_V1,
+        operation_kind: GpuTaskOperationKindV1.FrontendParse,
+        fallback_policy: GpuTaskFallbackPolicyV1.RequireRequested,
+        invocation_id: 17u64, provider_generation: 3u64,
+        lease_generation: 41u64,
+        input_arena: GpuTaskArenaRangeV1(offset: 0u64, length: 64u64),
+        output_arena: GpuTaskArenaRangeV1(offset: 64u64, length: 64u64),
+        arena_capacity_bytes: 128u64, resource_layout_identity:
+            GpuTaskIdentityV1(w0: layout, w1: 0u64, w2: 0u64, w3: 0u64),
+        required_effect_bits: effects, numerical_contract_id: numerical,
+        cpu_fallback_semantically_allowed: true)
+
+fn device_capacity(maximum: u64) -> GpuEnabledDeviceAuthorityV1:
+    GpuEnabledDeviceAuthorityV1(
+        device_identity: d(4u64), registry_generation: 5u64,
+        device_api_id: 1u32, enabled_api_version: 1u32,
+        enabled_feature_bits: 1u64, maximum_buffer_bytes: maximum,
+        maximum_workgroup_invocations: 64u32, queue_family_count: 1u32)
+
 fn image() -> GpuDeviceProgramImageV1:
     GpuDeviceProgramImageV1(
         program_identity: d(11u64), image_digest: d(15u64),
@@ -112,6 +134,23 @@ describe "native GPU environment task authority bridge V1":
             artifact_digest: d(9u64))
         expect(gpu_native_task_provider_shape_matches_v1(
             provider(), device(), too_wide)).to_be(false)
+
+    it "should enforce task layout effects numerics and device capacity locally":
+        step("Accept only the exact contract already retained by task preparation")
+        expect(gpu_native_task_contract_shape_matches_v1(
+            provider(), image(), device(), lease(), task())).to_be(true)
+        expect(gpu_native_task_contract_shape_matches_v1(
+            provider(), image(), device(), lease(),
+            task_contract(99u64, 1u64, 2u32))).to_be(false)
+        expect(gpu_native_task_contract_shape_matches_v1(
+            provider(), image(), device(), lease(),
+            task_contract(12u64, 2u64, 2u32))).to_be(false)
+        expect(gpu_native_task_contract_shape_matches_v1(
+            provider(), image(), device(), lease(),
+            task_contract(12u64, 1u64, 3u32))).to_be(false)
+        expect(gpu_native_task_contract_shape_matches_v1(
+            provider(), image(), device_capacity(127u64), lease(),
+            task())).to_be(false)
 
     it "should reject invalid live handles through every bridge consumer":
         step("Use zero runtime handles so no foreign call is attempted")
