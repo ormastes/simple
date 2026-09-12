@@ -178,7 +178,6 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             body: substitute_block_templates(&stmt.body, const_bindings),
             simd_requested: stmt.simd_requested,
             is_suspend: stmt.is_suspend,
-            auto_enumerate: stmt.auto_enumerate,
             invariants: stmt.invariants.clone(),
             label: stmt.label.clone(),
         }),

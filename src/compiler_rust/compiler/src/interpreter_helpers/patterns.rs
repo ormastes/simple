@@ -2010,37 +2010,63 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
     }
 }
 
-/// Decide, for a bare two-name for-pattern (`for a, b in e:`,
-/// `ForStmt.auto_enumerate == true`), whether `e` should be treated as
-/// TUPLE DESTRUCTURING (`k`/`v` unpack the tuple each element already is,
-/// same as the parenthesized `for (k, v) in e:`) rather than the classic
-/// enumerate shorthand (`i` = the loop's own position, `item` = the element
-/// as-is).
+/// Split one for-loop iteration value into exactly `arity` element values
+/// for a tuple loop pattern (`for a, b in e:` and the parenthesized
+/// `for (a, b) in e:` are the SAME pattern — see `parse_for_pattern`).
 ///
-/// This is a STATIC decision on the iterable EXPRESSION, made ONCE per loop
-/// — not a per-item runtime guess. An earlier version of this fix inspected
-/// each yielded `item`'s VALUE (wrap unless it was already a 2-tuple), which
-/// is wrong: it silently changes the meaning of `for i, pair in
-/// [(1, 2), (3, 4)]:` from enumerate (`i` = 0, 1; `pair` = the tuple) to
-/// destructure (`i` = 1, 3; `pair` = 2, 4) purely because the array's
-/// elements happen to be 2-tuples — a real feature break, and
-/// data-dependent: the same source could flip behavior depending on what the
-/// array holds at runtime. See
-/// doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
-///
-/// The static rule: destructure only when the iterable is written as a
-/// method call named `items` or `entries` (any receiver) — `d.items()`,
-/// `d.entries()`, `some_expr().items()`, etc. Every other iterable —
-/// including an array literal or variable that happens to hold 2-tuples —
-/// keeps the plain enumerate shorthand exactly as before this bug's fix.
-/// Direct dict iteration (`for k, v in d:`, no `.items()`/`.entries()` call
-/// at all) is handled separately by the caller via a runtime check on the
-/// iterable's evaluated `Value` (`Value::Dict`/`Value::FrozenDict`), since
-/// there is no syntactic marker for it — that check predates this bug and is
-/// unchanged in kind, only widened to include `FrozenDict`.
-pub(crate) fn for_loop_iterable_is_items_or_entries_call(iterable: &Expr) -> bool {
-    matches!(iterable, Expr::MethodCall { method, .. } if method == "items" || method == "entries")
+/// Missing elements bind `Nil` rather than failing the match, because a
+/// for-loop pattern is a DESTRUCTURE, not a test: there is no next arm to
+/// fall through to. This mirrors the pure-Simple compiler, whose HIR
+/// lowering emits one `let name = __for_tuple_elem[i]` per name
+/// (src/compiler/20.hir/hir_lowering/statements.spl, `StmtKind.For`) and
+/// therefore yields `nil` for an element a non-tuple does not have; the
+/// seed's own JIT already answered `nil` here too. A strict match would
+/// instead skip the iteration silently, which is what `bind_pattern`'s
+/// `bind_sequence_pattern` does — correct for a `case` arm, wrong here.
+fn for_loop_tuple_elements(value: Value, arity: usize) -> Vec<Value> {
+    let mut values: Vec<Value> = match value {
+        Value::Tuple(vals) => vals,
+        Value::Array(vals) | Value::FrozenArray(vals) => (*vals).clone(),
+        _ => Vec::new(),
+    };
+    values.truncate(arity);
+    values.resize(arity, Value::Nil);
+    values
 }
+
+/// Bind one for-loop iteration value to the loop pattern (`exec_for_inner`
+/// flavour, plain `env.insert` bindings). Returns false only for a pattern
+/// `bind_pattern` itself cannot bind, in which case the caller skips the
+/// iteration exactly as before.
+pub(crate) fn bind_for_pattern(pattern: &Pattern, value: Value, env: &mut Env) -> bool {
+    let Pattern::Tuple(patterns) = pattern else {
+        return bind_pattern(pattern, &value, env);
+    };
+    for (pat, val) in patterns
+        .iter()
+        .zip(for_loop_tuple_elements(value, patterns.len()))
+    {
+        bind_for_pattern(pat, val, env);
+    }
+    true
+}
+
+/// Bind one for-loop iteration value to the loop pattern (block-executor
+/// flavour). Uses `bind_pattern_value` so the loop variable keeps the
+/// `val`-binding const bookkeeping that site has always applied.
+pub(crate) fn bind_for_pattern_value(pattern: &Pattern, value: Value, env: &mut Env) {
+    let Pattern::Tuple(patterns) = pattern else {
+        bind_pattern_value(pattern, value, false, env);
+        return;
+    };
+    for (pat, val) in patterns
+        .iter()
+        .zip(for_loop_tuple_elements(value, patterns.len()))
+    {
+        bind_for_pattern_value(pat, val, env);
+    }
+}
+
 
 /// Bind any pattern from a let statement.
 pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {

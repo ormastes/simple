@@ -884,7 +884,17 @@ for i in 0..10:
 
 for key, value in dict.items():
     print "{key}: {value}"
+
+for i, item in items.enumerate():     # index + item — `.enumerate()` is required
+    print "{i}: {item}"
 ```
+
+A bare comma pattern is **always** a tuple destructure, of any arity, and
+means exactly what the parenthesized spelling means: `for a, b in xs:` ==
+`for (a, b) in xs:`. The iterable is never consulted. There is no
+"enumerate shorthand" — `for i, x in xs:` over a plain array does NOT give
+you the index; it tries to unpack each element and binds `nil` for the parts
+a non-tuple does not have. Write `xs.enumerate()` when you want positions.
 
 ### While Loops
 
