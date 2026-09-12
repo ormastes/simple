@@ -883,9 +883,23 @@ pub fn driver_native_capsule_result_reason_v1(
         return "receipt-missing:{receipt_path}"
     val object_fp = FileFingerprint.from_file(capsule.object_path)
     if not object_fp.?: return "object-fingerprint-failed:{capsule.object_path}"
-    var expected = ""
-    if val fp = object_fp:
-        expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+    # The binding is ANNOTATED, and `!` is used instead of `if val fp = ...`,
+    # deliberately. Under native codegen an `if val` binding of an Optional
+    # returned by a CROSS-MODULE function loses the struct type, and a later
+    # `.size` is then resolved by FIELD NAME against a global index instead of
+    # this struct's layout. `FileFingerprint.size` is field 3, but the first
+    # `size` field registered in the build (e.g. `TypeLayout.size`) is field 0,
+    # so the read returned offset 0 -- the `path` text POINTER -- rendered as a
+    # decimal. Measured 2026-09-12: the same expression yielded 732750049 /
+    # 383756385 / 920329169 on different runs of an 1080-byte object, on BOTH
+    # the write and verify sides, producing an equal-length
+    # `receipt-content-mismatch:expected-bytes=1572:actual-bytes=1572`.
+    # `content_hash` is field 1 and happens to collide with nothing, which is
+    # why only the size was wrong. Do not "simplify" this back to `if val`.
+    # Compiler bug: doc/08_tracking/bug/
+    # native_optional_unwrap_field_index_by_name_collision_2026-09-12.md
+    val fp: FileFingerprint = object_fp!
+    val expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
     val actual = _sffi_file_read_text(receipt_path) ?? ""
     if actual != expected:
         # Report LENGTHS, not the two blobs: the receipt is ~1.3 KB and the
