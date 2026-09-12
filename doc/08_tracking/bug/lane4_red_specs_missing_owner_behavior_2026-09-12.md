@@ -113,3 +113,25 @@ override.
 `backend_vulkan_image_exact_scratch_spec.spl` to lane 2 and
 `backend_metal_font_spec.spl` to lane 3, while lane 4's brief also lists them.
 Both were repaired here as oracle fixes; dedupe against those lanes.
+
+## Divergence-delta step-over record (required by `.claude/rules/vcs.md`)
+
+`sh scripts/check/check-test-tree-divergence-delta.shs origin/main HEAD` →
+`PASS — 3209 pre-existing offender(s), 0 introduced by this range` (exit 0),
+recorded here as the rule requires rather than stepped over silently.
+
+The underlying guard is honestly RED on `main` and was before this branch
+existed: `check-test-tree-divergence: FAIL — 3943 diverged vs 965 baselined
+(3081 new, 103 fixed-but-still-baselined); 26 mirror-only (25 unallowlisted, 0
+stale-allowlist)`. That backlog is not this lane's to repair.
+
+This branch touches exactly one file that has a `test/unit/` twin —
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+(twin 342 lines vs 1912; already diverged before this change, confirmed by
+`cmp` on pristine `main`). The other mirror pair in lane 4's list,
+`test/01_unit/browser_engine/anonymous_block_spec.spl` vs
+`test/unit/browser_engine/anonymous_block_spec.spl`, is likewise already
+diverged and was NOT modified. Every other spec edited here
+(`backend_metal_font_spec`, `backend_vulkan_mask_plane_spec`,
+`backend_vulkan_image_exact_scratch_spec`, `draw_ir_adv_spec`) exists only
+under `test/01_unit/` and has no twin.
