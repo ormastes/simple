@@ -1,7 +1,7 @@
 # An `i64` stored in an array is TRUNCATED under the JIT (data loss, not a print defect)
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (P1) — re-verified on the 2026-08-17 12:58 seed; root cause now pinned to `RuntimeValue::from_int` (see the re-verification section at the end)
+- **Status:** CLOSED (2026-09-12) — not reproducible on the deployed seed; see "Re-check 2026-09-12" at the end. (Was: OPEN (P1), root cause pinned to `RuntimeValue::from_int`.)
 - **Severity:** High — silent wrong-answer arithmetic. The value itself is
   corrupted in storage; every later read, comparison and arithmetic operation on
   it is wrong. This is not a formatting problem.
@@ -143,3 +143,42 @@ RED tests at `src/compiler_rust/runtime/tests/boxed_int_wide_roundtrip.rs`.
 Correction to this record's own analysis: the `[i64]` array is not special. Any
 value crossing the tagged-`RuntimeValue` boundary above 2^60 truncates; the array
 literal is merely one such crossing. Nothing needs changing in the array path.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+The record's own reproducer, all three channels, on all three lanes:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run i64max.spl
+9223372036854775807 | true | 9223372036854775807
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run i64max.spl
+9223372036854775807 | true | 9223372036854775807
+$ bin/simple run i64max.spl            (default)
+9223372036854775807 | true | 9223372036854775807
+```
+
+Documented defect: `-1` / `false` / `-1` under the JIT. **Not reproducible** —
+status CLOSED. The sibling row
+`runtime_from_int_still_truncates_61bit_2026-08-17.md` (the missing
+heap-boxing producer in `RuntimeValue::from_int`) should be re-checked against
+this evidence by whoever owns it; this row no longer reproduces.
+
+Regression guard: `test/01_unit/bugs/jit_wide_i64_storage_roundtrip_spec.spl`
+(9 examples). Per this record's own closing correction ("the `[i64]` array is
+not special"), the guard is written around the **2^60 tagged-value boundary**
+rather than around arrays: just below 2^60, 2^60 itself, `i64::MAX`, a wide
+negative, and a value delivered by `push` instead of an array literal. Each
+value is checked through three independent channels — `str()` rendering,
+`==` equality and arithmetic — because the original corruption survived a
+comparison and a rendering-only assertion would have missed it.
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/jit_wide_i64_storage_roundtrip_spec.spl outcome=OK declared>=9 executed=9 passed=9 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: substituting the documented buggy answers (`str()` == "-1",
+equality == false) turns the file RED —
+`outcome=ERROR declared>=9 executed=9 passed=7 failed=2 skipped=0 dropped=0`.
