@@ -1,0 +1,71 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.*
+
+fn mask_of(feature_id: u32) -> u64:
+    match environment_feature_registry_lookup_v2(feature_id):
+        case Ok(entry): entry.feature_mask
+        case Err(_):
+            fail("expected registered feature ID")
+            0u64
+
+describe "Environment feature registry exact x86 levels V2":
+    it "requires every x86-64-v3 feature independently":
+        val complete = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        val required = [
+            ENV_X86_FEATURE_BASELINE_V2,
+            ENV_X86_FEATURE_CMPXCHG16B_V2, ENV_X86_FEATURE_LAHF_SAHF_V2,
+            ENV_X86_FEATURE_POPCNT_V2, ENV_X86_FEATURE_SSE3_V2,
+            ENV_X86_FEATURE_SSSE3_V2, ENV_X86_FEATURE_SSE41_V2,
+            ENV_X86_FEATURE_SSE42_V2,
+            ENV_X86_FEATURE_AVX_V2, ENV_X86_FEATURE_AVX2_V2,
+            ENV_X86_FEATURE_BMI1_V2, ENV_X86_FEATURE_BMI2_V2,
+            ENV_X86_FEATURE_F16C_V2, ENV_X86_FEATURE_FMA_V2,
+            ENV_X86_FEATURE_LZCNT_V2, ENV_X86_FEATURE_MOVBE_V2,
+            ENV_X86_FEATURE_OSXSAVE_V2]
+        for feature in required:
+            expect(environment_feature_registry_x86_level_complete_v2(
+                ENV_FEATURE_X86_64_LEVEL3_V2, complete ^ feature)).to_equal(false)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            ENV_FEATURE_X86_64_LEVEL3_V2, complete)).to_equal(true)
+
+    it "requires the complete defined v4 group":
+        val complete = mask_of(ENV_FEATURE_X86_64_LEVEL4_V2)
+        for feature in [ENV_X86_FEATURE_AVX512F_V2,
+                        ENV_X86_FEATURE_AVX512BW_V2,
+                        ENV_X86_FEATURE_AVX512CD_V2,
+                        ENV_X86_FEATURE_AVX512DQ_V2,
+                        ENV_X86_FEATURE_AVX512VL_V2]:
+            expect(environment_feature_registry_x86_level_complete_v2(
+                ENV_FEATURE_X86_64_LEVEL4_V2, complete ^ feature)).to_equal(false)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            ENV_FEATURE_X86_64_LEVEL4_V2, complete)).to_equal(true)
+
+    it "keeps VBMI and VBMI2 outside plain x86-64-v4":
+        val v4 = mask_of(ENV_FEATURE_X86_64_LEVEL4_V2)
+        val vbmi = mask_of(ENV_FEATURE_X86_64_LEVEL4_VBMI_V2)
+        val vbmi2 = mask_of(ENV_FEATURE_X86_64_LEVEL4_VBMI2_V2)
+        expect(v4 & ENV_X86_FEATURE_AVX512VBMI_V2).to_equal(0u64)
+        expect(v4 & ENV_X86_FEATURE_AVX512VBMI2_V2).to_equal(0u64)
+        expect(vbmi & ENV_X86_FEATURE_AVX512VBMI_V2)
+            .to_equal(ENV_X86_FEATURE_AVX512VBMI_V2)
+        expect(vbmi2 & ENV_X86_FEATURE_AVX512VBMI2_V2)
+            .to_equal(ENV_X86_FEATURE_AVX512VBMI2_V2)
+        expect(environment_feature_registry_x86_id_subset_v2(
+            ENV_FEATURE_X86_64_LEVEL4_VBMI_V2,
+            ENV_FEATURE_X86_64_LEVEL4_V2)).to_equal(false)
+
+    it "rejects partial and unknown x86 level masks":
+        val v3 = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            0xffffffffu32, v3)).to_equal(false)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            ENV_FEATURE_X86_64_LEVEL4_V2, v3)).to_equal(false)
+
+    it "keeps legacy V1 words distinct from exact V2 words":
+        val legacy = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_V4_V1).unwrap().feature_mask
+        expect(legacy).to_equal(65535u64)
+        expect(environment_feature_registry_x86_validate_v2(legacy)).to_equal(false)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            ENV_FEATURE_X86_64_LEVEL4_V2, legacy)).to_equal(false)

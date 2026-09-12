@@ -1,0 +1,497 @@
+# Stable parse-result provider seam (EGL package 4).
+#
+# One versioned port through which a consumer asks for a parse result for a
+# (source-bytes identity, dialect) pair and receives either a NORMALIZED result
+# or a typed refusal. Providers are plain structs of callables -- no
+# inheritance, no registry object -- so a second provider is a second value,
+# not a subclass.
+#
+# Two provider slots exist today:
+#   * the scalar provider, which is the existing pure-Simple parser entry
+#     `parse_and_build_module_scoped`;
+#   * the SIMD/variant provider slot, which is declared UNAVAILABLE with an
+#     honest receipt until package 5 lands an admitted callable lease.
+#
+# Normalization follows the shape the frontend-seam todo asks for
+# (doc/08_tracking/todo/environment_optimized_dynamic_libraries_frontend_seam_2026-09-07.md,
+# resume step 4): length-prefixed, ORDERED token/span/node/diagnostic digests,
+# never a 32-bit lexical hash. The result reuses
+# `ParserScalarNormalizedOutputV1` so a normalized pair feeds
+# `parser_scalar_parity_qualify_v1` directly.
+#
+# This module is a sibling seam, not frontend wiring: `frontend.spl` and
+# `parse_full_frontend_with_scope` are owned by a concurrent lane and are not
+# touched here.
+#
+# Follow-up (package 4, second pass): the dialect grammar/actions/schema/
+# semantic digests are no longer declared labels. They are computed from the
+# tables a provider executes (`parse_dialect_identity_v1.spl`), and the seam
+# refuses a provider whose claimed dialect identity does not follow from its own
+# tables. The SDN and sosh dialects reach the same seam through
+# `parse_dialect_adapters_v1.spl`.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.string_core.{text_to_utf8_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+use compiler.driver.parser_scalar_parity_v1.{
+    ParserScalarNormalizedOutputV1,
+    ParserScalarParityEvidenceV1
+}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.frontend.core.lexer.{
+    lex_init_with_path, lex_next, lex_token_text, lex_token_line, lex_token_col
+}
+use compiler.core.tokens.{
+    tok_kind_name, keyword_lookup, tok_precedence, tok_is_right_assoc,
+    token_requires_rhs, token_can_end_expr
+}
+use compiler.driver.parse_dialect_identity_v1.{
+    DialectTablesV1,
+    ParseDialectIdentityV1,
+    parse_dialect_identity_of_v1,
+    parse_dialect_identity_same_v1,
+    parse_dialect_probe_words_v1
+}
+
+pub const PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1: u16 = 1u16
+
+# Dialect ids are seam-local and stable; 0 is reserved for "unset".
+pub const PARSE_DIALECT_SIMPLE_V1: u32 = 1u32
+
+# End-of-file token kind, as hardcoded by `lex_tokenize_all` in
+# src/compiler/10.frontend/core/lexer.spl. Named here so the token walk stops
+# on the same sentinel the lexer's own convenience walk uses.
+const _LEX_EOF_KIND: i64 = 190
+
+# Hang guard only: a lexer that never reaches EOF must not hang a consumer of
+# the seam. No real module approaches this, so there is no refusal for it.
+const _LEX_TOKEN_LIMIT: i64 = 4000000
+
+pub enum ParseResultRefusalV1:
+    ProviderUnavailable
+    ProviderSchemaMismatch
+    UnsupportedDialect
+    InvalidRequest
+
+pub struct ParseRequestV1:
+    schema_version: u16
+    source_text: text
+    source_path: text
+    dialect_id: u32
+
+pub struct ParseNormalizedResultV1:
+    schema_version: u16
+    provider_id: text
+    implementation_identity: EnvironmentDigest256V1
+    generation: u64
+    source_identity: EnvironmentDigest256V1
+    source_length: u64
+    dialect_id: u32
+    grammar_digest: EnvironmentDigest256V1
+    actions_digest: EnvironmentDigest256V1
+    schema_digest: EnvironmentDigest256V1
+    semantic_profile_digest: EnvironmentDigest256V1
+    token_count: u64
+    declaration_count: u64
+    diagnostic_count: u64
+    output: ParserScalarNormalizedOutputV1
+
+pub struct ParseResultProviderV1:
+    schema_version: u16
+    provider_id: text
+    implementation_identity: EnvironmentDigest256V1
+    generation: u64
+    available: bool
+    unavailable_reason: text
+    # The tables this provider actually executes, and the dialect identity it
+    # CLAIMS. The seam recomputes the identity from the tables and refuses a
+    # provider whose claim does not follow from them.
+    tables: DialectTablesV1
+    dialect_identity: ParseDialectIdentityV1
+    parse: fn(ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>
+
+# ---------------------------------------------------------------- digest material
+
+fn _push_u64(out: [i64], value: u64):
+    for shift in 0..8:
+        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+
+# Length-prefixed so "ab" + "c" and "a" + "bc" cannot collide.
+fn _push_text(out: [i64], value: text):
+    val bytes = text_to_utf8_bytes(value)
+    _push_u64(out, bytes.len() as u64)
+    for b in bytes:
+        out.append(b as i64)
+
+fn _read_u64(bytes: [i64], offset: i64) -> u64:
+    var value = 0u64
+    for index in 0..8:
+        value = value | ((bytes[offset + index] as u64) << ((index as u64) * 8u64))
+    value
+
+fn _digest_of(material: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(w0: _read_u64(raw, 0), w1: _read_u64(raw, 8),
+        w2: _read_u64(raw, 16), w3: _read_u64(raw, 24))
+
+fn _label_digest(label: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, label)
+    _digest_of(material)
+
+fn _same_digest(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+pub fn parse_result_source_identity_v1(source: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, "simple/parse-source/v1")
+    _push_text(material, source)
+    _digest_of(material)
+
+pub fn parse_result_normalized_output_same_v1(
+    a: ParserScalarNormalizedOutputV1, b: ParserScalarNormalizedOutputV1
+) -> bool:
+    _same_digest(a.token_digest, b.token_digest) and
+        _same_digest(a.span_digest, b.span_digest) and
+        _same_digest(a.node_digest, b.node_digest) and
+        _same_digest(a.diagnostic_digest, b.diagnostic_digest)
+
+# ---------------------------------------------------------------- normalization
+
+# Token stream: an ordered walk of the same lexer the parser uses. It runs a
+# fresh `lex_init_with_path`, so it must be called after the module has been
+# extracted -- never between `parser_init_with_path` and `parse_module_body`.
+fn _token_digest(source: text, path: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, "simple/parse-tokens/v1")
+    _push_text(material, path)
+    lex_init_with_path(source, path)
+    var walked = 0
+    while walked < _LEX_TOKEN_LIMIT:
+        val kind = lex_next()
+        walked = walked + 1
+        _push_u64(material, kind as u64)
+        _push_u64(material, lex_token_line() as u64)
+        _push_u64(material, lex_token_col() as u64)
+        _push_text(material, lex_token_text())
+        if kind == _LEX_EOF_KIND:
+            break
+    _push_u64(material, walked as u64)
+    _digest_of(material)
+
+fn _token_count(source: text, path: text) -> i64:
+    lex_init_with_path(source, path)
+    var walked = 0
+    while walked < _LEX_TOKEN_LIMIT:
+        val kind = lex_next()
+        walked = walked + 1
+        if kind == _LEX_EOF_KIND:
+            break
+    walked
+
+# Spans come from the declaration order the parser retained, so the digest is
+# order-sensitive by construction rather than by sorting after the fact.
+fn _span_digest(module: ParserModule, path: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, "simple/parse-spans/v1")
+    _push_text(material, path)
+    for name in module.function_order:
+        if module.functions.has(name):
+            val f = module.functions[name]
+            _push_text(material, name)
+            _push_u64(material, f.span.start as u64)
+            _push_u64(material, f.span.end as u64)
+            _push_u64(material, f.span.line as u64)
+            _push_u64(material, f.span.col as u64)
+            _push_u64(material, f.span.length as u64)
+            _push_text(material, f.span.file)
+    _digest_of(material)
+
+fn _push_sorted_names(material: [i64], label: text, names: [text]):
+    _push_text(material, label)
+    val sorted = names.sort()
+    var count = 0
+    for n in sorted:
+        count = count + 1
+    _push_u64(material, count as u64)
+    for n in sorted:
+        _push_text(material, n)
+
+fn _node_digest(module: ParserModule) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, "simple/parse-nodes/v1")
+    _push_text(material, module.name)
+    _push_text(material, module.tagged_layer)
+    _push_text(material, module.layer_dag_edges)
+    _push_u64(material, module.imports.len() as u64)
+    _push_u64(material, module.exports.len() as u64)
+    _push_u64(material, module.domain_blocks.len() as u64)
+    _push_u64(material, module.impls.len() as u64)
+    _push_u64(material, module.static_asserts.len() as u64)
+    _push_u64(material, module.aop_advices.len() as u64)
+    _push_u64(material, module.di_bindings.len() as u64)
+    _push_u64(material, module.arch_rules.len() as u64)
+    _push_u64(material, module.mock_decls.len() as u64)
+    # Ordered functions carry their shape, not just their name.
+    _push_text(material, "functions")
+    _push_u64(material, module.function_order.len() as u64)
+    for name in module.function_order:
+        _push_text(material, name)
+        if module.functions.has(name):
+            val f = module.functions[name]
+            _push_u64(material, f.params.len() as u64)
+            _push_u64(material, f.type_params.len() as u64)
+            _push_u64(material, f.attributes.len() as u64)
+            _push_u64(material, if f.has_return_type: 1u64 else: 0u64)
+            _push_u64(material, if f.is_async: 1u64 else: 0u64)
+            _push_u64(material, if f.is_static: 1u64 else: 0u64)
+            _push_u64(material, if f.is_public: 1u64 else: 0u64)
+            _push_u64(material, if f.is_method: 1u64 else: 0u64)
+            _push_u64(material, if f.is_mutable: 1u64 else: 0u64)
+            _push_u64(material, if f.is_const: 1u64 else: 0u64)
+            _push_u64(material, if f.is_extern: 1u64 else: 0u64)
+        else:
+            _push_u64(material, 0u64)
+    _push_sorted_names(material, "actors", module.actor_order)
+    # Dict-held declarations have no retained order, so their keys are sorted
+    # before digesting -- otherwise the digest would depend on hash iteration.
+    _push_sorted_names(material, "classes", module.classes.keys())
+    _push_sorted_names(material, "structs", module.structs.keys())
+    _push_sorted_names(material, "enums", module.enums.keys())
+    _push_sorted_names(material, "bitfields", module.bitfields.keys())
+    _push_sorted_names(material, "traits", module.traits.keys())
+    _push_sorted_names(material, "type_aliases", module.type_aliases.keys())
+    _push_sorted_names(material, "constants", module.constants.keys())
+    _digest_of(material)
+
+fn _diagnostic_digest(diagnostics: [text]) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_text(material, "simple/parse-diagnostics/v1")
+    _push_u64(material, diagnostics.len() as u64)
+    for d in diagnostics:
+        _push_text(material, d)
+    _digest_of(material)
+
+# The definition of the normalized form. The seam and any direct-parser
+# comparison leg share exactly this function, so a parity result says the parse
+# was unperturbed -- it does not say two normalizers agree.
+pub fn parse_result_normalize_module_v1(
+    module: ParserModule, source: text, path: text, diagnostics: [text]
+) -> ParserScalarNormalizedOutputV1:
+    val spans = _span_digest(module, path)
+    val nodes = _node_digest(module)
+    val diags = _diagnostic_digest(diagnostics)
+    ParserScalarNormalizedOutputV1(token_digest: _token_digest(source, path),
+        span_digest: spans, node_digest: nodes, diagnostic_digest: diags)
+
+fn _declaration_count(module: ParserModule) -> u64:
+    var total = 0
+    total = total + module.function_order.len()
+    total = total + module.actor_order.len()
+    for _k in module.classes.keys():
+        total = total + 1
+    for _k in module.structs.keys():
+        total = total + 1
+    for _k in module.enums.keys():
+        total = total + 1
+    for _k in module.traits.keys():
+        total = total + 1
+    for _k in module.type_aliases.keys():
+        total = total + 1
+    for _k in module.constants.keys():
+        total = total + 1
+    total as u64
+
+# ---------------------------------------------------------------- dialect identity
+
+# Dialect identity is COMPUTED from the tables the provider executes, by
+# `parse_dialect_identity_v1.spl`. The package 4 receipt recorded declared
+# labels here and named computing them as remaining work; this is that work for
+# the Simple dialect. The other dialects supply their own tables the same way
+# (`parse_dialect_adapters_v1.spl`).
+#
+# 222 is the kind domain of `src/compiler/10.frontend/core/tokens.spl`: the
+# highest constant there is `TOK_KW_AS = 221`. Walking the whole domain (rather
+# than a keyword list repeated here) is what makes a table edit move the digest.
+const _SIMPLE_KIND_LIMIT: i64 = 222
+
+const _SIMPLE_PROBE_PATH: text = "dialect-probe.simple"
+const _SIMPLE_PROBE_SOURCE: text = "fn probe_add(a: i64, b: i64) -> i64:\n    val total = a + b\n    if total > 0:\n        return total\n    0\n"
+
+# The precedence climber's action table: precedence, associativity, and the two
+# token predicates the statement/expression splitters consult. Packed above the
+# precedence range (max 12 in tokens.spl) so no bit collides with it.
+fn _simple_action_bits(kind: i64) -> i64:
+    var bits = tok_precedence(kind)
+    if tok_is_right_assoc(kind):
+        bits = bits + 4096
+    if token_requires_rhs(kind):
+        bits = bits + 8192
+    if token_can_end_expr(kind):
+        bits = bits + 16384
+    bits
+
+# Computed once per tables value, never during a request: re-entering the parser
+# while a request is in flight would reset the global error channel underneath it.
+fn _simple_probe_output() -> ParserScalarNormalizedOutputV1:
+    val module = parse_and_build_module_scoped(
+        _SIMPLE_PROBE_SOURCE, _SIMPLE_PROBE_PATH, false)
+    val diagnostics = if parser_has_errors(): parser_get_errors() else: []
+    parse_result_normalize_module_v1(
+        module, _SIMPLE_PROBE_SOURCE, _SIMPLE_PROBE_PATH, diagnostics)
+
+pub fn parse_dialect_tables_simple_v1() -> DialectTablesV1:
+    DialectTablesV1(dialect_id: PARSE_DIALECT_SIMPLE_V1,
+        kind_limit: _SIMPLE_KIND_LIMIT,
+        kind_name: tok_kind_name,
+        classify: keyword_lookup,
+        action_bits: _simple_action_bits,
+        probe_units: parse_dialect_probe_words_v1(_SIMPLE_PROBE_SOURCE),
+        probe_output: _simple_probe_output())
+
+# ---------------------------------------------------------------- providers
+
+const _SCALAR_PROVIDER_ID: text = "compiler.frontend.flat_ast_bridge.scalar.v1"
+const _SIMD_PROVIDER_ID: text = "compiler.frontend.parser.simd.v1"
+
+# A provider callable cannot see the provider value it hangs off, so it leaves
+# the four dialect digests unset; `parse_result_seam_request_v1` stamps them
+# from the identity it verified. A result obtained by calling `provider.parse`
+# directly is therefore undeclared, and the parity owner's `_declared` check
+# refuses it -- which is the intended asymmetry: the seam is the admitted path.
+pub fn parse_result_unstamped_dialect_digest_v1() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn _scalar_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    val tokens = _token_count(request.source_text, request.source_path)
+    val module = parse_and_build_module_scoped(
+        request.source_text, request.source_path, false)
+    # The parser's error channel is reset by the next `parser_init_with_path`,
+    # so it is drained here, before normalization re-runs the lexer.
+    val diagnostics = if parser_has_errors(): parser_get_errors() else: []
+    val output = parse_result_normalize_module_v1(
+        module, request.source_text, request.source_path, diagnostics)
+    Ok(ParseNormalizedResultV1(
+        schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        provider_id: _SCALAR_PROVIDER_ID,
+        implementation_identity: _label_digest(_SCALAR_PROVIDER_ID),
+        generation: 1u64,
+        source_identity: parse_result_source_identity_v1(request.source_text),
+        source_length: request.source_text.len() as u64,
+        dialect_id: request.dialect_id,
+        grammar_digest: parse_result_unstamped_dialect_digest_v1(),
+        actions_digest: parse_result_unstamped_dialect_digest_v1(),
+        schema_digest: parse_result_unstamped_dialect_digest_v1(),
+        semantic_profile_digest: parse_result_unstamped_dialect_digest_v1(),
+        token_count: tokens as u64,
+        declaration_count: _declaration_count(module),
+        diagnostic_count: diagnostics.len() as u64,
+        output: output))
+
+# The SIMD slot is a real provider value with a real callable, so the seam has
+# one dispatch path rather than a branch on "is this the scalar one". Its
+# callable refuses unconditionally: nothing is mapped, nothing is executed.
+fn _simd_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    Err(ParseResultRefusalV1.ProviderUnavailable)
+
+pub fn parse_result_provider_scalar_v1() -> ParseResultProviderV1:
+    val tables = parse_dialect_tables_simple_v1()
+    ParseResultProviderV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        provider_id: _SCALAR_PROVIDER_ID,
+        implementation_identity: _label_digest(_SCALAR_PROVIDER_ID),
+        generation: 1u64, available: true, unavailable_reason: "",
+        tables: tables,
+        dialect_identity: parse_dialect_identity_of_v1(tables),
+        parse: _scalar_parse)
+
+pub fn parse_result_provider_simd_v1() -> ParseResultProviderV1:
+    val tables = parse_dialect_tables_simple_v1()
+    ParseResultProviderV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        provider_id: _SIMD_PROVIDER_ID,
+        implementation_identity: _label_digest(_SIMD_PROVIDER_ID),
+        generation: 0u64, available: false,
+        unavailable_reason: "no admitted SIMD parse provider: build host is aarch64 (Cortex-X925, no AVX2) and no parser variant artifact has been mapped; see package 5",
+        tables: tables,
+        dialect_identity: parse_dialect_identity_of_v1(tables),
+        parse: _simd_parse)
+
+# ---------------------------------------------------------------- seam entry
+
+pub fn parse_result_seam_request_v1(
+    provider: ParseResultProviderV1, request: ParseRequestV1
+) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    if provider.schema_version != PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1 or
+       request.schema_version != PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1:
+        return Err(ParseResultRefusalV1.ProviderSchemaMismatch)
+    # The dialect a provider CLAIMS must follow from the tables it executes. A
+    # provider carrying a mutated grammar, action or projection cannot present
+    # another provider's dialect identity, because the identity is recomputed
+    # here from its own tables and compared.
+    val computed = parse_dialect_identity_of_v1(provider.tables)
+    if not parse_dialect_identity_same_v1(computed, provider.dialect_identity):
+        return Err(ParseResultRefusalV1.ProviderSchemaMismatch)
+    if not provider.available:
+        return Err(ParseResultRefusalV1.ProviderUnavailable)
+    if request.dialect_id != provider.tables.dialect_id:
+        return Err(ParseResultRefusalV1.UnsupportedDialect)
+    # A result with no source path cannot be bound to a source identity: the
+    # path is part of every span this seam normalizes.
+    if request.source_path == "" or request.source_text == "":
+        return Err(ParseResultRefusalV1.InvalidRequest)
+    match provider.parse(request):
+        case Ok(result):
+            var stamped = result
+            stamped.grammar_digest = computed.grammar_digest
+            stamped.actions_digest = computed.actions_digest
+            stamped.schema_digest = computed.schema_digest
+            stamped.semantic_profile_digest = computed.semantic_profile_digest
+            Ok(stamped)
+        case Err(refusal):
+            Err(refusal)
+
+# ---------------------------------------------------------------- parity evidence
+
+# Binds a seam result and an independently produced normalized output into the
+# evidence `parser_scalar_parity_qualify_v1` consumes. The two implementation
+# identities must differ -- the parity owner refuses a self-comparison -- so a
+# caller naming the same implementation for both legs is refused here first.
+pub fn parse_result_parity_evidence_v1(
+    canonical: ParseNormalizedResultV1,
+    legacy_output: ParserScalarNormalizedOutputV1,
+    legacy_implementation_id: text,
+    legacy_generation: u64
+) -> Result<ParserScalarParityEvidenceV1, ParseResultRefusalV1>:
+    if legacy_implementation_id == "" or legacy_generation == 0u64 or
+       canonical.declaration_count == 0u64:
+        return Err(ParseResultRefusalV1.InvalidRequest)
+    val legacy_identity = _label_digest(legacy_implementation_id)
+    if _same_digest(legacy_identity, canonical.implementation_identity):
+        return Err(ParseResultRefusalV1.InvalidRequest)
+    var coverage: [i64] = []
+    _push_text(coverage, "simple/parse-coverage/v1")
+    _push_u64(coverage, canonical.source_identity.w0)
+    _push_u64(coverage, canonical.declaration_count)
+    _push_u64(coverage, canonical.token_count)
+    _push_u64(coverage, canonical.diagnostic_count)
+    Ok(ParserScalarParityEvidenceV1(
+        source_snapshot_identity: canonical.source_identity,
+        # One immutable source snapshot per request, so its generation is 1.
+        source_snapshot_generation: 1u64,
+        dialect_id: canonical.dialect_id,
+        grammar_digest: canonical.grammar_digest,
+        actions_digest: canonical.actions_digest,
+        schema_digest: canonical.schema_digest,
+        semantic_profile_digest: canonical.semantic_profile_digest,
+        legacy_implementation_identity: legacy_identity,
+        legacy_generation: legacy_generation,
+        canonical_implementation_identity: canonical.implementation_identity,
+        canonical_generation: canonical.generation,
+        legacy_output: legacy_output,
+        canonical_output: canonical.output,
+        total_regions: canonical.declaration_count,
+        covered_regions: canonical.declaration_count,
+        unsupported_regions: 0u64,
+        coverage_evidence_digest: _digest_of(coverage)))

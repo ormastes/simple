@@ -14,7 +14,14 @@ use app.io.time_ops (time_now_unix_micros)
 use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
-use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver (
+    compiler_driver_create,
+    compiler_driver_create_with_environment_variant_policy_v1,
+    compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file,
+    aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
+    EnvironmentVariantPolicyCollectionV1}
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 use app.io._CliCompile.build_intermediate_policy.{
     native_build_cleanup_stale_intermediates, native_build_finish_intermediate,
@@ -283,6 +290,18 @@ fn cli_native_build_log_value_error(value: text) -> text:
         return "--log requires 'on' or 'off'"
     ""
 
+fn cli_native_build_policy_value_flag(arg: text) -> bool:
+    arg == "--parser-impl" or arg == "--parser-prefer" or
+        arg == "--parser-require" or arg == "--host-cpu-max" or
+        arg == "--frontend-offload" or
+        arg == "--frontend-offload-fallback"
+
+fn cli_native_build_inline_policy_flag(arg: text) -> bool:
+    arg.starts_with("--parser-impl=") or arg.starts_with("--parser-prefer=") or
+        arg.starts_with("--parser-require=") or arg.starts_with("--host-cpu-max=") or
+        arg.starts_with("--frontend-offload=") or
+        arg.starts_with("--frontend-offload-fallback=")
+
 # Reject malformed build invocations before they can reach the compiler or
 # publish an output. The compile loop below intentionally stays focused on
 # decoding already-valid options.
@@ -308,7 +327,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level":
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -376,6 +395,10 @@ fn cli_native_build_option_error(args: [text]) -> text:
         elif arg.starts_with("--opt-level="):
             val error = cli_native_build_inline_value_error(arg, "--opt-level=", "--opt-level", false)
             if error != "": return error
+        elif cli_native_build_inline_policy_flag(arg):
+            val at = arg.index_of("=")
+            if at < 0 or at + 1 >= arg.len():
+                return "policy option requires a value: {arg}"
         elif arg.starts_with("--parse-shard="):
             # Internal flag, emitted only by the parse-shard orchestrator
             # (src/app/cli/native_build_main.spl). Validated like any other
@@ -618,7 +641,19 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
 # Native build: compile entire project to native binary
 # Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
 # otherwise delegates to Rust NativeProjectBuilder SFFI.
-fn cli_native_build(args: [text]) -> i64:
+fn _cli_native_build_create_driver_with_environment_variant_policy_v1(
+    options: CompileOptions,
+    collection: EnvironmentVariantPolicyCollectionV1?
+) -> Result<CompilerDriver, text>:
+    match collection:
+        case Some(value):
+            compiler_driver_create_with_environment_variant_policy_v1(options, value)
+        case None:
+            Ok(compiler_driver_create(options))
+
+fn _cli_native_build(
+    args: [text], collection: EnvironmentVariantPolicyCollectionV1?
+) -> i64:
     val option_error = cli_native_build_option_error(args)
     if option_error != "":
         _cli_eprint("Error: {option_error}")
@@ -953,6 +988,12 @@ fn cli_native_build(args: [text]) -> i64:
                 # The public wrapper consumes these values; consume them here
                 # too so compatibility options cannot reinterpret one as entry.
                 j = j + 1
+            elif cli_native_build_policy_value_flag(a):
+                # The parent-to-worker handoff already validated and retained
+                # these values. E3 consumes the typed handoff; this legacy argv
+                # parser only consumes the public spelling so it cannot become
+                # an entry pathname or an unknown-option failure.
+                j = j + 1
             elif a == "--runtime-path":
                 if j + 1 < args.len():
                     j = j + 1
@@ -961,6 +1002,8 @@ fn cli_native_build(args: [text]) -> i64:
                 pass
             elif a.starts_with("--runtime-path="):
                 runtime_path = a.substring(15)
+            elif cli_native_build_inline_policy_flag(a):
+                pass
             elif a == "--clean":
                 # Ask the driver to wipe this build's cache scope before
                 # compiling. The driver consumes (clears) the flag, so it
@@ -1141,7 +1184,6 @@ fn cli_native_build(args: [text]) -> i64:
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
-            use compiler.driver.driver (CompilerDriver)
             var options = driver_core_compile_options_default()
             var native_inputs: [text] = []
             if effective_entry_closure:
@@ -1177,7 +1219,12 @@ fn cli_native_build(args: [text]) -> i64:
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
-            val driver = compiler_driver_create(options)
+            val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
+                options, collection):
+                case Ok(value): value
+                case Err(reason):
+                    _cli_eprint("Error: invalid environment variant policy: {reason}")
+                    return 1
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
             val driver_result = compiler_driver_run_compile(driver)
@@ -1219,7 +1266,12 @@ fn cli_native_build(args: [text]) -> i64:
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
-            val driver = compiler_driver_create(options)
+            val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
+                options, collection):
+                case Ok(value): value
+                case Err(reason):
+                    _cli_eprint("Error: invalid environment variant policy: {reason}")
+                    return 1
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
             val driver_result = compiler_driver_run_compile(driver)
@@ -1412,6 +1464,14 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Error: native-build requires --backend=llvm-lib in the pure Simple command path")
         _cli_eprint("The Rust seed is bootstrap-only; native-build no longer falls back to rt_native_build.")
         return 1
+
+fn cli_native_build(args: [text]) -> i64:
+    _cli_native_build(args, None)
+
+pub fn cli_native_build_with_environment_variant_policy_v1(
+    args: [text], collection: EnvironmentVariantPolicyCollectionV1
+) -> i64:
+    _cli_native_build(args, Some(collection))
 
 fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
     # Map semantic Simple/C runtime lane names onto legacy driver values.

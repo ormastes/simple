@@ -1,0 +1,88 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+use std.nogc_async_mut.structural.parse.lexical_candidate_resolution_v1.*
+use std.nogc_async_mut.structural.parse.lexical_routing_receipt_v1.*
+
+fn _bytes_lrr() -> [u8]:
+    [34u8, 97u8, 92u8, 34u8, 35u8, 98u8, 10u8, 123u8]
+
+describe "truthful lexical routing receipt verification V1":
+    it "issues a scalar-reference receipt that verifies against the work performed":
+        val bytes = _bytes_lrr()
+        val input = lexical_block_initial_state_v1()
+        val receipt = lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ScalarReference, false, 7u64).unwrap()
+        expect(receipt.scalar_resolution).to_equal(true)
+        expect(receipt.byte_count).to_equal(bytes.len() as u32)
+        expect(receipt.masks).to_equal(lexical_candidate_masks_scalar_v1(bytes).unwrap())
+        expect(receipt.output_state).to_equal(
+            lexical_resolve_state_sealed_v1(bytes, input).unwrap())
+        expect(lexical_routing_receipt_verify_v1(receipt, bytes, input, false, 7u64)).to_equal(
+            Ok(true))
+
+    it "refuses a receipt whose candidate masks were forged":
+        val bytes = _bytes_lrr()
+        val input = lexical_block_initial_state_v1()
+        var forged = lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ScalarReference, false, 7u64).unwrap()
+        forged.masks.newline = forged.masks.newline ^ 1u32
+        expect(lexical_routing_receipt_verify_v1(forged, bytes, input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.MaskMismatch))
+
+    it "refuses a receipt whose resolved state or byte count was forged":
+        val bytes = _bytes_lrr()
+        val input = lexical_block_initial_state_v1()
+        val honest = lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ScalarReference, false, 7u64).unwrap()
+        var state_forged = honest
+        state_forged.output_state = lexical_block_initial_state_v1()
+        expect(lexical_routing_receipt_verify_v1(state_forged, bytes, input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.StateMismatch))
+        var count_forged = honest
+        count_forged.byte_count = count_forged.byte_count + 1u32
+        expect(lexical_routing_receipt_verify_v1(count_forged, bytes, input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.ByteCountMismatch))
+        var scalar_forged = honest
+        scalar_forged.scalar_resolution = false
+        expect(lexical_routing_receipt_verify_v1(scalar_forged, bytes, input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.ScalarResolutionNotClaimed))
+
+    it "refuses a stale receipt and a receipt issued for different input":
+        val bytes = _bytes_lrr()
+        val input = lexical_block_initial_state_v1()
+        val receipt = lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ScalarReference, false, 7u64).unwrap()
+        expect(lexical_routing_receipt_verify_v1(receipt, bytes, input, false, 8u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.GenerationStale))
+        var other_input = lexical_block_initial_state_v1()
+        other_input.pending_identifier = true
+        expect(lexical_routing_receipt_verify_v1(receipt, bytes, other_input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.InputStateMismatch))
+        expect(lexical_routing_receipt_verify_v1(receipt, [97u8], input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.ByteCountMismatch))
+
+    it "refuses a native-provider claim that the host never admitted":
+        val bytes = _bytes_lrr()
+        val input = lexical_block_initial_state_v1()
+        expect(lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ParserLexicalAvx2, false, 7u64)).to_equal(
+            Err(LexicalRoutingIssueErrorV1.ProviderNotAdmitted))
+        val admitted = lexical_routing_receipt_issue_v1(bytes, input,
+            LexicalRoutingProviderV1.ParserLexicalAvx2, true, 7u64).unwrap()
+        expect(admitted.scalar_resolution).to_equal(true)
+        expect(lexical_routing_receipt_verify_v1(admitted, bytes, input, true, 7u64)).to_equal(
+            Ok(true))
+        expect(lexical_routing_receipt_verify_v1(admitted, bytes, input, false, 7u64)).to_equal(
+            Err(LexicalRoutingVerifyErrorV1.ProviderNotAdmitted))
+
+    it "verifies truthful receipts across every admitted input state":
+        val bytes = _bytes_lrr()
+        var checked = 0
+        for state in lexical_routing_verifiable_states_v1():
+            val receipt = lexical_routing_receipt_issue_v1(bytes, state,
+                LexicalRoutingProviderV1.ScalarReference, false, 3u64).unwrap()
+            expect(lexical_routing_receipt_verify_v1(receipt, bytes, state, false, 3u64)).to_equal(
+                Ok(true))
+            checked = checked + 1
+        expect(checked).to_equal(LEXICAL_TRANSITION_STATE_COUNT_V1 as i64)

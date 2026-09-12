@@ -1,0 +1,79 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+
+# Qualification of the canonical scalar summary across boundary states: an empty
+# block, a refused block, and a mismatched composition are all boundary states a
+# chunked caller can produce, so none of them may lose a pending introducer fact.
+
+fn scan_blocks_lbsb(blocks: [[u8]]) -> LexicalSummaryCompositionV1:
+    var state = lexical_block_initial_state_v1()
+    var acc = lexical_summary_from_block_v1(
+        lexical_block_summary_scalar_v1([], state).unwrap())
+    var first = true
+    for bytes in blocks:
+        val s = lexical_block_summary_scalar_v1(bytes, state).unwrap()
+        state = s.output_state
+        if first:
+            acc = lexical_summary_from_block_v1(s)
+            first = false
+        else:
+            acc = lexical_summary_compose_v1(acc, lexical_summary_from_block_v1(s)).unwrap()
+    acc
+
+fn boundary_states_lbsb() -> [LexicalBlockStateV1]:
+    val seeds = [[114u8], [34u8], [34u8, 34u8], [47u8], [10u8], [97u8],
+        [35u8, 97u8], [34u8, 92u8], [34u8, 97u8]]
+    var out = [lexical_block_initial_state_v1()]
+    for bytes in seeds:
+        out.push(lexical_block_summary_scalar_v1(bytes,
+            lexical_block_initial_state_v1()).unwrap().output_state)
+    out
+
+describe "lexical block summary V1 boundary states":
+    it "an empty block is the identity on every reachable boundary state":
+        for state in boundary_states_lbsb():
+            val s = lexical_block_summary_scalar_v1([], state).unwrap()
+            expect(s.byte_count).to_equal(0u32)
+            expect(s.fallback_bits).to_equal(0u64)
+            expect(s.output_state).to_equal(state)
+
+    it "a split introducer cannot evade fallback through an empty block":
+        val heads = [[114u8], [34u8, 34u8], [97u8], [47u8], [10u8]]
+        val tails = [[34u8], [34u8], [123u8], [42u8], [32u8]]
+        val expected = [LEX_FALLBACK_RAW_STRING_V1, LEX_FALLBACK_TRIPLE_STRING_V1,
+            LEX_FALLBACK_CUSTOM_BLOCK_V1, LEX_FALLBACK_BLOCK_COMMENT_V1,
+            LEX_FALLBACK_INDENTATION_V1]
+        var i = 0
+        while i < heads.len():
+            val adjacent = scan_blocks_lbsb([heads[i], tails[i]])
+            expect((adjacent.fallback_bits & expected[i]) != 0u64).to_equal(true)
+            val gapped = scan_blocks_lbsb([heads[i], [], tails[i]])
+            expect((gapped.fallback_bits & expected[i]) != 0u64).to_equal(true)
+            expect(gapped.canonical_usable).to_equal(false)
+            i = i + 1
+
+    it "every reachable output state is accepted by the validity predicate":
+        for state in boundary_states_lbsb():
+            expect(lexical_block_state_valid_v1(state)).to_equal(true)
+            expect(lexical_block_state_valid_v1(
+                lexical_block_summary_scalar_v1([], state).unwrap().output_state)).to_equal(true)
+
+    it "refuses an over-wide block and an unreachable input state":
+        val wide = [97u8 for _ in 0..33]
+        val too_wide = lexical_block_summary_scalar_v1(wide, lexical_block_initial_state_v1())
+        expect(too_wide.is_err()).to_equal(true)
+        expect(too_wide.unwrap_err()).to_equal(LexicalBlockSummaryErrorV1.BlockTooWide)
+        var bad = lexical_block_initial_state_v1()
+        bad.pending_quote_run = 1u8
+        val invalid = lexical_block_summary_scalar_v1([97u8], bad)
+        expect(invalid.is_err()).to_equal(true)
+        expect(invalid.unwrap_err()).to_equal(LexicalBlockSummaryErrorV1.InvalidInputState)
+
+    it "refuses composition across a mismatched boundary state":
+        val initial = lexical_block_initial_state_v1()
+        val a = lexical_block_summary_scalar_v1([114u8], initial).unwrap()
+        val foreign = lexical_block_summary_scalar_v1([34u8], initial).unwrap()
+        val mismatched = lexical_summary_compose_v1(
+            lexical_summary_from_block_v1(a), lexical_summary_from_block_v1(foreign))
+        expect(mismatched.is_err()).to_equal(true)
+        expect(mismatched.unwrap_err()).to_equal(LexicalBlockSummaryErrorV1.BoundaryMismatch)

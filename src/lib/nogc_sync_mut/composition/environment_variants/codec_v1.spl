@@ -1,0 +1,173 @@
+# codex-impl
+# Bounded inert catalog envelope codec for environment-variant records.
+#
+# The envelope is inspected before any executable artifact is mapped. Payload
+# record decoding is owned by the typed schema for the declared record kind.
+
+use std.common.crypto.sha256.{sha256_bytes}
+
+pub const ENV_VARIANT_CATALOG_MAGIC_V1: u32 = 827083845u32
+pub const ENV_VARIANT_CATALOG_HEADER_BYTES_V1: u32 = 48u32
+pub const ENV_VARIANT_CATALOG_MAX_BYTES_V1: u32 = 1048576u32
+pub const ENV_VARIANT_CATALOG_MAX_RECORDS_V1: u32 = 4096u32
+pub const ENV_VARIANT_RECORD_KIND_DESCRIPTOR_V1: u16 = 1u16
+pub const ENV_VARIANT_CATALOG_RECORD_HEADER_BYTES_V1: u32 = 4u32
+
+pub enum EnvironmentVariantCodecErrorV1:
+    InputTooShort
+    UnsupportedMagic
+    UnsupportedSchema
+    UnsupportedRecordKind
+    CapacityExceeded
+    LengthMismatch
+    DigestMismatch
+    RecordFramingInvalid
+
+pub struct EnvironmentVariantCatalogEnvelopeV1:
+    schema_version: u16
+    record_kind: u16
+    record_count: u32
+    payload: [u8]
+    payload_digest: [u8]
+
+fn _push_u16_v1(out: [u8], value: u16):
+    out.push((value & 255u16) as u8)
+    out.push(((value >> 8) & 255u16) as u8)
+
+fn _push_u32_v1(out: [u8], value: u32):
+    out.push((value & 255u32) as u8)
+    out.push(((value >> 8) & 255u32) as u8)
+    out.push(((value >> 16) & 255u32) as u8)
+    out.push(((value >> 24) & 255u32) as u8)
+
+fn _read_u16_v1(data: [u8], offset: i64) -> u16:
+    data[offset] as u16 | ((data[offset + 1] as u16) << 8)
+
+fn _read_u32_v1(data: [u8], offset: i64) -> u32:
+    data[offset] as u32 |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24)
+
+fn _payload_digest_v1(payload: [u8]) -> [u8]:
+    var wide: [i64] = []
+    var i = 0
+    while i < payload.len():
+        wide.push(payload[i] as i64)
+        i = i + 1
+    val raw = sha256_bytes(wide)
+    var digest: [u8] = []
+    i = 0
+    while i < raw.len():
+        digest.push(raw[i] as u8)
+        i = i + 1
+    digest
+
+fn _digest_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != 32 or right.len() != 32:
+        return false
+    var different: u8 = 0u8
+    var i = 0
+    while i < 32:
+        different = different | (left[i] ^ right[i])
+        i = i + 1
+    different == 0u8
+
+# The envelope record kind applies to every frame in the payload.  Each frame
+# is a little-endian u32 byte length followed by one inert typed-record body.
+# Keeping the body as bytes is intentional: descriptor paths and other
+# platform-specific fields must not be coerced through text or host path APIs.
+fn _record_framing_valid_v1(payload: [u8], record_count: u32) -> bool:
+    var offset: i64 = 0
+    var records: u32 = 0u32
+    while offset < payload.len():
+        if payload.len() - offset < ENV_VARIANT_CATALOG_RECORD_HEADER_BYTES_V1 as i64:
+            return false
+        val body_length = _read_u32_v1(payload, offset)
+        if body_length == 0u32 or
+           body_length as i64 > payload.len() - offset - ENV_VARIANT_CATALOG_RECORD_HEADER_BYTES_V1 as i64:
+            return false
+        offset = offset + ENV_VARIANT_CATALOG_RECORD_HEADER_BYTES_V1 as i64 + body_length as i64
+        records = records + 1u32
+        if records > record_count:
+            return false
+    records == record_count
+
+pub fn environment_variant_catalog_record_frame_v1(body: [u8]) -> Result<[u8], EnvironmentVariantCodecErrorV1>:
+    if body.len() == 0 or body.len() > ENV_VARIANT_CATALOG_MAX_BYTES_V1 as i64:
+        return Err(EnvironmentVariantCodecErrorV1.CapacityExceeded)
+    var frame: [u8] = []
+    _push_u32_v1(frame, body.len() as u32)
+    var i = 0
+    while i < body.len():
+        frame.push(body[i])
+        i = i + 1
+    Ok(frame)
+
+pub fn environment_variant_catalog_encode_v1(
+    payload: [u8], record_count: u32
+) -> Result<[u8], EnvironmentVariantCodecErrorV1>:
+    if record_count == 0u32 or record_count > ENV_VARIANT_CATALOG_MAX_RECORDS_V1:
+        return Err(EnvironmentVariantCodecErrorV1.CapacityExceeded)
+    if payload.len() == 0 or payload.len() > ENV_VARIANT_CATALOG_MAX_BYTES_V1 as i64 - ENV_VARIANT_CATALOG_HEADER_BYTES_V1 as i64:
+        return Err(EnvironmentVariantCodecErrorV1.CapacityExceeded)
+    if not _record_framing_valid_v1(payload, record_count):
+        return Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid)
+    val digest = _payload_digest_v1(payload)
+    var out: [u8] = []
+    _push_u32_v1(out, ENV_VARIANT_CATALOG_MAGIC_V1)
+    _push_u16_v1(out, 1u16)
+    _push_u16_v1(out, ENV_VARIANT_RECORD_KIND_DESCRIPTOR_V1)
+    _push_u32_v1(out, record_count)
+    _push_u32_v1(out, payload.len() as u32)
+    var i = 0
+    while i < 32:
+        out.push(digest[i])
+        i = i + 1
+    i = 0
+    while i < payload.len():
+        out.push(payload[i])
+        i = i + 1
+    Ok(out)
+
+pub fn environment_variant_catalog_decode_v1(
+    encoded: [u8]
+) -> Result<EnvironmentVariantCatalogEnvelopeV1, EnvironmentVariantCodecErrorV1>:
+    if encoded.len() < ENV_VARIANT_CATALOG_HEADER_BYTES_V1 as i64:
+        return Err(EnvironmentVariantCodecErrorV1.InputTooShort)
+    if encoded.len() > ENV_VARIANT_CATALOG_MAX_BYTES_V1 as i64:
+        return Err(EnvironmentVariantCodecErrorV1.CapacityExceeded)
+    if _read_u32_v1(encoded, 0) != ENV_VARIANT_CATALOG_MAGIC_V1:
+        return Err(EnvironmentVariantCodecErrorV1.UnsupportedMagic)
+    val schema_version = _read_u16_v1(encoded, 4)
+    if schema_version != 1u16:
+        return Err(EnvironmentVariantCodecErrorV1.UnsupportedSchema)
+    val record_kind = _read_u16_v1(encoded, 6)
+    if record_kind != ENV_VARIANT_RECORD_KIND_DESCRIPTOR_V1:
+        return Err(EnvironmentVariantCodecErrorV1.UnsupportedRecordKind)
+    val record_count = _read_u32_v1(encoded, 8)
+    val payload_length = _read_u32_v1(encoded, 12)
+    if record_count == 0u32 or record_count > ENV_VARIANT_CATALOG_MAX_RECORDS_V1 or
+       payload_length == 0u32:
+        return Err(EnvironmentVariantCodecErrorV1.CapacityExceeded)
+    if payload_length as i64 != encoded.len() - ENV_VARIANT_CATALOG_HEADER_BYTES_V1 as i64:
+        return Err(EnvironmentVariantCodecErrorV1.LengthMismatch)
+    var expected_digest: [u8] = []
+    var payload: [u8] = []
+    var i = 0
+    while i < 32:
+        expected_digest.push(encoded[16 + i])
+        i = i + 1
+    i = ENV_VARIANT_CATALOG_HEADER_BYTES_V1 as i64
+    while i < encoded.len():
+        payload.push(encoded[i])
+        i = i + 1
+    if not _record_framing_valid_v1(payload, record_count):
+        return Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid)
+    val actual_digest = _payload_digest_v1(payload)
+    if not _digest_equal_v1(actual_digest, expected_digest):
+        return Err(EnvironmentVariantCodecErrorV1.DigestMismatch)
+    Ok(EnvironmentVariantCatalogEnvelopeV1(
+        schema_version: schema_version, record_kind: record_kind,
+        record_count: record_count, payload: payload,
+        payload_digest: expected_digest))
