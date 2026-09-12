@@ -54,16 +54,38 @@ val FIXTURE_DIR: text = "test/fixtures/runner_degrade/"
 # One child run, shared by every example below: the runner is far too expensive
 # to spawn per example. `sh -c` redirects the whole (very noisy) run to a temp
 # file and greps only the verdict lines back to stdout, so a truncated capture
-# cannot silently drop them. The inner run must not inherit the OUTER runner's
-# per-spec environment: SIMPLE_TEST_RESULT_FILE would make the inner children
-# overwrite THIS spec's own structured evidence file.
+# cannot silently drop them.
+#
+# Two things this invocation must get right, both learned the hard way:
+#   * it must stay on the DIRECTORY (aggregating) lane, because that is the
+#     only lane that compiles a spec to SMF at all — a single-file run is the
+#     interpreter and hides this defect entirely. In particular do NOT add
+#     `--no-session-daemon`: `test_should_use_single_runner`
+#     (src/compiler_rust/driver/src/main.rs:240) routes on that flag alone, and
+#     the single-file lane answers a directory argument with
+#     `error: expected .spl test file:` and emits no verdict line at all.
+#     `--sequential` is safe (it is already the default) and keeps the nested
+#     run from competing with the outer one for workers.
+#   * the inner run must not inherit the outer runner's per-spec environment:
+#     SIMPLE_TEST_RESULT_FILE would make the inner children overwrite THIS
+#     spec's own structured evidence file.
+# When nothing is captured the tail of the child log is returned INSTEAD of an
+# empty string, so the fail-closed assertion below reports why rather than just
+# going red.
 fn capture_fixture_verdict_lines() -> text:
     val script = "log=$(mktemp); " +
         "env -u SIMPLE_TEST_RESULT_FILE -u SIMPLE_EXECUTION_MODE " +
         "-u SIMPLE_TIMEOUT_SECONDS -u SIMPLE_MCDC_MODE " +
-        "bin/simple test " + FIXTURE_DIR + " > \"$log\" 2>&1; " +
-        "grep '^SPEC FILE VERDICT:' \"$log\"; rm -f \"$log\""
+        "bin/simple test " + FIXTURE_DIR + " --sequential " +
+        "> \"$log\" 2>&1; " +
+        "grep '^SPEC FILE VERDICT:' \"$log\" || " +
+        "{ echo 'NO-VERDICT-LINES child tail:'; tail -c 1200 \"$log\"; }; " +
+        "rm -f \"$log\""
     val (out, err, code) = process_run_timeout("sh", ["-c", script], 1500000)
+    if not out.contains("SPEC FILE VERDICT:"):
+        print "[degrade-spec] child produced no verdict line (rc={code}, {out.len()} bytes captured)"
+        print "[degrade-spec] child stdout: {out}"
+        print "[degrade-spec] child stderr: {err}"
     out
 
 fn verdict_line_for(lines: text, spec_name: text) -> text:
