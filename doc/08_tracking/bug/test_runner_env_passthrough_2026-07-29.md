@@ -184,3 +184,39 @@ from "empty".
 - `src/app/test_daemon/client.spl:30-58` (`test_daemon_ensure_responsive`/`start_test_daemon_process`)
 
 Probe file (scratch, not committed): `/tmp/env_probe_spec.spl`.
+
+## Re-check 2026-09-12 (BUGFIX-5) — still reproduces, and the symptom is worse than recorded
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`. Probe file identical to §1's.
+
+The record's own repro now *passes*, which is misleading — so here it is with
+the daemon's env and the invocation's env deliberately **different**:
+
+```
+# a daemon is already alive, created by an earlier run that had MY_PROBE_VAR=hello
+$ MY_PROBE_VAR=goodbye bin/simple test env_probe_spec.spl
+PROBE v=[hello]                       <-- the DAEMON's stale value, not goodbye
+SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0
+
+$ MY_PROBE_VAR=goodbye bin/simple test env_probe_spec.spl --no-session-daemon --no-session-share
+PROBE v=[goodbye]                     <-- correct
+```
+
+Same root cause, same isolating variable (§2 stands), but note what changed
+about the **failure mode**: the record describes the spec body seeing an *empty*
+value and the example failing loudly (`PROBE v=[]`, `0 passed, 1 failed`). What
+happens now is that the body sees the daemon's **stale non-empty** value and the
+example **passes on it**. A spec that asserts on an env var can therefore go
+green against an env that was never supplied to it — a silent false green,
+strictly worse than the loud failure originally filed, and invisible at the
+verdict line.
+
+Left OPEN. The fix is still the session-daemon protocol change §2 identifies
+(the job request must carry the client's environment, and the daemon must apply
+it per job rather than inheriting once at spawn); that is out of a triage
+lane's scope, and no smaller patch is honest — forcing `--no-session-daemon`
+for env-sensitive specs would just hide it again.
+
+- Status: OPEN (2026-09-12) — reproduces on seed sha256 3d120a6f; symptom upgraded from a loud failure to a silent false green (spec body reads the daemon's stale env value)
