@@ -1,7 +1,6 @@
 # JIT: `if nil:` takes the TRUE branch — a nil condition is truthy under Cranelift, falsy under the interpreter (2026-08-04)
 
-**Status:** CLOSED (2026-09-12) — not reproducible on the deployed seed; see "Re-check 2026-09-12" at the end. (Was: ARCHITECTURAL-OPEN, re-verified 2026-08-17.)
-the class is WIDER than this title says)
+**Status:** CLOSED (2026-09-12) — not reproducible on the deployed seed; see "Re-check 2026-09-12" at the end. (Was: ARCHITECTURAL-OPEN, re-verified 2026-08-17, still reproduces, and the class is WIDER than this title says.)
 **Found:** 2026-08-04
 
 ## Re-verification + WIDENED SCOPE (2026-08-17)
