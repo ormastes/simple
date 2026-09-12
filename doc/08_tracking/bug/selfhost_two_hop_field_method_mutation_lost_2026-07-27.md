@@ -429,3 +429,57 @@ Scope: the **Rust seed's** interpreter lane only. The pure-Simple interpreter
 (`src/compiler/10.frontend/core/interpreter/eval_access.spl`, the file the work
 package attributed this row to) was NOT exercised by this run, and that
 attribution is a heuristic path mapping rather than a claim this record makes.
+
+## Re-check 2026-09-12 — the depth>=2 mutation now persists; the named covering spec is dead for an unrelated reason
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+Direct probe of the corrected framing ("ANY chain of depth >= 2, struct or class"),
+using a THREE-hop chain so it is strictly deeper than the reported case:
+
+```simple
+struct Inner:
+    var items: [i64] = []
+
+struct Mid:
+    var inner: Inner = Inner()
+
+struct Outer:
+    var mid: Mid = Mid()
+
+    fn push_it(mut self, v: i64):
+        self.mid.inner.items.push(v)
+
+fn main():
+    var o = Outer()
+    o.push_it(7)
+    o.push_it(8)
+    print(o.mid.inner.items.len())
+```
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run c_twohop.spl
+2
+```
+
+Both mutations persisted (`2`, not `0` and not `1`), through two intermediate
+struct hops, from inside a mutating method, with no extract-mutate-writeback
+workaround. The silent-write-loss shape in this record does not reproduce on this
+engine.
+
+Not closing it, for one honest reason: the record's evidence is from the
+**self-hosted** binary lane (`build/native_probe/simple`), and no self-hosted binary
+is deployed in this worktree, so the above exercises the Rust seed's interpreter
+rather than the engine that produced the report. A seed-interpreter pass is not
+proof about the self-hosted lane.
+
+Separately, the spec this record names as "the only covering spec",
+`test/01_unit/os/services/llm/ui_access_dispatch_spec.spl`, is **0 of 13 passing**
+for an unrelated reason — it calls a `column(id).child(...)` builder API that has
+never existed, so it dies before any assertion and can neither confirm nor refute
+this defect. Filed as
+`doc/08_tracking/bug/ui_access_dispatch_spec_uses_nonexistent_builder_child_api_2026-09-12.md`.
+Whatever happens to this record, that citation needs replacing with a spec that
+actually runs.
+
+- Status: OPEN (2026-09-12) — does not reproduce on the seed interpreter; needs a self-hosted binary to re-check on the lane that reported it

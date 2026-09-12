@@ -1,7 +1,7 @@
 # Parser hangs forever on a spec `it` block nested inside a function body
 
 Date: 2026-09-06
-Status: OPEN (source of the hang worked around; parser defect unfixed)
+Status: CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end of this file
 Area: parser / error recovery
 
 ## Symptom
@@ -75,3 +75,17 @@ deployed `bin/simple`, which most push hosts lack) — see `.claude/rules/vcs.md
 Binary measured: `bin/release/aarch64-unknown-linux-gnu/simple`,
 `Simple Language v1.0.0-rc.1` (Rust bootstrap seed). Not verified on a
 self-hosted binary — none exists on this host.
+
+## Re-check 2026-09-12 — not reproducible
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 400 bin/simple test test/01_unit/app/llm_caret/config_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/app/llm_caret/config_spec.spl outcome=OK declared>=24 executed=24 passed=24 failed=0 skipped=0 dropped=0
+PASS test/01_unit/app/llm_caret/config_spec.spl
+```
+
+The spec parses and runs to completion (24/24) well inside the timeout — no hang.
+
+- Status: CLOSED (2026-09-12) — not reproducible on 3d120a6f
