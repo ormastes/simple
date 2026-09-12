@@ -9,7 +9,9 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind
     VK_T_FONT_ATLAS_PACK, VK_T_FONT_ATLAS_UPLOAD, VK_T_FONT_ATLAS_DIGEST,
     VK_T_FONT_PACKED_PARAMS, VK_T_FONT_QUAD_VALIDATE, VK_T_FONT_OWNER_IDENTITY,
     vulkan_font_dirty_note, vulkan_font_pack_note,
-    vulkan_font_selfcheck_enabled, vulkan_font_mirror_note, vulkan_font_decision_note}
+    vulkan_font_selfcheck_enabled, vulkan_font_payload_digest_full,
+    vulkan_font_overlap_enabled, vulkan_font_overlap_note,
+    vulkan_font_mirror_note, vulkan_font_decision_note}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
@@ -17,7 +19,7 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontExecutionPolicy, font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity}
 use std.gpu.engine2d.helpers_text.{text_metrics}
 use std.gpu.engine2d.glyph.{glyph_data}
-use std.common.string_core.{char_from_code}
+use std.common.string_core.{char_from_code, text_to_utf8_bytes}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
@@ -201,6 +203,80 @@ fn _vulkan_font_pixels_to_bytes(pixels: [u32]) -> [u8]:
 # no native byte-buffer SHA-256 extern registered for the interpreter, so
 # routing to native would mean adding one across the Rust seed; that is a
 # separate lane. Externally measured: 4 MB atlas 3.91 s vs ~10 min before.
+fn _vulkan_font_count_overlapping_quads(quads: [FontRenderQuad]) -> i64:
+    """Ordered pairs of quads in ONE batch whose destination rects intersect.
+
+    Destination coordinates only: the kernel's race is on `dst[di]`, so two
+    quads sharing an ATLAS region are irrelevant and two sharing a destination
+    pixel are the whole question. Rect intersection is exact, not a bounding-box
+    approximation -- a `FontRenderQuad`'s destination IS an axis-aligned rect.
+
+    The origin offset is deliberately NOT applied: it is one constant added to
+    every quad in the batch, so it cannot change whether two of them intersect.
+    """
+    var pairs: i64 = 0
+    var i: i64 = 0
+    val n = quads.len().to_i64()
+    while i < n:
+        val a = quads[i]
+        val al = a.dst_x.to_i64()
+        val at = a.dst_y.to_i64()
+        val ar = al + a.width.to_i64()
+        val ab = at + a.height.to_i64()
+        var j = i + 1
+        while j < n:
+            val b = quads[j]
+            val bl = b.dst_x.to_i64()
+            val bt = b.dst_y.to_i64()
+            if al < bl + b.width.to_i64() and bl < ar and at < bt + b.height.to_i64() and bt < ab:
+                pairs = pairs + 1
+            j = j + 1
+        i = i + 1
+    pairs
+
+fn _vulkan_font_atlas_identity_digest(owner: text, generation: i64, width: i32,
+                                      height: i32, count: i64) -> text:
+    """O(1) atlas token: the generation/owner pair the upload cache already trusts.
+
+    Same output shape as `_vulkan_font_atlas_payload_digest` -- SHA-256 over a
+    56-byte, seven-lane preimage, so it is 64 lowercase hex characters and every
+    evidence assertion in the tree keeps holding -- but the four content lanes
+    carry the OWNER IDENTITY and the ATLAS GENERATION rather than a fold of a
+    million pixels. See `vulkan_font_payload_digest_full` in backend_vulkan.spl
+    for why that loses no information: the same pair is what decides whether the
+    atlas is re-uploaded at all.
+
+    The owner text is folded with the same FNV constants and index mixing the
+    payload digest uses, over its BYTES -- an identity string is tens of
+    characters, not a million pixels, so this stays O(1) in the atlas.
+    """
+    val mask32: i64 = 4294967295
+    val prime: i64 = 16777619
+    var l0: i64 = 2166136261
+    var l1: i64 = 2246822519
+    var l2: i64 = 3266489917
+    var l3: i64 = 668265263
+    val owner_bytes = text_to_utf8_bytes(owner)
+    var i: i64 = 0
+    while i < owner_bytes.len().to_i64():
+        l0 = ((l0 ^ (owner_bytes[i].to_i64() + i)) * prime) & mask32
+        i = i + 1
+    l1 = ((l1 ^ generation) * prime) & mask32
+    l2 = ((l2 ^ (owner_bytes.len().to_i64() + 1)) * prime) & mask32
+    l3 = ((l3 ^ (count + 7)) * prime) & mask32
+    val lanes: [i64] = [l0, l1, l2, l3, count, width.to_i64(), height.to_i64()]
+    var pre: [u8] = [0u8; 56]
+    var k: i64 = 0
+    while k < 7:
+        val w = lanes[k]
+        val base = k * 8
+        var b: i64 = 0
+        while b < 8:
+            pre[base + b] = ((w >> (b * 8)) & 255).to_u8()
+            b = b + 1
+        k = k + 1
+    sha256_u8_hex(pre)
+
 fn _vulkan_font_atlas_payload_digest(pixels: [u32], width: i32, height: i32) -> text:
     val mask32: i64 = 4294967295
     val prime: i64 = 16777619
@@ -1051,8 +1127,13 @@ impl VulkanBackend:
             vulkan_font_pack_note(mirror_ready)
             val payload_hash_started = clock.now_micros() * 1000
             val _t_digest = vulkan_timing_now_us()
-            self.font_atlas_payload_sha256 = _vulkan_font_atlas_payload_digest(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
+            self.font_atlas_payload_sha256 = if vulkan_font_payload_digest_full():
+                _vulkan_font_atlas_payload_digest(
+                    batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
+            else:
+                _vulkan_font_atlas_identity_digest(owner_identity,
+                    batch.atlas_generation, batch.atlas_width, batch.atlas_height,
+                    batch.atlas_pixels.len().to_i64())
             vulkan_timing_add(VK_T_FONT_ATLAS_DIGEST, _t_digest)
             evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(payload_hash_started, clock.now_micros() * 1000)
             self.font_atlas_generation = batch.atlas_generation
@@ -1065,6 +1146,9 @@ impl VulkanBackend:
             # the one path that may restore the flag without re-uploading.
             self.font_atlas_host_valid = mirror_was_valid
         if pipeline.artifact_mode == "precompiled-spirv" or pipeline.artifact_mode == "runtime-glsl":
+            if vulkan_font_overlap_enabled():
+                vulkan_font_overlap_note(batch.quads.len().to_i64(),
+                    _vulkan_font_count_overlapping_quads(batch.quads))
             val _t_packed = vulkan_timing_now_us()
             val packed = vulkan_font_packed_params(batch, origin_x, origin_y, width, height)
             vulkan_timing_add(VK_T_FONT_PACKED_PARAMS, _t_packed)

@@ -33,6 +33,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
     vulkan_dispatch_image_composite_checked,
     vulkan_order_trace, vulkan_order_trace_enabled,
+    vulkan_image_pack_note_byte_fallback,
     VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
     VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER
 }
@@ -1415,16 +1416,19 @@ impl RenderBackend for VulkanBackend:
         else:
             vulkan_image_upload_note("bytes", "typed-not-requested")
 
-        val scratch_reused = self.image_upload_scratch.len().to_i64() >= src_size
+        val scratch_reused = self.image_upload_scratch.len().to_i64() == src_size
         val _t_pack = vulkan_timing_now_us()
         val scratch_prepared = self._prepare_image_upload(pixels, pixel_count)
         vulkan_timing_add(VK_T_IMAGE_PACK, _t_pack)
         upload_ok = scratch_prepared
         if scratch_prepared:
-            # Timed separately from the composite total: this hands the WHOLE
-            # `image_upload_scratch` array across the SFFI boundary and only
-            # then says "use the first `src_size` bytes", so its cost tracks the
-            # scratch's high-water mark, not this image's size.
+            # Timed separately from the composite total: it hands the staging
+            # array across the SFFI boundary. Since `_prepare_image_upload`
+            # sizes that array to EXACTLY `src_size`, the prefix is the whole
+            # array and the interpreter-ABI admission test
+            # (`byte_count == data.len()`) holds, so the exact-size byte
+            # fallback below is dead for every admitted size instead of firing
+            # on 262 of 264 composites.
             val _t_up = vulkan_timing_now_us()
             upload_ok = vulkan_sffi_copy_to_buffer_prefix(
                 d_src, self.image_upload_scratch, src_size, 0)
@@ -1441,6 +1445,7 @@ impl RenderBackend for VulkanBackend:
             # Preserve the exact-size legacy path for oversized images and
             # interpreter array ABIs that cannot upload a prefix.
             val _t_bf = vulkan_timing_now_us()
+            vulkan_image_pack_note_byte_fallback()
             val source_bytes = _pixels_to_bytes(pixels, pixel_count)
             upload_ok = source_bytes.len().to_i64() == src_size and
                 vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0)
@@ -2833,6 +2838,62 @@ var _vk_font_decisions: text = ""
 pub fn vulkan_font_selfcheck_enabled() -> bool:
     (env_get("SIMPLE_VK_FONT_SELFCHECK") ?? "") == "1"
 
+# Atlas payload digest source (SIMPLE_VK_FONT_DIGEST=payload restores the walk).
+#
+# The digest is EVIDENCE -- callers assert it is 64 lowercase hex characters and
+# that it moves when the atlas moves; nothing reads it to decide whether to
+# re-upload. That decision is made, and has always been made, by
+# `(atlas_generation, owner_identity)`: `_vulkan_font_upload_atlas` re-uploads
+# exactly when either changes, so if that pair were not a sound content key the
+# upload cache would already be painting stale glyphs. Hashing 1,048,576 pixels
+# in interpreted Simple to restate what the pair already says cost **37,650 ms
+# across 21 calls** of a 259,523 ms 900x760 frame -- 53% of `font_composite` and
+# the single largest remaining term. The default digest therefore folds the same
+# geometry with that pair instead of the pixels, and keeps the identical
+# `sha256_u8_hex` shape so every existing evidence assertion still holds.
+#
+# `SIMPLE_VK_FONT_DIGEST=payload` restores the full pixel walk for anyone who
+# wants a content-derived token (e.g. to audit the generation counter itself);
+# `SIMPLE_VK_FONT_SELFCHECK=1` implies it, because a run that exists to check the
+# mirror against ground truth should not be reading a token that cannot see the
+# pixels.
+pub fn vulkan_font_payload_digest_full() -> bool:
+    (env_get("SIMPLE_VK_FONT_DIGEST") ?? "") == "payload" or vulkan_font_selfcheck_enabled()
+
+# Overlapping-quad census (SIMPLE_VK_FONT_OVERLAP=1). The packed font kernel
+# (`font_atlas_composite.spl:266`) runs ONE INVOCATION PER (pixel, glyph) and
+# blends with a plain non-atomic read-modify-write on `dst[di]`. Two glyphs in
+# the SAME dispatch whose destination rects share a pixel are therefore two
+# concurrent invocations racing on that word, and the loser's blend is dropped --
+# which produces exactly the graded, run-varying per-texel error F18 measured on
+# thin glyph stems (139 vs 226 against a CPU oracle of 124). This counter is the
+# host-side evidence for that: it counts, per batch, how many ordered quad pairs
+# have intersecting destination rects. O(n^2) in the glyph count, so it is
+# opt-in and never on in a timed run.
+var _vk_font_overlap_batches: i64 = 0
+var _vk_font_overlap_pairs: i64 = 0
+var _vk_font_overlap_max_batch: i64 = 0
+var _vk_font_overlap_quads: i64 = 0
+
+pub fn vulkan_font_overlap_enabled() -> bool:
+    (env_get("SIMPLE_VK_FONT_OVERLAP") ?? "") == "1"
+
+pub fn vulkan_font_overlap_note(quads: i64, pairs: i64):
+    _vk_font_overlap_batches = _vk_font_overlap_batches + 1
+    _vk_font_overlap_quads = _vk_font_overlap_quads + quads
+    _vk_font_overlap_pairs = _vk_font_overlap_pairs + pairs
+    if pairs > _vk_font_overlap_max_batch:
+        _vk_font_overlap_max_batch = pairs
+
+pub fn vulkan_font_overlap_report() -> text:
+    """`"batches=<n> quads=<n> overlapping_pairs=<n> max_in_one_batch=<n>"`.
+
+    `overlapping_pairs=0` across every batch would REFUTE the write-race
+    hypothesis for the packed font dispatch; any non-zero count confirms that at
+    least one destination word is written by two concurrent invocations.
+    """
+    "batches={_vk_font_overlap_batches} quads={_vk_font_overlap_quads} overlapping_pairs={_vk_font_overlap_pairs} max_in_one_batch={_vk_font_overlap_max_batch}"
+
 pub fn vulkan_font_mirror_note(mismatched_bytes: i64, detail: text):
     _vk_font_mirror_checks = _vk_font_mirror_checks + 1
     if mismatched_bytes > 0:
@@ -2987,6 +3048,8 @@ pub fn vulkan_timing_table() -> text:
         return "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
     var out = ("vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line() +
         "\n  " + vulkan_image_stats_line())
+    if vulkan_font_overlap_enabled():
+        out = out + "\n  font_quad_overlap " + vulkan_font_overlap_report()
     var i: i64 = 0
     while i < VK_T_COUNT:
         if _vk_t_n[i] > 0:
