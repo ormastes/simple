@@ -74,6 +74,18 @@ counters!(
     NUMBERED_DIR_HITS,
     SEGMENT_WITHIN_NUMBERED_MISSES,
     SEGMENT_WITHIN_NUMBERED_HITS,
+    // while-loop iterations executed by an inline-integer fast path instead of
+    // the generic AST walk (interpreter_control.rs: the one-arg/two-arg helper
+    // matchers and the generalised inline-expression matcher). Bumped once per
+    // loop with the iteration count, so it is free in the hot loop.
+    //
+    // This is also the observable that makes those fast paths diagnosable. A
+    // matched loop used to touch no counter at all, so the process emitted NO
+    // `interp-perf-counters:` block, and "no block" had to be read as "a fast
+    // path ran" -- see the hazard section of
+    // doc/08_tracking/bug/interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md.
+    // Now a matched loop reports the iterations it accelerated.
+    WHILE_INLINE_INT_ITERS,
 );
 
 #[inline(always)]
