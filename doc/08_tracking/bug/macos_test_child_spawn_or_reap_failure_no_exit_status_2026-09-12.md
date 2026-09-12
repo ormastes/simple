@@ -1,5 +1,6 @@
 # macOS arm64: `simple test` child produces no exit status — spawn/reap failure at the process layer
 
+- **Status:** OPEN (filed 2026-09-12)
 - **Status:** RESOLVED 2026-09-12 (see the RESOLVED section at the end)
 - **Severity:** P1 — `simple test` cannot execute ANY spec on this host
 - **Lane:** macOS open-bugs round 2, LANE 3. Found while fixing

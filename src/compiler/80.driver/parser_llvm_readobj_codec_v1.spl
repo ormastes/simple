@@ -1,0 +1,154 @@
+# Bounded codec for the exact LLVM readobj JSON schema used by the parser
+# inspector. This decodes data only; it does not launch or trust a tool.
+use std.common.json.parser.json_parse
+use std.common.json.object_ops.json_object_get
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+use std.common.crypto.sha256.sha256_u8_hex
+
+pub const PARSER_LLVM_READOBJ_JSON_MAX_BYTES_V1: i64 = 67108864
+pub const PARSER_LLVM_READOBJ_MAX_SECTIONS_V1: i64 = 4096
+
+pub enum ParserLlvmReadobjCodecErrorV1:
+    InputLimit
+    InvalidJson
+    SchemaMismatch
+    WrongObject
+    SectionLimit
+    InvalidSection
+
+pub struct ParserLlvmReadobjSectionV1:
+    section_index: i64
+    name: text
+    section_type: text
+    flags: i64
+    file_offset: i64
+    byte_count: i64
+    executable: bool
+    section_data_digest: text
+
+pub struct ParserLlvmReadobjProjectionV1:
+    file_label: text
+    format: text
+    architecture: text
+    address_size: text
+    object_type: text
+    machine: text
+    sections: [ParserLlvmReadobjSectionV1]
+    executable_section_count: i64
+
+fn _field_lro(value: any, key: text) -> any?:
+    if json_get_type(value) != "object": return nil
+    json_object_get(value, key)
+
+fn _text_lro(value: any) -> text?:
+    if json_get_type(value) != "string": return nil
+    json_to_string(value)
+
+fn _int_lro(value: any) -> i64?:
+    if json_get_type(value) != "number": return nil
+    val raw = json_to_number(value)
+    if raw == nil: return nil
+    val number = raw as f64
+    val integer = number as i64
+    if integer as f64 == number: integer else: nil
+
+fn _required_field_lro(value: any, key: text) -> Result<any, ParserLlvmReadobjCodecErrorV1>:
+    val found = _field_lro(value, key)
+    if found.is_none(): return Err(ParserLlvmReadobjCodecErrorV1.SchemaMismatch)
+    Ok(found.unwrap())
+
+fn _required_text_lro(value: any, key: text) -> Result<text, ParserLlvmReadobjCodecErrorV1>:
+    val raw = _required_field_lro(value, key)?
+    val text_value = _text_lro(raw)
+    if text_value.is_none(): return Err(ParserLlvmReadobjCodecErrorV1.SchemaMismatch)
+    Ok(text_value.unwrap())
+
+fn _required_int_lro(value: any, key: text) -> Result<i64, ParserLlvmReadobjCodecErrorV1>:
+    val raw = _required_field_lro(value, key)?
+    val int_value = _int_lro(raw)
+    if int_value.is_none(): return Err(ParserLlvmReadobjCodecErrorV1.SchemaMismatch)
+    Ok(int_value.unwrap())
+
+fn _named_text_lro(value: any, key: text) -> Result<text, ParserLlvmReadobjCodecErrorV1>:
+    val named = _required_field_lro(value, key)?
+    _required_text_lro(named, "Name")
+
+fn _named_int_lro(value: any, key: text) -> Result<i64, ParserLlvmReadobjCodecErrorV1>:
+    val named = _required_field_lro(value, key)?
+    _required_int_lro(named, "Value")
+
+fn _section_data_lro(section: any, expected_size: i64
+) -> Result<text, ParserLlvmReadobjCodecErrorV1>:
+    val data = _required_field_lro(section, "SectionData")?
+    if _required_int_lro(data, "Offset")? != 0:
+        return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+    val raw_values = _required_field_lro(data, "Bytes")?
+    if json_get_type(raw_values) != "array" or json_array_length(raw_values) != expected_size:
+        return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+    var bytes: [u8] = []
+    for index in 0..json_array_length(raw_values):
+        val raw = json_array_get(raw_values, index)
+        val value = _int_lro(raw)
+        if value.is_none() or value.unwrap() < 0 or value.unwrap() > 255:
+            return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+        bytes.push(value.unwrap() as u8)
+    Ok(sha256_u8_hex(bytes))
+
+pub fn parser_llvm_readobj_decode_v1(json: text, expected_file_label: text
+) -> Result<ParserLlvmReadobjProjectionV1, ParserLlvmReadobjCodecErrorV1>:
+    if json.len() <= 0 or json.len() > PARSER_LLVM_READOBJ_JSON_MAX_BYTES_V1:
+        return Err(ParserLlvmReadobjCodecErrorV1.InputLimit)
+    val parsed = json_parse(json)
+    if parsed == nil: return Err(ParserLlvmReadobjCodecErrorV1.InvalidJson)
+    if json_get_type(parsed) != "array" or json_array_length(parsed) != 1:
+        return Err(ParserLlvmReadobjCodecErrorV1.SchemaMismatch)
+    val root = json_array_get(parsed, 0)
+    val summary = _required_field_lro(root, "FileSummary")?
+    val file_label = _required_text_lro(summary, "File")?
+    val format = _required_text_lro(summary, "Format")?
+    val architecture = _required_text_lro(summary, "Arch")?
+    val address_size = _required_text_lro(summary, "AddressSize")?
+    if file_label != expected_file_label or format != "elf64-x86-64" or
+       architecture != "x86_64" or address_size != "64bit":
+        return Err(ParserLlvmReadobjCodecErrorV1.WrongObject)
+    val header = _required_field_lro(root, "ElfHeader")?
+    val object_type = _named_text_lro(header, "Type")?
+    val machine = _named_text_lro(header, "Machine")?
+    if _named_int_lro(header, "Type")? != 1 or _named_int_lro(header, "Machine")? != 62:
+        return Err(ParserLlvmReadobjCodecErrorV1.WrongObject)
+    val wrapped_sections = _required_field_lro(root, "Sections")?
+    if json_get_type(wrapped_sections) != "array":
+        return Err(ParserLlvmReadobjCodecErrorV1.SchemaMismatch)
+    if json_array_length(wrapped_sections) <= 0 or
+       json_array_length(wrapped_sections) > PARSER_LLVM_READOBJ_MAX_SECTIONS_V1:
+        return Err(ParserLlvmReadobjCodecErrorV1.SectionLimit)
+    var sections: [ParserLlvmReadobjSectionV1] = []
+    var expected_index = 0
+    var executable_count = 0
+    for section_position in 0..json_array_length(wrapped_sections):
+        val wrapped = json_array_get(wrapped_sections, section_position)
+        val section = _required_field_lro(wrapped, "Section")?
+        val index = _required_int_lro(section, "Index")?
+        val name = _named_text_lro(section, "Name")?
+        val section_type = _named_text_lro(section, "Type")?
+        val flags_record = _required_field_lro(section, "Flags")?
+        val flags = _required_int_lro(flags_record, "Value")?
+        val offset = _required_int_lro(section, "Offset")?
+        val size = _required_int_lro(section, "Size")?
+        if index != expected_index or offset < 0 or size < 0 or flags < 0:
+            return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+        val executable = flags & 4 != 0
+        var data_digest = ""
+        if executable:
+            if size <= 0: return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+            data_digest = _section_data_lro(section, size)?
+            executable_count = executable_count + 1
+        sections.push(ParserLlvmReadobjSectionV1(section_index: index, name: name,
+            section_type: section_type, flags: flags, file_offset: offset,
+            byte_count: size, executable: executable, section_data_digest: data_digest))
+        expected_index = expected_index + 1
+    if executable_count == 0: return Err(ParserLlvmReadobjCodecErrorV1.InvalidSection)
+    Ok(ParserLlvmReadobjProjectionV1(file_label: file_label, format: format,
+        architecture: architecture, address_size: address_size, object_type: object_type,
+        machine: machine, sections: sections, executable_section_count: executable_count))

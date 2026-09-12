@@ -1,0 +1,167 @@
+use std.spec.*
+use compiler.driver.host_environment_snapshot_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn authority() -> CompilerHostPlatformAuthorityV1:
+    CompilerHostPlatformAuthorityV1(
+        execution_architecture: ENV_ARCH_X86_64_V1, os_id: 1u32, abi_id: 1u32,
+        object_format_id: 1u32, endian_id: 1u16, pointer_width_bits: 64u16,
+        snapshot_identity: d(1u64), snapshot_generation: 2u64,
+        execution_domain_identity: d(3u64), loader_permission_bits: 1u64,
+        allowed_effect_bits: 1u64, numerical_contract_id: 1u32,
+        resource_layout_digest: d(4u64))
+
+fn mask_of(feature_id: u32) -> u64:
+    environment_feature_registry_lookup_v2(feature_id).unwrap().feature_mask
+
+fn full_v4(vbmi: bool, vbmi2: bool,
+           avx_state: bool, avx512_state: bool) -> CompilerHostX86CpuidFactsV1:
+    var leaf7_ecx = 0u32
+    if vbmi: leaf7_ecx = leaf7_ecx | (1u32 << 1u32)
+    if vbmi2: leaf7_ecx = leaf7_ecx | (1u32 << 6u32)
+    CompilerHostX86CpuidFactsV1(
+        maximum_basic_leaf: 7u32, maximum_extended_leaf: 0x80000001u32,
+        leaf1_ecx: (1u32 << 0u32) | (1u32 << 9u32) | (1u32 << 12u32) |
+            (1u32 << 13u32) | (1u32 << 19u32) | (1u32 << 20u32) |
+            (1u32 << 22u32) | (1u32 << 23u32) | (1u32 << 26u32) |
+            (1u32 << 27u32) | (1u32 << 28u32) | (1u32 << 29u32),
+        leaf7_0_ebx: (1u32 << 3u32) | (1u32 << 5u32) | (1u32 << 8u32) |
+            (1u32 << 16u32) | (1u32 << 17u32) | (1u32 << 28u32) |
+            (1u32 << 30u32) | (1u32 << 31u32),
+        leaf7_0_ecx: leaf7_ecx,
+        leaf80000001_ecx: (1u32 << 0u32) | (1u32 << 5u32),
+        avx_os_state_usable: avx_state,
+        avx512_os_state_usable: avx512_state)
+
+fn mapped(facts: CompilerHostX86CpuidFactsV1, ceiling: u32) -> CompilerHostEnvironmentSnapshotV1:
+    match compiler_host_environment_snapshot_x86_from_cpuid_facts_v1(
+        authority(), facts, ceiling):
+        case Ok(value): value
+        case Err(_):
+            fail("valid x86 facts must map")
+            compiler_host_environment_snapshot_baseline_v1(authority()).unwrap()
+
+describe "Compiler live x86 environment snapshot V1":
+    it "uses the exact V2 word for the x86 baseline facade":
+        val result = compiler_host_environment_snapshot_baseline_v1(authority()).unwrap()
+        val baseline = mask_of(ENV_FEATURE_X86_64_BASELINE_V2)
+        expect(result.feature_words).to_equal([baseline, baseline, baseline])
+
+    it "maps every complete v2 and v3 CPUID requirement":
+        val v2 = mask_of(ENV_FEATURE_X86_64_LEVEL2_V2)
+        val v3 = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        for bit in [13u32, 23u32, 0u32, 9u32, 19u32, 20u32]:
+            var facts = full_v4(false, false, true, true)
+            facts.leaf1_ecx = facts.leaf1_ecx ^ (1u32 << bit)
+            val result = mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+            expect((result.feature_words[0] & v2) == v2).to_equal(false)
+        var missing_lahf = full_v4(false, false, true, true)
+        missing_lahf.leaf80000001_ecx = missing_lahf.leaf80000001_ecx ^ 1u32
+        expect((mapped(missing_lahf, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+            .feature_words[0] & v2) == v2).to_equal(false)
+        for bit in [28u32, 29u32, 12u32, 22u32, 27u32]:
+            var facts = full_v4(false, false, true, true)
+            facts.leaf1_ecx = facts.leaf1_ecx ^ (1u32 << bit)
+            expect((mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+                .feature_words[0] & v3) == v3).to_equal(false)
+        for bit in [3u32, 5u32, 8u32]:
+            var facts = full_v4(false, false, true, true)
+            facts.leaf7_0_ebx = facts.leaf7_0_ebx ^ (1u32 << bit)
+            expect((mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+                .feature_words[0] & v3) == v3).to_equal(false)
+        var missing_lzcnt = full_v4(false, false, true, true)
+        missing_lzcnt.leaf80000001_ecx = missing_lzcnt.leaf80000001_ecx ^ (1u32 << 5u32)
+        expect((mapped(missing_lzcnt, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+            .feature_words[0] & v3) == v3).to_equal(false)
+
+    it "maps every complete v4 CPUID requirement":
+        val v4 = mask_of(ENV_FEATURE_X86_64_LEVEL4_V2)
+        for bit in [16u32, 30u32, 28u32, 17u32, 31u32]:
+            var facts = full_v4(false, false, true, true)
+            facts.leaf7_0_ebx = facts.leaf7_0_ebx ^ (1u32 << bit)
+            expect((mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+                .feature_words[0] & v4) == v4).to_equal(false)
+
+    it "separates hardware declaration from AVX-512 OS usability":
+        val result = mapped(full_v4(false, false, true, false),
+            COMPILER_HOST_X86_POLICY_NATIVE_V1)
+        val v4 = mask_of(ENV_FEATURE_X86_64_LEVEL4_V2)
+        val v3 = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        expect(result.feature_words[0] & v4).to_equal(v4)
+        expect(result.feature_words[1] & v4).to_equal(v3)
+        expect(result.snapshot.vector_length_bits).to_equal(256u32)
+
+    it "does not infer optional VBMI features from plain v4":
+        val result = mapped(full_v4(false, false, true, true),
+            ENV_FEATURE_X86_64_LEVEL4_V2)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX512VBMI_V2).to_equal(0u64)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX512VBMI2_V2).to_equal(0u64)
+        expect(result.snapshot.vector_length_bits).to_equal(512u32)
+
+    it "keeps detected VBMI capabilities outside a plain-v4 policy ceiling":
+        val result = mapped(full_v4(true, true, true, true),
+            ENV_FEATURE_X86_64_LEVEL4_V2)
+        expect(result.feature_words[0] & ENV_X86_FEATURE_AVX512VBMI_V2)
+            .to_equal(ENV_X86_FEATURE_AVX512VBMI_V2)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX512VBMI2_V2)
+            .to_equal(ENV_X86_FEATURE_AVX512VBMI2_V2)
+        expect(result.feature_words[2] & ENV_X86_FEATURE_AVX512VBMI_V2).to_equal(0u64)
+        expect(result.feature_words[2] & ENV_X86_FEATURE_AVX512VBMI2_V2).to_equal(0u64)
+
+    it "lets a v3 policy ceiling suppress usable v4 without rewriting hardware facts":
+        val result = mapped(full_v4(true, true, true, true),
+            ENV_FEATURE_X86_64_LEVEL3_V2)
+        val v4 = mask_of(ENV_FEATURE_X86_64_LEVEL4_V2)
+        val v3 = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        expect(result.feature_words[0] & v4).to_equal(v4)
+        expect(result.feature_words[1] & v4).to_equal(v4)
+        expect(result.feature_words[2]).to_equal(v3)
+
+    it "does not admit v3 when the OS cannot preserve AVX state":
+        val result = mapped(full_v4(false, false, false, false),
+            COMPILER_HOST_X86_POLICY_NATIVE_V1)
+        val v3 = mask_of(ENV_FEATURE_X86_64_LEVEL3_V2)
+        expect(result.feature_words[0] & v3).to_equal(v3)
+        expect((result.feature_words[1] & v3) == v3).to_equal(false)
+        expect(result.snapshot.vector_length_bits).to_equal(128u32)
+
+    it "preserves scalar v3 declarations when AVX state is disabled":
+        val result = mapped(full_v4(false, false, false, false),
+            COMPILER_HOST_X86_POLICY_NATIVE_V1)
+        val scalar = ENV_X86_FEATURE_BMI1_V2 | ENV_X86_FEATURE_BMI2_V2 |
+            ENV_X86_FEATURE_LZCNT_V2 | ENV_X86_FEATURE_MOVBE_V2 |
+            ENV_X86_FEATURE_OSXSAVE_V2
+        expect(result.feature_words[1] & scalar).to_equal(scalar)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX_V2).to_equal(0u64)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX2_V2).to_equal(0u64)
+
+    it "keeps usable AVX family bits on an AVX-capable non-AVX2 host":
+        var facts = full_v4(false, false, true, false)
+        facts.leaf7_0_ebx = facts.leaf7_0_ebx ^ (1u32 << 5u32)
+        val result = mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+        val usable_avx = ENV_X86_FEATURE_AVX_V2 | ENV_X86_FEATURE_F16C_V2 |
+            ENV_X86_FEATURE_FMA_V2
+        expect(result.feature_words[1] & usable_avx).to_equal(usable_avx)
+        expect(result.feature_words[1] & ENV_X86_FEATURE_AVX2_V2).to_equal(0u64)
+        expect(environment_feature_registry_x86_level_complete_v2(
+            ENV_FEATURE_X86_64_LEVEL3_V2, result.feature_words[1])).to_equal(false)
+
+    it "honors bounded CPUID leaves even when later register fields are populated":
+        var facts = full_v4(true, true, true, true)
+        facts.maximum_basic_leaf = 1u32
+        facts.maximum_extended_leaf = 0x80000000u32
+        val result = mapped(facts, COMPILER_HOST_X86_POLICY_NATIVE_V1)
+        val v2 = mask_of(ENV_FEATURE_X86_64_LEVEL2_V2)
+        expect(result.feature_words[0] & ENV_X86_FEATURE_AVX2_V2).to_equal(0u64)
+        expect(result.feature_words[0] & ENV_X86_FEATURE_LZCNT_V2).to_equal(0u64)
+        expect((result.feature_words[0] & v2) == v2).to_equal(false)
+
+    it "rejects a non-x86 ceiling rather than widening the host":
+        expect(compiler_host_environment_snapshot_x86_from_cpuid_facts_v1(
+            authority(), full_v4(false, false, true, true),
+            ENV_FEATURE_AARCH64_NEON_V1))
+            .to_equal(Err(CompilerHostSnapshotErrorV1.InvalidPolicyCeiling))

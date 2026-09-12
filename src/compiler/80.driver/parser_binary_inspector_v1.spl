@@ -1,0 +1,131 @@
+# Strict first-stage parser artifact inspection. This projects bounded, exact
+# `.text` / `.text.*` bytes from an x86-64 ELF64 relocatable object. It does not
+# claim the complete executable closure, decode instructions, or prove SIMD use.
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.common.string_core.bytes_to_text
+use compiler.driver.smf_binary_helpers.{_read_u16_le, _read_u32_le, _read_u64_le}
+
+pub val PARSER_BINARY_INSPECTION_MAX_ARTIFACT_BYTES_V1 = 67108864
+pub val PARSER_BINARY_INSPECTION_MAX_SECTIONS_V1 = 4096
+pub val PARSER_BINARY_INSPECTION_MAX_EXECUTABLE_BYTES_V1 = 67108864
+
+pub enum ParserBinaryInspectionErrorV1:
+    NotElf64LittleEndian
+    UnsupportedHeader
+    WrongMachine
+    InspectionLimit
+    MalformedSectionTable
+    MissingStringTable
+    MissingExecutableText
+    TruncatedSection
+    OverlappingSection
+
+pub struct ParserExecutableSectionProjectionV1:
+    name: text
+    section_index: i64
+    file_offset: i64
+    byte_count: i64
+    section_digest: text
+
+pub struct ParserExecutableTextProjectionV1:
+    artifact_digest: text
+    executable_text_digest: text
+    projection_digest: text
+    executable_text_bytes: [u8]
+    sections: [ParserExecutableSectionProjectionV1]
+    section_count: u64
+
+fn _text_name_at_pbi(bytes: [u8], table_at: i64, table_size: i64, name_index: i64) -> text?:
+    if name_index <= 0 or name_index >= table_size:
+        return nil
+    val start = table_at + name_index
+    val limit = table_at + table_size
+    var end = start
+    while end < limit and bytes[end] != 0u8:
+        end = end + 1
+    if end >= limit:
+        return nil
+    val name = bytes_to_text(bytes[start..end])
+    if name == ".text" or name.starts_with(".text."):
+        name
+    else:
+        nil
+
+fn _ranges_overlap_pbi(a_at: i64, a_size: i64, b_at: i64, b_size: i64) -> bool:
+    a_at < b_at + b_size and b_at < a_at + a_size
+
+pub fn parser_executable_text_project_v1(
+    artifact_bytes: [u8]
+) -> Result<ParserExecutableTextProjectionV1, ParserBinaryInspectionErrorV1>:
+    if artifact_bytes.len() > PARSER_BINARY_INSPECTION_MAX_ARTIFACT_BYTES_V1:
+        return Err(ParserBinaryInspectionErrorV1.InspectionLimit)
+    if (artifact_bytes.len() < 64 or artifact_bytes[0] != 0x7fu8 or
+        artifact_bytes[1] != 0x45u8 or artifact_bytes[2] != 0x4cu8 or
+        artifact_bytes[3] != 0x46u8 or artifact_bytes[4] != 2u8 or artifact_bytes[5] != 1u8):
+        return Err(ParserBinaryInspectionErrorV1.NotElf64LittleEndian)
+    if ((artifact_bytes[6] != 1u8) or
+        (artifact_bytes[7] != 0u8 and artifact_bytes[7] != 3u8) or
+        _read_u16_le(artifact_bytes, 16) != 1 or _read_u32_le(artifact_bytes, 20) != 1 or
+        _read_u32_le(artifact_bytes, 48) != 0 or _read_u16_le(artifact_bytes, 52) != 64):
+        return Err(ParserBinaryInspectionErrorV1.UnsupportedHeader)
+    if _read_u16_le(artifact_bytes, 18) != 62:
+        return Err(ParserBinaryInspectionErrorV1.WrongMachine)
+    val section_offset = _read_u64_le(artifact_bytes, 40)
+    val entry_size = _read_u16_le(artifact_bytes, 58)
+    val section_count = _read_u16_le(artifact_bytes, 60)
+    val names_index = _read_u16_le(artifact_bytes, 62)
+    if section_count > PARSER_BINARY_INSPECTION_MAX_SECTIONS_V1:
+        return Err(ParserBinaryInspectionErrorV1.InspectionLimit)
+    if (section_offset <= 0 or section_offset & 7 != 0 or entry_size != 64 or
+        section_count <= 0 or names_index <= 0 or names_index >= section_count or
+        names_index == 0xffff or section_offset > artifact_bytes.len() or
+        section_count > (artifact_bytes.len() - section_offset) / entry_size):
+        return Err(ParserBinaryInspectionErrorV1.MalformedSectionTable)
+    val names_header = section_offset + names_index * entry_size
+    if _read_u32_le(artifact_bytes, names_header + 4) != 3:
+        return Err(ParserBinaryInspectionErrorV1.MissingStringTable)
+    val names_offset = _read_u64_le(artifact_bytes, names_header + 24)
+    val names_size = _read_u64_le(artifact_bytes, names_header + 32)
+    if (names_offset < 0 or names_size <= 0 or names_offset > artifact_bytes.len() or
+        names_size > artifact_bytes.len() - names_offset):
+        return Err(ParserBinaryInspectionErrorV1.MissingStringTable)
+
+    var sections: [ParserExecutableSectionProjectionV1] = []
+    var total_size = 0
+    for index in 0..section_count:
+        val header = section_offset + index * entry_size
+        val section_type = _read_u32_le(artifact_bytes, header + 4)
+        val flags = _read_u64_le(artifact_bytes, header + 8)
+        val name_index = _read_u32_le(artifact_bytes, header)
+        val name_opt = _text_name_at_pbi(artifact_bytes, names_offset, names_size, name_index)
+        if section_type == 1 and flags & 4 != 0 and name_opt.is_some():
+            val data_offset = _read_u64_le(artifact_bytes, header + 24)
+            val data_size = _read_u64_le(artifact_bytes, header + 32)
+            if (data_offset < 0 or data_size <= 0 or data_offset > artifact_bytes.len() or
+                data_size > artifact_bytes.len() - data_offset):
+                return Err(ParserBinaryInspectionErrorV1.TruncatedSection)
+            if data_size > PARSER_BINARY_INSPECTION_MAX_EXECUTABLE_BYTES_V1 - total_size:
+                return Err(ParserBinaryInspectionErrorV1.InspectionLimit)
+            for prior in sections:
+                if _ranges_overlap_pbi(data_offset, data_size, prior.file_offset, prior.byte_count):
+                    return Err(ParserBinaryInspectionErrorV1.OverlappingSection)
+            val section_bytes = artifact_bytes[data_offset..(data_offset + data_size)]
+            sections.push(ParserExecutableSectionProjectionV1(
+                name: name_opt.unwrap(), section_index: index, file_offset: data_offset,
+                byte_count: data_size, section_digest: sha256_u8_hex(section_bytes)))
+            total_size = total_size + data_size
+    if sections.len() == 0:
+        return Err(ParserBinaryInspectionErrorV1.MissingExecutableText)
+
+    var executable: [u8] = []
+    var framed: [text] = []
+    for section in sections:
+        framed.push(section.name.len().to_text() + ":" + section.name + ":" +
+            section.section_index.to_text() + ":" + section.file_offset.to_text() + ":" +
+            section.byte_count.to_text() + ":" + section.section_digest)
+        for byte_index in 0..section.byte_count:
+            executable.push(artifact_bytes[section.file_offset + byte_index])
+    Ok(ParserExecutableTextProjectionV1(
+        artifact_digest: sha256_u8_hex(artifact_bytes), executable_text_digest: sha256_u8_hex(executable),
+        projection_digest: sha256_text("simple/parser-text-projection/v1\n" + framed.join("\n")),
+        executable_text_bytes: executable, sections: sections, section_count: sections.len() as u64))

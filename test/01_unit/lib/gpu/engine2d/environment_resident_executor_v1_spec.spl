@@ -1,0 +1,214 @@
+"""Resident frontend/render execution island (EGL package 7).
+
+`engine2d_gpu_epoch_admit` is a routing-only seam: it re-decides admission on
+every call and keeps nothing alive between them. These examples pin the
+remaining package-7 half — an executor that admits a bounded task ONCE, keeps
+the admitted surface resident across calls, retires it on an idle/lease bound,
+and refuses when the provider authority is missing and the task's own fallback
+policy forbids the CPU lane.
+
+Host probe (2026-09-12, aarch64): `vulkaninfo --summary` DOES enumerate a
+device -- NVIDIA GB10, integrated, driver 580.173.02, Vulkan 1.4.312 -- and
+/dev/dri/{card0,card1,renderD128} exist, though card0 is permission-denied to
+this user and the Mesa/Turnip ICDs fail to open renderD128. No device execution
+was attempted regardless: the deployed binary is the Rust bootstrap seed, and
+the device lane belongs to the package-6 modules this agent must not edit. The
+execution body below is therefore the existing CPU/software rasterizer
+(`SoftwareBackend`), reused as-is, and every receipt says so
+(`lane == "cpu_emulated"`, `device_execution_proven == false`). A green run
+here is never evidence of device execution.
+"""
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use common.gpu.environment_variant_task_contract_v1.*
+use std.gc_async_mut.gpu.engine2d.environment_resident_executor_v1.*
+use common.gpu.environment_transfer_scheduler_v1.*
+
+fn identity(v: u64) -> GpuTaskIdentityV1:
+    GpuTaskIdentityV1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn bounded_task(invocation: u64, policy: GpuTaskFallbackPolicyV1,
+    cpu_allowed: bool) -> GpuBoundedTaskV1:
+    GpuBoundedTaskV1(
+        descriptor_size: GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1,
+        schema_version: GPU_ENVIRONMENT_TASK_SCHEMA_V1,
+        operation_kind: GpuTaskOperationKindV1.Engine2d,
+        fallback_policy: policy,
+        invocation_id: invocation,
+        provider_generation: 3u64,
+        lease_generation: 1u64,
+        input_arena: GpuTaskArenaRangeV1(offset: 0u64, length: 64u64),
+        output_arena: GpuTaskArenaRangeV1(offset: 64u64, length: 64u64),
+        arena_capacity_bytes: 256u64,
+        resource_layout_identity: identity(5u64),
+        required_effect_bits: 1u64,
+        numerical_contract_id: 2u32,
+        cpu_fallback_semantically_allowed: cpu_allowed)
+
+fn cpu_task(invocation: u64) -> GpuBoundedTaskV1:
+    bounded_task(invocation, GpuTaskFallbackPolicyV1.AllowCpu, true)
+
+describe "Environment resident execution island V1":
+
+    it "refuses admission when the task contract is invalid":
+        # @req REQ-SSPEC-UNIT
+        step("refuses admission when the task contract is invalid")
+        var island = ResidentExecutionIslandV1.create(4, 64, 48)
+        var bad = cpu_task(0u64)   # invocation_id 0 is rejected by the contract
+        expect(island.admit(bad, false, 1)).to_equal(
+            Err(ResidentExecutorErrorV1.TaskContractRejected))
+
+    it "refuses admission when the required provider authority is missing":
+        # @req REQ-SSPEC-UNIT
+        step("refuses admission when the required provider authority is missing")
+        var island = ResidentExecutionIslandV1.create(4, 64, 48)
+        val required = bounded_task(1u64, GpuTaskFallbackPolicyV1.RequireRequested, true)
+        expect(island.admit(required, false, 1)).to_equal(
+            Err(ResidentExecutorErrorV1.AuthorityMissing))
+        # A task whose semantics forbid the CPU lane is refused for the same
+        # reason even under an AllowCpu policy.
+        val forbids = bounded_task(2u64, GpuTaskFallbackPolicyV1.AllowCpu, false)
+        expect(island.admit(forbids, false, 1)).to_equal(
+            Err(ResidentExecutorErrorV1.AuthorityMissing))
+        expect(island.admissions_granted).to_equal(0)
+
+    it "admits once and stays resident across calls":
+        # @req REQ-SSPEC-UNIT
+        step("admits once and stays resident across calls")
+        var island = ResidentExecutionIslandV1.create(100, 64, 48)
+        val lease = island.admit(cpu_task(1u64), false, 1).unwrap()
+        val first = island.execute(lease, 2, 0, 0, 8, 8, 0xFF204080u32).unwrap()
+        val second = island.execute(lease, 3, 16, 0, 8, 8, 0xFF208040u32).unwrap()
+        val third = island.execute(lease, 4, 32, 0, 8, 8, 0xFF804020u32).unwrap()
+        expect(island.admissions_granted).to_equal(1)
+        expect(third.executions).to_equal(3)
+        expect(third.phase).to_equal(RESIDENT_PHASE_RESIDENT_V1)
+        expect(third.last_used_tick).to_equal(4)
+        expect(third.resident_since_tick).to_equal(1)
+        # Residency is observable in the pixels: each frame accumulates on the
+        # surface admitted once, so the checksums strictly differ.
+        expect(first.readback_checksum != second.readback_checksum).to_equal(true)
+        expect(second.readback_checksum != third.readback_checksum).to_equal(true)
+        expect(third.pixel_count).to_equal(3072)
+
+    it "keeps the resident surface, not a fresh one, between calls":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the resident surface, not a fresh one, between calls")
+        var resident = ResidentExecutionIslandV1.create(100, 64, 48)
+        val kept = resident.admit(cpu_task(1u64), false, 1).unwrap()
+        resident.execute(kept, 2, 0, 0, 8, 8, 0xFF204080u32).unwrap()
+        val accumulated = resident.execute(kept, 3, 16, 0, 8, 8, 0xFF208040u32).unwrap()
+
+        var fresh = ResidentExecutionIslandV1.create(100, 64, 48)
+        val once = fresh.admit(cpu_task(1u64), false, 1).unwrap()
+        val only_second = fresh.execute(once, 2, 16, 0, 8, 8, 0xFF208040u32).unwrap()
+        expect(accumulated.readback_checksum != only_second.readback_checksum).to_equal(true)
+
+    it "reports the honest lane for every receipt":
+        # @req REQ-SSPEC-UNIT
+        step("reports the honest lane for every receipt")
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(9u64), false, 1).unwrap()
+        val receipt = island.execute(lease, 2, 0, 0, 4, 4, 0xFFFFFFFFu32).unwrap()
+        expect(receipt.lane).to_equal(RESIDENT_LANE_CPU_EMULATED_V1)
+        expect(receipt.device_execution_proven).to_equal(false)
+        expect(receipt.routing_evidence_only).to_equal(false)
+        expect(receipt.invocation_id).to_equal(9u64)
+
+    it "retires a lease past its idle bound and refuses further execution":
+        # @req REQ-SSPEC-UNIT
+        step("retires a lease past its idle bound and refuses further execution")
+        var island = ResidentExecutionIslandV1.create(3, 32, 32)
+        val lease = island.admit(cpu_task(1u64), false, 1).unwrap()
+        island.execute(lease, 2, 0, 0, 4, 4, 0xFF112233u32).unwrap()
+        expect(island.sweep(4)).to_equal(0)      # idle 2 ticks, still within bound
+        expect(island.sweep(6)).to_equal(1)      # idle 4 ticks, past the bound
+        expect(island.execute(lease, 7, 0, 0, 4, 4, 0xFF112233u32)).to_equal(
+            Err(ResidentExecutorErrorV1.NotResident))
+
+    it "produces a terminal retirement receipt on explicit retire":
+        # @req REQ-SSPEC-UNIT
+        step("produces a terminal retirement receipt on explicit retire")
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(4u64), false, 1).unwrap()
+        island.execute(lease, 2, 0, 0, 4, 4, 0xFF445566u32).unwrap()
+        val retired = island.retire(lease, 5).unwrap()
+        expect(retired.phase).to_equal(RESIDENT_PHASE_RETIRED_V1)
+        expect(retired.executions).to_equal(1)
+        expect(island.retire(lease, 6)).to_equal(
+            Err(ResidentExecutorErrorV1.UnknownLease))
+
+    it "refuses an unknown or cross-island lease":
+        # @req REQ-SSPEC-UNIT
+        step("refuses an unknown or cross-island lease")
+        var first = ResidentExecutionIslandV1.create(100, 32, 32)
+        var second = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = first.admit(cpu_task(1u64), false, 1).unwrap()
+        expect(second.execute(lease, 2, 0, 0, 4, 4, 0xFF000000u32)).to_equal(
+            Err(ResidentExecutorErrorV1.UnknownLease))
+
+    it "keeps the CPU body away from a device-lane lease":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the CPU body away from a device-lane lease")
+        # An offered provider now admits on the device lane, which completes
+        # only through a backend owner's callback authority (pinned in
+        # environment_resident_executor_deferral_v1_spec.spl). What must never
+        # happen is the CPU rasterizer serving that lease, so `execute` refuses
+        # it rather than letting the CPU lane impersonate a device.
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(1u64), true, 1).unwrap()
+        expect(island.execute(lease, 2, 0, 0, 4, 4, 0xFF223344u32)).to_equal(
+            Err(ResidentExecutorErrorV1.LaneMismatch))
+
+    it "bounds how many tasks can be resident at once":
+        # @req REQ-SSPEC-UNIT
+        step("bounds how many tasks can be resident at once")
+        var island = ResidentExecutionIslandV1.create(100, 16, 16)
+        var i: i64 = 1
+        while i <= RESIDENT_ISLAND_MAX_LIVE_V1:
+            island.admit(cpu_task(i.to_u64()), false, 1).unwrap()
+            i = i + 1
+        expect(island.live_count()).to_equal(RESIDENT_ISLAND_MAX_LIVE_V1)
+        expect(island.admit(cpu_task(i.to_u64()), false, 1)).to_equal(
+            Err(ResidentExecutorErrorV1.CapacityExceeded))
+
+describe "Transfer-aware plan driving the resident island":
+
+    it "executes resident tasks in the planned order and skips the deferred one":
+        # @req REQ-SSPEC-UNIT
+        step("executes resident tasks in the planned order and skips the deferred one")
+        # The two halves of package 7 joined: the plan decides the order and
+        # what does not fit the transfer budget; the island keeps each admitted
+        # task resident and executes only what the plan admitted.
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        var leases: {u64: ResidentLeaseV1} = {}
+        var invocation: u64 = 1u64
+        while invocation <= 3u64:
+            leases[invocation] = island.admit(cpu_task(invocation), false, 1).unwrap()
+            invocation = invocation + 1u64
+        expect(island.admissions_granted).to_equal(3)
+
+        val plan = transfer_aware_plan_v1([
+            TransferTaskV1(invocation_id: 1u64, residency_class: 10u64,
+                cost: TransferCostV1(host_to_device_bytes: 900u64, device_to_host_bytes: 0u64),
+                deferrals: 0),
+            TransferTaskV1(invocation_id: 2u64, residency_class: 20u64,
+                cost: TransferCostV1(host_to_device_bytes: 40u64, device_to_host_bytes: 0u64),
+                deferrals: 0),
+            TransferTaskV1(invocation_id: 3u64, residency_class: 30u64,
+                cost: TransferCostV1(host_to_device_bytes: 120u64, device_to_host_bytes: 0u64),
+                deferrals: 0)
+        ], 200u64).unwrap()
+        expect(plan.deferred).to_equal([1u64])
+
+        var executed: [u64] = []
+        var tick: i64 = 2
+        for batch in plan.batches:
+            for id in batch.invocation_ids:
+                val receipt = island.execute(leases[id], tick, 0, 0, 4, 4, 0xFF223344u32).unwrap()
+                executed.push(receipt.invocation_id)
+                tick = tick + 1
+        # Cheapest crossing first, and the over-budget task never ran.
+        expect(executed).to_equal([2u64, 3u64])
+        expect(island.admissions_granted).to_equal(3)

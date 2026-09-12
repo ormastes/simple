@@ -1,0 +1,130 @@
+# Compiler backend feature-declaration capture. This does not authenticate
+# backend acceptance, host execution, or target ABI. Future authority must bind
+# provider/build/mode/target/toolchain/policy receipt identities.
+use std.common.crypto.sha256.sha256_bytes
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1, ENV_ARCH_X86_64_V1,
+    ENV_ARCH_AARCH64_V1, ENV_ARCH_RISCV64_V1, ENV_ARCH_WASM32_V1}
+
+pub enum BackendFeatureAuthorityErrorV1:
+    InvalidOwner
+    InvalidIdentity
+    InvalidArchitecture
+    MalformedRange
+    CapacityExceeded
+    CounterOverflow
+    DuplicateActiveBackend
+    UnknownOrRevoked
+
+pub struct BackendFeatureAuthorityTokenV1:
+    token_id: u64
+    owner_identity: u64
+pub struct BackendFeatureAuthorityProjectionV1:
+    backend_identity: EnvironmentDigest256V1
+    architecture: u16
+    generation: u64
+    supported_feature_words: [u64]
+    evidence_digest: EnvironmentDigest256V1
+struct _BackendFeatureAuthorityRecordV1:
+    token: BackendFeatureAuthorityTokenV1
+    projection: BackendFeatureAuthorityProjectionV1
+
+var _next_backend_feature_owner_v1: u64 = 1u64
+pub class BackendFeatureAuthorityOwnerV1:
+    var owner_identity: u64
+    var next_token_id: u64
+    var next_generation: u64
+    var records: [_BackendFeatureAuthorityRecordV1]
+    pub static fn create() -> BackendFeatureAuthorityOwnerV1:
+        val candidate = _next_backend_feature_owner_v1
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64:
+            _next_backend_feature_owner_v1 = identity + 1u64
+        BackendFeatureAuthorityOwnerV1(owner_identity: identity,
+            next_token_id: 1u64, next_generation: 1u64, records: [])
+
+fn _declared_bfa(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _push64_bfa(out: [i64], v: u64):
+    for i in 0..8: out.push(((v >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _read64_bfa(raw: [i64], at: i64) -> u64:
+    var v = 0u64
+    for i in 0..8: v = v | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    v
+fn _digest_bfa(backend: EnvironmentDigest256V1, architecture: u16,
+               generation: u64, words: [u64]) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_bfa(bytes, 1u64)
+    for v in [backend.w0, backend.w1, backend.w2, backend.w3,
+              architecture as u64, generation, words.len() as u64]: _push64_bfa(bytes, v)
+    for word in words: _push64_bfa(bytes, word)
+    val raw = sha256_bytes(bytes)
+    EnvironmentDigest256V1(w0: _read64_bfa(raw, 0), w1: _read64_bfa(raw, 8),
+        w2: _read64_bfa(raw, 16), w3: _read64_bfa(raw, 24))
+fn _copy_bfa(words: [u64]) -> [u64]:
+    var copied: [u64] = []; for word in words: copied.push(word)
+    copied
+
+pub fn backend_feature_authority_register_v1(owner: BackendFeatureAuthorityOwnerV1,
+    backend_identity: EnvironmentDigest256V1, features: EnvironmentFeatureSetV1,
+    feature_arena: [u64]
+) -> Result<BackendFeatureAuthorityTokenV1, BackendFeatureAuthorityErrorV1>:
+    if owner.owner_identity == 0u64: return Err(BackendFeatureAuthorityErrorV1.InvalidOwner)
+    if not _declared_bfa(backend_identity): return Err(BackendFeatureAuthorityErrorV1.InvalidIdentity)
+    if features.architecture != ENV_ARCH_X86_64_V1 and
+       features.architecture != ENV_ARCH_AARCH64_V1 and
+       features.architecture != ENV_ARCH_RISCV64_V1 and
+       features.architecture != ENV_ARCH_WASM32_V1:
+        return Err(BackendFeatureAuthorityErrorV1.InvalidArchitecture)
+    if features.words.count == 0u32 or features.words.count > 64u32 or
+       features.words.offset > feature_arena.len() as u32 or
+       features.words.count > feature_arena.len() as u32 - features.words.offset:
+        return Err(BackendFeatureAuthorityErrorV1.MalformedRange)
+    for record in owner.records:
+        if record.projection.backend_identity == backend_identity and
+           record.projection.architecture == features.architecture:
+            return Err(BackendFeatureAuthorityErrorV1.DuplicateActiveBackend)
+    if owner.records.len() >= 256: return Err(BackendFeatureAuthorityErrorV1.CapacityExceeded)
+    if owner.next_token_id == 0u64 or owner.next_token_id == 0xffffffffffffffffu64 or
+       owner.next_generation == 0u64 or owner.next_generation == 0xffffffffffffffffu64:
+        return Err(BackendFeatureAuthorityErrorV1.CounterOverflow)
+    var words: [u64] = []; var i = 0u32
+    while i < features.words.count:
+        words.push(feature_arena[(features.words.offset + i) as i64]); i = i + 1u32
+    val token = BackendFeatureAuthorityTokenV1(token_id: owner.next_token_id,
+        owner_identity: owner.owner_identity)
+    val projection = BackendFeatureAuthorityProjectionV1(backend_identity: backend_identity,
+        architecture: features.architecture, generation: owner.next_generation,
+        supported_feature_words: words,
+        evidence_digest: _digest_bfa(backend_identity, features.architecture,
+            owner.next_generation, words))
+    owner.records.push(_BackendFeatureAuthorityRecordV1(token: token, projection: projection))
+    owner.next_token_id = owner.next_token_id + 1u64
+    owner.next_generation = owner.next_generation + 1u64
+    Ok(token)
+
+pub fn backend_feature_authority_project_v1(owner: BackendFeatureAuthorityOwnerV1,
+    token: BackendFeatureAuthorityTokenV1
+) -> Result<BackendFeatureAuthorityProjectionV1, BackendFeatureAuthorityErrorV1>:
+    if token.owner_identity != owner.owner_identity: return Err(BackendFeatureAuthorityErrorV1.UnknownOrRevoked)
+    for record in owner.records:
+        if record.token == token:
+            var result = record.projection
+            result.supported_feature_words = _copy_bfa(record.projection.supported_feature_words)
+            return Ok(result)
+    Err(BackendFeatureAuthorityErrorV1.UnknownOrRevoked)
+
+pub fn backend_feature_authority_projection_live_v1(owner: BackendFeatureAuthorityOwnerV1,
+    token: BackendFeatureAuthorityTokenV1, projection: BackendFeatureAuthorityProjectionV1) -> bool:
+    match backend_feature_authority_project_v1(owner, token):
+        case Ok(expected): expected == projection
+        case Err(_): false
+
+pub fn backend_feature_authority_revoke_v1(owner: BackendFeatureAuthorityOwnerV1,
+    token: BackendFeatureAuthorityTokenV1) -> Result<(), BackendFeatureAuthorityErrorV1>:
+    if token.owner_identity != owner.owner_identity: return Err(BackendFeatureAuthorityErrorV1.UnknownOrRevoked)
+    var found = false; var kept: [_BackendFeatureAuthorityRecordV1] = []
+    for record in owner.records:
+        if record.token == token: found = true
+        else: kept.push(record)
+    if not found: return Err(BackendFeatureAuthorityErrorV1.UnknownOrRevoked)
+    owner.records = kept; Ok(())

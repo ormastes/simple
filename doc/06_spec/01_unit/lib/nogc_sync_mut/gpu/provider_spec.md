@@ -121,7 +121,7 @@ step("should reject invalid resource and submit arguments locally")
 step("Construct the canonical unavailable session")
 val session = gpu_provider_open(8, 0)
 val resource = gpu_provider_resource_alloc(session, 0, 0, 0)
-val completion = gpu_provider_submit_raw(session, 1, 0, 0, 1)
+val completion = gpu_provider_submit_raw(session, resource, 1, 0, 0, 1)
 
 step("Return typed non-owning handles")
 expect(resource.is_live()).to_be(false)

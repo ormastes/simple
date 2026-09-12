@@ -1,0 +1,96 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+use std.nogc_async_mut.structural.parse.lexical_candidate_resolution_v1.*
+use std.nogc_async_mut.structural.parse.lexical_routing_receipt_v1.*
+use std.nogc_async_mut.structural.parse.lexical_advisory_wrapper_v1.*
+
+fn _bytes_law() -> [u8]:
+    [34u8, 97u8, 92u8, 34u8, 35u8, 98u8, 10u8, 123u8]
+
+describe "advisory lexical frontend wrapper V1":
+    it "returns the untouched scalar result when no provider is admitted":
+        val bytes = _bytes_law()
+        val input = lexical_block_initial_state_v1()
+        val result = lexical_advisory_scan_v1(bytes, input,
+            lexical_advisory_no_provider_v1(), 5u64).unwrap()
+        expect(result.outcome).to_equal(LexicalAdvisoryOutcomeV1.ScalarOnly)
+        expect(result.divergence_bits).to_equal(0u64)
+        expect(result.summary).to_equal(
+            lexical_block_summary_scalar_v1(bytes, input).unwrap())
+        expect(result.receipt.provider).to_equal(LexicalRoutingProviderV1.ScalarReference)
+        expect(lexical_routing_receipt_verify_v1(result.receipt, bytes, input, false, 5u64)).to_equal(
+            Ok(true))
+
+    it "reports agreement when an admitted provider matches the scalar masks":
+        val bytes = _bytes_law()
+        val input = lexical_block_initial_state_v1()
+        val offer = lexical_advisory_offer_v1(lexical_candidate_masks_scalar_v1(bytes).unwrap())
+        val result = lexical_advisory_scan_v1(bytes, input, offer, 5u64).unwrap()
+        expect(result.outcome).to_equal(LexicalAdvisoryOutcomeV1.AdvisoryAgreed)
+        expect(result.divergence_bits).to_equal(0u64)
+        expect(result.summary).to_equal(
+            lexical_block_summary_scalar_v1(bytes, input).unwrap())
+        expect(result.receipt.provider).to_equal(LexicalRoutingProviderV1.ParserLexicalAvx2)
+        expect(lexical_routing_receipt_verify_v1(result.receipt, bytes, input, true, 5u64)).to_equal(
+            Ok(true))
+
+    it "reports divergence per mask field without changing the scalar result":
+        val bytes = _bytes_law()
+        val input = lexical_block_initial_state_v1()
+        var masks = lexical_candidate_masks_scalar_v1(bytes).unwrap()
+        masks.newline = masks.newline ^ 1u32
+        masks.hash = masks.hash ^ 2u32
+        val result = lexical_advisory_scan_v1(bytes, input,
+            lexical_advisory_offer_v1(masks), 5u64).unwrap()
+        expect(result.outcome).to_equal(LexicalAdvisoryOutcomeV1.AdvisoryDiverged)
+        expect(result.divergence_bits).to_equal((LEX_CAND_NEWLINE_V1 as u64) | (LEX_CAND_HASH_V1 as u64))
+        expect(result.summary).to_equal(
+            lexical_block_summary_scalar_v1(bytes, input).unwrap())
+        expect(result.output_state).to_equal(
+            lexical_resolve_state_sealed_v1(bytes, input).unwrap())
+        expect(result.receipt.masks).to_equal(lexical_candidate_masks_scalar_v1(bytes).unwrap())
+        # A diverged provider contributed nothing, so the receipt must fall back
+        # to scalar reference and verify even where no provider is admitted.
+        expect(result.receipt.provider).to_equal(LexicalRoutingProviderV1.ScalarReference)
+        expect(lexical_routing_receipt_verify_v1(result.receipt, bytes, input, false, 5u64)).to_equal(
+            Ok(true))
+
+    it "reports a wrong provider block width as its own divergence reason":
+        val bytes = _bytes_law()
+        val input = lexical_block_initial_state_v1()
+        var masks = lexical_candidate_masks_scalar_v1(bytes).unwrap()
+        masks.byte_count = masks.byte_count + 1u32
+        val result = lexical_advisory_scan_v1(bytes, input,
+            lexical_advisory_offer_v1(masks), 5u64).unwrap()
+        expect(result.divergence_bits).to_equal(LEX_ADVISORY_DIVERGENCE_WIDTH_V1)
+        expect(result.outcome).to_equal(LexicalAdvisoryOutcomeV1.AdvisoryDiverged)
+        expect(result.receipt.provider).to_equal(LexicalRoutingProviderV1.ScalarReference)
+
+    it "keeps the scalar result identical whether or not a divergent provider is offered":
+        val bytes = _bytes_law()
+        var checked = 0
+        for state in lexical_routing_verifiable_states_v1():
+            var masks = lexical_candidate_masks_scalar_v1(bytes).unwrap()
+            masks.structural_delimiters = masks.structural_delimiters ^ 1u32
+            val scalar_only = lexical_advisory_scan_v1(bytes, state,
+                lexical_advisory_no_provider_v1(), 5u64).unwrap()
+            val with_provider = lexical_advisory_scan_v1(bytes, state,
+                lexical_advisory_offer_v1(masks), 5u64).unwrap()
+            expect(with_provider.summary).to_equal(scalar_only.summary)
+            expect(with_provider.output_state).to_equal(scalar_only.output_state)
+            expect(with_provider.outcome).to_equal(LexicalAdvisoryOutcomeV1.AdvisoryDiverged)
+            expect(with_provider.receipt).to_equal(scalar_only.receipt)
+            checked = checked + 1
+        expect(checked).to_equal(LEXICAL_TRANSITION_STATE_COUNT_V1 as i64)
+
+    it "refuses an over-wide block and an unadmitted input state":
+        val input = lexical_block_initial_state_v1()
+        expect(lexical_advisory_scan_v1([0u8 for _ in 0..33], input,
+            lexical_advisory_no_provider_v1(), 5u64)).to_equal(
+            Err(LexicalCandidateErrorV1.BlockTooWide))
+        var bad = lexical_block_initial_state_v1()
+        bad.in_block_comment = true
+        expect(lexical_advisory_scan_v1([97u8], bad,
+            lexical_advisory_no_provider_v1(), 5u64)).to_equal(
+            Err(LexicalCandidateErrorV1.StateNotAdmitted))

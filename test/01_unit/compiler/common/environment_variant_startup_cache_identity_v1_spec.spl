@@ -1,0 +1,55 @@
+use std.spec.*
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: value + 1u64,
+        w2: value + 2u64, w3: value + 3u64)
+
+fn selected_receipt() -> EnvironmentVariantStartupReceiptV1:
+    EnvironmentVariantStartupReceiptV1(
+        handle: EnvironmentVariantStartupHandleV1(
+            owner_id: 1u64, session_id: 2u64, generation: 3u64),
+        policy_digest: d(10u64), provider_identity: d(20u64),
+        variant_identity: d(30u64), artifact_identity: d(40u64),
+        environment_identity: d(50u64), environment_generation: 60u64,
+        status: EnvironmentVariantStartupStatusV1.Selected,
+        rejection_code: "")
+
+describe "environment variant startup cache identity V1":
+    it "is stable for the same exact startup authority":
+        expect(environment_variant_startup_cache_identity_v1(selected_receipt()))
+            .to_equal(environment_variant_startup_cache_identity_v1(selected_receipt()))
+
+    it "changes for every cache-authorizing identity":
+        val base = selected_receipt()
+        val identity = environment_variant_startup_cache_identity_v1(base)
+        var changed = base
+        changed.policy_digest = d(11u64)
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+        changed = base; changed.provider_identity = d(21u64)
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+        changed = base; changed.variant_identity = d(31u64)
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+        changed = base; changed.artifact_identity = d(41u64)
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+        changed = base; changed.environment_identity = d(51u64)
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+        changed = base; changed.environment_generation = 61u64
+        expect(environment_variant_startup_cache_identity_v1(changed) == identity).to_be(false)
+
+    it "does not confuse selected and reference startup receipts":
+        val selected = selected_receipt()
+        var reference = selected
+        reference.status = EnvironmentVariantStartupStatusV1.Reference
+        reference.rejection_code = "selected_provider_unavailable"
+        expect(environment_variant_startup_cache_identity_v1(reference) ==
+            environment_variant_startup_cache_identity_v1(selected)).to_be(false)
+
+    it "keeps authorization sessions and generated-output targets out of host cache content":
+        val first = selected_receipt()
+        var later_session = first
+        later_session.handle = EnvironmentVariantStartupHandleV1(
+            owner_id: 99u64, session_id: 100u64, generation: 101u64)
+        expect(environment_variant_startup_cache_identity_v1(later_session))
+            .to_equal(environment_variant_startup_cache_identity_v1(first))

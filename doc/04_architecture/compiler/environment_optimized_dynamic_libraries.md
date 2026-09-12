@@ -198,6 +198,16 @@ features, backend/compiler digest, target ABI, optimization/numerical policy,
 dependencies, and resource generation. Unsupported strict features fail; a
 scalar loop cannot be reported as SIMD execution.
 
+The x86 host path uses the V2 feature word as its sole preset authority. The
+live adapter bounds CPUID leaves, keeps hardware, OS-usable, and policy-ceiling
+words separate, and admits AVX-512 state only when XSAVE and OSXSAVE are
+advertised and XCR0 enables XMM, YMM, opmask, ZMM-high-256, and high-ZMM state.
+Plain x86-64-v4 requires AVX512F/BW/CD/DQ/VL; VBMI and VBMI2 remain separately
+named optional variants. Canonical publication routes x86 snapshots through
+this exact-level gate before mapping or artifact admission, while forwarding
+GPU device facts unchanged to the shared eligibility selector. Generated-code
+target CPU/features never participate in this host-execution decision.
+
 ## GPU architecture
 
 A GPU variant has a host control provider and one or more logical device
