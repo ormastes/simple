@@ -2902,6 +2902,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # attempt before entering the runner so failure diagnostics cannot attribute
   # stale compiler output to this invocation.
   rm -f "${stage2_native_log}"
+  # The stage-2 child is launched with an EXPLICIT env allowlist, not the
+  # caller's environment, so anything absent from the list below is silently
+  # dropped. That is why a lane exporting SIMPLE_NATIVE_INCREMENTAL=1 and then
+  # looking for the `[native-incremental] N reused / M rebuilt` receipt in
+  # stage2-native-build.log found nothing (measured 2026-09-12): the variable
+  # never reached the process that prints it. The receipt is gated on it by
+  # `incremental_hardening_requested`
+  # (src/compiler_rust/compiler/src/pipeline/native_project/mod.rs), and that
+  # gate is DIAGNOSTIC ONLY -- the dependency-aware cache key is unconditional
+  # -- so forwarding it changes what is reported, never what is built. It is
+  # forwarded only when the caller actually set it, so the default is unchanged.
   bootstrap_run_stage2_native() {
     set -- \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -2919,6 +2930,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${SIMPLE_NATIVE_INCREMENTAL:+"SIMPLE_NATIVE_INCREMENTAL=${SIMPLE_NATIVE_INCREMENTAL}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \

@@ -257,3 +257,28 @@ so `SIMPLE_TYPECHECK_PROFILE` cannot reach it. Unblock condition: a self-hosted
 Status: remains **OPEN** — the mechanism is in place and default-safe, but
 enforcement is not on, and the census that would justify turning it on is
 unmeasured.
+
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/types/declared_return_type_enforced_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/types/declared_return_type_enforced_spec.spl outcome=ERROR declared>=3 executed=3 passed=2 failed=1 skipped=0 dropped=0
+```
+
+1 of 3 examples still red — "rejects a text literal returned from a `-> bool`
+signature" (`assert_false failed: got true`). The other two pass, so the spec's
+own machinery works; it is the enforcement that is absent.
+
+Not attempted here, deliberately. Turning on declared-return-type checking in
+`src/compiler/30.types/type_system/checker.spl` is not a local change: the tree
+has been compiling without it for the life of the checker, so every existing
+mismatch anywhere in `src/` becomes a new error the moment it is enforced. That
+is a sweep with an unknown blast radius, and doing it half-way — enforcing under
+one profile only, or with an escape hatch — is exactly the "normalize the
+workaround" outcome the project rules forbid. It needs an owner and a measured
+count of current violations first.

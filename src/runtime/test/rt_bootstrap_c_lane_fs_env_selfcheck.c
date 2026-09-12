@@ -16,8 +16,17 @@
  * representation, not this lane's RtCoreArray), rt_cli_handle_compile /
  * rt_cli_run_tests_process_args (call into the compiler/test-runner
  * pipeline), rt_mmap / rt_execute_native (capability-sandboxed, need
- * security_runtime.rs), rt_file_atomic_write_mode / rt_file_list_dir /
- * rt_file_mode / rt_fs_read_text (no implementation on either side).
+ * security_runtime.rs).
+ *
+ * UPDATED 2026-09-12: rt_file_atomic_write_mode / rt_file_list_dir /
+ * rt_file_mode / rt_fs_read_text were listed here as "no implementation on
+ * either side" and therefore out of scope. That is no longer true -- all
+ * four are now implemented in runtime_native.c (they had to be: GNU ld
+ * tolerated the undefined symbols, MSVC's linker refused them and broke the
+ * Stage 2 Windows bootstrap link). They are COVERED below rather than
+ * excluded. Their ABI is the single-word boxed RuntimeValue `text` handle,
+ * confirmed by disassembling the real Windows stage3 call sites -- see the
+ * block comment above their definitions in runtime_native.c.
  *
  * Build (same recipe as rt_bootstrap_c_lane_atomic_math_time_selfcheck.c
  * beside this file):
@@ -33,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* SplArray is opaque outside runtime_native.c; test code, like any other
@@ -50,6 +60,18 @@ extern int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len);
 extern int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len);
 extern int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
 extern int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len);
+
+/* 2026-09-12 Stage2-Windows-link additions. Each `text` argument is ONE
+ * machine word -- the boxed RuntimeValue handle -- not a (ptr, len) pair;
+ * none of the four appears in text_arg_indices
+ * (src/compiler/50.mir/text_extern_abi.spl) and the real call sites are bare
+ * tail-jumps with zero argument setup. rt_file_atomic_write_mode's bool
+ * result is declared int64_t, not int8_t, because its call site reads the
+ * FULL 64-bit return register (`testq %rax, %rax`). */
+extern int64_t rt_fs_read_text(int64_t path_value);
+extern int64_t rt_file_mode(int64_t path_value);
+extern int64_t rt_file_atomic_write_mode(int64_t path_value, int64_t content_value, int32_t mode);
+extern int64_t rt_file_list_dir(int64_t path_value);
 
 extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 extern int64_t rt_string_len(int64_t string);
@@ -81,6 +103,29 @@ char* rt_getcwd(void) {
     if (!getcwd(buf, sizeof(buf))) return NULL;
     return spl_strdup(buf);
 }
+
+/* Same isolation rationale as spl_strdup/rt_getcwd above: these three live in
+ * runtime.c / runtime_memory.c, which this standalone selfcheck does not
+ * link. They became reachable when rt_file_atomic_write_mode's coverage was
+ * added (its shared body checks the destination's parent directory, and
+ * --gc-sections previously discarded that whole path).
+ *
+ * rt_is_dir is load-bearing here and is therefore REAL, not inert: the
+ * atomic-write path refuses to publish when it believes the parent directory
+ * is missing, so a stub that always answered false would make the write test
+ * vacuously "fail" for the wrong reason. The two transient-heap hooks are
+ * genuinely inert in this lane: -1 is rt_transient_raw_words' own
+ * "not a tracked transient allocation" answer, and 0 is "not promoted",
+ * which is exactly the state a selfcheck with no transient scope is in. */
+bool rt_is_dir(const char* path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+int64_t rt_transient_raw_words(int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr) {
+    (void)value; (void)words; (void)canonical_ptr;
+    return -1;
+}
+int32_t rt_transient_raw_promote(uintptr_t ptr) { (void)ptr; return 0; }
 
 static int failures = 0;
 #define CHECK(cond, msg) do { \
@@ -234,6 +279,82 @@ int main(void) {
     }
     CHECK(glob_n == 2 && has_a && has_b && !has_other,
           "rt_dir_glob matches exactly the two *.marker files, not the .other file");
+
+    /* ================================================================
+     * 2026-09-12 Stage2-Windows-link additions. Every `text` argument is
+     * built with rt_string_new, i.e. a real boxed RuntimeValue handle --
+     * exactly the single word the disassembled call sites pass.
+     * ---------------------------------------------------------------- */
+    #define TEXT_VALUE(s) rt_string_new((const uint8_t*)(s), (uint64_t)strlen(s))
+
+    /* ---- rt_fs_read_text: whole file as text; nil (not "") on failure ---- */
+    char* whole = read_string_value(rt_fs_read_text(TEXT_VALUE(path)), NULL);
+    CHECK(whole && strcmp(whole, content) == 0,
+          "rt_fs_read_text returns the file's exact contents");
+    free(whole);
+    CHECK(rt_fs_read_text(TEXT_VALUE("/tmp/rt_selfcheck_definitely_absent")) == RT_TEST_NIL,
+          "rt_fs_read_text returns nil for a missing file (text? contract, not \"\")");
+
+    /* ---- rt_file_mode: real permission bits; -1 (not 0) on failure ---- */
+    const char* mode_path = "/tmp/rt_selfcheck_mode.txt";
+    FILE* mf = fopen(mode_path, "wb"); fclose(mf);
+    chmod(mode_path, 0640);
+    CHECK(rt_file_mode(TEXT_VALUE(mode_path)) == 0640,
+          "rt_file_mode reports the real on-disk permission bits");
+    CHECK(rt_file_mode(TEXT_VALUE("/tmp/rt_selfcheck_definitely_absent")) == -1,
+          "rt_file_mode returns -1 for a missing file (the sentinel callers test with < 0)");
+
+    /* ---- rt_file_atomic_write_mode ---- */
+    const char* aw_path = "/tmp/rt_selfcheck_atomic.txt";
+    FILE* af = fopen(aw_path, "wb"); fputs("stale", af); fclose(af);
+    chmod(aw_path, 0644);
+    int64_t wrote = rt_file_atomic_write_mode(TEXT_VALUE(aw_path), TEXT_VALUE("fresh secret"), 0600);
+    CHECK(wrote == 1, "rt_file_atomic_write_mode reports success as exactly 1");
+    char* aw_read = read_string_value(rt_fs_read_text(TEXT_VALUE(aw_path)), NULL);
+    CHECK(aw_read && strcmp(aw_read, "fresh secret") == 0,
+          "rt_file_atomic_write_mode replaces the file's contents");
+    free(aw_read);
+    /* The point of the _mode variant: it IMPOSES the mode rather than
+     * preserving the destination's existing (here deliberately wider) 0644,
+     * which is what rt_file_atomic_write would have done. */
+    CHECK(rt_file_mode(TEXT_VALUE(aw_path)) == 0600,
+          "rt_file_atomic_write_mode imposes the requested mode over a wider existing one");
+    /* Failure must be exactly 0 across the FULL 64-bit return register --
+     * the call site tests `testq %rax, %rax`, so a narrow return leaving
+     * garbage in the upper bits would read as true.
+     *
+     * The failing path is deliberately "a REGULAR FILE used as a directory",
+     * not merely a missing directory: the shared atomic-write body CREATES
+     * missing parent directories (rt_dir_create_cpath(parent, true)), which
+     * this check discovered by initially passing when it should not have.
+     * mkdir cannot succeed under a regular file, so this fails for a reason
+     * the implementation genuinely cannot paper over. */
+    int64_t failed = rt_file_atomic_write_mode(
+        TEXT_VALUE("/tmp/rt_selfcheck_mode.txt/nope.txt"), TEXT_VALUE("x"), 0600);
+    CHECK(failed == 0,
+          "rt_file_atomic_write_mode reports failure as exactly 0 in all 64 bits");
+
+    /* ---- rt_file_list_dir: entry names, no "." / ".." ---- */
+    SplArray* listed = (SplArray*)(uintptr_t)rt_file_list_dir(TEXT_VALUE("/tmp/rt_selfcheck_glob"));
+    int64_t listed_n = rt_array_len(listed);
+    int saw_a = 0, saw_b = 0, saw_other = 0, saw_dot = 0;
+    for (int64_t i = 0; i < listed_n; i++) {
+        char* e = read_string_value(rt_array_get(listed, i), NULL);
+        if (!e) continue;
+        if (strcmp(e, "a.marker") == 0) saw_a = 1;
+        if (strcmp(e, "b.marker") == 0) saw_b = 1;
+        if (strcmp(e, "c.other") == 0) saw_other = 1;
+        if (strcmp(e, ".") == 0 || strcmp(e, "..") == 0) saw_dot = 1;
+        free(e);
+    }
+    CHECK(listed_n == 3 && saw_a && saw_b && saw_other,
+          "rt_file_list_dir returns every entry NAME in the directory");
+    CHECK(!saw_dot, "rt_file_list_dir skips \".\" and \"..\"");
+    /* Non-optional [text] return: an error must still be a real array. */
+    SplArray* missing_dir = (SplArray*)(uintptr_t)
+        rt_file_list_dir(TEXT_VALUE("/tmp/rt_selfcheck_definitely_absent"));
+    CHECK(missing_dir != NULL && rt_array_len(missing_dir) == 0,
+          "rt_file_list_dir returns an empty array (never nil) for a missing directory");
 
     if (failures == 0) {
         fprintf(stderr, "PASS: bootstrap core-C lane fs/env additions behave correctly\n");

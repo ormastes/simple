@@ -1988,30 +1988,27 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
             ))
     props
 
-# One advance per BYTE of `txt`, from a per-CODEPOINT advance array: the
-# codepoint's advance on its lead byte, 0 on each UTF-8 continuation byte.
-# Returns an empty array when `cp_advances` does not describe `txt`, so the
-# caller falls back rather than emitting a mis-sized array.
-fn _html_draw_ir_byte_advances(txt: text, cp_advances: [i32]) -> [i32]:
+# Validate that `cp_advances` describes `txt` in per-CODEPOINT arity and hand
+# it back unchanged. Round 5 used to re-express this array per BYTE here (the
+# codepoint's advance on its lead byte, 0 on each UTF-8 continuation byte)
+# because the Engine2D consumer indexed its staged quads in byte space; that
+# consumer defect is fixed (`font_advances_codepoint_arity` now resolves the
+# index space once per batch and accepts both conventions), so the producer
+# emits the CANONICAL per-codepoint array and declares it with the
+# `font-advance-arity: codepoint` style prop. Returns an empty array when the
+# array does not describe `txt`, so the caller falls back to the flat styled
+# command rather than emitting a mis-sized array.
+# The framebuffer painter keeps its own BYTE view of the same numbers
+# (`style_run_byte_advances`, ..._layout.spl) derived from the identical
+# per-codepoint `resolved_font_advances`, so layout, paint and Draw IR still
+# measure a run identically -- only the wire arity differs.
+fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
     var out: [i32] = []
     if cp_advances.len() == 0:
         return out
-    val n = txt.len()
-    var i = 0
-    var ci = 0
-    while i < n:
-        val b = txt.char_code_at(i)
-        if b >= 128 and b < 192:
-            out.push(0)
-        else:
-            if ci >= cp_advances.len():
-                return []
-            out.push(cp_advances[ci])
-            ci = ci + 1
-        i = i + 1
-    if ci != cp_advances.len():
-        return []
-    out
+    if cp_advances.len() != text_codepoint_len(txt) as i32:
+        return out
+    cp_advances
 
 # Emit ONE Draw IR text command for `txt`, carrying the resolved per-glyph
 # advances the layout path measured the same string with. Factored out of
@@ -2035,39 +2032,31 @@ fn _html_draw_ir_resolved_text_command(
         st.font_family, txt, st.font_size,
         _html_text_language(nodes, i, st)
     )
-    # BYTE/CODEPOINT ARITY BRIDGE (round 5). `metrics.advances` carries one
-    # advance per CODEPOINT; the Engine2D consumer of this command walks the
-    # string by BYTE (`Engine2D.draw_text_with_advances_*`, engine.spl:2072 ->
-    # `stage_text_with_advances_configured`). On a run carrying one em dash it
-    # reports `advances=71 text_len=73 ... quads=68 batch_valid=false`, returns
-    # false, and Draw-IR then draws NOTHING FOR THE WHOLE PAGE: at origin/main
-    # the `html` and `css-layout` catalog pages both die with `render produced
-    # too few pixels: 0 < 684000`. Rather than drop those runs to the flat
-    # estimate -- which would reintroduce the very layout/paint disagreement
-    # this round exists to remove, since layout keeps using the real metrics --
-    # the array is re-expressed in the consumer's own index space: the
-    # codepoint's advance on its LEAD byte, 0 on each UTF-8 continuation byte
-    # (which carries no glyph). The total width is unchanged by construction,
-    # so layout and paint still measure the run identically. The consumer's
-    # byte/codepoint confusion is the real defect and is filed separately at
-    # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md;
-    # this bridge is what lets the page render while that is fixed, and it is
-    # a no-op on ASCII, where bytes and codepoints already coincide.
-    val byte_advances = _html_draw_ir_byte_advances(txt, metrics.advances)
-    if byte_advances.len() != txt.len():
+    # ADVANCE ARITY (round 5 follow-up). `metrics.advances` carries one advance
+    # per CODEPOINT and that is exactly what now goes on the wire: the Engine2D
+    # consumer resolves the quads' index space per batch and normalises to
+    # codepoint arity (`font_advances_codepoint_arity`), so the round-5
+    # byte-expansion shim this call replaced is no longer needed. The command
+    # states its convention with `font-advance-arity: codepoint` below; a
+    # declaration that disagrees with what arrives makes the consumer take the
+    # flat fallback instead of silently reinterpreting the array. History and
+    # the incident this closes:
+    # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md.
+    val cp_advances = _html_draw_ir_codepoint_advances(txt, metrics.advances)
+    if cp_advances.len() == 0:
         return draw_ir_text_styled_clipped(
             cid, tx, ty, txt, st.fg, computed_style, clip_rect
         )
     var resolved = if metrics.shaping_required:
         draw_ir_text_shaped_font(
             cid, tx, ty, txt, st.fg,
-            metrics.family, metrics.identity, byte_advances, metrics.width,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
             metrics.line_height, st.font_size, metrics.glyph_run
         )
     else:
         draw_ir_text_resolved_font(
             cid, tx, ty, txt, st.fg,
-            metrics.family, metrics.identity, byte_advances, metrics.width,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
             metrics.line_height, st.font_size
         )
     if resolved.computed_style.len() == 0:
@@ -2084,6 +2073,8 @@ fn _html_draw_ir_resolved_text_command(
     # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / _resolved_font
     for prop in resolved.computed_style:
         merged.push(prop)
+    # Declare the wire arity of `advance_widths` for the Engine2D gate.
+    merged.push(draw_ir_style_prop("font-advance-arity", "codepoint"))
     resolved.computed_style = merged
     resolved.clip_rect = clip_rect
     resolved

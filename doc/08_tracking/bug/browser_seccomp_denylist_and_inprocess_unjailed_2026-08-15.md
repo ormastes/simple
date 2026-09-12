@@ -41,3 +41,19 @@ spec `test/01_unit/lib/js/js_native_confinement_spec.spl`.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/01_unit/lib/js/js_native_confinement_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/lib/js/js_native_confinement_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/lib/js/js_native_confinement_spec.spl outcome=ERROR declared>=6 executed=6 passed=2 failed=4 skipped=0 dropped=0
+```
+
+4 of 6 examples red, reproduced on the deployed seed. The primary file
+`src/runtime/runtime_process.c` is **fenced** by this fan-out (it appears in
+`egl_offlimits_v2.txt`), and it is C runtime rather than pure Simple, so no edit
+was attempted.

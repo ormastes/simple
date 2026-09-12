@@ -54,3 +54,25 @@ Do not touch any of the RFC 7748 §5.2/§6.2 expected byte values.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl outcome=ERROR declared>=7 executed=7 passed=0 failed=7 skipped=0 dropped=0
+```
+
+Still fully red: 7 of 7 examples fail. The expected vectors were checked and
+**are** canonical RFC 7748 §5.2 (TV1 scalar `3d262fdd…`, u `06fce640…`, result
+`ce3e4ff9…`), so unlike the sibling AES-256-CTR bug — where the stored constant
+turned out not to be the NIST value — there is no spec-side explanation here.
+The implementation is genuinely wrong.
+
+Fix direction unchanged from the original triage and confirmed as the right
+scope: this needs a from-scratch verification of the Curve448 field reduction
+and Montgomery ladder against a reference implementation, not a spot fix. It is
+well past this lane's 45-minute box, so it is left OPEN rather than half-done.

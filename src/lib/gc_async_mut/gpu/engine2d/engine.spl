@@ -324,6 +324,14 @@ class Engine2D with DrawIrRenderTarget:
     last_font_execution_target: text = ""
     last_font_plan_admitted: bool = false
     last_font_size_is_100: bool = false
+    # Acceptance item 4 of
+    # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
+    # an empty or degenerate text batch must never reach a backend dispatch.
+    # These counters are the structural oracle for that -- skipped batches are
+    # counted, and every backend batch call increments the dispatch counter.
+    font_batches_skipped_empty: i64 = 0
+    font_backend_dispatches: i64 = 0
+    last_font_skip_reason: text = ""
 
     fn vulkan_async_admission(capacity: i64 = 3) -> VulkanDrawIrAdmission:
         """Query async admission for this exact live Vulkan surface.
@@ -378,6 +386,12 @@ class Engine2D with DrawIrRenderTarget:
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
     fn font_execution_target() -> text: self.last_font_execution_target
+
+    # `me`, not `fn`: a `fn` that reads `self` is the nil-receiver trap the
+    # bug record above documents on the native lane.
+    me font_batches_skipped_empty_count() -> i64: self.font_batches_skipped_empty
+    me font_backend_dispatch_count() -> i64: self.font_backend_dispatches
+    me font_skip_reason() -> text: self.last_font_skip_reason
 
     me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
         """Install one bounded precompiled font compositor on a real Vulkan engine."""
@@ -1747,6 +1761,15 @@ class Engine2D with DrawIrRenderTarget:
     me _draw_font_batch_staged(x: i32, y: i32, plan: [text]) -> bool:
         if self.font_owner.active.len() == 0:
             return false
+        # The renderer already refused this payload with a typed reason; do
+        # not rebuild a zero-length batch just to hand it to a backend.
+        val staged_reject = self.font_owner.active[0].staged_reject_reason
+        if staged_reject != "":
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = staged_reject
+            self.last_font_execution_attempts = ["nothing-to-draw:" + staged_reject]
+            self.last_font_execution_target = ""
+            return false
         var atlas: [u32] = []
         if not self.font_owner.active[0].staged_atlas_empty:
             atlas = self.font_owner.active[0].atlas_pixels
@@ -1820,6 +1843,23 @@ class Engine2D with DrawIrRenderTarget:
             print("[vec-text-probe] consumer valid={batch.valid} material_supported={material_ok} n_quads={n_quads} atlas_len={batch.atlas_pixels.len()} first_w={first_w} first_h={first_h} first_ax={first_ax} first_ay={first_ay} first_cov_nz={nz} color_a={first_color_a}")
         if not material_ok or plan.len() == 0:
             return false
+        # Fail-CLOSED on a degenerate batch (acceptance item 4). Counted
+        # inline rather than through a zero-arg FontRenderBatch method: see
+        # the receiver-materialization note at the top of this function.
+        var drawable_quads: i64 = 0
+        var scan_i: i64 = 0
+        while scan_i < n_quads_total:
+            if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
+                drawable_quads = drawable_quads + 1
+            scan_i = scan_i + 1
+        if drawable_quads == 0:
+            val skip_reason = if n_quads_total == 0: "empty-quads" else: "zero-area-quads"
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = skip_reason
+            self.last_font_execution_attempts = ["nothing-to-draw:" + skip_reason]
+            self.last_font_execution_target = ""
+            return false
+        self.last_font_skip_reason = ""
         var quad_index: i64 = 0
         var attempts: [text] = []
         var winner = ""
@@ -1836,6 +1876,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("cuda:unavailable")
                 else:
                     val cuda = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = cuda.draw_font_batch(x, y, batch)
                     self.cuda_backend = cuda
                     if self.selected_backend_name == "cuda":
@@ -1845,6 +1886,7 @@ class Engine2D with DrawIrRenderTarget:
                     if quad_index == batch.quads.len(): winner = "cuda"
             elif target == "metal":
                 if val Some(metal) = self.metal_backend:
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = metal.draw_font_batch(x, y, batch)
                     self.metal_backend = Some(metal)
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
@@ -1858,6 +1900,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("opencl:unavailable")
                 else:
                     val opencl = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = opencl.draw_font_batch(x, y, batch)
                     self.opencl_backend = opencl
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
@@ -1877,6 +1920,7 @@ class Engine2D with DrawIrRenderTarget:
                     # var (not val): evidence.fallback_pixels is cleared below;
                     # W1006 mut-capability failure here silently killed
                     # whole-program JIT (2026-07-18).
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     var evidence = vulkan.composite_font_batch(x, y, batch)
                     self.last_vulkan_font_evidence = evidence
                     self.vulkan_backend = Some(vulkan)
@@ -1912,6 +1956,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("rocm:unavailable")
                 else:
                     val rocm = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = rocm.draw_font_batch(x, y, batch)
                     self.rocm_backend = rocm
                     if rocm.initialized:
@@ -1922,6 +1967,7 @@ class Engine2D with DrawIrRenderTarget:
             elif target == "cpu":
                 val cpu_simd_requested = self.selected_backend_name == "cpu_simd" and active_arch_text() == "x86_64"
                 val native_hits_before = engine2d_simd_native_hits()
+                self.font_backend_dispatches = self.font_backend_dispatches + 1
                 quad_index = self._draw_font_batch_cpu_suffix(x, y, batch, quad_index)
                 val cpu_simd = cpu_simd_requested and engine2d_simd_native_hits() > native_hits_before
                 if cpu_simd:
@@ -2049,6 +2095,18 @@ class Engine2D with DrawIrRenderTarget:
             execution_policy: FontExecutionPolicy.Suggested
         )
         self.draw_text_configured(x, y, text_val, color, config)
+
+    me mark_cpu_fallback_reason(reason: text):
+        """Record a CPU-boundary crossing on the Vulkan backend, if one is live.
+
+        Draw IR needs to record a fallback (e.g. a text run whose resolved
+        advances arrived in an arity the staging loop cannot consume) without
+        reaching into `vulkan_backend` itself. A no-op when no Vulkan backend
+        is attached -- the CPU lanes have no counter to bump.
+        """
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.mark_cpu_fallback(reason)
+            self.vulkan_backend = Some(vulkan)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
