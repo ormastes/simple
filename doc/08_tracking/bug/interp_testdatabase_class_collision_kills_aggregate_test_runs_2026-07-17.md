@@ -77,7 +77,7 @@ exactly the shape this row says always dies):
 ```
 Results: 349 total, 339 passed, 10 failed, 7 skipped     (with 8 new guards)
 Results: 341 total, 331 passed, 10 failed, 7 skipped     (same tree, 8 guards held out)
-Results: 367 total, 357 passed, 10 failed, 7 skipped     (with 11 new guards)
+Results: 369 total, 359 passed, 10 failed, 7 skipped     (with 11 new guards)
 ```
 
 All three reached the summary block and exited through the normal reporting
