@@ -81,11 +81,18 @@ guards conflict-markers / tree-size / guard-wiring all PASS.
 
 ## Capture results
 
-**NOT OBTAINED IN THIS SESSION.** Both lane runs for PR #644
-(`34692406802` on `fcbecf85`, `34692550694` on `ae604fd7`) were still `queued`
-when the session ended; an earlier `workflow_dispatch` run on `main`
-(`34692247209`) was cancelled by the runner queue with zero steps executed.
-The blocker is runner-queue capacity, not the lane.
+**NOT OBTAINED IN THIS SESSION.** The lane run carrying all four fixes,
+`34692788301` (tip `a1477d19`), was still `queued` when the session ended.
+Earlier runs on intermediate commits were cancelled deliberately to free queue
+capacity, and a `workflow_dispatch` run on `main` (`34692247209`) was cancelled
+by the runner queue itself with zero steps executed. The blocker is runner-queue
+capacity, not the lane.
+
+Local coverage of these changes is partial and stated as such: the capture
+lane's classifier selftest passes on macOS (9 fixtures), but
+`check-renderdoc-web-diff.shs --selftest` correctly ERRORs `no-simple-binary`
+here, so the diff-side and exporter changes have **no local test coverage** —
+the CI run is their first execution.
 
 No `.rdc` exists yet, so there is no event count, no `RENDERDOC DIFF:` verdict,
 no first divergent event, and consequently **no classification of Simple-side
@@ -118,8 +125,8 @@ Route 1 needs its own change set and was not attempted.
 
 ```bash
 gh run list --workflow=renderdoc-web-diff.yml -L 5 --json databaseId,status,conclusion
-gh run watch 34692550694 --exit-status          # or the newest run id
-gh run download 34692550694 -D build/renderdoc/ci
+gh run watch 34692788301 --exit-status          # or the newest run id
+gh run download 34692788301 -D build/renderdoc/ci
 cat build/renderdoc/ci/receipt.env              # per-page *_status, *_diff_status
 cat build/renderdoc/ci/*/diff.md                # RENDERDOC DIFF: verdict
 ```
