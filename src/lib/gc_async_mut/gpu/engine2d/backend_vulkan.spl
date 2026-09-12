@@ -54,6 +54,9 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_is_available,
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_prefix,
+    vulkan_sffi_copy_to_buffer_u32,
+    vulkan_image_upload_u32_requested, vulkan_image_upload_note,
+    vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
     vulkan_sffi_accepted_compute_submit_count,
     vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
@@ -1321,14 +1324,21 @@ impl RenderBackend for VulkanBackend:
         val _t = vulkan_timing_now_us()
         val rc = self._draw_image_composite_native_impl(x, y, dst_w, dst_h, src_w, src_h, pixels, opacity_milli, composite_mode, require_wholly_bounded)
         vulkan_timing_add(VK_T_IMAGE_COMPOSITE, _t)
+        # Split this call into the full-surface or the small population with its
+        # own wall time, so the 443 s / 102 s split the attribution run inferred
+        # from maxima is measured directly rather than reconstructed.
+        vulkan_image_size_note(_i64(src_w) * _i64(src_h), _i64(self.w) * _i64(self.h),
+            vulkan_timing_now_us() - _t)
         rc
 
     me _draw_image_composite_native_impl(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
+            vulkan_image_reason_note(VK_IMG_R_STATE)
             return 0
         if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
             opacity_milli <= 0 or opacity_milli > 1000 or
             (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER)):
+            vulkan_image_reason_note(VK_IMG_R_ARGS)
             return 0
 
         val pixel_count = _i64(src_w) * _i64(src_h)
@@ -1337,23 +1347,29 @@ impl RenderBackend for VulkanBackend:
         if (pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4 or
             pixels.len().to_i64() != pixel_count or
             scale_x_product > 2147483647 or scale_y_product > 2147483647):
+            vulkan_image_reason_note(VK_IMG_R_GEOM)
             return 0
         val right = _i64(x) + _i64(dst_w)
         val bottom = _i64(y) + _i64(dst_h)
         if right - 1 > 2147483647 or bottom - 1 > 2147483647:
+            vulkan_image_reason_note(VK_IMG_R_GEOM)
             return 0
         if require_wholly_bounded and (_i64(x) < 0 or _i64(y) < 0 or right > _i64(self.w) or bottom > _i64(self.h)):
+            vulkan_image_reason_note(VK_IMG_R_CLIP)
             return 0
         if self.clip_enabled:
             val clip_right = _i64(self.clip_x) + _i64(self.clip_w)
             val clip_bottom = _i64(self.clip_y) + _i64(self.clip_h)
             if self.clip_w <= 0 or self.clip_h <= 0 or clip_right > 2147483647 or clip_bottom > 2147483647:
+                vulkan_image_reason_note(VK_IMG_R_CLIP)
                 return 0
             if require_wholly_bounded and (_i64(x) < _i64(self.clip_x) or _i64(y) < _i64(self.clip_y) or
                 right > clip_right or bottom > clip_bottom):
+                vulkan_image_reason_note(VK_IMG_R_CLIP)
                 return 0
 
         val src_size = pixel_count * 4
+        val _t_alloc = vulkan_timing_now_us()
         var d_src = if self.frame_batching_enabled:
             self._acquire_image_source(src_size)
         else:
@@ -1369,10 +1385,41 @@ impl RenderBackend for VulkanBackend:
             if flushed > 0:
                 d_src = self._acquire_image_source(src_size)
         if d_src <= 0:
+            vulkan_timing_add(VK_T_IMAGE_ALLOC, _t_alloc)
+            vulkan_image_reason_note(VK_IMG_R_SOURCE)
             return 0
+        vulkan_timing_add(VK_T_IMAGE_ALLOC, _t_alloc)
+
+        # FASTEST when it runs: `pixels` is already `[u32]`, so the typed lane
+        # uploads the caller's own words and performs NO host packing at all --
+        # the runtime widens each word to four little-endian bytes, byte for
+        # byte what the interpreted loop below produces. That loop is
+        # `4 * pixel_count` interpreted array stores (2.7M for one 900x760
+        # full-surface composite) and is the measured dominant term of this
+        # function. Opt-in via `SIMPLE_VK_IMAGE_UPLOAD=u32`; see
+        # `_VULKAN_IMAGE_UPLOAD_U32_REQUESTED` for why it cannot be the default.
+        var upload_ok = false
+        if vulkan_image_upload_u32_requested():
+            upload_ok = vulkan_sffi_copy_to_buffer_u32(d_src, pixels, 0)
+            vulkan_image_upload_note("u32",
+                if upload_ok: "typed-requested" else: "typed-declined")
+        if upload_ok:
+            self.image_source_upload_count = self.image_source_upload_count + 1
+            self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+            return self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
+                opacity_milli, composite_mode)
+        if vulkan_image_upload_u32_requested():
+            # The typed lane declined (native array ABI). Fall through to the
+            # byte path, which is behaviour-preserving, only slower.
+            vulkan_image_upload_note("bytes", "typed-declined")
+        else:
+            vulkan_image_upload_note("bytes", "typed-not-requested")
+
         val scratch_reused = self.image_upload_scratch.len().to_i64() >= src_size
+        val _t_pack = vulkan_timing_now_us()
         val scratch_prepared = self._prepare_image_upload(pixels, pixel_count)
-        var upload_ok = scratch_prepared
+        vulkan_timing_add(VK_T_IMAGE_PACK, _t_pack)
+        upload_ok = scratch_prepared
         if scratch_prepared:
             # Timed separately from the composite total: this hands the WHOLE
             # `image_upload_scratch` array across the SFFI boundary and only
@@ -1393,14 +1440,30 @@ impl RenderBackend for VulkanBackend:
         if not upload_ok:
             # Preserve the exact-size legacy path for oversized images and
             # interpreter array ABIs that cannot upload a prefix.
+            val _t_bf = vulkan_timing_now_us()
             val source_bytes = _pixels_to_bytes(pixels, pixel_count)
             upload_ok = source_bytes.len().to_i64() == src_size and
                 vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0)
+            vulkan_timing_add(VK_T_IMAGE_BYTE_FALLBACK, _t_bf)
         if not upload_ok:
             self._release_image_source(d_src)
+            vulkan_image_reason_note(VK_IMG_R_UPLOAD)
             return 0
         self.image_source_upload_count = self.image_source_upload_count + 1
         self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+        self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
+            opacity_milli, composite_mode)
+
+    me _finish_image_composite(d_src: i64, x: i32, y: i32, dst_w: i32, dst_h: i32,
+                               src_w: i32, src_h: i32, opacity_milli: i32,
+                               composite_mode: i32) -> i64:
+        """Descriptor + dispatch + damage, once a source buffer holds the image.
+
+        Split out so the typed `[u32]` upload and the packed byte upload share
+        one dispatch path instead of duplicating it -- the two lanes must be
+        byte-identical downstream or the opt-in flag would change pixels.
+        """
+        val _t_disp = vulkan_timing_now_us()
         val pc = _pack_image_composite_pc(x, y, dst_w, dst_h, self.w, self.h,
             self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled,
             opacity_milli, composite_mode, src_w, src_h)
@@ -1422,6 +1485,10 @@ impl RenderBackend for VulkanBackend:
             self.mark_device_content_changed()
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
                 self.mark_cpu_fallback("image-composite-cleanup-ineligible")
+            vulkan_image_reason_note(VK_IMG_R_OK)
+        else:
+            vulkan_image_reason_note(VK_IMG_R_DISPATCH)
+        vulkan_timing_add(VK_T_IMAGE_DISPATCH, _t_disp)
         dispatched
 
     me _draw_image_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i64:
@@ -2569,7 +2636,7 @@ pub fn vulkan_readback_census_reset():
 # (`submits=0` against 111 drawn rects) because the pooled slot a probe can
 # reach is not always the instance that drew.
 
-val VK_T_COUNT: i64 = 30
+val VK_T_COUNT: i64 = 34
 
 val VK_T_RECT: i64 = 0
 val VK_T_RECT_LIST: i64 = 1
@@ -2603,13 +2670,21 @@ val VK_T_FONT_ATLAS_DIGEST: i64 = 26
 val VK_T_FONT_PACKED_PARAMS: i64 = 27
 val VK_T_FONT_QUAD_VALIDATE: i64 = 28
 val VK_T_FONT_OWNER_IDENTITY: i64 = 29
+# Sub-steps of `_draw_image_composite_native_impl`, which the 900x760
+# attribution run measured at 544 s across 264 calls -- 69% of the whole frame,
+# with the split between host packing, device allocation and dispatch
+# UNMEASURED. These four buckets settle it in one run.
+val VK_T_IMAGE_PACK: i64 = 30
+val VK_T_IMAGE_ALLOC: i64 = 31
+val VK_T_IMAGE_DISPATCH: i64 = 32
+val VK_T_IMAGE_BYTE_FALLBACK: i64 = 33
 
 var _vk_timing_armed: bool = false
 var _vk_timing_resolved: bool = false
 
-var _vk_t_us: [i64] = [0; 30]
-var _vk_t_n: [i64] = [0; 30]
-var _vk_t_max: [i64] = [0; 30]
+var _vk_t_us: [i64] = [0; 34]
+var _vk_t_n: [i64] = [0; 34]
+var _vk_t_max: [i64] = [0; 34]
 
 pub fn vulkan_timing_enabled() -> bool:
     """True when `SIMPLE_VK_TIMING=1`. The environment is read exactly once."""
@@ -2652,6 +2727,7 @@ pub fn vulkan_timing_note(bucket: i64, elapsed_us: i64):
 
 pub fn vulkan_timing_reset():
     vulkan_font_dirty_reset()
+    vulkan_image_stats_reset()
     var i: i64 = 0
     while i < VK_T_COUNT:
         _vk_t_us[i] = 0
@@ -2690,6 +2766,10 @@ fn _vk_timing_name(bucket: i64) -> text:
     if bucket == VK_T_FONT_PACKED_PARAMS: return "font_packed_params"
     if bucket == VK_T_FONT_QUAD_VALIDATE: return "font_quad_validate"
     if bucket == VK_T_FONT_OWNER_IDENTITY: return "font_owner_identity"
+    if bucket == VK_T_IMAGE_PACK: return "image_pack_u32_to_u8"
+    if bucket == VK_T_IMAGE_ALLOC: return "image_source_alloc"
+    if bucket == VK_T_IMAGE_DISPATCH: return "image_descriptor_dispatch"
+    if bucket == VK_T_IMAGE_BYTE_FALLBACK: return "image_exact_size_byte_fallback"
     "bucket{bucket}"
 
 # Why the font-atlas upload cache missed, per composite. The timing table says
@@ -2799,6 +2879,100 @@ pub fn vulkan_font_dirty_reset():
     _vk_font_composites = 0
     _vk_font_gen_trace = ""
 
+# Why an image composite declined the device path, and how big it was.
+#
+# `_draw_image_composite_native_impl` has ten `return 0` exits; every one of
+# them drops the caller to `emu_draw_image_*`, which does a full host
+# `core.read_pixels()` and a software blend. Until these counters existed the
+# 544 s attributed to `image_composite` at 900x760 could not be split between
+# "the device path ran and the interpreted u32->u8 pack was slow" and "the
+# device path declined and the cost is a host readback", which need opposite
+# fixes. The size tally separates the 3 full-surface composites (684k px) from
+# the 261 small ones, because those two populations also need different fixes.
+val VK_IMG_R_OK: i64 = 0
+val VK_IMG_R_STATE: i64 = 1
+val VK_IMG_R_ARGS: i64 = 2
+val VK_IMG_R_GEOM: i64 = 3
+val VK_IMG_R_CLIP: i64 = 4
+val VK_IMG_R_SOURCE: i64 = 5
+val VK_IMG_R_UPLOAD: i64 = 6
+val VK_IMG_R_DISPATCH: i64 = 7
+val VK_IMG_R_COUNT: i64 = 8
+
+var _vk_img_reason: [i64] = [0; 8]
+var _vk_img_full_surface: i64 = 0
+var _vk_img_small: i64 = 0
+var _vk_img_full_surface_us: i64 = 0
+var _vk_img_small_us: i64 = 0
+var _vk_img_max_px: i64 = 0
+
+pub fn vulkan_image_reason_note(reason: i64):
+    """Record the exit taken by one `_draw_image_composite_native_impl` call."""
+    if reason < 0 or reason >= VK_IMG_R_COUNT:
+        return
+    _vk_img_reason[reason] = _vk_img_reason[reason] + 1
+
+pub fn vulkan_image_size_note(pixel_count: i64, surface_pixels: i64, elapsed_us: i64):
+    """Tally one composite as full-surface or small, with its wall time.
+
+    "Full surface" is >= 90% of the destination surface: a viewport-sized
+    layer composite, which is the population that costs ~443 s of the 544 s.
+    """
+    if pixel_count > _vk_img_max_px:
+        _vk_img_max_px = pixel_count
+    if surface_pixels > 0 and pixel_count * 10 >= surface_pixels * 9:
+        _vk_img_full_surface = _vk_img_full_surface + 1
+        _vk_img_full_surface_us = _vk_img_full_surface_us + elapsed_us
+    else:
+        _vk_img_small = _vk_img_small + 1
+        _vk_img_small_us = _vk_img_small_us + elapsed_us
+
+fn _vk_img_reason_name(reason: i64) -> text:
+    if reason == VK_IMG_R_OK: return "ok"
+    if reason == VK_IMG_R_STATE: return "backend_state"
+    if reason == VK_IMG_R_ARGS: return "bad_args_or_mask"
+    if reason == VK_IMG_R_GEOM: return "geometry_overflow"
+    if reason == VK_IMG_R_CLIP: return "clip_reject"
+    if reason == VK_IMG_R_SOURCE: return "no_device_source"
+    if reason == VK_IMG_R_UPLOAD: return "upload_failed"
+    if reason == VK_IMG_R_DISPATCH: return "dispatch_declined"
+    "reason{reason}"
+
+pub fn vulkan_image_stats_line() -> text:
+    var reasons = ""
+    var i: i64 = 0
+    while i < VK_IMG_R_COUNT:
+        if _vk_img_reason[i] > 0:
+            reasons = reasons + " {_vk_img_reason_name(i)}={_vk_img_reason[i]}"
+        i = i + 1
+    ("image_composite_stats full_surface={_vk_img_full_surface}" +
+     " full_surface_ms={_vk_img_full_surface_us / 1000}" +
+     " small={_vk_img_small} small_ms={_vk_img_small_us / 1000}" +
+     " max_px={_vk_img_max_px} upload_mode={vulkan_image_upload_last_mode()}" +
+     " upload_reason={vulkan_image_upload_last_reason()}" +
+     " reasons:" + reasons)
+
+pub fn vulkan_image_full_surface_count() -> i64:
+    _vk_img_full_surface
+
+pub fn vulkan_image_small_count() -> i64:
+    _vk_img_small
+
+pub fn vulkan_image_reason_count(reason: i64) -> i64:
+    if reason < 0 or reason >= VK_IMG_R_COUNT: return 0
+    _vk_img_reason[reason]
+
+pub fn vulkan_image_stats_reset():
+    var i: i64 = 0
+    while i < VK_IMG_R_COUNT:
+        _vk_img_reason[i] = 0
+        i = i + 1
+    _vk_img_full_surface = 0
+    _vk_img_small = 0
+    _vk_img_full_surface_us = 0
+    _vk_img_small_us = 0
+    _vk_img_max_px = 0
+
 pub fn vulkan_timing_count(bucket: i64) -> i64:
     if bucket < 0 or bucket >= VK_T_COUNT: return 0
     _vk_t_n[bucket]
@@ -2811,7 +2985,8 @@ pub fn vulkan_timing_table() -> text:
     """Multi-line `bucket n total_ms max_ms` table, or one line when disarmed."""
     if not vulkan_timing_enabled():
         return "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
-    var out = "vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line()
+    var out = ("vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line() +
+        "\n  " + vulkan_image_stats_line())
     var i: i64 = 0
     while i < VK_T_COUNT:
         if _vk_t_n[i] > 0:

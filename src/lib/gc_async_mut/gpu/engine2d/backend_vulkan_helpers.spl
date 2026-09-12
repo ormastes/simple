@@ -90,6 +90,39 @@ val _VULKAN_ORDER_TRACE_ENABLED =
 val _VULKAN_RECT_UPLOAD_U32_REQUESTED =
     (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "u32"
 
+# The same opt-in, for the IMAGE composite path, under its own flag so the two
+# populations can be measured independently. The image case is strictly better
+# than the rect one: `pixels` is ALREADY `[u32]`, so the typed lane does not
+# pack at all -- it hands the caller's own words straight to the runtime, which
+# widens each to four little-endian bytes exactly as `_prepare_image_upload`
+# does by hand. That removes `4 * pixel_count` interpreted array stores per
+# composite: 2.7M stores for one 900x760 full-surface image. Default OFF for
+# the same reason as the rect flag -- calling `rt_vulkan_copy_to_buffer_u32` on
+# a binary built before the extern existed aborts the whole process from inside
+# the interpreter's unknown-extern path, before any guard can decline.
+val _VULKAN_IMAGE_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_IMAGE_UPLOAD") ?? "") == "u32"
+
+var _vulkan_image_upload_last_mode: text = "unset"
+var _vulkan_image_upload_last_reason: text = "no-upload-yet"
+
+pub fn vulkan_image_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last image composite
+    upload actually used. `"unset"` before any composite has uploaded."""
+    _vulkan_image_upload_last_mode
+
+pub fn vulkan_image_upload_last_reason() -> text:
+    """`"typed-requested"`, `"typed-not-requested"` (default, byte path), or
+    `"typed-declined"` (u32 requested but the runtime refused the words)."""
+    _vulkan_image_upload_last_reason
+
+pub fn vulkan_image_upload_u32_requested() -> bool:
+    _VULKAN_IMAGE_UPLOAD_U32_REQUESTED
+
+pub fn vulkan_image_upload_note(mode: text, reason: text):
+    _vulkan_image_upload_last_mode = mode
+    _vulkan_image_upload_last_reason = reason
+
 # Evidence of which payload shape the last `_enqueue_rect_batch_gpu` upload
 # actually took, and why -- read by tests/tooling that need to tell an
 # extern-unavailable byte fallback apart from an explicit-request byte
