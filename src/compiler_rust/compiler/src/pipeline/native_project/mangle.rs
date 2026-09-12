@@ -164,6 +164,33 @@ pub(crate) fn qualify_enum_runtime_names(
     Ok(())
 }
 
+/// The Optional/Result helper methods, which codegen lowers as builtins.
+///
+/// A BARE call target with one of these names must never be suffix-rebound to a
+/// user method of the same name. macOS Stage 2 linker blocker, 2026-09-13:
+/// `mold_path.unwrap()` on a `text?` (`mold.spl:704`) lowers to a bare `unwrap`
+/// call target; the bare `.method` scans below then bound it to the ONLY
+/// `.unwrap` entry reachable from the import maps,
+/// `lib__nogc_async_mut__async__poll__Poll.unwrap`, which returns 0 for a text
+/// receiver. `find_linker_path` therefore returned `Ok(0)`,
+/// `darwin_resolve_link_tool(0)` failed `file_exists`, and the hello-world link
+/// died as `Linking failed: no error payload from link_to_native`.
+///
+/// `resolve_call_target` and `resolve_method_call_static` already refuse this
+/// (their guards citing the `FailSafeResult.unwrap` RV64 leak), but those run
+/// only when the earlier scans left the name unresolved — once a scan rebinds,
+/// `known_mangled` holds the new name and the guarded resolver is skipped
+/// entirely. The guard has to be here as well, not only there.
+///
+/// Leaving the name bare routes it through codegen's `bare_rt_redirect` table,
+/// which is the correct lowering for every receiver representation.
+fn is_enum_helper_method(name: &str) -> bool {
+    matches!(
+        name,
+        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+    )
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,
@@ -438,7 +465,7 @@ pub(crate) fn mangle_mir(
                             continue;
                         } else if let Some(resolved) = use_map.get(&name) {
                             *target = target.with_name(resolved.clone());
-                        } else {
+                        } else if !is_enum_helper_method(&name) {
                             let method_dot = format!(".{}", name);
                             let mut use_resolved = None;
                             for (raw, mangled) in use_map.iter() {
@@ -553,7 +580,7 @@ pub(crate) fn mangle_mir(
                             *func_name = mangled.clone();
                         } else if let Some(resolved) = use_map.get(func_name.as_str()) {
                             *func_name = resolved.clone();
-                        } else {
+                        } else if !is_enum_helper_method(func_name.as_str()) {
                             let method_part = func_name.as_str();
                             let mut use_resolved = None;
                             for (raw, mangled) in use_map.iter() {
@@ -999,8 +1026,25 @@ fn resolve_method_call_static(
                 // type-qualified matching, which stays strict to avoid the
                 // `str.rfind`-vs-`DoubleEndedIterator.rfind` ambiguity above),
                 // and only when there is a single unambiguous candidate.
+                // NEVER for the Optional/Result helper names (macOS Stage 2
+                // linker blocker, 2026-09-13). `find_mold_path() -> text?`
+                // followed by `mold_path.unwrap()` reaches here as
+                // `text.unwrap` — a qualifier naming the PAYLOAD type, not a
+                // type that owns an `unwrap` method. In the 877-unit Stage 2
+                // closure the suffix index holds exactly ONE `unwrap`
+                // candidate, `lib__nogc_async_mut__async__poll__Poll.unwrap`,
+                // so this single-candidate arm rebound the call to it and
+                // `Ok(mold_path.unwrap())` was constructed with the INTEGER 0.
+                // `darwin_resolve_link_tool(0)` then failed `file_exists` and
+                // the hello-world link died as `Linking failed: no error
+                // payload from link_to_native`. A 1-unit reproducer cannot
+                // show it: `Poll.unwrap` is not in a small closure, so there
+                // is no candidate to rebind to. These names must reach
+                // codegen's builtin enum payload/discriminant lowering, which
+                // is what the bare-receiver guard above already relies on.
                 if has_type_qualifier
                     && matches!(type_part_lower.as_str(), "str" | "text" | "string")
+                    && !is_enum_helper_method(method)
                     && candidates.len() == 1
                 {
                     candidates.first()
@@ -1222,7 +1266,7 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_method_call_static;
+    use super::{is_enum_helper_method, resolve_method_call_static};
     use std::collections::HashMap;
 
     #[test]
@@ -1234,5 +1278,78 @@ mod tests {
             resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
             assert_eq!(name, builtin);
         }
+    }
+
+    /// macOS Stage 2 linker blocker, 2026-09-13.
+    ///
+    /// `mold_path.unwrap()` on a `text?` arrives here as `text.unwrap`. The
+    /// Stage 2 closure contributes exactly one `unwrap` candidate,
+    /// `Poll.unwrap`, and the str/text/string single-candidate UFCS arm bound
+    /// the call to it; `Ok(mold_path.unwrap())` then carried the integer 0.
+    /// The enum helpers must stay bare so codegen lowers them as builtins.
+    #[test]
+    fn text_qualified_enum_helpers_never_rebind_to_a_lone_user_method() {
+        let poll_unwrap = "lib__nogc_async_mut__async__poll__Poll.unwrap".to_string();
+        let suffix_index = HashMap::from([
+            ("unwrap".to_string(), vec![poll_unwrap]),
+            (
+                "split_whitespace".to_string(),
+                vec!["lib__common__text_advanced__split_whitespace".to_string()],
+            ),
+        ]);
+
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+            for receiver in ["str", "text", "string"] {
+                let mut name = format!("{receiver}.{helper}");
+                resolve_method_call_static(
+                    &mut name,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &suffix_index,
+                );
+                assert_eq!(name, format!("{receiver}.{helper}"), "{receiver}.{helper} must stay bare");
+            }
+        }
+
+        // The genuine text-UFCS rebind this arm exists for must still happen,
+        // so the guard above cannot be satisfied by disabling the whole arm.
+        let mut ufcs = "str.split_whitespace".to_string();
+        resolve_method_call_static(
+            &mut ufcs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &suffix_index,
+        );
+        assert_eq!(ufcs, "lib__common__text_advanced__split_whitespace");
+    }
+
+    /// The blocker itself. `mold_path.unwrap()` on a `text?` lowers to a BARE
+    /// `unwrap` call target, and `mangle_mir`'s two bare `.method` scans (one
+    /// for `MirInst::Call`, one for `MethodCallStatic`) rebound it to the only
+    /// `.unwrap` entry in the import maps. Those scans are inline in a function
+    /// that takes a whole `MirModule`, so this asserts the guard at source
+    /// level -- the same technique the LLVM redirect-table invariant uses, and
+    /// the reason a partial fix survived: guarding only the resolvers left the
+    /// scans that run BEFORE them wide open.
+    #[test]
+    fn bare_enum_helper_scans_are_guarded_in_mangle_mir() {
+        let src = include_str!("mangle.rs");
+
+        for guard in [
+            "} else if !is_enum_helper_method(&name) {",
+            "} else if !is_enum_helper_method(func_name.as_str()) {",
+        ] {
+            assert!(src.contains(guard), "bare `.method` scan lost its guard: {guard}");
+        }
+
+        // Every helper the builtin lowering owns must be covered, and a name it
+        // does not own must not be, so the predicate cannot pass vacuously.
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+            assert!(is_enum_helper_method(helper), "{helper} must be treated as a builtin helper");
+        }
+        assert!(!is_enum_helper_method("len"));
+        assert!(!is_enum_helper_method("to_string"));
     }
 }

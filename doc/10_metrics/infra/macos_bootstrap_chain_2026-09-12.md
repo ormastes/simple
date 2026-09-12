@@ -526,3 +526,80 @@ probes that did NOT isolate it, and the recommended next step (transcript replay
 with `SIMPLE_TRACE_FIELD_GET=1`, reading `[FIELD-TRACE]` for `mold.spl`):
 `doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`
 § CORRECTION, run 15.
+
+## Run 16 (2026-09-13) — a fix aimed at the wrong arm; FAILED byte-for-byte identically
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-ac2a80b2450890897`, stock Homebrew-first PATH,
+at `origin/main` 9670a991f02 plus one local seed commit.
+
+The commit guarded `resolve_method_call_static`'s str/text/string
+single-candidate UFCS arm (`mangle.rs`). Stage 1 admitted, Stage 2 built clean,
+sanity FAILED with the identical `Linking failed: no error payload from
+link_to_native (rendered nil)`.
+
+**The lesson is the method, not the outcome.** The new Stage 2 candidate was
+disassembled BEFORE reading the verdict, and `find_linker_path` still carried
+`bl <_lib__nogc_async_mut__async__poll__Poll.unwrap>`. Instrumenting the guarded
+function then produced ZERO hits for this program — it is not on the path at
+all. **Check the emitted instruction before spending 26 minutes on a bootstrap;
+run 16 is what that costs.**
+
+## Run 17 (2026-09-13) — the linker-path defect is FIXED; a new blocker is exposed
+
+Same lane and flags, virgin root, carrying the real fix (see below).
+
+Site clean at instruction level — the range that read `bl <Poll.unwrap>` now
+reads `bl 0x100c63430 <_rt_unwrap_or_trap>` — and the nil payload is gone from
+the verdict, replaced by a real link error with a real message:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+[DEBUG] CRT files not found, falling back to cc
+error: in-process native-build: LLVM native linking failed: Linking failed: cc linking failed: ld: warning: ignoring duplicate libraries: '-lSystem'
+ld: library 'c' not found
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+error: Stage 2 bootstrap compiler sanity failed
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Stages reached: Stage 1 admitted, Stage 2 built clean and REJECTED at sanity;
+Stage 3 not attempted. Candidate preserved, not deployed:
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
+139326760 bytes, sha256 `1a653582fc2c01d1203f…`.
+
+Successor blocker filed as
+`doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md`: `-lc`
+is a Linux-ism pushed by PURE-SIMPLE source
+(`70.backend/linker/_LinkerWrapper/native_linking.spl`, `mold.spl`), a
+different lane from the seed fix.
+
+### The fix runs 16-17 bracket
+
+`mangle_mir`'s two bare `.method` scans bound a bare `unwrap` target to the first
+import-map key ending in `.unwrap`. The resolvers (`resolve_call_target`,
+`resolve_method_call_static`) already refused this, but they run only when the
+earlier scans left the name unresolved — once a scan rebinds, `known_mangled`
+holds the new name and the resolver is skipped. The Cranelift twin
+(`codegen/instr/closures_structs.rs`) had the same split. One
+`is_enum_helper_method` predicate now covers both LLVM scans and all three
+Cranelift lookups.
+
+### The reproducer that ends the "needs the full closure" era
+
+2 units, 2.6 s. The missing ingredient in every earlier attempt was a COMPETING
+user method named `unwrap`:
+
+| | LLVM | Cranelift |
+|---|---|---|
+| without the rival `unwrap` | `[/usr/bin/ld]` | `[/usr/bin/ld]` |
+| with it, before | `[<value:0x4>]` | `[<value:0x4>]` |
+| with it, after | `[/usr/bin/ld]` | `[/usr/bin/ld]` |
+| genuine `rv.unwrap()` after | `[/real/rival]` | — |
+
+The closure-size dependence belongs to the REBIND, not the payload: a small
+closure has no competing symbol to bind to. **When a defect is said to need the
+full closure, ask what the closure CONTAINS that a small one does not** — naming
+it here turned a 26-minute lane into a 2.6-second loop.

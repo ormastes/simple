@@ -555,3 +555,167 @@ Three shapes survive, and they need different evidence:
 So: run the FIELD-TRACE replay first because it is cheap and rules out (1), but
 do not read a clean FIELD-TRACE as exoneration — (2) and (3) are still live and
 need the same instruction-level method that settled the receipt-size defect.
+
+## ROOT CAUSE, 2026-09-13 (runs 16-17) — a WRONG CALLEE, and the 2-unit reproducer that was always available
+
+Not a payload slot, not a pattern binding, not a tail `if/else`, not the `unwrap`
+lowering, and not a bad load of any kind. `find_linker_path` calls the wrong
+FUNCTION.
+
+Disassembly of the rejected run-15 candidate (sha256 `2be26905a8e3…`), at the
+block every `if <opt>.?:` arm of `find_linker_path` branches to:
+
+```
+100558408: aa1303e0  mov  x0, x19
+10055840c: 9402c01b  bl   0x100608478 <_lib__nogc_async_mut__async__poll__Poll.unwrap>
+100558414: aa0003e2  mov  x2, x0          <-- the Ok(...) payload
+100558428: 141c241f  b    0x100c614a4 <_rt_enum_new>
+```
+
+`mold_path.unwrap()` on a `text?` was bound to `Poll.unwrap`, an unrelated
+type's method, which returns 0 for a text receiver. `Ok(0)` is then a genuinely
+well-formed boxed enum — which is why `is_err=false` and why the payload printed
+as `0` rather than the blank line a nil produces — `darwin_resolve_link_tool(0)`
+fails `file_exists`, and the link dies with the nil-payload error.
+
+### The seed defect
+
+`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`, inside
+`mangle_mir`: two bare `.method` scans (one for `MirInst::Call`, one for
+`MethodCallStatic`) take a BARE `unwrap` target and bind it to the first
+import-map entry whose key ends in `.unwrap`.
+
+`resolve_call_target` and `resolve_method_call_static` already refuse exactly
+this — their guards cite the `FailSafeResult.unwrap` RV64 leak — but **they run
+only when the earlier scans left the name unresolved.** Once a scan rebinds,
+`known_mangled` holds the new name and the guarded resolver is skipped entirely.
+The guard was in the resolvers and not in the scans that run before them.
+
+The Cranelift twin (`codegen/instr/closures_structs.rs`) had the identical
+split: its bare `import_map` fallback carried the guard, its two qualified scans
+did not.
+
+### The reproducer that was always available — 2 units, 2.6 s
+
+Every earlier reproducer failed to reproduce because it was missing one
+ingredient: a COMPETING user method named `unwrap`.
+
+```
+rival.spl:  struct Rival<T>: value: T    /  impl Rival<T>: fn unwrap() -> T: self.value
+main.spl:   fn find_it() -> text?  ...   /  if p.?: return Ok(p.unwrap())
+```
+
+The minimal pair is the entire story — the only difference is whether one user
+`unwrap` exists in the closure:
+
+| | LLVM | Cranelift |
+|---|---|---|
+| without the rival `unwrap` | `[/usr/bin/ld]` | `[/usr/bin/ld]` |
+| with it, before the fix | `[<value:0x4>]` | `[<value:0x4>]` |
+| with it, after the fix | `[/usr/bin/ld]` | `[/usr/bin/ld]` |
+| genuine `rv.unwrap()` after the fix | `[/real/rival]` | — |
+
+**So the closure-size dependence belongs to the REBIND, not the payload.** A
+1- or 2-unit binary has no competing `unwrap` to bind to, so the call correctly
+stays bare. That is why F55's two probes "could not model this" and why the
+877-unit closure was thought to be required.
+
+### Every other suspect was read at instruction level and exonerated
+
+- `find_mold_path` (`0x100557728`): the `for` loop's `file_exists` truthiness
+  test and its `Some(candidate)` return are correct; so is the tail
+  `shell_output` -> `str_len` -> `Some`/`nil`. **Hypothesis 3 (tail `if/else`)
+  is dead.**
+- `find_lld_path`, `find_ld_path`: correct; `x2` is the `shell_output` result in
+  every `Some` return.
+- `shell_output` (`0x10060dd80`): the 3-tuple destructure is correct —
+  `rt_tuple_get(0)` is stdout, `rt_tuple_get(2)` -> `rt_value_unbox_int` is the
+  code, `cbz` takes the trim path. **The "bound to the process exit status"
+  hypothesis is dead**, and with it the `.len() > 0` tension: `.?` and `.len()`
+  both ran on the correct text. Only the `unwrap` CALL SITE was wrong.
+
+### Blast radius
+
+**270 call sites across 143 functions** besides `Poll.unwrap` itself called it
+in the rejected binary, including
+`MirToLlvm.translate_module_with_entry_policy`, `InterpreterBackendImpl.eval_expr`
+and the Cranelift adapter. Zero legitimate external `Poll.unwrap` callers exist.
+The linker was simply the first one whose wrong value was fatal.
+
+### Method notes, for the next session
+
+1. **The `SIMPLE_TRACE_FIELD_GET=1` transcript replay recommended by run 15 was
+   never needed and could not have found this** — a FIELD-TRACE reports loads,
+   and no load was wrong. Minutes of `llvm-objdump -d --start-address/--stop-address`
+   over the already-named symbols settled it with no execution at all. Reach for
+   the disassembler earlier when the suspect functions are named.
+2. **Run 16 proves you must check the artifact before spending 30 minutes.** It
+   carried a fix aimed at `resolve_method_call_static` and failed byte-for-byte
+   identically; disassembling the freshly built Stage 2 candidate showed the
+   `bl Poll.unwrap` still there, and instrumenting that function produced ZERO
+   hits. Verify the instruction, then start the bootstrap.
+3. **When a defect needs "the full closure", ask what the closure CONTAINS that
+   a small one does not.** Here it was one competing symbol, and naming it
+   turned a 26-minute lane into a 2.6-second loop.
+4. The 40 s direct-witness replay on a rejected candidate could not be
+   reproduced from a different worktree — it fails earlier at `backend
+   object-path status 1` even after matching the sanity PATH, `SIMPLE_LLVM_BIN`
+   and a private cache scope. The sanity child's full env is in
+   `<evidence-root>/stage3/<triple>/stage2-sanity.env`; diff against it rather
+   than guessing knobs.
+
+### Fix
+
+One `is_enum_helper_method` predicate (`unwrap`, `unwrap_or`, `unwrap_err`,
+`is_some`, `is_none`, `is_ok`, `is_err`), applied to both LLVM-side bare scans
+and all three Cranelift-side lookups. Leaving the name bare routes it through
+codegen's `bare_rt_redirect`, the correct lowering for every receiver
+representation; a genuine `Rival.unwrap()` on a real receiver still resolves.
+
+Also hardened as a sibling, NOT as the root cause:
+`resolve_method_call_static`'s str/text/string single-candidate UFCS arm (added
+2026-09-07 for `str.split_whitespace`) would rebind a `text.unwrap` the same way.
+Its test is proven discriminating. That arm was not the path this blocker took.
+
+Tests (`mangle.rs` test module):
+`text_qualified_enum_helpers_never_rebind_to_a_lone_user_method` and
+`bare_enum_helper_scans_are_guarded_in_mangle_mir` (a source-level invariant,
+because the scans are inline in a function that takes a whole `MirModule` —
+and a source-level invariant is exactly what would have caught the partial fix).
+
+### Status, run 17 (2026-09-13): this record's defect is RESOLVED; Stage 2 is blocked by a NEW one
+
+Run 17 carried the fix. The site is clean at instruction level — the same range
+that used to read `bl <Poll.unwrap>` now reads:
+
+```
+100558294: 941c2c67  bl  0x100c63430 <_rt_unwrap_or_trap>
+```
+
+and the nil-payload error is GONE from the verdict. It is replaced by a real
+link error with a real message, which is exactly what "make the payload
+non-nil" was supposed to achieve:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+[DEBUG] CRT files not found, falling back to cc
+error: in-process native-build: LLVM native linking failed: Linking failed: cc linking failed: ld: warning: ignoring duplicate libraries: '-lSystem'
+ld: library 'c' not found
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+error: Stage 2 bootstrap compiler sanity failed
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Rejected Stage 2 candidate (preserved, not deployed):
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
+139326760 bytes, sha256 `1a653582fc2c01d1203f…`.
+
+The link now resolves a tool, runs `cc`, and fails for a stated reason. The
+successor blocker is `-lc` on darwin — a Linux-ism: macOS has no `libc` to link,
+`libSystem` provides it. It is pushed by **pure-Simple** source
+(`src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:401,432,438,
+1151,1193` and `mold.spl:651`), NOT by the Rust seed, so it is a different lane
+and a different owner from this record's fix. Filed separately as
+`doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md`.
