@@ -1138,8 +1138,19 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
         // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
         // fixing one backend and not the other is how this family recurs.
+        // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
+        // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
+        // (it is not literally "unwrap"), so all four scans below still ran and
+        // the bare last-resort one bound it to the only `.unwrap` in the import
+        // maps. That is the second route behind the 208 residual
+        // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
+        // (2026-09-13); the LLVM twin is `mangle.rs`'s
+        // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
+        // lookup above still runs, so a genuine qualified `Poll.unwrap`
+        // resolves.
+        let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
         let enum_helper = matches!(
-            lookup_name,
+            enum_helper_method,
             "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
         );
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
@@ -1208,8 +1219,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Last resort: bare method name
-                if resolved_name.is_none() {
+                // Last resort: bare method name. Never for the enum helpers --
+                // discarding the qualifier here is exactly how a qualified
+                // `T.unwrap` reached an unrelated type's `unwrap` (2026-09-13).
+                if resolved_name.is_none() && !enum_helper {
                     resolved_name = ctx
                         .use_map
                         .get(method)
