@@ -486,6 +486,15 @@ admitted once, not by a counter. A green run of these specs is therefore not
 evidence of device execution, and the executor refuses an offered provider
 (`DeviceLaneUnavailable`) rather than letting the CPU lane impersonate one.
 
+> **Superseded 2026-09-12 by agent X2 (commit `2f0c1dbe557`).** The example above
+> is now `"keeps the CPU body away from a device-lane lease"`: a device admit
+> SUCCEEDS on `RESIDENT_LANE_DEVICE_AUTHORITY_V1` and it is `execute` — the CPU
+> rasterizer — that refuses the lease, with a new `LaneMismatch`. The honesty
+> invariant this paragraph describes is preserved and now holds on the stronger
+> lane; `DeviceLaneUnavailable` became unreachable and was DELETED from the enum
+> rather than left as a dead public variant. Everything else above still stands,
+> including that a green run is not evidence of device execution.
+
 Regression sweep (13 existing device-free engine2d/GPU specs, before and after,
 same seed binary): 12 verdict lines byte-identical across the two runs, and the
 13th (`draw_ir_runtime_queue_spec.spl`) had its before-run verdict line split by
