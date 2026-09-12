@@ -1,0 +1,100 @@
+# L5-G: spec-runner startup closure (test-one-spec entry).
+#
+# Measures the physical-file / physical-byte closure of `bin/simple test
+# <spec>` by shelling out to the shared measurer
+# (scripts/perf/measure-entry-closure.shs, copied from L5-A's
+# EntryClosureReceiptV1 producer), which handles hermetic HOME (avoids
+# false readings from a shared, cross-session test daemon on this
+# multi-agent host -- see RECEIPT_G.md), lane selection and cold
+# verification. Canonical fixture (per the measurer's SPEC_FIXTURE):
+# test/01_unit/app/examples_check_entry_args_spec.spl.
+#
+# Baseline measured 2026-09-12 on c7c5bef3ca3 (pre-fix), wave binary
+# (/home/yoon/dev/simple-wave/src/compiler_rust/target/release/simple),
+# hermetic HOME, default flags:
+#   lane=default:     physical_files=352, source_bytes_physical=3,004,187
+#   lane=interpreter: physical_files=332, source_bytes_physical=2,775,064
+#
+# Root cause (attribution chain, full detail in RECEIPT_G.md):
+#   src/lib/nogc_sync_mut/test_runner/**  (this package's original scope)
+#     -> use std.io.{name, ...}  (many files) -- hub facade
+#     -> std.database.feature / std.database.test_extended.factory
+#        (reached from std.test_runner.test_db_compat, in this package's
+#        scope) -- also `use std.io.{...}` / a bare `use std.io`
+#   Both hub sites resolve through src/lib/nogc_sync_mut/io.spl, which
+#   eagerly imports tcp/udp/buffer/pipe/event_loop/async_traits/future --
+#   none of which a test run needs. Replaced with the exact leaf owner
+#   (std.nogc_sync_mut.io.{file_ops,dir_ops,env_ops,process_ops,
+#   sysinfo_ops,file_shell,time_ops}) in ~71 files, plus one dead
+#   `use std.io` import deleted outright (unused) in
+#   src/lib/{nogc_sync_mut,nogc_async_mut}/database/feature.spl.
+#
+# Post-fix, measured DIRECTLY from a shell (not nested under `bin/simple
+# test`): both lanes converge to physical_files=184,
+# source_bytes_physical=1,757,778 -- a 47.7%/41.5% reduction vs the default
+# baseline and 44.6%/36.7% vs the interpreter baseline, both well past the
+# 25% target (see RECEIPT_G.md).
+#
+# Post-fix, measured HERE (nested: this spec's own process shells out to the
+# measurer while itself running under `bin/simple test`): physical_files=269,
+# source_bytes_physical=2,722,386 -- a real but smaller 19.0%/9.5% reduction.
+# The gap between 184 and 269 is a genuine, reproducible artifact of nesting
+# depth on the daemon-routing path (confirmed: 3/3 identical runs at each
+# depth) -- NOT measurement noise and NOT explained by any import this
+# package can still change (the io-hub dependency is gone in both cases; see
+# RECEIPT_G.md "nested vs direct" note). Per the coordinator's explicit
+# instruction, the second `it` below is left RED with this spec's own
+# honestly-measured (nested) number rather than reporting the better
+# direct-shell number as if it were this spec's result.
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+
+fn measure(lane: text, out_file: text) -> (i64, i64, i64):
+    val (_out, _err, _code) = rt_process_run_bounded(
+        "sh",
+        ["-c", "sh scripts/perf/measure-entry-closure.shs test-one-spec --binary bin/simple --lane " + lane + " > " + out_file + " 2>&1"],
+        90000,
+        200000
+    )
+    val extract_cmd = "grep '^PASS' " + out_file + " | sed -n 's/.*spl_opens=\\([0-9]*\\).*physical_files=\\([0-9]*\\).*source_bytes_physical=\\([0-9]*\\).*/\\1 \\2 \\3/p'"
+    val (line_out, _e2, _c2) = rt_process_run_bounded("sh", ["-c", extract_cmd], 10000, 500)
+    val parts = line_out.trim().split(" ")
+    if parts.len() < 3:
+        return (0, 0, 0)
+    return (parts[0].to_i64(), parts[1].to_i64(), parts[2].to_i64())
+
+describe "test-one-spec entry closure (L5-G)":
+    it "keeps spl_opens well below the pre-fix baseline (hub-import dedup pin)":
+        val (spl_opens, files, bytes) = measure("default", "/tmp/l5g_closure_spec_measurer_a.log")
+        print "[perf] test-one-spec spl_opens={spl_opens} physical_files={files} source_bytes_physical={bytes}"
+        # Non-vacuity: the measurer's own selftest + non-zero check must
+        # have actually run, or this assertion would pass on a broken
+        # harness exactly like the baseline it is supposed to guard.
+        expect(spl_opens > 0).to_equal(true)
+        # Pre-fix baseline (default lane): 3780 spl_opens. Post-fix: ~420.
+        # Budget generously at 1500 so unrelated future additions don't
+        # make this flaky, while a regression back to hub-style
+        # `std.io.{...}` / bare `use std.io` imports (which multiplies
+        # spl_opens by re-parsing the io hub through many separate
+        # importers) still trips it.
+        expect(spl_opens <= 1500).to_equal(true)
+
+    it "keeps the physical-file/byte closure at least 25% below the 2026-09-12 pre-fix baseline":
+        val (_spl_opens, files, bytes) = measure("default", "/tmp/l5g_closure_spec_measurer_b.log")
+        print "[perf] test-one-spec physical_files={files} source_bytes_physical={bytes}"
+        # Non-vacuity guard: a broken measurement pipeline (missing strace,
+        # empty extraction, measurer selftest failure) must not read as a
+        # pass.
+        expect(files > 0).to_equal(true)
+        expect(bytes > 0).to_equal(true)
+        # Baseline is the SMALLER (interpreter-lane) of the two measured
+        # pre-fix numbers, so this bound holds regardless of which lane a
+        # given run takes (the default lane was observed bimodal on this
+        # shared host before the fix -- see RECEIPT_G.md -- and can itself
+        # measure as low as the interpreter-lane number).
+        val baseline_files = 332
+        val baseline_bytes = 2775064
+        val target_files = (baseline_files * 75) / 100
+        val target_bytes = (baseline_bytes * 75) / 100
+        print "[perf] target (25% reduction): files<={target_files} bytes<={target_bytes}"
+        expect(files <= target_files).to_equal(true)
+        expect(bytes <= target_bytes).to_equal(true)
