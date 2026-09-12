@@ -105,3 +105,47 @@ indivisible future lane.
 (`bootstrap_planner_v2_verify_structure`) and never executes the planner, so authorization
 remains unbound to argv/env/exit status. These two rows collapse into one missing artefact:
 a non-circular planner-execution producer. Fixing either requires building it.
+
+
+## Re-check 2026-09-12 — spec repaired, status deliberately unchanged
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+The pure-Simple source-boundary spec this record names,
+`test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl`,
+was failing 2 of 2 examples — but not on its assertions:
+
+```
+✗ admits only the Stage 3 and Stage 4 targets
+    semantic: variable `source` not found
+✗ requires all four binding hashes
+    semantic: variable `source` not found
+```
+
+`val source = file_read("src/app/cli/bootstrap_reason_planner.spl")` was bound
+inside a **first** `describe "bootstrap reason planner v2"` block that contained
+no examples, while both examples live in a **second** `describe` of the same
+name further down the file. A `val` bound in one `describe` body is not in scope
+in another, so the spec had never once evaluated its own assertions — it had
+been aborting before reaching them.
+
+Fixed by binding `source` at module scope, plus a new first example that fails
+closed on vacuity (`expect(source.len() > 1000)`): every remaining assertion is
+a substring test, and an empty or failed read would otherwise satisfy the two
+`.to_equal(false)` assertions for free.
+
+```
+SPEC FILE VERDICT: .../bootstrap_reason_planner_admission_source_contract_spec.spl \
+  outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0
+```
+
+With the assertions actually running, they pass: the planner source does carry
+the two exact targets, does not carry the `//bootstrap:`/`//release:` prefix
+admission, and does bind all four hashes plus `simple-bootstrap-authorization-v2`.
+
+**Status stays OPEN.** This record is explicit that structural validity is not
+authority — the public verifier rejects every body until an independently
+admitted Stage 2 parent can build and execute the planner under an owned
+pre-exec lock. A green source-contract spec is evidence for the source boundary
+only, which is precisely the scope this record assigns it.

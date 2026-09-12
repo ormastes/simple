@@ -68,17 +68,16 @@ class TemplateInstantiator:
         self.in_progress = self.in_progress.push(key)
 
         # 3. Load template from context
-        # CompilationContext.load_template returns `GenericTemplate?`, not a
-        # Result: a nil load is the miss. The old `.is_err()`/`Ok`/`Err` shape
-        # here compiled to a call on `GenericTemplate`, which has no impl block,
-        # so it only surfaced as `undefined symbol: GenericTemplate.is_err` at
-        # Stage 2 link time.
+        # `CompilationContext.load_template` returns `GenericTemplate?`, NOT a
+        # Result. Treating it as one made method lookup strip the `?` and mangle
+        # a call to `GenericTemplate.is_err`, a method that exists nowhere — it
+        # links only because GNU tolerates undefined symbols; MSVC rejects it.
         val load_result = self.context.load_template(template_name)
-        if load_result == nil:
-            self._drop_in_progress(key)
-            return Err("Template not found: {template_name}")
-
-        val tmpl = load_result!
+        val tmpl = match load_result:
+            case Some(value): value
+            case nil:
+                self._drop_in_progress(key)
+                return Err("Template not found: {template_name}")
 
         # 4. Compile through full pipeline (context handles AOP/DI/contracts)
         val compile_result = self.context.compile_template(tmpl, type_args)

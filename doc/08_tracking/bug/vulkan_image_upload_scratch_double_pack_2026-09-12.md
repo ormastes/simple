@@ -132,3 +132,49 @@ right fix there is a bounded-length extern on the interpreter array ABI
 seed change, not a pure-Simple one. Until that lands, the exact-size scratch is
 what makes the existing facade usable for every size rather than only the
 largest one seen so far.
+
+## 2026-09-12 — the reuse example was vacuous, not the counters (macOS arm64)
+
+Re-run on macOS arm64 (M4), seed `/Users/ormastes/simple/build/cargo-r2/release/simple`,
+`stat -f '%z %m'` = `39528776 1789199850` bracketed identical before and after every
+run below. Lane
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=vulkan
+SIMPLE_VK_READBACK=native SIMPLE_2D_BACKEND_STRICT=1 ... run <spec>`.
+
+The round-2 fix plan carried this spec as "upload counters read zero". **That is
+not what this host shows.** 5 of 6 examples were GREEN, every counter non-zero,
+and the single red one was the reuse example:
+
+```
+x repeats the SAME size without re-allocating the staging array
+  expected packs=1 byte_fallbacks=0 scratch_resizes=1 to equal
+           packs=3 byte_fallbacks=0 scratch_resizes=1
+```
+
+Cause: the three uploads used byte-identical 4x4 pixels. 16 words is at or below
+`VK_IMAGE_INLINE_KEY_MAX_PIXELS` (64), so `_draw_image_composite_native_impl`
+digests the pixels, `_acquire_keyed_image_source` hits, and uploads 2 and 3 are
+skipped entirely (`image-upload-skipped`). `packs=1` is therefore CORRECT
+behaviour of the content key, and the example was not testing the staging array
+at all — it never reached it a second time. The load-bearing half
+(`scratch_resizes=1`) was vacuous rather than wrong.
+
+Fix: salt the three images (`oracle_image_distinct(SMALL, 1..3)`) so each carries
+distinct content at an identical SIZE. No product-source change; the exact-size
+scratch itself is untouched and still reads `!=` at
+`backend_vulkan_helpers.spl:430`.
+
+### Sabotage triple, all three run on the binary above
+
+1. **Clean** — `6 examples, 0 failures` (rc 0).
+2. **Restore the high-water test** (`!=` -> `<` at `backend_vulkan_helpers.spl:430`):
+   `x packs a SMALLER image after a larger one exactly once, not twice / expected
+   packs=2 byte_fallbacks=1 scratch_resizes=1 to equal packs=2 byte_fallbacks=0
+   scratch_resizes=2` — byte-for-byte the failure this record's original sabotage
+   section predicted; the new reuse example stays GREEN under it, as it should
+   (it never changes size). Reverted.
+3. **Un-salt the new example** (all three back to salt 1): `packs=1 ...` returns
+   exactly. That is what proves the edit discriminates against the content key
+   rather than passing by luck. Reverted.
+
+Not touched here: `bug_db.sdn` (another lane owns the status rows).

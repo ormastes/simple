@@ -56,11 +56,31 @@ fn simple_bin() -> text:
     return bin
 
 # Captures STDERR (2>&1) — the diagnostic never appears on stdout.
-fn probe_stderr_with(env_prefix: text) -> text:
+# Returns (combined stdout+stderr, exit code of the launch).
+fn probe_run_with(env_prefix: text) -> (text, i64):
     val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " +
         simple_bin() + " run " + PROBE_PATH + " 2>&1"
     val out = process_run("sh", ["-c", cmd])
-    out.0
+    (out.0, out.2)
+
+fn probe_stderr_with(env_prefix: text) -> text:
+    val run = probe_run_with(env_prefix)
+    run.0
+
+# The DEFAULT-settings launch is shared by two examples so this file stays at
+# TWO compiler launches total (see the BUDGET NOTE below). Memoised in
+# module-level slots; the first caller pays for the launch.
+var _default_probe_ran: bool = false
+var _default_probe_out: text = ""
+var _default_probe_rc: i64 = -1
+
+fn default_probe() -> (text, i64):
+    if not _default_probe_ran:
+        val run = probe_run_with("")
+        _default_probe_out = run.0
+        _default_probe_rc = run.1
+        _default_probe_ran = true
+    (_default_probe_out, _default_probe_rc)
 
 describe "cross-module collision detection covers every collision shape":
     # @manual scenario evidence
@@ -68,7 +88,8 @@ describe "cross-module collision detection covers every collision shape":
         # @req REQ-SSPEC-UNIT
         step("names every colliding symbol under default settings")
         step("Run the collision probe with NO diagnostic env vars — this is what a developer, a CI lane and a bootstrap actually see")
-        val out = probe_stderr_with("")
+        val run = default_probe()
+        val out = run.0
 
         step("The run must have happened at all — otherwise every absence below is vacuous")
         expect(out).to_contain("XMOD_COLLISION PROBE")
@@ -85,10 +106,43 @@ describe "cross-module collision detection covers every collision shape":
         step("Each warning must carry the stable collision-family tag, so a reworded message cannot silently void this spec")
         expect(out).to_contain("[compiler_cross_module_private_symbol_collision]")
 
+    # SEVERITY PIN. The differing-signature collision is emitted by
+    # `warn_duplicate_private_signatures` in
+    # src/compiler_rust/compiler/src/pipeline/module_loader.rs as
+    # `eprintln!("warning: ...")` — the same pattern as every other collision
+    # diagnostic in that module. It is a WARNING: it must never carry an `error:`
+    # prefix and must never abort the launch. Pinned here because a run of
+    # `bin/simple run src/app/llm_caret/main.spl` prints 64 of these (measured
+    # 2026-09-12, rc=0) and they were read as a hard failure. Reuses the
+    # default-settings launch above — zero extra compiler launches.
+    #
+    # Engine note: the pure-Simple interpreter twin
+    # (src/compiler/10.frontend/core/interpreter/eval_tables.spl,
+    # `_ftr_warn_collision`) prints `[WARN] ... differing signatures` on STDOUT
+    # instead; the `warning:` literal below must be widened when the
+    # self-hosted binary is deployed as `bin/simple`.
+    it "emits the differing-signature collision as a warning and does not abort the run":
+        # @req REQ-SSPEC-UNIT
+        step("emits the differing-signature collision as a warning and does not abort the run")
+        step("Reuse the default-settings launch (memoised) — this example adds no compiler launch")
+        val run = default_probe()
+        val out = run.0
+
+        step("Severity: the differing-signature line must start with the `warning:` prefix, naming the probe's `shared_arity` pair")
+        expect(out).to_contain("warning: public function `shared_arity` has 2 co-compiled definitions with 2 differing signatures")
+        assert_false(out.contains("error: public function `shared_arity`"))
+
+        step("Non-fatal: the launch exits 0 — the diagnostic does not turn into a compile failure")
+        expect(run.1).to_equal(0)
+
+        step("Non-fatal: the program body still ran to its completion marker after the warning was printed")
+        expect(out).to_contain("XMOD_COLLISION PROBE:")
+
     # BUDGET NOTE: every shell-out example is a full compiler launch against the
     # test daemon's budget, and an earlier 3-launch version of this spec timed out
     # at 900s with `reason=daemon-no-response` (an UNVERIFIED result, not a red).
-    # This spec is therefore capped at ONE launch per example, two total.
+    # This spec is therefore capped at ONE launch per env setting, two total —
+    # the severity example above shares the default-settings launch.
     it "reports a same-signature collision through the detector itself":
         # @req REQ-SSPEC-UNIT
         step("reports a same-signature collision through the detector itself")

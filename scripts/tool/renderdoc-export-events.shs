@@ -108,9 +108,51 @@ export RDOC_EXPORT_RDC="$CAPTURE"
 export RDOC_EXPORT_OUT="$OUT"
 export RDOC_EXPORT_THUMBS
 
+# `renderdoccmd python` DOES NOT EXIST. Verified against RenderDoc v1.44
+# source: renderdoccmd.cpp registers vulkanlayer, version, help, capture,
+# inject, thumb, remoteserver, replay, capaltbit, test, convert, embed and
+# extract -- and nothing else. (The PYTHON_AVAILABLE guards in that file gate
+# `test functional`, not a python command.) So this branch could never have
+# worked, and every non-qrenderdoc export was blocked:export-failed.
+#
+# The supported headless path is the pyrenderdoc swig module, which
+# build-renderdoc-linux-vulkan-only.shs stages into $RDOC_HOME/pymodules:
+# import it from the system python3. Fail closed with a distinct status when
+# the module is absent, rather than invoking a subcommand that does not exist.
 case "$RENDERDOCCMD" in
-    *qrenderdoc*) set -- "$RENDERDOCCMD" --python "$EXPORTER" ;;
-    *)            set -- "$RENDERDOCCMD" python "$EXPORTER" ;;
+    *qrenderdoc*)
+        set -- "$RENDERDOCCMD" --python "$EXPORTER"
+        ;;
+    *)
+        # RENDERDOC_HOME can be empty when renderdoccmd came from PATH, so
+        # derive the sibling prefix from the binary itself as a fallback.
+        pymod_dir=""
+        for cand in \
+            "${RDOC_PYMODULE_DIR:-}" \
+            "${RENDERDOC_HOME:+$RENDERDOC_HOME/pymodules}" \
+            "$(dirname -- "$(dirname -- "$RENDERDOCCMD")")/pymodules"
+        do
+            if [ -n "$cand" ] && [ -d "$cand" ]; then
+                pymod_dir="$cand"
+                break
+            fi
+        done
+        if [ -z "$pymod_dir" ]; then
+            echo "renderdoc_status=blocked:pyrenderdoc-module-missing"
+            echo "ERROR — no pymodules dir beside $RENDERDOCCMD; rebuild with RENDERDOC_ENABLE_PYTHON=1 sh scripts/setup/build-renderdoc-linux-vulkan-only.shs --all" >&2
+            exit 2
+        fi
+        PYTHONPATH="$pymod_dir${PYTHONPATH:+:$PYTHONPATH}"
+        export PYTHONPATH
+        # _renderdoc.so is linked against librenderdoc.so via an rpath of
+        # $ORIGIN/../lib, which holds from $RDOC_HOME/pymodules. Name the
+        # directory explicitly too, so a lib64 prefix or a staged-elsewhere
+        # module still resolves.
+        rdoc_prefix="$(dirname -- "$pymod_dir")"
+        LD_LIBRARY_PATH="$rdoc_prefix/lib:$rdoc_prefix/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+        set -- python3 "$EXPORTER"
+        ;;
 esac
 
 set +e

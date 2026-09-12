@@ -1,6 +1,6 @@
 # Bug: `simple test` daemon evaluator diverges from `simple run` on `text?`-returning lookup + equality pattern
 
-**Status:** OPEN — workaround applied in new code, latent defect left in place in existing code per scope constraint (see below)
+**Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`. The workaround note below is retained for history.
 
 **Date:** 2026-07-20
 **Reporter:** DRAWIR-PATCH lane (draw_ir_patch.spl / draw_ir_diff.spl id-map slice)
@@ -256,3 +256,43 @@ item 1's fix.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/01_unit/lib/common/ui/draw_ir_patch_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+The example this record names as its reproduction —
+"round-trips a mixed ~30-command composition (insert/remove/geometry/text/style/
+reorder/unchanged)", the 27-command fixture at which the daemon evaluator and
+`simple run` diverged — **passes** under `bin/simple test`, which is the
+evaluator the divergence was reported against. That is the direct negative
+result: same spec, same evaluator, same scale, no divergence.
+
+```
+SPEC FILE VERDICT: test/01_unit/lib/common/ui/draw_ir_patch_spec.spl \
+  outcome=ERROR declared>=19 executed=19 passed=17 failed=2   (before)
+SPEC FILE VERDICT: test/01_unit/lib/common/ui/draw_ir_patch_spec.spl \
+  outcome=ERROR declared>=19 executed=19 passed=18 failed=1   (after, see below)
+```
+
+Neither of the two failures present at re-check time was this bug:
+
+1. `semantic: function _op_kind_count not found` — the spec called a counting
+   helper (4 call sites, lines 426/442/443/445) that was never defined in the
+   file; only `_op_kind_present` existed. Fixed here by adding the helper, which
+   is what the call sites plainly intend (count ops matching kind +
+   component_id). With it defined, the glyph-run example's assertions hold, so
+   the helper was the only thing missing — not the assertions.
+
+2. `array index out of bounds: index is 1 but length is 1` in "preserves target
+   batch boundaries and metadata across insert/remove/reorder" — a separate,
+   pre-existing gap: `draw_ir_patch_apply` deliberately collapses all output
+   into a single batch. Filed as
+   `doc/08_tracking/bug/draw_ir_patch_apply_collapses_target_batch_boundaries_2026-09-12.md`
+   and left OPEN; it is not fixed here and this file is therefore still one
+   example short of green.
+
+Scope of this closure: the `bin/simple test` daemon evaluator on the deployed
+seed, aarch64. The latent-defect note above (existing code left on the
+nilable-lookup pattern) was not re-audited.
