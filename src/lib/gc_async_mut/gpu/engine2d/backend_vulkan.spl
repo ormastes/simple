@@ -58,6 +58,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_readback_u32_into,
+    vulkan_sffi_readback_u32_alloc,
+    vulkan_sffi_readback_u32_alloc_checksum,
     vulkan_sffi_copy_u32_into,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
@@ -283,6 +285,12 @@ class VulkanBackend:
     present_damage_rects: [i64]  # Validated flat x,y,w,h tuples owned by this backend
     present_damage_valid: bool
     host_mirror_valid: bool
+    # True when host_buf already holds THIS frame's device surface, so present()
+    # must not download the whole framebuffer a second time. Set by the readback
+    # that performed the download, cleared by every `dirty = true`. See
+    # doc/08_tracking/bug/
+    # vulkan_readback_interpreted_unpack_dominates_frame_2026-09-12.md.
+    host_mirror_frame_fresh: bool
     last_host_checksum: i64  # checksum of the last host_buf refresh (same algorithm as engine2d_readback_with_identity)
     present_readback_bytes: i64
     present_readback_rect_count: i64
@@ -430,6 +438,7 @@ class VulkanBackend:
             present_damage_rects: [],
             present_damage_valid: false,
             host_mirror_valid: false,
+            host_mirror_frame_fresh: false,
             last_host_checksum: 0,
             present_readback_bytes: 0,
             present_readback_rect_count: 0,
@@ -927,12 +936,14 @@ impl RenderBackend for VulkanBackend:
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
             self.mark_cpu_fallback("clear-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
@@ -973,12 +984,14 @@ impl RenderBackend for VulkanBackend:
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
             self.mark_cpu_fallback("rect-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
 
     me draw_rect_list_filled(rects: [i32], colors: [u32]):
         """Paint N filled rects with ONE interpreter transit and one dispatch each.
@@ -1035,6 +1048,7 @@ impl RenderBackend for VulkanBackend:
             return
         if enqueued > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
             self.mark_device_content_changed()
         if enqueued < count:
             # Replay only the tail; everything before `enqueued` is already
@@ -1076,6 +1090,7 @@ impl RenderBackend for VulkanBackend:
                 (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1)
             if rect_dispatched > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
             else:
                 self.mark_cpu_fallback("axis-line-rect-dispatch-failed")
                 if rect_dispatched < 0:
@@ -1098,6 +1113,7 @@ impl RenderBackend for VulkanBackend:
             self.pipe_line, pc, 1, 1, 1)
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
             self.mark_cpu_fallback("line-dispatch-failed")
         if dispatched < 0:
@@ -1173,6 +1189,7 @@ impl RenderBackend for VulkanBackend:
             return
         if not self.initialized:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
@@ -1268,6 +1285,7 @@ impl RenderBackend for VulkanBackend:
             vulkan_order_trace("image-composite x={x} y={y} w={dst_w} h={dst_h} mode={composite_mode} rc={dispatched} fb={self.d_framebuffer}")
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
             self.mark_device_content_changed()
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
                 self.mark_cpu_fallback("image-composite-cleanup-ineligible")
@@ -1585,10 +1603,20 @@ impl RenderBackend for VulkanBackend:
         # 480,000-element allocation. See
         # doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
         val px_count = self.w * self.h
-        if self.host_buf.len() != px_count:
-            self.host_buf = [0u32; px_count]
-        val checksum = vulkan_sffi_readback_u32_into(
-            self.host_buf, self.d_framebuffer, px_count, 0)
+        # Bulk native unpack when the interpreter lane offers it; the
+        # caller-owned-destination facade stays the fallback on every other
+        # lane and on any failure of this one.
+        val bulk = vulkan_sffi_readback_u32_alloc(self.d_framebuffer, px_count, 0)
+        var checksum: i64 = -1
+        if bulk.len() == px_count:
+            self.host_buf = bulk
+            checksum = vulkan_sffi_readback_u32_alloc_checksum(
+                self.d_framebuffer, px_count, 0)
+        else:
+            if self.host_buf.len() != px_count:
+                self.host_buf = [0u32; px_count]
+            checksum = vulkan_sffi_readback_u32_into(
+                self.host_buf, self.d_framebuffer, px_count, 0)
         if checksum < 0:
             self._mark_readback_length_failed()
             return false
@@ -1597,6 +1625,7 @@ impl RenderBackend for VulkanBackend:
         self.present_readback_bytes = fb_size
         self.present_readback_rect_count = 1
         self.present_full_readback_count += 1
+        self.host_mirror_frame_fresh = true
         true
 
     me _refresh_host_damage() -> bool:
@@ -1686,6 +1715,21 @@ impl RenderBackend for VulkanBackend:
         var pt1: i64 = 0
         if trace_present:
             pt1 = time_now_unix_micros()
+        if self.host_mirror_frame_fresh and self.host_mirror_valid:
+            # A readback already downloaded this frame's surface into host_buf
+            # (draw_ir_adv reads pixels BEFORE present, so strict device
+            # provenance stays satisfiable). The receipt fields below stay
+            # truthful -- the mirror IS refreshed from the device for this
+            # frame -- it is simply not downloaded twice.
+            self.present_readback_bytes = _i64(self.w) * _i64(self.h) * 4
+            self.present_readback_rect_count = 1
+            self.frame_present_mode = "host-cache-from-readback"
+            self.dirty = false
+            self.frame_readback_completed = true
+            self.frame_host_cache_refresh_completed = true
+            self.host_mirror_frame_fresh = false
+            self._clear_present_damage()
+            return
         if self.present_damage_valid and self.host_mirror_valid:
             if not self._refresh_host_damage():
                 self.frame_fallback_reason = "damaged-host-cache-refresh-failed"
@@ -1750,11 +1794,32 @@ impl RenderBackend for VulkanBackend:
         if self.dirty:
             # Fill a local buffer in place; see _refresh_host_full for why the
             # destination is passed in rather than returned in a tuple.
-            var pixels: [u32] = [0u32; self.w * self.h]
-            val checksum = vulkan_sffi_readback_u32_into(
-                pixels, self.d_framebuffer, self.w * self.h, 0)
+            val bulk_px = vulkan_sffi_readback_u32_alloc(
+                self.d_framebuffer, self.w * self.h, 0)
+            var pixels: [u32] = []
+            var checksum: i64 = -1
+            if bulk_px.len() == self.w * self.h:
+                pixels = bulk_px
+                checksum = vulkan_sffi_readback_u32_alloc_checksum(
+                    self.d_framebuffer, self.w * self.h, 0)
+            else:
+                pixels = [0u32; self.w * self.h]
+                checksum = vulkan_sffi_readback_u32_into(
+                    pixels, self.d_framebuffer, self.w * self.h, 0)
             if checksum < 0:
                 return engine2d_readback([], "readback_failed")
+            # Seed the host mirror from the download that just happened. Before
+            # this, an offscreen frame that read pixels and then presented paid
+            # for the SAME surface twice -- 48% of a 900x760 web frame -- to
+            # refresh a mirror no offscreen caller reads. The mirror and this
+            # readback share one array: every mirror writer rebinds or writes
+            # through `self.host_buf`, and a readback's pixels are read-only to
+            # its consumers (pinned by the readback/present/readback spec).
+            if pixels.len() == self.w * self.h:
+                self.host_buf = pixels
+                self.host_mirror_valid = true
+                self.last_host_checksum = checksum
+                self.host_mirror_frame_fresh = true
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
             return Engine2DReadback(
@@ -2015,6 +2080,7 @@ impl Engine2DExtended for VulkanBackend:
             return
         if not self.initialized:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
