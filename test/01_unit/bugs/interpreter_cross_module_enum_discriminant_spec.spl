@@ -1,0 +1,97 @@
+"""
+# Cross-module enum discriminant comparison Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/interpreter_cross_module_enum_discriminant_3_compares_false_2026-08-04.md
+
+## Overview
+
+`interpreter_cross_module_enum_discriminant_3_compares_false_2026-08-04`
+reported that a payload-less enum value read out of a struct field compared
+**false** against its own literal under the tree-walk interpreter — but only
+for the variant at **discriminant 3**, and only when the enum was declared in a
+different module. Discriminant 3 is the runtime's nil sentinel, so the
+importing and defining sides disagreed on the encoding for exactly that
+variant. The JIT was correct, which is what made the divergence silent.
+
+The record names `std.ndarray`'s `DType` (`F32`=0, `F64`=1, `I64`=2, `Bool`=3)
+as the reproducer and attributes 7 `test/03_system/feature/scilib` failures to
+it. This spec uses that same real enum — a locally declared enum of identical
+shape compared correctly even while the bug was live, so a same-file guard
+would be vacuous for this defect.
+
+Re-checked 2026-09-12: every discriminant compares correctly on both lanes.
+
+## Syntax
+
+```simple
+val a = array_bool([Bool.new(true)])
+a.dtype == DType.Bool      # discriminant 3 — must be true
+```
+
+"""
+
+use std.spec
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: every discriminant, positive comparison
+# ============================================================================
+
+describe "cross-module DType equality by discriminant":
+    """
+    ## 0, 1, 2, 3
+
+    Discriminants 0-2 were always correct; 3 is the defect. All four are
+    asserted so a future shift of the sentinel to another slot is visible.
+    """
+
+    it "compares discriminant 0 (F32) equal":
+        val a = array_f32([Float32.new(1.0)])
+        expect(a.dtype == DType.F32).to_equal(true)
+
+    it "compares discriminant 1 (F64) equal":
+        val a = array([Float64.new(1.0)])
+        expect(a.dtype == DType.F64).to_equal(true)
+
+    it "compares discriminant 2 (I64) equal":
+        val a = array_i64([Int64.new(1)])
+        expect(a.dtype == DType.I64).to_equal(true)
+
+    it "compares discriminant 3 (Bool) equal — the defect":
+        val a = array_bool([Bool.new(true)])
+        expect(a.dtype == DType.Bool).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: negative comparisons and the != guard shape
+# ============================================================================
+
+describe "cross-module DType inequality":
+    """
+    ## The guard shape
+
+    The 7 scilib failures all bottomed out in a `dtype == DType.Bool` /
+    `dtype != DType.Bool` guard, so both polarities are pinned. A defect that
+    made discriminant 3 compare false would flip the `!=` guard true and take
+    the wrong branch silently.
+    """
+
+    it "reports discriminant 3 as not equal to another variant":
+        val a = array_bool([Bool.new(true)])
+        expect(a.dtype == DType.I64).to_equal(false)
+
+    it "reports a non-Bool dtype as not equal to Bool":
+        val a = array_i64([Int64.new(1)])
+        expect(a.dtype != DType.Bool).to_equal(true)
+
+    it "reports Bool as not not-equal to Bool":
+        val a = array_bool([Bool.new(true)])
+        expect(a.dtype != DType.Bool).to_equal(false)

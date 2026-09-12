@@ -2,7 +2,7 @@
 
 **ID:** interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15
 **Severity:** P1
-**Status:** Open
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12"
 **Discovered:** 2026-06-15
 
 ## Symptom
@@ -48,3 +48,36 @@ equal to whatever is there.
 
 - `interp_run_enum_single_field_payload_corrupt_2026-06-15.md` — single-field enum payload
   corruption in `bin/simple run` (separate issue; absent in seed test runner)
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+Probe: a spec file with three `describe` blocks, with a deliberately wrong
+`expect(cv1).to_equal(999)` (where `cv1` is 0) in block 2 and a wrong
+`expect(a == b).to_equal(true)` in block 3.
+
+```
+SPEC FILE VERDICT: … outcome=ERROR declared>=3 executed=3 passed=1 failed=2 skipped=0 dropped=0
+Results: 3 total, 1 passed, 2 failed
+```
+
+Both late-block failures are reported. **Not reproducible** — status CLOSED.
+The recorded workaround ("use `assert_equal`/`assert_true` in any file with more
+than one `describe`") is no longer needed.
+
+Regression guard: `test/01_unit/bugs/spec_expect_fires_in_later_describe_blocks_spec.spl`
+(8 examples across FOUR describe blocks — a control block plus three later
+blocks, with integer, bool and text payloads).
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/spec_expect_fires_in_later_describe_blocks_spec.spl outcome=OK declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof, and the only evidence that actually bears on THIS defect: a
+swallowed matcher cannot be caught by a green spec, so one assertion in each of
+blocks 2, 3 and 4 was sabotaged to a wrong value. All three, in three different
+blocks, turn RED —
+`outcome=ERROR declared>=8 executed=8 passed=5 failed=3 skipped=0 dropped=0`.
+Under the original defect the block-2/3/4 sabotages would have stayed green.

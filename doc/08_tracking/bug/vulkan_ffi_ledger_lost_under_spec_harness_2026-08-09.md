@@ -109,3 +109,54 @@ failed assertion, not the first. The run above reported only
 `expected  to equal shutdown` although the two preceding count assertions
 had failed too. Reading a single failure message as "only one assertion
 failed" is a mistake.
+
+## Root cause ISOLATED 2026-09-12
+
+- Status: OPEN (2026-09-12) — root cause found, fix needs the Rust seed
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+Still reproduces verbatim under the harness:
+
+```
+FRESH          count=0 last=[]
+AFTER-INIT     count=0 last=[] ret=false
+AFTER-SHUTDOWN count=0 last=[] ret=false
+SPEC FILE VERDICT: test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl outcome=ERROR declared>=4 executed=4 passed=3 failed=1
+```
+
+**The trigger is not `VulkanFfi`, not the harness, and not either candidate this
+record proposed.** It is that `VulkanDynFfi.create_dynamic()` is declared
+`-> VulkanDynFfi?`: a `me` mutation is silently dropped whenever the receiver was
+bound from an **Optional-typed** expression. Minimal repro, two static
+constructors differing only in the `?` on the return type:
+
+```
+static fn make_plain() -> OptLedger:   ->  count=2 last=[shutdown]   CORRECT
+static fn make_opt()   -> OptLedger?:  ->  count=0 last=[]           WRONG
+```
+
+Bisect results, in the order this record asked for them:
+
+- **`DynLib?` field — ELIMINATED.** The record called this "the cheapest
+  discriminator"; a minimal class with a `DynLib?` field set to nil accumulates
+  correctly (`count=2`). It is not the trigger.
+- **`match self._mode` enum dispatch inside the mutator's caller — ELIMINATED.**
+  A `me` wrapper that matches on an enum field before calling an inner `me`
+  method accumulates correctly (`count=2`).
+- **Nested `me` -> `me` call — ELIMINATED** (`count=2`).
+- **Optional-bound receiver — CONFIRMED**, and an explicit `if l == nil: return`
+  guard before the call does **not** help (`count=0`). Rebinding `val l: T = o!`
+  into a non-optional local **does** (`count=2`). Two mutations inside a single
+  `me` call are also both lost, so the defect is in the write-back of the
+  unwrapped receiver, not in sequencing across calls.
+
+This also explains the `run` vs `test` split the table above records: the JIT path
+does not take the interpreter's optional-unwrap dispatch.
+
+Promoted to its own record because the blast radius is every
+`static fn create*() -> T?` in the tree, not this one class:
+`doc/08_tracking/bug/me_mutation_lost_on_optional_bound_receiver_2026-09-12.md`.
+Fix belongs in `src/compiler_rust` method dispatch, outside this pass's
+pure-Simple scope, so this stays OPEN rather than being worked around in the
+spec — rebinding through `!` in the spec would make it green while testing
+around the defect.

@@ -33,3 +33,41 @@ rather than to margin collapsing in general.
 This was masked before round 4 by a much larger error on the same box (the item
 measured 128 px because of the byte/codepoint wrap defect,
 `web_text_run_advance_measured_in_bytes_2026-09-12.md`).
+
+## Round 5 (2026-09-12) — mechanism located exactly, NOT attempted, and why
+
+The accumulator is `simple_web_html_layout_renderer_layout.spl:3216`:
+
+```
+    if child_count > 0:
+        ...
+        cy = cy + prev_margin_b
+```
+
+`prev_margin_b` is the LAST child's resolved bottom margin, and it is added into
+the parent's own height unconditionally. CSS 2.1 §8.3.1 says that margin
+collapses THROUGH the parent's bottom edge instead whenever the parent has
+`padding-bottom: 0`, `border-bottom: 0`, an auto height, and does not establish
+a new block formatting context — which is exactly `<li>`'s situation here. The
+file already knows how to do this for the *self-collapsing* case (:3186-3200,
+`self_collapsing` + `collapse_margins_signed`); the parent's own bottom edge is
+the case it does not handle.
+
+**Why round 5 did not change it.** Deleting the 16 px from `li1`'s height alone
+would break two figures that round 4 made Chrome-exact: the margin has to
+reappear in the PARENT's sibling gap, or `ul` drops 104 -> 88 and `li2` moves
+200 -> 184. A correct fix therefore has to return the uncollapsed trailing margin
+out of `layout_with_style` — a new field on `LayoutResult` (7 construction sites)
+— and have every caller's accumulator do
+`collapse_margins_signed(parent_own_margin_b, returned_trailing)` before placing
+the next sibling. That changes the height of EVERY block whose last child has a
+bottom margin, `body` included, so every one of the 8 catalog pages shifts and
+the full pixel table must be re-measured. On this host one full pass of
+`check-chrome-catalog-pixel-diff.shs` is ~1 h wall (8 pages, Chrome + an
+interpreter-mode Simple render each), and round 5's budget was spent proving the
+paint/layout advance parity fix. Landing half of this — the height change without
+the sibling propagation — would regress two Chrome-exact figures to fix one, so
+it was not started.
+
+Unchanged and still true: `li`'s position, `ul`'s height and the next item's
+position are all exact; only `li1`'s own height carries the 16.

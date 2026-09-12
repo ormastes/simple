@@ -40,17 +40,19 @@ fn scan_root() -> text:
     "src/compiler"
 
 # Known-live zero-definition call sites under scan_root(), keyed "<relpath>:<callee>".
-# Each is owned by a lane other than 00.common; see the bug doc's re-measurement
-# section (2026-08-17) for the full classification.
+#
+# Corrected 2026-09-12 (see the bug doc's "Triage 2026-09-12"). SIX entries were
+# removed because they were never call sites at all: they sat inside `"""`
+# docstrings — the `Example:` blocks in `15.blocks/blocks/{definition,easy,
+# registry}.spl` and the `Input:`/`Output:` sketches in both `desugar_async.spl`
+# files. Each was read at source before removal. `damage_callees_in_source`
+# below now skips docstring bodies, so they no longer appear as survivors and
+# the bidirectional check below would fail on them if they stayed listed.
+#
+# The one remaining entry is real code (`std.sys_exit(sys, 1)`), owned by
+# 70.backend, and is Class C (missing stdlib binding), not this family.
 fn known_survivors() -> [text]:
     [
-    # --- Class A: actual refactor damage, target must be restored ---
-        "src/compiler/10.frontend/desugar/desugar_async.spl:response_text",
-        "src/compiler/90.tools/desugar_async.spl:response_text",
-        "src/compiler/15.blocks/blocks/definition.spl:parser_set_mode",
-        "src/compiler/15.blocks/blocks/definition.spl:parser_parse_expr",
-        "src/compiler/15.blocks/blocks/easy.spl:pattern_trim",
-        "src/compiler/15.blocks/blocks/registry.spl:blk_lexer_mode",
     # --- Class C: not this family, filed separately (missing stdlib binding) ---
         "src/compiler/70.backend/backend/exhaustiveness_validator.spl:sys_exit"
     ]
@@ -107,6 +109,47 @@ fn damage_callees_on_line(line: text) -> [text]:
         k = k + 1
     found
 
+# Number of `"""` docstring fences on one line. Compared by character code so
+# the helper needs no triple-quote literal of its own.
+fn docstring_fence_count(line: text) -> i64:
+    var n = 0
+    var i = 0
+    val e = line.len()
+    while i + 3 <= e:
+        if line.char_code_at(i) == 34 and line.char_code_at(i + 1) == 34 and line.char_code_at(i + 2) == 34:
+            n = n + 1
+            i = i + 3
+        else:
+            i = i + 1
+    n
+
+# Callee names of the damage shape across a whole source, skipping `"""`
+# docstring bodies.
+#
+# Why the skip is required (measured 2026-09-12): SIX of the seven entries this
+# census carried in known_survivors() sat inside docstrings — illustrative
+# `Example:` blocks in `15.blocks/blocks/{definition,easy,registry}.spl` and the
+# `Input:`/`Output:` sketches in both `desugar_async.spl` files. Docstring text
+# is never compiled, so a call site there is not refactor damage; counting it
+# manufactured phantom damage and made the bug record claim twelve Class A
+# sites when only one call site under `src/compiler` is real.
+#
+# The skip is conservative in the suppressing direction, consistent with the
+# over-broad definition set above: a line carrying any fence is excluded, and a
+# fence count that is even leaves the state alone so a one-line docstring does
+# not swallow the rest of the file.
+fn damage_callees_in_source(src: text) -> [text]:
+    var found: [text] = []
+    var in_doc = false
+    for line in src.split("\n"):
+        val fences = docstring_fence_count(line)
+        if not in_doc and fences == 0:
+            for callee in damage_callees_on_line(line):
+                found.push(callee)
+        if fences % 2 == 1:
+            in_doc = not in_doc
+    found
+
 use std.spec.step
 
 describe "impl-to-free-fn refactor damage census":
@@ -150,6 +193,25 @@ describe "impl-to-free-fn refactor damage census":
         # The bug doc's oracle yielded the literal "fn" here, losing 341 defs.
         expect(def_name_on_line("    me fn cluster_to_sector(cluster: u32) -> u64:")).to_not_equal("fn")
 
+    it "ignores a call site inside a docstring":
+        step("Verify: ignores a call site inside a docstring")
+        # Docstring bodies carry illustrative `Example:` code that is never
+        # compiled. A call site there is not refactor damage.
+        val src = "fn f():\n    \"\"\"Doc.\n\n    Example:\n        parser_set_mode(parser, ParseMode.Math)\n    \"\"\"\n    1\n"
+        expect(damage_callees_in_source(src).len()).to_equal(0)
+
+    it "still detects a real call site in a source that also has a docstring":
+        step("Verify: still detects a real call site in a source that also has a docstring")
+        val src = "fn f():\n    \"\"\"Doc.\n        parser_set_mode(parser, ParseMode.Math)\n    \"\"\"\n    zzq_frobnicate(zzq, 1)\n"
+        val hits = damage_callees_in_source(src)
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("zzq_frobnicate")
+
+    it "does not let a one-line docstring toggle the skip state":
+        step("Verify: does not let a one-line docstring toggle the skip state")
+        val src = "fn f():\n    \"\"\"One liner.\"\"\"\n    zzq_frobnicate(zzq, 1)\n"
+        expect(damage_callees_in_source(src).len()).to_equal(1)
+
     # --- The census itself ------------------------------------------------
     it "finds no NEW zero-definition call site in the compiler tree":
         step("Verify: finds no NEW zero-definition call site in the compiler tree")
@@ -181,15 +243,30 @@ describe "impl-to-free-fn refactor damage census":
         var fi = 0
         while fi < files.len():
             val rel = files[fi]
-            for line in sources[fi].split("\n"):
-                for callee in damage_callees_on_line(line):
-                    if not defs.contains_key(callee):
-                        val key = rel + ":" + callee
-                        if not survivors.contains(key):
-                            survivors.push(key)
+            for callee in damage_callees_in_source(sources[fi]):
+                if not defs.contains_key(callee):
+                    val key = rel + ":" + callee
+                    if not survivors.contains(key):
+                        survivors.push(key)
             fi = fi + 1
 
         # Every survivor must be a KNOWN one. A new one fails here.
+        #
+        # KNOWN RED as of 2026-09-12, and NOT baselined away on purpose. The
+        # definition set above is built only from scan_root() ("src/compiler"),
+        # while call sites legitimately resolve against `src/lib` and
+        # `src/plugins` too, so every call of the damage shape to a function
+        # defined outside the compiler tree is reported as a survivor. Spot-
+        # checked: `dir_create_all` (src/lib/nogc_sync_mut/file_system/dir_ops.spl:25),
+        # `dir_list` (:46), `file_atomic_write` (src/lib/nogc_sync_mut/io/file_ops.spl:130),
+        # `operand_to_vhdl` and `local_to_vhdl`
+        # (src/plugins/backend_vhdl/vhdl_entity_compile.spl:297,276) all exist.
+        # The published oracle in the bug doc collected definitions from ALL of
+        # `src/`; this spec narrowed that to the scan root and so invents
+        # survivors — the same false-positive class as the `me fn` blind spot
+        # already recorded there. Widening the definition walk is a measured
+        # perf question (the scan-root walk alone is ~100s) and was left to the
+        # owning lane rather than guessed at. See the bug doc, Triage 2026-09-12.
         for s in survivors:
             expect(known_survivors().contains(s)).to_equal(true)
 

@@ -16,7 +16,7 @@
 
 use std.spec.step
 
-use app.io.mod (getpid, file_exists, file_delete, file_size, time_now_unix_micros)
+use app.io.mod (getpid, file_exists, file_delete, file_read, file_size, time_now_unix_micros)
 use std.test_runner.test_db_core (RunnerTestDbCore, micros_to_rfc3339)
 use std.test_runner.test_db_types.*
 use std.test_runner.test_stats (compute_statistics)
@@ -74,6 +74,33 @@ fn cleanup_temp_db(test_name: text):
         file_delete(db_path)
     if file_exists("{db_path}.bak"):
         file_delete("{db_path}.bak")
+    # An aborted writer leaves the lock sidecar behind, and the next write then
+    # reports Ok while producing no file -- see
+    # doc/08_tracking/bug/test_db_stale_lock_silent_no_write_2026-09-12.md.
+    if file_exists("{db_path}.lock"):
+        file_delete("{db_path}.lock")
+
+fn peak_rss_kb() -> i64:
+    """Peak resident set size of this process, in KiB, read from
+    /proc/self/status (VmHWM -- a high-water mark, so it never decreases).
+
+    Returns -1 when /proc is not readable, so a caller can fail rather than
+    silently report 0. `process_peak_rss_kb()` in std is NOT usable here: its
+    extern `rt_process_hwm_kib` is unbacked and returns 0 with an
+    E-SFFI-001 "unknown extern function" log --
+    doc/08_tracking/bug/rt_process_hwm_kib_unbacked_returns_zero_2026-09-12.md"""
+    if not file_exists("/proc/self/status"):
+        return -1
+    val status = file_read("/proc/self/status")
+    if status == "":
+        return -1
+    for line in status.split("\n"):
+        if line.starts_with("VmHWM:"):
+            # "VmHWM:\t    5616 kB"
+            for field in line.replace("\t", " ").split(" "):
+                if field != "" and field != "VmHWM:" and field != "kB":
+                    return field.to_i64()
+    -1
 
 fn create_large_db(test_count: i64) -> TestDatabase:
     var db = TestDatabase.empty()
@@ -114,12 +141,12 @@ describe "Test Database Performance":
 
             # Create database with 1000 tests
             var db = create_large_db(1000)
-            val save_result = db.save()
+            val save_result = db.save_to(temp_db_path(test_name))
             expect(save_result.ok.?).to_be(true)
 
             # Benchmark load operation
             val result = benchmark("Load 1K tests", 1, \:
-                val load_result = TestDatabase.load()
+                val load_result = TestDatabase.load_from(temp_db_path(test_name))
                 expect(load_result.ok == nil).to_equal(false)
             )
 
@@ -142,7 +169,7 @@ describe "Test Database Performance":
 
             # Benchmark save operation
             val result = benchmark("Save 1K tests", 1, \:
-                val save_result = db.save()
+                val save_result = db.save_to(temp_db_path(test_name))
                 expect(save_result.ok.?).to_be(true)
             )
 
@@ -166,7 +193,7 @@ describe "Test Database Performance":
 
             # Save
             val save_start = time_now_unix_micros()
-            val save_result = db.save()
+            val save_result = db.save_to(temp_db_path(test_name))
             val save_end = time_now_unix_micros()
             val save_ms = (save_end - save_start) / 1000
 
@@ -175,7 +202,7 @@ describe "Test Database Performance":
 
             # Load
             val load_start = time_now_unix_micros()
-            val load_result = TestDatabase.load()
+            val load_result = TestDatabase.load_from(temp_db_path(test_name))
             val load_end = time_now_unix_micros()
             val load_ms = (load_end - load_start) / 1000
 
@@ -365,7 +392,7 @@ describe "Test Database Performance":
                     )
 
                 # Save and record size
-                val save_result = db.save()
+                val save_result = db.save_to(temp_db_path(test_name))
                 expect(save_result.ok.?).to_be(true)
 
                 val db_path = temp_db_path(test_name)
@@ -464,7 +491,15 @@ describe "Test Database Performance":
     describe "Memory Usage":
 
         it "maintains reasonable memory footprint for large database":
+            val test_name = "memory_footprint"
+            cleanup_temp_db(test_name)
             var db = RunnerTestDbCore.empty()
+
+            step("record the process peak RSS before the database is populated")
+            val rss_before = peak_rss_kb()
+            # Fail closed: an unreadable /proc is absence of evidence, not a
+            # pass. A 0 here is exactly what the unbacked std extern returns.
+            expect(rss_before).to_be_greater_than(0)
 
             # Create large database (5000 tests)
             for i in 0..5000:
@@ -477,12 +512,30 @@ describe "Test Database Performance":
                     duration_ms: (i % 100).to_float() + 10.0
                 )
 
-            # Save to disk
-            val save_result = db.save()
+            step("save to an isolated path, never the repository's tracked database")
+            # `save()` writes doc/08_tracking/test/test_db.sdn; `save_to` takes
+            # an explicit path, which is what a spec must use.
+            val save_result = db.save_to(temp_db_path(test_name))
             expect(save_result.ok.?).to_be(true)
+            expect(file_exists(temp_db_path(test_name))).to_be(true)
 
-            # TODO: Add memory profiling
-            # For now, just verify database operations still work
-
+            step("the database is complete")
             expect(db.tests.len()).to_be(5000)
             expect(db.timing.len()).to_be(5000)
+
+            step("measure what 5000 records actually cost in resident memory")
+            val rss_after = peak_rss_kb()
+            expect(rss_after).to_be_greater_than(0)
+            val growth_kb = rss_after - rss_before
+            print "Peak RSS: {rss_before} kB -> {rss_after} kB (+{growth_kb} kB for 5000 records)"
+
+            # VmHWM is a high-water mark, so it can only rise.
+            expect(rss_after).to_be_greater_than(rss_before - 1)
+            # The footprint must stay "reasonable": 5000 records with 50 shared
+            # file paths and 100 shared suite names is a few MB of real data,
+            # so a gigabyte of growth means a leak or a failure of interning,
+            # not a large database. This is the assertion the scenario name
+            # promises and previously did not make.
+            expect(growth_kb).to_be_less_than(1024 * 1024)
+
+            cleanup_temp_db(test_name)

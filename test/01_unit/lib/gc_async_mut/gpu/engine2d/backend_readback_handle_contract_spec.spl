@@ -82,7 +82,12 @@ fn zero_handle_device_readback_violations(path: text) -> text:
         violations = violations + path + ": software mirror helper used for device_readback\n"
     if source.contains("engine2d_readback(_read_u32_pixels_from_host"):
         violations = violations + path + ": host readback helper used without backend handle\n"
-    if source.contains("source = \"device_readback\"") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer.ptr)") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer)"):
+    # `*_with_identity(copy, source, handle, identity)` is the STRONGER form of
+    # `*_with_handle(copy, source, handle)`: same concrete handle in the same
+    # position, plus a device identity. Accepting only the weaker spelling made
+    # this contract reject a backend for tightening its provenance (ROCm,
+    # backend_rocm.spl:698).
+    if source.contains("source = \"device_readback\"") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer.ptr)") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer)") and not source.contains("engine2d_readback_with_identity(copy, source, self.d_framebuffer, self.device_identity)"):
         violations = violations + path + ": variable device_readback source missing framebuffer handle\n"
     if source.contains("val source = if self.direct_fb: \"device_readback\"") and not source.contains("engine2d_readback_with_handle(copy, source, self.resource_id.to_i64())"):
         violations = violations + path + ": direct framebuffer device_readback source missing resource handle\n"
@@ -93,7 +98,15 @@ fn zero_handle_device_readback_violations(path: text) -> text:
             violations = violations + path + ": DirectX device_readback missing exact pixel-count gate\n"
         if source.contains("last_readback_pixels"):
             violations = violations + path + ": DirectX GC adapter must not cache a duplicate readback pixel buffer\n"
-        if not source.contains("engine2d_readback_with_handle(readback.pixels, \"device_readback\", self.readback_handle)"):
+        # Same widening as above, and one more: backend_directx.spl now says
+        # "device_readback" ONLY on its native path, through
+        # `*_with_identity(self.native_cached_pixels, "device_readback",
+        # self.native_cached_handle, self.native_device_identity)`. Its emulated
+        # DXVK/ICD round-trip was deliberately relabelled "emulated_icd_readback"
+        # (backend_directx.spl:466) because no device is involved — a strictly
+        # more honest provenance than the one this line used to demand. Requiring
+        # the old literal turned that improvement into a contract violation.
+        if not source.contains("engine2d_readback_with_handle(readback.pixels, \"device_readback\", self.readback_handle)") and not source.contains("engine2d_readback_with_identity(self.native_cached_pixels, \"device_readback\", self.native_cached_handle, self.native_device_identity)"):
             violations = violations + path + ": DirectX device_readback missing readback handle propagation\n"
     violations
 

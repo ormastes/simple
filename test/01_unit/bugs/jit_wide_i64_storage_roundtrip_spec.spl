@@ -1,0 +1,109 @@
+"""
+# Wide i64 storage round-trip Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_array_element_i64_storage_truncation_2026-08-17.md
+
+## Overview
+
+`jit_array_element_i64_storage_truncation_2026-08-17` reported that an `i64`
+read back out of an array came back as `-1` under the JIT while the tree-walk
+interpreter returned the true value. That record's own closing correction
+widens the claim: **the array is not special** — any value crossing the tagged
+`RuntimeValue` boundary above 2^60 truncated, because `RuntimeValue::from_int`
+never consulted `fits_inline_int` and no heap-boxing producer existed.
+
+The corruption survived a comparison (`e == 9223372036854775807` was `false`),
+so this was never a rendering defect: a `str()`-only assertion would not have
+caught it. This spec therefore checks the value through **three independent
+channels** — text rendering, equality, and arithmetic — at and around the 2^60
+inline boundary.
+
+Re-checked 2026-09-12: correct on the default, `jit` and `interpreter` lanes.
+
+## Syntax
+
+```simple
+var arr: [i64] = [9223372036854775807]
+val e: i64 = arr[0]
+e == 9223372036854775807     # must be true
+```
+
+"""
+
+use std.spec
+
+
+fn from_array(v: i64) -> i64:
+    var arr: [i64] = [v]
+    return arr[0]
+
+
+fn through_push(v: i64) -> i64:
+    var arr: [i64] = []
+    arr.push(v)
+    return arr[0]
+
+
+fn through_struct(v: i64) -> i64:
+    return from_array(v) + 0
+
+
+# ============================================================================
+# Test Group 1: the record's own reproducer
+# ============================================================================
+
+describe "i64::MAX read back out of an array literal":
+    """
+    ## `9223372036854775807`
+
+    Three channels: rendering, equality, arithmetic. The defect returned `-1`
+    on all three under the JIT.
+    """
+
+    it "renders as the full value":
+        expect(str(from_array(9223372036854775807))).to_equal("9223372036854775807")
+
+    it "compares equal to the literal it was built from":
+        expect(from_array(9223372036854775807) == 9223372036854775807).to_equal(true)
+
+    it "survives arithmetic":
+        expect(through_struct(9223372036854775807)).to_equal(9223372036854775807)
+
+    it "is not the -1 sentinel the defect produced":
+        expect(from_array(9223372036854775807) == 0 - 1).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: the 2^60 inline-channel boundary
+# ============================================================================
+
+describe "values around the 2^60 inline boundary":
+    """
+    ## Boundary sweep
+
+    The record's correction pins the truncation to the tagged-value inline
+    capacity, not to arrays. These probe just below, at, and far above it, in
+    both signs.
+    """
+
+    it "round-trips just below 2^60":
+        expect(from_array(1152921504606846975)).to_equal(1152921504606846975)
+
+    it "round-trips 2^60 itself":
+        expect(from_array(1152921504606846976)).to_equal(1152921504606846976)
+
+    it "round-trips a wide negative value":
+        expect(from_array(0 - 9223372036854775807)).to_equal(0 - 9223372036854775807)
+
+    it "round-trips a wide value pushed rather than written as a literal":
+        expect(through_push(9007199254740993)).to_equal(9007199254740993)
+
+    it "keeps two distinct wide values distinct":
+        expect(from_array(9223372036854775807) == from_array(1152921504606846976)).to_equal(false)

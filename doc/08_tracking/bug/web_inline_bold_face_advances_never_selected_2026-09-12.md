@@ -43,3 +43,49 @@ at this size, not a measurement.
 
 `resolve_font_metrics_*` accepting weight/style, the browser-engine style stage
 passing `st.font_weight`, and this probe reporting `strong` w=50.
+
+## Round 5 (2026-09-12) — re-investigated, still BLOCKED, and now with the reason measured
+
+Round 5 was briefed to "add the weight (and italic) argument through the advance
+API". It was not added, because threading it would have been dead code. The
+blocker is one level below the signature:
+
+- `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` contains **zero**
+  occurrences of `bold`, `weight`, or `Bold`
+  (`grep -rn "Bold\|bold\|weight" font_renderer.spl` -> no output). There is no
+  weight-aware face selection to pass a weight TO; the whole face choice is
+  `_browser_default_for_family_cached(family)`, family only.
+- The faces it can choose are enumerated in
+  `src/lib/nogc_sync_mut/text_layout/font_provider.spl`
+  (`browser_sans_font_candidates`, `browser_mono_font_candidates`, ...). Every
+  bundled entry is a **variable** font — `NotoSansSC[wght].ttf`,
+  `NotoSansMono[wdth,wght].ttf` — and the Linux fallbacks are all
+  `*-Regular.ttf`. The only static Bold anywhere under `assets/fonts` is
+  `unifrakturcook/UnifrakturCook-Bold.ttf`, a blackletter display face.
+- The tree DOES have a variation-axis concept, but only for the **default**
+  instance -- corrected here after a first pass wrongly reported it absent. A
+  live render trace from this round reads
+  `[draw-ir-font-trace] font_identity=sha256=a30418...;axes=wght=100`, and that
+  string is built in `src/lib/common/encoding/font_registry.spl:480` from
+  `_font_candidate_default_axes(family)` (:204), a STATIC per-family label
+  ("Noto Sans SC" -> `wght=100`, most others -> `wght=400`). It records which
+  instance the face happens to ship as its default; it is not a setting anything
+  can vary. The admission path proves the limit by name: `font_registry.spl:599`
+  calls `validate_glyf_font_instance(blob, candidate.default_axes)` and maps the
+  failure `unsupported-variation-instance` to the reason `default-axes` (:601) --
+  i.e. a non-default instance is rejected rather than synthesized. Asking
+  `NotoSansSC[wght].ttf` for wght=700 is therefore not possible today.
+
+So a `weight` parameter added to `resolve_font_metrics_with_language` would
+change no advance for any face this renderer can currently load, and adding an
+argument nothing reads is exactly the unused code `.claude/rules/code-style.md`
+forbids. Recorded rather than faked.
+
+**What would actually close it, in order:** (1) a static bold candidate list in
+`font_provider.spl` (`LiberationSans-Bold.ttf`, `DejaVuSans-Bold.ttf`, and a
+bundled Noto static bold) **or** `fvar` instancing in the TTF loader; THEN
+(2) the weight/style argument through `resolve_font_metrics_*` and into the
+cache key and `identity` (without that, bold and regular would share a cache
+entry and the first one measured would win); THEN (3) `st.bold` /
+`st.font_style_italic` passed at the `resolve_font_metrics_with_language` call
+site in `..._core.spl`. Step 1 is in files this lane does not own.

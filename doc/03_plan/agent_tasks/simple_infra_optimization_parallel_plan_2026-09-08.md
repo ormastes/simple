@@ -1521,3 +1521,15 @@ the separate bootstrap-tier `no-direct-rt` row, which is a different id and
 Also: `var a: [i64; 64]` rejects index assignment in the
 interpreter; the pre-existing `simple lint` segfault on
 `test/05_perf/text_i18n/*`; the JIT's bare enumerate over any array.
+
+## Status 2026-09-12 17:20 — Claude session (Codex at usage limit; Claude carries EGL/GL)
+
+Landed on `main` today (PR): interpreter perf #562 (place-aware in-place mutation kernel, string/dict/utf16 paths), loader alias units #568, `for a, b in xs` destructure #570, bootstrap Stage-2 link defects #575, bug/todo triage #576 + #578 (1,497 records: 121 resolved by re-run, 591 closed-stale, 749 left open; todo 287→244 open), guard wiring #579 (116 wired, baseline 725→607), L2 PersistentSet intersection/subset scaling #585, L10 profiling modules #589, L6 mapping-release owner + call boundary #590.
+
+In flight (pushed or queued behind the ledger gate-sync in this PR): L5 generated-binary closure (A–G integrated: check −83 %, mcp-help −70 %, lsp-mcp interpreter −87 %, test-runner −9 %, lint −12.5 % honest miss), M2 Stage-2 receipt-content-mismatch root cause (native `Optional<struct>` unwrap resolved fields by name; receipt gate passed run 3; Stage 2 still not admitted — 180 s probe budget scrubbed by the sanity env + `storage-unavailable` behind it), bug-db shards 0–3 (P0/P1 first; ~30 resolved/closed with sabotage-proven guard specs, ~40 diagnosed as seed defects, 5 new records), todo shards 0–1 (24 implemented with specs; the locked test-db writer never worked), L3 startup (stdlib variant-root probing −21 % stats), test-runner directory-mode degrade fix, and the L7/L8 host-ABI lane.
+
+L7/L8 (GL): Codex's ten packet tips merged by ownership into `work/l78-2026-09-12` (freeze `161f91bf`/`e71f20d`; P03 `aad948a`, P05 `a1b568e`, P07 `765f78b`, P08 `dd83e5f`, P10 `43b210b`, U01–U03). First execution of the V4 port specs: scope 8/8, affected-domain 9/9, namespace 14/14, publication 11/11, pipeline 10/10, scope_runner 8/8, gc-begin-authority 7/7; `cargo check` green; no-direct-rt unchanged. Gaps closed on top: P03 hook `issue` + scope `validate`/`close` runners + live-owner `issue`/`close`; P07 checked V3 host-probe capability (absent extern → `Unavailable`) + `begin/closure/finish/abort` runners. Not done by freeze rule: Live wiring (`_l78_pipeline_token_v4` TestDouble-only pin), hook `validate`/`close`, epoch advance for `ExpiredToken`, production activation. Three seed defects filed (wrapped trait return type, `union` reserved, global `struct Scope` shadowing).
+
+EGL: wave branch (Codex gpu-e4-e5 24 commits + P/W/V/U/X/T/N/K + U2/X2/V2) being rebased and its +9 direct `rt_*` sites routed; Q (2-token parse), S (frozen), sosh adapter (`StmtKind` collision) and `frontend.spl` rewiring remain Codex-owned blockers.
+
+Open lanes with no implementation: L4 memory lifecycle (agent running: bounded seed interpreter caches), L10 collector wiring (fenced), L11 complete. Push-gate note: bootstrap-tier manifest rows without ledger rows (#586, chrome-layout, test-runner-executes-bodies) blocked every push for ~1 h; this PR restores manifest == ledger (57).

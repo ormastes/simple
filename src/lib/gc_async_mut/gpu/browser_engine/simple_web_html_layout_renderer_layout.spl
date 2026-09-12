@@ -365,6 +365,68 @@ fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
         i = i + 1
     width
 
+# --- ONE advance table, shared by layout and paint -------------------------
+#
+# Round 4 made LAYOUT size an inline run from the resolved per-glyph metrics
+# while PAINT kept stepping glyphs by the flat `style_text_advance` estimate
+# (`fb_text_thin_scaled_clip_range`'s `advance`/`space_advance` arguments), and
+# the aligned line width (`style_text_line_advance_width`) used a THIRD rule:
+# it indexed `resolved_font_advances` with BYTE offsets as if bytes and
+# codepoints were the same thing. A centred or right-aligned run was therefore
+# positioned from real metrics and then drawn with wider flat advances, so its
+# glyphs walked out of the box the layout had sized. That is the `forms-media`
+# pixel regression recorded in
+# doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+#
+# `style_run_byte_advances` is the single source of truth that closes it: one
+# advance per BYTE of the string that is actually painted, carrying the
+# codepoint's measured advance on its lead byte and 0 on every UTF-8
+# continuation byte (which draw no glyph). Summing it over a byte range gives
+# the same number the paint loop walks, by construction. It returns an EMPTY
+# array whenever the measured metrics do not describe this exact string
+# (no resolved face, or an arity mismatch) so both sides fall back to the flat
+# estimate TOGETHER rather than one side at a time.
+fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+    var out: [i32] = []
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        return out
+    val cps = text_codepoints(s)
+    val adv = st.resolved_font_advances
+    if adv.len() != cps.len() or adv.len() == 0:
+        return out
+    val n = s.len()
+    var i = 0
+    var ci = 0
+    while i < n:
+        val b = s.char_code_at(i)
+        if b >= 128 and b < 192:
+            out.push(0)
+        else:
+            if ci >= adv.len():
+                return []
+            out.push(adv[ci])
+            ci = ci + 1
+        i = i + 1
+    if ci != adv.len():
+        return []
+    out
+
+fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
+    var width = 0
+    var i = start
+    while i < endv:
+        width = width + by[i]
+        i = i + 1
+    width
+
+# Line width from an already-built byte-advance table (the paint loop builds it
+# once per text node and hands the SAME array to the width call and to the
+# glyph stepper).
+fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    if by.len() == txt.len() and start >= 0 and endv <= by.len():
+        return byte_advances_range_width(by, start, endv)
+    text_line_advance_width(txt, start, endv, advance, space_advance)
+
 # Height of the CONTENT AREA of an inline non-replaced box: the font's own
 # ascent+descent, NOT the line-height. CSS 2.1 SS10.6.1 — `line-height` sizes
 # the LINE box; the inline box inside it is the content area, centred in the
@@ -726,10 +788,9 @@ fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space
     width
 
 fn style_text_line_advance_width(txt: text, start: i32, endv: i32, st: Style, advance: i32, space_advance: i32) -> i32:
-    val resolved = resolved_text_range_width(st, start, endv)
-    if resolved >= 0:
-        return resolved
-    text_line_advance_width(txt, start, endv, advance, space_advance)
+    style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, start, endv, advance, space_advance
+    )
 
 fn text_line_aligned_x(base_x: i32, line_box_w: i32, line_w: i32, st: Style, line_i: i32, line_count: i32) -> i32:
     var align = st.text_align
