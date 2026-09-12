@@ -418,6 +418,57 @@ impl VulkanBackend:
             i = i + 1
         true
 
+    me _image_source_pool_key_at(index: i64) -> i64:
+        if index < 0 or index >= self.image_source_pool_key.len().to_i64():
+            return 0
+        self.image_source_pool_key[index]
+
+    me _set_image_source_pool_key(index: i64, key: i64):
+        """Keep the key table exactly parallel to the pool, growing as it does."""
+        while self.image_source_pool_key.len().to_i64() <= index:
+            self.image_source_pool_key.push(0)
+        self.image_source_pool_key[index] = key
+
+    me _acquire_keyed_image_source(byte_count: i64, key: i64) -> i64:
+        """Return a pooled source that ALREADY holds `key`'s pixels, or 0.
+
+        The caller skips its upload on a hit. Two dispatches reading one source
+        buffer is not a hazard, so a slot that is still a dependency of the
+        pending command buffer is reusable here -- unlike
+        `_acquire_image_source`, which hands out a slot to be OVERWRITTEN.
+        The capacity must match exactly: a larger slot holds a previous,
+        larger image and only its prefix would be this one's pixels.
+        """
+        if key == 0 or byte_count <= 0 or not self._image_source_pool_owner_matches():
+            return 0
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if (source > 0 and self.image_source_pool_capacity[i] == byte_count and
+                self._image_source_pool_key_at(i) == key):
+                self.image_source_key_hit_count = self.image_source_key_hit_count + 1
+                return source
+            i = i + 1
+        0
+
+    me _record_image_source_key(source: i64, key: i64):
+        """Stamp (or clear) the key of the slot `source` occupies.
+
+        An unkeyed acquisition MUST clear the slot's old key, otherwise a slot
+        overwritten with different pixels keeps claiming the previous identity
+        and a later frame skips a real upload.
+        """
+        if source <= 0:
+            return
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            if self.image_source_pool[i] == source:
+                self._set_image_source_pool_key(i, key)
+                return
+            i = i + 1
+
     me _acquire_image_source(byte_count: i64) -> i64:
         """Return a completed source buffer large enough for one image.
 
@@ -472,6 +523,7 @@ impl VulkanBackend:
                 return 0
             self.image_source_pool[replace_index] = replacement
             self.image_source_pool_capacity[replace_index] = byte_count
+            self._set_image_source_pool_key(replace_index, 0)
             self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
             if replaced > 0:
                 self.image_source_pool_replacement_count = self.image_source_pool_replacement_count + 1
@@ -485,6 +537,7 @@ impl VulkanBackend:
             self.image_source_pool_surface_identity = self.d_framebuffer
         self.image_source_pool.push(source)
         self.image_source_pool_capacity.push(byte_count)
+        self._set_image_source_pool_key(pool_len, 0)
         self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
         source
 
@@ -505,6 +558,7 @@ impl VulkanBackend:
             i = i + 1
         self.image_source_pool = []
         self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
         self.image_source_pool_device_identity = 0
         self.image_source_pool_session_generation = 0
         self.image_source_pool_surface_identity = 0
@@ -615,18 +669,44 @@ impl VulkanBackend:
         self.font_params_pool_capacity = []
         self.image_source_pool = []
         self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
         self.image_source_pool_device_identity = 0
         self.image_source_pool_session_generation = 0
         self.image_source_pool_surface_identity = 0
 
+    me _flush_pending_compute_at(site: text) -> i64:
+        """`_flush_pending_compute` that NAMES its caller in the order trace.
+
+        Every submit this backend performs comes from exactly one
+        `_flush_pending_compute`, so `submits_per_frame` is a count of these
+        calls. Attributing a frame's submits to code required knowing WHICH
+        call site produced each one; the untagged entry point reports
+        `untagged`, which is how the two font-lane sites
+        (`backend_vulkan_font.spl:1112,1182`, owned elsewhere) are told apart
+        from this file's sites without editing that file.
+        """
+        self.pending_flush_site = site
+        self._flush_pending_compute()
+
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
         self.midframe_flush_count = self.midframe_flush_count + 1
+        # Move the armed site into the record and DISARM, so an untagged flush
+        # (the two font-lane sites, which this fix does not own) reports
+        # `untagged` instead of inheriting the previous caller's name and
+        # mis-attributing a submit to innocent code.
+        self.last_flush_site = self.pending_flush_site
+        self.pending_flush_site = "untagged"
+        # Captured BEFORE the impl runs: it ends in `_clear_pending_compute_state`,
+        # so reading these after the call always prints 0 and the trace could not
+        # tell a font-lane flush (`font_n>0`) from any other untagged one.
+        val traced_pending = self.pending_compute_count
+        val traced_font = self.pending_font_descriptors.len()
         val _t_flush = vulkan_timing_now_us()
         val flush_rc = self._flush_pending_compute_impl()
         vulkan_timing_add(VK_T_FLUSH, _t_flush)
         if vulkan_order_trace_enabled():
-            vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
+            vulkan_order_trace("flush site={self.last_flush_site} rc={flush_rc} pending_n={traced_pending} font_n={traced_font} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
         flush_rc
 
     me _flush_pending_compute_impl() -> i64:
@@ -750,7 +830,7 @@ impl VulkanBackend:
                     if not vulkan_sffi_destroy_descriptor_set(desc):
                         vulkan_sffi_quarantine_dependencies(
                             desc, 0, 0, 0)
-                val flushed = self._flush_pending_compute()
+                val flushed = self._flush_pending_compute_at("_enqueue_framebuffer_compute")
                 return if flushed < 0: -1 else: 0
             self._ensure_pending_compute_slot()
             self.pending_compute_pipelines[self.pending_compute_count] = pipe
@@ -785,7 +865,7 @@ impl VulkanBackend:
             # and an honest CPU fallback for THIS frame is the best available
             # outcome. What must not happen -- and no longer does -- is the
             # failure outliving the frame.
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_enqueue_framebuffer_compute")
             vulkan_timing_add(VK_T_ENQUEUE, _t_enqueue)
             return if flushed < 0: -1 else: 0
         self.frame_dispatch_count = self.frame_dispatch_count + 1
@@ -860,11 +940,11 @@ impl VulkanBackend:
                 return 0
         val desc = self._resolve_framebuffer_descriptor(pipe)
         if desc <= 0:
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
             return if flushed < 0: -1 else: 0
         val cmd = self.pending_compute_command
         if not vulkan_sffi_bind_pipeline(cmd, pipe) or not vulkan_sffi_bind_descriptors(cmd, desc):
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
             return if flushed < 0: -1 else: 0
         # One reusable push-constant staging buffer for the whole batch: the
         # runtime copies these bytes at record time (vkCmdPushConstants takes
@@ -917,7 +997,7 @@ impl VulkanBackend:
                 val gy = (rh as i64 + 15) / 16
                 if (not vulkan_sffi_push_constants(cmd, pipe, pc_buf) or
                     not vulkan_sffi_dispatch(cmd, gx, gy, 1)):
-                    val flushed = self._flush_pending_compute()
+                    val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
                     return if flushed < 0: -1 else: k
                 self.frame_dispatch_count = self.frame_dispatch_count + 1
             k = k + 1
@@ -1176,7 +1256,7 @@ impl VulkanBackend:
             not vulkan_sffi_bind_descriptors(cmd, desc) or
             not vulkan_sffi_push_constants(cmd, self.pipe_rect_batch, pc) or
             not vulkan_sffi_dispatch(cmd, (bw + 15) / 16, (bh + 15) / 16, 1)):
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch_gpu")
             return if flushed < 0: -1 else: 0
         # The slot is now referenced by an unsubmitted dispatch: burn it for the
         # rest of the frame.
@@ -1225,7 +1305,7 @@ impl VulkanBackend:
             if desc > 0 and not pooled and not vulkan_sffi_destroy_descriptor_set(desc):
                 vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
             self._release_image_source(d_src)
-            val bind_flush = self._flush_pending_compute()
+            val bind_flush = self._flush_pending_compute_at("_enqueue_image_composite")
             return if bind_flush < 0: -1 else: 0
         val cmd = self.pending_compute_command
         # Register dependencies before recording: if any command operation
@@ -1243,12 +1323,12 @@ impl VulkanBackend:
             vulkan_sffi_push_constants(cmd, pipe, push_data) and
             vulkan_sffi_dispatch(cmd, gx, gy, gz))
         if not ready:
-            val dispatch_flush = self._flush_pending_compute()
+            val dispatch_flush = self._flush_pending_compute_at("_enqueue_image_composite")
             return if dispatch_flush < 0: -1 else: 0
         1
 
     me _flush_for_host_fallback(reason: text) -> bool:
-        val status = self._flush_pending_compute()
+        val status = self._flush_pending_compute_at("_flush_for_host_fallback")
         if status == 1:
             return true
         self.mark_cpu_fallback(reason)
@@ -1317,7 +1397,7 @@ impl VulkanBackend:
             # retry ONCE on a fresh command buffer before latching the CPU
             # fallback -- a transient chain failure must not demote the whole
             # lane, but a persistent one still must.
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_dispatch_framebuffer_checked")
             if flushed >= 0:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("dispatch-retry pipe={pipe} after flush rc={flushed}")
@@ -1385,7 +1465,7 @@ impl VulkanBackend:
         """
         if not self.initialized:
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("_gpu_draw_text_fallback")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
