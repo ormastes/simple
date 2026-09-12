@@ -3,8 +3,8 @@
 **Date:** 2026-07-20
 **Severity:** medium (product source bug, not test-only — affects every real
 caller of `std.common.encoding.yaml`, not just this spec)
-- Status: RESOLVED (2026-09-12) — product source already fixed upstream; the last broken importer (the spec) fixed here. Original note follows: open — needs a source fix, out of test-triage scope (not a
-one-line change, not inside the assigned test-cluster dir)
+- Status: RESOLVED (2026-09-12) — product source fixed upstream; the last broken importer (the spec) fixed here, see Triage 2026-09-12
+  (2026-07-20 note, superseded: "open — needs a source fix, out of test-triage scope (not a one-line change, not inside the assigned test-cluster dir)")
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/common` cluster
 
 ## Symptom
