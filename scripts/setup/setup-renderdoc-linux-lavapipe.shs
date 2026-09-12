@@ -36,6 +36,10 @@ done
 # (scripts/setup/prepare-renderdoc-web-diff-container.shs) is where the
 # snapshot pin lives -- that is the reproducible surface.
 APT_PACKAGES="mesa-vulkan-drivers libvulkan1 vulkan-tools xvfb ca-certificates"
+# Prerequisites for the source build fallback. Kept in sync with
+# scripts/setup/build-renderdoc-linux-vulkan-only.shs --print-deps; the Qt UI
+# is configured OFF there, so only the headless/Vulkan subset is listed.
+RENDERDOC_BUILD_PACKAGES="git cmake ninja-build build-essential python3 python3-dev pkg-config libvulkan-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-xfixes0-dev libxcb-sync-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-render-util0-dev libxkbcommon-dev libxkbcommon-x11-dev"
 CHROME_DEB_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 
 is_linux() { [ "$(uname -s)" = Linux ]; }
@@ -79,7 +83,19 @@ build_renderdoc_if_needed() {
     [ -x "$ROOT/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ] && return 0
     have renderdoccmd && return 0
     [ -f "$ROOT/scripts/setup/build-renderdoc-linux-vulkan-only.shs" ] || return 1
-    sh "$ROOT/scripts/setup/build-renderdoc-linux-vulkan-only.shs" || return 1
+    # The builder's default MODE is --check, which only REPORTS prerequisites
+    # and exits 0 without building anything. Invoking it bare (as this function
+    # did until 2026-09-12) therefore always "succeeded" while leaving
+    # renderdoccmd missing, and the lane failed with renderdoc_status=missing
+    # on every ubuntu-latest run -- `renderdoc` was dropped from the Ubuntu
+    # noble archive, so the apt path cannot supply it either. Install the
+    # build prerequisites (scripts/setup/build-renderdoc-linux-vulkan-only.shs
+    # --print-deps) and ask for the real work with --all.
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive sudo_run apt-get install -y --no-install-recommends \
+        $RENDERDOC_BUILD_PACKAGES || return 1
+    sh "$ROOT/scripts/setup/build-renderdoc-linux-vulkan-only.shs" --all || return 1
+    [ -x "$ROOT/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ] || return 1
     return 0
 }
 
