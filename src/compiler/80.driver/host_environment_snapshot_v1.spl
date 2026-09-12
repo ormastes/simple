@@ -35,14 +35,7 @@ use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.{
     environment_feature_registry_validate_v1
 }
 
-@unsafe(reason: "raw host CPUID register ABI", capabilities: [ffi])
-extern fn rt_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32)
-@unsafe(reason: "native x86 architecture identity gate", capabilities: [ffi])
-extern fn rt_cpu_is_x86_64() -> i32
-@unsafe(reason: "raw x86 XGETBV register ABI", capabilities: [ffi])
-extern fn rt_xgetbv(index: i32) -> i64
-@unsafe(reason: "native CPUID/XGETBV AVX-512 state gate", capabilities: [ffi])
-extern fn rt_x86_avx512_os_state_usable() -> bool
+use std.sffi.host.{cpu_is_x86_64, cpuid, x86_avx512_os_state_usable, xgetbv}
 
 pub const COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1: u16 = 1u16
 pub const COMPILER_HOST_X86_POLICY_NATIVE_V1: u32 = 0u32
@@ -194,28 +187,28 @@ pub fn compiler_host_environment_snapshot_x86_live_v1(
     if authority.execution_architecture != ENV_ARCH_X86_64_V1:
         return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
     unsafe(capabilities: [ffi]):
-        if rt_cpu_is_x86_64() != 1:
+        if cpu_is_x86_64() != 1:
             return Err(CompilerHostSnapshotErrorV1.HostArchitectureMismatch)
-        val basic = rt_cpuid(0, 0).0 as u32
-        val extended = rt_cpuid(-2147483648, 0).0 as u32
+        val basic = cpuid(0, 0).0 as u32
+        val extended = cpuid(-2147483648, 0).0 as u32
         var leaf1 = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
         var leaf7 = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
         var leaf_extended = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
-        if basic >= 1u32: leaf1 = rt_cpuid(1, 0)
-        if basic >= 7u32: leaf7 = rt_cpuid(7, 0)
+        if basic >= 1u32: leaf1 = cpuid(1, 0)
+        if basic >= 7u32: leaf7 = cpuid(7, 0)
         if extended >= 0x80000001u32:
-            leaf_extended = rt_cpuid(-2147483647, 0)
+            leaf_extended = cpuid(-2147483647, 0)
         var avx_state_usable = false
         if basic >= 1u32 and _cpuid_bit_v1(leaf1.2 as u32, 26u32) and
            _cpuid_bit_v1(leaf1.2 as u32, 27u32):
-            avx_state_usable = ((rt_xgetbv(0) as u64) & 0x6u64) == 0x6u64
+            avx_state_usable = ((xgetbv(0) as u64) & 0x6u64) == 0x6u64
         compiler_host_environment_snapshot_x86_from_cpuid_facts_v1(authority,
             CompilerHostX86CpuidFactsV1(maximum_basic_leaf: basic,
                 maximum_extended_leaf: extended, leaf1_ecx: leaf1.2 as u32,
                 leaf7_0_ebx: leaf7.1 as u32, leaf7_0_ecx: leaf7.2 as u32,
                 leaf80000001_ecx: leaf_extended.2 as u32,
                 avx_os_state_usable: avx_state_usable,
-                avx512_os_state_usable: rt_x86_avx512_os_state_usable()),
+                avx512_os_state_usable: x86_avx512_os_state_usable()),
             policy_ceiling)
 
 pub fn compiler_host_environment_snapshot_from_facts_v1(
