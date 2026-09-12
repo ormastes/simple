@@ -22,6 +22,11 @@
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs [--out DIR] [--pages "a b"]
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --selftest
 #   sh scripts/check/check-chrome-catalog-pixel-diff.shs --diff-only --out DIR
+#   sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only --out DIR
+#
+# --simple-only re-renders the Simple side and reuses the *.chrome.{bmp,png}
+# already in DIR. That is the mode for a host with no Chrome, and the mode to
+# use when only the renderer changed. --diff-only skips BOTH sides.
 
 set -u
 
@@ -35,6 +40,8 @@ WIDTH=900
 HEIGHT=760
 SELFTEST=0
 DIFF_ONLY=0
+SIMPLE_ONLY=0
+CHROME_TIMEOUT=90
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -44,6 +51,8 @@ while [ $# -gt 0 ]; do
         --height) HEIGHT="$2"; shift 2 ;;
         --selftest) SELFTEST=1; shift ;;
         --diff-only) DIFF_ONLY=1; shift ;;
+        --simple-only) SIMPLE_ONLY=1; shift ;;
+        --chrome-timeout) CHROME_TIMEOUT="$2"; shift 2 ;;
         *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
@@ -139,7 +148,7 @@ mkdir -p "$OUT" || { echo "ERROR — nothing was checked (cannot create $OUT)"; 
 # ---------------------------------------------------------------------------
 # Capture
 # ---------------------------------------------------------------------------
-if [ "$DIFF_ONLY" -eq 0 ]; then
+if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
     CHROME_BIN=$(find_chrome) || {
         echo "ERROR — nothing was checked (no Chrome at /Applications/Google Chrome.app/Contents/MacOS/Google Chrome, /usr/bin/google-chrome or /usr/bin/chromium)"
         exit 2
@@ -155,15 +164,21 @@ for page in $PAGES; do
     fi
     chrome_ms=0
     simple_ms=0
-    if [ "$DIFF_ONLY" -eq 0 ]; then
+    if [ "$DIFF_ONLY" -eq 0 ] && [ "$SIMPLE_ONLY" -eq 0 ]; then
         profile="$OUT/.chrome-profile-$page"
         rm -rf "$profile"
         t0=$(now_ms)
-        "$CHROME_BIN" --headless=new --disable-gpu --hide-scrollbars \
+        perl -e 'alarm shift; exec @ARGV' "$CHROME_TIMEOUT" \
+            "$CHROME_BIN" --headless=new --disable-gpu --hide-scrollbars \
+            --no-first-run --no-default-browser-check --disable-extensions \
             --force-device-scale-factor=1 --virtual-time-budget=3000 \
             --user-data-dir="$profile" \
             --window-size="$WIDTH,$HEIGHT" \
             --screenshot="$OUT/$page.chrome.png" "file://$repo_root/$html" >/dev/null 2>&1
+        chrome_rc=$?
+        if [ ! -s "$OUT/$page.chrome.png" ]; then
+            echo "page=$page status=error reason=chrome-timeout-or-no-screenshot rc=$chrome_rc"
+        fi
         t1=$(now_ms)
         chrome_ms=$((t1 - t0))
         rm -rf "$profile"
@@ -175,6 +190,17 @@ for page in $PAGES; do
             elif command -v magick >/dev/null 2>&1; then
                 magick "$OUT/$page.chrome.png" "$OUT/$page.chrome.bmp" >/dev/null 2>&1
             fi
+        fi
+        t2=$(now_ms)
+        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=cpu_simd \
+            "$SIMPLE_BIN" run examples/06_io/ui/web_render_page_ppm.spl \
+            "$html" "$OUT/$page.simple.ppm" "$WIDTH" "$HEIGHT" > "$OUT/$page.simple.log" 2>&1
+        t3=$(now_ms)
+        simple_ms=$((t3 - t2))
+    fi
+    if [ "$SIMPLE_ONLY" -eq 1 ]; then
+        if command -v sips >/dev/null 2>&1 && [ -f "$OUT/$page.chrome.png" ] && [ ! -f "$OUT/$page.chrome.bmp" ]; then
+            sips -s format bmp "$OUT/$page.chrome.png" --out "$OUT/$page.chrome.bmp" >/dev/null 2>&1
         fi
         t2=$(now_ms)
         SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=cpu_simd \
