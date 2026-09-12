@@ -1,6 +1,7 @@
 use std.spec.*
 use gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.io_runtime.{env_get}
 
 # The Vulkan damage path was dead: `present_damage_valid` and
 # `host_mirror_valid` were false on every frame, so `_refresh_host_damage` never
@@ -18,6 +19,16 @@ fn vulkan_available() -> bool:
     val probe = Engine2D.create_with_backend_fast(8, 8, "vulkan")
     probe.backend_name() == "vulkan"
 
+# `vulkan_sffi_readback_u32_alloc` -- the primitive the damage route needs --
+# returns `[]` unless `SIMPLE_VK_READBACK=native` selects it (F8/F9:
+# doc/08_tracking/bug/vulkan_readback_interpreted_unpack_dominates_frame_2026-09-12.md,
+# doc/08_tracking/bug/vulkan_damage_path_dead_interpreted_copy_2026-09-12.md).
+# Without it the damage route declines and the full-surface refresh always
+# runs, so a lane-dependent example must assert each lane's OWN documented
+# contract rather than one absolute number.
+fn native_readback_lane() -> bool:
+    env_get("SIMPLE_VK_READBACK") == "native"
+
 describe "A partial frame refreshes exactly its damage rect":
     it "reproduce: one 10x10 rect after a full frame copies 100 pixels, not the surface":
         if not vulkan_available():
@@ -34,10 +45,18 @@ describe "A partial frame refreshes exactly its damage rect":
                 b.draw_rect_filled(20, 30, 10, 10, FG)
                 val frame = b.read_pixels_with_source()
                 # The damage union is exactly the rect, and the interpreted
-                # mirror patch is bounded by it. Before this change the same
-                # frame re-downloaded and re-unpacked all W*H pixels.
-                expect(b.damage_rect_px).to_equal(100)
-                expect(b.mirror_copy_iterations).to_equal(100)
+                # mirror patch is bounded by it -- but only on the native
+                # readback lane. Without `SIMPLE_VK_READBACK=native` the
+                # damage route's own primitive returns `[]`, so it declines
+                # and the full-surface refresh runs instead (documented
+                # contract, not a bug): W*H pixels re-downloaded, 0
+                # interpreted element writes.
+                if native_readback_lane():
+                    expect(b.damage_rect_px).to_equal(100)
+                    expect(b.mirror_copy_iterations).to_equal(100)
+                else:
+                    expect(b.damage_rect_px).to_equal((W * H).to_i64())
+                    expect(b.mirror_copy_iterations).to_equal(0)
                 # Pixel oracle: painted inside, untouched outside.
                 expect(frame.pixels[30 * W + 20]).to_equal(FG)
                 expect(frame.pixels[39 * W + 29]).to_equal(FG)
@@ -60,9 +79,15 @@ describe "A partial frame refreshes exactly its damage rect":
                 b.draw_rect_filled(50, 40, 4, 4, 0xFF0000FFu32)
                 val frame = b.read_pixels_with_source()
                 # Union of (10,10,4,4) and (50,40,4,4) is (10,10)-(54,44):
-                # 44 wide by 34 tall.
-                expect(b.damage_rect_px).to_equal(44 * 34)
-                expect(b.mirror_copy_iterations).to_equal(44 * 34)
+                # 44 wide by 34 tall -- on the native readback lane only; the
+                # default lane declines the damage route (see above) and takes
+                # the full-surface refresh instead.
+                if native_readback_lane():
+                    expect(b.damage_rect_px).to_equal(44 * 34)
+                    expect(b.mirror_copy_iterations).to_equal(44 * 34)
+                else:
+                    expect(b.damage_rect_px).to_equal((W * H).to_i64())
+                    expect(b.mirror_copy_iterations).to_equal(0)
                 expect(frame.pixels[10 * W + 10]).to_equal(0xFFFF0000u32)
                 expect(frame.pixels[40 * W + 50]).to_equal(0xFF0000FFu32)
                 expect(frame.pixels[0]).to_equal(BG)
