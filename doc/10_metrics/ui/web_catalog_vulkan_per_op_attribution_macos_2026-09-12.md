@@ -63,6 +63,46 @@ missing. The waste was rebuilding all 4 MB for a few new glyph cells.
 cpu_simd control, same page/size/binary: **25,xxx ms** (see below). Vulkan went
 from 2.7x that to 1.44x.
 
+## 900x760: the dominant term is a DIFFERENT one
+
+True before/after pair on this tree, same binary, one run at a time (the
+"before" was produced by checking the two font files back to the
+instrumentation-only commit, so the instrumentation is identical on both sides):
+
+| bucket | before | after |
+|---|---|---|
+| frame | 863,307 ms | **789,177 ms (-8.6%)** |
+| font_composite (23 calls) | 113,668 ms | **61,463 ms (-45.9%)** |
+| font_atlas_pack | — | 29,095 ms (`pack_full=8 pack_incremental=13`) |
+| **image_composite (264 calls)** | 568,149 ms | **544,646 ms** |
+| rect (550) | 286,068 | 270,139 |
+| image_blend (262) | 285,770 | 269,842 |
+
+The font fix does what it does at both sizes (-46% of the font term), but at
+900x760 **the font term was never the dominant one**: `_draw_image_composite_native`
+is **544 s of a 789 s frame (69%)**, with a **max of 179,403 ms for a SINGLE
+call**. Its SFFI upload is 237 ms across all 264 calls, so the cost is interpreted
+host work inside the composite, not the GPU.
+
+Nesting note for reading the table: `rect` ⊃ `image_blend` ⊃ `image_composite`.
+`rect - image_blend` is 297 ms, so the alpha-rect `[color; w*h]` allocation is
+NOT the term; and `image_composite - image_blend` is ~275 s, i.e. more than half
+the composite time comes from callers other than the alpha-rect path.
+
+**Not diagnosed further here, and deliberately not fixed.** One call doing 179 s
+of work is ~70x a full-surface (684,000 px) interpreted pack at the rate the
+atlas pack measures (3.7 us/px), so `_prepare_image_upload` alone does not
+explain it. The untimed candidate that would is task suspect (d): a
+`_draw_image_composite_native` early `return 0` falling back to
+`emu_draw_image_blend` (`backend_emu_adv.spl:66`), which does a full
+`core.read_pixels()` plus an interpreted per-pixel blend **without calling
+`mark_cpu_fallback`** — which is why `cpu_fallback_reason` is empty and every
+existing counter reads clean. Three probes would settle it in one run: wall time
++ `pixel_count` on `_prepare_image_upload`, a reason counter on every `return 0`
+exit of `_draw_image_composite_native_impl`, and a timer on
+`read_pixels_with_source()` itself (the `readback` bucket wraps only
+`read_pixels()`, n=2, and would miss a core-level call).
+
 ## Control and the honest gap
 
 `cpu_simd` at 300x253 measured **25 s** (start 1789181280, end 1789181305).
@@ -70,7 +110,14 @@ Of the 36.1 s Vulkan frame, only ~16.5 s is inside the Vulkan backend; the
 remaining ~19.6 s is layout/style, shared with cpu_simd. So the lane-specific
 cost is ~16.5 s against roughly 6 s of cpu_simd painting.
 
-**Target missed.** Reaching parity needs the two remaining O(atlas) walks gone:
+**Target missed, and the arithmetic says no incremental scheme reaches it.**
+cpu_simd's 25 s is ~19.6 s shared layout/style plus ~5.4 s of its own painting.
+Vulkan after is 19.6 s shared plus 16.5 s backend, so parity requires the Vulkan
+backend to fit in ~5.4 s — i.e. never touching 1M atlas pixels at all. Only the
+typed `[u32]` upload or a producer-supplied used-extent gets there; caching
+does not.
+
+Reaching parity needs the two remaining O(atlas) walks gone:
 `font_atlas_payload_sha256` 8.3 s and the 2 surviving full repacks 7.8 s.
 Concrete next steps, neither taken here:
 1. **Digest:** make it incremental over the same dirty cells (per-row
@@ -80,6 +127,17 @@ Concrete next steps, neither taken here:
 2. **Full repack:** `vulkan_sffi_copy_to_buffer_u32` uploads `[u32]` with no
    pack at all, but is opt-in because an older deployed binary aborts on the
    unknown extern (`typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`).
+
+## The unconditional style traces are already gone
+
+F14 reported `[rfm]` / `[font-*-trace]` printing hundreds of lines per render
+(815 `[rfm]` lines in 4,354). On `origin/main` @ `51ae2a9c4e3` they are all
+level-gated already (`_WM_TRACE` in `text_layout/font_renderer.spl:2611+`,
+`_font_style_trace_on` in `simple_web_html_layout_renderer_core.spl:2865`).
+Measured on a full 300x253 Vulkan render here: `[rfm]` 0 lines,
+`font-inherit-trace` 0, `font-style-trace` 0, whole log **401 lines**. Only
+`[web-style-producer]` still prints unconditionally, at 5 lines per render —
+not worth a gate. **No print-gating change was made**; the gap closed upstream.
 
 ## Counter trustworthiness
 
