@@ -959,6 +959,48 @@ class GlyphCache:
         FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions, render_config_identity: self.observed_render_config_identity)
 
 # ============================================================================
+# Parked font atlases (2026-09-12)
+# ============================================================================
+# One FontRenderer owns exactly ONE atlas buffer (Engine2D keeps a single
+# renderer, `font_owner.active[0]`), and until now a face switch called
+# `_reset_font_atlas`, wiping it. On a page where two font identities
+# interleave (A,B,A,B) that re-rasterises every glyph on every switch and
+# forces the GPU backends to repack all 1,048,576 pixels each time.
+#
+# A park is a whole-atlas snapshot keyed by the same `(font_identity,
+# face_generation)` pair the switch tests. Returning to a parked owner
+# restores its buffer verbatim, so its `atlas_owner_sequence` stays
+# contiguous and a consumer's incremental-repack path applies.
+#
+# The list is bounded and every mutation REPLACES the field wholesale --
+# never `self.atlas_parks[i].field = x` -- because in-place mutation of a
+# nested place clones the container on the interpreter lane (see
+# doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md).
+val FONT_ATLAS_PARK_MAX: i64 = 4
+
+class FontAtlasPark:
+    key: text
+    pixels: [u32]
+    codepoints: [i32]
+    face_ids: [i64]
+    face_generations: [i64]
+    glyph_indices: [i32]
+    font_sizes: [i32]
+    xs: [i32]
+    ys: [i32]
+    widths: [i32]
+    heights: [i32]
+    cursor_x: i32
+    cursor_y: i32
+    row_height: i32
+    owner_sequence: i64
+    unpublished_mutation: bool = false
+
+fn font_atlas_park_key(font_identity: text, face_generation: i64) -> text:
+    "font-atlas-park-v1|" + font_identity.len().to_string() + ":" + font_identity +
+        "|face-generation=" + face_generation.to_string()
+
+# ============================================================================
 # Font Renderer
 # ============================================================================
 
@@ -985,6 +1027,35 @@ class FontRenderer:
     atlas_generation: i64
     atlas_face_generation: i64
     atlas_font_identity: text
+    # Per-owner sequence for the CURRENT atlas. See FontRenderBatch
+    # .atlas_owner_sequence. Seeded from the globally-monotone dependency
+    # counter on every reset so values are never reused after a wipe, then
+    # advanced by exactly 1 per dirty batch.
+    atlas_owner_sequence: i64 = -1
+    # True while the atlas holds glyph cells that no dirty batch has published.
+    # Several staging paths insert a glyph and then abort with `valid: false`
+    # before reaching the `dirty.len() > 0` bump, so the atlas can move without
+    # the sequence moving. A consumer that took the sequence at face value
+    # there could trust a mirror that is missing those cells, which is exactly
+    # what the VK_FONT_MIRROR_ALREADY_TRUTH outcome must never do. While this
+    # is set, `_stage_batch` publishes -1 (no continuity claim) and the
+    # consumer falls back to a full repack.
+    atlas_unpublished_mutation: bool = false
+    # The park key of the CURRENTLY ACTIVE atlas, captured at the moment that
+    # owner became active. It must NOT be re-derived from `atlas_font_identity`
+    # / `atlas_face_generation` at park time: the shaped-run `-2` branch
+    # reassigns both (`atlas_font_identity = dependencies`, generation `-2`),
+    # so a re-derived key files the slot under a name the next lookup never
+    # asks for. Traced 2026-09-12: 2 resident slots, 2 alternating lookup keys,
+    # ZERO restores in 5 switches -- see the bug record.
+    atlas_active_park_key: text = ""
+    # Parked atlases, one per font owner, index 0 = least recently used.
+    # Without this a face switch WIPES the atlas (`_reset_font_atlas`), so an
+    # A,B,A,B page re-rasterises every glyph and forces a full 1,048,576-pixel
+    # repack downstream on each switch -- the 8 `pack_full`s measured at
+    # 900x760. Bounded at FONT_ATLAS_PARK_MAX; an evicted owner falls back to
+    # the wipe, i.e. to the previous behaviour.
+    atlas_parks: [FontAtlasPark] = []
     active_render_config_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
@@ -1012,6 +1083,7 @@ class FontRenderer:
     staged_face_generation: i64 = 0
     staged_atlas_generation: i64 = 0
     staged_atlas_owner_generation: i64 = -1
+    staged_atlas_owner_sequence: i64 = -1
     # `true` reproduces the one construction site that deliberately publishes
     # an EMPTY atlas (stale end-of-run identity), without copying the 1 MiB
     # atlas into the staged slot in every other case.
@@ -1259,6 +1331,7 @@ class FontRenderer:
         self.staged_face_generation = batch.face_generation
         self.staged_atlas_generation = batch.atlas_generation
         self.staged_atlas_owner_generation = batch.atlas_owner_generation
+        self.staged_atlas_owner_sequence = if self.atlas_unpublished_mutation: -1 else: self.atlas_owner_sequence
         self.staged_atlas_empty = batch.atlas_pixels.len() == 0
         self.staged_quads = batch.quads
         self.quad_phase_stored_nonempty = self.staged_quads.len() > 0
@@ -1392,6 +1465,7 @@ class FontRenderer:
             atlas_generation: self.staged_atlas_generation,
             dirty_rects: self.staged_dirty_rects,
             atlas_owner_generation: self.staged_atlas_owner_generation,
+            atlas_owner_sequence: self.staged_atlas_owner_sequence,
             render_config_identity: self.staged_render_config_identity,
             execution_target: self.staged_execution_target,
             execution_policy: self.staged_execution_policy
@@ -2037,8 +2111,91 @@ class FontRenderer:
         self.atlas_cursor_y = 0
         self.atlas_row_height = 0
         self.atlas_generation = _next_font_atlas_dependency_generation()
+        # Seeded from the SAME globally-monotone counter, never from 0: an
+        # owner whose atlas was wiped must not reuse a sequence value a
+        # consumer's mirror may still be holding, or the mirror would look
+        # contiguous against content that no longer exists.
+        self.atlas_owner_sequence = _next_font_atlas_dependency_generation()
+        self.atlas_unpublished_mutation = false
         self.atlas_face_generation = face_generation
         self.atlas_font_identity = font_identity
+        # Capture the key HERE, while it still names this owner.
+        self.atlas_active_park_key = font_atlas_park_key(font_identity, face_generation)
+
+    # Park the current atlas (if any) under its own key, then restore the
+    # incoming owner's parked atlas, or wipe when it has none. This replaces
+    # the bare `_reset_font_atlas` call on a face switch.
+    me _switch_font_atlas(face_generation: i64, font_identity: text):
+        # MEASUREMENT CONTROL: `SIMPLE_FONT_ATLAS_PARK=0` restores the bare
+        # wipe, so before/after pack counts come from the same binary and the
+        # same tree and cannot be contaminated by a rebuild.
+        if (env_get("SIMPLE_FONT_ATLAS_PARK") ?? "") == "0":
+            self._reset_font_atlas(face_generation, font_identity)
+            return
+        val outgoing_key = self.atlas_active_park_key
+        if outgoing_key != "" and self.atlas_pixels.len() > 0:
+            var kept: [FontAtlasPark] = []
+            for park in self.atlas_parks:
+                if park.key != outgoing_key:
+                    kept = kept.push(park)
+            # Index 0 is least recently used; drop from the front when full.
+            while kept.len() >= FONT_ATLAS_PARK_MAX:
+                var tail: [FontAtlasPark] = []
+                var di: i64 = 1
+                while di < kept.len():
+                    tail = tail.push(kept[di])
+                    di = di + 1
+                kept = tail
+            self.atlas_parks = kept.push(FontAtlasPark(
+                key: outgoing_key, pixels: self.atlas_pixels,
+                codepoints: self.atlas_codepoints, face_ids: self.atlas_face_ids,
+                face_generations: self.atlas_face_generations,
+                glyph_indices: self.atlas_glyph_indices, font_sizes: self.atlas_font_sizes,
+                xs: self.atlas_xs, ys: self.atlas_ys,
+                widths: self.atlas_widths, heights: self.atlas_heights,
+                cursor_x: self.atlas_cursor_x, cursor_y: self.atlas_cursor_y,
+                row_height: self.atlas_row_height,
+                owner_sequence: self.atlas_owner_sequence,
+                unpublished_mutation: self.atlas_unpublished_mutation))
+        val incoming_key = font_atlas_park_key(font_identity, face_generation)
+        var found = false
+        var remaining: [FontAtlasPark] = []
+        for park in self.atlas_parks:
+            if park.key == incoming_key and not found:
+                found = true
+                # Restore wholesale. The active owner then holds NO park slot,
+                # so no two live places ever alias the same atlas arrays.
+                self.atlas_pixels = park.pixels
+                self.atlas_codepoints = park.codepoints
+                self.atlas_face_ids = park.face_ids
+                self.atlas_face_generations = park.face_generations
+                self.atlas_glyph_indices = park.glyph_indices
+                self.atlas_font_sizes = park.font_sizes
+                self.atlas_xs = park.xs
+                self.atlas_ys = park.ys
+                self.atlas_widths = park.widths
+                self.atlas_heights = park.heights
+                self.atlas_cursor_x = park.cursor_x
+                self.atlas_cursor_y = park.cursor_y
+                self.atlas_row_height = park.row_height
+                self.atlas_owner_sequence = park.owner_sequence
+                self.atlas_unpublished_mutation = park.unpublished_mutation
+            else:
+                remaining = remaining.push(park)
+        if (env_get("SIMPLE_FONT_ATLAS_TRACE") ?? "") == "1":
+            print("[atlas-park] {if found: "restore" else: "reset"} parked={self.atlas_parks.len()} key={incoming_key}")
+        if found:
+            self.atlas_parks = remaining
+            # The GLOBAL generation must still move: the consumer's device copy
+            # holds the other owner's atlas and has to be rewritten. Only the
+            # per-owner sequence stays put, and that is what makes the restored
+            # mirror usable without a repack.
+            self.atlas_generation = _next_font_atlas_dependency_generation()
+            self.atlas_face_generation = face_generation
+            self.atlas_font_identity = font_identity
+            self.atlas_active_park_key = incoming_key
+        else:
+            self._reset_font_atlas(face_generation, font_identity)
 
     fn _font_atlas_dependency_identity(face_id: i64, face_generation: i64) -> text:
         var identities: [text] = []
@@ -2077,6 +2234,9 @@ class FontRenderer:
             return -1
         if glyph.pixels.len() != glyph.width.to_i64() * glyph.height.to_i64():
             return -1
+        # From here the atlas is about to change. Mark it unpublished until a
+        # dirty batch names the cells; see `atlas_unpublished_mutation`.
+        self.atlas_unpublished_mutation = true
         val padded_width = glyph.width + 1
         val padded_height = glyph.height + 1
         var x = self.atlas_cursor_x
@@ -2168,7 +2328,7 @@ class FontRenderer:
         if content == "":
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
-            self._reset_font_atlas(face_generation, font_identity)
+            self._switch_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
         # Scalar mirrors of the fallback layout entries. On the freestanding
         # native lane, an i64 field written into a struct pushed into an
@@ -2296,6 +2456,8 @@ class FontRenderer:
                         self._reset_font_atlas(face_generation, font_identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 if quads.len() > 0:
                     val end_cache_stats = self.cache.stats()
                     var end_generation = end_cache_stats.generation
@@ -2442,7 +2604,7 @@ class FontRenderer:
         cache.sync_face_identity(generation, identity)
         self.cache = cache
         if self.atlas_face_generation != generation or self.atlas_font_identity != identity:
-            self._reset_font_atlas(generation, identity)
+            self._switch_font_atlas(generation, identity)
         var ascent = self.horizontal_line_metric(font_size, 0)
         if self.selected_outline_blob.len() > 0:
             var ascent_meta: [i64] = [0; 20]
@@ -2492,6 +2654,8 @@ class FontRenderer:
                         self._reset_font_atlas(generation, identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = dependency_generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 val after_generation = active.cache_identity_generation()
                 val after_identity = active.cache_identity()
                 if after_generation != generation or after_identity != identity:
@@ -2535,6 +2699,13 @@ class FontRenderer:
             run.glyph_ids.len() != run.clusters.len()):
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != -2:
+            # BYPASSES the park: a text->shaped transition wipes the shared
+            # shaped atlas even though the text side parked one under
+            # (dependencies, -2). Traced rather than fixed blind -- routing it
+            # through _switch_font_atlas changes what the shared-atlas owner
+            # identity means for every consumer.
+            if (env_get("SIMPLE_FONT_ATLAS_TRACE") ?? "") == "1":
+                print("[atlas-park] reset-2 from_gen={self.atlas_face_generation}")
             self._reset_font_atlas(-2, font_identity)
         else:
             val dependencies = self._font_atlas_dependency_identity(face_id, run.face_generation)
@@ -2588,6 +2759,8 @@ class FontRenderer:
                         self._reset_font_atlas(-2, font_identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(-2, font_identity)
             attempt = attempt + 1
