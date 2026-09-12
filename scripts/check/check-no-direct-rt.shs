@@ -94,16 +94,33 @@ GENERATE_BASELINE=0
 # the offender tally is computed and then deleted, so only the top 5 are ever
 # visible and only on a FAIL.
 OFFENDERS_OUT=""
+# Every value-taking option is read through require_value(). Writing the old
+# `shift; VAR="$1"` inline meant that a value-taking option given LAST (the
+# dispatcher builds these command lines from a manifest row, so a row that
+# ends in a bare `--rev` is a single typo away) shifted the argument list
+# empty and then expanded "$1" under `set -u`, killing the guard with
+#
+#   scripts/check/check-no-direct-rt.shs: line 105: $1: unbound variable
+#
+# and NO verdict line at all -- a blocking push gate dying with a raw shell
+# trace, which .claude/rules/vcs.md's PASS/FAIL/ERROR convention exists
+# precisely to forbid. Reproduced on macOS 2026-09-12 with
+# `--roots src --rev`. The failure is fail-CLOSED (non-zero), so it never
+# laundered a pass; it was unreadable, not unsafe.
+require_value() {
+  # $1 = option name, $2 = number of args remaining INCLUDING the option
+  [ "$2" -ge 2 ] || { echo "ERROR — nothing was checked: $1 requires a value"; exit 2; }
+}
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest-only) SELFTEST_ONLY=1 ;;
     --generate-baseline) GENERATE_BASELINE=1 ;;
-    --offenders) shift; OFFENDERS_OUT="$1" ;;
+    --offenders) require_value "$1" $#; shift; OFFENDERS_OUT="$1" ;;
     --critical) CRITICAL=1 ;;
-    --root) shift; ROOT="$1" ;;
-    --roots) shift; ROOTS="$1" ;;
-    --rev) shift; REV="$1" ;;
-    --baseline-rev) shift; BASELINE_REV="$1" ;;
+    --root) require_value "$1" $#; shift; ROOT="$1" ;;
+    --roots) require_value "$1" $#; shift; ROOTS="$1" ;;
+    --rev) require_value "$1" $#; shift; REV="$1" ;;
+    --baseline-rev) require_value "$1" $#; shift; BASELINE_REV="$1" ;;
     --count-only) COUNT_ONLY=1 ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
@@ -573,12 +590,26 @@ selftest() {
   NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/l" --roots src --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1
   st_relative_new_rc=$?
   if [ "$st_relative_new_rc" != "1" ]; then echo "ERROR — selftest failed: new committed debt did not fail base-relative ratchet (rc=$st_relative_new_rc)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 20: a value-taking option given with NO value must produce the
+  # ERROR verdict line and exit 2, never a bare `$1: unbound variable` shell
+  # trace with no verdict at all (measured on macOS 2026-09-12 for
+  # `--roots src --rev`). Asserted for EVERY value-taking option, and on BOTH
+  # channels: the verdict must be on stdout (a caller reading the last stdout
+  # line must see it) and the exit status must be 2.
+  for st_opt in --offenders --root --roots --rev --baseline-rev; do
+    st_missing_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" "$st_opt" 2>/dev/null)
+    st_missing_rc=$?
+    if [ "$st_missing_rc" != "2" ] || [ "$st_missing_out" != "ERROR — nothing was checked: $st_opt requires a value" ]; then
+      echo "ERROR — selftest failed: $st_opt with no value did not emit the ERROR verdict on stdout (rc=$st_missing_rc, out=[$st_missing_out])"
+      rm -rf "$st_dir"; exit 2
+    fi
+  done
   rm -rf "$st_dir"
 }
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 19 selftest fixture(s) checked"
+  echo "PASS — 20 selftest fixture(s) checked"
   exit 0
 fi
 

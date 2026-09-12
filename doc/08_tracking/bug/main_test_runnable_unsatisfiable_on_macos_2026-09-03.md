@@ -1,6 +1,35 @@
 # `push-main-test-runnable` cannot pass on this host — no deployed binary both has `test` and reads the tree (2026-09-03)
 
-Status: OPEN — environmental, blocks every push from this machine
+Status: RESOLVED — re-verified on macOS aarch64 at `origin/main@b9667d6584f`,
+2026-09-12. The gate no longer requires a full-CLI binary that both has `test`
+and reads the tree; `b623eef45f5` rebuilt it as a `--rev` guard over the
+COMMITTED tree's startup-path `.spl` parse, which is a property of the commit
+rather than of the host's deployed artifacts. That dissolves the
+unsatisfiability recorded below — the four-row table of "no binary on this host
+satisfies C2" no longer describes what the gate asks for.
+
+Measured on this Mac, with a FRESH marker directory so the content-keyed green
+fast path cannot launder the verdict (the first run hit the fast path and said
+`1 fixture invocation skipped`; this one did not):
+
+```
+$ MAIN_RUNNABLE_MARKER_DIR=<fresh empty dir> \
+    sh scripts/check/check-main-test-runnable-push.shs ; echo rc=$?
+check-main-test-runnable-push.shs: PASS — 1 fixture invocation executed at
+  b9667d6584f87f09abc8774f9a404c0961ffc2b0, tree is test-runnable
+  (startup-path content 69918c864c54ff8c9d6f05c5bdee0f16 recorded green)
+rc=0
+```
+
+`1 fixture invocation executed` (not `skipped`) is the non-vacuity evidence.
+Note this worktree has **no `bin/simple` at all** — the gate passes anyway,
+which is the point: it is no longer coupled to a deployed binary. The
+`/mnt/data` hardcode this record's lane also covered is already portable at
+`:90-95` (`_main_runnable_scratch_base` falls back to
+`$SIMPLE_USER_STORAGE_ROOT`), so no edit was needed there either.
+
+The `run_fixture_in` self-clobbering ELOOP defect recorded in the 2026-09-04
+update below is likewise gone with the rewrite.
 
 ## Verdict
 
