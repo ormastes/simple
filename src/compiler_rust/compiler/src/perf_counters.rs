@@ -84,6 +84,24 @@ counters!(
     NUMBERED_DIR_HITS,
     SEGMENT_WITHIN_NUMBERED_MISSES,
     SEGMENT_WITHIN_NUMBERED_HITS,
+    // retention bounds on the loader memos (module_cache, bounded_cache).
+    // EVICTIONS counts entries dropped to stay under the limit; PINNED_SKIPS
+    // counts enforcement passes that could free nothing because every
+    // over-limit candidate was still borrowed (the cache then stays OVER its
+    // limit rather than freeing a live entry); RETAINED_MAX is a high-water
+    // entry count, written with `set_max`, not `bump`.
+    PARSED_SOURCE_EVICTIONS,
+    PARSED_SOURCE_PINNED_SKIPS,
+    PARSED_SOURCE_RETAINED_MAX,
+    PROBE_SOURCE_EVICTIONS,
+    PROBE_SOURCE_PINNED_SKIPS,
+    PROBE_SOURCE_RETAINED_MAX,
+    PATH_KEY_EVICTIONS,
+    PATH_KEY_PINNED_SKIPS,
+    PATH_KEY_RETAINED_MAX,
+    FILTERED_DICT_EVICTIONS,
+    FILTERED_DICT_PINNED_SKIPS,
+    FILTERED_DICT_RETAINED_MAX,
 );
 
 #[inline(always)]
@@ -161,6 +179,16 @@ pub fn bump(counter: &AtomicU64, by: u64) {
     }
 }
 
+/// Raise `counter` to `value` if `value` is larger, for high-water marks such
+/// as `*_RETAINED_MAX`. Adding these with `bump` would report the sum of every
+/// sample, which is meaningless for a maximum.
+#[inline(always)]
+pub fn set_max(counter: &AtomicU64, value: u64) {
+    if enabled() {
+        counter.fetch_max(value, Ordering::Relaxed);
+    }
+}
+
 /// Dump on SIGTERM/SIGINT as well as at exit.
 ///
 /// `atexit` never runs when the process is killed by a signal, and the
@@ -214,5 +242,18 @@ mod tests {
         assert!(text.contains("VT_ARRAY_ELEMS_CLONED"));
         assert!(text.contains('7'));
         VT_ARRAY_ELEMS_CLONED.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn set_max_keeps_the_high_water_not_the_sum() {
+        let was = STATE.load(Ordering::Relaxed);
+        set_enabled(true);
+        let counter = AtomicU64::new(0);
+        set_max(&counter, 5);
+        set_max(&counter, 3);
+        set_max(&counter, 9);
+        set_max(&counter, 4);
+        assert_eq!(counter.load(Ordering::Relaxed), 9, "a maximum, not 5+3+9+4");
+        STATE.store(was, Ordering::Relaxed);
     }
 }
