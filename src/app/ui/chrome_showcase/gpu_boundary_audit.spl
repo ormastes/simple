@@ -21,6 +21,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     web_vulkan_lane_census_line, web_vulkan_lane_census_drain,
     web_vulkan_lane_timing_table}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_route_stage_drain}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 # --- log scraping helpers ---------------------------------------------------
@@ -176,6 +178,18 @@ pub fn audit_classify(log: text) -> text:
     out = out + "atlas_full_repacks={pack_full}\n"
     out = out + "fence_waits={fences + midframe}\n"
     out = out + "full_readbacks={full_rb}\n"
+    # Presenter-owned route attribution. `host_paint_pixels` is the one boundary
+    # term no Vulkan counter can carry: pixels rasterized on the HOST and then
+    # uploaded write no GPU op, so the vk-timing table reads 0 for them however
+    # much CPU they burned. An absent `[web-route-stage]` line means the counters
+    # were never drained, which is reported as `unavailable`, never as 0.
+    val route_line_present = log.contains("[web-route-stage]")
+    val host_paint_px = _audit_to_int(audit_field_in_log(log, "host_paint_pixels"))
+    val rb_gpu_paint = _audit_to_int(audit_field_in_log(log, "readbacks_gpu_paint"))
+    val rb_upload = _audit_to_int(audit_field_in_log(log, "readbacks_upload"))
+    out = out + "host_paint_pixels=" + (if route_line_present: "{host_paint_px}" else: na) + "\n"
+    out = out + "presenter_readbacks_gpu_paint=" + (if route_line_present: "{rb_gpu_paint}" else: na) + "\n"
+    out = out + "presenter_readbacks_upload=" + (if route_line_present: "{rb_upload}" else: na) + "\n"
 
     # Fail closed: a disarmed timing table means three invariants were never
     # measured, so the run cannot pass on them.
@@ -201,6 +215,8 @@ pub fn audit_classify(log: text) -> text:
         bad = bad + ["submits_per_frame={submits} (>1)"]
     if cpu_fb > 0:
         bad = bad + ["cpu_fallback_count={cpu_fb} ({cpu_fb_reason})"]
+    if route_line_present and host_paint_px > 0:
+        bad = bad + ["host_paint_pixels={host_paint_px} (>0) on the Vulkan lane"]
     if bad.len() == 0:
         return out + "PASS — {frames} frame(s) audited, host_pixel_iterations=0, readbacks_per_frame<=1, submits_per_frame<=1"
     var why = ""
@@ -271,6 +287,46 @@ val FIXTURE_WRONG_LANE: text = ("audit page=p.html size=10x10 backend_requested=
     "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
     "  image_composite_stats full_surface=0 small=0 max_px=0 upload_mode=u32 upload_reason= reasons:")
 
+# A frame whose per-frame counts are all within the invariants but whose
+# presenter route-stage line reports HOST-painted pixels handed to the device.
+# No Vulkan counter can see that work — the census and every vk-timing bucket
+# read exactly as they do on the clean fixture — so without this key the run
+# would PASS while the page was rastered on the CPU and the GPU used as a
+# pass-through. It must FAIL.
+val FIXTURE_HOST_PAINT: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "[web-route-stage] readbacks_gpu_paint=0 readbacks_upload=1 host_paint_pixels=100\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+    "  rect 3 4 2\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# The same frame with the route-stage line present and ZERO host paint: the
+# key must be reported as a measured 0 (never `unavailable`) and must not
+# invent a violation. Pairs with FIXTURE_HOST_PAINT so the classifier is
+# proven to discriminate rather than to fail on the line's mere presence.
+val FIXTURE_ROUTE_STAGE_CLEAN: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "[web-route-stage] readbacks_gpu_paint=0 readbacks_upload=0 host_paint_pixels=0\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+    "  rect 3 4 2\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
 pub fn audit_verdict_of(block: text) -> text:
     var last = ""
     for line in block.split("\n"):
@@ -310,6 +366,26 @@ pub fn audit_selftest() -> i64:
     val v6 = audit_verdict_of(audit_classify(FIXTURE_WRONG_LANE))
     if not (v6.starts_with("ERROR") and v6.contains("not the Vulkan lane")):
         print "selftest FAIL wrong-lane: {v6}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v7 = audit_verdict_of(audit_classify(FIXTURE_HOST_PAINT))
+    if not (v7.starts_with("FAIL") and v7.contains("host_paint_pixels=100")):
+        print "selftest FAIL host-paint: {v7}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v8 = audit_verdict_of(audit_classify(FIXTURE_ROUTE_STAGE_CLEAN))
+    if not v8.starts_with("PASS"):
+        print "selftest FAIL route-stage-clean: {v8}"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_ROUTE_STAGE_CLEAN).contains("host_paint_pixels=0"):
+        print "selftest FAIL route-stage-clean key: measured 0 not reported"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_CLEAN).contains("host_paint_pixels=unavailable"):
+        print "selftest FAIL no-route-line: absent counters must be unavailable, not 0"
         failures = failures + 1
 
     examples = examples + 1
@@ -376,11 +452,15 @@ fn main() -> i64:
     var f: i64 = 0
     while f < frames:
         web_vulkan_lane_census_drain()
+        # Drain the presenter route-stage counters with the census, so both are
+        # per-frame and the last occurrence in the log describes the last frame.
+        web_route_stage_drain()
         val t0 = default_frame_clock().now_micros()
         val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, requested)
         val dt = (default_frame_clock().now_micros() - t0) / 1000
         val kind = if f == 0: "cold" else: "steady"
         print "[audit-frame {f + 1}] ms={dt} px={pixels.len()} kind={kind}"
+        print web_route_stage_drain()
         print web_vulkan_lane_census_line()
         print web_vulkan_lane_timing_table()
         f = f + 1
