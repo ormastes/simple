@@ -234,6 +234,64 @@ which is not legacy-versus-canonical promotion evidence, and
 `parser_scalar_parity_qualify_v1` is fed two distinct implementation identities
 precisely because it refuses a self-comparison.
 
+### Package 4 follow-up receipt (2026-09-12, computed dialect identity)
+
+The dialect grammar/actions/schema/semantic-profile identities are no longer
+declared labels. `src/compiler/80.driver/parse_dialect_identity_v1.spl` (178
+lines) computes them from the tables a provider executes: the grammar component
+is the kind ↔ name round trip over the whole kind domain of
+`src/compiler/10.frontend/core/tokens.spl` (`kind_limit = 222`, `TOK_KW_AS = 221`
+being the highest constant there), the actions component is `tok_precedence` /
+`tok_is_right_assoc` / `token_requires_rhs` / `token_can_end_expr` packed per
+kind, and schema and semantic come from the dialect projection's
+token+span and node+diagnostic digests for a fixed probe source. The probe domain
+is derived from the tables themselves, not from a name list restated in the
+module. `src/lib/*/structural/parse` was deliberately not digested: those tables
+are the SIMD/variant twin's, not what `parse_and_build_module_scoped` runs.
+`ParseResultProviderV1` gains `tables` and the dialect identity it CLAIMS; the
+seam recomputes the identity from the tables, refuses `ProviderSchemaMismatch`
+when the claim does not follow, refuses `UnsupportedDialect` against
+`provider.tables.dialect_id`, and stamps the verified identity onto the admitted
+result. Verification re-enters no GLOBAL-STATE parser: the Simple probe output is
+computed once per tables value, never during a request, so an in-flight parse's
+error channel is never reset under it. SDN's own lexer and parser are stateless
+`Result`-returners and are re-run during verification.
+
+`src/compiler/80.driver/parse_dialect_adapters_v1.spl` (273 lines) adds the SDN
+dialect (id 2) as a second scalar provider through the same seam, projecting the
+minimal stable fields the design document leaves unspecified — the real
+`tokenize` walk, the parser's own dotted-path span table with sorted keys, the
+canonical encoding `sdn_encode_canonical` already produces as the node digest,
+and `parse_with_issues` diagnostics. Spec
+`test/01_unit/compiler/driver/parse_dialect_identity_and_adapters_v1_spec.spl`
+(253 lines, 11 examples, fixtures `test/fixtures/parse_dialect_adapters_v1/*.sdn`)
+went RED `outcome=ERROR declared>=11 executed=0`, cause
+`Module "compiler.driver" does not export 'parse_dialect_identity_v1'`, to GREEN
+`outcome=OK executed=11 passed=11 failed=0` (45511ms) on the deployed seed
+`bin/release/aarch64-unknown-linux-gnu/simple` (50093192 bytes, 2026-09-06
+09:59:11). Agent V's own spec is unedited and still 8/8. Non-vacuity is asserted:
+a fixture whose `classify` diverges on one keyword must move the grammar digest
+AND leave the other three components equal, and the same tables on the real
+scalar provider must be refused `ProviderSchemaMismatch`.
+
+`frontend.spl` is still not rewired — it remains owned by a concurrent lane — but
+the compatibility example now calls its public entry `parse_full_frontend` and
+requires the seam result to be byte-identical after normalization, so the
+one-line hook is a behaviour-preserving edit rather than an assertion about one.
+
+Two things remain, both recorded rather than implied. The sosh dialect adapter
+could not be written: `os.apps.shell.shell_script.StmtKind` is shadowed by
+`src/compiler/10.frontend/parser_types_expr.spl`'s `StmtKind` under
+co-compilation, so importing the seam and `ScriptEngine` into one spec breaks
+`ScriptEngine.parse` outright — six-line reproduction, the measured fact that an
+aliased import does not help, and the fix in
+`doc/08_tracking/bug/shell_stmtkind_collides_with_frontend_stmtkind_2026-09-12.md`.
+And per-request identity verification is expensive on this seed: agent V's spec
+went 17860ms to 67238ms for the same 8 examples (~25 requests, ≈2s each), so the
+frontend hook should not be applied until an admit-once entry hoists verification
+off the request path — deliberately not a cache keyed on provider id or
+generation, since the mutated fixture carries the real provider's both.
+
 ---
 
 ## Agent U → new `## Package 2 receipt (2026-09-12)`, appended at end of document

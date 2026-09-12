@@ -22,6 +22,13 @@
 # This module is a sibling seam, not frontend wiring: `frontend.spl` and
 # `parse_full_frontend_with_scope` are owned by a concurrent lane and are not
 # touched here.
+#
+# Follow-up (package 4, second pass): the dialect grammar/actions/schema/
+# semantic digests are no longer declared labels. They are computed from the
+# tables a provider executes (`parse_dialect_identity_v1.spl`), and the seam
+# refuses a provider whose claimed dialect identity does not follow from its own
+# tables. The SDN and sosh dialects reach the same seam through
+# `parse_dialect_adapters_v1.spl`.
 
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.string_core.{text_to_utf8_bytes}
@@ -36,6 +43,17 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
 use compiler.core.parser.{parser_has_errors, parser_get_errors}
 use compiler.frontend.core.lexer.{
     lex_init_with_path, lex_next, lex_token_text, lex_token_line, lex_token_col
+}
+use compiler.core.tokens.{
+    tok_kind_name, keyword_lookup, tok_precedence, tok_is_right_assoc,
+    token_requires_rhs, token_can_end_expr
+}
+use compiler.driver.parse_dialect_identity_v1.{
+    DialectTablesV1,
+    ParseDialectIdentityV1,
+    parse_dialect_identity_of_v1,
+    parse_dialect_identity_same_v1,
+    parse_dialect_probe_words_v1
 }
 
 pub const PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1: u16 = 1u16
@@ -88,6 +106,11 @@ pub struct ParseResultProviderV1:
     generation: u64
     available: bool
     unavailable_reason: text
+    # The tables this provider actually executes, and the dialect identity it
+    # CLAIMS. The seam recomputes the identity from the tables and refuses a
+    # provider whose claim does not follow from them.
+    tables: DialectTablesV1
+    dialect_identity: ParseDialectIdentityV1
     parse: fn(ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>
 
 # ---------------------------------------------------------------- digest material
@@ -284,23 +307,63 @@ fn _declaration_count(module: ParserModule) -> u64:
 
 # ---------------------------------------------------------------- dialect identity
 
-# Declared dialect identity labels. These bind the seam to a named dialect so a
-# result cannot be compared across dialects; they are NOT digests computed from
-# the grammar tables, action tables, or schema files. Computing real ones is
-# frontend-seam work and is stated as remaining in the package 4 receipt.
-fn _dialect_grammar(dialect_id: u32) -> EnvironmentDigest256V1:
-    _label_digest("simple/dialect/{dialect_id}/grammar/declared-v1")
-fn _dialect_actions(dialect_id: u32) -> EnvironmentDigest256V1:
-    _label_digest("simple/dialect/{dialect_id}/actions/declared-v1")
-fn _dialect_schema(dialect_id: u32) -> EnvironmentDigest256V1:
-    _label_digest("simple/dialect/{dialect_id}/schema/declared-v1")
-fn _dialect_semantic(dialect_id: u32) -> EnvironmentDigest256V1:
-    _label_digest("simple/dialect/{dialect_id}/semantic-profile/declared-v1")
+# Dialect identity is COMPUTED from the tables the provider executes, by
+# `parse_dialect_identity_v1.spl`. The package 4 receipt recorded declared
+# labels here and named computing them as remaining work; this is that work for
+# the Simple dialect. The other dialects supply their own tables the same way
+# (`parse_dialect_adapters_v1.spl`).
+#
+# 222 is the kind domain of `src/compiler/10.frontend/core/tokens.spl`: the
+# highest constant there is `TOK_KW_AS = 221`. Walking the whole domain (rather
+# than a keyword list repeated here) is what makes a table edit move the digest.
+const _SIMPLE_KIND_LIMIT: i64 = 222
+
+const _SIMPLE_PROBE_PATH: text = "dialect-probe.simple"
+const _SIMPLE_PROBE_SOURCE: text = "fn probe_add(a: i64, b: i64) -> i64:\n    val total = a + b\n    if total > 0:\n        return total\n    0\n"
+
+# The precedence climber's action table: precedence, associativity, and the two
+# token predicates the statement/expression splitters consult. Packed above the
+# precedence range (max 12 in tokens.spl) so no bit collides with it.
+fn _simple_action_bits(kind: i64) -> i64:
+    var bits = tok_precedence(kind)
+    if tok_is_right_assoc(kind):
+        bits = bits + 4096
+    if token_requires_rhs(kind):
+        bits = bits + 8192
+    if token_can_end_expr(kind):
+        bits = bits + 16384
+    bits
+
+# Computed once per tables value, never during a request: re-entering the parser
+# while a request is in flight would reset the global error channel underneath it.
+fn _simple_probe_output() -> ParserScalarNormalizedOutputV1:
+    val module = parse_and_build_module_scoped(
+        _SIMPLE_PROBE_SOURCE, _SIMPLE_PROBE_PATH, false)
+    val diagnostics = if parser_has_errors(): parser_get_errors() else: []
+    parse_result_normalize_module_v1(
+        module, _SIMPLE_PROBE_SOURCE, _SIMPLE_PROBE_PATH, diagnostics)
+
+pub fn parse_dialect_tables_simple_v1() -> DialectTablesV1:
+    DialectTablesV1(dialect_id: PARSE_DIALECT_SIMPLE_V1,
+        kind_limit: _SIMPLE_KIND_LIMIT,
+        kind_name: tok_kind_name,
+        classify: keyword_lookup,
+        action_bits: _simple_action_bits,
+        probe_units: parse_dialect_probe_words_v1(_SIMPLE_PROBE_SOURCE),
+        probe_output: _simple_probe_output())
 
 # ---------------------------------------------------------------- providers
 
 const _SCALAR_PROVIDER_ID: text = "compiler.frontend.flat_ast_bridge.scalar.v1"
 const _SIMD_PROVIDER_ID: text = "compiler.frontend.parser.simd.v1"
+
+# A provider callable cannot see the provider value it hangs off, so it leaves
+# the four dialect digests unset; `parse_result_seam_request_v1` stamps them
+# from the identity it verified. A result obtained by calling `provider.parse`
+# directly is therefore undeclared, and the parity owner's `_declared` check
+# refuses it -- which is the intended asymmetry: the seam is the admitted path.
+pub fn parse_result_unstamped_dialect_digest_v1() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
 
 fn _scalar_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
     val tokens = _token_count(request.source_text, request.source_path)
@@ -319,10 +382,10 @@ fn _scalar_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, Par
         source_identity: parse_result_source_identity_v1(request.source_text),
         source_length: request.source_text.len() as u64,
         dialect_id: request.dialect_id,
-        grammar_digest: _dialect_grammar(request.dialect_id),
-        actions_digest: _dialect_actions(request.dialect_id),
-        schema_digest: _dialect_schema(request.dialect_id),
-        semantic_profile_digest: _dialect_semantic(request.dialect_id),
+        grammar_digest: parse_result_unstamped_dialect_digest_v1(),
+        actions_digest: parse_result_unstamped_dialect_digest_v1(),
+        schema_digest: parse_result_unstamped_dialect_digest_v1(),
+        semantic_profile_digest: parse_result_unstamped_dialect_digest_v1(),
         token_count: tokens as u64,
         declaration_count: _declaration_count(module),
         diagnostic_count: diagnostics.len() as u64,
@@ -335,18 +398,24 @@ fn _simd_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, Parse
     Err(ParseResultRefusalV1.ProviderUnavailable)
 
 pub fn parse_result_provider_scalar_v1() -> ParseResultProviderV1:
+    val tables = parse_dialect_tables_simple_v1()
     ParseResultProviderV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
         provider_id: _SCALAR_PROVIDER_ID,
         implementation_identity: _label_digest(_SCALAR_PROVIDER_ID),
         generation: 1u64, available: true, unavailable_reason: "",
+        tables: tables,
+        dialect_identity: parse_dialect_identity_of_v1(tables),
         parse: _scalar_parse)
 
 pub fn parse_result_provider_simd_v1() -> ParseResultProviderV1:
+    val tables = parse_dialect_tables_simple_v1()
     ParseResultProviderV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
         provider_id: _SIMD_PROVIDER_ID,
         implementation_identity: _label_digest(_SIMD_PROVIDER_ID),
         generation: 0u64, available: false,
         unavailable_reason: "no admitted SIMD parse provider: build host is aarch64 (Cortex-X925, no AVX2) and no parser variant artifact has been mapped; see package 5",
+        tables: tables,
+        dialect_identity: parse_dialect_identity_of_v1(tables),
         parse: _simd_parse)
 
 # ---------------------------------------------------------------- seam entry
@@ -357,15 +426,31 @@ pub fn parse_result_seam_request_v1(
     if provider.schema_version != PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1 or
        request.schema_version != PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1:
         return Err(ParseResultRefusalV1.ProviderSchemaMismatch)
+    # The dialect a provider CLAIMS must follow from the tables it executes. A
+    # provider carrying a mutated grammar, action or projection cannot present
+    # another provider's dialect identity, because the identity is recomputed
+    # here from its own tables and compared.
+    val computed = parse_dialect_identity_of_v1(provider.tables)
+    if not parse_dialect_identity_same_v1(computed, provider.dialect_identity):
+        return Err(ParseResultRefusalV1.ProviderSchemaMismatch)
     if not provider.available:
         return Err(ParseResultRefusalV1.ProviderUnavailable)
-    if request.dialect_id != PARSE_DIALECT_SIMPLE_V1:
+    if request.dialect_id != provider.tables.dialect_id:
         return Err(ParseResultRefusalV1.UnsupportedDialect)
     # A result with no source path cannot be bound to a source identity: the
     # path is part of every span this seam normalizes.
     if request.source_path == "" or request.source_text == "":
         return Err(ParseResultRefusalV1.InvalidRequest)
-    provider.parse(request)
+    match provider.parse(request):
+        case Ok(result):
+            var stamped = result
+            stamped.grammar_digest = computed.grammar_digest
+            stamped.actions_digest = computed.actions_digest
+            stamped.schema_digest = computed.schema_digest
+            stamped.semantic_profile_digest = computed.semantic_profile_digest
+            Ok(stamped)
+        case Err(refusal):
+            Err(refusal)
 
 # ---------------------------------------------------------------- parity evidence
 
