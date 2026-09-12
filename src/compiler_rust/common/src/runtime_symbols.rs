@@ -1112,6 +1112,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_write_u32s_strided_to_raw",
     "rt_write_u32s_to_raw_checksum",
     "rt_write_fill_u32s_to_raw_checksum",
+    "rt_vulkan_readback_u32_array",
+    "rt_vulkan_readback_u32_array_checksum",
     "rt_simple_sandbox_section_start",
     "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",

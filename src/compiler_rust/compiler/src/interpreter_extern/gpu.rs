@@ -4751,6 +4751,131 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
     }
 }
 
+/// `rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i64) -> [u32]`
+///
+/// Interpreter-legal bulk pixel readback. The natively-linked lane uses
+/// `rt_vulkan_readback_u32_checksum(dest, ...)`, which PASSES a runtime array
+/// and is therefore refused by `interpreter_extern/vulkan.rs`'s dispatch, so
+/// the interpreter arm of `vulkan_sffi_readback_u32_into` fell back to an
+/// interpreted byte->u32 unpack loop: 3.6 us/pixel, i.e. 99.6% of a 900x760
+/// web frame (doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md).
+///
+/// Shape is deliberately `rt_vulkan_read_buffer_bytes`'s: scalars in, array
+/// out -- the only shape this lane marshals. Returns an EMPTY array on any
+/// validation failure so the caller can fall back rather than consume partial
+/// pixels.
+pub fn rt_vulkan_readback_u32_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::array(vec![]));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::array(vec![])),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::array(vec![]));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::array(vec![])),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::array(vec![]));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::array(vec![]));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let words: Vec<Value> = bytes
+            .chunks_exact(4)
+            .map(|c| Value::Int(i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
+            .collect();
+        Ok(Value::array(words))
+    }
+}
+
+/// `rt_vulkan_readback_u32_array_checksum(handle, pixel_count, offset) -> i64`
+///
+/// The identity checksum that the natively-linked `rt_vulkan_readback_u32_checksum`
+/// returns, over the same bytes, without materialising an array. Kept as a
+/// separate scalar call so the formula stays byte-identical across lanes
+/// instead of being recomputed by an interpreted per-pixel fold. Returns -1 on
+/// any validation failure (a valid checksum is >= 0).
+pub fn rt_vulkan_readback_u32_array_checksum_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array_checksum", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::Int(-1));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::Int(-1));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Int(-1)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Int(-1));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Int(-1)),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Int(-1));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let mut checksum: i64 = 0;
+        for c in bytes.chunks_exact(4) {
+            let px = i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            checksum = (checksum + px) % 2_147_483_647;
+        }
+        Ok(Value::Int(checksum))
+    }
+}
+
 /// `rt_vulkan_destroy_shader(handle: i64)`
 pub fn rt_vulkan_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
