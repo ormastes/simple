@@ -1130,8 +1130,20 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
         let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+        // The Optional/Result helpers must never be suffix-rebound to a user
+        // method of the same name -- same defect as the bare import_map
+        // fallback below already refuses, but reached through the two qualified
+        // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
+        // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
+        // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
+        // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
+        // fixing one backend and not the other is how this family recurs.
+        let enum_helper = matches!(
+            lookup_name,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+        );
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !enum_helper {
             let method_suffix = format!(".{}", func_name);
             for (raw, mangled) in ctx.use_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1141,7 +1153,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !enum_helper {
             let method_suffix = format!(".{}", lookup_name);
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1154,12 +1166,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none()
-            && !matches!(
-                lookup_name,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-            )
-        {
+        if resolved_name.is_none() && !enum_helper {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
