@@ -173,3 +173,84 @@ No perf regression: 7 of 8 pages are faster than the control run (css-layout
 shadow-heavy page — the separable shadow blur is cheaper than the old
 fill-then-blur). `html` is +4 %, within the run-to-run spread of its own control
 pair (275961 / 282521).
+
+## Round 2 — form-control UA font + flex-wrap auto-width item
+
+Same host, same binary, same 8 pages, same Chrome references
+(`build/perf/chrome_compare_2026-09-12/`, regenerated 2026-09-12 08:41). Both
+runs below are `sh scripts/check/check-chrome-catalog-pixel-diff.shs
+--simple-only --out build/perf/round2` on THIS worktree, so the before column is
+a same-binary re-measurement rather than the table above — necessary because
+`web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md` says frames
+are not bit-stable. It reproduced the round-1 numbers to within 0.01 pt.
+
+| page | before | after | delta |
+|---|---|---|---|
+| css-layout | 29.20 | 29.20 | 0.00 |
+| html | 17.05 | 17.05 | 0.00 |
+| animation | 15.78 | 15.78 | 0.00 |
+| css-paint | 10.28 | 10.28 | 0.00 |
+| overview | 10.52 | **4.05** | **-6.47** |
+| forms-media | 8.59 | **7.74** | **-0.85** |
+| tab-bar | 3.71 | **1.14** | **-2.57** |
+| evidence | 2.26 | 2.26 | 0.00 |
+
+`PASS — 8 page(s) compared, worst=29.20`. No page regressed.
+
+### What was fixed, and what the "+12 % block vertical advance" actually was
+
+`web_block_vertical_advance_12pct_2026-09-12.md` filed a single +12 % symptom
+after excluding the block-advance rule, margin collapsing, explicit
+`line-height` and the default line-box height by fixture. It was right to
+conclude the cause was element-specific, and there turned out to be **two
+independent ones — there is no single block-advance defect**:
+
+1. **Form controls inherited the page font.** Chrome's UA stylesheet gives
+   `button`/`input`/`select`/`textarea` `font: 400 13.3333px <system>` with
+   `line-height: normal`; Simple let them inherit `body { font: 16px/1.5 }`, so
+   a catalog button was 42 px tall against Chrome's 33, and the tab strip 65
+   against 53. Chrome also computes `margin-bottom: 0px` on a button, where the
+   UA defaults carried 3 px. Record:
+   `doc/08_tracking/bug/web_form_control_inherits_page_font_2026-09-12.md`.
+2. **Auto-width flex items filled a whole wrap line.** In a `flex-wrap: wrap`
+   row, an item with no `flex-basis` and `width: auto` was given the container's
+   full inner width, so each wrapped onto its own line. Record:
+   `doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md`.
+
+Overview now matches Chrome element for element where it previously drifted:
+
+| element | Chrome | Simple before | Simple after |
+|---|---|---|---|
+| `section#panel-overview` h | 348.78 | 392 | **348** |
+| `div.flex` h | 80.00 | 124 | **80** |
+| `ol` y / w | 287.78 / 133.38 | 287 / 810 | **287 / 132** |
+| `ul` y / w | 287.78 / 150.28 | 355 / 810 | **287 / 150** |
+| `button` h (tab-bar) | 33.00 | 42 | **33** |
+| `nav.tabs` h (tab-bar) | 53.00 | 65 | **53** |
+
+### Method — element-level oracle
+
+Chrome's own geometry, not a pixel ruler: the catalog page is rewritten with an
+appended `<script>` that walks `document.querySelectorAll("body *")` and writes
+`getBoundingClientRect()` plus `getComputedStyle()` for every element into a
+`<pre>`, then `--headless=new --dump-dom --virtual-time-budget=3000
+--window-size=900,760` is read back. The Simple side is a layout-box dump
+through the same `parse_html` / `extract_css_vw` / `compute_styles` / `layout`
+chain `simple_web_layout_debug_layout_by_id` uses. Diffing the two element lists
+positionally names the FIRST divergent element, and everything below it is
+inherited drift — which is what made both causes nameable at a `file:line` where
+the earlier fixture sweep could not.
+
+### What still dominates the four unchanged pages
+
+The element diff on `css-layout` (29.20 %, the worst page) shows 400 of 401
+elements divergent, and the first structural divergence is a **grid** row
+(`div` children at `w=180` where Chrome has `w=399`), immediately followed by
+the flex-wrap row this change fixes. Remaining ranked causes on that page, by
+first divergence: grid column sizing; `<br>` line box (24 px vs Chrome's 18);
+`<code>` inline box (24 vs 19); block auto-height accumulation inside `<li>`
+(128 vs 88). These are unowned by this change and are consistent with the
+independent ranking produced by the Draw-IR geometry differ
+(`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`), whose
+items 3 (flex item main size) and 5 (inline-block button) are the two closed
+here.
