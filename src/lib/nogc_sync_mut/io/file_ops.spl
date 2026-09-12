@@ -36,6 +36,7 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 @unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_read_regular_no_follow_last_failure() -> i64
 @unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
 extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
@@ -113,10 +114,36 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
         # secure temp dir and provider diagnostic guards.
         val value = content.unwrap()
         if value.len() < 0:
-            return Err("regular no-follow bounded file read returned nil: {path}")
+            return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
         Ok(value)
     else:
-        Err("regular no-follow bounded file read failed: {path}")
+        Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+
+fn _read_no_follow_failure_name() -> text:
+    """Name the admission arm that rejected the most recent bounded read.
+
+    The extern has eight indistinguishable nil returns. Reporting only "returned
+    nil" is what kept the Stage 2 backend failure unexplainable: the AOT
+    diagnostic was written successfully and read back as nil with nothing able to
+    say which arm refused it.
+    """
+    var code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        code = rt_file_read_regular_no_follow_last_failure()
+    if code == 0: "diagnostic extern unresolved in this lane"
+    elif code == 77: "reader never called"
+    elif code == 100: "read succeeded"
+    elif code == 1: "capability denied"
+    elif code == 2: "bad arguments"
+    elif code == 3: "path is not valid utf-8"
+    elif code == 4: "open failed"
+    elif code == 5: "metadata unavailable"
+    elif code == 6: "not a regular file"
+    elif code == 7: "larger than the read bound"
+    elif code == 8: "reparse point"
+    elif code == 9: "read failed"
+    elif code == 10: "content is not valid utf-8"
+    else: "arm {code}"
 
 fn file_size_raw(path: text) -> i64:
     unsafe(capabilities: [ffi]):

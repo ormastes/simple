@@ -421,6 +421,7 @@ pub use sffi::{
     rt_file_canonicalize,
     rt_file_read_text,
     rt_file_read_regular_no_follow_bounded,
+    rt_file_read_regular_no_follow_last_failure,
     rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,

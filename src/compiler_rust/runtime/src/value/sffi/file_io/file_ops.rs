@@ -338,19 +338,65 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 /// reparse-point and directory attributes from that handle. Unsupported hosts
 /// fail closed. `NIL` denotes every admission/read/UTF-8 failure, while an
 /// allocated empty text remains a successful empty-file result.
+/// Why the last `rt_file_read_regular_no_follow_bounded` call returned `NIL`.
+///
+/// That function has eight indistinguishable `NIL` returns, and its Simple
+/// caller can only report "returned nil". The Stage 2 bootstrap failure stayed
+/// unexplainable across many sessions for exactly that reason: the AOT
+/// diagnostic was written successfully, read back as nil, and nothing could say
+/// which admission arm rejected it. `rt_secure_temp_dir_diag` solved the same
+/// problem for the staging directory; this is its counterpart for the reader.
+/// Starts at a sentinel rather than zero so a readout is never ambiguous:
+/// `READ_NF_NEVER_CALLED` means the reader never ran, `READ_NF_OK` means it
+/// succeeded, 1..=10 name a rejected arm, and a literal 0 means this diagnostic
+/// extern is itself unresolved in the lane that read it. Zero used to collapse
+/// all three of those onto one number, which is how a readout of "arm 0" got
+/// read as a success it was not.
+static READ_NO_FOLLOW_LAST_FAILURE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(READ_NF_NEVER_CALLED);
+
+// Failure-arm codes. Small integers so the value crosses the SFFI boundary
+// without allocating inside a path that is already failing.
+const READ_NF_NEVER_CALLED: i64 = 77;
+const READ_NF_OK: i64 = 100;
+const READ_NF_CAPABILITY: i64 = 1;
+const READ_NF_BAD_ARGS: i64 = 2;
+const READ_NF_BAD_UTF8_PATH: i64 = 3;
+const READ_NF_OPEN: i64 = 4;
+const READ_NF_METADATA: i64 = 5;
+const READ_NF_NOT_REGULAR: i64 = 6;
+const READ_NF_TOO_LARGE: i64 = 7;
+const READ_NF_REPARSE: i64 = 8;
+const READ_NF_READ: i64 = 9;
+const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+
+fn read_no_follow_fail(code: i64) -> RuntimeValue {
+    READ_NO_FOLLOW_LAST_FAILURE.store(code, std::sync::atomic::Ordering::Relaxed);
+    RuntimeValue::NIL
+}
+
+/// Read the arm code recorded by the most recent bounded no-follow read.
+#[no_mangle]
+pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
+    READ_NO_FOLLOW_LAST_FAILURE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     path_ptr: *const u8,
     path_len: u64,
     max_bytes: i64,
 ) -> RuntimeValue {
-    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) || path_ptr.is_null() || max_bytes < 0 {
-        return RuntimeValue::NIL;
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if path_ptr.is_null() || max_bytes < 0 {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
     }
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
-        _ => return RuntimeValue::NIL,
+        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
     };
     let path = Path::new(path_str);
     let mut options = OpenOptions::new();
@@ -363,32 +409,39 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     return RuntimeValue::NIL;
     let mut file = match options.open(path) {
         Ok(file) => file,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return RuntimeValue::NIL;
+    if !metadata.is_file() {
+        return read_no_follow_fail(READ_NF_NOT_REGULAR);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
         // FILE_ATTRIBUTE_REPARSE_POINT
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_REPARSE);
     }
     let read_limit = match (max_bytes as u64).checked_add(1) {
         Some(limit) => limit,
-        None => return RuntimeValue::NIL,
+        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
     };
     let mut raw = Vec::new();
     let mut bounded = file.take(read_limit);
-    if bounded.read_to_end(&mut raw).is_err() || raw.len() as i64 > max_bytes {
-        return RuntimeValue::NIL;
+    if bounded.read_to_end(&mut raw).is_err() {
+        return read_no_follow_fail(READ_NF_READ);
+    }
+    if raw.len() as i64 > max_bytes {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     if std::str::from_utf8(&raw).is_err() {
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
     }
+    READ_NO_FOLLOW_LAST_FAILURE.store(READ_NF_OK, std::sync::atomic::Ordering::Relaxed);
     rt_string_new(raw.as_ptr(), raw.len() as u64)
 }
 
