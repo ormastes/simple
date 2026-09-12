@@ -2699,15 +2699,6 @@ impl RenderBackend for VulkanBackend:
             self.last_error = "glass-device-work-budget-exceeded"
             return false
 
-        # Flush the batched work the kernel is about to READ. Deliberately NOT
-        # `_flush_for_host_fallback`: that records a CPU fallback, and this
-        # frame never leaves the device.
-        val flushed = self._flush_pending_compute_at("glass-device")
-        if flushed < 0:
-            self.completion_unknown = true
-            self.last_error = "glass-device-flush-unknown"
-            return false
-
         val out_bytes = pixel_count * 4
         # One acquisition serves both roles: the kernel's output buffer and,
         # immediately after, the image source of the copy-back -- so the pool
@@ -2739,12 +2730,19 @@ impl RenderBackend for VulkanBackend:
             config.gradient_enabled, config.gradient_layered_over_surface)
         val gx = (_i64(config.width) + 15) / 16
         val gy = (_i64(config.height) + 15) / 16
-        val produced = vulkan_dispatch_region_kernel_checked(
-            self.d_framebuffer, self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        # Recorded rather than submitted, for the same reason as the blur twin
+        # above: every dispatch already carries a full memory barrier.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
         if vulkan_order_trace_enabled():
             vulkan_order_trace("glass-device x={config.x} y={config.y} w={config.width} h={config.height} blur={blur} rc={produced} fb={self.d_framebuffer}")
         if produced <= 0:
-            self._release_image_source(d_out)
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
             if produced < 0:
                 self.completion_unknown = true
             self.last_error = "glass-device-dispatch-failed"
@@ -2793,14 +2791,6 @@ impl RenderBackend for VulkanBackend:
         if pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4:
             return false
 
-        # Flush the work the kernel is about to READ -- deliberately NOT
-        # `_flush_for_host_fallback`, which records a CPU fallback for a frame
-        # that never leaves the device.
-        val flushed = self._flush_pending_compute_at("blur-device")
-        if flushed < 0:
-            self.completion_unknown = true
-            return false
-
         val out_bytes = pixel_count * 4
         # One acquisition serves both roles: the kernel's output buffer and,
         # immediately after, the image source of the copy-back, so the pool
@@ -2819,12 +2809,24 @@ impl RenderBackend for VulkanBackend:
         val pc = _pack_blur_rect_pc(x, y, w, h, self.w, self.h, radius)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        val produced = vulkan_dispatch_region_kernel_checked(
-            self.d_framebuffer, self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        # RECORDED, not submitted. The kernel samples framebuffer content that
+        # earlier dispatches in this same command buffer produced, and that is
+        # safe without a flush because `rt_vulkan_dispatch` emits a full memory
+        # barrier after EVERY dispatch (vulkan_graphics_runtime_compute.rs:480-494).
+        # Flushing here instead would cost one queue submission per blurred
+        # rect -- which is exactly what the host path cost, so the boundary
+        # crossing would be gone while the submit count stood still.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
         if vulkan_order_trace_enabled():
             vulkan_order_trace("blur-device x={x} y={y} w={w} h={h} r={radius} rc={produced} fb={self.d_framebuffer}")
         if produced <= 0:
-            self._release_image_source(d_out)
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
             if produced < 0:
                 self.completion_unknown = true
             return false
