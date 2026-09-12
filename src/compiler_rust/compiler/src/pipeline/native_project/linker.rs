@@ -1066,7 +1066,13 @@ int main(int argc, char** argv) {
         std::fs::write(&init_cpp, &code).map_err(|e| format!("write init_all: {e}"))?;
 
         let init_o = temp_dir.join("_init_all.o");
-        let status = if is_clang_cl {
+        // `is_msvc`, not `is_clang_cl`: cl.exe shares clang-cl's driver CLI, and
+        // taking the GNU branch made it read `-o` as its deprecated `/o`, so the
+        // object was written to the CWD as `_init_all.obj` instead of to
+        // `temp_dir`. The link then failed with `LNK1181: cannot open input file
+        // ..._init_all.o`. The sibling main-stub compile above already gates on
+        // `is_msvc`, which is why only this object went missing.
+        let status = if is_msvc {
             let mut cmd = std::process::Command::new(&cxx);
             cmd.arg("/c")
                 .arg("/O2")
