@@ -6,7 +6,7 @@
   below): **25 oracle hits, of which 12 are actual refactor damage**. 7 are
   `fuzz.spl`'s missing-module defect, 5 are known regex false positives, 1 is a
   Class C stdlib gap. Quote both numbers (oracle-25 / family-12) or the next
-  reader chases 13 non-issues. **The family is NOT closed.**
+  reader chases 13 non-issues. **The family is NOT closed.** SUPERSEDED IN PART by "Triage 2026-09-12" at the end: the six `src/compiler` Class A entries are docstring phantoms, so real Class A damage under `src/compiler` is ZERO, not twelve.
   (Superseded figures, 2026-08-08: oracle-40 / family-27.)
 - **Found by:** adversarial review of `b0c98541d2a`, `bc052a4470d`
 
