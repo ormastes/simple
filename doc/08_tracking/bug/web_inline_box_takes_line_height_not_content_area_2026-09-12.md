@@ -64,6 +64,14 @@ Measured on a 3-line `<li>`: centring put the `<code>` 12 px too low, worse than
 before. Those runs keep the existing top placement until wrapped text is modelled
 as real line boxes.
 
+A second, narrower limit: `inline_content_area_height` is a pure font metric and
+ignores the element's own vertical padding and border. Chrome's border box for a
+padded inline (a badge-style `<code>`, a `<kbd>`) is `content + pad_t + pad_b +
+border`. The `out_bh[c] <= style_line_h(cst)` guard means such an element keeps
+the height layout gave it rather than being shrunk to 18 px, so this is a
+documented limit, not a regression introduced here — but it is also why a padded
+inline is still wrong against Chrome.
+
 ## Still open (NOT fixed here)
 
 The horizontal deltas on the same elements are untouched and are a different
