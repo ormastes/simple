@@ -1,0 +1,93 @@
+@allow(primitive_api)
+# Digest-bound dynamic-library admission with a non-fatal symbol probe.
+#
+# Two gaps in `std.nogc_sync_mut.sffi.dynamic` kept an admitted environment
+# variant from ever becoming a callable, and both are measured on the deployed
+# aarch64 seed (2026-09-06), not inferred:
+#
+#  * `ExactArtifactDynLib.load_exact_linux` — the existing digest-bound loader —
+#    calls `spl_dynlib_snapshot_linux`, which this seed answers with
+#    `semantic: unknown extern function`. The whole exact-artifact path is dead
+#    here.
+#  * There is no way to ASK whether a symbol exists. `spl_dlsym` raises
+#    `runtime: spl_dlsym: unresolved symbol '<name>'` and kills the process on
+#    a miss, and every typed wrapper above it (`sym_checked`,
+#    `resolve_i64_checked`, `VersionedDynLib.has_symbol`) falls through to that
+#    same raise, because the `*mut i64` writeback those wrappers depend on is
+#    lost on a seed built before 2026-09-11
+#    (doc/08_tracking/bug/interpreter_refmut_extern_out_slots_never_written_back_2026-09-11.md).
+#    A loader that cannot refuse a missing symbol without dying cannot fail
+#    closed.
+#
+# The `rt_host_dynlib_*` family answers a miss with 0 and does not raise, so
+# this module is the small boundary that turns it into an admission decision.
+# It lives under the allowlisted `sffi/` provider directory precisely because
+# it holds the raw `rt_*` call sites; consumers import these wrappers.
+#
+# Execution deliberately rides the direct-return `spl_wffi_call_i64`, never the
+# `*_checked` transport: on this seed the checked transport reports `Ok(0)` for
+# a call that really produced 222 — a silent wrong answer, which is exactly the
+# failure class NFR-001 forbids.
+
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
+extern fn rt_host_dynlib_close(handle: i64) -> i64
+extern fn rt_file_hash_sha256(path: text) -> text
+
+use std.io_runtime.{file_exists}
+
+# RTLD_NOW: resolve every relocation at load time rather than discovering a
+# missing dependency at the first call.
+pub val DYNLIB_ADMIT_RESOLVE_NOW_V1: i64 = 2
+
+pub enum DynlibAdmissionErrorV1:
+    ArtifactAbsent
+    DigestUnreadable
+    DigestMismatch
+    LoadFailed
+
+# SHA-256 of the artifact's bytes on disk. Empty when the file cannot be read.
+pub fn dynlib_artifact_digest_hex_v1(path: text) -> text:
+    if path == "" or not file_exists(path):
+        return ""
+    rt_file_hash_sha256(path)
+
+# Hash first, map second: a shared object's ELF constructors run during load, so
+# a mismatched artifact has to be rejected while it is still inert.
+#
+# Honest limit — this is NOT fd-pinned. The digest is taken by path and the
+# artifact is then opened by the same path, so a swap between the two calls is
+# not detected, and the architecture's "identities bind to the exact bytes
+# mapped" is therefore not met yet. Closing it needs the snapshot-descriptor
+# route `ExactArtifactDynLib.load_exact_linux` already takes (hash
+# `/proc/self/fd/N`, dlopen that same descriptor), which is unavailable here
+# because `spl_dynlib_snapshot_linux` is unbacked on this seed.
+@unsafe(reason: "maps an unverified foreign artifact once its digest is bound", capabilities: [ffi])
+pub fn dynlib_admit_exact_v1(
+    path: text, expected_digest_hex: text
+) -> Result<i64, DynlibAdmissionErrorV1>:
+    if path == "" or not file_exists(path):
+        return Err(DynlibAdmissionErrorV1.ArtifactAbsent)
+    val actual = rt_file_hash_sha256(path)
+    if actual.len() != 64:
+        return Err(DynlibAdmissionErrorV1.DigestUnreadable)
+    if actual != expected_digest_hex:
+        return Err(DynlibAdmissionErrorV1.DigestMismatch)
+    val handle = rt_host_dynlib_open(path, DYNLIB_ADMIT_RESOLVE_NOW_V1)
+    if handle <= 0:
+        return Err(DynlibAdmissionErrorV1.LoadFailed)
+    Ok(handle)
+
+# Address of `name` in the admitted artifact, or 0 when it is not exported.
+# Never raises on a miss — that is the whole reason this wrapper exists.
+@unsafe(reason: "returns a raw foreign address from an admitted artifact", capabilities: [ffi, raw_ptr])
+pub fn dynlib_symbol_address_v1(handle: i64, name: text) -> i64:
+    if handle <= 0 or name == "":
+        return 0
+    rt_host_dynlib_symbol(handle, name)
+
+@unsafe(reason: "unmaps an admitted foreign artifact", capabilities: [ffi])
+pub fn dynlib_admitted_close_v1(handle: i64) -> bool:
+    if handle <= 0:
+        return false
+    rt_host_dynlib_close(handle) == 0
