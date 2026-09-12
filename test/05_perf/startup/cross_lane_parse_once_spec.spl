@@ -15,6 +15,10 @@ ONE file many times (`module_resolver/var_overlay.rs` reads
 `variants/__init__.spl` 49 times): that is a missing memo at a single site, a
 different defect with a different owner.
 
+Non-vacuity is fail closed: the probe's `skip=` outputs (no strace, no binary,
+entry failed) and an empty or 0-file census are FAILURES, not skips. A
+measurement that did not happen must never read as a pass.
+
 `spl_opens` is printed for information only and is NOT asserted. It stays far
 above the physical count (444 vs 129 here) because the JIT lane
 (`pipeline/module_loader.rs`) and the resolver's manifest probes issue the rest;
@@ -36,20 +40,24 @@ describe "cross-lane parsed-source cache":
     it "never reads one physical file from two lanes":
         val result = process_run("sh", [PROBE])
         val report = result.0
-        if report.contains("skip="):
-            print "[perf] cross_lane_parse_once SKIPPED: " + report.trim()
-            expect(true).to_equal(true)
-        else:
-            val reads = field(report, "reads")
-            val physical = field(report, "physical")
-            val crosssite = field(report, "crosssite")
-            val shared = field(report, "shared")
-            val sharedphys = field(report, "sharedphys")
-            print "[perf] cross_lane_parse_once reads=" + reads.to_text() + " physical=" + physical.to_text() + " crosssite=" + crosssite.to_text() + " shared=" + shared.to_text() + "/" + sharedphys.to_text() + " spl_opens=" + field(report, "opens").to_text()
-            expect(physical > 0).to_equal(true)
-            # The defect: 117 files read once per lane. Now zero.
-            expect(crosssite).to_equal(0)
-            # ... because both lanes read through the one shared cache, which
-            # reads each file it serves exactly once.
-            expect(shared > 0).to_equal(true)
-            expect(shared).to_equal(sharedphys)
+        # NON-VACUITY GUARD (fail closed). The probe prints `skip=no-strace`,
+        # `skip=no-binary` or `skip=entry-failed` when it observed nothing at
+        # all; the previous branch answered that with `expect(true)`, i.e. a
+        # green for zero evidence. A census that did not happen is a FAILURE.
+        print "[perf] cross_lane_parse_once probe report: " + report.trim()
+        expect(report.contains("skip=")).to_equal(false)
+        expect(report.trim().len() > 0).to_equal(true)
+        val reads = field(report, "reads")
+        val physical = field(report, "physical")
+        val crosssite = field(report, "crosssite")
+        val shared = field(report, "shared")
+        val sharedphys = field(report, "sharedphys")
+        print "[perf] cross_lane_parse_once reads=" + reads.to_text() + " physical=" + physical.to_text() + " crosssite=" + crosssite.to_text() + " shared=" + shared.to_text() + "/" + sharedphys.to_text() + " spl_opens=" + field(report, "opens").to_text()
+        expect(reads > 0).to_equal(true)
+        expect(physical > 0).to_equal(true)
+        # The defect: 117 files read once per lane. Now zero.
+        expect(crosssite).to_equal(0)
+        # ... because both lanes read through the one shared cache, which
+        # reads each file it serves exactly once.
+        expect(shared > 0).to_equal(true)
+        expect(shared).to_equal(sharedphys)

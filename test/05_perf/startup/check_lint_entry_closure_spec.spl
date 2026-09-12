@@ -18,11 +18,11 @@ unset and whole-module-compiles, `--lane interpreter` exports it. Each lane is
 held against its OWN baseline, so the lane gap cannot be banked as progress.
 Only the PHYSICAL pair is ratcheted -- `physical_files` and
 `source_bytes_physical`; `spl_opens` and `unit_spellings` move under the seed's
-cross-lane parse cache (L5-E) and are not held here. Skipping is fail-closed: a
-scenario asserts nothing only when the producer itself is absent or unrunnable
-(probed with `--list-entries`, which needs no `strace`). Once the producer
-answers, a missing or ERROR verdict FAILS -- a measurement that did not happen
-must never read as a pass.
+cross-lane parse cache (L5-E) and are not held here. There is NO skip path. The producer is
+probed with `--list-entries` (which needs no `strace`) and a producer that does
+not answer is a FAILURE, as is a missing or ERROR verdict, a 0 physical-file
+reading or a 0-byte reading -- a measurement that did not happen must never
+read as a pass.
 ## Verification guidance and troubleshooting
 A failure prints measured vs allowed for the entry and lane that regressed. The
 usual cause is a new `use` in an entry that resolves to a hub module:
@@ -126,9 +126,11 @@ fn measure_verdict(entry_id: text, lane: text) -> text:
     out.trim()
 
 fn assert_closure(entry_id: text, lane: text, base_files: i64, base_bytes: i64):
-    if not measurer_available():
-        print "[closure] SKIPPED {entry_id}/{lane}: {MEASURER} is absent or not runnable here"
-        return
+    # NON-VACUITY GUARD (fail closed). The producer is a TRACKED file in this
+    # repo, so it answering nothing means the measurement did not happen -- and
+    # a measurement that did not happen must never read as a pass. The early
+    # `return` this replaces let a scenario that asserted NOTHING count green.
+    expect("measurer runnable: {measurer_available()}").to_equal("measurer runnable: true")
     val verdict = measure_verdict(entry_id, lane)
     print "[closure] {entry_id}/{lane} verdict: {verdict}"
     # The producer is present, so a missing or ERROR verdict is a failure, not a
@@ -144,15 +146,15 @@ fn assert_closure(entry_id: text, lane: text, base_files: i64, base_bytes: i64):
     expect(bytes <= allowed(base_bytes)).to_equal(true)
 
 fn assert_ceiling(entry_id: text, lane: text, ceiling_files: i64, ceiling_bytes: i64):
-    if not measurer_available():
-        print "[closure] SKIPPED {entry_id}/{lane} ceiling: {MEASURER} is absent or not runnable here"
-        return
+    # NON-VACUITY GUARD (fail closed) -- see assert_closure above.
+    expect("measurer runnable: {measurer_available()}").to_equal("measurer runnable: true")
     val verdict = measure_verdict(entry_id, lane)
     expect(verdict.starts_with("PASS —")).to_equal(true)
     val files = field_after(verdict, "physical_files=")
     val bytes = field_after(verdict, "source_bytes_physical=")
     print "[closure] {entry_id}/{lane} ceiling check: {files} files / {bytes} bytes (ceiling {ceiling_files} / {ceiling_bytes})"
     expect(files > 0).to_equal(true)
+    expect(bytes > 0).to_equal(true)
     expect(files <= ceiling_files).to_equal(true)
     expect(bytes <= ceiling_bytes).to_equal(true)
 

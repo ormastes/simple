@@ -62,11 +62,17 @@
 # the one this entry runs under) and PRINTS the default lane for visibility
 # without asserting it, so a reviewer sees both numbers on every run.
 #
-# RED -> GREEN: `git stash push -- src/app/simple_lsp_mcp/main.spl` reproduces
-# the pre-change tree (interpreter-lane physical=38, ratio bound fails);
-# `git stash pop` restores this package's change (physical=6, ratio bound
-# holds). Skips honestly (prints a reason, asserts nothing) when `strace` is
-# unavailable or the measurement binary is not present on this host.
+# RED -> GREEN: copy `src/app/simple_lsp_mcp/main.spl` aside, `git checkout --`
+# it to reproduce the pre-change tree (interpreter-lane physical=38, ratio
+# bound fails), then put the copy back (physical=6, ratio bound holds).
+# Do NOT use `git stash` for this: refs/stash lives in the common .git and is
+# SHARED across every worktree of this clone, and has already handed one
+# agent another agent's changes (scratchpad/L5/SHARED_STASH_INCIDENT.md).
+#
+# NON-VACUITY (fail closed): this spec does NOT skip. If `strace` or the
+# measurement binary is missing, the measurement did not happen, and a
+# measurement that did not happen must never read as a pass -- every such
+# path FAILS with the status text naming the reason.
 
 use app.io.mod.{shell}
 
@@ -126,13 +132,16 @@ fn write_lines(path: text, lines: [text]):
 describe "LSP-MCP entry closure (src/app/simple_lsp_mcp/main.spl)":
     it "help: interpreter-lane physical files/bytes drop >= 30% below baseline":
         val (status, physical, bytes) = measure_closure("--help", "/dev/null", "l5c-help-{rt_time_now_unix_micros()}")
-        if status.starts_with("SKIP:"):
-            print "[perf] SKIP lsp-mcp-help closure: {status}"
-        else:
-            expect(status).to_equal("OK")
-            print "[perf] lsp-mcp-help interpreter lane: physical={physical} bytes={bytes} (baseline physical={BASELINE_PHYSICAL} bytes={BASELINE_BYTES})"
-            expect(physical * 10 <= BASELINE_PHYSICAL * 7).to_equal(true)
-            expect(bytes * 10 <= BASELINE_BYTES * 7).to_equal(true)
+        print "[perf] lsp-mcp-help interpreter lane: status={status} physical={physical} bytes={bytes} (baseline physical={BASELINE_PHYSICAL} bytes={BASELINE_BYTES})"
+        # NON-VACUITY GUARD (fail closed). A `SKIP:` status means strace or the
+        # measurement binary is absent -- i.e. nothing was observed. A 0-file
+        # or 0-byte reading means the pipeline broke. Both used to slip under
+        # every ratio bound; both are failures now.
+        expect(status).to_equal("OK")
+        expect(physical > 0).to_equal(true)
+        expect(bytes > 0).to_equal(true)
+        expect(physical * 10 <= BASELINE_PHYSICAL * 7).to_equal(true)
+        expect(bytes * 10 <= BASELINE_BYTES * 7).to_equal(true)
 
     it "3-frame stdio session (initialize, tools/list, ping): closure drops >= 30%, output byte-identical":
         val frames = [
@@ -144,23 +153,23 @@ describe "LSP-MCP entry closure (src/app/simple_lsp_mcp/main.spl)":
         write_lines(input_path, frames)
 
         val (status, physical, bytes) = measure_closure("", input_path, "l5c-3frame-{rt_time_now_unix_micros()}")
-        if status.starts_with("SKIP:"):
-            print "[perf] SKIP lsp-mcp-3frame closure: {status}"
-        else:
-            expect(status).to_equal("OK")
-            print "[perf] lsp-mcp-3frame interpreter lane: physical={physical} bytes={bytes} (baseline physical={BASELINE_PHYSICAL} bytes={BASELINE_BYTES})"
-            expect(physical * 10 <= BASELINE_PHYSICAL * 7).to_equal(true)
-            expect(bytes * 10 <= BASELINE_BYTES * 7).to_equal(true)
+        print "[perf] lsp-mcp-3frame interpreter lane: status={status} physical={physical} bytes={bytes} (baseline physical={BASELINE_PHYSICAL} bytes={BASELINE_BYTES})"
+        # NON-VACUITY GUARD (fail closed) -- see the --help scenario above.
+        expect(status).to_equal("OK")
+        expect(physical > 0).to_equal(true)
+        expect(bytes > 0).to_equal(true)
+        expect(physical * 10 <= BASELINE_PHYSICAL * 7).to_equal(true)
+        expect(bytes * 10 <= BASELINE_BYTES * 7).to_equal(true)
 
-        if not is_binary_available():
-            print "[perf] SKIP 3-frame byte-identity: measurement binary unavailable"
-        else:
-            val output = run_stdio(input_path)
-            var response_count = 0
-            for ch_line in output.split("\n"):
-                if ch_line.trim().starts_with("{"):
-                    response_count = response_count + 1
-            expect(response_count).to_equal(3)
+        # Same guard on the protocol half: an absent binary is no evidence.
+        expect(is_binary_available()).to_equal(true)
+        val output = run_stdio(input_path)
+        expect(output.len() > 0).to_equal(true)
+        var response_count = 0
+        for ch_line in output.split("\n"):
+            if ch_line.trim().starts_with("{"):
+                response_count = response_count + 1
+        expect(response_count).to_equal(3)
 
     it "resources/list (tools.spl-routed) frame still answers, byte-identical to the pre-change baseline":
         # Correctness pin for the lazy path: this method is NOT reachable from
@@ -173,10 +182,12 @@ describe "LSP-MCP entry closure (src/app/simple_lsp_mcp/main.spl)":
         ]
         val input_path = "/tmp/lsp_mcp_entry_closure_resources_input.jsonl"
         write_lines(input_path, frames)
+        # NON-VACUITY GUARD (fail closed): an empty response is indistinguishable
+        # from an absent binary, and neither is evidence that the lazy
+        # `use .tools` edge resolves. Both FAIL.
+        expect(is_binary_available()).to_equal(true)
         val output = run_stdio(input_path)
-        if output == "":
-            print "[perf] SKIP resources/list byte-identity: measurement binary unavailable"
-        else:
-            expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
-            expect(output.contains("\"resources\":[{\"uri\":\"simple-summary://\"")).to_equal(true)
-            expect(output.contains("\"error\":")).to_equal(false)
+        expect(output.len() > 0).to_equal(true)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
+        expect(output.contains("\"resources\":[{\"uri\":\"simple-summary://\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
