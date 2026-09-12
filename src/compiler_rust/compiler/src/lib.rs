@@ -85,6 +85,7 @@ pub mod trait_coherence;
 pub mod type_check;
 pub mod type_inference_config;
 pub mod units;
+pub mod bounded_cache;
 pub mod perf_counters;
 pub mod value;
 pub mod value_bridge;
