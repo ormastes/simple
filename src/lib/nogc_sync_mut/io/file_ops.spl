@@ -103,7 +103,18 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
     unsafe(capabilities: [ffi]):
         content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
     if content.?:
-        Ok(content.unwrap())
+        # `.len() < 0` is the nil marker. The extern can answer "present" with a
+        # payload that is itself nil, and `.?` only tests the OPTIONAL, not the
+        # value inside it -- so a failed read was handed back as `Ok(<nil>)`.
+        # Callers then saw a successful read of an empty string and reported the
+        # file as empty rather than unreadable, which is exactly how the Stage 2
+        # backend diagnostic ("wrote 29 bytes but reads back -1") stayed
+        # invisible across many bootstrap cycles. Same nil-vs-empty family as the
+        # secure temp dir and provider diagnostic guards.
+        val value = content.unwrap()
+        if value.len() < 0:
+            return Err("regular no-follow bounded file read returned nil: {path}")
+        Ok(value)
     else:
         Err("regular no-follow bounded file read failed: {path}")
 
