@@ -1,7 +1,7 @@
 # rv32 NVMe fw: hand-assembled `_start` stub uses hard-float flags, mismatching the compiler's soft-float object
 
 - **Date:** 2026-07-20
-- **Status:** fix in flight (stub flags aligned to `rv32imac`/`ilp32`)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (blocks the firmware link outright; latent since 2026-07-07)
 - **Area:** `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`
 
@@ -87,3 +87,6 @@ thermal-model owner before touching it.
 
 - `doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`
   (the SMP variant of this firmware still cannot be built at all)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # SimpleOS pthread lock false success
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -25,3 +26,6 @@ wait/park transition exists.
 `test/01_unit/os/libc/simpleos_pthread_sync_honesty_test.c` passed strict C
 compilation with SimpleOS headers. It checks all mutex/rwlock operations,
 null handling, and that failed initialization preserves sentinel storage.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

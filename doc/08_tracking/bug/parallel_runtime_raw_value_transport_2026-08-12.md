@@ -1,4 +1,5 @@
 # Parallel runtime: raw RuntimeValue transport violates isolation
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-08-12
 - **Severity:** P0 (ownership/isolation correctness)
@@ -107,3 +108,6 @@ policy-selected capacity, cancellation/terminal receipts, and admitted Stage 4
 evidence remain required. Session freshness and replay lifecycle details are
 tracked separately in
 `process_transfer_session_replay_identity_2026-08-12.md`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

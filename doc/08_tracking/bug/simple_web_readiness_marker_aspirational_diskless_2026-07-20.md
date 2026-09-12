@@ -1,7 +1,7 @@
 # simple_web readiness marker is aspirational; diskless desktop boots never render web content
 
 - **ID:** simple_web_readiness_marker_aspirational_diskless_2026-07-20
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (check-honesty: readiness line overstates surface state; web surface unverified in-guest)
 - **Found by:** WEB-CHECK surface verification lane, 2026-07-20
 
@@ -66,3 +66,6 @@ diskless System Console. Net: the readiness marker stays aspirational until the
 FS-trait sentinel is fixed AND the render-loop sentinels
 (`frame_for_time`/`next_frame_due_micros`) and the frozen-placeholder bug are
 cleared.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

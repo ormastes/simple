@@ -1,4 +1,5 @@
 # riscv64 freestanding: a `bool` read out of a tuple or array is ALWAYS `true`
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: **OPEN** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
   build-and-run sanity). Not fixed.
@@ -489,3 +490,6 @@ Probe, in-guest, the actual function count of the built HIR module immediately
 before `interpret_hir_module`, and print the raw value rather than a comparison
 result. Do not assume the module is empty: `phase=mir-ok functions lowered`
 printed, which is weak evidence that lowering saw something.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

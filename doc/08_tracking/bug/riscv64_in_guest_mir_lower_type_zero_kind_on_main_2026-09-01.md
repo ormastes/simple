@@ -1,4 +1,5 @@
 # riscv64 in-guest: MIR lowering rejects `main` with a raw-0 HirType kind
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: **OPEN** — the current blocker for goal item 1 row 2, and a NEW one.
 - Date: 2026-09-01
@@ -170,3 +171,6 @@ callee `add` from `main`'s body. That is a separate defect — row 1
 (`interpreter_hello`) is green but its program never makes a cross-function
 call, so nothing on this lane had exercised callee resolution before. Filed as
 the row's next blocker; it is NOT a regression of this fix.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

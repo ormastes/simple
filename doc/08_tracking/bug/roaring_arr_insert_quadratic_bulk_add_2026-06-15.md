@@ -1,4 +1,5 @@
 # Bug: roaring arr_insert O(n²) scan on sequential bulk-add causes interpreter timeout
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/search/roaring_spec.spl -> 12 passed, 3 failed, still reproduces)
 
 **Date:** 2026-06-15
 **ID:** roaring_arr_insert_quadratic_bulk_add_2026-06-15
@@ -77,3 +78,6 @@ probe:
 - AND([1,3,5,7,9], [3,4,5,6,9,10]) → cardinality 3
 - OR → cardinality 8
 - ANDNOT → cardinality 2
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/search/roaring_spec.spl` on the deployed seed; 3 of 15 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

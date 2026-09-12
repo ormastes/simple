@@ -1,4 +1,5 @@
 # SimpleOS ARM32 process mapping integration blocker — 2026-08-24
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Current safe prerequisite
 
@@ -41,3 +42,6 @@ ARM32 short-descriptor root. It owns PT_LOAD frames and L2 tables, performs
 copy/zero/readback, and retains residual resources after partial rollback.
 No test, build, SPipe, benchmark, optimizer, bootstrap, or runtime verification
 was run for this update, so it does not establish ARM32 execution readiness.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

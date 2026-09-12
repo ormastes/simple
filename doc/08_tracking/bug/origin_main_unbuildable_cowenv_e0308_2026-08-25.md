@@ -1,4 +1,5 @@
 # origin/main unbuildable: E0308 CowEnv at interpreter_eval.rs:1777 (2026-08-25)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 
@@ -39,3 +40,6 @@ would have caught this — the pushing lane evidently did not run it (hook
 bypass, same failure mode as the 2026-08-11 incident). No new guard needed;
 the existing guard's marker store simply has no green entry for this content,
 so the next guarded push would have FAILed.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

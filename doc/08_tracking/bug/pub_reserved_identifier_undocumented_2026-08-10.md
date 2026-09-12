@@ -1,4 +1,5 @@
 # `pub` rejected as an identifier but absent from the reserved-keyword list
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/doc/reserved_keyword_pub_documented_spec.spl -> 0 passed, 3 failed, still reproduces)
 
 **RESOLVED 2026-08-17** — option (a): `pub` is now documented as reserved in
 `doc/07_guide/quick_reference/syntax_quick_reference.md` (new "Reserved
@@ -55,3 +56,6 @@ This note also documents the same-family records
 `examples_identifier_rejected_in_named_argument_position_2026-08-10.md`; those
 remain OPEN as *behaviour* requests (make the tokens contextual), but the
 "undocumented" half of all three is now closed.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/doc/reserved_keyword_pub_documented_spec.spl` on the deployed seed; 3 of 3 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

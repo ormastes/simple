@@ -1,4 +1,5 @@
 # Bug: Runaway `simple` process OOMs the whole host (session crash)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Date:** 2026-06-14
 - **Severity:** P1 (takes down the entire machine / agent session)
@@ -66,3 +67,6 @@ is killed at the 4 GB cap instead of thrashing host swap into a global OOM.
   accumulates unboundedly. Hunt which spec/input balloons and add per-spec
   reclamation or process isolation. Tracked separately — the cap above prevents
   the host crash regardless of which leak fires.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

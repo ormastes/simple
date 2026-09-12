@@ -4,7 +4,7 @@
 - **Severity:** P2 (blocks loading `common.ui.style`, hence the slides/word GUI
   widget render chain, from new dependents)
 - **Discovered:** 2026-06-14, wiring slides render to the office style resolver
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Summary
 
@@ -71,3 +71,6 @@ Note this instance narrows the trigger usefully: `rows` here is a **function
 parameter** declared `rows: [i64]`, not a local `var`. So the disambiguation
 fails for parameter bindings too, not just locals — worth covering in whatever
 fix lands. Sibling report: `u8_index_generics_deprecation_false_positive_test_path_2026-06-28.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

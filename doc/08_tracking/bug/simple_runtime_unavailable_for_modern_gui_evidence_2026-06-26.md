@@ -1,4 +1,5 @@
 # Simple Runtime Unavailable for Modern GUI Evidence
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/app/ui/web_wm_modern_shell_spec.spl -> 3 passed, 2 failed, still reproduces)
 
 Date: 2026-06-26
 
@@ -47,3 +48,6 @@ bin/simple test test/02_integration/app/ui/web_wm_modern_shell_evidence_spec.spl
 At least one deployed runtime should be available at `bin/simple`,
 `bin/release/simple`, or another documented wrapper path so SPipe lanes can run
 without depending on a segfaulting local native binary.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/ui/web_wm_modern_shell_spec.spl` on the deployed seed; 2 of 5 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

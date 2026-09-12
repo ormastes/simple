@@ -1,4 +1,5 @@
 # `rt_time_now_micros()` deltas print as tagbox garbage — in-language microbenchmarking is unusable
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: OPEN
 - Found: 2026-08-02, while A/B-measuring a CPU-lane hot-path fix
@@ -65,3 +66,6 @@ larger run.
 - Whether the corruption is in `rt_time_now_micros()`'s return typing, in `i64`
   subtraction, or in string interpolation of the result. The three-way split
   should be resolved by printing each of `a0`, `a1`, and `a1 - a0` separately.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

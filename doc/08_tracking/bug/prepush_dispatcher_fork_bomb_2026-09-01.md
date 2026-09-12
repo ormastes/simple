@@ -1,4 +1,5 @@
 # pre-push dispatcher fork bomb: launcher-shaped `pre-push.local` recursed until pid exhaustion (2026-09-01)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 A running test suite began reporting spec failures whose only error was:
@@ -64,3 +65,6 @@ This is the mechanism behind the recurring
 error that has been forcing `--no-verify` on routine pushes. That message was
 the recursion protection firing, i.e. a symptom of this cycle — with the cycle
 removed, pushes should no longer need to route around the guards.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Bug: check-simpleos-wm-qmp-drag-delta-evidence.shs invokes a nonexistent entry file
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Date:** 2026-07-02
 - **Severity:** medium (gate cannot run at all)
@@ -274,3 +275,6 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   exercises the x86_64 SimpleOS LLVM linker instead of falling through the
   generic x86_64 Cranelift default. The environment override still wins for
   explicit Cranelift diagnostics.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

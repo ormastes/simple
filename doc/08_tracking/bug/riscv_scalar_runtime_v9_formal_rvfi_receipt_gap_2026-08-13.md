@@ -1,4 +1,5 @@
 # V9 scalar runtime lacks solver-backed RVFI receipts
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: implementation scaffold complete; external formal evidence blocked.
 - Owner: RISC-V Gen2 formal/backend lane.
@@ -30,3 +31,6 @@ After an admitted self-hosted CLI is deployed, run the V9 RVFI GHDL fixture
 once and then the new V9-specific formal runner with Yosys/GHDL/SymbiYosys and
 Boolector receipts. Do not substitute bootstrap output or the legacy ADD-only
 aggregate for these jobs.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

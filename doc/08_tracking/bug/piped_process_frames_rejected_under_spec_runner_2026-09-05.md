@@ -1,4 +1,5 @@
 # Real-child process frames are REJECTED under the spec runner but ACCEPTED from `fn main()` — identical code
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl -> 2 passed, 2 failed, still reproduces)
 
 Date: 2026-09-05. Found while trying to close
 `doc/03_plan/agent_tasks/parent_authoritative_actor_process.md` E1 box
@@ -80,3 +81,6 @@ with `src/compiler_rust/target/debug/simple` (current-source Rust seed, built
 2026-09-04 18:13) — the sanctioned `bin/release/aarch64-apple-darwin/simple_seed`
 (2026-07-25) cannot parse current stdlib source at all, see
 `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl` on the deployed seed; 2 of 4 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

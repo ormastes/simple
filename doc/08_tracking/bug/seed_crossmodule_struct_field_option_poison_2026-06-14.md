@@ -1,4 +1,5 @@
 # BUG: seed interpreter poisons cross-module struct field access to `Option` under a broad import closure
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **ID:** `seed_crossmodule_struct_field_option_poison`
 - **Severity:** P1 (false-RED on a green GUI gate; blocks any `run --mode=interpreter` app that
@@ -119,3 +120,6 @@ tests; the 190 crate-wide failures are pre-existing, in `value::matches_type`, r
 selection and module path-resolution — subsystems this change never touches). NOTE: a full 3-stage
 bootstrap was NOT run (interpreter-only change; disk-constrained env) — run `bin/simple build
 bootstrap` to fully certify.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

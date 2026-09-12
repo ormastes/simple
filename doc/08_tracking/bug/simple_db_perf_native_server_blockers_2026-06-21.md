@@ -1,4 +1,5 @@
 # Simple DB Perf Native/Server Blockers - 2026-06-21
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Goal: embedded and full/server DB CRUD benchmarks should match or beat SQLite
 and PostgreSQL where comparable.
@@ -91,3 +92,6 @@ Crash-safety note:
 
 - Do not loop native/release rebuilds while investigating this; run one bounded
   native check at a time and stop on segfault/core-dump/fallback.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

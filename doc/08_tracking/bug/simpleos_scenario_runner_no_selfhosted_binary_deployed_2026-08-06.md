@@ -1,4 +1,5 @@
 # Bug: no genuine self-hosted `simple` binary deployed in this environment — scenario runner can never find a runnable compiler
+**Status:** OPEN (unverified 2026-09-12)
 
 **ID:** simpleos-scenario-runner-no-selfhosted-binary-deployed-2026-08-06
 **Domain:** os/simpleos build tooling (`src/os/_QemuRunner/os_build_run.spl`, deployment state)
@@ -86,3 +87,6 @@ the probe-timeout fix that surfaced it.
 
 - `doc/08_tracking/bug/os_build_scenario_runner_5s_compiler_probe_timeout_2026-08-06.md`
   — the probe-timeout bug fixed alongside this discovery.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

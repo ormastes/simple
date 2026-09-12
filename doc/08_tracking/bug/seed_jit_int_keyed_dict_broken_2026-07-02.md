@@ -3,7 +3,7 @@
 **Date:** 2026-07-02
 **Component:** Rust seed JIT (cranelift path) — dict lowering / runtime dict SFFI
 **Severity:** Critical — blocks stage2 bootstrap
-**Status:** Open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -109,3 +109,6 @@ Still no stage2 binary produced. This next failure is a separate issue
 (tracked separately, not chased further here) and may itself be another
 symptom of the same underlying int-keyed Dict corruption (e.g. a
 function-list/module dict losing entries).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

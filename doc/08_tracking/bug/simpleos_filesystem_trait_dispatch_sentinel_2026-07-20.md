@@ -1,7 +1,7 @@
 # SimpleOS hosted FileSystem-layer trait dispatch still sentinels (ud2) after C8 BlockDevice fix
 
 - **ID:** simpleos_filesystem_trait_dispatch_sentinel_2026-07-20
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (blocks enabling the hosted FAT32 mount / app-surface
   materialization on evidence boots)
 - **Found by:** BROWSER-FS lane, 2026-07-20
@@ -138,3 +138,6 @@ OR fix the FileSystem-trait dispatch resolution itself (preferred).
 3. Interim: robustly gate `g_vfs_read_file_bytes` off the hosted trait path
    for pure-Simple boots (workaround above, once the const-fold issue is
    addressed).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

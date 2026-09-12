@@ -1,4 +1,5 @@
 # NVFS stack: a family of functions that are CALLED and never DEFINED (2026-09-01)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/os/services/vfs/vfs_nvfs_connector_spec.spl -> 12 passed, 2 failed, still reproduces)
 
 ## Summary
 
@@ -287,3 +288,6 @@ rung asserting that no load-bearing NVFS symbol appears in the build's
 prevented this record from asserting a green L4/L5. Do NOT baseline the 77
 fabricated stubs to silence the warning — that converts the only surviving
 signal into noise.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/services/vfs/vfs_nvfs_connector_spec.spl` on the deployed seed; 2 of 14 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

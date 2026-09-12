@@ -3,7 +3,7 @@
 - **Filed:** 2026-07-23
 - **Component:** `src/compiler_rust/` bootstrap seed — JIT (Cranelift) backend, constant evaluation
 - **Severity:** Medium (Rust-seed-only; interpreter and real hardware unaffected)
-- **Status:** Open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Summary
 
@@ -58,3 +58,6 @@ than truncated. `i64` globals take a different, correct path. Not reproducible i
 the interpreter, so the defect is isolated to the Cranelift const-eval path in
 `src/compiler_rust/`. This is seed-only and off the FPGA critical path (the
 hardware model is synthesized from interpreter-verified `.spl`, never the JIT).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

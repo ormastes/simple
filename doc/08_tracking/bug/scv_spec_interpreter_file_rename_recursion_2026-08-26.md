@@ -1,4 +1,5 @@
 # SCV specs fail on test-runner interpreter: `file_rename` recursion depth 1000
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/integration/app/scv_forced_unparsed_spec.spl -> 6 passed, 0 failed)
 
 - Date: 2026-08-26
 - Found via: sspec wave-2 dual check (batch D), `/tmp/sspec_census/w2_03`
@@ -24,3 +25,6 @@ stack overflow: recursion depth 1000 exceeded in function 'file_rename'
 Pre-existing lane failure at the time of the sspec modernization pass; assertions left
 untouched, spec scores 95 with 0 blockers. Unblock condition: fix/land the `file_rename`
 interpreter recursion handling or the owning scv WIP session lands its tree.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/integration/app/scv_forced_unparsed_spec.spl` on the deployed seed; the spec now passes in full (6/6), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

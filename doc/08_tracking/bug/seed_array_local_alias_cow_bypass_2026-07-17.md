@@ -1,6 +1,6 @@
 # Seed (Rust interpreter): arrays alias on local-bind despite Arc/COW design
 
-**Status:** Open (root cause NOT pinned down)  **Found:** 2026-07-17 (task #186, lane S42)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Path:** `bin/simple run` (Rust seed AST interpreter, `src/compiler_rust/driver` /
 `src/compiler_rust/compiler/src/interpreter*`) — sibling of #186's native-side fix
 (`src/compiler/50.mir/mir_lowering_stmts.spl`, `maybe_copy_array_value`).
@@ -90,3 +90,6 @@ Per repo rule ("Fix .spl not Rust" / pure-Simple-first), and since native
 total=17 pass=17 fail=0 codegen_fallback_hits=0), this seed-side gap is
 lower priority: `bin/simple run`/oracle-mode is a bootstrap/comparison tool,
 not the default tooling path.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

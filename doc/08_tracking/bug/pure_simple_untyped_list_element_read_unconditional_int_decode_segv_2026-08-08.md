@@ -1,4 +1,5 @@
 # Pure-Simple `list`-param element read: correct for int content, SIGSEGV on non-int content (2026-08-08)
+**Status:** OPEN (unverified 2026-09-12)
 
 Assignment: implement, in pure Simple, the fix for the seed-documented
 `<<3` untyped-`list`-element-read bug
@@ -148,3 +149,6 @@ plus a `KNOWN-OPEN` line reporting `list0=40 list1=56` (value*8). That KNOWN-OPE
 belongs to the SEED lane and is tracked by
 `untyped_list_element_read_seed_rootcause_2026-07-30.md`, not by this pure-Simple
 doc.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

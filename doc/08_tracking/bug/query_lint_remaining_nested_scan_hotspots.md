@@ -1,4 +1,5 @@
 # Query lint remaining nested-scan hotspots
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -28,3 +29,6 @@ Each rule consumes shared indexed source or typed-HIR facts; generated cardinali
 fixtures bound work and allocations; exact diagnostic order, code, severity, and source
 span are preserved or a deliberate semantic correction is documented. Unknown typed
 facts fail closed rather than upgrading textual heuristics.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

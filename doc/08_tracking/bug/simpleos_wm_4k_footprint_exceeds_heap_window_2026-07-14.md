@@ -1,6 +1,6 @@
 # SimpleOS WM 4K regressed: DrawIR first-frame footprint exceeds the entire sub-384MB heap window
 
-- **Status:** Open (regression; NOT fixable by heap sizing — needs OS-layout work)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Filed:** 2026-07-14
 - **Area:** os / simpleos / x86_64 / baremetal-heap / WM-DrawIR
 - **Severity:** high (blocks the 4K WM harness PASS that landed 2026-07-12 `603fabe601`)
@@ -192,3 +192,6 @@ NET SimpleOS WM 4K: advanced from boot-crash → boots through pmm/vmm/vfs/frame
 4K-scanout/engine2d/input/compositor/shell-init (via `1fe2653d` O(n^2) + `3e5ef0c9`
 compositor + this font guard); remaining blocker is the systemic null-deref on any
 Fat32Core read against the failed NVMe mount — deep VFS/NVMe-driver work.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

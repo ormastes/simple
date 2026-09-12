@@ -1,4 +1,5 @@
 # Hook bypass evidence — 2026-08-19 (lane rt-audit, 1 docs commit)
+**Status:** OPEN (unverified 2026-09-12)
 
 `git push` was run with `--no-verify`. This records WHY, with evidence, per
 `.claude/rules/vcs.md`'s requirement that a bypass never be silent. It is the
@@ -67,3 +68,6 @@ The real fix is redeploying `bin/simple` from a tree that carries the
 this guard will keep blocking every lane on this host, and every lane will keep
 bypassing it — which is how a fail-closed guard degrades into a rubber stamp.
 Tracked here so the second occurrence is not mistaken for a one-off.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

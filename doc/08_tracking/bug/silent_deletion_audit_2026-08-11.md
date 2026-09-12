@@ -1,4 +1,5 @@
 ## Row #3 re-verified 2026-08-17 — RESTORED, close this row
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/std/mock_spec.spl -> 3 passed, 1 failed, still reproduces)
 
 `src/compiler_rust/runtime/src/value/collections.rs` is back at **6148 lines /
 210 `fn rt_*`** (audit recorded 4211/198 as still-missing). `rt_array_reduce`
@@ -161,3 +162,6 @@ already restoring this one — do not act on it here.**
   post-commit line count matching the stated scope), 0 UNCLEAR.
 - No new, still-unaddressed silent deletions were found beyond the already-reported
   `6e2f613d302941d0733bf5907355e68de8e9f7f1`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/std/mock_spec.spl` on the deployed seed; 1 of 4 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

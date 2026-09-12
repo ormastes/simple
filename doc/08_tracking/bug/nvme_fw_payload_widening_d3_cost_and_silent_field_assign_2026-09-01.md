@@ -1,4 +1,5 @@
 # NVMe FW payload widening (D1-D3): measured cost regression + a silent-field-assign hazard
+**Status:** OPEN (unverified 2026-09-12)
 
 Filed 2026-09-01 while landing D1-D3 of
 `doc/03_plan/hardware/nvme_command_set_and_payload_completeness_plan.md`
@@ -66,3 +67,6 @@ Not fixed here — the compiler is out of this change's scope
 (`examples/09_embedded/simpleos_nvme_fw/fw/*.spl` only). The specific instance
 was repaired by renaming the reference to `nt.page`, and the assertion it guards
 is unchanged.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

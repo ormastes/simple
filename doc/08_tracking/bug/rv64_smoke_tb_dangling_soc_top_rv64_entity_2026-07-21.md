@@ -1,7 +1,7 @@
 # rv64 smoke testbench instantiates dangling entity `soc_top_rv64`
 
 - **Date:** 2026-07-21
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (clean-checkout reproducibility failure; blocks honest
   rv64 smoke evidence)
 - **Area:** `examples/09_embedded/fpga_riscv/rtl/tb_rv64_wb_soc_smoke.vhd`
@@ -45,3 +45,6 @@ Either:
 
 The checker staying RED on the current tree is correct fail-closed behavior;
 this doc is the tracked justification, not an excuse to exclude the file.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Phase 3 HIR import materialization time and RSS
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -26,3 +27,6 @@ by rebuilding the complete imported `CompilerDriver` method/type closure for
 every driver extension module. Preserve module-local symbol identity while
 caching only immutable terminal-route indexes; do not retain prior-module HIR
 graphs or replace the Pure-Simple path with Rust/C.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # BUG: SMF header `source_hash` write/read offset mismatch (68 vs 84)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **ID:** `smf_header_source_hash_offset_mismatch`
 - **Severity:** P2 (latent — user-script SMF cache validator may read the wrong bytes)
@@ -28,3 +29,6 @@ reader agree; add a round-trip spec (`write header → read field → equal`).
 ## Status
 OPEN — recorded. Out of AC-7 scope (sidecar lane unaffected). Validate before relying on the
 user-script SMF source-hash field.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

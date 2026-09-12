@@ -1,4 +1,5 @@
 # SimpleOS aligned allocation ownership boundary
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -31,3 +32,6 @@ semantics for over-alignment, invalid alignment/size, and page-aligned APIs.
 To support alignment above 16 bytes, add a registered aligned-allocation block
 format to the dlmalloc owner and make `free`/`realloc` recognize it before
 advertising those requests as supported.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

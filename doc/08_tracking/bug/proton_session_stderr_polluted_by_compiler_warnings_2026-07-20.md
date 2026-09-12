@@ -1,4 +1,5 @@
 # `proton_session_plan_command_spec.spl`: `stderr == ""` fails because `bin/simple run` emits style-lint warnings to stderr
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/app/proton_session_plan_command_spec.spl -> 0 passed, 1 failed, still reproduces)
 
 **Date:** 2026-07-20
 **Component:** `bin/simple run` diagnostic-warning output (style-lint
@@ -49,3 +50,6 @@ Spec left unmodified — the `stderr == ""` contract is a reasonable thing to
 want for a "clean" CLI plan-printing command; whether the fix is
 suppressing lint noise from `run` globally, or scoping it away from this
 app's dependency chain, needs product input.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/proton_session_plan_command_spec.spl` on the deployed seed; 1 of 1 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

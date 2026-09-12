@@ -1,4 +1,5 @@
 # SimpleOS: the two `default_axes == "static"` faces are rejected by selected-asset validation -- 2026-08-09
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl -> 3 passed, 0 failed)
 
 ## Status 2026-08-17: the read-derived root cause below is FALSIFIED by execution
 
@@ -234,3 +235,6 @@ and verify by diffing **both directions** -- origin's version may be ahead on
 some axes and behind on others, so overwriting either way can revert real work.
 Read both the `-` and `+` sides of `diff -u <origin> <local>` before choosing,
 then apply the readiness/diagnostic change on top of the reconciled file.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl` on the deployed seed; the spec now passes in full (3/3), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

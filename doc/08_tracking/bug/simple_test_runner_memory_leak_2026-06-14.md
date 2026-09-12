@@ -1,4 +1,5 @@
 # Bug: `bin/simple test` runner grows unbounded RSS → OOM-killed (45–118 GB)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Date:** 2026-06-14
 - **Severity:** P1 (kills CI containers via kernel global_oom)
@@ -129,3 +130,6 @@ still climbs from output parsing. (Use a deliberately verbose/large-output spec 
 - `src/lib/nogc_sync_mut/test_runner/test_runner_fork.spl` — fork model (child reclaimed, parent not)
 - `src/runtime/runtime_fork.c:74-78,150` — parent capture buffers reset per spec (NOT the leak)
 - `src/runtime/runtime.c:1014`, `src/runtime/runtime_memtrack.h:94` — no-GC allocator
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

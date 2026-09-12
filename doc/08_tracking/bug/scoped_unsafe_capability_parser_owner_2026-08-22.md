@@ -1,4 +1,5 @@
 # Scoped unsafe capability parser owner (2026-08-22)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/frontend/scoped_unsafe_function_body_parser_spec.spl -> 0 passed, 1 failed, still reproduces)
 
 ## Symptom
 
@@ -67,3 +68,6 @@ set lacks 45 runtime providers (including SDL2 and legacy I/O symbols). This is
 positive evidence for the scoped compiler question, but not an executable or a
 full Stage-4 acceptance result. Logs and `/usr/bin/time -v` receipts are under
 `build/native_probe/mcdc_cycle3_sffi_hosted/`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/frontend/scoped_unsafe_function_body_parser_spec.spl` on the deployed seed; 1 of 1 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

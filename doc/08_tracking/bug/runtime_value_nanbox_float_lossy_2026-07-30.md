@@ -1,4 +1,5 @@
 # RuntimeValue NaN-boxing is lossy for all normal floats (2026-07-30)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 `RuntimeValue.from_float(x)` → `as_float()` does NOT round-trip. For any normal
@@ -39,3 +40,6 @@ scheme's test suite. Do not hack in place.
 Parallel divergence scan lane 4 (2026-07-30). Anchor-family sibling: the landed
 `04a68b28` (logical-vs-bitwise operators) and `e9bee8a2baf` (gc_async_mut byte
 serialization) fixes.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

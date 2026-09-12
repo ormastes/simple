@@ -1,4 +1,5 @@
 # riscv64 freestanding: the top-level declaration walk yields the SAME function twice
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: **OPEN** — the current blocker for goal item 1 row 2 (SimpleOS riscv64
   in-guest build-and-run sanity).
@@ -244,3 +245,6 @@ seen downstream on this row. The new blocker is unrelated: `fn main():`
 declares no return type, and the producer of its implicit return HirType leaves
 `kind` at raw 0. Filed as
 `riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
