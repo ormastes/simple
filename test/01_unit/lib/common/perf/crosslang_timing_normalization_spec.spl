@@ -1,0 +1,131 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# plan: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L10, rows 735-769 / 1280 / 1303-1305)
+
+# @cover src/lib/common/perf/crosslang_timing_normalization.spl 80%
+# @tag: unit, perf, cross_language, l10, normalization
+#
+# L10 recorded rejection cause 1 — TIMING NORMALIZATION.
+# Astra rejected the L10 parity candidate in part because "Simple and peer
+# `warm_ms` units differ" and because each adapter carried its own warmup /
+# discard shape (staged C/Rust/Go fixtures ran 1,024 warmup + 1,024 timed
+# passes while Simple/Python/Bun ran 1 warmup + 1,024 timed). This spec pins
+# ONE shared policy — a single warmup/discard count, a single clock source and
+# a single unit — applied identically to every adapter, over a SYNTHETIC sample
+# set. No live benchmark is run here and none may be: the plan forbids a fourth
+# collector cycle.
+
+use std.spec
+use std.spec.step
+use common.perf.crosslang_timing_normalization.{
+    NormalizationPolicy,
+    RawSeries,
+    crosslang_policy_v1,
+    crosslang_normalize,
+}
+
+fn synthetic_raw(adapter_id: text, clock_source: text, unit: text) -> RawSeries:
+    """A synthetic 20-sample series: 5 inflated warmup samples then 15 steady
+    samples. Deliberately shaped so a WRONG discard count is visible in the
+    output rather than hidden by averaging."""
+    RawSeries(
+        adapter_id: adapter_id,
+        clock_source: clock_source,
+        unit: unit,
+        values: [9000, 8000, 7000, 6000, 5000,
+                 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 900],
+    )
+
+describe "crosslang timing normalization — one shared policy for every adapter":
+    # @manual_section L10 rejection cause 1
+
+    it "applies byte-identical normalization to two different adapters":
+        """The collector normalizes every adapter's raw series with the same
+        policy, so two adapters that produced the same raw numbers end up with
+        the same normalized series."""
+        # @req REQ-SSPEC-UNIT
+        step("normalize the same synthetic series under two adapter identities")
+        val policy = crosslang_policy_v1()
+        val a = crosslang_normalize(policy, synthetic_raw("simple", policy.clock_source, policy.unit))
+        val b = crosslang_normalize(policy, synthetic_raw("rust", policy.clock_source, policy.unit))
+        assert_false(a.rejected)
+        assert_false(b.rejected)
+        # Fail closed on vacuity: an empty normalized series must never pass.
+        assert_true(a.values.len() == 15)
+        assert_true(b.values.len() == 15)
+        assert_true(a.values.len() == b.values.len())
+        var i: i64 = 0
+        var equal_count: i64 = 0
+        while i < a.values.len():
+            assert_true(a.values[i.to_i32()] == b.values[i.to_i32()])
+            equal_count = equal_count + 1
+            i = i + 1
+        assert_true(equal_count == 15)
+        # The 5 warmup samples were really discarded — the head is the steady
+        # value, not the 9000us warmup sample.
+        assert_true(a.values[0] == 100)
+        assert_true(a.values[14] == 900)
+        assert_true(a.policy_id == policy.policy_id)
+        assert_true(a.unit == policy.unit)
+
+    it "rejects a series whose unit differs from the policy":
+        """The exact `warm_ms` defect: a peer reporting milliseconds while the
+        policy is microseconds is a typed rejection, never a silent unit mix."""
+        # @req REQ-SSPEC-UNIT
+        step("normalize a millisecond series under a microsecond policy")
+        val policy = crosslang_policy_v1()
+        val out = crosslang_normalize(policy, synthetic_raw("go", policy.clock_source, "ms"))
+        assert_true(out.rejected)
+        assert_true(out.values.len() == 0)
+        assert_contains(out.reason, "unit_mismatch")
+        assert_contains(out.reason, "ms")
+
+    it "rejects a series taken from a different clock source":
+        """Two adapters timed on different clocks are not comparable, whatever
+        the unit says."""
+        # @req REQ-SSPEC-UNIT
+        step("normalize a wall-clock series under a monotonic policy")
+        val policy = crosslang_policy_v1()
+        val out = crosslang_normalize(policy, synthetic_raw("bun", "wall_clock", policy.unit))
+        assert_true(out.rejected)
+        assert_true(out.values.len() == 0)
+        assert_contains(out.reason, "clock_source_mismatch")
+
+    it "rejects an empty raw series instead of reporting a clean pass":
+        """Vacuity gate: a captured-nothing run is a rejection, not a pass."""
+        # @req REQ-SSPEC-UNIT
+        step("normalize a zero-sample series")
+        val policy = crosslang_policy_v1()
+        val empty = RawSeries(adapter_id: "simple", clock_source: policy.clock_source, unit: policy.unit, values: [])
+        val out = crosslang_normalize(policy, empty)
+        assert_true(out.rejected)
+        assert_contains(out.reason, "empty_raw_series")
+
+    it "rejects a series too short for the policy's warmup plus timed count":
+        """A 10-sample series cannot satisfy 5 warmup + 15 timed; truncating it
+        silently is how unequal-work rows entered the historical matrices."""
+        # @req REQ-SSPEC-UNIT
+        step("normalize a 10-sample series under a 5+15 policy")
+        val policy = crosslang_policy_v1()
+        val short = RawSeries(
+            adapter_id: "python",
+            clock_source: policy.clock_source,
+            unit: policy.unit,
+            values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        )
+        val out = crosslang_normalize(policy, short)
+        assert_true(out.rejected)
+        assert_contains(out.reason, "insufficient_samples")
+        assert_contains(out.reason, "20")
+
+    it "pins the shared policy's own values so a silent policy drift fails here":
+        """The policy is the single normalization authority; changing it must
+        break this assertion rather than quietly re-baseline every adapter."""
+        # @req REQ-SSPEC-UNIT
+        step("read the shared policy")
+        val policy = crosslang_policy_v1()
+        assert_equal(policy.policy_id, "crosslang-normalization-v1")
+        assert_equal(policy.warmup_discard, 5)
+        assert_equal(policy.timed_count, 15)
+        assert_equal(policy.clock_source, "monotonic_micros")
+        assert_equal(policy.unit, "us")
