@@ -56,10 +56,54 @@ host readback plus software blend; until it existed the 544 s could not be split
 between "the pack is slow" and "the device path declined", which need opposite
 fixes.
 
-## Measured
+## Measured, 900x760, flag OFF (both sides carry the instrumentation; the
+"before" is the flag OFF, not the pre-instrumentation tip)
 
-Both sides carry the instrumentation; the "before" is the flag OFF, not the
-pre-instrumentation tip. See the metrics doc for the full table.
+| bucket | n | total ms | max ms |
+|---|---|---|---|
+| frame | | **830,186** | |
+| image_composite | 264 | 573,780 | 185,586 |
+| **image_pack_u32_to_u8** | 264 | **391,259** | 99,721 |
+| **image_exact_size_byte_fallback** | 262 | **180,995** | 92,529 |
+| image_source_alloc | 264 | 315 | 4 |
+| image_descriptor_dispatch | 264 | 94 | 2 |
+| sffi_upload | 264 | 907 | 669 |
+
+`image_composite_stats full_surface=4 full_surface_ms=563,638 small=260
+small_ms=10,148 max_px=12,874,224 reasons: ok=264`.
+
+**Three things this settles that the earlier attribution could not.**
+
+1. **`reasons: ok=264` — the device path ran EVERY time.** Not one composite
+   took any of the ten `return 0` exits, so none fell back to
+   `emu_draw_image_*`. The metrics doc's alternative hypothesis (a silent host
+   readback via the fallback that never calls `mark_cpu_fallback`) is
+   **excluded**. The cost is host packing, as suspected.
+2. **The composite is host-bound by three orders of magnitude.** Device
+   allocation 315 ms, descriptor+dispatch 94 ms and the SFFI upload 907 ms sum
+   to 1.3 s against 572 s of packing. There is no device-side term to optimise.
+3. **Every composite packs the image TWICE, not once** — a second, independent
+   defect this run found. `image_exact_size_byte_fallback` fired **262 of 264**
+   times, at 181 s. Cause, at `sffi_vulkan.spl:1279`
+   (`vulkan_sffi_copy_to_buffer_prefix`): on the interpreter array ABI the
+   prefix upload is admitted **only when `byte_count == data.len()`** and fails
+   closed otherwise. `image_upload_scratch` is grown to a high-water mark and
+   never shrunk, so after the first large image every smaller composite has
+   `byte_count < scratch.len()`, the prefix declines, and
+   `_pixels_to_bytes(pixels, pixel_count)` packs the whole image a second time.
+   The scratch reuse optimisation therefore *causes* a full extra pack on all
+   but the first two composites. The typed lane bypasses both packs; the byte
+   path's double pack remains and is filed here rather than patched, because
+   the right fix (shrink-to-fit, or an exact-size scratch) is a separate change
+   with its own oracle.
+
+**`max_px = 12,874,224`.** The largest composite's SOURCE is 12.87M pixels —
+**18.8x the 684,000-pixel destination surface**, i.e. a very large image scaled
+down, not a surface-sized layer. That single composite accounts for the
+`image_composite` max of 185,586 ms (99.7 s pack + 92.5 s byte fallback). Note
+also that the `full_surface=4` tally classifies "source >= 90% of THIS engine's
+surface", so a small offscreen child engine at `draw_ir_adv.spl:2600` counts as
+full-surface too; read `max_px` alongside the count, never the count alone.
 
 ## Origin of the full-surface composites
 
