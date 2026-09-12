@@ -1,0 +1,69 @@
+# Symbol extraction at an editor position, shared by the one-shot LSP query
+# script and the in-process MCP adapter.
+#
+# This used to live privately inside `lsp_query.spl`, which meant the in-process
+# adapter would have had to copy it and could then drift from the one-shot it is
+# supposed to match. There is exactly one implementation, so the two routes pick
+# the same symbol by construction.
+
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+fn _is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+        (ch >= "0" and ch <= "9") or ch == "_"
+
+# `line_num` and `col` are 1-based, as the LSP query CLI receives them.
+# Returns "" when the position carries no identifier.
+fn lsp_query_symbol_at_v1(file: text, line_num: i64, col: i64) -> text:
+    val content = file_read_text(file) ?? ""
+    if content == "":
+        return ""
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        return ""
+    val target_line = lines[line_num - 1]
+    if target_line.trim() == "":
+        return ""
+    if col > 0 and col <= target_line.len():
+        var start = col - 1
+        var end_pos = col - 1
+        for _i in range(0, col):
+            if start <= 0:
+                break
+            if not _is_word_char(target_line.substring(start - 1, start)):
+                break
+            start = start - 1
+        for _i in range(0, 200):
+            if end_pos >= target_line.len():
+                break
+            if not _is_word_char(target_line.substring(end_pos, end_pos + 1)):
+                break
+            end_pos = end_pos + 1
+        if end_pos > start:
+            return target_line.substring(start, end_pos)
+    val trimmed = target_line.trim()
+    var rest = trimmed
+    if rest.starts_with("fn "):
+        rest = rest.substring(3)
+    elif rest.starts_with("val "):
+        rest = rest.substring(4)
+    elif rest.starts_with("var "):
+        rest = rest.substring(4)
+    elif rest.starts_with("class "):
+        rest = rest.substring(6)
+    elif rest.starts_with("struct "):
+        rest = rest.substring(7)
+    elif rest.starts_with("enum "):
+        rest = rest.substring(5)
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+    var parts: [text] = []
+    for ch in rest:
+        if not _is_word_char(ch):
+            break
+        parts.push(ch)
+    parts.join("")
+
+export lsp_query_symbol_at_v1

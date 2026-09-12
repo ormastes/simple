@@ -1,0 +1,314 @@
+# Bounded nested search for the LSP cross-file query paths.
+#
+# The cross-file fallbacks in `app.cli.query_engine` run
+# `grep -rn <pattern> src/ --include=*.spl` through `query_process_run`, which
+# applies no timeout, no output cap and no depth cap.  On a deep or very large
+# tree that call can stall the MCP server for an unbounded time, and it also
+# forces the query modules to depend on an external process just to read files
+# the current process can already read.
+#
+# This walk is the bounded replacement.  It is pure Simple, it owns no process,
+# and it stops at the first budget it reaches — reporting WHICH budget stopped
+# it rather than returning a silently short answer.  Emitted lines keep grep's
+# `path:line:content` shape so callers that already parse grep output do not
+# change.
+#
+# Bounded, but NOT narrower than grep: the default budget is sized to cover this
+# repository's whole `src` tree without truncating, and
+# `lsp_bounded_search_spec.spl` pins that.  Losing cross-file coverage would be
+# a feature regression; the budgets exist to bound the WORST case, not to shrink
+# the normal one.
+#
+# `max_depth` counts directory levels BELOW the root: 0 scans the root only,
+# 1 also scans its immediate subdirectories, and so on.
+#
+# Determinism: candidate paths are sorted before scanning, so two runs over the
+# same tree emit the same lines in the same order (`grep -r` does not promise
+# this).
+
+# Native primitives only, and as FEW of them as possible. Two traps, both
+# measured on the deployed seed:
+#   * `std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}` look pure but are
+#     shell-outs (`ls -1 '<p>'`, `test -d '<p>'`), so a per-entry walk built on
+#     them forks a process per directory ENTRY: 1.44 ms per `is_dir`.
+#   * even with real syscalls, classifying each entry with
+#     `file_is_regular_no_follow` costs 0.057 ms/file — 940 ms over this repo's
+#     16,569 `.spl` files, more than the whole rest of the scan.
+# `io_runtime.dir_walk` is a single native recursive walk that returns regular
+# files only (60,501 paths in 123 ms here, matching `find src -type f`), so the
+# tree is enumerated once and no path is ever stat-ed.
+use std.io_runtime.{dir_exists, dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_mmap_read_text}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+# Default budget. Bounded is not the same as narrow: these defaults are sized so
+# that a normal query over THIS repo completes WITHOUT truncating, because a
+# cross-file `references` answer that silently covers a fraction of the tree is
+# a feature regression, not a safety feature.
+#
+# Measured on the deployed seed, whole `src` tree: 16,569 `.spl` files,
+# 125.9 MB, scanned in 821 ms end to end (enumerate 123 ms, suffix filter
+# 130 ms, sort 4 ms, read + native prefilter 563 ms = 224 MB/s). The file and
+# byte caps are set at roughly 2x that so the tree has room to grow, and
+# `max_wall_ms` is the axis that actually bounds the work. 8,000 ms, not 5,000:
+# a rare symbol scans the tree in ~550-850 ms, but a ubiquitous one like `len`
+# line-scans 573 files on the way and measured 4,596 ms on a loaded host — a
+# 5,000 ms cap would push that onto the wall axis and report lost coverage for
+# an ordinary query. 8,000 ms still leaves 2,000 ms of the 10,000 ms LSP command
+# deadline for framing and the rest of the request.
+const LSP_BOUNDED_SEARCH_MAX_FILES_V1: i64 = 40000
+const LSP_BOUNDED_SEARCH_MAX_BYTES_V1: i64 = 268435456
+const LSP_BOUNDED_SEARCH_MAX_DEPTH_V1: i64 = 64
+const LSP_BOUNDED_SEARCH_MAX_MATCHES_V1: i64 = 5000
+const LSP_BOUNDED_SEARCH_MAX_WALL_MS_V1: i64 = 8000
+
+struct LspBoundedSearchBudgetV1:
+    max_files: i64
+    max_bytes: i64
+    max_depth: i64
+    max_matches: i64
+    max_wall_ms: i64
+
+struct LspBoundedSearchResultV1:
+    lines: [text]
+    files_scanned: i64
+    bytes_scanned: i64
+    # Files whose content passed the native prefilter and were therefore split
+    # into lines. The gap between this and `files_scanned` is the prefilter's
+    # whole value: the interpreted line scanner is ~30x more expensive per byte
+    # than the native containment test, and the symbol is absent from almost
+    # every file.
+    files_line_scanned: i64
+    truncated: bool
+    truncation_reason: text
+
+fn lsp_bounded_search_budget_default_v1() -> LspBoundedSearchBudgetV1:
+    LspBoundedSearchBudgetV1(
+        max_files: LSP_BOUNDED_SEARCH_MAX_FILES_V1,
+        max_bytes: LSP_BOUNDED_SEARCH_MAX_BYTES_V1,
+        max_depth: LSP_BOUNDED_SEARCH_MAX_DEPTH_V1,
+        max_matches: LSP_BOUNDED_SEARCH_MAX_MATCHES_V1,
+        max_wall_ms: LSP_BOUNDED_SEARCH_MAX_WALL_MS_V1,
+    )
+
+fn _is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+        (ch >= "0" and ch <= "9") or ch == "_"
+
+# Word-boundary containment, equivalent to grep's `\bword\b` for the identifier
+# alphabet the query engine uses.
+fn lsp_bounded_search_line_has_word_v1(line: text, word: text) -> bool:
+    if word == "":
+        return false
+    # Native substring test first: the per-character boundary scan below is
+    # interpreted Simple and costs ~30x more per byte, so paying it only on
+    # lines that actually contain the text is the difference between 0.24 MB/s
+    # and a usable walk rate.
+    if not line.contains(word):
+        return false
+    val wlen = word.len()
+    var pos = 0
+    while pos + wlen <= line.len():
+        if line.substring(pos, pos + wlen) == word:
+            var left_ok = true
+            var right_ok = true
+            if pos > 0:
+                left_ok = not _is_word_char(line.substring(pos - 1, pos))
+            if pos + wlen < line.len():
+                right_ok = not _is_word_char(line.substring(pos + wlen, pos + wlen + 1))
+            if left_ok and right_ok:
+                return true
+        pos = pos + 1
+    false
+
+# Every declaration keyword the grep alternations in the query modules used.
+fn lsp_bounded_search_decl_kinds_all_v1() -> [text]:
+    ["fn ", "class ", "struct ", "enum ", "trait ", "val ", "var "]
+
+# Declaration match against an explicit keyword set: `^<kw> X` with a word
+# boundary after the name, which is what each grep alternation expressed.
+fn lsp_bounded_search_line_is_decl_kind_v1(line: text, symbol: text, keywords: [text]) -> bool:
+    if symbol == "":
+        return false
+    for kw in keywords:
+        if line.starts_with(kw):
+            val rest = line.substring(kw.len())
+            if rest.starts_with(symbol):
+                if rest.len() == symbol.len():
+                    return true
+                if not _is_word_char(rest.substring(symbol.len(), symbol.len() + 1)):
+                    return true
+    false
+
+fn lsp_bounded_search_line_is_decl_v1(line: text, symbol: text) -> bool:
+    lsp_bounded_search_line_is_decl_kind_v1(
+        line, symbol, lsp_bounded_search_decl_kinds_all_v1())
+
+# `impl ...X...` — an impl block naming the symbol. Covers both the
+# `impl X` and `impl Trait for X` shapes the grep patterns reached for.
+fn lsp_bounded_search_line_is_impl_v1(line: text, symbol: text) -> bool:
+    if not line.trim().starts_with("impl "):
+        return false
+    lsp_bounded_search_line_has_word_v1(line, symbol)
+
+# `mode` is "word", "decl" or "impl"; `keywords` applies to "decl" only.
+fn _bounded_walk(
+    root: text,
+    suffix: text,
+    symbol: text,
+    mode: text,
+    keywords: [text],
+    budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    var lines: [text] = []
+    var files_scanned = 0
+    var bytes_scanned = 0
+    var files_line_scanned = 0
+    var truncated = false
+    var reason = ""
+    val started_us = time_now_unix_micros()
+
+    if root == "" or symbol == "" or not dir_exists(root):
+        return LspBoundedSearchResultV1(
+            lines: lines, files_scanned: 0, bytes_scanned: 0,
+            files_line_scanned: 0, truncated: false, truncation_reason: "")
+
+    # One native enumeration of the whole tree, then suffix + depth selection.
+    # `max_depth` counts path separators below the root, so a file sitting
+    # directly in the root is at depth 0.
+    val root_prefix_len = root.len() + 1
+    var candidates: [text] = []
+    for path in dir_walk(root):
+        if not path.ends_with(suffix):
+            continue
+        val depth = path.substring(root_prefix_len).split("/").len() - 1
+        if depth > budget.max_depth:
+            truncated = true
+            reason = "budget:max_depth"
+            continue
+        candidates.push(path)
+
+    # Sorted so two runs over the same tree emit the same lines in the same
+    # order; `grep -r` makes no such promise. Measured at 4 ms for 16,569 paths.
+    # The clock is sampled every 64 files rather than every file: 16,569 extra
+    # native calls cost more than the 64-file (~0.5 MB, ~3 ms) slack they buy.
+    var clock_countdown = 0
+    for child in candidates.sort():
+        if clock_countdown > 0:
+            clock_countdown = clock_countdown - 1
+        elif budget.max_wall_ms > 0 and
+            time_now_unix_micros() - started_us >= budget.max_wall_ms * 1000:
+            truncated = true
+            reason = "budget:max_wall_ms"
+            break
+        else:
+            clock_countdown = 63
+        if files_scanned >= budget.max_files:
+            truncated = true
+            reason = "budget:max_files"
+            break
+        if bytes_scanned >= budget.max_bytes:
+            truncated = true
+            reason = "budget:max_bytes"
+            break
+        val content = file_mmap_read_text(child) ?? ""
+        files_scanned = files_scanned + 1
+        bytes_scanned = bytes_scanned + content.len()
+        # Whole-file native prefilter: a file that never mentions the symbol
+        # cannot match in any mode, so it is never split into lines. This is
+        # what keeps a full-tree scan affordable — see `files_line_scanned`.
+        if not content.contains(symbol):
+            continue
+        if mode == "impl" and not content.contains("impl "):
+            continue
+        files_line_scanned = files_line_scanned + 1
+        # `truncated` may already be set by a depth exclusion during selection,
+        # so the match cap needs its own stop flag rather than reusing it.
+        var match_cap_reached = false
+        var lineno = 0
+        for line in content.split("\n"):
+            lineno = lineno + 1
+            val hit = if mode == "decl":
+                lsp_bounded_search_line_is_decl_kind_v1(line, symbol, keywords)
+            elif mode == "impl":
+                lsp_bounded_search_line_is_impl_v1(line, symbol)
+            else:
+                lsp_bounded_search_line_has_word_v1(line, symbol)
+            if hit:
+                if lines.len() >= budget.max_matches:
+                    truncated = true
+                    reason = "budget:max_matches"
+                    match_cap_reached = true
+                    break
+                lines.push(child + ":" + str(lineno) + ":" + line)
+        if match_cap_reached:
+            break
+
+    LspBoundedSearchResultV1(
+        lines: lines, files_scanned: files_scanned, bytes_scanned: bytes_scanned,
+        files_line_scanned: files_line_scanned, truncated: truncated,
+        truncation_reason: reason)
+
+# `mode` is "word", "decl" or "impl". Anything else matches nothing.
+fn lsp_bounded_search_v1(
+    root: text, suffix: text, symbol: text, mode: text,
+    budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    _bounded_walk(root, suffix, symbol, mode,
+        lsp_bounded_search_decl_kinds_all_v1(), budget)
+
+fn lsp_bounded_search_word_v1(
+    root: text, suffix: text, symbol: text, budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    lsp_bounded_search_v1(root, suffix, symbol, "word", budget)
+
+fn lsp_bounded_search_decl_v1(
+    root: text, suffix: text, symbol: text, budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    lsp_bounded_search_v1(root, suffix, symbol, "decl", budget)
+
+# Declaration search restricted to the given keywords, e.g.
+# ["class ", "struct ", "enum ", "trait "] for a type-definition query.
+fn lsp_bounded_search_decl_kinds_v1(
+    root: text, suffix: text, symbol: text, keywords: [text],
+    budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    _bounded_walk(root, suffix, symbol, "decl", keywords, budget)
+
+fn lsp_bounded_search_impl_v1(
+    root: text, suffix: text, symbol: text, budget: LspBoundedSearchBudgetV1,
+) -> LspBoundedSearchResultV1:
+    _bounded_walk(root, suffix, symbol, "impl",
+        lsp_bounded_search_decl_kinds_all_v1(), budget)
+
+# Human-readable note appended to a query answer when the walk stopped early.
+# Callers must not present a truncated result as complete.
+#
+# Two very different things are reported here and the wording keeps them apart.
+# `budget:max_matches` means the whole tree WAS searched but the symbol has more
+# matches than the result is allowed to carry — the old `grep` route had the
+# same property and hid it, since its callers print only the first 20-50 lines.
+# Every other reason means part of the tree was never looked at, which is the
+# case a reader must not mistake for a complete answer.
+fn lsp_bounded_search_truncation_note_v1(result: LspBoundedSearchResultV1) -> text:
+    if not result.truncated:
+        return ""
+    if result.truncation_reason == "budget:max_matches":
+        return "[more than " + str(result.lines.len()) +
+            " matches; the whole tree was searched, only the first " +
+            str(result.lines.len()) + " are listed]"
+    "[search truncated: " + result.truncation_reason + " after " +
+        str(result.files_scanned) + " file(s), " + str(result.bytes_scanned) +
+        " byte(s) — part of the tree was NOT searched]"
+
+export LSP_BOUNDED_SEARCH_MAX_FILES_V1, LSP_BOUNDED_SEARCH_MAX_BYTES_V1
+export LSP_BOUNDED_SEARCH_MAX_DEPTH_V1, LSP_BOUNDED_SEARCH_MAX_MATCHES_V1
+export LSP_BOUNDED_SEARCH_MAX_WALL_MS_V1
+export LspBoundedSearchBudgetV1, LspBoundedSearchResultV1
+export lsp_bounded_search_budget_default_v1
+export lsp_bounded_search_line_has_word_v1, lsp_bounded_search_line_is_decl_v1
+export lsp_bounded_search_decl_kinds_all_v1, lsp_bounded_search_line_is_decl_kind_v1
+export lsp_bounded_search_line_is_impl_v1
+export lsp_bounded_search_v1, lsp_bounded_search_word_v1, lsp_bounded_search_decl_v1
+export lsp_bounded_search_decl_kinds_v1, lsp_bounded_search_impl_v1
+export lsp_bounded_search_truncation_note_v1

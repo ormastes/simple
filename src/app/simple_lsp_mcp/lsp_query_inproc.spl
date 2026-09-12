@@ -1,0 +1,101 @@
+# In-process LSP query adapters for the MCP tool path (L9 gate G1).
+#
+# `tools.spl` used to answer every semantic query by starting a `simple` child
+# on `src/lib/nogc_sync_mut/lsp/lsp_query.spl`, which re-loaded the outline and
+# query modules from scratch each time. When the request names a workspace file
+# the server process can already read, there is nothing in that child the server
+# cannot do itself.
+#
+# This module owns no process, no cache and no transport. It calls the
+# `engine_*_lines` cores in `app.cli.query_engine` — the very functions the
+# one-shot's printers wrap — so the answer is byte-identical to the child's
+# stdout by construction, not by a comparison that could drift.
+#
+# Deliberately NOT here: any memoization of an answer. Workspace answer caching
+# is prohibited until snapshot and negative/membership invalidation exists
+# (see doc/05_design/compiler_semantic_cache_manager.md). Every call re-reads
+# the source, exactly like the child did.
+
+use app.cli.query_engine.{engine_find_definition_lines, engine_find_references_lines,
+    engine_hover_lines, engine_completions_lines, engine_type_at_lines,
+    engine_signature_help_lines}
+use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
+use std.nogc_sync_mut.lsp.lsp_query_symbol.{lsp_query_symbol_at_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+struct LspQueryInprocResultV1:
+    handled: bool
+    text: text
+    code: i64
+    reason: text
+
+fn _declined(reason: text) -> LspQueryInprocResultV1:
+    LspQueryInprocResultV1(handled: false, text: "", code: 0, reason: reason)
+
+fn _answer(lines: [text], code: i64) -> LspQueryInprocResultV1:
+    LspQueryInprocResultV1(handled: true, text: lines.join("\n"), code: code, reason: "")
+
+# Operations whose whole implementation lives in `query_engine`. The
+# `query_lsp_extras` operations (folding-range, document-highlight,
+# type-definition, implementation) and `symbols` still return printed text only,
+# so they stay on the bounded child route rather than being faked here.
+fn lsp_query_inproc_supported_v1(subcmd: text) -> bool:
+    subcmd == "definition" or subcmd == "references" or subcmd == "hover" or
+        subcmd == "completions" or subcmd == "type-at" or subcmd == "signature-help"
+
+fn lsp_query_inproc_readable_v1(file: text) -> bool:
+    if file == "":
+        return false
+    val content = file_read_text(file) ?? ""
+    content != ""
+
+# `line_num` and `col` are 1-based, matching the one-shot CLI's arguments.
+fn lsp_query_inproc_dispatch_v1(
+    subcmd: text, file: text, line_num: i64, col: i64,
+) -> LspQueryInprocResultV1:
+    if not lsp_query_inproc_supported_v1(subcmd):
+        return _declined("subcommand_not_supported")
+    val safe_file = sanitize_path(file)
+    if safe_file == "":
+        return _declined("path_rejected")
+    if not lsp_query_inproc_readable_v1(safe_file):
+        return _declined("file_not_readable")
+
+    val symbol = lsp_query_symbol_at_v1(safe_file, line_num, col)
+    if symbol == "":
+        return _answer(["No symbol found at {safe_file}:{line_num}"], 1)
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        return _declined("symbol_rejected")
+
+    if subcmd == "definition":
+        val (lines, code) = engine_find_definition_lines(safe_file, clean_sym)
+        return _answer(lines, code)
+    if subcmd == "references":
+        val (lines, code) = engine_find_references_lines(safe_file, clean_sym)
+        return _answer(lines, code)
+    if subcmd == "hover":
+        val (lines, code) = engine_hover_lines(safe_file, line_num, clean_sym)
+        return _answer(lines, code)
+    if subcmd == "completions":
+        val (lines, code) = engine_completions_lines(safe_file, 0, clean_sym)
+        return _answer(lines, code)
+    if subcmd == "type-at":
+        val (lines, code) = engine_type_at_lines(safe_file, line_num, clean_sym)
+        return _answer(lines, code)
+    val (lines, code) = engine_signature_help_lines(safe_file, line_num, col, clean_sym)
+    _answer(lines, code)
+
+# Same shape `run_command_text` returns: the clean text on success, the
+# `command failed with exit code N: ...` form otherwise.
+fn lsp_query_inproc_command_text_v1(result: LspQueryInprocResultV1) -> text:
+    if result.code == 0:
+        return result.text
+    val detail = result.text
+    if detail == "":
+        return "command failed with exit code " + str(result.code)
+    "command failed with exit code " + str(result.code) + ": " + detail
+
+export LspQueryInprocResultV1
+export lsp_query_inproc_supported_v1, lsp_query_inproc_readable_v1
+export lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1
