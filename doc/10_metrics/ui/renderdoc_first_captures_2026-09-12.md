@@ -46,19 +46,33 @@ Two independent causes, both fixed in PR #644:
    `renderdoc_lavapipe_build=failed` was printed because nothing had failed —
    nothing had been attempted. A probe was being read as a build.
 
-A third defect was found by reading ahead rather than waiting for it:
-`scripts/tool/renderdoc-export-events.shs` shells out to `renderdoccmd python`,
-which does not exist unless RenderDoc is built with the Python bindings, and
-the builder hardcoded `-DENABLE_PYRENDERDOC=OFF`. The lane was on course to
-produce two valid `.rdc` files and then report `renderdoc_diff_status=blocked`
-— captures without a diff.
+Two further defects were found by reading ahead rather than waiting an hour to
+be told. The lane was on course to produce two valid `.rdc` files and then
+report `renderdoc_diff_status=blocked` — captures without a diff.
+
+3. **`renderdoccmd python` does not exist.** `renderdoc-export-events.shs`
+   shells out to it on the non-`qrenderdoc` path. Checked against RenderDoc
+   v1.44 source: `renderdoccmd.cpp` registers `vulkanlayer`, `version`, `help`,
+   `capture`, `inject`, `thumb`, `remoteserver`, `replay`, `capaltbit`, `test`,
+   `convert`, `embed`, `extract` — and nothing else. The `PYTHON_AVAILABLE`
+   guards in that file gate `test functional`, **not** a python command. That
+   branch could never have worked; every non-`qrenderdoc` export was
+   `blocked:export-failed`.
+4. **The pyrenderdoc module was neither built nor installed.** The supported
+   headless path is the swig module (`qrenderdoc/Code/pyrenderdoc`: `_renderdoc`
+   plus a generated `renderdoc.py`), gated by `ENABLE_PYRENDERDOC` — which the
+   builder hardcoded OFF — and it has **no `install()` rule**, so even when
+   built it stays in the build tree, outside both the install prefix and the CI
+   cache.
 
 ## Fixes landed (PR #644)
 
 | Fix | File |
 |---|---|
 | Invoke the builder with `--all`, install its `--print-deps` prerequisites, and re-assert `renderdoccmd` exists afterwards so a silent build failure cannot be laundered into a pass | `scripts/setup/setup-renderdoc-linux-lavapipe.shs` |
-| `RENDERDOC_ENABLE_PYTHON=1` builds the Python bindings, **falling back** to a bindings-less build if that configure fails; resolved mode recorded as `renderdoc_vulkan_only_python_bindings=on\|off` | `scripts/setup/build-renderdoc-linux-vulkan-only.shs` |
+| `RENDERDOC_ENABLE_PYTHON=1` (set by the setup script; the builder's own default stays `0`) builds the Python bindings, **falling back** to a bindings-less build if that configure fails; resolved mode recorded as `renderdoc_vulkan_only_python_bindings=on\|off` | `scripts/setup/build-renderdoc-linux-vulkan-only.shs` |
+| Stage the built pyrenderdoc module into `$RDOC_HOME/pymodules` at install time, so the prefix is self-contained and the CI cache carries it | `scripts/setup/build-renderdoc-linux-vulkan-only.shs` |
+| Run the exporter as `python3 <exporter>` with `PYTHONPATH` pointing at that module instead of the nonexistent `renderdoccmd python`; fail closed with `blocked:pyrenderdoc-module-missing` when it is absent | `scripts/tool/renderdoc-export-events.shs` |
 | Cache the RenderDoc build; `cache/restore` + `cache/save` split with `if: always()` because `actions/cache@v4` saves only on job success, which would discard the 10-20 min build on every red run; timeout 40 -> 90 min | `.github/workflows/renderdoc-web-diff.yml` |
 
 Verification available at the time of writing: lane classifier selftest
