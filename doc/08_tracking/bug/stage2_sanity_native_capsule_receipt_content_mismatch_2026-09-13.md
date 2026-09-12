@@ -44,6 +44,40 @@ mean the object file on disk hashes differently at verification time than when
 the receipt was written, or one of the two hash computations is wrong in the
 stage-2 NATIVE binary while being right in the interpreter.
 
+## The differing field, measured
+
+The written receipt is on disk; its 4th line — `fp.size` — reads
+
+```
+37196932097
+```
+
+for an object file that is **632 bytes**. The 5th line, `fp.content_hash`, is
+`76e16357e568394bbe191e9c9f3633f4ba8dd5c5bf8b97d725f5474936eb327a`, which is
+byte-for-byte what `shasum -a 256` gives for that object. So the hash is right
+and **the size is garbage** — a value around 0x8_A8xx_xxxx, the shape of a
+pointer or an undecoded box, not a file size. Both sides are 1648 bytes because
+both garbage values have the same digit count; they differ because the garbage
+is not stable between the write and the verify.
+
+`FileFingerprint.size` is filled by `incremental_file_size` ->
+`extern rt_file_size` (`driver_build/incremental.spl:60,639`), and it is read
+back through an optional bind:
+
+```
+val object_fp = FileFingerprint.from_file(capsule.object_path)
+if val fp = object_fp:
+    expected = "native-capsule-result-v1\n...\n{fp.size}\n{fp.content_hash}\n"
+```
+
+`rt_file_size` itself is NOT the defect: a two-call native probe built by the
+seed tier (`extern fn rt_file_size(path: text) -> i64`, printed twice) returns
+the true size, twice, on this host. The suspicion is therefore the
+**optional-bound scalar FIELD read** (`if val fp = object_fp: ... fp.size`) in
+the stage-2 native binary — the same family as the earlier optional-bound scalar
+field divergence — with `content_hash`, a `text` field beside it, surviving
+intact.
+
 Not yet established, and the next steps:
 1. dump both texts (not just the lengths) for this one unit and diff them — the
    differing FIELD is the whole diagnosis and the current message deliberately
