@@ -25,6 +25,15 @@
  * *-pc-windows-msvc defines _MSC_VER but supports both attributes, so gating
  * on _MSC_VER alone would silently drop them there. GCC and Clang keep the
  * real attributes byte for byte on every target. */
+/* MSVC has no __builtin_popcount; __popcnt is its intrinsic equivalent and is
+ * available on every x64 target (POPCNT is baseline for the SSE4.2-era ISA the
+ * AVX2 kernels below already require). Unresolved otherwise:
+ *     LNK2019: __builtin_popcount referenced in avx2_utf8_count_codepoints */
+#if defined(_MSC_VER) && !defined(__GNUC__) && !defined(__clang__)
+#include <intrin.h>
+#define __builtin_popcount(x) ((int)__popcnt((unsigned int)(x)))
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define RT_SIMD_TARGET(feature) __attribute__((target(feature)))
 #define RT_SIMD_UNUSED __attribute__((unused))
