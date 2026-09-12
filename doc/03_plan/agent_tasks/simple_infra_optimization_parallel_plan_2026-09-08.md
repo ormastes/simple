@@ -1624,3 +1624,31 @@ L7/L8 (GL): Codex's ten packet tips merged by ownership into `work/l78-2026-09-1
 EGL: wave branch (Codex gpu-e4-e5 24 commits + P/W/V/U/X/T/N/K + U2/X2/V2) being rebased and its +9 direct `rt_*` sites routed; Q (2-token parse), S (frozen), sosh adapter (`StmtKind` collision) and `frontend.spl` rewiring remain Codex-owned blockers.
 
 Open lanes with no implementation: L4 memory lifecycle (agent running: bounded seed interpreter caches), L10 collector wiring (fenced), L11 complete. Push-gate note: bootstrap-tier manifest rows without ledger rows (#586, chrome-layout, test-runner-executes-bodies) blocked every push for ~1 h; this PR restores manifest == ledger (57).
+
+## Status 2026-09-13 05:10 — Claude session: landing complete, bootstrap Stage 2 still unadmitted
+
+Landed on `main` between 2026-09-13 00:00 and 04:45 KST (22 PRs, every one a single reviewed commit on the
+then-current `main`): L3 startup probe waste (#719), L4 bounded loader caches (#724), L5 integration (#667) and
+L5-H per-family MCP dispatch (#716, `mcp-read-call` closure 129→55 files), L7/L8 packet consolidation with the
+28 Rust twins (#638), EGL wave (#720, 167 files), L9-G34 (#658), runner-degrade (#734), bug-db shards 2/4/5
+(#731, #673, #733), todo-db shards 0/2 (#730, #671), tracking-db sync (#725), PERF-1/2/3 (#692, #695, #738 —
+interpreter scaling certified linear; `check --help` 203→81 opens; while-loop shape cliff 513×/1049×), BOOT-3
+(#696) and BOOT-4 (#713), and the four gate syncs that kept the required CI job and the push gates green under
+concurrent landings (#665, #697 hot-loop baseline, #710 `rt_file_size` routed through `file_size_raw`).
+`main` @ `e5f1b5f0a0c` passes the hot-loop, keyword-binding, lifecycle, guard-wiring and ledger gates; the
+ruleset's strict up-to-date flag is restored.
+
+Landing method that finally held (recorded for the next wave): never squash-merge `main` into a lane; rebuild the
+lane as ONE commit on current `origin/main` from its own files (3-way merged), push to a fresh branch, supersede
+the PR. Squashed-merge histories re-conflicted on every later `main` edit and a DIRTY PR receives no required
+check run at all. New guards are wired at a name-hashed position inside the advisory block, not appended.
+
+Bootstrap (BOOT-3/4/5): `request-invalid` root-caused (total `env_get` swallowing its `??` fallback), three
+bootstrap-mode sites closed by measurement, site 4 fixed upstream by #712, and the Stage-2 sanity
+`SIMPLE_BOOTSTRAP=0` pass is green for the first time. **Stage 2 is not admitted**: the `SIMPLE_BOOTSTRAP=1`
+pass fails in the backend (`backend object-path status 1, diagnostic file empty`,
+`doc/08_tracking/bug/stage2_sanity_bootstrap1_backend_object_path_status_1_2026-09-13.md`, 30 s repro); BOOT-6
+is on it. The `v1.0.1-beta.2` bump and tag stay held until Stage 2 admits, per the beta.1 precedent.
+
+Still open: L10 collector wiring (the collector exists on no committed ref — nothing to wire), EGL Q (2-token
+parse) and S (frozen by Codex), `_runtime_object_cache_dir`, frontend rewiring.
