@@ -265,6 +265,16 @@ class VulkanBackend:
     font_atlas_generation: i64
     font_atlas_owner_identity: text
     font_atlas_payload_sha256: text
+    # Host byte mirror of the device font atlas, kept so a dirty batch repacks
+    # only the glyph cells it actually inserted instead of all 1,048,576 atlas
+    # pixels. `font_atlas_host_valid` is cleared at the START of every upload
+    # and set again only once that upload has SUCCEEDED, so a composite that
+    # returns early (glyph cap, invalid quad, failed upload) leaves the mirror
+    # stale and forces the next one to repack in full -- which is what makes
+    # the incremental path sound without assuming batches arrive unbroken.
+    font_atlas_host_bytes: [u8]
+    font_atlas_host_identity: text
+    font_atlas_host_valid: bool
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -448,6 +458,9 @@ class VulkanBackend:
             font_atlas_generation: -1,
             font_atlas_owner_identity: "",
             font_atlas_payload_sha256: "",
+            font_atlas_host_bytes: [],
+            font_atlas_host_identity: "",
+            font_atlas_host_valid: false,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -903,6 +916,10 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
         self.font_atlas_payload_sha256 = ""
+        # The device buffer is gone, so the mirror no longer describes anything.
+        self.font_atlas_host_bytes = []
+        self.font_atlas_host_identity = ""
+        self.font_atlas_host_valid = false
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -2543,7 +2560,7 @@ pub fn vulkan_readback_census_reset():
 # (`submits=0` against 111 drawn rects) because the pooled slot a probe can
 # reach is not always the instance that drew.
 
-val VK_T_COUNT: i64 = 24
+val VK_T_COUNT: i64 = 30
 
 val VK_T_RECT: i64 = 0
 val VK_T_RECT_LIST: i64 = 1
@@ -2569,13 +2586,21 @@ val VK_T_SFFI_WAIT_FENCE: i64 = 20
 val VK_T_UPLOAD: i64 = 21
 val VK_T_FONT_COMPOSITE: i64 = 22
 val VK_T_FONT_ATLAS_BUILD: i64 = 23
+# Sub-steps of `composite_font_batch`, which the first attribution run measured
+# at 27.3 s across 5 calls on a 300x253 page -- 58% of the whole frame.
+val VK_T_FONT_ATLAS_PACK: i64 = 24
+val VK_T_FONT_ATLAS_UPLOAD: i64 = 25
+val VK_T_FONT_ATLAS_DIGEST: i64 = 26
+val VK_T_FONT_PACKED_PARAMS: i64 = 27
+val VK_T_FONT_QUAD_VALIDATE: i64 = 28
+val VK_T_FONT_OWNER_IDENTITY: i64 = 29
 
 var _vk_timing_armed: bool = false
 var _vk_timing_resolved: bool = false
 
-var _vk_t_us: [i64] = [0; 24]
-var _vk_t_n: [i64] = [0; 24]
-var _vk_t_max: [i64] = [0; 24]
+var _vk_t_us: [i64] = [0; 30]
+var _vk_t_n: [i64] = [0; 30]
+var _vk_t_max: [i64] = [0; 30]
 
 pub fn vulkan_timing_enabled() -> bool:
     """True when `SIMPLE_VK_TIMING=1`. The environment is read exactly once."""
@@ -2617,6 +2642,7 @@ pub fn vulkan_timing_note(bucket: i64, elapsed_us: i64):
         _vk_t_max[bucket] = elapsed_us
 
 pub fn vulkan_timing_reset():
+    vulkan_font_dirty_reset()
     var i: i64 = 0
     while i < VK_T_COUNT:
         _vk_t_us[i] = 0
@@ -2649,7 +2675,73 @@ fn _vk_timing_name(bucket: i64) -> text:
     if bucket == VK_T_UPLOAD: return "sffi_upload"
     if bucket == VK_T_FONT_COMPOSITE: return "font_composite"
     if bucket == VK_T_FONT_ATLAS_BUILD: return "font_atlas_cpu_build"
+    if bucket == VK_T_FONT_ATLAS_PACK: return "font_atlas_pack_u32_to_u8"
+    if bucket == VK_T_FONT_ATLAS_UPLOAD: return "font_atlas_sffi_upload"
+    if bucket == VK_T_FONT_ATLAS_DIGEST: return "font_atlas_payload_sha256"
+    if bucket == VK_T_FONT_PACKED_PARAMS: return "font_packed_params"
+    if bucket == VK_T_FONT_QUAD_VALIDATE: return "font_quad_validate"
+    if bucket == VK_T_FONT_OWNER_IDENTITY: return "font_owner_identity"
     "bucket{bucket}"
+
+# Why the font-atlas upload cache missed, per composite. The timing table says
+# the 4 MB repack+redigest ran 5 times on a page whose atlas should be built
+# once; these counters separate "the atlas genuinely changed" (new glyphs were
+# rasterized between batches) from "the cache key is unstable" (same atlas,
+# different identity), because the correct fix differs in each case.
+var _vk_font_dirty_gen: i64 = 0
+var _vk_font_dirty_identity: i64 = 0
+var _vk_font_dirty_dims: i64 = 0
+var _vk_font_composites: i64 = 0
+var _vk_font_gen_trace: text = ""
+
+pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
+                              dims_changed: bool, generation: i64):
+    if not vulkan_timing_enabled():
+        return
+    _vk_font_composites = _vk_font_composites + 1
+    if gen_changed: _vk_font_dirty_gen = _vk_font_dirty_gen + 1
+    if identity_changed: _vk_font_dirty_identity = _vk_font_dirty_identity + 1
+    if dims_changed: _vk_font_dirty_dims = _vk_font_dirty_dims + 1
+    if _vk_font_composites <= 16:
+        _vk_font_gen_trace = _vk_font_gen_trace + " {generation}"
+
+var _vk_font_pack_full: i64 = 0
+var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_pack_note(incremental: bool):
+    """Record whether an atlas upload repacked the whole atlas or only the
+    cells the batch inserted. Always counted, not just when timing is armed:
+    a spec asserts on these without wanting the clock overhead."""
+    if incremental:
+        _vk_font_pack_incremental = _vk_font_pack_incremental + 1
+    else:
+        _vk_font_pack_full = _vk_font_pack_full + 1
+
+pub fn vulkan_font_pack_full_count() -> i64:
+    _vk_font_pack_full
+
+pub fn vulkan_font_pack_incremental_count() -> i64:
+    _vk_font_pack_incremental
+
+pub fn vulkan_font_pack_reset():
+    _vk_font_pack_full = 0
+    _vk_font_pack_incremental = 0
+
+pub fn vulkan_font_dirty_line() -> text:
+    ("font_atlas_dirty composites={_vk_font_composites}" +
+     " gen_changed={_vk_font_dirty_gen}" +
+     " identity_changed={_vk_font_dirty_identity}" +
+     " dims_changed={_vk_font_dirty_dims}" +
+     " generations=[{_vk_font_gen_trace} ]" +
+     " pack_full={_vk_font_pack_full} pack_incremental={_vk_font_pack_incremental}")
+
+pub fn vulkan_font_dirty_reset():
+    vulkan_font_pack_reset()
+    _vk_font_dirty_gen = 0
+    _vk_font_dirty_identity = 0
+    _vk_font_dirty_dims = 0
+    _vk_font_composites = 0
+    _vk_font_gen_trace = ""
 
 pub fn vulkan_timing_count(bucket: i64) -> i64:
     if bucket < 0 or bucket >= VK_T_COUNT: return 0
@@ -2663,7 +2755,7 @@ pub fn vulkan_timing_table() -> text:
     """Multi-line `bucket n total_ms max_ms` table, or one line when disarmed."""
     if not vulkan_timing_enabled():
         return "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
-    var out = "vk-timing bucket n total_ms max_ms"
+    var out = "vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line()
     var i: i64 = 0
     while i < VK_T_COUNT:
         if _vk_t_n[i] > 0:
