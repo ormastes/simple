@@ -20,9 +20,32 @@
 val _ADV_ASCII_LO: i32 = 32
 val _ADV_ASCII_HI: i32 = 126
 val _ADV_ASCII_SPAN: i32 = 95
-var _adv_ascii_identity: text = ""
-var _adv_ascii_size: i32 = -1
-var _adv_ascii_vals: [i32] = [-1; 95]
+# The ASCII fast lane holds several (identity, size) buckets, not one.
+# It used to hold exactly one: a single `_adv_ascii_identity`/`_adv_ascii_size`
+# pair, and `_adv_cache_store` wiped the whole 95-entry table whenever either
+# differed. A real page mixes font sizes (heading, body, code, caption), and the
+# cascade visits their text nodes interleaved, so the single slot thrashed and
+# essentially every character fell through to the SFFI-dylib backend's full
+# pixel rasterize just to read `.advance`. Measured on the shared catalog page
+# (908 nodes, 900x760, interpreter): 24,141 ms inside measure_text_advances for
+# 2,601 characters -- 9.3 ms PER CHARACTER, 80% of the whole style stage.
+# See doc/10_metrics/ui/web_style_cascade_after_memo_macos_2026-09-12.md.
+# 8 slots, not 1. Raising this to 32 was measured and made no difference on the
+# catalog page (13,084 ms vs 13,118 ms style), so 8 covers the sizes a real page
+# actually interleaves; the residual per-character cost is elsewhere.
+val _ADV_ASCII_SLOTS: i32 = 8
+var _adv_ascii_identity: [text] = [""; 8]
+var _adv_ascii_size: [i32] = [-1; 8]
+var _adv_ascii_vals: [[i32]] = [[-1; 95]; 8]
+var _adv_ascii_cursor: i32 = 0
+
+fn _adv_ascii_slot(identity: text, font_size: i32) -> i32:
+    var i: i32 = 0
+    while i < _ADV_ASCII_SLOTS:  # cpu-lane-loop-ok: scans the 8 fixed ASCII advance-cache buckets for a matching (face identity, size) pair
+        if _adv_ascii_size[i] == font_size and _adv_ascii_identity[i] == identity:
+            return i
+        i = i + 1
+    -1
 var _adv_overflow_identity: [text] = []
 var _adv_overflow_size: [i32] = []
 var _adv_overflow_cp: [i32] = []
@@ -32,8 +55,9 @@ var _adv_overflow_cursor: i32 = 0
 
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
-        if identity == _adv_ascii_identity and font_size == _adv_ascii_size:
-            return _adv_ascii_vals[codepoint - _ADV_ASCII_LO]
+        val slot = _adv_ascii_slot(identity, font_size)
+        if slot >= 0:
+            return _adv_ascii_vals[slot][codepoint - _ADV_ASCII_LO]
         return -1
     var i: i32 = 0
     while i < _adv_overflow_cp.len():
@@ -47,11 +71,19 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     if advance <= 0:
         return
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
-        if identity != _adv_ascii_identity or font_size != _adv_ascii_size:
-            _adv_ascii_identity = identity
-            _adv_ascii_size = font_size
-            _adv_ascii_vals = [-1; 95]
-        _adv_ascii_vals[codepoint - _ADV_ASCII_LO] = advance
+        var slot = _adv_ascii_slot(identity, font_size)
+        if slot < 0:
+            # Round-robin eviction across the fixed slots: bounded, and never
+            # discards a bucket that is still being filled by the current size
+            # unless every slot is in use by another (identity, size) pair.
+            slot = _adv_ascii_cursor
+            _adv_ascii_cursor = (_adv_ascii_cursor + 1) % _ADV_ASCII_SLOTS
+            _adv_ascii_identity[slot] = identity
+            _adv_ascii_size[slot] = font_size
+            _adv_ascii_vals[slot] = [-1; 95]
+        var bucket = _adv_ascii_vals[slot]
+        bucket[codepoint - _ADV_ASCII_LO] = advance
+        _adv_ascii_vals[slot] = bucket
         return
     if _adv_overflow_cp.len() < _ADV_OVERFLOW_CAP:
         _adv_overflow_identity = _adv_overflow_identity.push(identity)
@@ -85,6 +117,8 @@ use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
 # `char_code_at(i)` is CODEPOINT indexed, so `while ci < content.len()` walked
 # a 3-character string 6 times and read phantom zero codepoints past the end —
@@ -312,6 +346,7 @@ fn resolved_font_metric_cache_misses() -> i64:
 
 fn _resolved_font_metric_cache_reset_for_test():
     """Test-only: clear entries AND counters so a spec gets a cold cache."""
+    _resolved_font_front_reset()
     _resolved_font_metric_keys = []
     _resolved_font_metric_values = []
     _resolved_font_metric_cursor = 0
@@ -556,7 +591,13 @@ val _VEC_ATLAS_PROBE: bool = false
 # WARNING: adding NEW prints inside this file's hot paths has regressed the WM
 # lane before (probing _resolved_font_metric_cached re-broke the font execution
 # plan and lost every PPM) — this region is layout-sensitive.
-val _WM_TRACE: bool = true
+# Level-gated (default OFF). This was hardcoded `true`, so four [rfm] lines were
+# printed for EVERY font resolution on every render -- pure I/O in the hot path
+# that no caller asked for. Keeping the probes (log-retention policy) while
+# gating them restores the "default off" the surrounding comment assumes.
+# `env_get` returns "" (not nil) when unset, so the `?? "" == "1"` form is the
+# only correct gate idiom here; a `!= nil` test is always true.
+val _WM_TRACE: bool = (env_get("SIMPLE_WM_TRACE") ?? "") == "1"
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
 
@@ -2453,7 +2494,88 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
 
+# ---------------------------------------------------------------------------
+# Front memo for resolved font metrics.
+#
+# The identity-keyed cache below this point only answers AFTER the language /
+# category / codepoint classification, the optional shaping pass and the
+# default-face lookup have already run, and its early lookup is reachable only
+# when a language-selected asset exists (`expected_identity != ""`), i.e. never
+# for the common `language == "und"` page. The web lane resolves the same
+# (family, size, language, text) tuple at least twice for every #text node —
+# once in the style cascade and again in Draw-IR compose — so that classification
+# work was paid twice per node for nothing
+# (doc/10_metrics/ui/web_catalog_cold_render_profile_macos_2026-09-12.md, leaf #3).
+#
+# This front memo keys on the full argument tuple, which determines the result,
+# and short-circuits before any of that work. Same bound and same cacheability
+# predicate as the identity cache. Caveat, stated rather than hidden: like the
+# identity cache it assumes the font registry does not change underneath a
+# document; `_resolved_font_metric_cache_reset_for_test` clears both.
+# ---------------------------------------------------------------------------
+# Level-gated cost probe for the measurement leaf (SIMPLE_WEB_STYLE_COUNTERS=1),
+# the counterpart of the browser engine's style-stage counters.
+var _fr_probe_on: i32 = -1
+var _fr_measure_us: i64 = 0
+var _fr_measure_calls: i64 = 0
+var _fr_measure_chars: i64 = 0
+
+fn _fr_probe_armed() -> bool:
+    if _fr_probe_on < 0:
+        _fr_probe_on = if (env_get("SIMPLE_WEB_STYLE_COUNTERS") ?? "") == "1": 1 else: 0
+    _fr_probe_on == 1
+
+fn _fr_probe_now() -> i64:
+    if _fr_probe_armed():
+        return rt_time_now_micros()
+    0
+
+fn _fr_probe_add_measure(us: i64, chars: i64):
+    if _fr_probe_armed():
+        _fr_measure_us = _fr_measure_us + us
+        _fr_measure_calls = _fr_measure_calls + 1
+        _fr_measure_chars = _fr_measure_chars + chars
+
+pub fn font_measure_probe_report() -> text:
+    "measure_calls={_fr_measure_calls} measure_ms={_fr_measure_us / 1000} measure_chars={_fr_measure_chars}"
+
+val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 512
+var _resolved_font_front_index: Dict<text, i64> = {}
+var _resolved_font_front_values: [ResolvedFontMetrics] = []
+var _resolved_font_front_hits: i64 = 0
+var _resolved_font_front_misses: i64 = 0
+
+pub fn resolved_font_front_memo_hits() -> i64:
+    _resolved_font_front_hits
+
+pub fn resolved_font_front_memo_misses() -> i64:
+    _resolved_font_front_misses
+
+fn _resolved_font_front_reset():
+    _resolved_font_front_index = {}
+    _resolved_font_front_values = []
+    _resolved_font_front_hits = 0
+    _resolved_font_front_misses = 0
+
 fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
+                                              language: text, render_config_identity: text) -> ResolvedFontMetrics:
+    if not _resolved_font_metrics_cacheable(family, content):
+        return _resolve_font_metrics_with_language_config_uncached(
+            family, content, font_size, language, render_config_identity)
+    val front_key = family + "\n" + font_size.to_string() + "\n" + language + "\n" +
+        render_config_identity.len().to_string() + ":" + render_config_identity + "\n" + content
+    if _resolved_font_front_index.has(front_key):
+        _resolved_font_front_hits = _resolved_font_front_hits + 1
+        return _resolved_font_front_values[_resolved_font_front_index[front_key]]
+    _resolved_font_front_misses = _resolved_font_front_misses + 1
+    val resolved = _resolve_font_metrics_with_language_config_uncached(
+        family, content, font_size, language, render_config_identity)
+    if resolved.valid and _resolved_font_front_values.len() < RESOLVED_FONT_FRONT_CACHE_LIMIT:
+        _resolved_font_front_index[front_key] = _resolved_font_front_values.len()
+        _resolved_font_front_values = _resolved_font_front_values.push(resolved)
+    resolved
+
+fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
@@ -2514,7 +2636,9 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
             if _WM_TRACE: print("[rfm] at=cache-hit")
             return cached
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
+    val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (text_codepoints(content).len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
     if shaped.valid:
