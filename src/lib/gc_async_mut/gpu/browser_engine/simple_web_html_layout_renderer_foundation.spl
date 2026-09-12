@@ -9,6 +9,7 @@ use std.common.animation.timing.{parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_flat_projection_with_limits
 }
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value_checked}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
@@ -1267,7 +1268,31 @@ fn parse_color(raw: text) -> u32:
             val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
             if c1 >= 0 and c2 >= 0 and c2 < rp:
                 return argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
-    0u32
+    _parse_color_delegated(s)
+
+fn _parse_color_delegated(lowered: text) -> u32:
+    """Named colors, hsl()/hsla() and the other CSS color forms this local
+    parser never learned, delegated to the browser-engine color parser
+    (`dom_color.parse_color_value_checked`, RGBA-packed) and converted to the
+    ARGB packing used here. `currentcolor` is excluded: it needs the inherited
+    text color, which this context-free entry point does not have, and the
+    delegate would silently answer opaque black."""
+    if lowered == "currentcolor":
+        return 0u32
+    val first = if lowered.len() > 0: lowered.char_at(0) else: ""
+    if dec_val(first) < 10 or first == ".":
+        # The delegate ends with a bare `parse_i64`, so `1` would come back as
+        # a nonzero "color". No CSS color starts with a digit or a dot, and
+        # callers here read nonzero as "a color was found".
+        return 0u32
+    val parsed = parse_color_value_checked(lowered)
+    if parsed == nil:
+        return 0u32
+    val rgba = parsed ?? 0u32
+    val a = rgba & 0xFFu32
+    if a == 0u32:
+        return 0u32
+    (a << 24) | ((rgba >> 8) & 0xFFFFFFu32)
 
 fn parse_color_any(raw: text) -> u32:
     val direct = parse_color(raw)
