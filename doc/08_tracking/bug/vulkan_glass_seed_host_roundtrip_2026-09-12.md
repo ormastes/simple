@@ -151,3 +151,30 @@ The base itself is red (`3943 diverged vs 965 baselined; 26 mirror-only`), left
 by other lanes; this range introduces none of it and touches no mirrored test
 path. Offender list saved by the helper at
 `$TMPDIR/test_tree_divergence_preexisting.txt`.
+
+## Why `submits_per_frame` is still 17, and what it would take
+
+The readback half of this defect is closed; the submit half is NOT, and is
+deliberately left rather than half-done.
+
+Measured before and after: **17 submits per frame, unchanged.** The blur is
+submit-neutral, not submit-free. The host path already cost one submit (the
+`_flush_for_host_fallback` before the readback); the device path spends the same
+one, because the kernel must READ framebuffer content that earlier batched
+dispatches produced, and the only barrier available at this seam is a queue
+submission. The copy-back is already batched (`_finish_image_composite` ->
+`_enqueue_image_composite`), so it adds nothing. The remaining ~16 submits have
+other producers — the frame runs 107 dispatches — and none of them is the blur.
+
+Reaching `submits_per_frame=1` needs the batching machinery to accept a
+two-storage-buffer kernel and an intra-command-buffer barrier between the
+producer dispatches and the kernel that samples their output.
+`_enqueue_image_composite` is shaped for the single-source image-composite
+pipeline only. That is a change to the frame batcher, not to this kernel, and
+is not attempted here.
+
+**One correction for anyone picking that up:** do not implement the blur as a
+"separable box blur x3". The CPU reference (`emu_draw_blur_rect`) is a SINGLE
+box pass that keeps raw sums and divides once. A triple separable pass is a
+different filter and would break the byte-identical pixel result this change
+currently achieves.
