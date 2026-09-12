@@ -106,7 +106,8 @@ fn parse_inline_pairs(line: &str) -> Vec<(String, String)> {
 
 /// Read `order: [a, b, c]` from `variants/__init__.spl`; empty if absent.
 fn read_group_order(variants_dir: &Path) -> Vec<String> {
-    let manifest = match std::fs::read_to_string(variants_dir.join("__init__.spl")) {
+    let manifest_path = variants_dir.join("__init__.spl");
+    let manifest = match crate::read_trace::rts(file!(), line!(), &manifest_path) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };

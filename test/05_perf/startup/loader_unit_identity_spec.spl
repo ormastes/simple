@@ -1,0 +1,58 @@
+"""One physical file must be ONE loader unit.
+
+The repo reaches a single `.spl` file through several spellings: `src/std` is a
+symlink to `lib`, `src/compiler/common` to `00.common`, and the module resolver
+emits both relative and absolute forms of the same path. Every loader cache
+keyed by the RAW spelling turns one file into several units -- an extra read and
+a full re-parse per alias, and the same definitions registered more than once.
+
+Measured on `src/app/mcp/main.spl` against the 2026-09-06 seed, the HIR lowerer's
+parse memo (`IMPORTED_MODULE_AST`) read 120 spellings for 117 physical files:
+3 files parsed twice, 41,134 bytes. The interpreter's own module cache was
+already canonical (`normalize_path_key`) and read 128 spellings for 128 files.
+
+The gate is the call-site read trace (`SIMPLE_READ_TRACE=1`): a site that reads
+two different spellings of one realpath is keying by spelling. A site that reads
+one spelling many times is a missing memo -- a different defect, reported by the
+gate but deliberately not failed here.
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-loader-unit-identity.shs"
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+describe "loader unit identity":
+    it "keys the parse memo by canonical realpath, not by spelling":
+        val source = read_file("src/compiler_rust/compiler/src/hir/lower/import_loader.rs")
+        expect(source).to_contain("let key = crate::interpreter::normalize_path_key(path);")
+        expect(source).to_contain("IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(key, parsed.clone()));")
+
+    it "keys the lowerer's loaded-unit set by canonical realpath":
+        val source = read_file("src/compiler_rust/compiler/src/hir/lower/import_loader.rs")
+        expect(source).to_contain("let unit_key = crate::interpreter::normalize_path_key(&resolved.path);")
+        expect(source).to_contain("self.loaded_modules.insert(unit_key.clone());")
+        expect(source).to_contain("self.loaded_modules.remove(&unit_key);")
+        expect(source).to_contain("self.loaded_modules.contains(&unit_key)")
+
+    it "keys the directory manifest cache by canonical realpath":
+        val source = read_file("src/compiler_rust/compiler/src/module_resolver/manifest.rs")
+        expect(source).to_contain("let manifest_key = crate::interpreter::normalize_path_key(&init_path);")
+        expect(source).to_contain("self.manifests.insert(manifest_key, manifest.clone());")
+
+    it "proves the gate discriminates before it is trusted":
+        val (out, code) = run_sh("sh " + GATE + " --selftest 2>&1")
+        expect(code).to_equal(0)
+        expect(out).to_contain("PASS — 7 selftest fixture(s) checked, 0 failures")
+
+    it "reads no physical file under two spellings at one call site":
+        val (out, code) = run_sh("sh " + GATE + " src/app/mcp/main.spl 2>&1")
+        print "[perf] loader-unit-identity: " + out
+        expect(code).to_equal(0)
+        expect(out).to_contain("0 alias-duplicate unit(s)")
+        expect(out.contains("alias-duplicate unit:")).to_equal(false)

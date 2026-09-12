@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=216
+ROW_FLOOR=225
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -709,6 +709,26 @@ must_contain     "PLACEMUT place-aware in-place kernel exists"    "$PATRS" "fn t
 must_contain     "PLACEMUT slot walk uses make_mut per hop"        "$PLACERS" "fn place_slot_mut<"
 must_contain     "PLACEMUT expression path routes to the kernel"   "$CALLSRS" "patterns::try_place_mutation_in_place("
 must_contain     "PLACEMUT 2-level index assign mutates the slot"  "$NODEXRS" "let container_slot = match env.get_mut(root_name)"
+# --- 2026-09-12: loader unit identity — one physical file is ONE loader unit ---
+# `src/std` is a symlink to `lib` and `src/compiler/common` to `00.common`, and
+# the resolver emits both relative and absolute spellings, so a cache keyed by
+# the RAW path made each spelling its own unit: an extra read + full re-parse per
+# alias, and the same types registered twice into the lowerer. Measured on
+# `src/app/mcp/main.spl`: the HIR parse memo read 120 spellings for 117 physical
+# files (IMPORT_AST_PARSES 120 -> 117, 41,134 bytes). The interpreter's own cache
+# was already canonical and is NOT the defect. Pin every key site plus the gate.
+IMPLOAD="$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs"
+MANIFEST="$ROOT/src/compiler_rust/compiler/src/module_resolver/manifest.rs"
+UNITGATE="$ROOT/scripts/check/check-loader-unit-identity.shs"
+must_contain     "LOADERUNIT ast memo keyed canonically"        "$IMPLOAD" "let key = crate::interpreter::normalize_path_key(path);"
+must_not_contain "LOADERUNIT ast memo not keyed by raw path"    "$IMPLOAD" "IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned())"
+must_contain     "LOADERUNIT loaded-unit set keyed canonically" "$IMPLOAD" "let unit_key = crate::interpreter::normalize_path_key(&resolved.path);"
+must_not_contain "LOADERUNIT loaded_modules not keyed raw"      "$IMPLOAD" "self.loaded_modules.insert(resolved.path.clone());"
+must_contain     "LOADERUNIT cycle search compares identities"  "$IMPLOAD" "let repeated_key = crate::interpreter::normalize_path_key(repeated);"
+must_contain     "LOADERUNIT manifest cache keyed canonically"  "$MANIFEST" "let manifest_key = crate::interpreter::normalize_path_key(&init_path);"
+must_not_contain "LOADERUNIT manifest not keyed by raw path"    "$MANIFEST" "self.manifests.insert(init_path, manifest.clone());"
+must_contain     "LOADERUNIT gate exists and is fail-closed"    "$UNITGATE" "ERROR — nothing was checked"
+must_contain     "LOADERUNIT gate selftest is fatal"            "$UNITGATE" "if ! selftest; then"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
