@@ -57,6 +57,25 @@ fn try_place_receiver_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    // In-place kernel first (2026-09-12): `self.inner.xs.push(x)`,
+    // `rows[i].push(x)`, `self.d.insert(k, v)` and `arr[i].inc()` mutate the leaf
+    // where it lives instead of evaluating the receiver to a COPY, running the
+    // functional builtin (which clones the whole container) and rebuilding the
+    // root through `updated_root` — O(container) per call. Same kernel the
+    // statement-position path in `interpreter_helpers/patterns.rs` uses, so the
+    // two spellings of the same call cannot diverge.
+    if let Some(result) = super::super::interpreter_helpers::patterns::try_place_mutation_in_place(
+        receiver,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )? {
+        return Ok(Some(result));
+    }
     let place = match super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)? {
         Some(place) => place,
         None => return Ok(None),

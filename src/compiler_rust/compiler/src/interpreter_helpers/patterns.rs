@@ -264,30 +264,24 @@ fn apply_array_mutation_in_place(
     }
 }
 
-/// Ownership-gated in-place mutation for the `obj.field.push(x)` shape.
+/// Dict methods that mutate the receiver and update its binding.
 ///
-/// The bare-identifier receiver (`arr.push(x)`) already gets in-place mutation via
-/// `Arc::make_mut` further down this file, which is why local list building is O(N).
-/// The FIELD receiver did NOT: `interpreter/expr/calls.rs` copied the field value into
-/// a `__nested_field_*__` temp, so the array Arc was aliased (object + temp) and every
-/// single `push` cloned the whole backing `Vec` — O(N^2) list building on any object
-/// field. That is the cost the font loader pays (`self.glyphs = self.glyphs.push(..)`
-/// style accumulation), and it is why an unrelated large live object appeared to make
-/// font loading explode.
+/// Deliberately the same list the identifier-receiver Dict branch further down
+/// this file uses: a method that does not write back today must not start doing
+/// so merely because it gained an in-place implementation. (`update` appears in
+/// the frozen-dict rejection list but is not implemented by
+/// `handle_dict_methods`, so it is not here either.)
+const DICT_MUTATING_METHODS: &[&str] = &["set", "insert", "remove", "delete", "merge", "extend", "clear"];
+
+/// Evaluate an array mutator's item / index / second operands exactly ONCE, up
+/// front — before the receiver array is re-read for mutation, so an argument
+/// that itself retains a reference to that array bumps its refcount and
+/// correctly forces the copy branch.
 ///
-/// Same discipline as the identifier path: arguments are evaluated FIRST (so an
-/// argument that retains a reference to this array forces the clone branch), then the
-/// array is re-read through `env.get_mut` and mutated via `Arc::make_mut` — uniquely
-/// owned mutates in place, aliased clones-then-mutates, so value semantics are
-/// preserved exactly. `Arc::make_mut` on the field map likewise isolates an aliased
-/// object before its field is touched.
-///
-/// Returns `Ok(None)` when the shape does not apply, leaving the caller on its
-/// previous path.
+/// Shared by `try_field_array_mutation_in_place` and the general place kernel so
+/// both evaluate the same operands in the same order under the same rules.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_field_array_mutation_in_place(
-    obj_name: &str,
-    field: &str,
+fn eval_array_mutator_args(
     method: &str,
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
@@ -295,21 +289,7 @@ pub(crate) fn try_field_array_mutation_in_place(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Option<Value>, CompileError> {
-    // `write_span` takes four arguments and is handled by its own path; keep this
-    // helper to the generic item/idx/second mutators.
-    if method == "write_span" || !ARRAY_MUTATING_METHODS.contains(&method) {
-        return Ok(None);
-    }
-    // Only fire for a local object binding whose field is currently a plain array.
-    match env.get(obj_name) {
-        Some(Value::Object { fields, .. }) => match fields.get(field) {
-            Some(Value::Array(_)) => {}
-            _ => return Ok(None),
-        },
-        _ => return Ok(None),
-    }
-
+) -> Result<(Option<Value>, Option<usize>, Option<Value>), CompileError> {
     let item = match method {
         "push" | "append" => Some(eval_arg(
             args,
@@ -371,6 +351,56 @@ pub(crate) fn try_field_array_mutation_in_place(
         ),
         _ => (None, None),
     };
+    Ok((item, idx, second))
+}
+
+/// Ownership-gated in-place mutation for the `obj.field.push(x)` shape.
+///
+/// The bare-identifier receiver (`arr.push(x)`) already gets in-place mutation via
+/// `Arc::make_mut` further down this file, which is why local list building is O(N).
+/// The FIELD receiver did NOT: `interpreter/expr/calls.rs` copied the field value into
+/// a `__nested_field_*__` temp, so the array Arc was aliased (object + temp) and every
+/// single `push` cloned the whole backing `Vec` — O(N^2) list building on any object
+/// field. That is the cost the font loader pays (`self.glyphs = self.glyphs.push(..)`
+/// style accumulation), and it is why an unrelated large live object appeared to make
+/// font loading explode.
+///
+/// Same discipline as the identifier path: arguments are evaluated FIRST (so an
+/// argument that retains a reference to this array forces the clone branch), then the
+/// array is re-read through `env.get_mut` and mutated via `Arc::make_mut` — uniquely
+/// owned mutates in place, aliased clones-then-mutates, so value semantics are
+/// preserved exactly. `Arc::make_mut` on the field map likewise isolates an aliased
+/// object before its field is touched.
+///
+/// Returns `Ok(None)` when the shape does not apply, leaving the caller on its
+/// previous path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_field_array_mutation_in_place(
+    obj_name: &str,
+    field: &str,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // `write_span` takes four arguments and is handled by its own path; keep this
+    // helper to the generic item/idx/second mutators.
+    if method == "write_span" || !ARRAY_MUTATING_METHODS.contains(&method) {
+        return Ok(None);
+    }
+    // Only fire for a local object binding whose field is currently a plain array.
+    match env.get(obj_name) {
+        Some(Value::Object { fields, .. }) => match fields.get(field) {
+            Some(Value::Array(_)) => {}
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    }
+
+    let (item, idx, second) = eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
 
     // Re-read after argument evaluation: an argument may have rebound `obj_name`
     // or replaced the field, in which case the shape no longer applies.
@@ -391,6 +421,293 @@ pub(crate) fn try_field_array_mutation_in_place(
     };
     let new_array_val = Value::Array(Arc::clone(arc));
     Ok(Some(popped.unwrap_or(new_array_val)))
+}
+
+/// Which in-place leaf mutation a place receiver resolves to.
+enum PlaceMutation {
+    /// `[T]` leaf reached by an `ARRAY_MUTATING_METHODS` method.
+    Array,
+    /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
+    Dict,
+    /// Object leaf whose class (carried here) defines the method.
+    Object(String),
+}
+
+/// In-place mutation through an arbitrary PLACE receiver — the single kernel for
+/// every mutating call whose receiver is neither a bare identifier nor the
+/// one-hop `obj.field` array shape that `try_field_array_mutation_in_place` owns.
+///
+/// The defect this closes. The general PLACE branch and the Index-receiver
+/// branch in `handle_method_call_with_self_update_inner` both mutate a COPY and
+/// rebuild the root. `evaluate_method_call_with_self_update` evaluates the
+/// receiver EXPRESSION to a Value — an `Arc` clone of the leaf — so the mutator
+/// runs through the purely functional `handle_array_methods` /
+/// `handle_dict_methods`, which clone the whole container because they never see
+/// an owner to mutate; `place::updated_root` then clones the root value and walks
+/// it with `Arc::make_mut`, copying every container on the path a second time.
+/// The Index-receiver branch is the same defect spelled differently: it binds the
+/// element to a `__indexed_elem_` temp (aliasing the inner Arc) and rebuilds the
+/// OUTER array with `(*arr).clone()` on every call.
+///
+/// Measured on the interpreter lane at n = 5,000, elements copied:
+///   * `self.inner.xs.push(x)`  12,497,500  (= n(n-1)/2)
+///   * `self.rows[r].push(x)`    3,122,500
+///   * `self.d.insert(k, v)`    12,497,500
+///   * `arr[i].inc()`           25,000,000  (= n^2, the outer array per call)
+/// i.e. exactly quadratic on shapes that are O(1) amortized for a bare
+/// identifier. An `SIMPLE_PLACE_TRACE` walk showed `Arc::strong_count == 1` at
+/// EVERY hop including the leaf before the call, so nothing in `env` aliased the
+/// container — the call path manufactured the alias itself.
+///
+/// The fix is to stop copying: walk `env.get_mut(root)` -> `place::project_mut`,
+/// which is `Arc::make_mut` per hop (O(depth), in place whenever the path is
+/// uniquely owned), and mutate the leaf where it lives. Value semantics are
+/// unchanged — `Arc::make_mut` still deep-copies a genuinely aliased container
+/// before touching it, so a second live binding never observes the write.
+///
+/// Same argument discipline as the identifier and `obj.field` paths
+/// (MECALL-OWNED): arguments are evaluated FIRST, while the receiver is still in
+/// place, and only then is the leaf re-read for mutation.
+///
+/// Returns `Ok(None)` when the shape does not apply — a bare-identifier receiver,
+/// a root that lives only in MODULE_GLOBALS (not a place), a frozen or packed-byte
+/// leaf, a non-mutating method — leaving the caller on its previous path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_place_mutation_in_place(
+    receiver: &Expr,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    use super::super::place;
+
+    // Cheap discriminant guard first: only a projection chain can be a place with
+    // a non-empty projection list, and `resolve_place` allocates a `Vec` and
+    // evaluates index expressions. Everything else (identifiers, call results,
+    // literals) is rejected without touching `env`.
+    if !matches!(
+        receiver,
+        Expr::FieldAccess { .. } | Expr::Index { .. } | Expr::ForceUnwrap(_)
+    ) {
+        return Ok(None);
+    }
+    // NB: for a receiver this kernel DECLINES, the caller's own `resolve_place`
+    // runs again, so a side-effecting index expression is evaluated once more
+    // than before. The branches below already re-evaluate the index on each of
+    // their own fallthrough paths (the Index branch re-enters `evaluate_expr` on
+    // the whole call for a scalar element), so this is the same pre-existing
+    // class, and every in-tree index expression is pure.
+    let Some(target) = place::resolve_place(receiver, env, functions, classes, enums, impl_methods)? else {
+        return Ok(None);
+    };
+    // A bare identifier keeps its own fast paths: they additionally re-seed a
+    // module-global receiver, reject `const` bindings and handle packed bytes.
+    if target.projections.is_empty() {
+        return Ok(None);
+    }
+    // Decide the arm from a READ-ONLY peek: a peek that bails must not have paid
+    // a copy-on-write isolation on the way in.
+    let kind = match place::place_slot_ref(env, &target) {
+        // `write_span` takes four operands and has its own path.
+        Some(Value::Array(_)) if method != "write_span" && ARRAY_MUTATING_METHODS.contains(&method) => {
+            PlaceMutation::Array
+        }
+        Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
+        Some(Value::Object { class, .. }) if object_method_exists(classes, impl_methods, class, method) => {
+            PlaceMutation::Object(class.clone())
+        }
+        _ => return Ok(None),
+    };
+
+    let result = match kind {
+        PlaceMutation::Array => {
+            let (item, idx, second) =
+                eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+            // Re-read after argument evaluation: an argument may have replaced the
+            // leaf or the root, in which case the shape no longer applies and the
+            // caller's previous path re-evaluates the arguments — the same
+            // accepted re-evaluation `try_field_array_mutation_in_place` has.
+            let Some(Value::Array(arc)) = place::place_slot_mut(env, &target) else {
+                return Ok(None);
+            };
+            note_place_mutation(arc.len(), Arc::strong_count(arc));
+            let popped = {
+                let vec = Arc::make_mut(arc);
+                apply_array_mutation_in_place(method, vec, item, idx, second)?
+            };
+            // Hand the (already-mutated) Arc back as the expression result — an
+            // O(1) refcount bump — except for `pop`/`remove`, whose result is the
+            // ELEMENT.
+            let new_array_val = Value::Array(Arc::clone(arc));
+            popped.unwrap_or(new_array_val)
+        }
+        PlaceMutation::Dict => {
+            // Every operand is evaluated AND validated before the leaf is re-read,
+            // so a rejected `merge` argument leaves the dict untouched exactly as
+            // the functional path did. Behaviour mirrors
+            // `interpreter_method/collections.rs::handle_dict_methods` arm for arm,
+            // including `wrap_dict_entry` on the stored value and the fact that
+            // `remove` yields the DICT (unlike `[T].remove`, which yields the
+            // element).
+            let (key_val, value, other) = match method {
+                "set" | "insert" => (
+                    Some(eval_arg(
+                        args,
+                        0,
+                        Value::Nil,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?),
+                    Some(eval_arg(
+                        args,
+                        1,
+                        Value::Nil,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?),
+                    None,
+                ),
+                "remove" | "delete" => (
+                    Some(eval_arg(
+                        args,
+                        0,
+                        Value::Nil,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?),
+                    None,
+                    None,
+                ),
+                "merge" | "extend" => {
+                    let arg0 = eval_arg(
+                        args,
+                        0,
+                        Value::Dict(Arc::new(HashMap::new())),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    match arg0 {
+                        Value::Dict(map) => (None, None, Some(map)),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("merge expects a dict argument");
+                            return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
+                        }
+                    }
+                }
+                // "clear" takes no operands.
+                _ => (None, None, None),
+            };
+            let Some(Value::Dict(entries)) = place::place_slot_mut(env, &target) else {
+                return Ok(None);
+            };
+            note_place_mutation(entries.len(), Arc::strong_count(entries));
+            let map = Arc::make_mut(entries);
+            match method {
+                "set" | "insert" => {
+                    let key_val = key_val.expect("set/insert evaluated its key above");
+                    let stored = Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil));
+                    map.insert(key_val.to_key_string(), stored);
+                }
+                "remove" | "delete" => {
+                    map.remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
+                }
+                "merge" | "extend" => {
+                    if let Some(other) = other {
+                        map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                }
+                "clear" => map.clear(),
+                _ => unreachable!("DICT_MUTATING_METHODS is exhaustive here"),
+            }
+            Value::Dict(Arc::clone(entries))
+        }
+        PlaceMutation::Object(class) => {
+            // MECALL-OWNED: arguments first (so `f(self.x)`-style operands still
+            // see the receiver in place), then the object is MOVED out of its slot
+            // so the callee owns it at refcount 1 and `self.f = v` inside the
+            // method mutates without copying the field map.
+            let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
+            let Some(slot) = place::place_slot_mut(env, &target) else {
+                return Ok(None);
+            };
+            if !matches!(slot, Value::Object { class: c, .. } if *c == class) {
+                // An argument replaced the element; the shape no longer applies.
+                return Ok(None);
+            }
+            let Value::Object { fields, .. } = std::mem::replace(slot, Value::Nil) else {
+                unreachable!("matched as an Object immediately above")
+            };
+            note_place_mutation(0, 1);
+            // Leaving `Value::Nil` behind on an `Err` is unobservable for the same
+            // reason the identifier fast path gives: TryError unwinds to the
+            // enclosing function boundary and every other CompileError aborts.
+            let Some((call_result, updated_self)) = find_and_exec_method_with_self_owned_values(
+                method,
+                &arg_vals,
+                args,
+                &class,
+                fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            else {
+                unreachable!("object_method_exists checked before the element was taken")
+            };
+            let mut pending = Some(updated_self);
+            if let Some(slot) = place::place_slot_mut(env, &target) {
+                *slot = pending.take().expect("set immediately above");
+            }
+            if let Some(value) = pending {
+                // The callee structurally changed the container the element lived
+                // in, so the emptied slot is gone. Fall back to the generic
+                // write-through, which can also CREATE a missing final projection.
+                place::write_place(env, &target, value);
+            }
+            call_result
+        }
+    };
+
+    // Keep MODULE_GLOBALS in step, exactly as the sibling paths do. `write_place`
+    // does this itself; the arms above write through `place_slot_mut`, which
+    // deliberately does not (it is also used on frame-local roots in hot loops).
+    if !env.is_local(target.root.as_str()) {
+        if let Some(updated) = env.get(target.root.as_str()).cloned() {
+            sync_flat_global(target.root.as_str(), &updated);
+        }
+    }
+    Ok(Some(result))
+}
+
+/// Record one place-receiver mutation, and the copy it cost when the leaf turned
+/// out to be genuinely aliased (`Arc::make_mut` deep-copies that case, which is
+/// the value semantics contract, not a defect).
+fn note_place_mutation(len: usize, strong_count: usize) {
+    crate::perf_counters::bump(&crate::perf_counters::PLACE_MUT_CALLS, 1);
+    if crate::perf_counters::enabled() && strong_count > 1 {
+        crate::perf_counters::bump(&crate::perf_counters::PLACE_MUT_COW_CLONES, 1);
+        crate::perf_counters::bump(&crate::perf_counters::PLACE_MUT_COW_ELEMS_CLONED, len as u64);
+    }
 }
 
 /// Handle method call on object with self-update tracking
@@ -834,6 +1151,20 @@ fn handle_method_call_with_self_update_inner(
                     }
                 }
             }
+        }
+
+        // Single in-place kernel for every remaining place receiver:
+        // `self.inner.xs.push(x)`, `rows[i].push(x)`, `self.rows[r].push(x)`,
+        // `self.d.insert(k, v)`, `arr[i].inc()`. It mutates the leaf where it
+        // lives instead of evaluating the receiver to a copy and rebuilding the
+        // root, which was O(container) per call — quadratic list/dict building on
+        // every shape deeper than one hop. The two branches below stay as the
+        // fallback for everything it declines (a MODULE_GLOBALS-only root is not a
+        // place; frozen and packed-byte leaves; non-mutating methods).
+        if let Some(result) =
+            try_place_mutation_in_place(receiver, method, args, env, functions, classes, enums, impl_methods)?
+        {
+            return Ok((result, None));
         }
 
         // Handle `arr[i].method()` — Index receiver write-back (bug #28).
@@ -2028,6 +2359,430 @@ mod cow_alias_mechanism_tests {
         }
         assert_eq!(arr_len(field_of(&env, "o", "xs")), 4, "o.xs must have grown");
         assert_eq!(arr_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
+    }
+
+    // ---------------------------------------------------------------------
+    // Place-receiver mutation (2026-09-12). A mutating call whose receiver is
+    // anything other than a bare identifier or a one-hop `obj.field` used to
+    // evaluate the receiver to a COPY, run the functional builtin
+    // (`handle_array_methods` / `handle_dict_methods`, which clone the whole
+    // container), and rebuild the ROOT from the result — O(container) per call.
+    // Measured at n=5000 on the probes: 12,497,500 elements copied for
+    // `self.inner.xs.push(x)` and for `self.d.insert(k, v)`, 25,000,000 for
+    // `arr[i].inc()`. Site table: scratchpad B_sites.md.
+    // These pin the MECHANISM (distinct backing buffers), not wall time.
+    // ---------------------------------------------------------------------
+
+    /// `(PLACE_MUT_CALLS, PLACE_MUT_COW_ELEMS_CLONED)` for the tests whose copy
+    /// is invisible to pointer identity (a rebuilt `HashMap`/`Vec` allocation is
+    /// routinely handed back at the address the dropped one just vacated).
+    ///
+    /// The counters are process-global and the test binary runs tests in
+    /// parallel, so a delta can only be too HIGH, never too low — both
+    /// assertions are written in the direction that stays sound under that.
+    fn counter_snapshot() -> (u64, u64) {
+        crate::perf_counters::set_enabled(true);
+        (
+            crate::perf_counters::PLACE_MUT_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            crate::perf_counters::PLACE_MUT_COW_ELEMS_CLONED.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn counter_delta(before: (u64, u64)) -> (u64, u64) {
+        let now = counter_snapshot();
+        (now.0 - before.0, now.1 - before.1)
+    }
+
+    fn dict_len(v: &Value) -> usize {
+        match v {
+            Value::Dict(d) => d.len(),
+            other => panic!("expected dict, got {:?}", other),
+        }
+    }
+
+    fn nested_box_with_empty_xs() -> Value {
+        let mut inner: HashMap<String, Value> = HashMap::new();
+        inner.insert("xs".to_string(), Value::array(vec![]));
+        let mut outer: HashMap<String, Value> = HashMap::new();
+        outer.insert(
+            "inner".to_string(),
+            Value::Object {
+                class: "Inner".to_string(),
+                fields: Arc::new(inner),
+            },
+        );
+        Value::Object {
+            class: "Outer".to_string(),
+            fields: Arc::new(outer),
+        }
+    }
+
+    fn nested_field_of<'e>(env: &'e Env, obj: &str, path: &[&str]) -> &'e Value {
+        let mut current = env.get(obj).expect("root binding");
+        for field in path {
+            current = match current {
+                Value::Object { fields, .. } => fields.get(*field).expect("field"),
+                other => panic!("expected object, got {:?}", other),
+            };
+        }
+        current
+    }
+
+    fn index_expr(receiver: Expr, idx: i64) -> Expr {
+        Expr::Index {
+            receiver: Box::new(receiver),
+            index: Box::new(Expr::Integer(idx)),
+        }
+    }
+
+    #[test]
+    fn nested_field_array_push_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        env.insert("o".to_string(), nested_box_with_empty_xs());
+        let call = push_call(Expr::FieldAccess {
+            receiver: Box::new(Expr::FieldAccess {
+                receiver: Box::new(ident("o")),
+                field: "inner".to_string(),
+            }),
+            field: "xs".to_string(),
+        });
+        let mut seen: HashSet<usize> = HashSet::new();
+        for _ in 0..N {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            seen.insert(arr_ptr(nested_field_of(&env, "o", &["inner", "xs"])));
+        }
+        assert_eq!(
+            arr_len(nested_field_of(&env, "o", &["inner", "xs"])),
+            N,
+            "every push must land"
+        );
+        assert!(
+            seen.len() < 64,
+            "`o.inner.xs.push(v)` must mutate the leaf array in place; got {} distinct \
+             buffers for {N} pushes — the general PLACE receiver path is still evaluating \
+             the receiver to a copy and cloning the whole Vec per call",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn indexed_row_push_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        env.insert(
+            "rows".to_string(),
+            Value::array(vec![Value::array(vec![]), Value::array(vec![])]),
+        );
+        let call = push_call(index_expr(ident("rows"), 0));
+        let mut rows_seen: HashSet<usize> = HashSet::new();
+        let mut row_seen: HashSet<usize> = HashSet::new();
+        for _ in 0..N {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            let rows = env.get("rows").expect("rows");
+            rows_seen.insert(arr_ptr(rows));
+            row_seen.insert(arr_ptr(match rows {
+                Value::Array(items) => &items[0],
+                other => panic!("expected array, got {:?}", other),
+            }));
+        }
+        let rows = env.get("rows").expect("rows");
+        let row0 = match rows {
+            Value::Array(items) => &items[0],
+            other => panic!("expected array, got {:?}", other),
+        };
+        assert_eq!(arr_len(row0), N, "every push must land");
+        assert!(
+            row_seen.len() < 64,
+            "`rows[0].push(v)` must mutate the row in place; got {} distinct row buffers \
+             for {N} pushes — the `__indexed_elem_` temp still aliases the row Arc",
+            row_seen.len()
+        );
+        assert!(
+            rows_seen.len() < 64,
+            "`rows[0].push(v)` must not rebuild the OUTER array; got {} distinct outer \
+             buffers for {N} pushes",
+            rows_seen.len()
+        );
+    }
+
+    #[test]
+    fn field_indexed_row_push_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert(
+            "rows".to_string(),
+            Value::array(vec![Value::array(vec![]), Value::array(vec![])]),
+        );
+        env.insert(
+            "g".to_string(),
+            Value::Object {
+                class: "Grid".to_string(),
+                fields: Arc::new(fields),
+            },
+        );
+        let call = push_call(index_expr(
+            Expr::FieldAccess {
+                receiver: Box::new(ident("g")),
+                field: "rows".to_string(),
+            },
+            1,
+        ));
+        let mut seen: HashSet<usize> = HashSet::new();
+        for _ in 0..N {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            seen.insert(arr_ptr(match field_of(&env, "g", "rows") {
+                Value::Array(items) => &items[1],
+                other => panic!("expected array, got {:?}", other),
+            }));
+        }
+        let row1 = match field_of(&env, "g", "rows") {
+            Value::Array(items) => &items[1],
+            other => panic!("expected array, got {:?}", other),
+        };
+        assert_eq!(arr_len(row1), N, "every push must land");
+        assert!(
+            seen.len() < 64,
+            "`g.rows[1].push(v)` must mutate the row in place; got {} distinct buffers \
+             for {N} pushes",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn field_dict_insert_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        env.insert(
+            "r".to_string(),
+            Value::Object {
+                class: "Reg".to_string(),
+                fields: Arc::new(fields),
+            },
+        );
+        let before = counter_snapshot();
+        for i in 0..N {
+            let call = Expr::MethodCall {
+                receiver: Box::new(Expr::FieldAccess {
+                    receiver: Box::new(ident("r")),
+                    field: "d".to_string(),
+                }),
+                method: "insert".to_string(),
+                args: vec![arg(Expr::String(format!("k{i}"))), arg(Expr::Integer(i as i64))],
+                generic_args: vec![],
+            };
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        assert_eq!(dict_len(field_of(&env, "r", "d")), N, "every insert must land");
+        // A dict is `Arc<HashMap<..>>`: a rebuilt map is a fresh allocation the
+        // allocator readily hands back at the SAME address, so pointer identity
+        // (the metric the array tests use on `Vec::as_ptr`) cannot see the copy.
+        // Pin the kernel's own counters instead.
+        let (calls, elems) = counter_delta(before);
+        assert!(
+            calls >= N as u64,
+            "`r.d.insert(k, v)` must go through the in-place place kernel; it fired {calls} \
+             times for {N} inserts — the general PLACE path is still evaluating the receiver \
+             to a copy and running the functional `handle_dict_methods`, which clones the \
+             whole map per call"
+        );
+        assert!(
+            elems < N as u64,
+            "`r.d.insert(k, v)` must not copy the map per call; {elems} entries copied over \
+             {N} inserts"
+        );
+    }
+
+    #[test]
+    fn indexed_object_method_does_not_rebuild_the_outer_array() {
+        const N: usize = 400;
+        let source = "class Counter:\n    v: i64\n    fn inc(mut self):\n        self.v = self.v + 1\n";
+        let module = simple_parser::Parser::new(source).parse().expect("parse Counter");
+        let class_def = module
+            .items
+            .iter()
+            .find_map(|item| match item {
+                simple_parser::ast::Node::Class(cd) if cd.name == "Counter" => Some(cd.clone()),
+                _ => None,
+            })
+            .expect("Counter class in parsed module");
+        let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        classes.insert("Counter".to_string(), Arc::new(class_def));
+
+        let mut env = Env::new();
+        let counters: Vec<Value> = (0..N)
+            .map(|_| {
+                let mut fields: HashMap<String, Value> = HashMap::new();
+                fields.insert("v".to_string(), Value::Int(0));
+                Value::Object {
+                    class: "Counter".to_string(),
+                    fields: Arc::new(fields),
+                }
+            })
+            .collect();
+        env.insert("arr".to_string(), Value::array(counters));
+
+        let call = Expr::MethodCall {
+            receiver: Box::new(index_expr(ident("arr"), 0)),
+            method: "inc".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        };
+        let before = counter_snapshot();
+        for _ in 0..N {
+            let (_, update) = handle_method_call_with_self_update(
+                &call,
+                &mut env,
+                &mut HashMap::new(),
+                &mut classes,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("method call");
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        let v = match env.get("arr").expect("arr") {
+            Value::Array(items) => match &items[0] {
+                Value::Object { fields, .. } => fields.get("v").expect("v").clone(),
+                other => panic!("expected object, got {:?}", other),
+            },
+            other => panic!("expected array, got {:?}", other),
+        };
+        assert_eq!(v, Value::Int(N as i64), "every inc must land on arr[0]");
+        // Same allocator-address-reuse caveat as the dict test: the rebuilt outer
+        // `Vec` lands at the old address, so only the counters see the copy.
+        let (calls, elems) = counter_delta(before);
+        assert!(
+            calls >= N as u64,
+            "`arr[i].inc()` must go through the in-place place kernel; it fired {calls} times \
+             for {N} calls — the Index-receiver Object arm is still rebuilding the array with \
+             `(*arr).clone()`, which is O(arr.len()) per call"
+        );
+        assert!(
+            elems < N as u64,
+            "`arr[i].inc()` must not copy the outer array per call; {elems} elements copied \
+             over {N} calls"
+        );
+    }
+
+    #[test]
+    fn genuinely_aliased_nested_field_array_still_copies_on_write() {
+        let mut env = Env::new();
+        let mut inner: HashMap<String, Value> = HashMap::new();
+        inner.insert("xs".to_string(), Value::array(vec![Value::Int(0)]));
+        let mut outer: HashMap<String, Value> = HashMap::new();
+        outer.insert(
+            "inner".to_string(),
+            Value::Object {
+                class: "Inner".to_string(),
+                fields: Arc::new(inner),
+            },
+        );
+        env.insert(
+            "o".to_string(),
+            Value::Object {
+                class: "Outer".to_string(),
+                fields: Arc::new(outer),
+            },
+        );
+        let alias = nested_field_of(&env, "o", &["inner", "xs"]).clone();
+        env.insert("b".to_string(), alias);
+        let call = push_call(Expr::FieldAccess {
+            receiver: Box::new(Expr::FieldAccess {
+                receiver: Box::new(ident("o")),
+                field: "inner".to_string(),
+            }),
+            field: "xs".to_string(),
+        });
+        for _ in 0..3 {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        assert_eq!(
+            arr_len(nested_field_of(&env, "o", &["inner", "xs"])),
+            4,
+            "o.inner.xs must have grown"
+        );
+        assert_eq!(arr_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
+    }
+
+    #[test]
+    fn genuinely_aliased_indexed_row_still_copies_on_write() {
+        let mut env = Env::new();
+        env.insert(
+            "rows".to_string(),
+            Value::array(vec![Value::array(vec![Value::Int(0)])]),
+        );
+        let alias = match env.get("rows").expect("rows") {
+            Value::Array(items) => items[0].clone(),
+            other => panic!("expected array, got {:?}", other),
+        };
+        env.insert("b".to_string(), alias);
+        let call = push_call(index_expr(ident("rows"), 0));
+        for _ in 0..3 {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        let row0 = match env.get("rows").expect("rows") {
+            Value::Array(items) => items[0].clone(),
+            other => panic!("expected array, got {:?}", other),
+        };
+        assert_eq!(arr_len(&row0), 4, "rows[0] must have grown");
+        assert_eq!(arr_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
+    }
+
+    #[test]
+    fn genuinely_aliased_field_dict_still_copies_on_write() {
+        let mut env = Env::new();
+        let mut entries: HashMap<String, Value> = HashMap::new();
+        entries.insert("seed".to_string(), Value::Int(0));
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("d".to_string(), Value::Dict(Arc::new(entries)));
+        env.insert(
+            "r".to_string(),
+            Value::Object {
+                class: "Reg".to_string(),
+                fields: Arc::new(fields),
+            },
+        );
+        let alias = field_of(&env, "r", "d").clone();
+        env.insert("b".to_string(), alias);
+        let call = Expr::MethodCall {
+            receiver: Box::new(Expr::FieldAccess {
+                receiver: Box::new(ident("r")),
+                field: "d".to_string(),
+            }),
+            method: "insert".to_string(),
+            args: vec![arg(Expr::String("k".to_string())), arg(Expr::Integer(1))],
+            generic_args: vec![],
+        };
+        let (_, update) = run(&call, &mut env);
+        if let Some((name, val)) = update {
+            env.insert(name, val);
+        }
+        assert_eq!(dict_len(field_of(&env, "r", "d")), 2, "r.d must have grown");
+        assert_eq!(dict_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
     }
 
     #[test]

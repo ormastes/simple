@@ -1,0 +1,537 @@
+# Component-scaling budget for the seed tree-walk interpreter.
+#
+# One `it` per "shape" from the interpreter perf-bug survey. Each shape runs
+# its loop at n and 4n and asserts `large * 10 < small * 70` (ratio < 7).
+# Linear/O(n log n) work clears this easily (ratio ~ 4); the eight shapes below
+# marked QUADRATIC do not, and are EXPECTED RED on the deployed seed -- that
+# is the point of this spec: a red `it` names the exact bottleneck shape.
+#
+# READ THE RATIO, NOT THE SECONDS. This host is shared and absolute times
+# drift 2x between runs of identical code; the ratio bound is what
+# discriminates linear from quadratic.
+#
+# Measured on the deployed seed (interpreter lane, `bin/simple test`, which
+# runs specs in interpreter mode by default):
+#   /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple
+#   50093192 bytes, mtime 2026-09-06 09:59:11 +0900
+#   (includes the 08-21 obj.field.push fast path)
+#
+# This run (2026-09-12, this spec, wall 1m23s for all 21 examples):
+#
+# | shape                 | code                              | n small | n large | small     | large      | ratio | verdict    |
+# |------------------------|-----------------------------------|---------|---------|-----------|------------|-------|------------|
+# | nested_field_push      | self.inner.xs.push(x) in a method | 20000   | 80000   | 1.722s    | 26.790s    | 15.5  | QUADRATIC  |
+# | index_arr_push         | rows[i % 4].push(i) (local)       | 20000   | 80000   | 0.466s    | 7.052s     | 15.1  | QUADRATIC  |
+# | self_index_push        | self.rows[r].push(x) in a method  | 20000   | 80000   | 0.562s    | 7.533s     | 13.4  | QUADRATIC  |
+# | field_dict_method*     | self.d.insert(k, v) in a method   | 5000    | 20000   | 0.547s    | 8.266s     | 15.1  | QUADRATIC  |
+# | nested_dict_insert*    | self.inner.d[k] = v in a method   | 5000    | 20000   | 0.536s    | 8.175s     | 15.2  | QUADRATIC  |
+# | index_obj_mutate_big*  | arr[i].inc(), arr.len()==n        | 5000    | 20000   | 1.182s    | 17.620s    | 14.9  | QUADRATIC  |
+# | nested_field_extend    | self.inner.xs.extend([x])         | 20000   | 80000   | 3.600s    | 65.520s    | 18.2  | QUADRATIC  |
+# | nested_field_remove_l* | self.inner.xs.remove(len - 1)     | 5000    | 20000   | 0.380s    | 4.640s     | 12.2  | QUADRATIC  |
+# | dict_insert_local      | d["k{i}"] = i (local)             | 20000   | 80000   | 12.695ms  | 52.119ms   | 4.1   | linear pin |
+# | str_concat             | s = s + "x"                       | 20000   | 80000   | 10.641ms  | 42.353ms   | 3.9   | linear pin |
+# | closure_capture        | \x: arr.len() + x, called n times | 20000   | 80000   | 40.858ms  | 162.355ms  | 3.9   | linear pin |
+# | fn_call                | acc = add(acc, i)                 | 20000   | 80000   | 67us      | 246us      | 3.6   | linear pin |
+# | struct_in_arr_assign   | arr[i % 64].x = i                 | 20000   | 80000   | 59.091ms  | 236.437ms  | 4.0   | linear pin |
+# | text_slice             | s.slice(i, i + 1).len()           | 20000   | 80000   | 19.751ms  | 79.633ms   | 4.0   | linear pin |
+# | char_code_at           | s.char_code_at(i) (ASCII memo)    | 20000   | 80000   | 15.449ms  | 62.125ms   | 4.0   | linear pin |
+# | dict_get_loop          | d.get("k{i % 1000}") ?? 0         | 20000   | 80000   | 20.016ms  | 79.898ms   | 3.9   | linear pin |
+# | field_push (1-level)   | self.items.push(x)                | 20000   | 80000   | 38.445ms  | 151.306ms  | 3.9   | linear pin |
+#
+# `*` shapes time out around n=80000 today, so those three run at n=5000/20000
+# instead (still a 4x ratio; the quadratic curve already shows ratio ~15 at
+# this scale, well above the >=9 threshold this spec's ratio bound needs).
+#
+# `text_substr`, `str_index`/`char_at` are QUADRATIC/SUPERLINEAR too but are
+# owned by a sibling spec (string-mechanism shapes) -- not duplicated here.
+#
+# Mechanism (src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs,
+# `handle_method_call_with_self_update_inner`): the FieldAccess-object branch
+# and the Index-receiver branch clone an outer container per self-mutating
+# method call instead of writing through a unique Arc, which turns n
+# sequential mutations into O(n^2) total element copies. See BRIEF.md for the
+# full source map (interpreter/place.rs, interpreter_method/collections.rs).
+#
+# doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L2/L3)
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn report_ratio(shape: text, n_small: i64, small_us: i64, n_large: i64, large_us: i64):
+    val ratio_x10 = (large_us * 10) / small_us
+    print "[perf] {shape}: n={n_small}={small_us}us 4n={n_large}={large_us}us ratio={ratio_x10 / 10}.{ratio_x10 % 10}"
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+class NestedPushInner:
+    xs: [i64]
+
+class NestedPushOuter:
+    inner: NestedPushInner
+    fn add(mut self, x: i64):
+        self.inner.xs.push(x)
+    fn add_via_extend(mut self, x: i64):
+        self.inner.xs.extend([x])
+    fn drop_last(mut self):
+        self.inner.xs.remove(self.inner.xs.len() - 1)
+
+class SelfIndexGrid:
+    rows: [[i64]]
+    fn add(mut self, r: i64, x: i64):
+        self.rows[r].push(x)
+
+class FieldDictReg:
+    d: {text: i64}
+    fn put(mut self, k: text, v: i64):
+        self.d.insert(k, v)
+
+class NestedDictInner:
+    d: {text: i64}
+
+class NestedDictOuter:
+    inner: NestedDictInner
+    fn put(mut self, k: text, v: i64):
+        self.inner.d[k] = v
+
+class MutCounter:
+    v: i64
+    fn inc(mut self):
+        self.v = self.v + 1
+
+struct ArrPoint:
+    x: i64
+    y: i64
+
+class PushOnlyBucket:
+    items: [i64]
+    fn push_one(mut self, x: i64):
+        self.items.push(x)
+
+fn add_i64(a: i64, b: i64) -> i64:
+    a + b
+
+# ---------------------------------------------------------------------------
+# run_<shape>(n) -- builds the fixture, times ONLY the loop, and asserts the
+# final result so a "fix" that drops writes still fails.
+# ---------------------------------------------------------------------------
+
+fn run_nested_field_push(n: i64) -> i64:
+    var o = NestedPushOuter(inner: NestedPushInner(xs: []))
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        o.add(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(o.inner.xs.len()).to_equal(n)
+    elapsed
+
+fn run_nested_field_extend(n: i64) -> i64:
+    var o = NestedPushOuter(inner: NestedPushInner(xs: []))
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        o.add_via_extend(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(o.inner.xs.len()).to_equal(n)
+    elapsed
+
+# Removing the LAST element is O(1) for `Vec::remove` (nothing shifts), so any
+# growth beyond linear here is the receiver copy, not the removal itself. The
+# fill loop is excluded from the timed window.
+fn run_nested_field_remove_last(n: i64) -> i64:
+    var o = NestedPushOuter(inner: NestedPushInner(xs: []))
+    var j = 0
+    while j < n:
+        o.add(j)
+        j = j + 1
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        o.drop_last()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(o.inner.xs.len()).to_equal(0)
+    elapsed
+
+fn run_index_arr_push(n: i64) -> i64:
+    var rows: [[i64]] = [[], [], [], []]
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        rows[i % 4].push(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(rows[0].len()).to_equal(n / 4)
+    elapsed
+
+fn run_self_index_push(n: i64) -> i64:
+    var g = SelfIndexGrid(rows: [[], [], [], []])
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        g.add(i % 4, i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(g.rows[0].len()).to_equal(n / 4)
+    elapsed
+
+fn run_field_dict_method(n: i64) -> i64:
+    var r = FieldDictReg(d: {})
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        r.put("k{i}", i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(r.d.len()).to_equal(n)
+    elapsed
+
+fn run_nested_dict_insert(n: i64) -> i64:
+    var o = NestedDictOuter(inner: NestedDictInner(d: {}))
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        o.put("k{i}", i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(o.inner.d.len()).to_equal(n)
+    elapsed
+
+fn run_index_obj_mutate_big(n: i64) -> i64:
+    var arr: [MutCounter] = []
+    var j = 0
+    while j < n:
+        arr.push(MutCounter(v: 0))
+        j = j + 1
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        arr[i].inc()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(arr[0].v).to_equal(1)
+    expect(arr[n - 1].v).to_equal(1)
+    elapsed
+
+fn run_dict_insert_local(n: i64) -> i64:
+    var d: {text: i64} = {}
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        d["k{i}"] = i
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(d.len()).to_equal(n)
+    elapsed
+
+fn run_str_concat(n: i64) -> i64:
+    var s = ""
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        s = s + "x"
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(s.len()).to_equal(n)
+    elapsed
+
+fn run_closure_capture(n: i64) -> i64:
+    var arr: [i64] = []
+    var i = 0
+    while i < n:
+        arr.push(i)
+        i = i + 1
+    val f = \x: arr.len() + x
+    var acc = 0
+    i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        acc = acc + f(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(acc).to_equal(n * n + (n * (n - 1)) / 2)
+    elapsed
+
+fn run_fn_call(n: i64) -> i64:
+    var acc = 0
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        acc = add_i64(acc, i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(acc).to_equal((n * (n - 1)) / 2)
+    elapsed
+
+fn run_struct_in_arr_assign(n: i64) -> i64:
+    var arr: [ArrPoint] = []
+    var j = 0
+    while j < 64:
+        arr.push(ArrPoint(x: 0, y: 0))
+        j = j + 1
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        arr[i % 64].x = i
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(arr[(n - 1) % 64].x).to_equal(n - 1)
+    elapsed
+
+fn run_text_slice(n: i64) -> i64:
+    var parts: [text] = []
+    var i = 0
+    while i < n:
+        parts.push("ab")
+        i = i + 1
+    val s = parts.join("")
+    var cnt = 0
+    i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        cnt = cnt + s.slice(i, i + 1).len()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(cnt).to_equal(n)
+    elapsed
+
+fn run_char_code_at(n: i64) -> i64:
+    var parts: [text] = []
+    var i = 0
+    while i < n:
+        parts.push("a")
+        i = i + 1
+    val s = parts.join("")
+    var sum = 0
+    i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        sum = sum + s.char_code_at(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(sum).to_equal(n * 97)
+    elapsed
+
+fn run_dict_get_loop(n: i64) -> i64:
+    var d: {text: i64} = {}
+    var i = 0
+    while i < 1000:
+        d["k{i}"] = i
+        i = i + 1
+    var acc = 0
+    i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        acc = acc + (d.get("k{i % 1000}") ?? 0)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(acc).to_equal((n / 1000) * 499500)
+    elapsed
+
+fn run_field_push(n: i64) -> i64:
+    var b = PushOnlyBucket(items: [])
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < n:
+        b.push_one(i)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    expect(b.items.len()).to_equal(n)
+    elapsed
+
+# ---------------------------------------------------------------------------
+# Scaling assertions -- one `it` per shape.
+# ---------------------------------------------------------------------------
+
+describe "seed interpreter: component scaling (n vs 4n)":
+    it "nested_field_push: self.inner.xs.push(x) in a method -- KNOWN RED (quadratic)":
+        val n = 20000
+        val small = run_nested_field_push(n)
+        val large = run_nested_field_push(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("nested_field_push", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "index_arr_push: rows[i % 4].push(i) (local) -- KNOWN RED (quadratic)":
+        val n = 20000
+        val small = run_index_arr_push(n)
+        val large = run_index_arr_push(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("index_arr_push", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "self_index_push: self.rows[r].push(x) in a method -- KNOWN RED (quadratic)":
+        val n = 20000
+        val small = run_self_index_push(n)
+        val large = run_self_index_push(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("self_index_push", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "field_dict_method: self.d.insert(k, v) in a method -- KNOWN RED (quadratic)":
+        val n = 5000
+        val small = run_field_dict_method(n)
+        val large = run_field_dict_method(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("field_dict_method", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "nested_dict_insert: self.inner.d[k] = v in a method -- KNOWN RED (quadratic)":
+        val n = 5000
+        val small = run_nested_dict_insert(n)
+        val large = run_nested_dict_insert(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("nested_dict_insert", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "index_obj_mutate_big: arr[i].inc() with arr.len()==n -- KNOWN RED (quadratic)":
+        val n = 5000
+        val small = run_index_obj_mutate_big(n)
+        val large = run_index_obj_mutate_big(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("index_obj_mutate_big", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "nested_field_extend: self.inner.xs.extend([x]) in a method -- KNOWN RED (quadratic)":
+        val n = 20000
+        val small = run_nested_field_extend(n)
+        val large = run_nested_field_extend(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("nested_field_extend", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "nested_field_remove_last: self.inner.xs.remove(len - 1) in a method -- KNOWN RED (quadratic)":
+        val n = 5000
+        val small = run_nested_field_remove_last(n)
+        val large = run_nested_field_remove_last(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("nested_field_remove_last", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "dict_insert_local: d[\"k{i}\"] = i (local) -- linear pin":
+        val n = 20000
+        val small = run_dict_insert_local(n)
+        val large = run_dict_insert_local(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("dict_insert_local", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "str_concat: s = s + \"x\" -- linear pin":
+        val n = 20000
+        val small = run_str_concat(n)
+        val large = run_str_concat(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("str_concat", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "closure_capture: \\x: arr.len() + x, called n times -- linear pin":
+        val n = 20000
+        val small = run_closure_capture(n)
+        val large = run_closure_capture(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("closure_capture", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "fn_call: acc = add(acc, i) -- linear pin":
+        val n = 20000
+        val small = run_fn_call(n)
+        val large = run_fn_call(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("fn_call", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "struct_in_arr_assign: arr[i % 64].x = i -- linear pin":
+        val n = 20000
+        val small = run_struct_in_arr_assign(n)
+        val large = run_struct_in_arr_assign(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("struct_in_arr_assign", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "text_slice: s.slice(i, i + 1).len() -- linear pin":
+        val n = 20000
+        val small = run_text_slice(n)
+        val large = run_text_slice(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("text_slice", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "char_code_at: s.char_code_at(i) (ASCII memo) -- linear pin":
+        val n = 20000
+        val small = run_char_code_at(n)
+        val large = run_char_code_at(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("char_code_at", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "dict_get_loop: d.get(\"k{i % 1000}\") ?? 0 -- linear pin":
+        val n = 20000
+        val small = run_dict_get_loop(n)
+        val large = run_dict_get_loop(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("dict_get_loop", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "field_push (1-level): self.items.push(x) -- FIXED 08-21, linear pin":
+        val n = 20000
+        val small = run_field_push(n)
+        val large = run_field_push(n * 4)
+        expect(small > 0).to_equal(true)
+        report_ratio("field_push", n, small, n * 4, large)
+        expect(large * 10 < small * 70).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Value semantics preserved -- a second binding must still copy-on-write.
+# ---------------------------------------------------------------------------
+
+describe "value semantics preserved":
+    it "nested_field_push: alias of the inner array does not see a later self.inner.xs.push":
+        var o = NestedPushOuter(inner: NestedPushInner(xs: [1, 2, 3]))
+        val alias = o.inner.xs
+        o.add(4)
+        expect(alias).to_equal([1, 2, 3])
+        expect(o.inner.xs).to_equal([1, 2, 3, 4])
+
+    it "index_arr_push: an alias of the MUTATED row keeps its old contents, and the push does not leak into rows[j]":
+        var rows: [[i64]] = [[1], [2]]
+        val alias_mutated = rows[1]
+        rows[1].push(99)
+        expect(alias_mutated).to_equal([2])
+        expect(rows[1]).to_equal([2, 99])
+        expect(rows[0]).to_equal([1])
+
+    it "self_index_push: aliasing the whole object AND aliasing the mutated row both keep their old contents":
+        var g = SelfIndexGrid(rows: [[1], [2], [3], [4]])
+        val alias = g
+        val row0_alias = g.rows[0]
+        g.add(0, 99)
+        expect(alias.rows[0]).to_equal([1])
+        expect(row0_alias).to_equal([1])
+        expect(g.rows[0]).to_equal([1, 99])
+        expect(g.rows[1]).to_equal([2])
+
+    it "field_dict_method: aliasing the whole object AND aliasing the mutated dict both keep their old contents":
+        var r = FieldDictReg(d: {"a": 1})
+        val alias = r
+        val d_alias = r.d
+        r.put("b", 2)
+        expect(alias.d.len()).to_equal(1)
+        expect(d_alias.len()).to_equal(1)
+        expect(r.d.len()).to_equal(2)
+
+    it "nested_dict_insert: alias of the inner dict does not see a later self.inner.d[k] = v":
+        var o = NestedDictOuter(inner: NestedDictInner(d: {"a": 1}))
+        val alias = o.inner.d
+        o.put("b", 2)
+        expect(alias.len()).to_equal(1)
+        expect(o.inner.d.len()).to_equal(2)
+
+    it "index_obj_mutate_big: alias of an array element does not see a later arr[i].inc()":
+        var arr: [MutCounter] = [MutCounter(v: 0), MutCounter(v: 0)]
+        val alias = arr[0]
+        arr[0].inc()
+        expect(alias.v).to_equal(0)
+        expect(arr[0].v).to_equal(1)

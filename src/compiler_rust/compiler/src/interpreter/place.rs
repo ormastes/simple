@@ -305,6 +305,32 @@ pub(crate) fn updated_root(env: &Env, place: &Place, value: Value) -> Option<Val
     Some(root)
 }
 
+/// Borrow the storage the place designates, **without** touching ownership.
+///
+/// Read-only on purpose: a caller that only wants to know what KIND of value
+/// sits at the leaf (an array? a dict? an object with this method?) must not
+/// pay a copy-on-write isolation just to look. Pairs with `place_slot_mut`,
+/// which is the same walk with `Arc::make_mut` once the caller has committed.
+pub(crate) fn place_slot_ref<'a>(env: &'a Env, place: &Place) -> Option<&'a Value> {
+    let mut slot = env.get(&place.root)?;
+    for projection in &place.projections {
+        slot = step_ref(slot, projection)?;
+    }
+    Some(slot)
+}
+
+/// Mutably borrow the storage the place designates, isolating exactly the
+/// containers on the path (`Arc::make_mut` per hop) and nothing else.
+///
+/// This is the O(depth) counterpart of `updated_root`, which clones the root
+/// value FIRST and therefore aliases every Arc along the path — making each hop's
+/// `Arc::make_mut` a deep copy. Callers that mutate the leaf in place (a
+/// mutating method on `self.inner.xs`, `rows[i]`, `self.d`) must use this.
+pub(crate) fn place_slot_mut<'a>(env: &'a mut Env, place: &Place) -> Option<&'a mut Value> {
+    let root_slot = env.get_mut(&place.root)?;
+    project_mut(root_slot, &place.projections)
+}
+
 /// Read-only counterpart of `step_mut`.
 fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
     match (slot, projection) {
