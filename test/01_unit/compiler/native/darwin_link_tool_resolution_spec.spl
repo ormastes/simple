@@ -1,0 +1,40 @@
+# Darwin link-tool resolution must not depend on PATH.
+#
+# Regression for the macOS Stage 2 sanity failure of 2026-09-12, where the
+# whole native link died with the single token `darwin-link-tool-unresolved`
+# (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md, run 5). The
+# resolver consulted `/usr/bin/which` and nothing else, so it inherited
+# whatever PATH the child happened to get, and its failure said nothing about
+# what had been attempted.
+use compiler.backend.linker._LinkerWrapper.native_linking.{
+    darwin_link_tool_env_name, darwin_link_tool_xcrun_name,
+    darwin_link_tool_unresolved_error
+}
+
+describe "darwin link tool resolution":
+    it "maps each link-tool command to the env var that pins its path":
+        expect(darwin_link_tool_env_name("ld")).to_equal("SIMPLE_DARWIN_LD")
+        expect(darwin_link_tool_env_name("/usr/bin/ld")).to_equal("SIMPLE_DARWIN_LD")
+        expect(darwin_link_tool_env_name("cc")).to_equal("SIMPLE_DARWIN_CLANG")
+        expect(darwin_link_tool_env_name("clang")).to_equal("SIMPLE_DARWIN_CLANG")
+        expect(darwin_link_tool_env_name("clang++")).to_equal("SIMPLE_DARWIN_CLANG")
+
+    it "leaves an unknown command unpinned rather than guessing a var":
+        expect(darwin_link_tool_env_name("mold")).to_equal("")
+        expect(darwin_link_tool_xcrun_name("mold")).to_equal("")
+
+    it "names the canonical xcrun tool for the fallback probe":
+        expect(darwin_link_tool_xcrun_name("ld")).to_equal("ld")
+        expect(darwin_link_tool_xcrun_name("/usr/bin/cc")).to_equal("clang")
+        expect(darwin_link_tool_xcrun_name("clang++")).to_equal("clang++")
+
+    it "reports what was tried instead of a bare token":
+        val message = darwin_link_tool_unresolved_error("simple-no-such-link-tool")
+        expect(message).to_contain("darwin-link-tool-unresolved")
+        expect(message).to_contain("command=simple-no-such-link-tool")
+        expect(message).to_contain("tried=[")
+        expect(message).to_contain("PATH=")
+
+    it "records the pinned env var by name when it is the missing step":
+        val message = darwin_link_tool_unresolved_error("ld-simple-absent")
+        expect(message).to_contain("tried=[")
