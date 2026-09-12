@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded}
 
 val BACKEND_AOT_DIAGNOSTIC_MAX_SCALARS: i64 = 1024
 
@@ -20,6 +20,18 @@ fn backend_aot_write_diagnostic(path: text, message: text) -> bool:
     # fail silently is worse than none, because it makes the real fault look
     # like an absent one.
     val written = file_atomic_write(path, bounded)
+    # Read straight back. The writer has been reporting success while the
+    # driver finds the file empty, and that single unknown has blocked every
+    # attempt to see WHY the backend failed. Verifying here separates "the
+    # write never landed" from "something truncated or removed it afterwards",
+    # which are different bugs with different owners.
+    if written:
+        match file_read_regular_no_follow_bounded(path, 4096):
+            case Ok(back):
+                if back.len() != bounded.len():
+                    print "warning: AOT diagnostic wrote {bounded.len()} bytes but reads back {back.len()}: {path}"
+            case Err(read_error):
+                print "warning: AOT diagnostic wrote {bounded.len()} bytes but is unreadable ({read_error}): {path}"
     if not written:
         print "warning: AOT diagnostic write failed ({path.len()} chars): {path}"
     written
