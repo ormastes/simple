@@ -1,6 +1,17 @@
 # Stage4 Windows C ABI inference used the object suffix
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Status: FIXED (verified 2026-09-12 against the current tree)
+
+Verification: `stage4_windows_c_object_uses_msvc_abi`
+(`src/compiler/70.backend/backend/stage4_symbol_closure.spl:231-252`) classifies
+the object ABI from the normalized C-driver basename (`cl`/`clang-cl` -> MSVC,
+`gcc`/`cc`/`*-gcc` -> MinGW), rejects an unrecognised driver, rejects
+compiler/linker disagreement in both directions, and rejects an explicit
+`*-pc-windows-msvc` target under a MinGW driver. No object-suffix (`.obj`/`.o`)
+inference remains: `stage4_hosted_provider_object_format` takes the already-
+resolved `msvc_objects: bool` and only maps it to `coff-msvc`/`coff-mingw`.
+Coverage: 13 assertions over that function in
+`test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl`.
 
 ## Symptom
 
@@ -33,7 +44,3 @@ compiler and linker resolve to MinGW, before any temporary object is compiled.
 
 Runtime/native execution remains pending because this session was explicitly
 restricted to static/source checks.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

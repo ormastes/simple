@@ -570,3 +570,68 @@ face exists), the `<li>` last-child bottom margin, and table shrink-to-fit /
 UA `border-spacing`. Each has a record naming the exact mechanism and why it was
 not attempted on this round's oracle budget (~1 h per full catalog pass, run
 strictly one page at a time).
+
+## Round 6 — 2026-09-12 (producer switched to per-CODEPOINT advance arity)
+
+Round 5's browser-engine producer emitted the BYTE-expanded advance array as a
+containment for a consumer defect that is now fixed. Round 6 switches it to the
+canonical per-codepoint array and declares the convention on the command:
+`_html_draw_ir_byte_advances` -> `_html_draw_ir_codepoint_advances`, plus
+`font-advance-arity: codepoint` on the merged style props
+(`simple_web_html_layout_renderer_paint_layout.spl`). The CPU framebuffer
+painter keeps its BYTE view (`style_run_byte_advances`) derived from the same
+per-codepoint `resolved_font_advances`, so layout, paint and Draw IR still
+measure a run identically -- only the wire arity changed.
+
+**Reference caveat, stated up front:** round 5's `build/perf/r5_base` no longer
+exists on this host, so the Chrome references were re-captured fresh into
+`build/perf/r6` with today's Chrome. The comparison below is therefore
+apples-to-apples only to the extent Chrome is stable between the two runs --
+which every row suggests it is, since all eight land on round 5's figure to the
+hundredth. Same `--simple-only` overwrite caveat as round 5: `*.simple.ppm` is
+overwritten in place, so these figures survive only here and in the run logs.
+
+| page | round 5 after | round 6 | delta |
+|---|---|---|---|
+| html | 17.11 | 17.11 | 0.00 |
+| animation | 15.63 | 15.63 | 0.00 |
+| css-paint | 10.50 | 10.50 | 0.00 |
+| css-layout | 10.29 | 10.29 | 0.00 |
+| forms-media | 8.11 | 8.11 | 0.00 |
+| overview | 3.89 | 3.89 | 0.00 |
+| evidence | 2.26 | 2.26 | 0.00 |
+| tab-bar | 1.14 | 1.14 | 0.00 |
+
+Verdicts, as printed: `PASS — 1 page(s) compared, worst=17.11` (html, run first
+as the discriminating probe), `PASS — 2 page(s) compared, worst=3.89`,
+`PASS — 2 page(s) compared, worst=10.50`, `PASS — 2 page(s) compared,
+worst=15.63`, `PASS — 1 page(s) compared, worst=10.29`. No page rendered zero
+pixels; no page moved.
+
+### The probe that actually discriminates
+
+No pixel on this catalog separates byte from codepoint arity, because at
+round 5 a byte-arity array was already rejected upstream by
+`draw_ir_text_resolved_font` (`src/lib/common/ui/draw_ir.spl:311-315`, which
+requires one advance per CODEPOINT) and the run was silently demoted to the
+flat styled command. A flat page and a correctly-advanced page happen to differ
+by less than the differ's resolution here. The evidence is the Engine2D gate's
+own output instead. Sabotaging the declaration to `font-advance-arity: byte`
+while sending the per-codepoint array and re-rendering `html`:
+
+```
+[e2d-adv] arity-declared-mismatch declared=byte advances=71 chars=71
+[e2d-adv] text-advance-arity-fallback text_len=73 shaped=false
+```
+
+`advances=71` equals `chars=71` and not the run's 73 bytes: the array on the
+wire is per-codepoint, the prop reaches the consumer, and a disagreeing
+declaration takes the paint fallback rather than blanking the page
+(`mismatch_pct` stayed 17.11). Restoring `codepoint` removes both lines.
+Record: `doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`.
+
+### Specs (interpreter, `SIMPLE_2D_BACKEND=cpu_simd`)
+
+`draw_ir_em_dash_text_ink_spec` 2/2, `paint_layout_advance_parity_spec` 2/2,
+`inline_run_advance_and_break_boxes_spec` 5/5,
+`font_advance_codepoint_arity_spec` 9/9.

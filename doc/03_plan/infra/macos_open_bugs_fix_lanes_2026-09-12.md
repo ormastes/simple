@@ -89,3 +89,17 @@ All six lanes shipped via separate PRs, each confirmed `MERGED` same day via
 Per-item fixed/blocked detail lives in the `doc/08_tracking/bug/*.md` records
 each PR touched, not duplicated here — this table only pins the lane-to-PR
 mapping and merge state.
+## Status column, filled from today's PR bodies (Lane 6, round 2, 2026-09-12)
+
+| id | status today | PR |
+|---|---|---|
+| c_runtime_compiles_guard_red_on_macos_aarch64 | FIXED (already upstream via #455's `st_mtim` guard); re-verified `PASS — 143 file(s) compiled, 0 errors (6 skipped)` | #599 |
+| push_gates_unrunnable_on_macos_bsd_awk | FIXED (already upstream at `e09f6b9ac66`) + one new blocking push-gate shell-trace defect found and fixed | #599 |
+| darwin_stage_binaries_clobber_bare_paths | FIXED | #587 |
+| macos_bootstrap_lane_platform_defect_cluster | re-audited, still OPEN — Stage-2 `serialize_mir_function` SEGV not re-reproduced this pass (cold seed build alone took 18m35s); see round-2 plan lane 1 | #587 |
+| bootstrap_macos_blocked_seed_compile_linux_only_stage3 | OPEN, unchanged — `manifest-verify.shs` still has 19 `/proc` refs, byte-identical to 09-06 | #587 |
+| macos_gui_run_sigpipe_141_and_stale_winit_marker_gate | FIXED — SIGPIPE exit 141 fixed (ps captured into a variable); stale winit gate now admits the dlopen route | #591 |
+| vulkan_2d_c_compare_skips_on_macos | PARTIALLY FIXED — C leg now reaches `c_status=admitted` on real MoltenVK; `simple`-leg still `skipped:no-selfhosted-simple-binary` (folded into lane-1 dependency, round-2 plan) | #591 |
+| macos_full_cli_gui_admission_process_proof | still BLOCKED — `--build-candidate` correctly fails closed `policy-not-prepared`; no self-hosted binary deployed on this mac host; expected, not a new defect | #588 |
+| test_runner_ulimit_caps_unusable_on_macos / macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot | load-only greenwash reproduced (deliberate-red spec exits 0 "All tests passed" on the deployed binary); calibration gate added that PASSes on source and FAILs on the stale binary; safe mode now honours `--no-limits` | #594 |
+| wm_metal_glass_multi_receipt_opacity | still unverified — `bin/simple test` fast-fails with a spurious timeout (reproduces the test-runner blocker above); `bin/simple run` gets further but hits an unrelated import-resolution gap; no live Metal receipt captured this pass | #584 |

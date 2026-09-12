@@ -1,0 +1,46 @@
+"""The test runner must never try to spawn a `.spl` source file as a binary.
+
+Audience: anyone editing `_cli_current_exe_path` in `src/app/io/cli_ops.spl`
+or `find_simple_binary` in `src/app/test_runner_new/test_runner_single.spl`.
+
+Why this spec exists (REPRODUCER). Measured 2026-09-12 on macOS arm64 with a
+current seed: EVERY `simple test <spec>` died in ~3 ms with "child produced no
+exit status -- spawn or reap failure at the process layer". It was not a
+process-layer fault at all. The driver replaces the Simple-visible argv with
+the SCRIPT's args before any `.spl` runs (`rt_set_args`), so
+`sys_get_args()[0]` is the `.spl` source file. On Linux `_cli_current_exe_path`
+returns from `/proc/self/exe` and never sees that; macOS has no `/proc`, so the
+`.spl` path was handed back as "the current executable" and the runner tried
+to SPAWN it. The spawn failed, and the failure was reported as a process-layer
+defect.
+
+Record: doc/08_tracking/bug/macos_test_child_spawn_or_reap_failure_no_exit_status_2026-09-12.md
+
+The first example is the direct regression guard: it runs INSIDE `simple test`,
+which is exactly the failing condition, and is trivially green on Linux. The
+remaining examples pin the spawn facade itself, so a genuine spawn/reap defect
+is distinguishable from this identity defect the next time one appears.
+
+# @req REQ-TESTRUNNER-CHILD-SPAWN-BINARY-IDENTITY
+"""
+
+use std.spec.*
+
+use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+describe "the resolved current executable", :
+    it "is never a .spl source file", :
+        val exe = cli_current_exe_path()
+        expect(exe).to_not_equal("")
+        expect(exe.ends_with(".spl")).to_equal(false)
+
+describe "the bounded spawn facade", :
+    it "reports a child's real exit code, not -1", :
+        val (_out, _err, code) = process_run_bounded("/bin/sh", ["-c", "exit 7"], 30000, 65536)
+        expect(code).to_equal(7)
+
+    it "reports a successful child as 0", :
+        val (out, _err, code) = process_run_bounded("/bin/sh", ["-c", "echo ok"], 30000, 65536)
+        expect(code).to_equal(0)
+        expect(out.contains("ok")).to_equal(true)

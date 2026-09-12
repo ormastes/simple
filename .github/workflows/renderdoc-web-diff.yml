@@ -33,7 +33,7 @@ jobs:
   capture:
     name: Capture (lavapipe, 2 pages)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +46,20 @@ jobs:
           path: src/compiler_rust/target
           key: renderdoc-seed-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
           restore-keys: renderdoc-seed-${{ runner.os }}-
+
+      # `renderdoc` is not in the Ubuntu noble archive, so the setup script
+      # builds a Vulkan-only RenderDoc from source (~10-20 min). Cache the
+      # installed tree so only the first run on a given ref pays for it.
+      # restore/save are SPLIT deliberately: actions/cache@v4's implicit save
+      # runs only when the job SUCCEEDS, and this lane is expected to fail on
+      # first contact -- which would throw the build away every single run.
+      # The save below is `if: always()`, so the build survives a red lane.
+      - name: Restore the Vulkan-only RenderDoc build
+        id: rdoc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/tools/renderdoc-linux-vulkan-only
+          key: renderdoc-vulkanonly-${{ runner.os }}-v1.44-py
 
       - name: Provision lavapipe + RenderDoc + Chrome
         run: sh scripts/setup/setup-renderdoc-linux-lavapipe.shs
@@ -74,6 +88,13 @@ jobs:
           for p in $RDOC_WEB_PAGES; do args="$args --page $p"; done
           # shellcheck disable=SC2086
           sh scripts/check/check-renderdoc-web-capture-lane.shs $args
+
+      - name: Save the Vulkan-only RenderDoc build
+        if: always() && steps.rdoc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/tools/renderdoc-linux-vulkan-only
+          key: renderdoc-vulkanonly-${{ runner.os }}-v1.44-py
 
       - name: Show receipt
         if: always()
