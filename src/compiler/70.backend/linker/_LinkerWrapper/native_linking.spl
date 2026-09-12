@@ -266,7 +266,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         darwin_resolve_link_tool(linker_path)
     else:
         linker_path
-    if execution_linker_path == "": return Err("darwin-link-tool-unresolved")
+    if execution_linker_path == "":
+        return Err(darwin_link_tool_unresolved_error(linker_path))
     if trace:
         print "[LINKER] got linker_path={linker_path}"
     val linker_type = linker_info[1]
@@ -795,18 +796,111 @@ fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
     val plan = hosted_c_compiler_plan(target, os, arch)
     plan.requires_cross and plan.supported
 
-fn darwin_resolve_link_tool(command: text) -> text:
+fn darwin_link_tool_basename(command: text) -> text:
+    val parts = command.split("/")
+    if parts.len() == 0: return command
+    parts[parts.len() - 1]
+
+pub fn darwin_link_tool_env_name(command: text) -> text:
+    """Name of the env var that pins the absolute path of this link tool.
+
+    Empty for a command this lane does not pin, which simply means the pinned
+    step is skipped and resolution continues with xcrun."""
+    val base = darwin_link_tool_basename(command)
+    if base == "ld" or base == "ld64": return "SIMPLE_DARWIN_LD"
+    if base == "cc" or base == "clang" or base == "gcc": return "SIMPLE_DARWIN_CLANG"
+    if base == "c++" or base == "clang++" or base == "g++": return "SIMPLE_DARWIN_CLANG"
+    ""
+
+pub fn darwin_link_tool_xcrun_name(command: text) -> text:
+    """Canonical Xcode tool name to hand to `xcrun --find`, or "" if unknown."""
+    val base = darwin_link_tool_basename(command)
+    if base == "ld" or base == "ld64": return "ld"
+    if base == "cc" or base == "clang" or base == "gcc": return "clang"
+    if base == "c++" or base == "clang++" or base == "g++": return "clang++"
+    ""
+
+pub fn darwin_link_tool_trail(command: text) -> text:
+    """The diagnostic trail: every resolution step that was attempted and failed.
+
+    Deliberately a plain `text` return, not the second half of a tuple. The
+    first version of this code returned `(resolved, trail)` and the stage-2
+    NATIVE binary turned the whole error payload into `nil`
+    (`LLVM native linking failed: Linking failed: nil`, measured 2026-09-13),
+    so the trail this exists to carry never reached the log. Filed as
+    doc/08_tracking/bug/native_tuple_return_of_texts_yields_nil_2026-09-13.md;
+    until that is fixed, nothing on this path returns a tuple."""
+    var tried = "path=" + command + "(absent)"
+    val env_name = darwin_link_tool_env_name(command)
+    if env_name != "":
+        val pinned = env_get(env_name) ?? ""
+        if pinned == "":
+            tried = tried + " " + env_name + "(unset)"
+        else:
+            tried = tried + " " + env_name + "=" + pinned + "(absent)"
+    val xcrun_name = darwin_link_tool_xcrun_name(command)
+    if xcrun_name != "":
+        if file_exists("/usr/bin/xcrun"):
+            tried = tried + " xcrun --find " + xcrun_name + "(failed)"
+        else:
+            tried = tried + " /usr/bin/xcrun(absent)"
+    tried + " which " + command + "(failed)"
+
+pub fn darwin_resolve_link_tool(command: text) -> text:
+    """Resolve a darwin link tool to an absolute path, or "" if nothing worked.
+
+    Order is deliberate and PATH-independence is the point. Until 2026-09-12
+    this was `/usr/bin/which <command>` and nothing else, so the whole native
+    link depended on the PATH the child happened to inherit, and a failure
+    produced the single opaque token `darwin-link-tool-unresolved` with no
+    statement of what had been attempted. Stage 2 sanity died exactly there --
+    and the sanity child's env dump (added the same day) then showed a FULL
+    PATH including /usr/bin, so PATH was never the problem: `which` itself does
+    not answer from inside the stage-2 native binary.
+
+      1. an absolute/relative path that already exists -- no subprocess at all;
+      2. the path pinned by the bootstrap lane at admission time
+         (SIMPLE_DARWIN_CLANG / SIMPLE_DARWIN_LD, resolved once with
+         `xcrun --find` and forwarded through the explicit env allowlist).
+         This step also needs no subprocess, which is why it is the one that
+         has to work when spawning does not;
+      3. `/usr/bin/xcrun --find <tool>` -- absolute interpreter, the documented
+         Xcode/CLT locator, which does not consult PATH for the tool;
+      4. `/usr/bin/which` LAST, only as a legacy fallback."""
     if file_exists(command): return command
+    val env_name = darwin_link_tool_env_name(command)
+    if env_name != "":
+        val pinned = env_get(env_name) ?? ""
+        if pinned != "" and file_exists(pinned): return pinned
+    val xcrun_name = darwin_link_tool_xcrun_name(command)
+    if xcrun_name != "" and file_exists("/usr/bin/xcrun"):
+        val (xcrun_out, _, xcrun_code) = process_run("/usr/bin/xcrun", ["--find", xcrun_name])
+        val xcrun_path = xcrun_out.trim().split("\n")[0]
+        if xcrun_code == 0 and xcrun_path != "" and file_exists(xcrun_path):
+            return xcrun_path
     val (stdout, _, code) = process_run("/usr/bin/which", [command])
-    if code != 0: return ""
     val resolved = stdout.trim().split("\n")[0]
-    if file_exists(resolved): resolved else: ""
+    if code == 0 and resolved != "" and file_exists(resolved): return resolved
+    ""
+
+pub fn darwin_link_tool_unresolved_error(command: text) -> text:
+    """The error a caller returns when resolution failed, naming what was tried.
+
+    Also PRINTS the same line, because a returned error string is only as good
+    as the machinery that carries it: the first version of this fix returned a
+    perfectly-formed message that the caller logged as `nil`. A print cannot be
+    laundered by a return-value defect."""
+    val path_value = env_get("PATH") ?? ""
+    val message = "darwin-link-tool-unresolved: command=" + command +
+        " tried=[" + darwin_link_tool_trail(command) + "] PATH=" + path_value
+    print "[linker-wrapper] {message}"
+    message
 
 fn publish_darwin_link_tool_identity(tool_path: text) -> text:
     val os = host_os()
     if os != "macos" and os != "darwin": return ""
     val resolved = darwin_resolve_link_tool(tool_path)
-    if resolved == "": return "darwin-link-tool-unresolved"
+    if resolved == "": return darwin_link_tool_unresolved_error(tool_path)
     val artifact = file_hash_sha256(resolved)
     if artifact.len() != 64: return "darwin-link-tool-digest-failed"
     val behavior = sha256_text(
@@ -933,8 +1027,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         else:
             cc = "cc"
     if os_name == "macos" or os_name == "darwin":
-        cc = darwin_resolve_link_tool(cc)
-        if cc == "": return Err("darwin-link-tool-unresolved")
+        val cc_requested = cc
+        cc = darwin_resolve_link_tool(cc_requested)
+        if cc == "":
+            return Err(darwin_link_tool_unresolved_error(cc_requested))
 
     # Keep the fallback complete: native-build links user objects, runtime
     # objects, and a generated entry object. Truncating this list produces a
