@@ -341,3 +341,99 @@ flex_wrap_grow_distribution,inline_content_area_half_leading}_spec.spl`,
 4. **`<br>` line boxes** — 24 px against Chrome's 18, same cause as the inline
    content-area fix but on the forced-break path, which takes `style_line_h`
    directly.
+
+## Round 4 — 2026-09-12 (inline run advance, non-ASCII line boxes, `<br>` box)
+
+Same tool and settings as round 3: `check-chrome-layout-geometry-diff.shs` with
+`GEOM_DIFF_HEIGHT=20000`, interpreter `build/cargo-r2/release/simple`
+(`stat -f '%z %m'` = `39528776 1789199850`), Chrome headless, same catalog.
+Base commit `d23b43dde27` (PR #611 merged).
+
+**Baseline caveat, stated rather than papered over.** The "before" column is
+round 3's column C, i.e. the published numbers for the exact commit this branch
+starts from — NOT a fresh pre-fix run on this host. Two attempts at a controlled
+pre-fix re-run were made and abandoned: the first was contaminated (the stdlib is
+read as SOURCE on every process start, so an edit landed mid-run), and the second
+was killed after >20 min on its second page, because the pre-fix code is far
+slower on exactly the pages the fix speeds up — a run that wraps an em dash to
+one line box per byte does many times the layout work. The magnitude column below
+is computed by summing `|dx|+|dy|+|dw|+|dh|` over rows marked `inherited: false`
+in each page's `*.geometry_diff.sdn`; on pages where that row set is slightly
+wider than the differ's own root-mismatch set (html: 401 vs 247) the extra rows
+carry deltas of at most 1 px each, i.e. under 2 % of the page total, so the two
+methods are comparable at this resolution.
+
+| page | C cmp/mism | **D cmp/mism** | C sum abs-delta | **D sum abs-delta** | change |
+|---|---|---|---|---|---|
+| overview | 18 / 5 | 18 / 5 | 202 | **36** | **-82 %** |
+| html | 253 / 247 | 253 / 247 | 164,002 | **38,338** | **-77 %** |
+| css-layout | 376 / 364 | 376 / **360** | 366,839 | **131,076** | **-64 %** |
+| css-paint | 468 / 467 | **493 / 492** | 1,061,919 | **937,413** | -12 % |
+| forms-media | 102 / 99 | 102 / 99 | 57,674 | **9,762** | **-83 %** |
+| animation | 81 / 79 | 81 / 79 | 13,171 | **5,305** | **-60 %** |
+| evidence | 4 / 0 | 4 / 0 | 0 | 0 | — |
+| tab-bar | 9 / 7 | 9 / 7 | 119 | 119 | — |
+| **TOTAL** | 1311 / 1268 | 1336 / 1289 | 1,663,926 | **1,122,049** | **-33 %** |
+
+`css-paint`'s compared count RISES by 25 (468 → 493). That is not a regression:
+25 elements the Simple side previously did not produce at all — `<li>` subtrees
+whose text carries an `&mdash;` — are now laid out and therefore compared. Its
+magnitude still falls. No page's magnitude rose.
+
+### The targets were NOT met, and the count metric still cannot show them being met
+
+Targets for round 4 were html ≤ 10 %, css-layout ≤ 8 %, animation ≤ 10 %
+mismatched. Measured: html **97.6 %**, css-layout **95.7 %**, animation
+**97.5 %** — essentially unmoved, for exactly the reason round 3 recorded: one
+flow error high on the page marks every element below it as its own root
+mismatch, and the differ's `inherited` filter does not recognise a sibling
+inheriting a shifted flow position. Magnitude is the discriminating column, and
+it fell by a third overall and by 64-83 % on five of eight pages. Reporting the
+rate as "met" on this metric would require every remaining flow error above the
+fold to be fixed at once; three of them are named below and two are blocked.
+
+### What round 4 closed, with Chrome-exact evidence
+
+Oracle: `test/fixtures/browser_engine/layout/round4_probe.html` at 900x20000,
+`body{margin:0;font:16px/1.5 sans-serif}`, harvested with headless
+`--dump-dom` + `getBoundingClientRect()`.
+
+| defect | before | after | Chrome |
+|---|---|---|---|
+| leading inline run advance | `<strong>` at x=140 | x=**112** | 113 |
+| non-ASCII run line boxes | `<div>&mdash;</div>` h=72 | h=**24** | 24 |
+| `<li>`/`<ul>` flow behind it | `ul` h=152, nested `p` y=208 | **104 / 160** | 104 / 160 |
+| `<br>` box | y=56 h=24 | y=**59** h=**18** | 59 / 18 |
+
+Specs: `test/01_unit/browser_engine/inline_run_advance_and_break_boxes_spec.spl`,
+`5 examples, 0 failures`. Sabotage triple: disabling the codepoint-arity branch
+fails 2 examples, restoring the `<br>` line-box box fails 1, disabling the
+trimmed-arity advance branch fails 1.
+
+Records: `web_text_run_advance_measured_in_bytes_2026-09-12.md`,
+`web_br_box_is_whole_line_box_2026-09-12.md`, and the RESOLVED section appended
+to `web_inline_run_x_advance_font_metrics_2026-09-12.md`.
+
+### Ranked remainder (honest)
+
+1. **Bold face advances are never selected.** `resolve_font_metrics_with_language`
+   takes no weight argument, so `<strong>` measures 43 px against Chrome's 50 and
+   everything after it on the line inherits the deficit (`em` 164 vs 171, `a` 285
+   vs 293). BLOCKED: the fix is in `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`
+   and the bold face assets, neither owned by this lane.
+   `web_inline_bold_face_advances_never_selected_2026-09-12.md`.
+2. **A list item's last-child bottom margin does not collapse out** — `li` h=80
+   against Chrome's 64, exactly the nested `<p>`'s 1em. The item's position, the
+   list's height and the next item's position are all now exact, which narrows
+   this to the height accumulator.
+   `web_list_item_last_child_bottom_margin_not_collapsed_2026-09-12.md`.
+3. **Table row/cell geometry** — untouched this round. On the probe the `<table>`
+   is 900x48 where Chrome gives 119x30, and both cells are full-width blocks:
+   shrink-to-fit table width, cell padding/border and `row height = max cell` are
+   all still unimplemented.
+4. **`<code>` width** — 130 px against Chrome's 125 and h=18 vs 19. Within the
+   differ's tolerance on height, 5 px out on width; the monospace UA font size
+   (Chrome resolves bare `monospace` to 13 px) was not investigated.
+5. **Non-ASCII runs that genuinely overflow** still wrap at BYTE offsets —
+   `compute_style_wrap_ranges` was not converted to codepoints, only the
+   whole-run fits-the-box test was.
