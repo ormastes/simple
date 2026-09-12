@@ -1561,6 +1561,13 @@ bootstrap_stage_sanity() (
   # all (see the frontend_log preservation added just above this function).
   sanity_windows_abi=${SIMPLE_WINDOWS_ABI:-}
   sanity_linker_flavor=${SIMPLE_LINKER_FLAVOR:-}
+  # Captured before the scrub, like INCLUDE/LIB below. The backend resolves
+  # llc through _env_tool_dirs, which reads these two BEFORE any PATH lookup.
+  # Without them the sanity child saw env_dirs=0 (measured), fell through to a
+  # shell `where llc`, and the LLVM object stage returned "llc not found" --
+  # surfacing only as "backend object-path status 1".
+  sanity_llvm_bin=${SIMPLE_LLVM_BIN:-}
+  sanity_llvm_prefix=${LLVM_SYS_180_PREFIX:-}
   sanity_include=${INCLUDE:-}
   sanity_lib=${LIB:-}
   sanity_libpath=${LIBPATH:-}
@@ -1582,6 +1589,14 @@ bootstrap_stage_sanity() (
   LC_ALL=C
   LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
+  if [ -n "${sanity_llvm_bin}" ]; then
+    SIMPLE_LLVM_BIN=${sanity_llvm_bin}
+    export SIMPLE_LLVM_BIN
+  fi
+  if [ -n "${sanity_llvm_prefix}" ]; then
+    LLVM_SYS_180_PREFIX=${sanity_llvm_prefix}
+    export LLVM_SYS_180_PREFIX
+  fi
   if [ -n "${sanity_windows_abi}" ]; then
     SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
     export SIMPLE_WINDOWS_ABI
