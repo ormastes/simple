@@ -437,3 +437,38 @@ to `web_inline_run_x_advance_font_metrics_2026-09-12.md`.
 5. **Non-ASCII runs that genuinely overflow** still wrap at BYTE offsets —
    `compute_style_wrap_ranges` was not converted to codepoints, only the
    whole-run fits-the-box test was.
+
+### Round 4 — pixel differ, and the one page that REGRESSED
+
+`sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only --out
+build/perf/chrome_compare_r4`, run in page batches (a whole-catalog run exceeds
+this host's 600 s foreground budget), reusing the Chrome references from the
+earlier rounds unchanged. The before column is round 2's published "after"
+table, EXCEPT for `forms-media`, which was re-measured pre-round-4 on this
+binary specifically to attribute the regression below.
+
+| page | before | after | delta |
+|---|---|---|---|
+| css-layout | 29.20 | 29.19 | -0.01 |
+| html | 17.05 | 17.05 | 0.00 |
+| animation | 15.78 | 15.77 | -0.01 |
+| css-paint | 10.28 | 10.28 | 0.00 |
+| forms-media | 7.74 | **8.58** | **+0.84** |
+| overview | 4.05 | **3.89** | -0.16 |
+| evidence | 2.26 | 2.26 | 0.00 |
+| tab-bar | 1.14 | 1.14 | 0.00 |
+
+Verdicts: `PASS — 4 page(s) compared, worst=8.58`, `PASS — 2 page(s) compared,
+worst=29.19`, `PASS — 2 page(s) compared, worst=17.05`.
+
+**`forms-media` regressed and the round-4 brief said no page may.** It is
+attributed, not guessed: the same binary and the same Chrome references were run
+twice with ONLY `simple_web_html_layout_renderer_layout.spl` swapped between its
+pre- and post-round-4 content, giving 7.74 then 8.58. The likely mechanism is
+that LAYOUT now measures an inline run with the resolved font metrics while
+PAINT still steps glyphs by its own advance, so on a control-dense page the
+glyphs are drawn at positions the box was not sized for. It was not reverted —
+the same change is worth 64-83 % of the geometry magnitude error on five pages —
+and that trade is recorded as a judgement in
+`doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md`,
+which also names the fix: have both paths call one advance function.
