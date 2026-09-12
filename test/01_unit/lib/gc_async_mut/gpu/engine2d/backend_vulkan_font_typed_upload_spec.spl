@@ -1,0 +1,53 @@
+"""Device-free oracle for the typed (`[u32]`) font-atlas upload opt-in (F36).
+
+The font atlas is the LAST host pixel loop the GPU-boundary audit reported:
+`font_atlas_pack_u32_to_u8`, 1,048,576 interpreted iterations per full repack of
+the fixed 1024x1024 atlas, purely because `vulkan_sffi_copy_to_buffer` truncates
+each array element to one byte and so a `[u32]` atlas has to be exploded into
+four host stores per pixel first. `vulkan_sffi_copy_to_buffer_u32` takes the
+words as words, so with `SIMPLE_VK_FONT_UPLOAD=u32` no pack runs at all.
+
+What this file pins is the CONTRACT around that switch, which is device-free:
+the flag is OPT-IN (a binary built before the extern existed aborts on the
+unknown extern, so the default must stay on the byte path), and the mode/reason
+evidence must distinguish "not requested" from "requested and declined" -- the
+two look identical on the wire and only the reason tells a debugger which
+happened.
+
+Deliberately NOT covered here: that the typed lane carries the right pixels.
+That is the live device lane's job -- the audit gate reports the same
+`frame_digest` (`a15c50cd` on overview.html 900x760) for the typed and byte
+lanes, and a deliberate byte-order swap inside the typed upload moved it to
+`acadc75d`. See
+`doc/08_tracking/bug/vulkan_font_atlas_host_pack_last_host_loop_2026-09-12.md`.
+"""
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
+    vulkan_font_upload_u32_requested, vulkan_font_upload_last_mode,
+    vulkan_font_upload_last_reason, vulkan_font_upload_note}
+
+describe "typed font atlas upload opt-in":
+    it "defaults to the byte payload when the env var is unset":
+        # A deployed binary without `rt_vulkan_copy_to_buffer_u32` aborts the
+        # whole process from the interpreter's unknown-extern path, before any
+        # guard can decline, so the safe default is the byte lane.
+        expect(vulkan_font_upload_u32_requested()).to_equal(false)  # oracle: REQ-VK-FONT-U32-001
+
+    it "reports no upload before any atlas has crossed the boundary":
+        expect(vulkan_font_upload_last_mode()).to_equal("unset")  # oracle: REQ-VK-FONT-U32-002
+        expect(vulkan_font_upload_last_reason()).to_equal("no-upload-yet")  # oracle: REQ-VK-FONT-U32-003
+
+    it "distinguishes a declined typed upload from one that was never requested":
+        # Both end on the byte payload; only the reason says which, and that is
+        # the difference between "old binary, expected" and "the runtime
+        # refused these words", which need opposite responses.
+        vulkan_font_upload_note("bytes", "typed-not-requested")
+        expect(vulkan_font_upload_last_mode()).to_equal("bytes")  # oracle: REQ-VK-FONT-U32-004
+        expect(vulkan_font_upload_last_reason()).to_equal("typed-not-requested")  # oracle: REQ-VK-FONT-U32-005
+        vulkan_font_upload_note("bytes", "typed-declined")
+        expect(vulkan_font_upload_last_reason()).to_equal("typed-declined")  # oracle: REQ-VK-FONT-U32-006
+
+    it "records the typed lane when the words were accepted":
+        vulkan_font_upload_note("u32", "typed-requested")
+        expect(vulkan_font_upload_last_mode()).to_equal("u32")  # oracle: REQ-VK-FONT-U32-007
+        expect(vulkan_font_upload_last_reason()).to_equal("typed-requested")  # oracle: REQ-VK-FONT-U32-008

@@ -1,0 +1,63 @@
+"""
+## Purpose and audience
+Purpose: Prove that an inline non-replaced element's box is its font CONTENT
+AREA, centred in the line box by half-leading — not the whole line box pinned
+to the line's top edge.
+Audience: browser-engine layout maintainers.
+
+CSS 2.1 SS10.6.1: `line-height` sizes the LINE box; the inline box inside it is
+the content area (the font's ascent + descent), centred by half-leading. Simple
+gave every inline element the full line-height at the line's top, so on the
+catalog's `<p>` every `<strong>`/`<em>`/`<a>` measured 6 px too tall and 3-4 px
+too high against Chrome.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+test/fixtures/browser_engine/layout/round3_probe.html at 900x20000, body
+margin 0, font 16px/1.5):
+  p          x=0   y=274 w=900 h=24
+  strong     x=113 y=277 w=51  h=18
+  em         x=173 y=277 w=69  h=18
+  a          x=295 y=277 w=111 h=18
+The load-bearing figures are the VERTICAL ones: h=18 (content area, not the
+24 px line box) and y = p.y + 3 (half-leading (24-18)/2). The x/w columns are
+font-advance metrics and are NOT pinned here — they are a separate open defect
+(doc/08_tracking/bug/web_inline_run_x_advance_font_metrics_2026-09-12.md).
+"""
+
+# @req: REQ-BROWSER-ENGINE-INLINE-CONTENT-AREA-001 — inline boxes are content-area sized and half-leaded.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+
+val INLINE_PAGE: text = (
+    "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">" +
+    "<p id=\"p\">Paragraph with <strong id=\"s\">strong</strong>, " +
+    "<em id=\"e\">emphasis</em>, and a <a id=\"a\" href=\"#x\">working anchor</a>.</p>" +
+    "</body></html>"
+)
+
+fn inline_field(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(INLINE_PAGE, VW, VH, id, field)
+
+describe "inline element boxes are content areas, half-leaded in the line box":
+    it "AC-1: the paragraph's line box is 24 px, as Chrome reports":
+        expect(inline_field("p", "h")).to_equal("24")
+
+    it "AC-2: each inline element's box is the 18 px content area, not 24":
+        expect(inline_field("s", "h")).to_equal("18")
+        expect(inline_field("e", "h")).to_equal("18")
+        expect(inline_field("a", "h")).to_equal("18")
+
+    it "AC-3: each sits 3 px below the line top — half-leading (24-18)/2":
+        val line_top = inline_field("p", "y").to_i32()
+        expect(inline_field("s", "y").to_i32() - line_top).to_equal(3)
+        expect(inline_field("e", "y").to_i32() - line_top).to_equal(3)
+        expect(inline_field("a", "y").to_i32() - line_top).to_equal(3)
+
+    it "AC-4: they are NOT pinned to the line box top (the old behaviour)":
+        assert_true(inline_field("s", "y") != inline_field("p", "y"))

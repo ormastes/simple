@@ -876,6 +876,32 @@ fn _web_draw_ir_state(
     _web_draw_ir_route_states.push(state)
     state
 
+# ---------------------------------------------------------------------------
+# Level-gated stage counters (SIMPLE_WEB_ROUTE_STAGES=1). Read-only: they never
+# change which route is taken. They exist to answer one question that no
+# existing census can -- how much of a COLD single render is the software
+# oracle raster that only the A/B sampler needs.
+var _web_route_stage_oracle_us: i64 = 0
+var _web_route_stage_oracle_n: i32 = 0
+var _web_route_stage_present_us: i64 = 0
+var _web_route_stage_present_n: i32 = 0
+var _web_route_stage_gpu_us: i64 = 0
+var _web_route_stage_gpu_n: i32 = 0
+
+fn _web_route_stages_enabled() -> bool:
+    (env_get("SIMPLE_WEB_ROUTE_STAGES") ?? "") == "1"
+
+pub fn web_draw_ir_route_stage_line() -> text:
+    "route_stages oracle_raster_ms=" + (_web_route_stage_oracle_us / 1000).to_text() +
+    " oracle_n=" + _web_route_stage_oracle_n.to_text() +
+    " present_upload_ms=" + (_web_route_stage_present_us / 1000).to_text() +
+    " present_n=" + _web_route_stage_present_n.to_text() +
+    " gpu_route_ms=" + (_web_route_stage_gpu_us / 1000).to_text() +
+    " gpu_n=" + _web_route_stage_gpu_n.to_text() +
+    " consults=" + _web_draw_ir_route_consults.to_text() +
+    " canonical_submissions=" + _web_draw_ir_route_canonical_submissions.to_text() +
+    " cached_reuses=" + _web_draw_ir_route_cached_reuses.to_text()
+
 fn _web_draw_ir_upload_route(
     composition: DrawIrComposition, width: i32, height: i32, backend_name: text
 ) -> _WebDrawIrTimedRoute:
@@ -884,9 +910,15 @@ fn _web_draw_ir_upload_route(
         _web_draw_ir_route_canonical_submissions + 1)
     val oracle = _simple_web_layout_render_draw_ir_composition(
         composition, width, height, "software", [])
+    val oracle_end_us = _fast_clock.now_micros()
     val readback = present_layout_pixels_with_engine2d_readback(
         oracle.pixels, width, height, backend_name, 0u32)
     val end_us = _fast_clock.now_micros()
+    if _web_route_stages_enabled():
+        _web_route_stage_oracle_us = _web_route_stage_oracle_us + (oracle_end_us - start_us)
+        _web_route_stage_oracle_n = _web_route_stage_oracle_n + 1
+        _web_route_stage_present_us = _web_route_stage_present_us + (end_us - oracle_end_us)
+        _web_route_stage_present_n = _web_route_stage_present_n + 1
     val elapsed_us = if start_us > 0 and end_us > start_us:
         end_us - start_us
     else:
@@ -904,8 +936,12 @@ fn _web_draw_ir_oracle_route(
     composition: DrawIrComposition, width: i32, height: i32
 ) -> _WebDrawIrTimedRoute:
     _web_draw_ir_route_canonical_submissions = _web_draw_ir_route_canonical_submissions + 1
+    val oracle_start_us = _fast_clock.now_micros()
     val oracle = _simple_web_layout_render_draw_ir_composition(
         composition, width, height, "software", [])
+    if _web_route_stages_enabled():
+        _web_route_stage_oracle_us = _web_route_stage_oracle_us + (_fast_clock.now_micros() - oracle_start_us)
+        _web_route_stage_oracle_n = _web_route_stage_oracle_n + 1
     _WebDrawIrTimedRoute(
         readback: engine2d_readback([], "not_requested"),
         oracle_pixels: oracle.pixels, elapsed_us: 0,
@@ -958,6 +994,9 @@ fn _web_draw_ir_gpu_route(
         pixel_count: render.pixels.len().to_i64(),
         checksum: render.readback_checksum)
     val end_us = _fast_clock.now_micros()
+    if _web_route_stages_enabled():
+        _web_route_stage_gpu_us = _web_route_stage_gpu_us + (end_us - start_us)
+        _web_route_stage_gpu_n = _web_route_stage_gpu_n + 1
     val elapsed_us = if start_us > 0 and end_us > start_us:
         end_us - start_us
     else:

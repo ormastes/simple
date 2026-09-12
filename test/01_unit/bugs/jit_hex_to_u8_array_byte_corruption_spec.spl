@@ -1,0 +1,111 @@
+"""
+# Hex-string to [u8] decode Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_hex_to_u8_array_byte_corruption_2026-06-30.md
+
+## Overview
+
+`jit_hex_to_u8_array_byte_corruption_2026-06-30` reported that the standard
+pure-Simple hex-decode idiom —
+
+```simple
+r.push(((hi << 4) | lo).to_u8())
+```
+
+— produced the **correct array length** but **garbage byte values** (a nearly
+constant 249-251 regardless of the input nibbles) under the JIT/native lane,
+while the tree-walk interpreter returned the right bytes. The X.509 decoder
+(`src/lib/common/cert/x509_typed.spl`) is the load-bearing consumer.
+
+Re-checked 2026-09-12: both lanes now decode correctly. This spec pins the
+byte VALUES, not just the length — the original defect was invisible to a
+length-only assertion, which is exactly how it survived.
+
+## Syntax
+
+```simple
+h2b("308201610a")   # -> [48, 130, 1, 97, 10]
+```
+
+"""
+
+use std.spec
+
+
+fn hex_nibble(c: text) -> i64:
+    if c >= "0" and c <= "9":
+        return c.char_code_at(0) - 48
+    elif c >= "a" and c <= "f":
+        return c.char_code_at(0) - 87
+    else:
+        return c.char_code_at(0) - 55
+
+
+fn hex_to_bytes(hex: text) -> [u8]:
+    val byte_count = hex.len() / 2
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < byte_count:
+        val hi = hex_nibble(hex.char_at(i * 2))
+        val lo = hex_nibble(hex.char_at(i * 2 + 1))
+        out.push(((hi << 4) | lo).to_u8())
+        i = i + 1
+    return out
+
+
+fn decoded_as_i64(hex: text) -> [i64]:
+    var out: [i64] = []
+    for b in hex_to_bytes(hex):
+        out.push(b.to_i64())
+    return out
+
+
+# ============================================================================
+# Test Group 1: the exact DER prefix from the bug record
+# ============================================================================
+
+describe "hex decode of the X.509 DER prefix":
+    """
+    ## `308201610a`
+
+    The record's own reproducer. Expected bytes `48 130 1 97 10`; the defect
+    produced `249 251 250 ...`.
+    """
+
+    it "produces the right number of bytes":
+        expect(hex_to_bytes("308201610a").len()).to_equal(5)
+
+    it "produces the right byte values":
+        expect(decoded_as_i64("308201610a")).to_equal([48, 130, 1, 97, 10])
+
+
+# ============================================================================
+# Test Group 2: nibble coverage across the whole byte range
+# ============================================================================
+
+describe "hex decode nibble coverage":
+    """
+    ## Boundary values
+
+    Covers both nibble halves at 0x0, 0x0f, 0xf0, 0xff and a lowercase
+    alphabetic run, so a shift/mask defect cannot hide in a single sample.
+    """
+
+    it "decodes the byte-range boundaries":
+        expect(decoded_as_i64("000ff0ff")).to_equal([0, 15, 240, 255])
+
+    it "decodes a lowercase alphabetic run":
+        expect(decoded_as_i64("deadbeef")).to_equal([222, 173, 190, 239])
+
+    it "decodes an uppercase alphabetic run identically":
+        expect(decoded_as_i64("DEADBEEF")).to_equal([222, 173, 190, 239])
+
+    it "decodes an empty hex string to an empty array":
+        expect(hex_to_bytes("").len()).to_equal(0)

@@ -254,3 +254,319 @@ independent ranking produced by the Draw-IR geometry differ
 (`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`), whose
 items 3 (flex item main size) and 5 (inline-block button) are the two closed
 here.
+
+## Round 3 — 2026-09-12 (grid `repeat()`/`minmax()`, flex-wrap grow, inline content area)
+
+Tool: `scripts/check/check-chrome-layout-geometry-diff.shs` run with
+`GEOM_DIFF_HEIGHT=20000` so the differ sees the WHOLE page. At the default
+760 px it only ever saw ~6 % of a long document (the Draw IR viewport clip
+recorded as Bug 0 in
+`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`), which is
+why the round-2 ranking measured on 18-27 elements per page is superseded here.
+Interpreter `build/cargo-r2/release/simple` (`39178424 1789197971`), Chrome
+152.0.7977.83 headless. The Chrome `GEOM|` harvest is byte-identical across all
+three columns — only the Simple side and the differ change.
+
+### The three columns, and why there are three
+
+`check-chrome-layout-geometry-diff.shs` numbered `::marker` pseudo boxes as
+elements, so on every `<li>` Chrome's first real child was compared against
+Simple's marker box and each `<li>` produced 2-3 fabricated mismatch rows
+(`doc/08_tracking/bug/web_layout_geometry_differ_counts_marker_boxes_as_elements_2026-09-12.md`).
+Fixing that changes what is measured, so the pre-fix numbers are NOT comparable
+to the post-fix numbers. Column **A** is the differ as F22 left it; column **B**
+is the corrected differ over the SAME pre-round-3 layout code, and is the only
+honest baseline; column **C** is round 3. **Read B → C.**
+
+| page | A cmp/mism | B cmp/mism | C cmp/mism | B sum abs-delta | C sum abs-delta | change |
+|---|---|---|---|---|---|---|
+| overview | 18 / 5 | 18 / 5 | 18 / 5 | 245 | **202** | -17.6 % |
+| html | 202 / 195 | 253 / 247 | 253 / 247 | 165,523 | **164,002** | -0.9 % |
+| css-layout | 372 / 370 | 376 / 374 | 376 / **364** | 414,505 | **366,839** | **-11.5 %** |
+| css-paint | 469 / 468 | 468 / 467 | 468 / 467 | 1,062,483 | **1,061,919** | -0.1 % |
+| forms-media | 102 / 99 | 102 / 99 | 102 / 99 | 57,778 | **57,674** | -0.2 % |
+| animation | 81 / 79 | 81 / 79 | 81 / 79 | 13,263 | **13,171** | -0.7 % |
+| evidence | 4 / 0 | 4 / 0 | 4 / 0 | 0 | 0 | — |
+| tab-bar | 9 / 7 | 9 / 7 | 9 / 7 | 119 | 119 | — |
+| **TOTAL** | 1257 / 1223 | 1311 / 1278 | 1311 / **1268** | 1,713,916 | **1,663,926** | **-2.9 %** |
+
+`sum abs-delta` is the sum of `|dx|+|dy|+|dw|+|dh|` over ROOT (non-inherited)
+mismatch rows, missing-element rows excluded. Median per-row magnitude moved the
+same way: css-layout 1169 → 1057, overview 45 → 38, animation 146 → 142.
+**No page regressed on either metric.**
+
+### The targets were NOT met, and the count metric cannot show them being met
+
+Round 3 was set a target of css-layout ≤ 15 % mismatched and html ≤ 10 %.
+Measured: css-layout **96.8 %**, html **97.6 %**. That is not close, and the
+gap is not one more fix away — the metric itself saturates:
+
+- A long page's mismatch count is dominated by **sibling cascade**. One early
+  block-flow error shifts every element below it, and each of those is counted
+  as its own root mismatch. The differ's `inherited` filter only recognises a
+  child repeating its PARENT's exact four deltas, not a sibling inheriting a
+  shifted flow position, so a single 120 px error near the top of `css-layout`
+  marked ~350 downstream elements mismatched.
+- The grid fix removed exactly that 120 px error and the count fell by only 10,
+  because other, smaller flow errors above the same elements remain.
+
+So on these pages the count is close to binary and **magnitude is the
+discriminating column**. Reaching a low mismatch RATE needs every flow error
+above the fold fixed at once — principally block auto-height on wrapped `<li>`
+runs, `<br>` line boxes, and the inline x-advance metrics — not three of them.
+
+### What round 3 closed, with Chrome-exact evidence
+
+| defect | before | after | Chrome |
+|---|---|---|---|
+| `.grid` three columns (`repeat(3, minmax(0,1fr))`) | 3 rows of 900 px, container 168 px tall | 292 / 292 / 292 at x 0 / 304 / 608, container 48 px | identical |
+| `.flex` cards (`flex: 1 1 180px`) | 180 px, second card at x=192 | 444 px, second card at x=456 | identical |
+| inline `<strong>`/`<em>`/`<a>` box | y = line top, h = 24 (line-height) | y = line top + 3, h = 18 | y +3, h 18 |
+
+Specs pinning each: `test/01_unit/browser_engine/{grid_repeat_minmax_track_list,
+flex_wrap_grow_distribution,inline_content_area_half_leading}_spec.spl`,
+`4 examples, 0 failures` each, sabotage triples in the matching bug records.
+
+### Ranked remainder (from column C, root rows)
+
+1. **Block auto-height inside `<li>`** — the inline run before a nested `<p>` is
+   2-3 line-heights where Chrome has 1, so every inventory `<li>` is ~40-60 px
+   tall too much and the page accumulates thousands of px. This is the single
+   largest remaining contributor on css-layout / css-paint / html.
+2. **Inline-run x advance** — plain text over-measured ~25 %, bold not measured
+   as bold. The whole remaining overview mismatch set (5 of 5).
+   `doc/08_tracking/bug/web_inline_run_x_advance_font_metrics_2026-09-12.md`.
+3. **Table row/cell heights** — 10 `table-cell` + 1 `table` root rows on
+   css-paint, unchanged from round 2.
+4. **`<br>` line boxes** — 24 px against Chrome's 18, same cause as the inline
+   content-area fix but on the forced-break path, which takes `style_line_h`
+   directly.
+
+## Round 4 — 2026-09-12 (inline run advance, non-ASCII line boxes, `<br>` box)
+
+Same tool and settings as round 3: `check-chrome-layout-geometry-diff.shs` with
+`GEOM_DIFF_HEIGHT=20000`, interpreter `build/cargo-r2/release/simple`
+(`stat -f '%z %m'` = `39528776 1789199850`), Chrome headless, same catalog.
+Base commit `d23b43dde27` (PR #611 merged).
+
+**Baseline caveat, stated rather than papered over.** The "before" column is
+round 3's column C, i.e. the published numbers for the exact commit this branch
+starts from — NOT a fresh pre-fix run on this host. Two attempts at a controlled
+pre-fix re-run were made and abandoned: the first was contaminated (the stdlib is
+read as SOURCE on every process start, so an edit landed mid-run), and the second
+was killed after >20 min on its second page, because the pre-fix code is far
+slower on exactly the pages the fix speeds up — a run that wraps an em dash to
+one line box per byte does many times the layout work. The magnitude column below
+is computed by summing `|dx|+|dy|+|dw|+|dh|` over rows marked `inherited: false`
+in each page's `*.geometry_diff.sdn`; on pages where that row set is slightly
+wider than the differ's own root-mismatch set (html: 401 vs 247) the extra rows
+carry deltas of at most 1 px each, i.e. under 2 % of the page total, so the two
+methods are comparable at this resolution.
+
+| page | C cmp/mism | **D cmp/mism** | C sum abs-delta | **D sum abs-delta** | change |
+|---|---|---|---|---|---|
+| overview | 18 / 5 | 18 / 5 | 202 | **36** | **-82 %** |
+| html | 253 / 247 | 253 / 247 | 164,002 | **38,338** | **-77 %** |
+| css-layout | 376 / 364 | 376 / **360** | 366,839 | **131,076** | **-64 %** |
+| css-paint | 468 / 467 | **493 / 492** | 1,061,919 | **937,413** | -12 % |
+| forms-media | 102 / 99 | 102 / 99 | 57,674 | **9,762** | **-83 %** |
+| animation | 81 / 79 | 81 / 79 | 13,171 | **5,305** | **-60 %** |
+| evidence | 4 / 0 | 4 / 0 | 0 | 0 | — |
+| tab-bar | 9 / 7 | 9 / 7 | 119 | 119 | — |
+| **TOTAL** | 1311 / 1268 | 1336 / 1289 | 1,663,926 | **1,122,049** | **-33 %** |
+
+`css-paint`'s compared count RISES by 25 (468 → 493). That is not a regression:
+25 elements the Simple side previously did not produce at all — `<li>` subtrees
+whose text carries an `&mdash;` — are now laid out and therefore compared. Its
+magnitude still falls. No page's magnitude rose.
+
+### The targets were NOT met, and the count metric still cannot show them being met
+
+Targets for round 4 were html ≤ 10 %, css-layout ≤ 8 %, animation ≤ 10 %
+mismatched. Measured: html **97.6 %**, css-layout **95.7 %**, animation
+**97.5 %** — essentially unmoved, for exactly the reason round 3 recorded: one
+flow error high on the page marks every element below it as its own root
+mismatch, and the differ's `inherited` filter does not recognise a sibling
+inheriting a shifted flow position. Magnitude is the discriminating column, and
+it fell by a third overall and by 64-83 % on five of eight pages. Reporting the
+rate as "met" on this metric would require every remaining flow error above the
+fold to be fixed at once; three of them are named below and two are blocked.
+
+### What round 4 closed, with Chrome-exact evidence
+
+Oracle: `test/fixtures/browser_engine/layout/round4_probe.html` at 900x20000,
+`body{margin:0;font:16px/1.5 sans-serif}`, harvested with headless
+`--dump-dom` + `getBoundingClientRect()`.
+
+| defect | before | after | Chrome |
+|---|---|---|---|
+| leading inline run advance | `<strong>` at x=140 | x=**112** | 113 |
+| non-ASCII run line boxes | `<div>&mdash;</div>` h=72 | h=**24** | 24 |
+| `<li>`/`<ul>` flow behind it | `ul` h=152, nested `p` y=208 | **104 / 160** | 104 / 160 |
+| `<br>` box | y=56 h=24 | y=**59** h=**18** | 59 / 18 |
+
+Specs: `test/01_unit/browser_engine/inline_run_advance_and_break_boxes_spec.spl`,
+`5 examples, 0 failures`. Sabotage triple: disabling the codepoint-arity branch
+fails 2 examples, restoring the `<br>` line-box box fails 1, disabling the
+trimmed-arity advance branch fails 1.
+
+Records: `web_text_run_advance_measured_in_bytes_2026-09-12.md`,
+`web_br_box_is_whole_line_box_2026-09-12.md`, and the RESOLVED section appended
+to `web_inline_run_x_advance_font_metrics_2026-09-12.md`.
+
+### Ranked remainder (honest)
+
+1. **Bold face advances are never selected.** `resolve_font_metrics_with_language`
+   takes no weight argument, so `<strong>` measures 43 px against Chrome's 50 and
+   everything after it on the line inherits the deficit (`em` 164 vs 171, `a` 285
+   vs 293). BLOCKED: the fix is in `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`
+   and the bold face assets, neither owned by this lane.
+   `web_inline_bold_face_advances_never_selected_2026-09-12.md`.
+2. **A list item's last-child bottom margin does not collapse out** — `li` h=80
+   against Chrome's 64, exactly the nested `<p>`'s 1em. The item's position, the
+   list's height and the next item's position are all now exact, which narrows
+   this to the height accumulator.
+   `web_list_item_last_child_bottom_margin_not_collapsed_2026-09-12.md`.
+3. **Table row/cell geometry** — untouched this round. On the probe the `<table>`
+   is 900x48 where Chrome gives 119x30, and both cells are full-width blocks:
+   shrink-to-fit table width, cell padding/border and `row height = max cell` are
+   all still unimplemented.
+4. **`<code>` width** — 130 px against Chrome's 125 and h=18 vs 19. Within the
+   differ's tolerance on height, 5 px out on width; the monospace UA font size
+   (Chrome resolves bare `monospace` to 13 px) was not investigated.
+5. **Non-ASCII runs that genuinely overflow** still wrap at BYTE offsets —
+   `compute_style_wrap_ranges` was not converted to codepoints, only the
+   whole-run fits-the-box test was.
+
+### Round 4 — pixel differ, and the one page that REGRESSED
+
+`sh scripts/check/check-chrome-catalog-pixel-diff.shs --simple-only --out
+build/perf/chrome_compare_r4`, run in page batches (a whole-catalog run exceeds
+this host's 600 s foreground budget), reusing the Chrome references from the
+earlier rounds unchanged. The before column is round 2's published "after"
+table, EXCEPT for `forms-media`, which was re-measured pre-round-4 on this
+binary specifically to attribute the regression below.
+
+| page | before | after | delta |
+|---|---|---|---|
+| css-layout | 29.20 | 29.19 | -0.01 |
+| html | 17.05 | 17.05 | 0.00 |
+| animation | 15.78 | 15.77 | -0.01 |
+| css-paint | 10.28 | 10.28 | 0.00 |
+| forms-media | 7.74 | **8.58** | **+0.84** |
+| overview | 4.05 | **3.89** | -0.16 |
+| evidence | 2.26 | 2.26 | 0.00 |
+| tab-bar | 1.14 | 1.14 | 0.00 |
+
+Verdicts: `PASS — 4 page(s) compared, worst=8.58`, `PASS — 2 page(s) compared,
+worst=29.19`, `PASS — 2 page(s) compared, worst=17.05`.
+
+**`forms-media` regressed and the round-4 brief said no page may.** It is
+attributed, not guessed: the same binary and the same Chrome references were run
+twice with ONLY `simple_web_html_layout_renderer_layout.spl` swapped between its
+pre- and post-round-4 content, giving 7.74 then 8.58. The likely mechanism is
+that LAYOUT now measures an inline run with the resolved font metrics while
+PAINT still steps glyphs by its own advance, so on a control-dense page the
+glyphs are drawn at positions the box was not sized for. It was not reverted —
+the same change is worth 64-83 % of the geometry magnitude error on five pages —
+and that trade is recorded as a judgement in
+`doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md`,
+which also names the fix: have both paths call one advance function.
+
+## Round 5 — 2026-09-12 (the catalog was rendering 5 of 8 pages as ZERO pixels)
+
+Round 5 began as a fix for the round-4 `forms-media` pixel regression. The
+baseline pass found something larger first, so that is the headline.
+
+### Baseline, measured on a clean `origin/main` @ `43cb44149fe`
+
+```
+SIMPLE_BIN=<repo>/build/cargo-r2/release/simple \
+sh scripts/check/check-chrome-catalog-pixel-diff.shs --out build/perf/r5_base
+FAIL — 3 page(s) compared, 5 unreadable, worst=3.89
+```
+
+**Five of the eight pages produced no framebuffer at all** — `html`,
+`css-layout`, `css-paint`, `forms-media` and `animation` each ended
+`render produced too few pixels: 0 < 684000`. `forms-media`, the page this round
+was briefed to repair, was among them, so the brief's `<= 7.74` target had no
+measurable "before" at HEAD.
+
+Cause, read straight off the render log and then confirmed by sabotage:
+`[e2d-batch] advances-draw-failed ... advances=71 batch_valid=false quads=68`
+with `text_len=73` on a run containing one em dash. `ResolvedFontMetrics.advances`
+carries one entry per CODEPOINT; the Engine2D consumer walks BYTES. U+2014 is 3
+bytes and 1 codepoint, the arrays run at different rates, the batch is rejected,
+and Draw-IR then draws nothing for the ENTIRE page. One em dash cost every pixel.
+Record: `doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`.
+
+### Table
+
+`--simple-only` against the same Chrome references, same binary, same host. The
+"before" column is this round's own baseline run, NOT round 4's published table:
+round 4 measured on a tree where these pages still rendered, so its figures are
+context, not a baseline. Three pages have a real before/after; five went from no
+output at all.
+
+| page | before (r5 baseline) | after | round-4 figure, for context |
+|---|---|---|---|
+| css-layout | **0 px (unreadable)** | **10.29** | 29.19 |
+| html | **0 px (unreadable)** | 17.11 | 17.05 |
+| animation | **0 px (unreadable)** | 15.63 | 15.77 |
+| css-paint | **0 px (unreadable)** | 10.50 | 10.28 |
+| forms-media | **0 px (unreadable)** | **8.11** | 8.58 (7.74 pre-round-4) |
+| overview | 3.89 | 3.89 | 3.89 |
+| evidence | 2.26 | 2.26 | 2.26 |
+| tab-bar | 1.14 | 1.14 | 1.14 |
+
+Verdicts: baseline `FAIL — 3 page(s) compared, 5 unreadable, worst=3.89`;
+after `PASS — 1 page(s) compared, worst=17.11` (html, run first as the
+discriminating probe) and `PASS — 7 page(s) compared, worst=15.63`.
+
+No page regressed against a figure that existed. `css-layout` is the largest
+single movement this project has recorded on the pixel differ, and it is a
+side effect: the page was not merely mis-rendered before, it was blank.
+
+**Artifact caveat:** `--simple-only` overwrites `*.simple.ppm` in place, so
+`build/perf/r5_base` now holds the AFTER renders. The baseline survives only as
+the figures above and in the run log; do not diff those files expecting
+before/after.
+
+### What round 5 changed
+
+1. **Wrapped Draw-IR text lines now carry the resolved advances.** A wrapped run
+   used to be emitted with `draw_ir_text_styled_clipped` — no advances, flat
+   fixed-advance model — while LAYOUT had already sized every one of those lines
+   from the real metrics (round 4). That is the recorded `forms-media`
+   layout/paint disagreement, and the file's own comment had called it "a scope
+   simplification". `_html_draw_ir_resolved_text_command` is now shared by the
+   single-line, first-wrapped-line and extra-wrapped-line emitters.
+2. **The advance array is re-expressed in the consumer's index space**
+   (`_html_draw_ir_byte_advances`): the codepoint's advance on its lead byte, 0
+   on each UTF-8 continuation byte. Same total width, one entry per byte. This
+   is the containment for the defect above; it is a no-op on ASCII.
+3. **The CPU framebuffer painter and the aligned line width step by one table.**
+   `style_run_byte_advances` in `..._layout.spl` is now the single source for
+   `style_text_line_advance_width` and for the glyph stepper
+   (`fb_text_thin_scaled_clip_range_adv`), replacing a third rule that indexed
+   the per-codepoint array with byte offsets.
+
+### Spec and sabotage
+
+`test/01_unit/browser_engine/paint_layout_advance_parity_spec.spl` —
+`2 examples, 0 failures`; asserts paint's line width equals the element's layout
+box width AND Chrome's (`em` 68, `a` 108, +/-1). Sabotage triple, each re-run:
+
+| sabotage | result |
+|---|---|
+| `style_run_byte_advances` returns `[]` | `2 examples, 2 failures` |
+| byte table filled with the flat `style_text_advance` | `2 examples, 2 failures` |
+| pass `metrics.advances` straight through (no byte expansion) | `html` back to `render produced too few pixels: 0 < 684000` |
+
+### Still open after round 5
+
+Bold-face advances (BLOCKED one level below the signature — no loadable bold
+face exists), the `<li>` last-child bottom margin, and table shrink-to-fit /
+UA `border-spacing`. Each has a record naming the exact mechanism and why it was
+not attempted on this round's oracle budget (~1 h per full catalog pass, run
+strictly one page at a time).

@@ -227,7 +227,7 @@ fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st:
 fn inline_line_baseline_descent(st: Style) -> i32:
     style_line_h(st) - inline_line_strut_baseline_offset(st)
 
-fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
+fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
     if nodes.len() == 0:
@@ -263,7 +263,27 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, n
             child_index, node_index, styles[node_index],
             margin_bs[baseline_i], bh
         )
-        val shift_y = line_y + ascent - node_baseline_offset - out_by[node_index]
+        # An inline non-replaced box sits in the line box by HALF-LEADING: its
+        # content area is centred, so its top is line_y + (line_h - content_h)/2
+        # rather than line_y. Every other participant (inline-block, replaced,
+        # sub/super) keeps the baseline placement computed above.
+        # Only for a SINGLE-line run. This renderer models a wrapped #text as
+        # one tall box rather than N line boxes, so on a wrapped run
+        # `resolved_height` is N line-heights and centring in it would push the
+        # element down by (N-1)/2 lines — measured 12 px too low on a 3-line
+        # `<li>`. Those runs keep the existing top placement until wrapped text
+        # is modelled as real line boxes.
+        val node_is_half_leaded = (
+            styles[node_index].display == "inline" and
+            styles[node_index].vertical_align == "baseline" and
+            not grid_item_is_replaced(html_nodes[node_index]) and
+            bh[node_index] > 0 and bh[node_index] < resolved_height and
+            resolved_height <= style_line_h(line_style)
+        )
+        val shift_y = if node_is_half_leaded:
+            line_y + (resolved_height - bh[node_index]) / 2 - out_by[node_index]
+        else:
+            line_y + ascent - node_baseline_offset - out_by[node_index]
         if shift_y != 0:
             val shifted = offset_layout_subtree(
                 child_index, node_index, 0, shift_y, out_bx, out_by
@@ -344,6 +364,88 @@ fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
         width = width + st.resolved_font_advances[i]
         i = i + 1
     width
+
+# --- ONE advance table, shared by layout and paint -------------------------
+#
+# Round 4 made LAYOUT size an inline run from the resolved per-glyph metrics
+# while PAINT kept stepping glyphs by the flat `style_text_advance` estimate
+# (`fb_text_thin_scaled_clip_range`'s `advance`/`space_advance` arguments), and
+# the aligned line width (`style_text_line_advance_width`) used a THIRD rule:
+# it indexed `resolved_font_advances` with BYTE offsets as if bytes and
+# codepoints were the same thing. A centred or right-aligned run was therefore
+# positioned from real metrics and then drawn with wider flat advances, so its
+# glyphs walked out of the box the layout had sized. That is the `forms-media`
+# pixel regression recorded in
+# doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+#
+# `style_run_byte_advances` is the single source of truth that closes it: one
+# advance per BYTE of the string that is actually painted, carrying the
+# codepoint's measured advance on its lead byte and 0 on every UTF-8
+# continuation byte (which draw no glyph). Summing it over a byte range gives
+# the same number the paint loop walks, by construction. It returns an EMPTY
+# array whenever the measured metrics do not describe this exact string
+# (no resolved face, or an arity mismatch) so both sides fall back to the flat
+# estimate TOGETHER rather than one side at a time.
+fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+    var out: [i32] = []
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        return out
+    val cps = text_codepoints(s)
+    val adv = st.resolved_font_advances
+    if adv.len() != cps.len() or adv.len() == 0:
+        return out
+    val n = s.len()
+    var i = 0
+    var ci = 0
+    while i < n:
+        val b = s.char_code_at(i)
+        if b >= 128 and b < 192:
+            out.push(0)
+        else:
+            if ci >= adv.len():
+                return []
+            out.push(adv[ci])
+            ci = ci + 1
+        i = i + 1
+    if ci != adv.len():
+        return []
+    out
+
+fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
+    var width = 0
+    var i = start
+    while i < endv:
+        width = width + by[i]
+        i = i + 1
+    width
+
+# Line width from an already-built byte-advance table (the paint loop builds it
+# once per text node and hands the SAME array to the width call and to the
+# glyph stepper).
+fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    if by.len() == txt.len() and start >= 0 and endv <= by.len():
+        return byte_advances_range_width(by, start, endv)
+    text_line_advance_width(txt, start, endv, advance, space_advance)
+
+# Height of the CONTENT AREA of an inline non-replaced box: the font's own
+# ascent+descent, NOT the line-height. CSS 2.1 SS10.6.1 — `line-height` sizes
+# the LINE box; the inline box inside it is the content area, centred in the
+# line by half-leading. Simple used to give an inline element the whole
+# line-height and place it at the line's top edge, which is why every
+# `<strong>`/`<em>/<code>/<a>` in the catalog measured 6 px too tall and 3-4 px
+# too high against Chrome (measured: Chrome `<strong>` y=195 h=18 inside a
+# y=192 h=24 line; Simple gave y=192 h=24 for the same element).
+#
+# 9/8 of the font size (18 px at 16 px) is the normal-metrics approximation this
+# renderer already uses elsewhere for vertical font geometry; Chrome measures
+# 18 px for the UI sans stack and 19 px for the monospace `<code>` stack, both
+# within the 1 px comparison tolerance. A real per-family ascent+descent would
+# need font metrics this layout path does not carry.
+fn inline_content_area_height(st: Style) -> i32:
+    var h = st.font_size * 9 / 8
+    if h < 1:
+        h = 1
+    h
 
 fn style_baseline_offset(st: Style) -> i32:
     var baseline = st.font_size * 7 / 8
@@ -561,6 +663,37 @@ fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlC
         return caller_base_w
     max_content
 
+# Advance width of a WHOLE text run, in the face the metrics were measured with.
+#
+# `resolved_font_advances` carries one advance per CODEPOINT; `txt_len` and
+# every wrap offset in this renderer are BYTE indices. On any non-ASCII run the
+# two disagree, so `resolved_text_range_width` bails to -1 and the flat
+# per-character estimate was compared against a `node_w` that had already been
+# sized from the REAL measured width. A one-glyph em dash therefore "overflowed"
+# its own box and wrapped to one line per BYTE: measured h=72 (3 lines) for
+# `<div>&mdash;</div>` where Chrome reports 24, and the same for any run
+# containing a single accented letter. That inflated every catalog `<li>` whose
+# text carries an `&mdash;`.
+fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == text_codepoints(txt).len():
+        return st.resolved_font_width
+    style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
+
+fn codepoint_is_space(ch: i64) -> bool:
+    ch == 32 or ch == 9 or ch == 10 or ch == 13
+
+# Advance of ONE space in the face the resolved metrics were measured with.
+# Prefer a real space advance out of the measured array; only when the measured
+# string carries no space at all does the flat estimate stand in.
+fn resolved_space_advance(st: Style, measured_cps: [i64]) -> i32:
+    var i = 0
+    val n = measured_cps.len()
+    while i < n:
+        if measured_cps[i] == 32 and i < st.resolved_font_advances.len():
+            return st.resolved_font_advances[i]
+        i = i + 1
+    style_space_advance(st)
+
 fn inline_text_advance_width(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
@@ -572,6 +705,26 @@ fn inline_text_advance_width(node: HNode, st: Style) -> i32:
     # accident on ASCII and matched a byte-per-byte advance array on non-ASCII.
     if st.resolved_font_width > 0 and st.resolved_font_advances.len() == cps.len():
         return st.resolved_font_width
+    # The metrics were measured over the TRIMMED text unless white-space:nowrap
+    # (see the `metric_text` binding in ..._core.spl's style stage), so on any
+    # run with leading/trailing whitespace — which is most prose, e.g.
+    # `<p>Paragraph with <strong>` — the arity check above could never match and
+    # the whole real-metrics path was dead. It fell back to the flat
+    # `text_advance` below, which over-measured plain 16 px text by ~25 %
+    # (Chrome 112 px for "Paragraph with ", Simple ~140 px) and, because the
+    # over-wide runs wrap sooner, also inflated wrapped-block heights.
+    # Charge the trimmed-off edge whitespace separately: CSS collapses a run of
+    # white space to a single space, so at most one space per edge.
+    val trimmed = node.text_trimmed
+    if st.resolved_font_width > 0 and trimmed.len() > 0:
+        val trimmed_cps = text_codepoints(trimmed)
+        if st.resolved_font_advances.len() == trimmed_cps.len():
+            var edges = 0
+            if cps.len() > 0 and codepoint_is_space(cps[0]):
+                edges = edges + 1
+            if cps.len() > 1 and codepoint_is_space(cps[cps.len() - 1]):
+                edges = edges + 1
+            return st.resolved_font_width + edges * resolved_space_advance(st, trimmed_cps)
     if raw == " " and node.text_trimmed == "":
         var whitespace_advance = style_space_advance(st) / 3
         if whitespace_advance < 1:
@@ -635,10 +788,9 @@ fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space
     width
 
 fn style_text_line_advance_width(txt: text, start: i32, endv: i32, st: Style, advance: i32, space_advance: i32) -> i32:
-    val resolved = resolved_text_range_width(st, start, endv)
-    if resolved >= 0:
-        return resolved
-    text_line_advance_width(txt, start, endv, advance, space_advance)
+    style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, start, endv, advance, space_advance
+    )
 
 fn text_line_aligned_x(base_x: i32, line_box_w: i32, line_w: i32, st: Style, line_i: i32, line_count: i32) -> i32:
     var align = st.text_align
@@ -1513,7 +1665,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # scale 1) while cpl divides by cell width (6px/char), so without this
         # check a run that exactly fits its box spuriously wraps at ~5/6 of its
         # length ("Simple Editor" -> "Simple"/"Editor", "EDITOR" -> "EDITO"/"R").
-        val full_adv = style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
+        val full_adv = style_measured_run_advance(txt, txt_len, st)
         # Active left-float band: lines of this text that vertically overlap
         # the band wrap to the narrowed width, the rest to the full width.
         val band_lh = style_line_h(st)
@@ -2060,6 +2212,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             var line_widths: [i32] = [0; children_for_i_count]
             var line_item_counts: [i32] = [0; children_for_i_count]
             var line_auto_margin_counts: [i32] = [0; children_for_i_count]
+            # Sum of `flex-grow` over the items on each wrapped line. A line
+            # with a non-zero total consumes its free space by GROWING its
+            # items (CSS Flexbox SS9.7 "Resolving Flexible Lengths"), which also
+            # means `justify-content` has nothing left to distribute — the two
+            # are alternatives, never both.
+            var line_grow_totals: [i32] = [0; children_for_i_count]
+            var grow_total_measure = 0
             var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
@@ -2092,12 +2251,14 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         line_widths[line_count] = cx_measure
                         line_item_counts[line_count] = child_count_measure
                         line_auto_margin_counts[line_count] = auto_margin_count_measure
+                        line_grow_totals[line_count] = grow_total_measure
                         line_count = line_count + 1
                         total_line_h = total_line_h + line_h_measure
                         cx_measure = 0
                         line_h_measure = 0
                         child_count_measure = 0
                         auto_margin_count_measure = 0
+                        grow_total_measure = 0
                     if child_count_measure > 0:
                         cx_measure = cx_measure + row_wrap_column_gap
                     cx_measure = cx_measure + item_outer_w
@@ -2108,12 +2269,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     auto_margin_count_measure = (
                         auto_margin_count_measure + item_auto_margins
                     )
+                    if cst.flex_grow > 0:
+                        grow_total_measure = grow_total_measure + cst.flex_grow
                 fm_i = fm_i + 1
             if child_count_measure > 0:
                 line_heights[line_count] = line_h_measure
                 line_widths[line_count] = cx_measure
                 line_item_counts[line_count] = child_count_measure
                 line_auto_margin_counts[line_count] = auto_margin_count_measure
+                line_grow_totals[line_count] = grow_total_measure
                 line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
             if line_count > 1:
@@ -2144,7 +2308,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val reverse_wrap = st.flex_wrap == "wrap-reverse"
             var line_distribution = if line_count > 0:
                 row_flex_distribution(
-                    iw - line_widths[0], line_item_counts[0],
+                    if line_grow_totals[0] > 0: 0 else: iw - line_widths[0],
+                    line_item_counts[0],
                     line_auto_margin_counts[0], st.justify_content
                 )
             else:
@@ -2158,6 +2323,12 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 y + st.border_t + st.pad_t + align_content_offset
             var line_h_wrap = 0
             var line_index_wrap = 0
+            # Running sum of `flex-grow` already placed on the CURRENT line.
+            # Each item takes the prefix DIFFERENCE of the free space
+            # (floor(free*acc_after/total) - floor(free*acc_before/total)), so
+            # integer division loses no pixel to rounding: the line's items
+            # always sum to exactly the free space.
+            var grow_acc_wrap = 0
             var flex_child_count_wrap = 0
             var wrap_content_bottom = 0
             var fc_wrap_i = 0
@@ -2209,9 +2380,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         line_index_wrap = line_index_wrap + 1
                         line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] + align_content_line_extra else: 0
                         flex_child_count_wrap = 0
+                        grow_acc_wrap = 0
                         line_distribution = if line_index_wrap < line_count:
                             row_flex_distribution(
-                                iw - line_widths[line_index_wrap],
+                                if line_grow_totals[line_index_wrap] > 0: 0 else: iw - line_widths[line_index_wrap],
                                 line_item_counts[line_index_wrap],
                                 line_auto_margin_counts[line_index_wrap],
                                 st.justify_content
@@ -2238,6 +2410,24 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                             line_distribution.gap_extra
                         )
                     cx_wrap = cx_wrap + effective_cml
+                    # Grow this item into its share of the line's free space.
+                    # Until this existed the wrap branch placed every item at
+                    # its flex BASIS and left the remainder unused, so the
+                    # catalog's `flex: 1 1 180px` cards were 180 px wide on a
+                    # 900 px line where Chrome makes them 444 px, and the
+                    # second card was displaced by the same 219 px.
+                    if (
+                        cst.flex_grow > 0 and line_index_wrap < line_count and
+                        line_grow_totals[line_index_wrap] > 0
+                    ):
+                        val grow_total_wrap = line_grow_totals[line_index_wrap]
+                        var free_on_line = iw - line_widths[line_index_wrap]
+                        if free_on_line < 0:
+                            free_on_line = 0
+                        val grow_before = free_on_line * grow_acc_wrap / grow_total_wrap
+                        grow_acc_wrap = grow_acc_wrap + cst.flex_grow
+                        val grow_after = free_on_line * grow_acc_wrap / grow_total_wrap
+                        base_w_wrap = base_w_wrap + grow_after - grow_before
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
@@ -2804,12 +2994,20 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         inline_line_h = break_line_h
                     elif break_line_h > inline_line_h:
                         inline_line_h = break_line_h
+                    # `<br>` is an inline non-replaced box like any other: its
+                    # own box is the font CONTENT AREA, half-leaded inside the
+                    # line box it terminates — NOT the whole line box pinned to
+                    # the line top. The LINE still advances by `inline_line_h`
+                    # below; only the <br> element's reported box changes.
+                    # Chrome (900 px, 16px/1.5): line top 56, `<br>` y=59 h=18
+                    # inside a 24 px line; Simple reported y=56 h=24.
+                    val br_content_h = inline_content_area_height(cst)
                     out_bx[c] = ix + inline_x
-                    out_by[c] = cy
+                    out_by[c] = cy + (inline_line_h - br_content_h) / 2
                     out_bw[c] = 0
-                    out_bh[c] = inline_line_h
+                    out_bh[c] = br_content_h
                     val aligned = align_inline_line_baselines(
-                        child_index, st, inline_baseline_nodes,
+                        child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
                         inline_line_h, out_bx, out_by, out_bh
@@ -2892,7 +3090,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     inline_x + inline_outer_w > iw
                 ):
                     val aligned = align_inline_line_baselines(
-                        child_index, st, inline_baseline_nodes,
+                        child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
                         inline_line_h, out_bx, out_by, out_bh
@@ -2927,10 +3125,18 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val text_lines = if wrap_lines > 0: wrap_lines else: 1
                     out_bh[c] = text_lines * style_line_h(cst)
                 elif (
-                    cst.display == "inline" and nodes[c].tag == "span" and
-                    out_bh[c] > 1
+                    cst.display == "inline" and
+                    not grid_item_is_replaced(nodes[c])
                 ):
-                    out_bh[c] = out_bh[c] - 1
+                    # An inline element that fits on one line is its CONTENT
+                    # AREA, not the whole line box — see
+                    # inline_content_area_height. A taller box means the element
+                    # genuinely wrapped, and keeps the height layout gave it.
+                    # REPLACED elements (img/input/select/video/...) are excluded:
+                    # their box is their intrinsic size, not a font metric.
+                    val inline_content_h = inline_content_area_height(cst)
+                    if out_bh[c] > 1 and out_bh[c] <= style_line_h(cst):
+                        out_bh[c] = inline_content_h
                 var inline_contribution_h = out_bh[c]
                 if nodes[c].tag == "button":
                     inline_contribution_h = inline_contribution_h + 3
@@ -2959,7 +3165,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 continue
             if in_inline_run:
                 val aligned = align_inline_line_baselines(
-                    child_index, st, inline_baseline_nodes,
+                    child_index, st, nodes, inline_baseline_nodes,
                     inline_baseline_margin_ts, inline_baseline_margin_bs,
                     styles, cy,
                     inline_line_h, out_bx, out_by, out_bh
@@ -3060,7 +3266,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     if child_count > 0:
         if in_inline_run:
             val aligned = align_inline_line_baselines(
-                child_index, st, inline_baseline_nodes,
+                child_index, st, nodes, inline_baseline_nodes,
                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                 styles, cy,
                 inline_line_h, out_bx, out_by, out_bh

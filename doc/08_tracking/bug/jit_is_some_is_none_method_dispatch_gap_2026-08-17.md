@@ -2,7 +2,7 @@
 
 - **ID:** jit_is_some_is_none_method_dispatch_gap
 - **Date:** 2026-08-17
-- **Status:** OPEN (P1)
+- **Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end. (Was: OPEN (P1).)
 - **Severity:** high — one shape is a silent wrong result (`nil` where `true`
   belongs), the other is a hard stop. Both on the default `bin/simple run` lane.
 - **Component:** seed JIT method dispatch,
@@ -283,3 +283,34 @@ JIT (Cranelift) only. `native-build` is unreachable on this host — it fails wi
 `native-capsule-receipt-invalid` for the unmodified seed too. The LLVM backend
 has its own `"is_some" => Some("rt_is_some")` mapping
 (`codegen/llvm/functions/calls.rs:2287`) and was not exercised.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+Both shapes in one file, payload deliberately `0` as in the record:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run issome.spl
+local=true/false call=true/false absent=false/true ctrl=true
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run issome.spl
+local=true/false call=true/false absent=false/true ctrl=true
+```
+
+Shape A (plain local) no longer dies with `Function 'is_some' not found`, and
+all four Shape B rows return real bools instead of raw `nil`/`0`. The two
+engines agree. **Not reproducible** — status CLOSED.
+
+Regression guard: `test/01_unit/bugs/jit_option_presence_method_dispatch_spec.spl`
+(8 examples: 3 for the local-receiver shape, the record's own 4-row table for
+the call-result shape, and the record's bool-boxing control). The payload stays
+`0` throughout — a falsy payload is the only case where a presence test and a
+truthiness test disagree, so a non-zero payload would not discriminate.
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/jit_option_presence_method_dispatch_spec.spl outcome=OK declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: inverting the present-payload answers turns the file RED —
+`outcome=ERROR declared>=8 executed=8 passed=5 failed=3 skipped=0 dropped=0`.

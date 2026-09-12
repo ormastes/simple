@@ -28,6 +28,8 @@ use std.gpu.engine2d.backend_vulkan_font_spirv.{
     font_atlas_composite_vulkan_spirv_trusted
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_batch}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_glass_material_spirv.{spirv_glass_material}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_blur_rect_spirv.{spirv_blur_rect}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_last_error,
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
@@ -116,6 +118,24 @@ class VulkanSession:
     pipe_rect_batch: i64
     rect_batch_error: text
 
+    # Device glass material lane (optional, same degradation contract as the
+    # batched-rect lane above): one dispatch produces the whole blurred,
+    # saturated and tinted glass rect on the device instead of reading the
+    # entire framebuffer to the host, compositing it there and uploading it
+    # back. A driver that cannot build this pipeline keeps the CPU twin and
+    # reports `glass_error` as the fallback reason -- degraded in throughput,
+    # never in pixels.
+    shader_glass_material: i64
+    pipe_glass_material: i64
+    glass_error: text
+
+    # Device box-blur lane (optional, same degradation contract). Backdrop
+    # blur is the ONE remaining primitive that used to read the whole
+    # framebuffer to the host on every frame that painted a blurred rect.
+    shader_blur_rect: i64
+    pipe_blur_rect: i64
+    blur_error: text
+
     font_atlas_artifact_mode: text
     font_atlas_artifact_identity: text
     font_atlas_emission_compile_ns: i64
@@ -167,6 +187,12 @@ class VulkanSession:
             shader_rect_batch: 0,
             pipe_rect_batch: 0,
             rect_batch_error: "not-installed",
+            shader_glass_material: 0,
+            pipe_glass_material: 0,
+            glass_error: "not-installed",
+            shader_blur_rect: 0,
+            pipe_blur_rect: 0,
+            blur_error: "not-installed",
             font_atlas_artifact_mode: "none",
             font_atlas_artifact_identity: "",
             font_atlas_emission_compile_ns: 0,
@@ -318,6 +344,33 @@ class VulkanSession:
                 self.rect_batch_error = "rect-batch-pipeline: {vulkan_sffi_last_error()}"
             else:
                 self.rect_batch_error = ""
+
+        # Optional device glass material pipeline. Two storage bindings
+        # (0 = framebuffer read, 1 = glass output); failure is recorded and
+        # swallowed exactly like the batched-rect lane above, because the CPU
+        # twin still paints the identical pixels.
+        self.shader_glass_material = vulkan_sffi_compile_spirv(spirv_glass_material())
+        if self.shader_glass_material <= 0:
+            self.glass_error = "glass-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_glass_material = vulkan_sffi_create_compute_pipeline(
+                self.shader_glass_material, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_glass_material <= 0:
+                self.glass_error = "glass-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.glass_error = ""
+
+        # Optional device box-blur pipeline, same swallow-and-record contract.
+        self.shader_blur_rect = vulkan_sffi_compile_spirv(spirv_blur_rect())
+        if self.shader_blur_rect <= 0:
+            self.blur_error = "blur-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_blur_rect = vulkan_sffi_create_compute_pipeline(
+                self.shader_blur_rect, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_blur_rect <= 0:
+                self.blur_error = "blur-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.blur_error = ""
 
         self.ref_count = 1
         self.is_initialized = true
@@ -526,8 +579,12 @@ class VulkanSession:
         if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
         if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
         if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
+        if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
+        if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
         if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
         self.pipe_rect_batch = 0
+        self.pipe_glass_material = 0
+        self.pipe_blur_rect = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
         self.pipe_rect_outline = 0
@@ -550,8 +607,12 @@ class VulkanSession:
         if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
         if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
         if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
+        if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
+        if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
         if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
         self.shader_rect_batch = 0
+        self.shader_glass_material = 0
+        self.shader_blur_rect = 0
         self.rect_batch_error = "not-installed"
         self.shader_clear = 0
         self.shader_rect_filled = 0
