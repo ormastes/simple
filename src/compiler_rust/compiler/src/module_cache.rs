@@ -72,6 +72,110 @@ pub fn clear_probe_source_cache() {
     PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
+thread_local! {
+    /// Cross-lane source+AST cache: one read and one parse per PHYSICAL file.
+    ///
+    /// The HIR lowerer and the interpreter each walked the same import graph
+    /// with a private cache that the other could not see, so every file both
+    /// lanes reach was read and fully re-parsed twice. Measured on
+    /// `src/app/mcp/main.spl --help` (`SIMPLE_READ_TRACE=1`, realpaths):
+    /// lowerer 117 physical files, interpreter 128, intersection 117 --
+    /// 1,265,979 bytes parsed a second time for nothing.
+    ///
+    /// Keyed by `normalize_path_key`, the same canonical key the exports cache
+    /// uses, so alias spellings of one file (`src/std` -> `lib`,
+    /// relative vs absolute) share one entry.
+    ///
+    /// INVALIDATION: none, per process -- which is exactly the policy BOTH
+    /// lanes already had (`IMPORTED_MODULE_AST` and `MODULE_EXPORTS_CACHE` are
+    /// both plain per-process memos with no stamp), so the unified cache is no
+    /// weaker than either. A `src/lib/**` edit is still picked up by the next
+    /// run; nothing is baked into the binary.
+    static PARSED_SOURCE_CACHE: RefCell<HashMap<PathBuf, SharedSource>> = RefCell::new(HashMap::new());
+}
+
+/// One physical file, read once and parsed once, borrowed by both lanes.
+#[derive(Clone)]
+pub enum SharedSource {
+    /// Read succeeded. `source` is CRLF-normalized.
+    Parsed {
+        source: Arc<String>,
+        /// The parse of exactly those bytes, or the parse error's `Display` text.
+        /// Keeping the TEXT (the error is not `Clone`) is what lets every lane
+        /// rebuild its own diagnostic byte-identically from a shared entry.
+        ast: Result<Arc<simple_parser::ast::Module>, Arc<str>>,
+    },
+    /// Read failed. Holds the `std::io::Error`'s `Display` text rather than the
+    /// error (which is not `Clone`), so each lane rebuilds its own message
+    /// byte-identically instead of inventing a new one.
+    ReadError(Arc<str>),
+}
+
+impl SharedSource {
+    /// The parsed AST, or `None` when unreadable or unparseable. This is what
+    /// the HIR lowerer consumes; it treats both failures the same way.
+    pub fn ast(&self) -> Option<Arc<simple_parser::ast::Module>> {
+        match self {
+            SharedSource::Parsed { ast, .. } => ast.clone().ok(),
+            SharedSource::ReadError(_) => None,
+        }
+    }
+}
+
+/// Look up a file in the cross-lane cache WITHOUT filling it.
+///
+/// Split from `shared_source` so a caller can attribute a miss to its own lane
+/// (the lowerer's `IMPORT_AST_PARSES` counts the parses that lane caused).
+pub fn shared_source_lookup(path: &Path) -> Option<SharedSource> {
+    let key = normalize_path_key(path);
+    PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+}
+
+/// Read + parse `path` once per process, shared by every lane. See
+/// `PARSED_SOURCE_CACHE`.
+pub fn shared_source(path: &Path) -> SharedSource {
+    let key = normalize_path_key(path);
+    if let Some(hit) = PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_HITS, 1);
+        return hit;
+    }
+    // The borrow is dropped before the read/parse: filling is not re-entrant
+    // today, and holding it across arbitrary work is how a RefCell panic gets
+    // introduced later.
+    crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_PARSES, 1);
+    let entry = match crate::read_trace::rts(file!(), line!(), path) {
+        Ok(mut source) => {
+            // Normalize CRLF -> LF so indentation-sensitive parsing works on
+            // all platforms. Both lanes did this before caching; do it once.
+            if source.contains('\r') {
+                source = source.replace('\r', "");
+            }
+            let ast = simple_parser::Parser::new(&source)
+                .parse()
+                .map(Arc::new)
+                .map_err(|e| Arc::from(e.to_string().as_str()));
+            SharedSource::Parsed {
+                source: Arc::new(source),
+                ast,
+            }
+        }
+        Err(e) => SharedSource::ReadError(Arc::from(e.to_string().as_str())),
+    };
+    PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, entry.clone()));
+    entry
+}
+
+/// Drop the cross-lane source+AST cache.
+pub fn clear_parsed_source_cache() {
+    PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Entry count -- for tests that assert "one parse per physical file" without
+/// reading process-global perf counters (cargo runs tests in parallel).
+pub fn parsed_source_cache_len() -> usize {
+    PARSED_SOURCE_CACHE.with(|cache| cache.borrow().len())
+}
+
 /// Print a one-line breakdown of every never-evicted loader cache.
 pub fn report_cache_sizes(tag: &str) {
     let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
@@ -171,7 +275,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
-    crate::hir::lower::clear_imported_module_ast_cache();
+    clear_parsed_source_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -239,7 +343,7 @@ pub fn clear_module_cache_selective() {
     // Source-derived probe/AST memos must not survive a selective boundary:
     // test and IDE callers may edit, delete, or recreate files between runs.
     clear_probe_source_cache();
-    crate::hir::lower::clear_imported_module_ast_cache();
+    clear_parsed_source_cache();
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)

@@ -1,0 +1,136 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# MEMBERSHIP FENCE for `simple check <dir>`.
+#
+# `simple check` has TWO directory-recursion lanes with DIFFERENT membership,
+# and an import-closure change to a check entry has already shipped a silent
+# membership regression once (the 2026-09-09 attempt, rejected in review):
+#
+#   public entry  src/app/cli/check_entry.spl
+#       -> app.check.targets.expand_check_targets
+#       -> app.io.source_discovery.discover_spl_files   (rt_dir_walk: RECURSIVE)
+#   worker entry  src/app/check/main.spl
+#       -> collect_files
+#       -> std.nogc_sync_mut.io.file_discovery.find_spl_files  (dir_list: SHALLOW)
+#
+# The divergence is pinned here as CURRENT BEHAVIOUR, not endorsed: unifying
+# the two walkers changes what `simple check <dir>` checks and is a separate,
+# reviewed change. This spec exists so that such a change cannot land as an
+# invisible side effect of an import edit.
+#
+# Fixture `test/fixtures/app/check/membership/` is mixed-depth on purpose:
+#   a_top.spl            depth 0, name sorts BEFORE every subdirectory name
+#   z_top.spl            depth 0, name sorts AFTER  every subdirectory name
+#   notes.txt            depth 0, non-Simple, must never be discovered
+#   m_zebra/inner.spl    depth 1, subdirectory between the two top-level names
+#   nested/mid.spl       depth 1
+#   nested/deep/leaf.spl depth 2, reachable only by the recursive lane
+#
+# What is pinned, and what deliberately is not:
+#   PINNED   membership (exact set and count) at every depth, the non-.spl
+#            exclusion, the empty-directory diagnostic, cross-target first-seen
+#            GROUPING and dedupe, and the path SPELLING the target dictates
+#            (relative target -> relative results, absolute -> absolute).
+#   NOT      the order of files WITHIN one directory target. `discover_spl_files`
+#            ends in `files.sort()`, and that call is a NO-OP on this seed --
+#            `["c","a","b"].sort()` evaluates to `[c, a, b]` both in place and as
+#            a value -- so the emitted order is raw readdir order and differs
+#            between a relative and an absolute walk of the same tree. Pinning it
+#            would pin the filesystem, not the code. The no-op `[text].sort()` is
+#            a separate seed defect reported with this lane's receipt; it is not
+#            worked around here.
+
+use std.spec.step
+use app.check.targets.{expand_check_targets}
+use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
+
+extern fn rt_path_absolute(path: text) -> text
+
+val MIXED_DEPTH_DIR = "test/fixtures/app/check/membership"
+val NO_SPL_DIR = "test/fixtures/app/check/membership_no_spl"
+
+fn count_present(haystack: [text], needles: [text]) -> i64:
+    var found = 0
+    for needle in needles:
+        if haystack.contains(needle):
+            found = found + 1
+    found
+
+describe "simple check directory membership":
+    # @manual scenario evidence
+    it "expands a mixed-depth directory to every .spl at every depth":
+        # @req REQ-SSPEC-UNIT
+        step("expand the mixed-depth fixture through the public entry's walker")
+        val (files, empty_dirs) = expand_check_targets([MIXED_DEPTH_DIR])
+        expect(files.len()).to_equal(5)
+        expect(empty_dirs.len()).to_equal(0)
+        expect(files.contains("{MIXED_DEPTH_DIR}/a_top.spl")).to_equal(true)
+        expect(files.contains("{MIXED_DEPTH_DIR}/z_top.spl")).to_equal(true)
+        expect(files.contains("{MIXED_DEPTH_DIR}/m_zebra/inner.spl")).to_equal(true)
+        expect(files.contains("{MIXED_DEPTH_DIR}/nested/mid.spl")).to_equal(true)
+        expect(files.contains("{MIXED_DEPTH_DIR}/nested/deep/leaf.spl")).to_equal(true)
+
+    it "never discovers a non-Simple file":
+        # @req REQ-SSPEC-UNIT
+        step("confirm the sibling notes.txt is filtered out")
+        val (files, _empty_dirs) = expand_check_targets([MIXED_DEPTH_DIR])
+        expect(files.contains("{MIXED_DEPTH_DIR}/notes.txt")).to_equal(false)
+
+    it "spells results the way the target was spelled":
+        # @req REQ-SSPEC-UNIT
+        step("a trailing slash does not double the separator or change membership")
+        val (slashed, _e1) = expand_check_targets(["{MIXED_DEPTH_DIR}/"])
+        expect(slashed.len()).to_equal(5)
+        expect(slashed.contains("{MIXED_DEPTH_DIR}/nested/deep/leaf.spl")).to_equal(true)
+        step("an absolute target yields absolute results, same membership")
+        val absolute_root = rt_path_absolute(MIXED_DEPTH_DIR)
+        val (absolute, _e2) = expand_check_targets([absolute_root])
+        expect(absolute.len()).to_equal(5)
+        expect(absolute.contains("{absolute_root}/nested/deep/leaf.spl")).to_equal(true)
+        expect(absolute.contains("{MIXED_DEPTH_DIR}/nested/deep/leaf.spl")).to_equal(false)
+
+    it "reports a directory with no Simple source as empty instead of checking it":
+        # @req REQ-SSPEC-UNIT
+        step("expand a directory holding only a non-Simple file")
+        val (files, empty_dirs) = expand_check_targets([NO_SPL_DIR])
+        expect(files.len()).to_equal(0)
+        expect(empty_dirs.len()).to_equal(1)
+        expect(empty_dirs[0]).to_equal(NO_SPL_DIR)
+
+    it "groups targets first-seen and deduplicates the overlap":
+        # @req REQ-SSPEC-UNIT
+        step("expand a nested directory, a file inside the parent, then the parent")
+        val (files, empty_dirs) = expand_check_targets([
+            "{MIXED_DEPTH_DIR}/nested",
+            "{MIXED_DEPTH_DIR}/a_top.spl",
+            MIXED_DEPTH_DIR
+        ])
+        expect(empty_dirs.len()).to_equal(0)
+        expect(files.len()).to_equal(5)
+        step("slots 0-1 belong to the first target, in some order")
+        val nested_pair = [files[0], files[1]]
+        expect(count_present(nested_pair, [
+            "{MIXED_DEPTH_DIR}/nested/mid.spl",
+            "{MIXED_DEPTH_DIR}/nested/deep/leaf.spl"
+        ])).to_equal(2)
+        step("slot 2 is the explicit file target, emitted once and not again")
+        expect(files[2]).to_equal("{MIXED_DEPTH_DIR}/a_top.spl")
+        step("slots 3-4 are only what the parent adds beyond the earlier targets")
+        val remainder = [files[3], files[4]]
+        expect(count_present(remainder, [
+            "{MIXED_DEPTH_DIR}/m_zebra/inner.spl",
+            "{MIXED_DEPTH_DIR}/z_top.spl"
+        ])).to_equal(2)
+
+    it "keeps the worker lane SHALLOW — pinned divergence, not an endorsement":
+        # @req REQ-SSPEC-UNIT
+        step("discover through the worker entry's walker")
+        val shallow = find_spl_files(MIXED_DEPTH_DIR)
+        expect(shallow.len()).to_equal(2)
+        expect(shallow.contains("{MIXED_DEPTH_DIR}/a_top.spl")).to_equal(true)
+        expect(shallow.contains("{MIXED_DEPTH_DIR}/z_top.spl")).to_equal(true)
+        expect(shallow.contains("{MIXED_DEPTH_DIR}/nested/mid.spl")).to_equal(false)
+        expect(shallow.contains("{MIXED_DEPTH_DIR}/nested/deep/leaf.spl")).to_equal(false)
+        step("a directory with no Simple source at its own level discovers nothing")
+        expect(find_spl_files(NO_SPL_DIR).len()).to_equal(0)

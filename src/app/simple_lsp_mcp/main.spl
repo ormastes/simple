@@ -3,17 +3,16 @@
 # Migrated to McpServer facade (Wave C2).
 # Apps own only tool handlers + wiring (design rule D5).
 
+# `.tools` (and the query-engine/process-io tree it reaches through
+# `lsp_query_inproc`/`cache_contract`) is NOT imported at module scope here:
+# `--help`/`--version` never call a tool handler, so eagerly importing it would
+# pay for the whole closure on every startup. Each dispatch site below carries
+# its own function-local `use .tools.{...}` (same shape as
+# `app/mcp/bootstrap/main_lazy_v2.spl`'s `dispatch_*` functions) so the handler
+# tree loads only when a message actually routes to it.
 use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jsonrpc_result, jsonrpc_error, has_method, read_stdin_message, write_stdout_message}
-use .tools.{
-    arg_field,
-    arg_int_field,
-    run_lsp_query, run_visibility_query, run_visibility_symbols,
-    run_lsp_diagnostics, format_lsp_diagnostics_block,
-    handle_tool_call, handle_resources_list, handle_resource_templates_list, handle_resource_read,
-    handle_prompts_list, handle_roots_list, handle_logging_set_level
-}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use app.io.minimal_runtime_ops.{get_args, exit, report_error}
+use app.io.minimal_runtime_ops.{get_args, report_error}
 
 val SERVER_NAME = "simple-lsp-mcp"
 val SERVER_VERSION = "0.9.8"
@@ -148,6 +147,7 @@ fn make_saml_analyze_schema() -> text:
     schema
 
 fn handle_position_tool(subcmd: text, is_visibility: bool, a: text) -> text:
+    use .tools.{arg_field, arg_int_field, run_lsp_query, run_visibility_query}
     val file = arg_field(a, "file")
     val line0 = arg_int_field(a, "line")
     val char0 = arg_int_field(a, "character")
@@ -201,6 +201,37 @@ fn lsp_initialize_result(id: text) -> text:
     result = result + RB()
     jsonrpc_result(id, result)
 
+# Tool/resource dispatch wrappers — each carries its own local `.tools` import
+# so the heavy handler tree (and, through it, lsp_query_inproc/cache_contract)
+# loads only when a message actually routes to that branch.
+fn dispatch_tools_call(id: text, msg: text) -> text:
+    use .tools.{handle_tool_call}
+    handle_tool_call(id, msg)
+
+fn dispatch_resources_list(id: text) -> text:
+    use .tools.{handle_resources_list}
+    handle_resources_list(id)
+
+fn dispatch_resource_templates_list(id: text) -> text:
+    use .tools.{handle_resource_templates_list}
+    handle_resource_templates_list(id)
+
+fn dispatch_resource_read(id: text, msg: text) -> text:
+    use .tools.{handle_resource_read}
+    handle_resource_read(id, msg)
+
+fn dispatch_prompts_list(id: text) -> text:
+    use .tools.{handle_prompts_list}
+    handle_prompts_list(id)
+
+fn dispatch_roots_list(id: text) -> text:
+    use .tools.{handle_roots_list}
+    handle_roots_list(id)
+
+fn dispatch_logging_set_level(id: text, msg: text) -> text:
+    use .tools.{handle_logging_set_level}
+    handle_logging_set_level(id, msg)
+
 fn lsp_handle_message(msg: text) -> text:
     val id = extract_id(msg)
     if has_method(msg, "initialize"):
@@ -210,19 +241,19 @@ fn lsp_handle_message(msg: text) -> text:
     if has_method(msg, "tools/list"):
         return lsp_tools_list_result(id)
     if has_method(msg, "tools/call"):
-        return handle_tool_call(id, msg)
+        return dispatch_tools_call(id, msg)
     if has_method(msg, "resources/list"):
-        return handle_resources_list(id)
+        return dispatch_resources_list(id)
     if has_method(msg, "resources/templates/list"):
-        return handle_resource_templates_list(id)
+        return dispatch_resource_templates_list(id)
     if has_method(msg, "resources/read"):
-        return handle_resource_read(id, msg)
+        return dispatch_resource_read(id, msg)
     if has_method(msg, "prompts/list"):
-        return handle_prompts_list(id)
+        return dispatch_prompts_list(id)
     if has_method(msg, "roots/list"):
-        return handle_roots_list(id)
+        return dispatch_roots_list(id)
     if has_method(msg, "logging/setLevel"):
-        return handle_logging_set_level(id, msg)
+        return dispatch_logging_set_level(id, msg)
     if has_method(msg, "ping"):
         return jsonrpc_result(id, LB() + RB())
     if msg.contains(Q() + "method" + Q() + ":" + Q() + "notifications/"):
