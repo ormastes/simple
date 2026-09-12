@@ -1,0 +1,84 @@
+"""Typed provider call boundary.
+
+A call site that wants to reach an admitted provider declares the signature it
+was compiled against.  This owner validates that declaration against the
+catalog entry the admission path already published — the in-tree
+`ProviderAdmissionReceiptV1` — and yields a typed dispatch permit only when
+they agree.  A disagreement is a refusal, never a best-effort call.
+
+No new descriptor or catalog type is introduced: the receipt is the catalog
+entry, digest well-formedness is delegated to
+`provider_admission_digest_valid_v1`, and the permit carries the existing
+`ProviderExecutionTicketV1` produced by `provider_execution_ticket_v1`, so the
+effect-owner rule is enforced by its current owner rather than restated here.
+
+Validation is fail-closed on the digest itself: a malformed digest is refused
+even when both sides carry the same malformed text, because an equality test
+between two unvalidated strings is not proof of an ABI match.
+
+This owner performs no dispatch.  Producing a permit is the boundary's whole
+job; loading a provider image and executing a payload are separate, still-open
+concerns.
+"""
+
+use compiler.loader.provider_admission.state.{
+    ProviderAdmissionReceiptV1, ProviderExecutionTicketV1,
+    provider_execution_ticket_v1}
+use compiler.loader.provider_admission.admission.{
+    provider_admission_digest_valid_v1}
+
+val PROVIDER_CALL_REFUSED_EMPTY_SYMBOL_V1: i64 = 1
+val PROVIDER_CALL_REFUSED_MALFORMED_DIGEST_V1: i64 = 2
+val PROVIDER_CALL_REFUSED_IDENTITY_MISMATCH_V1: i64 = 3
+val PROVIDER_CALL_REFUSED_ABI_MISMATCH_V1: i64 = 4
+val PROVIDER_CALL_REFUSED_EFFECT_OWNER_V1: i64 = 5
+
+
+struct ProviderCallSignatureV1:
+    """What the call site believes it is calling."""
+    provider_identity: text
+    symbol: text
+    abi_digest: text
+
+
+struct ProviderCallDispatchV1:
+    """Permission to dispatch one validated call.
+
+    `ticket` is the admission path's own execution ticket; this boundary adds
+    only the call-site facts that were checked against the catalog entry.
+    """
+    ticket: ProviderExecutionTicketV1
+    symbol: text
+    abi_digest: text
+
+
+fn provider_call_admit_v1(
+    receipt: ProviderAdmissionReceiptV1,
+    signature: ProviderCallSignatureV1
+) -> Result<ProviderCallDispatchV1, i64>:
+    if signature.symbol == "":
+        return Err(PROVIDER_CALL_REFUSED_EMPTY_SYMBOL_V1)
+    if not provider_admission_digest_valid_v1(signature.abi_digest):
+        return Err(PROVIDER_CALL_REFUSED_MALFORMED_DIGEST_V1)
+    if not provider_admission_digest_valid_v1(receipt.abi_digest):
+        return Err(PROVIDER_CALL_REFUSED_MALFORMED_DIGEST_V1)
+    if signature.provider_identity != receipt.provider_identity:
+        return Err(PROVIDER_CALL_REFUSED_IDENTITY_MISMATCH_V1)
+    if signature.abi_digest != receipt.abi_digest:
+        return Err(PROVIDER_CALL_REFUSED_ABI_MISMATCH_V1)
+    val ticket = provider_execution_ticket_v1(receipt)
+    if ticket.is_err():
+        return Err(PROVIDER_CALL_REFUSED_EFFECT_OWNER_V1)
+    Ok(ProviderCallDispatchV1(
+        ticket: ticket.unwrap(),
+        symbol: signature.symbol,
+        abi_digest: signature.abi_digest))
+
+
+export PROVIDER_CALL_REFUSED_EMPTY_SYMBOL_V1
+export PROVIDER_CALL_REFUSED_MALFORMED_DIGEST_V1
+export PROVIDER_CALL_REFUSED_IDENTITY_MISMATCH_V1
+export PROVIDER_CALL_REFUSED_ABI_MISMATCH_V1
+export PROVIDER_CALL_REFUSED_EFFECT_OWNER_V1
+export ProviderCallSignatureV1, ProviderCallDispatchV1
+export provider_call_admit_v1
