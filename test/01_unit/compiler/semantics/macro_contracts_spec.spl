@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: pin that `process_macro_contract` RECORDS what an `inject` contract
+item declares. The Rust->Simple port computed the anchor and then rebuilt the
+result copying every field from itself, so `inject_labels` and `injections`
+came back empty and a macro's inject contract was invisible to IDE completion.
+Audience: compiler semantics engineers.
+
+## Operator workflow
+
+`bin/simple test test/01_unit/compiler/semantics/macro_contracts_spec.spl`
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.35.semantics.macro_contracts.{
+    process_macro_contract,
+    symbolscope_empty,
+    macrocontractresult_empty,
+    MacroContractItem,
+    MacroContractResult,
+    MacroAnchor
+}
+
+fn _inject_item(anchor_value: text, label: text) -> MacroContractItem:
+    MacroContractItem(
+        kind: "inject",
+        has_name: false, name: "",
+        has_type_name: false, type_name: "",
+        has_label: true, label: label,
+        has_anchor: true, anchor: anchor_value,
+        has_anchor_value: true, anchor_value: anchor_value)
+
+fn _process(items: [MacroContractItem]) -> MacroContractResult:
+    val r = process_macro_contract(items, {}, symbolscope_empty())
+    match r:
+        case Ok(v): v
+        case _: macrocontractresult_empty()
+
+fn _anchor_name(a: MacroAnchor) -> text:
+    match a:
+        case Head: "head"
+        case Tail: "tail"
+        case _: "here"
+
+describe "process_macro_contract — inject contract items":
+
+    context "a single head injection":
+        it "records the label in inject_labels":
+            val res = _process([_inject_item("head", "body")])
+            expect(res.inject_labels.contains_key("body")).to_equal(true)
+
+        it "maps the label to the Head anchor":
+            val res = _process([_inject_item("head", "body")])
+            expect(_anchor_name(res.inject_labels["body"])).to_equal("head")
+
+        it "seeds an injections bucket for the anchor":
+            val res = _process([_inject_item("head", "body")])
+            expect(res.injections.contains_key("head")).to_equal(true)
+
+    context "tail and callsite anchors":
+        it "maps 'tail' to the Tail anchor":
+            val res = _process([_inject_item("tail", "after")])
+            expect(_anchor_name(res.inject_labels["after"])).to_equal("tail")
+
+        it "maps an unknown anchor word to Here":
+            val res = _process([_inject_item("somewhere", "mid")])
+            expect(_anchor_name(res.inject_labels["mid"])).to_equal("here")
+
+        it "seeds a distinct bucket per anchor":
+            val res = _process([_inject_item("head", "a"), _inject_item("tail", "b")])
+            expect(res.injections.contains_key("head")).to_equal(true)
+            expect(res.injections.contains_key("tail")).to_equal(true)
+
+    context "several injections":
+        it "records every label":
+            val res = _process([
+                _inject_item("head", "a"),
+                _inject_item("tail", "b"),
+                _inject_item("here", "c")
+            ])
+            expect(res.inject_labels.len()).to_equal(3)
+
+        it "shares one bucket for two labels on the same anchor":
+            val res = _process([_inject_item("head", "a"), _inject_item("head", "b")])
+            expect(res.inject_labels.len()).to_equal(2)
+            expect(res.injections.len()).to_equal(1)
+
+    context "contracts with no inject item":
+        it "leaves inject_labels empty":
+            val res = _process([])
+            expect(res.inject_labels.len()).to_equal(0)
+
+        it "leaves injections empty":
+            val res = _process([])
+            expect(res.injections.len()).to_equal(0)
