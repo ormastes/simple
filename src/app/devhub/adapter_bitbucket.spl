@@ -35,7 +35,8 @@
 
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use std.nogc_sync_mut.http_client.{http_get, http_post, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_get_header}
-use app.devhub.config.{ItfConfig, load_auth_token}
+use app.devhub.config.{ItfConfig, load_config, load_auth_token}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, bitbucket_owner_url, bitbucket_repo_url, bitbucket_pr_collection_url, bitbucket_page_query}
 use app.devhub.errors.{ItfError, ITF_ERR_AUTH, ITF_ERR_NOT_FOUND, ITF_ERR_API, ITF_ERR_CONFLICT, ITF_ERR_NETWORK}
 
 
@@ -93,22 +94,39 @@ class BbStatus:
 
 
 class BbClient:
-    """Bitbucket Cloud REST 2.0 client.
+    """Bitbucket REST client — Cloud REST 2.0 by default, Server / Data
+    Center REST 1.0 when `deployment` is datacenter.
 
-    Holds the Repository Access Token (Bearer) and base URL.
-    Per the arch doc (FooClient with config + auth_header()).
+    Holds the token and base URL. Per the arch doc (FooClient with config +
+    auth_header()). `deployment`, `auth_scheme` and `user` are optional: an
+    omitted/"" deployment is Cloud, an omitted/"" auth_scheme is Bearer —
+    the pre-existing behaviour — and `user` is only read for Basic auth.
     """
     token: text
     base_url: text
+    deployment: text    # "cloud" | "datacenter" (app.devhub.atlassian_site)
+    auth_scheme: text   # "bearer" (access token / DC PAT) | "basic" (base64(user:token))
+    user: text
 
     static fn from_token(token: text) -> BbClient:
-        BbClient(token: token, base_url: BB_API_BASE)
+        BbClient(token: token, base_url: BB_API_BASE, deployment: "", auth_scheme: "", user: "")
 
     static fn from_env() -> BbClient:
-        BbClient(token: load_auth_token("bitbucket"), base_url: BB_API_BASE)
+        """Token from auth.sdn / token_env / token_cmd; deployment shape,
+        site URL, auth scheme and user from [bitbucket] in config.sdn."""
+        val config = load_config()
+        val url = if config.bb_url == nil or config.bb_url == "": BB_API_BASE else: config.bb_url
+        BbClient(token: load_auth_token("bitbucket"), base_url: url, deployment: config.bb_deployment, auth_scheme: config.bb_auth, user: config.bb_user)
+
+    fn site() -> AtlassianSite:
+        """The deployment shape this client talks to. A Cloud client whose
+        base_url is the default keeps "" so the shape helpers emit exactly
+        BB_API_BASE."""
+        val base = if self.base_url == nil or self.base_url == BB_API_BASE: "" else: self.base_url
+        AtlassianSite.create(base, self.deployment)
 
     fn auth_header() -> text:
-        bb_auth_header(self.token)
+        atlassian_auth_header(atlassian_normalize_auth(self.auth_scheme, ATLASSIAN_AUTH_BEARER), self.user, self.token)
 
     fn is_configured() -> bool:
         self.token != ""
@@ -133,29 +151,59 @@ fn bb_auth_header(token: text) -> text:
 # URL builders (pure — covered by unit tests)
 # ============================================================================
 
+#
+# The `(ws, repo)` builders keep their Cloud-only signatures (and their
+# byte-identical output) for existing callers and specs; the `_for` variants
+# take the client's deployment shape and place `(workspace, slug)` on Cloud
+# or `(PROJECT_KEY, slug)` on Server / Data Center:
+#   Cloud  https://api.bitbucket.org/2.0/repositories/{ws}/{slug}/pullrequests
+#   DC     {url}/rest/api/1.0/projects/{KEY}/repos/{slug}/pull-requests
+# Named DC gaps (URLs only; not translated here): `statuses` is a separate
+# build-status API on Server, `approve` is deprecated on REST 1.0 in favour
+# of participants, pagination is `limit`/`start` + `isLastPage` (the `next`
+# follow below stops after page 1), and PR JSON uses fromRef/toRef.
+
+fn _bb_cloud_site() -> AtlassianSite:
+    """The Cloud default shape (api.bitbucket.org/2.0) the `(ws, repo)` builders pin."""
+    AtlassianSite.create("", "")
+
+
 fn bb_pr_collection_url(ws: text, repo: text) -> text:
-    """Build URL for the PR collection of a repo."""
-    BB_API_BASE + "/repositories/" + ws + "/" + repo + "/pullrequests"
+    """Build URL for the PR collection of a repo (Cloud shape)."""
+    bb_pr_collection_url_for(_bb_cloud_site(), ws, repo)
 
 
 fn bb_pr_url(ws: text, repo: text, pr_id: i64) -> text:
-    """Build URL for an individual PR resource."""
-    bb_pr_collection_url(ws, repo) + "/" + pr_id.to_string()
+    """Build URL for an individual PR resource (Cloud shape)."""
+    bb_pr_url_for(_bb_cloud_site(), ws, repo, pr_id)
 
 
 fn bb_pr_sub_url(ws: text, repo: text, pr_id: i64, sub: text) -> text:
-    """Build URL for a sub-resource of a PR (comments, approve, merge, statuses)."""
-    bb_pr_url(ws, repo, pr_id) + "/" + sub
+    """Build URL for a sub-resource of a PR (comments, approve, merge, statuses) (Cloud shape)."""
+    bb_pr_sub_url_for(_bb_cloud_site(), ws, repo, pr_id, sub)
 
 
 fn bb_repo_collection_url(ws: text) -> text:
-    """Build URL for the repository collection of a workspace."""
-    BB_API_BASE + "/repositories/" + ws
+    """Build URL for the repository collection of a workspace (Cloud shape)."""
+    bitbucket_owner_url(_bb_cloud_site(), ws)
 
 
 fn bb_repo_url(ws: text, repo: text) -> text:
-    """Build URL for an individual repository resource."""
-    bb_repo_collection_url(ws) + "/" + repo
+    """Build URL for an individual repository resource (Cloud shape)."""
+    bitbucket_repo_url(_bb_cloud_site(), ws, repo)
+
+
+fn bb_pr_collection_url_for(site: AtlassianSite, owner: text, repo: text) -> text:
+    """PR collection for (workspace|project key, slug) on the given deployment."""
+    bitbucket_pr_collection_url(site, owner, repo)
+
+
+fn bb_pr_url_for(site: AtlassianSite, owner: text, repo: text, pr_id: i64) -> text:
+    bb_pr_collection_url_for(site, owner, repo) + "/" + pr_id.to_string()
+
+
+fn bb_pr_sub_url_for(site: AtlassianSite, owner: text, repo: text, pr_id: i64, sub: text) -> text:
+    bb_pr_url_for(site, owner, repo, pr_id) + "/" + sub
 
 
 fn _bb_clamp_pagelen(limit: i64) -> i64:
@@ -187,16 +235,22 @@ fn _bb_resolve_total_limit(limit: i64) -> i64:
 
 fn bb_repo_list_url(ws: text, limit: i64) -> text:
     """Build URL for the FIRST page of GET /repositories/{ws} with a pagelen
-    query param. Subsequent pages are followed via the response's `next`
-    link — see _bb_collect_pages and the pagination note at the top of this
-    file.
+    query param (Cloud shape). Subsequent pages are followed via the
+    response's `next` link — see _bb_collect_pages and the pagination note
+    at the top of this file.
     """
-    bb_repo_collection_url(ws) + "?pagelen=" + _bb_clamp_pagelen(limit).to_string()
+    bb_repo_list_url_for(_bb_cloud_site(), ws, limit)
+
+
+fn bb_repo_list_url_for(site: AtlassianSite, owner: text, limit: i64) -> text:
+    """First page of the repository collection; `pagelen=N` on Cloud,
+    `limit=N` on Server / Data Center."""
+    bitbucket_owner_url(site, owner) + "?" + bitbucket_page_query(site, _bb_clamp_pagelen(limit))
 
 
 fn bb_pr_list_url(ws: text, repo: text, state: text, limit: i64) -> text:
     """Build URL for the FIRST page of GET .../pullrequests with optional
-    state filter + pagelen.
+    state filter + pagelen (Cloud shape).
 
     state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all" (case
     insensitive; "" or "all" omits the state filter entirely, returning PRs
@@ -204,11 +258,15 @@ fn bb_pr_list_url(ws: text, repo: text, state: text, limit: i64) -> text:
     link — see _bb_collect_pages and the pagination note at the top of this
     file.
     """
-    val base = bb_pr_collection_url(ws, repo)
-    val n = _bb_clamp_pagelen(limit).to_string()
+    bb_pr_list_url_for(_bb_cloud_site(), ws, repo, state, limit)
+
+
+fn bb_pr_list_url_for(site: AtlassianSite, owner: text, repo: text, state: text, limit: i64) -> text:
+    val base = bb_pr_collection_url_for(site, owner, repo)
+    val page = bitbucket_page_query(site, _bb_clamp_pagelen(limit))
     if state == "" or state.lower() == "all":
-        return base + "?pagelen=" + n
-    base + "?state=" + state.upper() + "&pagelen=" + n
+        return base + "?" + page
+    base + "?state=" + state.upper() + "&" + page
 
 
 # ============================================================================
@@ -704,7 +762,7 @@ fn bb_create_pr_with_body(client: BbClient, ws: text, repo: text, title: text, s
     val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_collection_url(ws, repo)
+    val url = bb_pr_collection_url_for(client.site(), ws, repo)
     val payload = bb_build_create_pr_body_full(title, source_branch, dest_branch, reviewers, description)
     val (status, body, _retry) = _bb_post(client, url, payload)
     if status != 200 and status != 201:
@@ -721,7 +779,7 @@ fn bb_get_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, BbPr,
     val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_url(ws, repo, pr_id)
+    val url = bb_pr_url_for(client.site(), ws, repo, pr_id)
     val (status, body, _retry) = _bb_get(client, url)
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -736,7 +794,7 @@ fn bb_list_pr_comments(client: BbClient, ws: text, repo: text, pr_id: i64) -> (b
     """GET /repositories/{ws}/{repo}/pullrequests/{id}/comments."""
     if not client.is_configured():
         return (false, [], "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_sub_url(ws, repo, pr_id, "comments")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"comments")
     val (status, body, _retry) = _bb_get(client, url)
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -760,7 +818,7 @@ fn bb_post_pr_comment(client: BbClient, ws: text, repo: text, pr_id: i64, conten
     val empty = BbComment(id: 0, author: "", content: "", inline_path: "", inline_to: -1)
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_sub_url(ws, repo, pr_id, "comments")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"comments")
     val payload = bb_build_comment_body(content, inline_path, inline_from, inline_to)
     val (status, body, _retry) = _bb_post(client, url, payload)
     if status != 200 and status != 201:
@@ -776,7 +834,7 @@ fn bb_approve_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, t
     """POST /repositories/{ws}/{repo}/pullrequests/{id}/approve."""
     if not client.is_configured():
         return (false, "", "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_sub_url(ws, repo, pr_id, "approve")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"approve")
     val (status, body, _retry) = _bb_post(client, url, "")
     if status != 200 and status != 201:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -788,7 +846,7 @@ fn bb_unapprove_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool,
     """DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve."""
     if not client.is_configured():
         return (false, "", "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_sub_url(ws, repo, pr_id, "approve")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"approve")
     val (status, body, _retry) = _bb_delete(client, url)
     if status != 200 and status != 204:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -806,7 +864,7 @@ fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: tex
         return (false, empty, "blocked-auth: no Bitbucket token configured")
     if strategy != "merge_commit" and strategy != "squash" and strategy != "fast_forward":
         return (false, empty, "invalid merge strategy: " + strategy)
-    val url = bb_pr_sub_url(ws, repo, pr_id, "merge")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"merge")
     val payload = bb_build_merge_body(strategy, close_source_branch, "")
     val (status, body, _retry) = _bb_post(client, url, payload)
     if status != 200 and status != 202:
@@ -822,7 +880,7 @@ fn bb_get_pr_statuses(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bo
     """GET /repositories/{ws}/{repo}/pullrequests/{id}/statuses."""
     if not client.is_configured():
         return (false, [], "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_sub_url(ws, repo, pr_id, "statuses")
+    val url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"statuses")
     val (status, body, _retry) = _bb_get(client, url)
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -844,14 +902,14 @@ fn bb_check_ready_to_merge(client: BbClient, ws: text, repo: text, pr_id: i64) -
     """
     if not client.is_configured():
         return (false, "blocked-auth: no Bitbucket token configured")
-    val pr_url = bb_pr_url(ws, repo, pr_id)
+    val pr_url = bb_pr_url_for(client.site(), ws, repo, pr_id)
     val (pr_status, pr_body, _r1) = _bb_get(client, pr_url)
     if pr_status != 200:
         return (false, "GET PR failed: HTTP " + pr_status.to_string())
     val pr_parsed = json_parse(pr_body)
     if pr_parsed == nil:
         return (false, "invalid PR JSON")
-    val statuses_url = bb_pr_sub_url(ws, repo, pr_id, "statuses")
+    val statuses_url = bb_pr_sub_url_for(client.site(), ws, repo, pr_id,"statuses")
     val (st_status, st_body, _r2) = _bb_get(client, statuses_url)
     if st_status != 200:
         return (false, "GET statuses failed: HTTP " + st_status.to_string())
@@ -872,7 +930,7 @@ fn bb_list_repos(client: BbClient, ws: text, limit: i64) -> (bool, [BbRepo], tex
     if not client.is_configured():
         return (false, [], "blocked-auth: no Bitbucket token configured", false)
     val n = _bb_resolve_total_limit(limit)
-    val first_url = bb_repo_list_url(ws, limit)
+    val first_url = bb_repo_list_url_for(client.site(), ws, limit)
     val (ok, raw, err, capped) = _bb_collect_pages(client, _bb_fetch_list_page, first_url, n)
     if not ok:
         return (false, [], err, false)
@@ -887,7 +945,7 @@ fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
     val empty = BbRepo(slug: "", name: "", full_name: "", description: "", is_private: false, updated_on: "", main_branch: "", web_url: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
-    val url = bb_repo_url(ws, repo)
+    val url = bitbucket_repo_url(client.site(), ws, repo)
     val (status, body, _retry) = _bb_get(client, url)
     if status != 200:
         val err = bb_map_http_error(status, body, BB_OP_GENERAL)
@@ -909,7 +967,7 @@ fn bb_list_prs(client: BbClient, ws: text, repo: text, state: text, limit: i64) 
     if not client.is_configured():
         return (false, [], "blocked-auth: no Bitbucket token configured", false)
     val n = _bb_resolve_total_limit(limit)
-    val first_url = bb_pr_list_url(ws, repo, state, limit)
+    val first_url = bb_pr_list_url_for(client.site(), ws, repo, state, limit)
     val (ok, raw, err, capped) = _bb_collect_pages(client, _bb_fetch_list_page, first_url, n)
     if not ok:
         return (false, [], err, false)

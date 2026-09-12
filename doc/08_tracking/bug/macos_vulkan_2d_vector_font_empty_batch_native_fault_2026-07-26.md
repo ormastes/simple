@@ -437,3 +437,92 @@ path emits the `[font-batch] degenerate ... quads=0` diagnostic and continues,
 which is why a producer defect surfaces as a native fault instead of a named
 error. Making that one edit would turn every future occurrence of this class into
 a legible failure rather than a 21-cycle investigation.
+
+## 2026-09-12 — NOT reproduced this pass, and the bug_db file pointer is wrong
+
+Host macOS arm64 (M4). Available binary: the Rust seed
+`/Users/ormastes/simple/build/cargo-r2/release/simple`
+(`stat -f '%z %m'` = `39528776 1789199850`). **No attempt was made to reproduce
+the fault, deliberately:** every documented occurrence is a NATIVE fault in a
+`native-build` artifact, and the acceptance gate above already exhausted three
+bounded no-bootstrap cycles proving that another probe on the interpreter or on
+an ad-hoc native diagnostic does not localize it. The prerequisite is a deployed
+self-hosted compiler carrying the 2026-07-27 receiver-lowering fix, and Stage 4
+deployment on this host is blocked in a separate lane (macOS bootstrap chain).
+No `lldb` backtrace is offered here because nothing was run that could fault.
+
+Two corrections for whoever schedules this next:
+
+- **`bug_db.sdn` names `src/os/compositor/host_compositor_core.spl` as this
+  bug's file. That is not where the seam is.** The degenerate-batch emitter is
+  `src/lib/gc_async_mut/gpu/engine2d/engine.spl:1740`, and the staging seam the
+  record identifies (`local quads -> FontRenderBatch.quads -> _stage_batch`) is
+  `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:1323`
+  (`_stage_batch`) / `:1434` (`_stage_batch_with_config`). The compositor file
+  was not touched by this pass and appears to be a stale attribution. The row
+  itself is left alone — bug_db status/field edits belong to the docs lane.
+- Acceptance item 4 ("an empty or inconsistent `FontRenderBatch` must return a
+  named failure without dereferencing a nil aggregate") is the only part of this
+  bug that looks pure-Simple-fixable without a native build, and it lives in
+  `font_renderer.spl`, not in the compositor. Nothing in the round-2 plan assigns it: lane 2 was pointed at the compositor file, lane 3 owns the test runner, lane 4 the red specs. It is left unstarted here rather
+  than half-done -- it is outside lane 2's assigned files AND assigned to no lane at all, so it needs one.
+
+Status unchanged: **open, blocked on the macOS bootstrap/deploy lane.**
+
+## 2026-09-12 — acceptance item 4 RESOLVED in pure Simple (native verification still owed)
+
+Item 4 ("an empty or inconsistent `FontRenderBatch` must return a named failure
+propagated to the caller, without dereferencing a nil aggregate, with evidence
+that no backend batch method was entered") is now implemented at the two seams
+this record identifies. No other acceptance item changed; the record stays
+**open**, blocked on the macOS bootstrap/Stage 4 deploy lane.
+
+What changed:
+
+- `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` `_stage_batch`: counts
+  drawable quads (`width > 0 and height > 0`) and sets a new
+  `staged_reject_reason` field — `"empty-quads"` for a zero-glyph payload,
+  `"zero-area-quads"` when every quad is degenerate, `""` when drawable. On
+  rejection it stores an EMPTY quad list rather than a zero-length payload
+  dressed as drawable, and returns 0. New receipts `staged_reject_reason_text()`
+  / `staged_is_drawable()` (both `me`, never `fn`-reading-`self`).
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` `_draw_font_batch_staged`
+  short-circuits on a non-empty `staged_reject_reason` instead of rebuilding a
+  batch to hand to a backend; `_draw_font_batch_plan` re-checks drawable quads
+  inline (NOT via a zero-arg method on the non-self `batch` local — see the
+  receiver-materialization note in that function) and returns `false` with
+  `last_font_execution_attempts == ["nothing-to-draw:<reason>"]`,
+  `last_font_execution_target == ""`. Truthful counters added:
+  `font_batches_skipped_empty` and `font_backend_dispatches` (incremented at
+  each of the six backend call sites), read through `me` accessors.
+  Side effect: the old false `"<backend>:success"` that a zero-quad batch
+  produced via `quad_index == batch.quads.len()` can no longer occur.
+
+Evidence (interpreter lane, seed
+`/Users/ormastes/simple/build/cargo-r2/release/simple`, `stat -f '%z %m'` =
+`39528776 1789199850`, `SIMPLE_EXECUTION_MODE=interpreter`):
+
+- New spec `test/01_unit/lib/gpu/engine2d/font_empty_batch_fail_closed_spec.spl`
+  — `outcome=OK executed=5 passed=5`. Oracles: backend dispatch counter stays 0
+  for a zero-glyph and for an all-zero-area batch, the framebuffer is
+  byte-identical before/after (absolute pixel oracle), and a batch carrying one
+  drawable quad still dispatches (counter 1, target `cpu`) and still CHANGES
+  pixel 0.
+- Sabotage: neutering both guards (`if false:`) turns the two fail-closed
+  examples RED (`passed=3 failed=2`), then green again on restore.
+- Unchanged: `backend_vulkan_font_quad_partition_spec` 7/7,
+  `vulkan_font_atlas_incremental_repack_spec` 30/30,
+  `draw_ir_em_dash_text_ink_spec` 2/2,
+  `vulkan_font_batch_admission_spec` 7/7,
+  `backend_vulkan_text_fallback_spec` 2/2.
+- Pre-existing reds, verified identical with the changes reverted (NOT caused by
+  this change): `font_runtime_config_spec` (stale `rocm:unavailable` expectation)
+  and `engine2d_font_scalar_receipt_spec`.
+- `vulkan_font_atlas_slot_plan_spec` does not exist anywhere in `test/`.
+
+Still owed: this is a STRUCTURAL fix proven on the interpreter. The native fault
+itself is not re-verified — that needs a `native-build` artifact from a deployed
+Stage 4 self-hosted compiler, which is blocked in the macOS bootstrap lane. What
+this change buys is that the next native occurrence of this class surfaces as
+`nothing-to-draw:<reason>` at the emitter instead of a nil-receiver fault inside
+a backend.

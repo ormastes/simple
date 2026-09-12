@@ -77,6 +77,50 @@ output-mismatch|size-mismatch|format-mismatch`. Captures come from the Linux lan
 on macOS only `--selftest` (10 fixtures) runs. Guide:
 `doc/07_guide/app/ui/renderdoc_web_diff.md`.
 
+## RenderDoc diff lane + Linux lavapipe CI (2026-09-12)
+
+`.github/workflows/renderdoc-web-diff.yml` produces RenderDoc `.rdc` captures
+for both sides of the web differential on a GPU-less `ubuntu-latest` runner
+using Mesa lavapipe as the software Vulkan ICD (RenderDoc captures lavapipe
+fine). Deliberately **never a required check** — triggers are
+`workflow_dispatch` plus a path-filtered `pull_request` only, so the slow CI
+queue and the red baseline don't gate unrelated PRs. Local equivalent of the
+diff step: `scripts/check/check-renderdoc-web-diff.shs` (see the RenderDoc
+capture-diff paragraph already in this file).
+
+## Geometry differ (2026-09-12)
+
+`scripts/check/check-chrome-layout-geometry-diff.shs` +
+`src/app/ui/chrome_showcase/layout_geometry_diff.spl` (spec
+`test/01_unit/app/ui/layout_geometry_diff_spec.spl`) is a BUG-FINDER, not a
+regression gate: per catalog page it keys Chrome headless's per-element
+border-box geometry and the pure-Simple renderer's geometry on the same
+body-relative nth-path, flags any `|dx|,|dy|,|dw|,|dh| > 1px`, clustered by
+CSS feature. Chrome has no JS-eval flag in headless dump-dom mode, so the
+harvest writes a walker-injected COPY of each page beside the original
+(relative CSS/img URLs must still resolve; an iframe wrapper was rejected —
+`file://` origins are opaque without `--allow-file-access-from-files`).
+Verdict is the last stdout line; 0 elements compared or no Chrome is ERROR,
+never PASS.
+
+**Current mismatch table** (`doc/10_metrics/ui/chrome_layout_geometry_diff_macos_2026-09-12.md`,
+Chrome 152.0.7977.83, tolerance 1px, interpreter `39368072 1789171430`):
+overall **158 compared, 136 mismatched**. Per page (compared / root
+mismatches / inherited / Chrome-elements-with-no-Simple-box): overview
+18/9/5/0, html 28/16/5/403, css-layout 23/21/1/378, css-paint 25/22/2/503,
+forms-media 27/22/2/76, animation 24/20/2/57. Read the full doc for the
+remaining pages and root-cause clustering — do not re-derive counts by hand.
+
+## Pixel differ zero-pixel-render fallback
+
+`scripts/check/check-chrome-catalog-pixel-diff.shs` classifies an
+all-background (uninked) captured image as `zero-pixel-render` rather than a
+false "0% mismatch" pass — an all-background Simple frame and a real Chrome
+frame can both read as trivially identical otherwise. `--selftest` (5
+fixtures) asserts an inked image is never misclassified as zero-pixel-render
+and that the differ discriminates. A run with any `zero-pixel-render` page is
+FAIL, named per page, never silently averaged into the pass rate.
+
 ## Update Rule
 
 Update this skill with new links, current ABI/symbol inventory, and handoff

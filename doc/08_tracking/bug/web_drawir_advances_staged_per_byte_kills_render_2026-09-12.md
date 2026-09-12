@@ -1,7 +1,5 @@
 # Engine2D stages one text quad per BYTE against a per-CODEPOINT advance array — a single em dash renders the whole page black
 
-- Status: OPEN. Root cause located and reproduced at `origin/main`; the fix is in
-  Engine2D / `draw_ir_adv`, which round 5 does not own. Round 5 landed a
 - Status: FIXED in Engine2D / text staging (2026-09-12, branch
   `work/engine2d-text-staging-codepoints-2026-09-12`). The producer-side
   containment below is still in place and still correct -- both arities are now

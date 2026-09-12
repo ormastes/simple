@@ -204,3 +204,17 @@ aliases, and permit Stage 2 admission when every other sanity, receiver,
 source, tool, and runtime receipt is unchanged. Ablations for a changed target,
 escaped target, missing receipt row, and extra junction must each refuse Stage
 2 admission.
+
+## 2026-09-12 re-verification: receipt dispatch present, row stays OPEN
+
+`bootstrap_stage3_git_state` (`scripts/check/lib/bootstrap-stage3/authority.shs:3453-3461`)
+now reads `SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT` (or an explicit third
+argument, which cannot silently disable an exported receipt) and dispatches to
+`bootstrap_stage3_materialized_git_state`, the PowerShell-backed alias-aware
+path. The receipt is exported by `scripts/bootstrap/bootstrap-windows.sh:39`.
+
+An audit lead proposed flipping this row to `fixed`. Not warranted: the
+alias-aware path still runs under the same `/usr/bin/timeout -k 2s 30s` bound
+that produced the original exit-124, and no post-fix run showing a retained
+Git-state receipt exists in the tree. The mechanism is verified present; the
+defect is not verified resolved. Status unchanged.

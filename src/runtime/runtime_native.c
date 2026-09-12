@@ -12221,7 +12221,21 @@ int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
     return (int64_t)(uintptr_t)out;
 }
 
-int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
+/* Shared body of rt_file_atomic_write / rt_file_atomic_write_mode.
+ *
+ * `have_mode == 0` reproduces rt_file_atomic_write's original behaviour
+ * exactly: preserve the destination's existing mode across the rename.
+ * `have_mode != 0` instead imposes `mode & 07777` on the TEMP file, before
+ * the rename, which is the whole point of the _mode variant --
+ * src/lib/nogc_sync_mut/terminal/credential/store.spl:750 requires that the
+ * target "never exists at a wider mode", so chmod-after-publish (i.e.
+ * rt_file_atomic_write followed by a chmod) is NOT an acceptable
+ * implementation: it leaves a window in which a private key file is
+ * world-readable. That security requirement is why this function was
+ * factored out of rt_file_atomic_write rather than the mode variant being
+ * written as a wrapper around it. */
+static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
+                                         int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
     RtCoreString* path_string = rt_core_as_string(path_value);
     RtCoreString* content_string = rt_core_as_string(content_value);
@@ -12232,7 +12246,7 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     if (!path) return 0;
 #if !defined(_WIN32)
     struct stat existing_stat;
-    int preserve_mode = stat(path, &existing_stat) == 0;
+    int preserve_mode = !have_mode && stat(path, &existing_stat) == 0;
 #endif
     char* parent = spl_strdup(path);
     if (!parent) {
@@ -12290,6 +12304,9 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     if (ok) ok = fflush(file) == 0;
 #if !defined(_WIN32)
     if (ok && preserve_mode) ok = fchmod(fd, existing_stat.st_mode & 07777) == 0;
+    /* Narrow-to-target BEFORE the rename: the temp file was created 0600, so
+     * the published path never exists at a wider mode than requested. */
+    if (ok && have_mode) ok = fchmod(fd, (mode_t)(mode & 07777)) == 0;
 #endif
 #if defined(_WIN32)
     if (ok) ok = _commit(fd) == 0;
@@ -12305,6 +12322,14 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
 #endif
     }
 #if defined(_WIN32)
+    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
+     * POSIX mode is honoured to the only extent the platform allows: the
+     * owner-write bit maps to _S_IWRITE, everything else (group/other,
+     * setuid, sticky) has no Win32 equivalent and is silently not applied.
+     * Applied to the TEMP file, before the move, for the same
+     * never-wider-than-requested reason as the fchmod above. A failure here
+     * is NOT fatal to the write: the bytes are still published atomically. */
+    if (ok && have_mode) _chmod(temp_path, _S_IREAD | ((mode & 0200) ? _S_IWRITE : 0));
     if (ok) ok = MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
     if (ok) ok = rename(temp_path, path) == 0;
@@ -12313,6 +12338,165 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     free(temp_path);
     free(path);
     return ok ? 1 : 0;
+}
+
+int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
+    return rt_file_atomic_write_impl(path_value, content_value, 0, 0);
+}
+
+/* ================================================================
+ * Stage2 Windows/MSVC link gap (2026-09-12): rt_file_atomic_write_mode,
+ * rt_file_list_dir, rt_file_mode, rt_fs_read_text. Declared as externs in
+ * src/lib/nogc_sync_mut/sffi/fs.spl (:50, :106, :122, :228) and defined
+ * NOWHERE -- neither here nor in the Rust runtime. The selfcheck beside
+ * this file recorded them as "no implementation on either side". GNU ld
+ * tolerated the undefined symbols; MSVC's linker refuses them, which is
+ * what finally exposed the gap. This is the unregistered_extern_silent_nil
+ * class (doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md).
+ *
+ * ABI established by DISASSEMBLING the real call sites in the kept Windows
+ * stage3 object set (.simple/storage/build/bootstrap/stage3/
+ * x86_64-pc-windows-msvc/native-objects-2X62WD/mod_828.o), the same method
+ * the bucket-2 comment above used -- not by reading the .spl declaration:
+ *   - lib__nogc_sync_mut__sffi__fs__{file_mode,fs_read_text,file_list_dir}
+ *     are each a bare `jmp` with ZERO argument setup, so the single `text`
+ *     argument is the boxed RuntimeValue handle passed straight through in
+ *     rcx, and the return value passes back out untouched. None of the four
+ *     appears in text_arg_indices (src/compiler/50.mir/text_extern_abi.spl),
+ *     which independently predicts exactly this single-word shape -- the
+ *     same shape rt_file_exists_str was confirmed to have.
+ *   - file_atomic_write_mode sets up no arguments either (rcx, rdx, r8
+ *     pass through), so it is (path_value, content_value, mode).
+ *   - Its return is consumed with `testq %rax, %rax` -- the FULL 64-bit
+ *     register, not `testb %al, %al`. The bool return is therefore declared
+ *     int64_t and always assigned exactly 0 or 1: an int8_t return leaves
+ *     the upper 56 bits of rax undefined, and a `false` carrying garbage
+ *     there would be read as true. (Note for a separate change: the
+ *     neighbouring rt_file_exists_str returns int8_t and ITS call site at
+ *     mod_828.o+0x219 also uses `testq %rax, %rax`, so it has this latent
+ *     defect today. Not fixed here -- different symbol, different lane.)
+ *   - The `mode: i32` argument is a RAW machine integer, NOT a tagged
+ *     RuntimeValue. This one matters: RT_VALUE_TAG_INT is 0x0, so a raw
+ *     0600 (0x180) has clear tag bits and rt_core_is_int() answers TRUE for
+ *     it -- meaning the defensive `rt_core_is_int(v) ? rt_core_as_int(v) : v`
+ *     decode used by rt_file_write_text_at CANNOT disambiguate here, and
+ *     applying it anyway would shift 0600 down to 060. Guessing either way
+ *     is a silent security bug: read as tagged, 0600 would be published as
+ *     06000, i.e. setuid+setgid on a private key file. Resolved by
+ *     disassembling the sibling wrapper file_open, which has the same
+ *     `(path: text, mode: i32)` shape and MUST marshal (its text expands to
+ *     a (ptr, len) pair, so the registers visibly move): mod_828.o+0x2b3 is
+ *     `movq %rsi, %r8` -- the mode travels to the third argument register
+ *     verbatim, with no shift and no tag OR. Confirmed behaviourally by
+ *     this file's existing rt_file_open, which switches on mode == 0/1/2
+ *     and would never match a tagged 0/8/16. Hence plain `int32_t mode`
+ *     and a plain `mode & 07777`, with no untagging. */
+
+/* fs.spl:50 `extern fn rt_file_atomic_write_mode(path: text, content: text,
+ * mode: i32) -> bool`. Temp file + rename, with the mode imposed before the
+ * rename; see rt_file_atomic_write_impl's comment for why that ordering is
+ * load-bearing rather than incidental. */
+int64_t rt_file_atomic_write_mode(int64_t path_value, int64_t content_value, int32_t mode) {
+    return rt_file_atomic_write_impl(path_value, content_value, (int64_t)mode, 1) != 0 ? 1 : 0;
+}
+
+/* fs.spl:228 `extern fn rt_fs_read_text(path: text) -> text?` -- whole file
+ * as UTF-8 text, nil on failure. Decodes the boxed handle and delegates to
+ * rt_file_read_text (this same translation unit, (ptr, len) ABI), which
+ * already reads to EOF keeping the true BYTE COUNT rather than strlen'ing
+ * at the first NUL, and already returns RT_NIL on failure -- the exact
+ * `text?` contract, on both platform branches, with no new I/O code. */
+int64_t rt_fs_read_text(int64_t path_value) {
+    uint64_t len = 0;
+    const uint8_t* bytes = rt_core_string_bytes(path_value, &len);
+    if (!bytes) return rt_core_nil();
+    return rt_file_read_text(bytes, len);
+}
+
+/* fs.spl:122 `extern fn rt_file_mode(path: text) -> i64` -- the file's
+ * permission bits, or -1 when they cannot be read. -1 (not 0) is the
+ * contract both consumers test: credential/store.spl:835 does `if mode < 0`
+ * and falls back to owner-only, and dual_fs/__init__.spl:143 uses -1 as its
+ * "unknown" sentinel. On Windows st_mode carries only the read/write bits;
+ * masking is identical, there is simply less to report. */
+int64_t rt_file_mode(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return -1;
+    struct stat st;
+    int rc = stat(path, &st);
+    free(path);
+    if (rc != 0) return -1;
+    return (int64_t)(st.st_mode & 07777);
+}
+
+/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]` -- entry
+ * NAMES (not full paths), "." and ".." skipped, empty array on error so the
+ * `[text]` (non-optional) return is always a real array.
+ *
+ * The Windows branch deliberately uses FindFirstFileW/FindNextFileW where
+ * the neighbouring rt_dir_list uses the ...A variants: Simple `text` is
+ * UTF-8, and the A variants transcode through the process ANSI codepage,
+ * which mangles any non-ASCII file name. The UTF-8 <-> UTF-16 conversion
+ * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
+ * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
+int64_t rt_file_list_dir(int64_t path_value) {
+    SplArray* out = rt_array_new(0);
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path || !out) {
+        if (path) free(path);
+        return (int64_t)(uintptr_t)out;
+    }
+#if defined(_WIN32)
+    size_t path_len = strlen(path);
+    char* pattern = (char*)malloc(path_len + 3);
+    if (!pattern) { free(path); return (int64_t)(uintptr_t)out; }
+    memcpy(pattern, path, path_len);
+    /* Tolerate a trailing separator so "dir\" and "dir" behave alike. */
+    if (path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/')) path_len--;
+    pattern[path_len] = '\\';
+    pattern[path_len + 1] = '*';
+    pattern[path_len + 2] = '\0';
+    free(path);
+
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
+    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t)) : NULL;
+    if (!wide_pattern ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
+        if (wide_pattern) free(wide_pattern);
+        free(pattern);
+        return (int64_t)(uintptr_t)out;
+    }
+    free(pattern);
+
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(wide_pattern, &data);
+    free(wide_pattern);
+    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, NULL, 0, NULL, NULL);
+        if (utf8_len <= 1) continue;
+        char* name = (char*)malloc((size_t)utf8_len);
+        if (!name) continue;
+        if (WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, utf8_len, NULL, NULL) > 0)
+            rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)utf8_len - 1));
+        free(name);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return (int64_t)(uintptr_t)out;
+#else
+    DIR* dir = opendir(path);
+    free(path);
+    if (!dir) return (int64_t)(uintptr_t)out;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        const char* name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)strlen(name)));
+    }
+    closedir(dir);
+    return (int64_t)(uintptr_t)out;
+#endif
 }
 
 static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {

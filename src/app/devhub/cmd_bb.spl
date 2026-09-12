@@ -28,6 +28,7 @@ use app.devhub.adapter_bitbucket.{
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error, print_success, print_info, print_dim, print_table_header, print_table_row, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, should_use_color}
 use std.nogc_sync_mut.env.{env_get}
+use app.devhub.config.{load_config}
 
 
 # ============================================================================
@@ -70,14 +71,28 @@ fn handle_bb(args: [text]) -> i64:
 # ============================================================================
 
 fn _bb_resolve_workspace(args: [text]) -> text:
-    """Resolve workspace from --workspace flag or BB_WORKSPACE env var."""
+    """Resolve the URL owner slot: the Cloud workspace, or — on Bitbucket
+    Server / Data Center, whose shape is /projects/{PROJECT_KEY}/repos/{slug}
+    — the project key. Tiers stay flag > env > user config; within a tier
+    the project key is consulted before the workspace (`--project` >
+    `--workspace`/`--ws` > BB_PROJECT > BB_WORKSPACE > [bitbucket] project).
+    The workspace rungs are unchanged for Cloud."""
+    val project = _extract_flag(args, "--project", "")
+    if project != "":
+        return project
     val flag = _extract_flag(args, "--workspace", "")
     if flag != "":
         return flag
     val ws = _extract_flag(args, "--ws", "")
     if ws != "":
         return ws
-    env_get("BB_WORKSPACE")
+    val project_env = env_get("BB_PROJECT")
+    if project_env != "":
+        return project_env
+    val env_ws = env_get("BB_WORKSPACE")
+    if env_ws != "":
+        return env_ws
+    load_config().bb_project
 
 
 fn _bb_resolve_repo(args: [text]) -> text:
