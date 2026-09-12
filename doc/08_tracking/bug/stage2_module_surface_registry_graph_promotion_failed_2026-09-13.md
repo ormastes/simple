@@ -1,6 +1,12 @@
 # Stage 2 passes sanity and the struct receiver, then fails the Stage-3 route in `module_surfaces_promote`
 
-- Status: OPEN (2026-09-13)
+- Status: **FIXED (2026-09-13, proven by BOOT-7)** — `592041db98a` removes the
+  repeat-promote post-condition from `module_surface_promote_freeze_names`. The proof is
+  `build/bootstrap-boot7b` (candidate sha256 `f02b5a4c1310df6e...`, 152198856 B): the
+  message below appears nowhere in that run, and the positional Stage-3 route advances six
+  phases further — through `parse`, `hir`, `monomorphize`, `mir` and `native_cache` — before
+  hitting an unrelated SEGV tracked as site 8
+  (`stage2_stage3_route_segv_mir_json_shadow_witness_2026-09-13.md`)
 - Found: bootstrap lane BOOT-7, `work/bootstrap-full-5-2026-09-12` at `823da06e9fa`
 - Severity: **the current `--stop-after-stage2` admission blocker on Linux aarch64**, and the
   successor to site 6 (`stage2_positional_stage3_route_scv_authority_missing_2026-09-13.md`,
@@ -65,3 +71,21 @@ is true of arrays too, the 24-way chain cannot pass for any surface that went th
 - which of the three sites answers false, and for which field/surface;
 - whether `rt_transient_heap_promote` can also answer false for allocation failure, which
   would change the fix shape.
+
+## What the removed guard was, and was not, worth
+
+Two things, stated because "a fail-closed check was deleted" deserves them:
+
+1. **It could never catch a genuine promotion failure.** A value whose FIRST promote answers
+   false (the docstring's own "already persistent" case) also answers false on the second, so
+   it passes the guard. The only thing the guard could distinguish was a value whose repeat
+   promote answers TRUE — which, measured above, is every raw/array/dict/enum/closure
+   representation whether or not the promotion worked. It fired on success and stayed silent
+   on the failure it was written for.
+2. **The remaining check is not an equivalent substitute, and is not claimed to be.**
+   `module_surfaces_frozen_alignment_error` (`module_surface_registry_index.spl:321`) runs
+   AFTER `_sffi_transient_array_scope_end()` and reads `preferred_registry_name` back out of
+   the dead scope — a real post-scope-end read at the only moment such a read means anything.
+   But it tests `== ""`, so it catches an emptied name, not a dangling pointer into freed
+   memory reading as garbage, which is the shape the 2026-09-06 SEGV had. Coverage of the
+   four freeze-assigned names after scope end is therefore PARTIAL, not restored.
