@@ -1,0 +1,28 @@
+#!/bin/sh
+# Read-site census for `cross_lane_parse_once_spec.spl`.
+#
+# One traced run of the MCP entry; prints `key=value` lines and nothing else.
+# `SIMPLE_EXECUTION_MODE` is CLEARED: the spec runner exports it, and
+# `interpreter` mode skips HIR lowering entirely -- which leaves a single lane
+# in the trace and would pass the spec on a binary with no shared cache at all.
+set -e
+BIN=${SIMPLE_BIN:-bin/simple}
+command -v strace >/dev/null 2>&1 || { echo 'skip=no-strace'; exit 0; }
+[ -x "$BIN" ] || { echo 'skip=no-binary'; exit 0; }
+D=$(mktemp -d)
+trap 'rm -rf "$D"' EXIT
+unset SIMPLE_EXECUTION_MODE SIMPLE_TEST_MODE
+SIMPLE_READ_TRACE=1 strace -f -e trace=openat -o "$D/o.log" \
+    "$BIN" run src/app/mcp/main.spl --help >/dev/null 2>"$D/r.log" \
+    || { echo 'skip=entry-failed'; exit 0; }
+# site + realpath per traced source read, so an alias spelling cannot look like
+# a second file and two lanes reaching one file cannot look like one read.
+grep '^\[read\] ' "$D/r.log" | awk '{print $2, $3}' > "$D/sp"
+while read -r site p; do printf '%s %s\n' "$site" "$(readlink -f "$p")"; done < "$D/sp" > "$D/sr"
+sort -u "$D/sr" | awk '{print $2}' | sort | uniq -c | awk '$1>1' | grep -c . > "$D/x" || true
+echo "reads=$(grep -c . "$D/sr")"
+echo "physical=$(awk '{print $2}' "$D/sr" | sort -u | grep -c .)"
+echo "crosssite=$(cat "$D/x")"
+echo "shared=$(grep -c 'module_cache\.rs' "$D/sr" || true)"
+echo "sharedphys=$(grep 'module_cache\.rs' "$D/sr" | awk '{print $2}' | sort -u | grep -c . || true)"
+echo "opens=$(grep -o 'openat([^,]*, "[^"]*\.spl"' "$D/o.log" | grep -c .)"

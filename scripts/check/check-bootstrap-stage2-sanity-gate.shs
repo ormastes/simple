@@ -44,12 +44,50 @@ if grep -q 'version.*=.*"simple-bootstrap 1\.0\.0-[A-Za-z]' "${fn}"; then
   exit 2
 fi
 
+# bootstrap_stage_sanity calls this collaborator, which lives in the SAME
+# shipped file and was never extracted. Without it the driven function died at
+# `bootstrap_stage2_sanity_output_preflight: not found` and returned 1 before
+# writing any evidence -- so every "must reject" case below was passing because
+# the harness was broken, not because the gate rejected anything, and every
+# "must accept" case was failing for the same reason. Extracted verbatim from
+# the shipped file for the same no-drift reason as the function under test.
+preflight_fn="${work}/preflight.sh"
+awk '/^bootstrap_stage2_sanity_output_preflight\(\) \(/{f=1} f{print} f&&/^\)$/{exit}' \
+  "${src}" >"${preflight_fn}"
+if ! grep -q '^bootstrap_stage2_sanity_output_preflight() (' "${preflight_fn}"; then
+  echo "ERROR — nothing was checked (could not extract bootstrap_stage2_sanity_output_preflight from ${src})"
+  exit 2
+fi
+if ! grep -q '^)$' "${preflight_fn}"; then
+  echo "ERROR — nothing was checked (extracted preflight is truncated)"
+  exit 2
+fi
+
 # ---- harness: stubs for the gate's collaborators ---------------------------
 harness="${work}/harness.sh"
 cat >"${harness}" <<'EOF'
 run_timeout() { shift; "$@"; }
 bootstrap_stage3_hash_file() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 bootstrap_stage3_hash_stream() { sha256sum | cut -d' ' -f1; }
+# candidate_frontend_capture_setup / candidate_frontend_pinned_smoke: the
+# function under test was moved onto the PINNED capture path (it now calls
+# these two, not candidate_frontend_smoke directly) without the harness being
+# taught about them, so every case died at `candidate_frontend_capture_setup:
+# not found`. The real capture_setup pins the output directory through an open
+# descriptor (/proc/<pid>/fd/6 on Linux) so a symlink swap cannot redirect the
+# probe's writes; for a synthetic candidate in a private mktemp -d that
+# hardening has nothing to defend against, so the stub hands back the plain
+# directory and the pinned smoke delegates to the existing candidate_frontend_
+# smoke stub. What must stay real is the variable the receipt records.
+candidate_frontend_capture_setup() {
+  CANDIDATE_FRONTEND_CAPTURE_KIND=harness-plain-dir
+  CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+  export CANDIDATE_FRONTEND_CAPTURE_KIND CANDIDATE_FRONTEND_CAPTURE_PARENT
+}
+candidate_frontend_pinned_smoke() {
+  printf 'probe=synthetic driver=begin\n' >"$2" || return 126
+  candidate_frontend_smoke "$1"
+}
 # candidate_frontend_smoke: real one compiles a fixture. Stub delegates to the
 # candidate so a broken candidate genuinely fails the smoke, as in production.
 candidate_frontend_smoke() {
@@ -97,7 +135,7 @@ EOF
 drive() { # drive <candidate> <evidence>  -> echoes rc on its own line
   ( . "${harness}"
     . "${repo_root}/scripts/check/lib/bootstrap-stage3/sanity.shs"
-    repo_root="${REPO_ROOT_OVERRIDE}"; . "${fn}"
+    repo_root="${REPO_ROOT_OVERRIDE}"; . "${preflight_fn}"; . "${fn}"
     bootstrap_stage_sanity "$1" "$2" "${work}/h" "${work}/t" "$PATH" >/dev/null 2>&1
     echo "RC=$?" )
 }
@@ -208,6 +246,55 @@ EOF
 REPO_ROOT_OVERRIDE="${work}/tail-identity"
 check reject_bootstrap_identity_tail fail "${work}/good"
 REPO_ROOT_OVERRIDE="${repo_root}"
+
+# --- REPRODUCER (2026-09-12): an EXPORTED operator override of the probe
+#     budget must survive bootstrap_stage_sanity's environment scrub.
+#
+#     The scrub `unset`s every name `env` reports, and `unset` removes the
+#     VALUE, not merely the export attribute. COMPILER_BUILD_TIMEOUT_SECONDS is
+#     read AFTER the scrub (candidate_frontend_admission.shs:238, the
+#     --timeout-seconds of the bounded collector), so exporting it did not
+#     raise the budget -- it destroyed it. Leaving it UNexported was the only
+#     way the 180s default reached the probe, which is precisely why the knob
+#     was unreachable from outside the script. Measured that day: a Stage-2
+#     candidate_frontend_smoke reported `hello-world-positional-build failed
+#     (raw rc=124)` against the 180s whole-probe budget while the LINK phase
+#     alone took 273.8s at host load 47 (`phase=link state=succeeded
+#     elapsed_ms=299399 dt_ms=273785`), so the rc=124 was the host, not a
+#     verdict on the candidate.
+#
+#     Fail-closed: the assertion is on the bounded receipt the probe actually
+#     wrote. Zero receipts is a FAILURE, not a pass -- a case that asserted
+#     only "no abort" would go green on a run that never probed anything.
+CASES_RUN=$((CASES_RUN + 1))
+mkdir -p "${work}/tov"
+(
+  COMPILER_BUILD_TIMEOUT_SECONDS=1234
+  export COMPILER_BUILD_TIMEOUT_SECONDS
+  drive "${work}/good" "${work}/tov/timeout_override.env"
+) >"${work}/tov/drive.out" 2>&1
+override_seen=
+override_receipts=0
+override_wrong=
+for override_receipt in "${work}/tov/"*.bounded.env; do
+  [ -f "${override_receipt}" ] || continue
+  override_receipts=$((override_receipts + 1))
+  override_seen=$(sed -n 's/^timeout_seconds=//p' "${override_receipt}")
+  [ "${override_seen}" = 1234 ] ||
+    override_wrong="${override_wrong} ${override_receipt##*/}=${override_seen:-<absent>}"
+done
+if [ "${override_receipts}" -eq 0 ]; then
+  FAILURES="${FAILURES} operator_timeout_override_survives_scrub(no-bounded-receipt-written)"
+  note "operator_timeout_override_survives_scrub: FAIL (0 bounded receipts --"
+  note "  nothing was probed, so nothing was checked)"
+elif [ -n "${override_wrong}" ]; then
+  FAILURES="${FAILURES} operator_timeout_override_survives_scrub(scrubbed:${override_wrong})"
+  note "operator_timeout_override_survives_scrub: FAIL (exported override lost"
+  note "  to the scrub;${override_wrong}, expected 1234)"
+else
+  note "operator_timeout_override_survives_scrub: PASS (${override_receipts} bounded"
+  note "  receipt(s), every one records timeout_seconds=1234)"
+fi
 
 # --- non-vacuity + evidence completeness -----------------------------------
 for f in version_expect_status version_match_status unsupported_match_status \

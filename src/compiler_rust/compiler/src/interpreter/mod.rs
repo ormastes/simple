@@ -176,6 +176,7 @@ use interpreter_call::{
 mod module_cache;
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
+pub use module_cache::{clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_lookup, SharedSource};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 

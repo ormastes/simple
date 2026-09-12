@@ -1,0 +1,44 @@
+# A link failure must never be reported as the bare token `nil`.
+#
+# Regression for the macOS Stage 2 sanity failure of 2026-09-13
+# (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md,
+# run 7), where `link_to_native` returned `Err(e)` with `e` lost in the native
+# return channel and the orchestrator formatted it as
+# `LLVM native linking failed: Linking failed: nil` — a failure that named
+# neither the site nor the reason, on a path whose every print was
+# verbose-gated.
+#
+# The interpreter cannot reproduce the lost value (it is a native-codegen
+# divergence), so what is pinned here is the guard itself: the two helpers that
+# every `"" == ok` status check and every error payload on the darwin link path
+# now go through.
+use compiler.backend.linker._LinkerWrapper.native_linking.{
+    link_status_text, link_error_detail
+}
+
+describe "link error payload hardening":
+    it "passes an ordinary success status through unchanged":
+        expect(link_status_text("site", "")).to_equal("")
+
+    it "passes a real failure message through unchanged":
+        expect(link_status_text("site", "unknown runtime bundle 'x'"))
+            .to_equal("unknown runtime bundle 'x'")
+
+    it "treats a status lost in the native return channel as the success it was":
+        # A helper on this path returns "" on success and a message otherwise.
+        # A value that renders as the literal "nil" is neither, so it is the
+        # return channel that failed, not the check — report and continue.
+        expect(link_status_text("site", nil)).to_equal("")
+
+    it "names the site when an error payload is unusable":
+        expect(link_error_detail("darwin-link-tool-identity-cc", nil))
+            .to_contain("darwin-link-tool-identity-cc")
+
+    it "never lets an unusable payload become the whole diagnosis":
+        val detail = link_error_detail("native-runtime-provider-selection", "")
+        expect(detail).to_contain("no error payload")
+        expect(detail).to_contain("native-runtime-provider-selection")
+
+    it "keeps a real payload and prefixes it with its site":
+        expect(link_error_detail("cc-fuse-ld-selection", "boom"))
+            .to_equal("cc-fuse-ld-selection: boom")
