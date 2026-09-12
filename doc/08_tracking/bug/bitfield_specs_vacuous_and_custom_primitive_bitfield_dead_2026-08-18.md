@@ -1,6 +1,6 @@
 # Bitfield "coverage" is vacuous, and `custom_primitive_bitfield.spl` is unreachable code
 
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/custom_primitive_sffi_spec.spl` now PASSes)
 - **Date:** 2026-08-18
 - **Area:** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`,
   `src/compiler/50.mir/custom_primitive_bitfield.spl`
@@ -219,3 +219,6 @@ cannot be closed in this lane until the Rust seed compiles again. The existing
 evidence (compiler modules still load; `custom_primitive_sffi_spec.spl` 20/20;
 `bitfield_mir_spec.spl` 14/14) stands unchanged and is still the limit of what
 has been proven.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/custom_primitive_sffi_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # UI backend-isolation gate: red since 2026-07-25, and never executed in CI
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-01
 - **Guard:** `scripts/check/check-ui-backend-isolation.shs`
 - **Baseline:** `scripts/check/ui_backend_isolation_baseline.txt`
@@ -211,3 +213,7 @@ Unblock requires the gate to reach `new=0`. Cheapest credible path: resolve
 **G6/G7** (2 files), then G2–G5 (18 files). Only after `new=0` should the hook be
 installed, and it should be installed as a **symlink**, not a copy — the
 guard-wiring ratchet fails copied hooks because they go stale silently.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

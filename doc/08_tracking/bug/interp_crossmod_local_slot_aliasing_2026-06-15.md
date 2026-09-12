@@ -1,5 +1,7 @@
 # Bug: Interpreter local-slot aliasing when cross-module fn receives local object arg
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **ID:** interp_crossmod_local_slot_aliasing_2026-06-15
 **Severity:** P1 (silent data corruption, hard to diagnose)
 **Discovered:** 2026-06-15 while building deflate_typed codec
@@ -65,3 +67,6 @@ describe "B":
 ```
 
 Fix: inline `MyHelper` into `MyFn` body.
+
+## Triage 2026-09-12
+Older than 45 days with no directly runnable repro (needs a crafted 2-module `test/`-subdirectory fixture); a workaround is already landed in `deflate_typed.spl`. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

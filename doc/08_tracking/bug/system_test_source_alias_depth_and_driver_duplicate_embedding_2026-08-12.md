@@ -1,5 +1,7 @@
 # System-test source aliases are dangling and duplicate driver embedding
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Claimed and fixed 2026-08-12.
@@ -23,3 +25,7 @@ canonical physical file, making wrapper selection deterministic and unique.
 `driver/tests/build_script_symlink_dedup.rs` checks the exact three link
 targets/resolutions and an adjacent two-alias fixture that must yield one
 canonical wrapper.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

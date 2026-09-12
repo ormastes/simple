@@ -1,5 +1,7 @@
 # Interpreter lane fails on ANY evaluation of a None-valued `Option<struct>`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 8D (modernizing `test/system/coupling_analysis_spec.spl`)
 
@@ -45,3 +47,6 @@ None-valued `Option<struct>` evaluates without a semantic error on the
 interpreter lane; then the W-rule halves in
 `test/system/coupling_analysis_spec.spl` (and its eventual twin) can be
 re-pointed at direct None-matching.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -2,7 +2,7 @@
 
 - **ID:** seed_jit_boxed_int_61bit_drops_high_bits
 - **Date:** 2026-07-22
-- **Status:** OPEN — ROOT CAUSE FULLY BISECTED; fix is a core value-representation change (awaiting go-ahead)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high — root cause of the soc_top_64 JIT miscompile (57 probe failures) and the OpenSBI-banner block
 - **Component:** seed JIT value boxing (`src/compiler_rust/compiler/src/codegen`)
 
@@ -178,3 +178,6 @@ them under a "boxed-int fixed" message would be a false-green. The `copy`/
 `concat` packing-preserve edits are correct in isolation and are preserved in
 worktree `/tmp/wt_heapint` should Option-B-complete or Option-A ever be
 authorized.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

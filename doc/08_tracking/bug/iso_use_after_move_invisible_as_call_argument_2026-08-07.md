@@ -1,5 +1,7 @@
 # Bug: `iso` use-after-move is invisible to the borrow checker when the second use is a call argument
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -111,3 +113,6 @@ bug's directly-measured scope.
 `test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl` — left in the
 repo with 3/4 cases green and the `print x` case genuinely red, per repo
 policy (never weaken a failing test to make it pass).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

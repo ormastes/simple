@@ -1,5 +1,7 @@
 # Interpreter: enum-variant match returns nil when a class shares the variant name (closure-dependent)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-06
 - **Area:** interpreter (self-hosted deployed binary, interpret mode)
 - **Severity:** high (silent nil poisoning, closure-dependent — passes in unit repros, fails in apps)
@@ -68,3 +70,6 @@ distinct `Logger` classes exist (`js_error`, `browser_engine/shared/logging`,
 load-order dependent. Workaround used in probes: avoid importing `app.io.mod`
 into graphs that load the JS engine (raw `rt_file_read_text` extern instead).
 Real fix should make interpreter class resolution module-scoped.
+
+## Triage 2026-09-12
+Older than 45 days; the repro is app-closure-dependent (only manifests inside a specific import closure) and not a standalone <=3 min check. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

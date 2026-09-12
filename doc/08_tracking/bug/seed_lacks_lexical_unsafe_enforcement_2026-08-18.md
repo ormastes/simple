@@ -1,5 +1,7 @@
 # Rust seed accepts raw-pointer / SFFI / inline-asm operations outside `unsafe:`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **TODO-DB row:** 557 (`doc/08_tracking/todo/todo_db.sdn:559`), area=compiler, P1, status=open
 - **Row text:** "Enforce lexical unsafe scope in the Rust seed so raw pointer, SFFI, and
   inline-assembly operations are rejected outside UnsafeBlock."
@@ -198,3 +200,7 @@ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"   # before
   precedent: the same pass existed and was not invoked at all.
 - `src/compiler/80.driver/driver_safety_severity.spl` — the settled severity ladder any seed
   implementation must mirror.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

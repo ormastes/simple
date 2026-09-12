@@ -1,5 +1,7 @@
 # Stage 4 DevHub daily-debug time owner
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Source fixed; focused native contract PASS; exact Phase 4 verification requires
@@ -25,3 +27,7 @@ Bind the clock call to `std.nogc_sync_mut.io.time_ops`, its physical owner.
 checked a positive Unix time and the existing firmware triage behavior, then
 exited 30. The three-cycle cap is exhausted, so no fourth full closure is run in
 this session.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

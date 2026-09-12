@@ -1,4 +1,5 @@
 # Simple Web Gradient Dither Residual
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -45,3 +46,6 @@ Derive the remaining Chromium/Skia color deltas in the larger nested and
 positioned scenes. Fix the underlying selector/layout/color sources where
 possible, and split a manifest policy only if the residual is proven to be a
 stable Chromium compositor/rasterization difference.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

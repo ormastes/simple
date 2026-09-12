@@ -1,4 +1,5 @@
 # `_parse_duplicate_typed_arg_signature` returned nil on a non-optional return contract (2026-08-21)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 RESOLVED 2026-08-21 — b02b5f7c6f3 (fix) + 47ee75c7cf5 (seed classifier follow-up). Evidence: see commit messages; _parse_duplicate_typed_arg_signature no longer returns nil on non-optional return contract.
@@ -141,3 +142,6 @@ measurement in
 ("Every seed buildable from today's tree refuses to lint anything"). With this
 arm in place the same seed lints real compiler modules again, which is what
 made those numbers obtainable.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

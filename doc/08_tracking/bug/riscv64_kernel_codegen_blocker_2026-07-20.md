@@ -1,4 +1,5 @@
 # Bug: RISC-V 64 full-kernel boot path fails rv64 codegen (interrupt.spl + privilege_bridge.spl)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** riscv64-kernel-codegen-blocker-2026-07-20
 **Domain:** compiler/backend (rv64 MIR + codegen), os/simpleos
@@ -464,3 +465,6 @@ parallel fix for the currently-dead build path),
 `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1017-1027`
 (`configured_extra_link_objects` only reachable from the hosted sibling
 path). Reproduction: same exact command as earlier in this doc.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Interpreter: CompositorBackend.put_pixel clones the whole framebuffer per pixel
 
+**Status:** WORKAROUND LANDED (interpreter root cause still open — see body)
+
 - id: interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03
 - status: worked around in the compositor (interpreter root cause still open)
 - workaround (2026-07-04): `HeadlessHostCompositorBackend.fill_rect` and
@@ -72,3 +74,6 @@ Arc reference is only the transient inner-`me` `self` borrow of the SAME object
 whose field is being mutated — i.e. recognize self-aliasing so a `me`-in-`me`
 per-element write stays in-place. Until then, the interpreter cannot support
 per-pixel CPU rasterization at interactive sizes.
+
+## Triage 2026-09-12
+Reviewed 2026-09-12: the record's own inline status (worked around; root cause open) is already accurate; added a top-level Status line for gate compliance only, no reclassification. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

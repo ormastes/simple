@@ -1,5 +1,7 @@
 # Bug: wm-lane-boundary ratchet has 7 new uncaught violations
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Found**: 2026-08-08, via `scripts/check/check-wm-lane-boundary.shs` (an
 unwired guard under triage in the guard-wiring campaign — currently nothing
 runs this gate, so these violations have been silently accumulating).
@@ -106,3 +108,7 @@ for the same reason: it is not a `doc/08_tracking/bug/` doc and the doc
 itself frames re-baselining as requiring "an explicit, reviewed
 justification for each new entry" — a judgment call outside this pass's
 remit. Status remains open; violation count updated 7 -> 11 in this note.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

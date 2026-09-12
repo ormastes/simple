@@ -4,7 +4,7 @@
 - **Severity:** P1 (reproducibility — lane green only from a stale artifact)
 - **Found:** 2026-06-14, during multiarch dedup verification (riscv dedup agent)
 - **Component:** compiler/cranelift backend → riscv64 freestanding kernel codegen
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -69,3 +69,6 @@ env SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build \
 - riscv32 builds green only with the LLVM-backed driver (cranelift blocks rv32).
 - Multiarch lane status + dedup plan: `doc/03_plan/os/multiarch_qemu_systest/`
   and `doc/05_design/os/multiarch_qemu_systest/duplication_analysis.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

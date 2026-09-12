@@ -1,7 +1,7 @@
 # Pure-Simple deploy blocked: stage3 self-host fail + stage4 sha3 hir infer + 574 stubs
 
 Date: 2026-06-28
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: high
 
 ## Summary
@@ -44,3 +44,7 @@ stage3 self-host failure remain the larger blockers.
 
 `bin/simple` left on the working Rust seed (verified: prints `2`). No deploy.
 Related: long-standing stage3 self-host break; 574-stub cross-module gap.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

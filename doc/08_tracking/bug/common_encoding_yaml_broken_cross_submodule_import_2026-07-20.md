@@ -103,3 +103,6 @@ green.
 - `test/unit/lib/common/encoding/yaml_spec.spl` — currently fails at import
   resolution (dead `std.common.yaml` path, see above); after that companion
   fix, 22 of 27 examples would still fail via this source-level blocker.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/unit/lib/common/encoding/yaml_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

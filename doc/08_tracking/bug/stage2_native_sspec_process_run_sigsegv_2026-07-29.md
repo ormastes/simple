@@ -1,5 +1,7 @@
 # Stage 2 Native SSpec Runner Process Crash
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 ABI FIXED and admitted for the NVMe Phase 2 path. A current-source Stage 2
@@ -160,3 +162,7 @@ The NVMe Phase 2 software gate is complete. Do not substitute the stale global
 deployed CLI for the admitted Stage 2/runtime pair, and do not rerun the bounded
 Stage 3 command. Physical Cosmos+ BT-001..BT-006 remains the next production
 gate.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

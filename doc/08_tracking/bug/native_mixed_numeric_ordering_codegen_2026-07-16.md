@@ -1,6 +1,8 @@
 # Native mixed numeric ordering depends on operand order
 
-- status: source fixed 2026-07-16; staged platform execution pending
+**Status:** CLOSED-STALE (2026-09-12: source fix recorded but staged platform execution never completed; not re-verifiable from the record)
+
+- status: source fixed 2026-07-16 -> CLOSED-STALE 2026-09-12; staged platform execution pending
 - severity: high (possible silent wrong comparison)
 - component: MIR numeric coercion, LLVM and Cranelift lowering
 
@@ -28,3 +30,6 @@ duplicate builds. First staged platform-matrix execution is pending.
 
 Unsigned integer/float ordering is tracked separately in
 `native_unsigned_float_ordering_codegen_2026-07-16.md`.
+
+## Triage 2026-09-12
+Older than 45 days with the described staged-platform execution still pending; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

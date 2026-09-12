@@ -1,5 +1,7 @@
 # Pre-existing reds in interpreter_flattened_module_globals suite (2026-07-29)
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 ## RESOLVED (same day) — TWO independent root causes, both required
 
 - **Lane L2 (harness):** process-global `RECURSION_DEPTH` reset mid-flight by a
@@ -38,3 +40,6 @@ thread-locals survive across tests sharing a thread;
 CURRENT_EXEC_MODULE). Plan lane L2.
 
 Context: doc/01_research/compiler/bootstrap/stage4_memory_ownership_research_2026-07-29.md
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

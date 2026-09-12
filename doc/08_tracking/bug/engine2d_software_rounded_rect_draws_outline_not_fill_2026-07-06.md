@@ -1,4 +1,5 @@
 # SoftwareBackend.draw_rounded_rect draws an OUTLINE where it must FILL
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces)
 
 ## Status
 Fixed (2026-07-06).
@@ -45,3 +46,6 @@ persists) and is byte-identical to the canonical algorithm by construction.
 `cmp_rounded_rect()` now returns 0 (was 604). The harness assertion for
 `draw_rounded_rect` was flipped from `> 0` (pinned divergence) to `== 0`
 (byte-exact) and stays green.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # Bug: `verification/lean/__init__.spl` bare `export Symbol, ...` lines never import the symbols they claim to re-export — package-level `use verification.lean.{X}` fails while direct submodule import works
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** `src/compiler_rust/lib/std/src/verification/lean/__init__.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning — this is an import/export-resolution defect, not obviously seed-specific, but not independently re-verified on a genuinely self-hosted binary.
 
@@ -44,3 +44,7 @@ Add the missing `use module.{Names...}` (or convert each bare `export Name, ...`
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/lean_block_integration_spec.spl --no-session-daemon
 ```
 5/8 examples fail with `semantic: variable 'LeanCodegenOptions' not found` (or equivalent for other symbols reached the same way).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

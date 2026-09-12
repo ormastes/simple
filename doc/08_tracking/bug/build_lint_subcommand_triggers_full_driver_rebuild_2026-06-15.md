@@ -1,4 +1,5 @@
 # Bug: `bin/simple build lint <file>` triggers a full cargo/clippy driver rebuild
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **ID:** build_lint_subcommand_triggers_full_driver_rebuild_2026-06-15
 - **Filed:** 2026-06-15
@@ -41,3 +42,6 @@ the Rust crates. A per-file lint should be sub-second, not a 50s+ crate rebuild.
   `rust_driver_rebuild_blocks_short_grammar_interpolation_verification_2026-05-27`
   (that was a build-script symbol-scan issue, now resolved); this is the
   `build lint` subcommand falling through to a cargo rebuild.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Stage 4 cannot continue from an admitted resumed Stage 3
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 FIXED (source and sabotage contract). Live execution evidence remains pending
@@ -74,3 +76,7 @@ passed once with: `PASS: admitted Stage 4 resume is planner-bound, locked,
 immutable, collision-safe, and uses existing gates`. No admitted Stage-3
 artifact and planner receipt were present in this worktree, so the live Stage-4
 continuation was correctly not started.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

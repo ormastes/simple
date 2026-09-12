@@ -1,7 +1,7 @@
 # Bug: IDE render example falls back from JIT on static-method self diagnostic
 
 Date: 2026-05-30
-Status: open (triaged 2026-06-11, JIT proof still open per body)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl` now PASSes)
 
 ## Observation
 
@@ -82,3 +82,6 @@ Current fallback text is:
 Functional status remains PASS for the embedded example render contract, but the
 JIT/native proof remains open under this bug until the imported render block
 type is available to HIR lowering.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

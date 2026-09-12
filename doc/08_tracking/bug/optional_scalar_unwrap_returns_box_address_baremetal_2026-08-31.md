@@ -1,5 +1,7 @@
 # `.unwrap()` on an optional scalar returns the box ADDRESS under baremetal Cranelift (2026-08-31)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 STATUS: OPEN (compiler bug). Routed around at one call site; NOT fixed.
 
 ## Symptom
@@ -116,3 +118,7 @@ page; PCI memory-space decoding not actually enabled before the reads
 (`pcimgr_enable_mmio_bus_master`); or `mmio_read64`/`mmio_read32` miscompiled on
 this backend the way the optional unwrap above was. This is a SEPARATE defect
 from the optional-unwrap bug and is where the round-trip lane now stands.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -3,7 +3,7 @@
 - **Date:** 2026-07-07
 - **Area:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   (`css_bytes_find` ~`:3707`, `css_bytes_match_close` ~`:3715`, `css_bytes_trimmed_eq` ~`:3730`).
-- **Status:** open — pre-existing on `main` (confirmed present on base, before the parse_html
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
   linear-scan rewrite; not introduced by that change). Found during opus review of the
   parse_html event-scanner rewrite.
 - **Severity:** low (dead code, no runtime impact) but violates the project's
@@ -47,3 +47,6 @@ comment block at `:3703-3706`) from
 `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl` to confirm no hidden caller (expected:
 all stay green, since grep found none). Not done in this record's authoring pass — scoped as a
 separate, disjoint follow-up so it doesn't get bundled into an unrelated commit.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

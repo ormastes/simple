@@ -1,5 +1,7 @@
 # Vulkan Engine2D receipt physical-adapter identity gap
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Native Vulkan 8K measurements remain unqualified until a successful
@@ -100,3 +102,7 @@ The focused structural contract passes 3/3, and an isolated
 winit `EventLoop::run` deprecation warning). Native live validation remains
 blocked until a current self-hosted compiler/runtime authority is admitted and
 published.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

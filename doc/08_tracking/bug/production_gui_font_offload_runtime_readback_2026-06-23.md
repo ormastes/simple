@@ -1,6 +1,6 @@
 # Bug: Production GUI font offload lacks runtime glyph readback
 
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Date: 2026-06-23
 Area: GUI/web renderer parity, Engine2D font offload
 
@@ -34,3 +34,6 @@ Related historical evidence is in:
 
 - `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-16.md`
 - `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

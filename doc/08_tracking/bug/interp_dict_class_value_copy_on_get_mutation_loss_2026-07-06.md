@@ -1,5 +1,7 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)
 - Found during: task #15 S1 cache wiring (WebRenderPixelArtifactCache in HostCompositor)
@@ -99,3 +101,6 @@ completely (6 of 7 checks fail). **Conclusion: PARTIALLY FIXED.** The
 production-relevant JIT path (`bin/simple run`, the default engine) is fixed;
 the interpreter path (what `bin/simple test` spec BODIES execute, and what
 this bug was originally filed against) is not.
+
+## Triage 2026-09-12
+Older than 45 days; a workaround is already documented in-tree (explicit write-back after mutation). Not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

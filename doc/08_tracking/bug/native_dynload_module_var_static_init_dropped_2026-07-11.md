@@ -1,5 +1,7 @@
 # Native dynload build drops static initializers on module-level `var` globals
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 Source implemented for scalar initialization, load, and store. Strict
 LLVM/Cranelift initialization and mutation execution remains pending; retain
@@ -93,3 +95,7 @@ zero-filled/`.data` section the loader honors). Until then, entries on this path
 must runtime-initialize any mutable module global they depend on. Likely related
 to the previously noted "seed segfault on uninit module var" and "zero-store
 array inits" observations.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

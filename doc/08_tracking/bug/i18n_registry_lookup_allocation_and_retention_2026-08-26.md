@@ -1,5 +1,7 @@
 # i18n registry lookup allocation and retention
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Evidence
 
 The current thread-local nested-`HashMap<String, HashMap<String, String>>`
@@ -24,3 +26,6 @@ state and test whether catalog capacity is retained or released.
    bytes are reported in the same native run.
 4. Concurrent locale contexts do not use mutable process/thread global state.
 
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

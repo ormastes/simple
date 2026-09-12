@@ -1,5 +1,7 @@
 # Rust seed interpreter intercepts `pending`/`skip_it`/`skip` calls before `.spl` body runs
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Found: 2026-08-07, while landing WP-9 (skip governance,
@@ -114,3 +116,6 @@ is a maintainability defect, not a correctness one.
 Rust arm once the self-hosted binary is the default tool (the intercept exists
 only because the seed cannot rely on the stdlib spec DSL loading), not to patch
 it now.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

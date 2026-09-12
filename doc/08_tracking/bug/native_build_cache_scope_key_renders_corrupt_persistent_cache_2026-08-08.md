@@ -1,5 +1,7 @@
 # Persistent native-build cache has no GC and a key that has rendered corrupt
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **ID**: native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -335,3 +337,6 @@ design change (retention policy, LRU vs size cap, concurrency against the live
 bootstrap writing into `build/bootstrap/native_cache/<lane>/`), not a bug fix,
 and this lane was instructed not to touch `build/bootstrap/**`.
 Not proven: actual disk consumption was not measured this session.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

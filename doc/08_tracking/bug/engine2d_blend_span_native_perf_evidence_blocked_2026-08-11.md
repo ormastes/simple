@@ -1,4 +1,5 @@
 # Engine2D blend-span native performance evidence blocked (2026-08-11)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -67,3 +68,6 @@ and 494.9 ms respectively, both over the 12.5 ms full-frame budget. This is
 useful runtime-kernel evidence but does not close item 1 (native-AOT Simple) or
 item 5 (measured full framebuffer). A proposed two-pixel AVX2/NEON bridge was
 about 7x slower on mixed alpha and was reverted.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

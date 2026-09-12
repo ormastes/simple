@@ -1,5 +1,7 @@
 # SimpleOS SIMD object gate rejects valid AArch64 `st1`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved for the ARM64/x86 static prerequisite gate on 2026-08-11. Live guest
@@ -52,3 +54,7 @@ symbols on every architecture and emits three machine-readable pass rows.
 
 The remaining work is live QEMU guest hit/chunk/parity and display capture
 receipts; static objects alone remain insufficient for 8K/80 admission.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,4 +1,5 @@
 # Decimal `u64` literals rejected through the signed range guard
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -27,3 +28,6 @@ Unsuffixed and other suffixed literals retain the existing signed ceiling.
 The streaming module-surface lifecycle spec covers the FNV basis and u64 max
 inside synthetic source text, exercising the exact Stage-4 parser path without
 requiring the test harness itself to pre-parse those numeric tokens.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -5,7 +5,7 @@
   `test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches across multiple
   independent RFC 3610 vectors).
-- **Status:** OPEN. **Do not touch the expected vectors** — RFC 3610 §8
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl` now PASSes)
   values are canonical.
 
 ## Symptom
@@ -59,3 +59,6 @@ canonical values.
 ## Affected specs
 
 - `test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl` (6 of 9 examples)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

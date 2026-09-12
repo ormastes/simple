@@ -1,4 +1,5 @@
 # BUG: `for ch in <text>:` loop-bound element is corrupted — `char_code_at(0)` always 0, `.len()` segfaults the interpreter
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 SOURCE FIXED (2026-07-22), rebuilt current-source execution pending. The Rust
@@ -264,3 +265,6 @@ use elsewhere in the codebase (`x64_freestanding_char_code_at_dynamic_text.md`'s
 - `doc/08_tracking/bug/for_loop_var_shadows_prior_local_binding_lost_2026-06-11.md`
   (prior, different for-loop local-binding defect class — same general
   "for-loop pattern-variable local slot" area of the compiler)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

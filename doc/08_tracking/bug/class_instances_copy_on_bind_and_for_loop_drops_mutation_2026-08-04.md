@@ -134,3 +134,6 @@ correct against the documented reference-type contract; the runtime is not.
   fields it explicitly resets — it is a targeted workaround for one field, not
   a fix for the underlying copy-on-bind/for-loop mutation-drop defect
   documented here.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

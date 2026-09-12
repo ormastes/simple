@@ -1,5 +1,7 @@
 # Vulkan Raster Kernels No-op / Divergent vs CPU Reference - 2026-06-17
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 ## Severity
 P1 (partially fixed — 6 of 10 kernels wired and verified as of 2026-06-17).
 Several Engine2D Vulkan primitives silently rendered nothing (dispatched a no-op
@@ -205,3 +207,7 @@ first-failure preservation without fabricating a GPU receipt. The low-level
 dispatch helper only returns the checked status; the primitive owner is the
 single provenance writer, so a rejected dispatch cannot preempt its typed
 reason or falsely mark device readback dirty.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

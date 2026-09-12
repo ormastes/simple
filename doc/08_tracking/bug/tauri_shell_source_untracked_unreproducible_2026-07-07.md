@@ -1,6 +1,6 @@
 # Tauri mobile shell source is untracked and absent from disk — app not reproducible from a clean checkout
 
-- **Status:** RECOVERED (2026-07-07)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Priority:** P0
 - **Date:** 2026-07-07
 - **Area:** `tools/tauri-shell/` (Tauri 2 mobile shell — iOS + Android)
@@ -151,3 +151,7 @@ ls tools/tauri-shell/dist                  # No such file or directory (or absen
 - Plan: `doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md` — Phase 0, P0.1 (blocks all
   later phases; P1 re-verification cannot run until this is fixed)
 - Guide (documents the now-missing files as present): `doc/07_guide/platform/mobile/tauri_mobile_guide.md`
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

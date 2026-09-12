@@ -1,4 +1,5 @@
 # Pure-Simple HIR Module GPU Metadata Transport Loss
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/interpreter/dict_field_argument_transport_spec.spl -> 2 passed, 0 failed)
 
 ## Status
 
@@ -95,3 +96,6 @@ An incremental `bin/simple check` of `_MirLowering/module_lowering.spl` also
 failed to complete within the standing 60-second CPU monitor limit and exited
 255. This is retained as a tooling-performance blocker; no bootstrap or retry
 with a raised timeout was attempted.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/interpreter/dict_field_argument_transport_spec.spl` on the deployed seed; the spec now passes in full (2/2), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

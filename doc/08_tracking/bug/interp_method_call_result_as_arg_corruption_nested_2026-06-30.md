@@ -1,5 +1,7 @@
 # Interpreter: method-call result passed directly as a method argument is corrupted (nested subprocess) - 2026-06-30
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Open. Worked around in the NVMe firmware by binding the inner call result to a local `val`
@@ -60,3 +62,7 @@ The firmware's `CONVENTIONS.md` records this alongside the other call-boundary d
 - Test/selftest code using `obj.m(other.method(...))` can fail only when run nested under the
   test runner while passing standalone — easy to miss (the file-level verdict can still read
   PASS). Core firmware service paths use the free-function idiom and are unaffected.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

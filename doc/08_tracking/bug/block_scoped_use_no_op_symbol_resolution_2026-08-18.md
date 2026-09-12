@@ -82,3 +82,6 @@ pins the fixed AOT contract (module-scope import + the exact 10-argument
 the body-scoped import form (`semantic: function `source_to_cache_path` not
 found`, `Results: 1 total, 0 passed, 1 failed`) and GREEN with module scope
 (`Results: 1 total, 1 passed, 0 failed`).
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/driver/aot_both_format_smf_manifest_symbols_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

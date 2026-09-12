@@ -1,5 +1,7 @@
 # Self-hosted parser: trailing-operator continuation fails across a DEDENT
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-11 · **Status:** CLOSED — not reproducible against current source; premise
 corrected (see "Re-diagnosis" below). Regression spec added:
 `test/01_unit/compiler/parser/dedent_continuation_spec.spl`.
@@ -91,3 +93,7 @@ Self-hosted lexer/parser: while a binary operator ends a line, treat subsequent
 INDENT/DEDENT as insignificant until the expression closes (mirror the seed's rule).
 Owner: compiler 10.lexer/parser layer. Until fixed, the dedented-close style is legal
 per the seed grammar and WILL reappear from peers writing JSON builders.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

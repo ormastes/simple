@@ -1,7 +1,7 @@
 # Stage4 entry closure parses duplicate sources and exceeds bounded runtime
 
 **Date:** 2026-07-17  
-**Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 session (2026-08-10). This doc's own continuations already fixed the
 duplicate-parse/dedup issue in the entry-closure source-collection logic
 (unique physical-source plan, 2,020 collected / 1,246 unique, one-parse-per-
@@ -203,3 +203,7 @@ time. Native execution is separately blocked by the missing canonical macOS
 `simple-core` runtime archive: the supported core-C lane lacks Metal symbols,
 while the removed legacy hosted lane is no longer selectable. This runtime
 packaging issue does not justify another monolithic Stage4 attempt.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

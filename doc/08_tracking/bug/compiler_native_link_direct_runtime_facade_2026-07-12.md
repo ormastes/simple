@@ -1,4 +1,5 @@
 # Compiler native linker still uses direct runtime imports
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 The LLVM native-link owner still imports `rt_env_get`, `rt_process_run`, and
 file operations directly. The ARM64 freestanding dispatch added on 2026-07-12
@@ -38,3 +39,6 @@ green at `total=15 pass=15 fail=0 codegen_fallback_hits=0`, and
 `STATUS: PASS` (that guard's scope is `src/app` + `src/lib/gc_async_mut`, so
 this is not direct coverage of the compiler tree, but it is the mandated gate
 and it stays green).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # SMF writer/kernel trailer layout skew: toolchain cannot emit a kernel-recognized role-2 library
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/os/kernel/loader/smf_dyload_spec.spl -> 0 passed, 6 failed, still reproduces)
 
 **Found by** Lane H8 (SMF dynamic-load in-guest gate), pinned by the last test
 in `test/01_unit/os/kernel/loader/smf_dyload_spec.spl` ("documents the
@@ -65,3 +66,6 @@ The gate's real-toolchain-writer round-trip runs cross-process under
 `416 as u32` → 0). Same BoxInt-mangle family as
 `jit_hex_to_u8_array_byte_corruption_2026-06-30.md`. Interpret mode is correct;
 fix belongs in the seed JIT (gated on the #99 toolchain redeploy).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/kernel/loader/smf_dyload_spec.spl` on the deployed seed; 6 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

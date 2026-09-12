@@ -1,4 +1,5 @@
 # SimpleOS `umask` needs end-to-end permission ownership
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -19,3 +20,6 @@ mode through both open-create and mkdir atomically.  The owner must retain the
 per-process mask, enforce/read back permissions, and provide regressions for
 open-create and mkdir under changed masks.  Until then this API cannot support
 permission-sensitive deployment claims.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

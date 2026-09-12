@@ -1,7 +1,7 @@
 # Interpreter: `env_get as web_backend_env_get` re-export alias unresolved — chromium WebRenderBackend facade crashes E1002
 
 Date: 2026-07-07
-Status: open (pre-existing, discovered during backend-isolation Gap B integration)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: P2
 Related: web_render_backend (`--web-engine chromium` facade), family of
 `interp_module_alias_time_shadowed_builtin_2026-07-02.md` (interpreter
@@ -91,3 +91,7 @@ particularly for `env_get`-shaped stdlib entry points.
 
 Until fixed, the chromium lane is native/compiled-mode only; interpret mode
 fails loudly (E1002) rather than silently degrading.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

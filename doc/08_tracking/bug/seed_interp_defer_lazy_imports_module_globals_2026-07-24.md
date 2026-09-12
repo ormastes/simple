@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-24
 - **Severity:** P0 — seed `native-build --backend llvm` (self-hosted .spl pipeline, interpreted) cannot parse ANY project; blocks the NVMe rv32 fw gate and every seed-driven cross build
-- **Status:** ROOT-CAUSED by bisect; workaround active (seed built at `906b85d1420`); Rust-side fix pending
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -67,3 +67,6 @@ git checkout HEAD -- src/compiler_rust   # restore sources
    (writer module + reader module via re-export), mirroring
    `interpreter_flattened_module_globals.rs` but with deferred lazy imports on.
 3. Gate: `check-nvme-rv32-minimal-live.shs` green on a seed built from HEAD.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

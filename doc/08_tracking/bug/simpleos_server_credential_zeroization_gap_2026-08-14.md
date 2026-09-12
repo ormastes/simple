@@ -1,4 +1,5 @@
 # SimpleOS server credential zeroization gap
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/database/server/credential_zeroization_spec.spl -> 1 passed, 5 failed, still reproduces)
 
 ## Status
 
@@ -125,3 +126,6 @@ The existing retained-artifact credential scan and destruction of every
 credential-bearing normal/crash image remain in force. This record is not
 closed until a freshly built ARM64 payload completes the QEMU gate and produces
 the signed target readback receipt.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/database/server/credential_zeroization_spec.spl` on the deployed seed; 5 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

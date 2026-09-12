@@ -1,5 +1,7 @@
 # Stage 4 db_atomic physical-owner gap
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved in source on 2026-08-04; production Phase 4 crossed this module in the
@@ -29,3 +31,7 @@ row mapping with an explicit loop; and consumes the current two-field
 generation and stopped only at the narrow core bundle's missing
 `rt_file_atomic_write`. Production cycle 1 crossed the repaired module and
 advanced to `compile_targets.spl`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

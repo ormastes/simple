@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Lane:** self-hosted AOT `native-build` (flat `--entry-closure` path; both default and `--backend cranelift`)
 - **Severity:** P0 for the AOT lane — blocks compiling essentially any real program
-- **Status:** OPEN — an earlier layout-metadata nil was repaired in source; rebuilt execution and the later Field arm remain pending
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Repro (5 lines, reproduces on the DEPLOYED `bin/release` binary)
 
@@ -102,3 +102,7 @@ both desugared fields explicitly for structs and classes. No consumer-side nil
 default was added because that would hide malformed explicit ABI metadata.
 Source contract: 5/5 passing. Rebuilt positional execution is pending the next
 bounded cycle.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

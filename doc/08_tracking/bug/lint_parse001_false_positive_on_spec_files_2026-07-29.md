@@ -1,5 +1,7 @@
 # lint PARSE001 false positive on `use std.spec.*` describe-specs (2026-07-29)
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 ## Status Update (2026-07-30)
 
 **Item 1 (PARSE001 false positive): FIXED** by commit f4adc39bf39 (2026-07-28).
@@ -33,3 +35,6 @@ defects, all report-only so far:
 Repro for (1): `bin/simple lint test/03_system/check/stage4_memory_gate_spec.spl`
 (errors) vs `SIMPLE_EXECUTION_MODE=interpreter bin/simple test <same file>`
 (Results: 2 total, 2 passed).
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

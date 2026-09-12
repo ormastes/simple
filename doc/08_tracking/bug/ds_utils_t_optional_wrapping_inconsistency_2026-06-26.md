@@ -1,4 +1,5 @@
 # Bug: ds_utils T? return inconsistently wraps in Option::Some
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/common/ds_utils_stack_queue_spec.spl` now PASSes)
 
 **Date:** 2026-06-26
 **Spec:** `test/01_unit/lib/common/ds_utils_stack_queue_spec.spl`
@@ -49,3 +50,6 @@ alone because the same API call yields inconsistent results in different test co
 
 1. Interpreter: ensure `-> T?` impl-method returns are not wrapped in `Option::Some`.
 2. Matcher: `to_be_nil()` should treat `Option::None` as nil (see also the nil-matcher bug).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/ds_utils_stack_queue_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

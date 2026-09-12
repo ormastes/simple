@@ -1,4 +1,5 @@
 # Skia Matrix3x3 missing `is_identity()` method
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/unit/lib/skia/matrix_spec.spl -> 18 passed, 0 failed)
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing method, not a rename)
@@ -36,3 +37,6 @@ Trivial to add, but per the cluster-fix guide's hard prohibition
 ("No src/** edits unless the fix is unambiguously a one-line import/rename"),
 adding a brand-new method is out of scope for this pass even though it's
 short — filed here instead.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/skia/matrix_spec.spl` on the deployed seed; the spec now passes in full (18/18), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Pure-Simple Cranelift CLI corrupts lexer tokens
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -43,3 +44,6 @@ Add a focused native regression that tokenizes `for arg in raw:` and requires
 `TOK_KW_FOR`, `TOK_IDENT`, `TOK_KW_IN`, `TOK_IDENT`, `TOK_COLON` before
 rebuilding the full CLI. Do not deploy a version-only binary or fall back to
 the Rust seed.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

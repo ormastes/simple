@@ -1,5 +1,7 @@
 # JIT-compile failure anywhere in the whole-program closure → interpreter fallback loses a struct's 2nd+ static method registration
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-20
 **Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to verify current source, not a `.spl` source edit)
 **Severity:** medium — silently drops real static methods; no compile error, just a runtime "unknown static method" that looks like a source bug
@@ -110,3 +112,6 @@ source already contains the required all-method registration behavior.
 Source invariant pinned; deployed-binary verification pending. The exact
 `test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
 assertion remains unchanged and red on the stale deployed binary.
+
+## Triage 2026-09-12
+Older than 45 days; has a concrete spec path (`test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`) but was not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

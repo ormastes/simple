@@ -1,5 +1,7 @@
 # Interrupted rebase produced a 3-file tree that was pushed to main (2026-08-20)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## What happened
 - Landing flow built a clean 3-commit tip `1454b55d778` (116,301 files) on base
   `7ca031f1dd6` in an isolated worktree; all range guards PASSed on it.
@@ -30,3 +32,6 @@ The existing `check-tree-size-push` guard would have caught this exact tree
 full hook suite hangs >8min on compiler-dependent probes; the fast tree
 guards should be re-run manually on the FINAL sha whenever `--no-verify` is
 used.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

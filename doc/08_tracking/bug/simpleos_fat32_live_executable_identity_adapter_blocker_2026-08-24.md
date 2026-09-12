@@ -1,4 +1,5 @@
 # FAT32 live executable identity adapter blocker (2026-08-24)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -137,3 +138,6 @@ The backend identity/capsule provider also needs a deterministic unpin-failure
 injection seam before candidate-cleanup quarantine and exact retry can receive
 executable failure-path coverage; the owner retains that authority today, but
 this turn intentionally does not claim runtime evidence.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

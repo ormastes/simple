@@ -1,5 +1,7 @@
 # Native codegen: calling a closure VALUE (not a name) SIGSEGVs/aborts
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-09-07
 Found while: clearing the macOS Stage-4 final-link undefined-symbol list
 (`_UiAccessPersistence.insert_event_fn`, `_UiAccessPersistence.persist_snapshot_fn`).
@@ -159,3 +161,6 @@ non-capturing) verified against the interpreter, all matching:
 
 Full-CLI Stage-4 relink and `simple test` acceptance status: see the commit
 that lands this fix and, if present, a follow-up note below.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

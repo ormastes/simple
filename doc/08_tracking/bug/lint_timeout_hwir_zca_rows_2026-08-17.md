@@ -1,5 +1,7 @@
 # Lint cost on src/compiler/50.mir/hwir/zca_rows.spl — dominant term is an interpreted frontend, not a superlinear parser
 
+**Status:** OPEN (unverified 2026-09-12)
+
 > **2026-08-18 — CAUSE FOUND, and it is not the one this row hunts for.**
 > `simple lint` never JITs: `src/app/cli/lint_entry.spl` imports
 > `std.cli.cli_util (get_cli_args)`, which trips the entry-file text-grep in
@@ -375,3 +377,6 @@ which is a seed-interpreter issue owned by the Rust lane.
 - Remaining: the seed per-call constant is reduced, not zero; the strategic fix
   stays the self-hosted deploy. zca_rows full-file lint should be re-measured
   next session against the ~99s/decl history.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

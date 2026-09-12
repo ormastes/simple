@@ -1,5 +1,7 @@
 # Bug: `expect(n).to_equal(0)` mis-reports the integer `0` as falsy
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-06-29
 **Area:** test runner / sspec matchers (`std.spec`)
 **Severity:** low (correct logic fails the assertion; misleading message)
@@ -42,3 +44,7 @@ In the `to_equal` matcher, compare actual vs expected by value/structure before
 (or instead of) any truthiness check on the actual. The `0`/empty/`false` family
 must not short-circuit through a "truthy" guard. Add a regression case
 `expect(0).to_equal(0)`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

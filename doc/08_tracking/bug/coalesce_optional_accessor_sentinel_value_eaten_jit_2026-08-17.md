@@ -107,3 +107,6 @@ must carry a distinguishable `T?` with a BOXED payload across the JIT call
 boundary), not a local patch — suppressing the nil check for these accessors
 would trade this bug for the strictly worse `[].first() ?? -1` leak. Not
 attempted; standing workaround unchanged.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/codegen/coalesce_sentinel_collision_class_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

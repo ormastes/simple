@@ -1,4 +1,5 @@
 # Pristine seed `cargo build --release` is broken at origin/main HEAD — blocks virtio arm64 defect repro
+**Status:** OPEN (unverified 2026-09-12)
 
 - Date: 2026-08-11
 - SHA tested: `7f967a8ad7029ec5f3e93d239a22cd544a6b82b9` (origin/main, fresh `git fetch` + `git worktree add --detach`)
@@ -75,3 +76,6 @@ No files under `src/os/drivers/virtio/` or `src/compiler_rust/compilability.rs`
 were modified in this session — the blocker is entirely upstream in the Rust
 runtime crate. Worktree `/mnt/data/build-virtio` was removed after this
 investigation; nothing was pushed (nothing to push — no fix produced).
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

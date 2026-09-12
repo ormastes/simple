@@ -1,4 +1,5 @@
 # `query_source_mask` cannot see single-quoted strings — `'"""'` swallows the file
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/app/cli/query_source_mask_shared_lexer_spec.spl -> 11 passed, 0 failed)
 
 ## Status
 
@@ -71,3 +72,6 @@ outside them. `check_tier` computes `simple_code_lines`/
 
 - `doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md`
 - `doc/00_llm_process/feature_expert/parser_sharing/skill.md`
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/cli/query_source_mask_shared_lexer_spec.spl` on the deployed seed; the spec now passes in full (11/11), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

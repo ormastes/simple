@@ -3,7 +3,7 @@
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** open — minimal repro confirmed
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary
@@ -151,3 +151,7 @@ concatenation; that is a valid spelling under this grammar and needs no
 rewrite (they may equally use `}}}}`). The LSP code-action emitter cited under
 "Impact" must emit `}}}}` or concatenate — its bug record, not the lexer, owns
 that fix.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

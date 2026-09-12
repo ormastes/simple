@@ -1,5 +1,7 @@
 # X25519MLKEM768 coverage contract omits GPU admission owners
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open
@@ -51,3 +53,7 @@ Start with `src/app/test/x25519mlkem768_coverage_contract.spl`, then run the
 focused coverage composer, critical-inventory, and manifest-existence specs on
 the self-hosted binary. A fresh native coverage run is additionally required
 before closing this record.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

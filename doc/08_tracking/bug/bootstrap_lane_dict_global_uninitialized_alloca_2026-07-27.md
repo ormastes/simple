@@ -1,7 +1,7 @@
 # Bug: module-level Dict global lowers to uninitialized alloca in the stage-4 bootstrap lane
 
 **Date:** 2026-07-27
-**Status:** unconfirmed
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Area:** native codegen / MIR lowering (module-level global initializers, bootstrap lane)
 **Severity:** High — segfaults on first read, no compile-time diagnostic
 
@@ -85,3 +85,6 @@ runtime.
   working pattern for array-typed module globals (commit `952d2ca34d7`).
 - `src/compiler/20.hir/hir_lowering/module_registry.spl` — current
   array-based implementation (commit `797497d757bd`), post-workaround.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

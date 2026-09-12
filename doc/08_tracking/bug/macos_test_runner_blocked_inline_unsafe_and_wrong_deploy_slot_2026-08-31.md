@@ -1,5 +1,7 @@
 # CORRECTION (2026-08-31, after this record was drafted)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **The parser gap described below is NOT a code defect. The fix is already in the
 tree, and every failure recorded here is a STALE BINARY.**
 
@@ -192,3 +194,6 @@ parses `inline.spl` fine.
 2. Teach the Rust seed's parser the suffixed `unsafe(...): <expr>` form so the seed can
    still build current source. Do **not** rewrite the 53 call sites to the block form —
    that normalizes a workaround over a compact form the language is supposed to accept.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # LLVM backend: narrow struct-field readback emits mistyped load → llc rejects
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED / FOCUSED LLVM-IR REGRESSION ADDED · **Area:** LLVM backend / struct field access
 **Lane:** interpreted native-build worker (`SIMPLE_NATIVE_BUILD_WORKER=1
 bin/simple run src/app/cli/native_build_worker.spl --backend llvm ...`,
@@ -52,3 +54,7 @@ Two additional infra findings while attempting the all-i64 end-to-end run:
    End-to-end verification on this lane needs a quiescent tree or a pinned
    worktree. The defaulted-field fix's IR-level verification (store 5/true)
    was captured on a coherent tree and stands.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

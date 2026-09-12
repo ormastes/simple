@@ -1,5 +1,7 @@
 # Stage4 atomic-database HIR names
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Reproduction
 
 Stage4 HIR lowering stopped in `nogc_async_mut/db_atomic.spl` with unresolved
@@ -16,3 +18,7 @@ which Stage4 treated as an unresolved identifier.
 
 `db_atomic_hir_contract_spec.spl` checks concrete owners, removal of the broad
 facade import, native-safe propagation, and sync/async mirror parity.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

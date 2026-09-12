@@ -1,7 +1,7 @@
 # Bug: `src/lib/nogc_sync_mut/src/table.spl` has 4 real gaps (missing `Set` import, missing array `sorted_by`, broken `group_by`/`agg`, broken `value_counts`)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/table_spec.spl` after
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   fixing its stale `use std.table.*` import and free-function-style API calls
   to match the real `Table`/`Column` OOP API — see that spec's diff)
 - **Area:** `src/lib/nogc_sync_mut/src/table.spl` (library source, no rebuild
@@ -81,3 +81,7 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/table_spec.s
 self-hosted compiler — only the Rust seed interpreter was probed, though this
 particular fix (unlike the other bugs filed this pass) does not require a
 rebuild since `table.spl` is regular interpreted library source.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

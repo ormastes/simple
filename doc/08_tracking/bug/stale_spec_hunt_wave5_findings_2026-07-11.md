@@ -1,5 +1,7 @@
 # Stale-spec hunt wave 5 (2026-07-11) — seam exhausted; real bugs found (report-only)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Wave 5 scanned 27 failing specs after waves 1-4 de-staled 13 spec families. **Zero retargeting
 wins remain** — everything left is a real bug, an unimplemented placeholder, or out-of-scope
 infrastructure. The stale-assertion seam from the self-hosting transition is closed.
@@ -36,3 +38,7 @@ infrastructure. The stale-assertion seam from the self-hosting transition is clo
 Previously filed (waves 2-4, unchanged): multi_mode_test_runner (removed API),
 net_connect_completion (`expect(x.?)` compares receiver not bool), http_baremetal (stale doc
 assertion in riscv64 FPGA plan).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

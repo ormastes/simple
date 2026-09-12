@@ -71,3 +71,6 @@ Not part of the 2026-07-02 "5 lost fixes" restoration pass. `DiContainer.has()`
 (the actual lost fix for this file) is implemented and verified correct in
 isolation — this failure is a pre-existing, unrelated subprocess/env-propagation
 bug in the test runner infrastructure.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/03_system/feature/features/di_extensions_system_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

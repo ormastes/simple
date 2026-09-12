@@ -1,6 +1,6 @@
 # Pure-Simple shaping cannot feed the shared font renderer
 
-Status: open — blocks shared multilingual GPU fonts REQ-005/007/009/012/013
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Problem
 
@@ -80,3 +80,6 @@ is still pending, and GSUB plan selection/application remains the open blocker.
   face, glyph, cluster, advance, offsets, direction, language, and script.
 - Rasterized glyph IDs match shaped output; missing glyphs/formats fail closed.
 - The executable corpus gate promotes candidates only after every witness passes.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

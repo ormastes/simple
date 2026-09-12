@@ -1,5 +1,7 @@
 # Stage-3 primary import resolution aggregate corruption (2026-08-21)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Claimed by the `codex/must-check-slang` lane for a fresh bounded repair
@@ -101,3 +103,7 @@ cycle still failed convergence: HIR recorded 15 unresolved `Span` errors in
 `driver_pipeline_passes.spl` and 19 in `driver_pipeline_aop.spl`. The scan was
 terminated once failure was certain; no Stage 4, deployment, hook PASS, or push
 is claimed.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

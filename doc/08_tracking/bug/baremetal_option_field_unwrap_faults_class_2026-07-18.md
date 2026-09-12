@@ -1,7 +1,7 @@
 # CLASS: Option-unwrap / if-val field access faults on baremetal native codegen
 
 **Date:** 2026-07-18
-**Status:** Per-site workarounds LANDED across the font lane (SHAs below). **Root
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 compiler codegen bug is OPEN** — it has only been worked around at each call
 site, never fixed in the codegen owner. This file exists to track the *class*,
 not to claim it is fixed.
@@ -105,3 +105,6 @@ the logic, not just patch the instance), this class needs:
 - Related but distinct compiler workaround:
   `fontrenderconfig_entry_closure_receiver_binding_miscompile_2026-07-18.md`
   (method receiver-binding, not Option unwrap).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

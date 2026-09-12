@@ -1,4 +1,5 @@
 # Dynamic Torch facade bypasses lexical raw-SFFI ownership
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: OPEN
 - Filed: 2026-08-27
@@ -39,3 +40,6 @@ It cannot be marked signed or verified.
 - Interpreter/JIT/native registrations share the same contract family.
 - A representative tensor-op benchmark shows no new call, copy, allocation,
   lookup, or dispatch overhead.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

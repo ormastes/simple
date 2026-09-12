@@ -1,5 +1,7 @@
 # A struct passed to a function is half-copied: scalar fields detach, array fields alias
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Filed 2026-09-03. Status: OPEN. Severity: HIGH — silent wrong answers, no diagnostic.
 
 ## Summary
@@ -98,3 +100,7 @@ without a semantic change.
 
 That either half is wrong in isolation. The defect is that they disagree, and
 that the disagreement is invisible at the call site.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

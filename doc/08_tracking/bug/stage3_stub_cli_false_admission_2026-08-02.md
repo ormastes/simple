@@ -1,5 +1,7 @@
 # Stage 3 stub CLI false admission
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in the Stage 4 operating contract; no compiler rebuild was performed.
@@ -35,3 +37,7 @@ The Stage 4 lane plan now makes the canonical entry, strict-stub setting, log
 rejection, bootstrap identity, unsupported-command behavior, frontend
 admission, and stable candidate hash mandatory for every manual Stage 3
 refresh. `stage4_manual_stage3_admission_contract_spec.spl` locks those rules.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

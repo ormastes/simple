@@ -1,5 +1,7 @@
 # Interpreter: `val x = self.<field>.<call>().<call>()` clobbers `self` with the chain's tail value
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-01 · **Status:** OPEN · **Severity:** blocker (aborted every MCP native build at HIR entry)
 
 ## Symptom
@@ -95,3 +97,7 @@ both prose — `src/app/tag_query/main.spl:17` and a comment at
 sets it from the tag. So the file reds a whole-suite run today (7 examples,
 4 failures). Left red deliberately — the failures ARE this defect. Promote to
 green by fixing the interpreter, not by weakening the assertions.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

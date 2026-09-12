@@ -1,5 +1,7 @@
 # Stage 4 formatter legacy scalar types
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed. Exact x86 Phase 4 cycle 1 crossed the formatter with the refreshed
@@ -36,3 +38,7 @@ separate `stage4_runtime_core_owner_gap_2026-07-18.md` concern.
 Cycle 1 continued to `compiler.tools.fix.main`, proving the formatter no longer
 blocks HIR. Evidence:
 `build/bootstrap-stage4-x86-phase4-llvm23/logs/x86_64-unknown-linux-gnu/stage4-native-build-formatter-cycle1.log`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

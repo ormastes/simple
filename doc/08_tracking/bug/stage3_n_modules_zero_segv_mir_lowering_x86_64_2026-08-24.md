@@ -1,5 +1,7 @@
 # Stage 3 self-host: parse yields `n_modules=0` after 692 modules, SEGV at MIR lowering (x86_64-linux, 2026-08-24)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Cross-platform companion to the arm64 report
 `stage3_monomorphize_segv_at_origin_main_arm64_2026-08-24.md` (present at
 `origin/main`; not in this working tree at time of writing).
@@ -1671,3 +1673,7 @@ Filed separately as `stage2_native_compile_segv_after_unwrap_fix_2026-08-25.md`.
 Whether that downstream crash shares a root cause with this record's Stage-3
 `aot:lower_to_mir` death is **unknown**: same rc, different phase, no evidence
 either way. It is deliberately not asserted.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,5 +1,7 @@
 # Unparseable pass/fail summary: specs that execute nothing (2026-08-31)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Suite run `/tmp/suite4.log` (ephemeral; binary from `4b4e2a304b4`, identified durably as the 60914128-byte binary dated 2026-08-31 13:46 — see Method note) produced 6 occurrences of
 `Error: no parseable pass/fail summary in test output; refusing synthetic pass`.
 
@@ -111,3 +113,7 @@ for root, _, fs in os.walk('test'):
 may be scanner artifacts (a closing `"""` with trailing content on the line is not
 matched) and each needs spot-checking before any edit. An earlier count of 1139
 was a scanner artifact from naive triple-quote parity and is retracted.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

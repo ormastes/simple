@@ -1,6 +1,6 @@
 # Bare `hardware.*` namespace imports fail to resolve (needs `std.` prefix; ~64 specs affected)
 
-**Status:** open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** compiler module resolution / `src/lib/hardware/**`
 
@@ -82,3 +82,6 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 (Broader sibling pattern: 64 files under `test/01_unit/hardware/` use the
 same bare `use hardware.X` import style; likely all share this root cause,
 not independently verified here — out of shard scope.)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

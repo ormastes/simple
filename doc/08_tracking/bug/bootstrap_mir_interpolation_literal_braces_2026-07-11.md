@@ -1,4 +1,5 @@
 # Bootstrap MIR: string interpolation `{expr}` printed literally, not evaluated
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-11 · **Status:** RESOLVED (root-cause gate fixed) 2026-07-17 — see
 "Fix landed" below. One unrelated pre-existing blocker remains for full E2E
@@ -151,3 +152,6 @@ still exists before un-gating interps.
   lower in bootstrap; similar pattern (expression not lowered → null/zero constant emitted).
 - **print_loss_bisect_report.md:** Interpreter-side `.join()` produces corrupted pointer
   (upstream of this bug in severity; this one is raw-literal loss).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

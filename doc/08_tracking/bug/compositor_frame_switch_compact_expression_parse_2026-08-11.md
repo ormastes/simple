@@ -1,4 +1,5 @@
 # Compositor frame-switch compact-expression parse regression
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -17,3 +18,6 @@ Both focused compositor specs previously stopped at parse time. After repair,
 / 1 fail; the remaining failure is the deployed CLI's missing
 `rt_is_interpreter_runtime` extern, tracked with the other deployment-skew
 externs. No 8K/80 or device-present conclusion follows from this partial run.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

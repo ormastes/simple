@@ -1,5 +1,7 @@
 # `main`'s `.spipe/spipe` gitlink points at a commit that exists on no SPipe remote
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-09-06. Found while re-landing PR #371 after PR #375 ("session-cleanup") merged.
 
 ## Symptom
@@ -34,3 +36,6 @@ A push-tier guard row that, for every gitlink in the outgoing range, runs
 `git -C <submodule> branch -r --contains <sha>` and FAILs when empty. Same fail-closed shape as
 the other guards; a range with zero gitlink changes is `PASS — 0 gitlink(s) changed`, not ERROR,
 since absence of a gitlink change is a positive fact here.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

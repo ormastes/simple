@@ -1,5 +1,7 @@
 # native-build: non-parse driver overhead before and inside the per-file loop
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 - Date: 2026-08-21
 - Status: PARTIALLY FIXED (source-closure preamble 4.0x faster; residue tracked below)
 - Area: `src/compiler/80.driver/`, `src/compiler/10.frontend/core/interpreter/`
@@ -155,3 +157,6 @@ bootstrap redeploy, unlike the two driver fixes which the worker reads as source
   call sites would recover the copy, but those call sites are in
   `driver_source_pipeline_loading.spl` and `src/app/io/_CliCompile/compile_targets.spl`.
 - Per-file `parse` dt remains 4.8-22.2 s and is untouched: that is the parser lane.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

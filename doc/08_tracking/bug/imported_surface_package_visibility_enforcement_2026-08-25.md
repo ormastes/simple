@@ -1,5 +1,7 @@
 # Imported surface package visibility is not enforced
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Evidence
 
 `ModuleSurfaceCallable.visibility` retains the declaration visibility and both
@@ -26,3 +28,6 @@ kind, with same-package, outside-package, alias, and facade tests.
 
 This needs shared requester-package plumbing across several registration paths;
 it must not be approximated only for crypto callables.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

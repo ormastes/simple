@@ -1,5 +1,7 @@
 # goal-r8 Stage 3 aborted: frozen runtime-authority BEFORE-snapshot deleted mid-run
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-24
 Worktree: /mnt/data/worktrees/goal-bootstrap-frozen (the "frozen" bootstrap worktree)
 Log: /mnt/data/tmp/claude-1000/goal-r8-stage4.log
@@ -106,3 +108,6 @@ the other lane's edits in this worktree, or giving each lane its own worktree â€
 and stopping another lane's work is explicitly out of scope for this session.
 
 Status: STEP 1 (receipt) proven working. STEP 2 blocked by worktree contention.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

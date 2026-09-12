@@ -1,5 +1,7 @@
 # UNUSED001 typed use-def migration is incomplete
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Query lint's compatibility producer is now linear in source and identifier volume,
@@ -21,3 +23,7 @@ document deliberate precision changes; warm latency and allocation evidence cove
 with many declarations.
 
 Unknown or incomplete binding facts must suppress a typed claim, not infer unused state.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

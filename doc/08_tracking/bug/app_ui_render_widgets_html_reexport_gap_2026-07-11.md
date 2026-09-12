@@ -1,4 +1,5 @@
 # app.ui.render.widgets does not re-export render_html_widget/render_html_tree (pre-existing, unrelated to Lane A/C)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-11 · **Status:** fixed (re-export + LayoutKind rename + stale assertions retargeted)
 **Found:** Lane E ("rendering-inside-rendering") baseline run of the existing
@@ -117,3 +118,6 @@ Noted for separate follow-up (pre-existing, unrelated to this bug):
 before the rename. Also `runtime_layout_verification_spec`/
 `mir_exported_types_spec` fail on legacy `from hir_definitions import`
 module resolution, pre-existing.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

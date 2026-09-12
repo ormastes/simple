@@ -3,7 +3,7 @@
 - **ID:** string_literal_brace_breaks_concat_2026-06-29
 - **Severity:** P2 (silently emits the source `" + var + "` verbatim → invalid CSS/JSON, blank web render)
 - **Area:** language / interpreter (string-literal interpolation lexing)
-- **Status:** open — minimal repro confirmed; app-level workaround landed in `src/os/compositor/simple_web_window_renderer.spl`
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Summary
 When a string literal containing an **unescaped single `{`** is part of a `+`
@@ -43,3 +43,7 @@ never consume following concatenation operators.
 - [[angle_bracket_index_lint_parse_mismatch_2026-06-06]] — separate JIT generics-vs-index
   false positive (`rules[pos] < x`) that forces compositor specs onto the interpreter path
   where this bug surfaces.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

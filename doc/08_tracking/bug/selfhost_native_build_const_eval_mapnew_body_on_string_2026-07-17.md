@@ -1,6 +1,6 @@
 # Self-host/native-build route hard-broken: `Map.new()` frontend const-eval → seed `.body`-on-String (no location)
 
-- **Status:** ROOT-IDENTIFIED; canonical source fix landing separately (see
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   "Fix ownership"). This doc records the self-host-route manifestation +
   bisect evidence + the diagnostic gap that made it expensive to find.
 - **Discovered / bisected:** 2026-07-17, lane S53 (#138 self-host census)
@@ -113,3 +113,6 @@ the next self-host debugger does not re-derive it.
 - Frontend `Map.new()`→`{}` re-revert: canonical fix landing on origin
   (separate lane). #185 guard test `d597355d9ed` already exists.
 - This doc: census/bisect evidence + workaround + next-wall, for #138.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

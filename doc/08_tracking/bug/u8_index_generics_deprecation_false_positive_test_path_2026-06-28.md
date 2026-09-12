@@ -1,5 +1,7 @@
 # `[u8]` Indexing Mis-Flagged as Deprecated Generics in Test Path
 
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl` runs clean — 14 examples, 0 failures, and emits zero "Deprecated syntax for type parameters / Use angle brackets" warnings; only unrelated `#[runtime_intrinsics]` deprecation notices appear)
+
 Date: 2026-06-28
 
 Lane: `.spipe/simpleos-alpine-harden-musl-busybox`
@@ -47,3 +49,7 @@ flagged for `--fix-generics`.
 - Indexing an array-typed variable (`[u8]`, `[i64]`, …) never emits the
   "Use angle brackets" deprecation, and `simple migrate --fix-generics` never
   rewrites such indexing.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the described false-positive deprecation warning no longer fires. Evidence: `bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `14 examples, 0 failures`, zero "Use angle brackets" warnings in output.

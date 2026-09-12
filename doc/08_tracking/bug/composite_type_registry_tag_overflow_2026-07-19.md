@@ -1,4 +1,5 @@
 # Bug: composite type registries cross encoded tag ranges
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -24,3 +25,6 @@ added.
 The focused regression fills every range to its last valid slot, rejects the
 next unique payload, checks fresh-literal interning and negative getters, then
 resets and requires every first tag to return to its family base.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

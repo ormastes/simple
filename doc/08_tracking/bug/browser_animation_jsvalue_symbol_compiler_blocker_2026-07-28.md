@@ -1,4 +1,5 @@
 # Browser animation target blocked by `JsValue.Symbol` lowering
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Evidence
 
@@ -24,3 +25,6 @@ build/browser-full-refresh/stage2/x86_64-unknown-linux-gnu/simple native-build \
 Trace every `JsValue.Symbol` construction and pattern through HIR-to-MIR enum
 resolution, fix the shared qualified-variant lowering, and rerun the fixture.
 Do not replace symbols with strings or use the Rust seed as target evidence.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

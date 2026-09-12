@@ -1,6 +1,6 @@
 # Seed JIT: `text.to_i64()` / `.to_int()` return a FLOAT-tagged value — silent wrong results
 
-- **Status:** OPEN (pre-existing; found while landing an unrelated interpreter-lane fix)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high — silent wrong values, not a crash. `"42".to_i64() == 42`
   evaluates to **false**.
 - **Lane:** Rust bootstrap seed, **JIT (cranelift) lane**. `bin/simple run` is
@@ -164,3 +164,6 @@ TO_I64=42   EQ42=yes      # jit
 ```
 
 Probe `_scratch/p_str.spl`. Not fixed by this session.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

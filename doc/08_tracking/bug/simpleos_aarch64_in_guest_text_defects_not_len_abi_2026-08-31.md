@@ -1,5 +1,7 @@
 # SimpleOS aarch64 in-guest: two text defects that are NOT the `.len()` u32/i64 ABI bug
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-31
 Lane: aarch64 in-guest toolchain components (EDK2/AAVMF pflash -> BOOTAA64.EFI)
 Gate: `scripts/check/check-simpleos-aarch64-components-in-guest-efi.shs`
@@ -124,3 +126,7 @@ Current verdict (unchanged across the PR #173 rebuild):
     rt_closure_func_ptr undefined symbol: rt_closure_new)
 
 `COMPONENTS=devtool` gives `PASS — 1 component(s) checked`, exit 0.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # Bug: native-build incremental object cache key omits the compiler/seed version
 
+**Status:** RESOLVED (2026-09-12, re-verified: fix confirmed still in source)
+
 - **ID:** native_object_cache_key_omits_seed_version_2026-06-15
 - **Severity:** P2 (silent: stale `.o` from an older compiler are reused after a
   codegen change, so the new codegen never reaches the link)
@@ -38,3 +40,6 @@ seed's codegen changes but the source does not, the key is unchanged → stale h
 Any future codegen change to the Rust seed silently no-ops on cached modules
 until the cache is manually cleared — easy to mistake for "my change didn't
 work."
+
+## Triage 2026-09-12
+Re-verified 2026-09-12 via source grep: `object_cache_key` in `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:1589-1610` now hashes `compiler_fingerprint()` (plus `cache_lane()`) alongside source/backend/opt-level, so a codegen change to the seed changes the cache key. Matches CLAUDE.md's `.claude/rules/commands.md` note that this was superseded 2026-08-17. Evidence: source grep above; seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # BUG: LLM Caret compiled carrier cannot be produced within bounded build time
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **ID:** `llm_caret_compiled_carrier_build_latency`
 - **Severity:** P1 (blocks production compiled database/plugin carriers)
 - **Found:** 2026-08-02
@@ -118,3 +120,6 @@ imported database methods were unresolved, lowered to const-zero placeholders,
 and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

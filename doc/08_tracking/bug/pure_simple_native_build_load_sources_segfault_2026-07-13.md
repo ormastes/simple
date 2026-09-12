@@ -1,4 +1,5 @@
 # Pure-Simple native-build crashes while loading sources
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -179,3 +180,6 @@ reaches the cached native-build worker path that produced stages 12 and 13.
 Keep `build/bootstrap-simd-stage5/cache`, do not rerun an unchanged entry path,
 and resume the unchanged LLVM SIMD probe only after a new pure-Simple compiler
 artifact is produced.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

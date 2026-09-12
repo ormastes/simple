@@ -101,3 +101,6 @@ today would convert a real drift signal into a rubber stamp.
 Cause 2 needs `build/dynsmf/*.smf` produced (the plans are already emitted by
 `dynsmf_build_plans`, `:144`), i.e. a build step, plus a decision on whether the
 spec should hard-fail or report a missing-artifact precondition.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

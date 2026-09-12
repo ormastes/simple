@@ -1,4 +1,5 @@
 # Bootstrap Stage 1: seed native-build CPU-spins with runaway allocation on src/app entry closure (2026-07-17)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Severity: release blocker.** Blocks the entire Linux redeploy chain: stage1
 never completes → self-hosted binary cannot be rebuilt → deployed stale seed
@@ -60,3 +61,6 @@ or instrument the closure walk.
 ## Status (2026-07-18)
 
 SUPERSEDED/PARTIALLY RESOLVED. Fresh cargo seed (built 2026-07-17 from src/compiler_rust) runs stage1-3 cleanly (rc=0, no spin). Jul-16 prebuilt artifact remains defective; replace with fresh cargo build.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

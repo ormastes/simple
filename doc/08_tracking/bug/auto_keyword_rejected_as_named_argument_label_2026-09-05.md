@@ -1,4 +1,5 @@
 # `auto` is a hard keyword: rejected as a named-argument label
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-09-05 · **Status:** REOPENED 2026-09-08 (not accepted by every deployed/admitted seed; positional boundary restored) · **Class:** reserved token rejected at the USE site
 (same family as `examples`/`and_then` 2026-08-10, `move` 2026-08-15, `admit`/`assume` 2026-08-21).
@@ -71,3 +72,6 @@ This broke the supposedly clean fixture of the blocking main-test-runnable
 push gate. Both construction sites are positional again. Closure requires the
 named form to pass on every admitted bootstrap binary used by push lanes, not
 only one Linux deployment.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

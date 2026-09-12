@@ -1,4 +1,5 @@
 # HandleArena spec fails on anonymous-tuple `.0`/`.1` field access
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/unit/lib/engine/resource_handle_spec.spl -> 5 passed, 3 failed, still reproduces)
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (likely interpreter/compiler tuple-return defect, not a lib API gap)
@@ -42,3 +43,6 @@ it needs interpreter/compiler-level investigation into anonymous tuple
 `.0`/`.1` access under the `simple test` evaluation path, which is out of
 scope for this cluster-fix pass (guide: "Do NOT attempt a Rust seed source
 fix; out of scope").
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/engine/resource_handle_spec.spl` on the deployed seed; 3 of 8 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

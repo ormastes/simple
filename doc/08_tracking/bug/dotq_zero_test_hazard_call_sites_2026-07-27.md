@@ -3,7 +3,7 @@
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Companion:** `dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27.md`
-- **Status:** Production hazards repaired; test-suite hazard filed, not repaired
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Method
 
@@ -123,3 +123,6 @@ currently-green assertions start actually asserting, which must be triaged as
 its own campaign rather than smuggled into a containment lane. Rewrite them to
 `!= nil` / `== nil` (or `.len() > 0` where emptiness is the real intent) only
 behind a dedicated lane with per-file red/green review.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # rt_hal_tag_retention_spec: two pre-existing RED cases after helper repair
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/frontend/rt_hal_tag_retention_spec.spl -> 8 passed, 2 failed, still reproduces)
 
 **Date:** 2026-08-28 · **Spec:** `test/01_unit/compiler/frontend/rt_hal_tag_retention_spec.spl`
 **Found by:** impl_C (dual-run lane) while widening `validate_rt_hal_tags`.
@@ -54,3 +55,6 @@ missing `lower_module`). The three new validator cases
 
 Neither case touches `validate_rt_hal_tags`; both were unreachable before this
 lane repaired the helpers.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/frontend/rt_hal_tag_retention_spec.spl` on the deployed seed; 2 of 10 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

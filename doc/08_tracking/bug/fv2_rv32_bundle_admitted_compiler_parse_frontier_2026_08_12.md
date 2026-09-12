@@ -1,4 +1,5 @@
 # FV2 RV32 bundle admitted-compiler parse frontier
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -32,3 +33,6 @@ temporary executable only after rejecting stale-runtime and stub markers.
 2. Build the generator once with that compiler and require a clean transcript.
 3. Execute proof, reachability cover, subtraction mutation, RTL/netlist
    equivalence, and pinned Sail differential jobs over one exact bundle.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

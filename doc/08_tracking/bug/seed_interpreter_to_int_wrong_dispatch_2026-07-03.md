@@ -1,6 +1,6 @@
 # Seed interpreter: `.to_int()` misdispatches on split()-produced strings
 
-- **Status:** open (seed/Rust interpreter; worked around in Simple code)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Date:** 2026-07-03
 - **Component:** `src/compiler_rust` interpreter method dispatch
 
@@ -55,3 +55,6 @@ Probe `_scratch/p_str.spl`. Not fixed by this session — it was already correct
 The workaround `core_digits_to_i64` in `src/compiler/10.frontend/core/lexer.spl`
 that this record installed can be revisited independently; it was NOT removed
 here, since removing a live workaround needs its own verification pass.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

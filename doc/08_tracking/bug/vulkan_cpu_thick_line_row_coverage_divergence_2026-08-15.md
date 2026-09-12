@@ -1,5 +1,7 @@
 # Vulkan vs CPU thick-line row coverage divergence — 2026-08-15
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Summary
 Rendering the SAME scene through the same `Engine2D` draw API on the strict
 `vulkan` backend and on the CPU/software lane produces pixel-different frames:
@@ -74,3 +76,7 @@ exercised.
 OPEN — divergence measured and fenced; fix is to unify thick-line coverage
 between `SoftwareBackend.draw_line` and the vulkan line path, then remove the
 spec tolerance.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

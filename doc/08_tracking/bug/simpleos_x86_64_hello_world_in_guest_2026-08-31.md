@@ -1,4 +1,5 @@
 # SimpleOS x86_64 hello-world in-guest: what blocks each half (2026-08-31)
+**Status:** OPEN (unverified 2026-09-12)
 
 Goal: run hello world **on SimpleOS x86_64**, booted through **real firmware
 (OVMF pflash -> GRUB-EFI -> multiboot1)** — never QEMU `-kernel`, never
@@ -636,3 +637,6 @@ its `_start` sets up its own `.bss` stack inside a mapped RW page.
 Gate verdict, honestly RED — the lane is landed RED, not weakened to green:
 `FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L6 L7;`
 `interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

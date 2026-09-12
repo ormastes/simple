@@ -1,5 +1,7 @@
 # Graphics 2D showcase nil-receiver crash
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Open. Blocks `graphics_2d_showcase` standalone readiness.
@@ -21,3 +23,7 @@ The failure occurs before the first Engine2D readback/provenance row. The app no
 - Requested GPU backends must match the actual backend and report device-readback provenance with a positive real handle or fail explicitly.
 - Five semantic scene samples must demonstrate at least four adjacent differences; background-only output fails.
 - GUI mode creates a real window and routes close/Q/Escape without reporting unavailable presentation as success.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

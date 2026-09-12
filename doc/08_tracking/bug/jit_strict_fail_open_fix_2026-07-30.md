@@ -1,5 +1,7 @@
 # SIMPLE_JIT_STRICT fail-open fix (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Assignment (part 1 of 2): fix the SIMPLE_JIT_STRICT fail-open hole flagged
 as a side finding in the pass-12 `os.*` JIT root-cause doc — strict mode
 printed a "refusing to fall back" message and then fell back anyway,
@@ -135,3 +137,6 @@ in the main repo to keep build time tractable within budget) — this is
 INFERRED-safe (the change is 12 added lines in one function, no new
 dependencies, no signature changes) but not empirically re-verified from
 a fully clean build.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

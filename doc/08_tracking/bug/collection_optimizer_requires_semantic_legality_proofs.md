@@ -1,4 +1,5 @@
 # Collection optimizer requires semantic-legality proofs
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -34,3 +35,6 @@ Rehabilitate each rewrite independently with resolved operation identity,
 ownership/COW/lifetime/trapping/destruction proof, positive and negative
 witnesses, adversarial semantic differentials, and profitability evidence.
 Do not re-enable the aggregate pass merely because one pattern is repaired.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

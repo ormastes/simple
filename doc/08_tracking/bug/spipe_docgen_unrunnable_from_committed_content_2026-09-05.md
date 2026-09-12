@@ -1,5 +1,7 @@
 # `spipe-docgen` does not run from committed content, on any spec
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Not a regression in any one spec — the command is unrunnable for every
@@ -104,3 +106,7 @@ for `refs/heads/main` explicitly.
 - `doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md`
   (snapshot-build contention; this is a committed-content counterexample to the
   "committed content is buildable" premise a snapshot wrapper rests on)
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

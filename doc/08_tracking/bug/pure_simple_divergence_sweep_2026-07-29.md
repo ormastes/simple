@@ -1,4 +1,5 @@
 # Pure-Simple Divergence Sweep (2026-07-29)
+**Status:** OPEN (unverified 2026-09-12)
 
 Read-only continuation of `pure_simple_fix_plan_2026-07-29.md`'s known 6-bug
 family. Method: `bin/simple` here is the **Rust bootstrap seed** (stderr banner
@@ -109,3 +110,6 @@ user-defined enum payloads.
 ## Report
 
 Path: `doc/08_tracking/bug/pure_simple_divergence_sweep_2026-07-29.md`
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

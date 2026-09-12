@@ -1,5 +1,7 @@
 # jit-module-drop fence: 43% NOT MEASURED, and its own gap breakdown was mislabelled
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Filed:** 2026-08-18
 - **Fence:** `scripts/check/check-no-jit-module-drop.shs`
 - **Oracle used for every number here:**
@@ -105,3 +107,6 @@ remainder. Specs:
 **The fence measures 57% of what it selects, and cannot do better as built.**
 A package-aware probe is required. Not started here; the coverage number and its
 cause breakdown are now honest, which is the precondition for fixing it.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

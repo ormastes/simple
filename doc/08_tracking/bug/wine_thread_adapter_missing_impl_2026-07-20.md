@@ -1,6 +1,6 @@
 # Missing implementation: common.wine_thread_adapter module
 
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/lib/common/` — Wine thread-adapter SFFI gate module
 - **Severity:** Medium — the only consumer (its own spec) can never run;
@@ -75,3 +75,7 @@ spec's own assertions — `wine_thread_adapter_required_apis`,
 `_sffi_binding`), or (b) if this was scratch/WIP work from a different lane
 that never shipped, remove the dead spec — that decision belongs to the
 feature owner, not this triage pass. Nothing in the spec was weakened here.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

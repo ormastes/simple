@@ -1,6 +1,6 @@
 ---
 id: backend_linker_check_arm_body_const_assign_2026-07-02
-status: OPEN
+status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/03_system/compiler/symbol_analysis_spec.spl` now PASSes)
 severity: low
 discovered: 2026-07-02
 discovered_by: `bin/simple check src/compiler/70.backend/linker/symbol_analysis.spl` while re-applying explicit dict-value type annotations
@@ -39,3 +39,6 @@ Blocks the literal "clean check" acceptance bar for
 unrelated compiler self-check quirk (likely in how `check <file>` resolves
 transitive dependencies for backend/linker-layer files vs. `__init__.spl`
 aggregation), not part of the 2026-07-02 "5 lost fixes" restoration.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/compiler/symbol_analysis_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

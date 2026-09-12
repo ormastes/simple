@@ -1,4 +1,5 @@
 # Inventory: resolution-sensitive defaults / caps in the 2D + GPU lane (8K-first audit)
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-09-03
 - **Directive:** two first-class default targets — 8K screen 7680x4320 (33.2 Mpx,
@@ -304,3 +305,6 @@ This audit changed no code — its two artifacts are a new tracking document and
 `config/graphics/resolution_targets.sdn`, which no code path loads — so pixel
 identity cannot have been affected. The gate must be re-run to green before any
 of the §F change requests is landed.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

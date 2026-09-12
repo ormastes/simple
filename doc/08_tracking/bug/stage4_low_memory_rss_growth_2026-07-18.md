@@ -2,6 +2,8 @@
 
 ## Status
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Source plumbing fixed; executable acceptance remains open. The bounded
 incremental Stage 4 build was stopped deliberately before host/session failure;
 no Stage 4 artifact was produced, so the canonical essential
@@ -98,3 +100,7 @@ Observed on 2026-07-18:
 Acceptance requires a produced full CLI, bounded warm elapsed time/RSS evidence,
 and green test-runner, lint, and duplication probes. A CPU-active process with
 unbounded RSS is not a passing “slow build.”
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

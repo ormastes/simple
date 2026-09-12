@@ -265,3 +265,6 @@ rather than a hard infinite loop.
   re-run this bug's proof recipe (`SIMPLE_TRACE_AST_RESET=1`, watch for
   `[ast_reset]` / `[flat-bridge]` / `[OOB-PROOF]`-style markers) to determine
   whether the re-entrant-parse arena race is real.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/frontend/flat_ast_if_else_bridge_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

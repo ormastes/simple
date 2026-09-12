@@ -2,7 +2,7 @@
 
 - **ID:** rv64_core_no_c_extension_opensbi_stall
 - **Date:** 2026-07-22
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (blocks booting any C-compiled RV64 firmware on soc_top_64)
 - **Component:** `src/lib/hardware/rv64gc_rtl/core.spl`, `.../decode.spl` (RTL core datapath)
 
@@ -71,3 +71,6 @@ divergence deterministically (`pc 0x8000_0548 → 0x8000_054c`, delta 4 not 2).
 Reproduce: `bin/simple run test/01_unit/lib/hardware/soc_rtl/opensbi_boot_probe.spl`
 (requires `sh scripts/os/build_opensbi_rv64_soc.shs` to have produced
 `build/os/opensbi_rv64_soc/fw_payload.bin`).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

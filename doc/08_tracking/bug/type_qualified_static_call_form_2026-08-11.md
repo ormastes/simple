@@ -1,5 +1,7 @@
 # `Type.method(arg)` static-call form: claimed silent-nothing NOT reproduced — already errors correctly (VERIFIED, closed as false positive)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Claim under investigation
 
 Reported 2026-08-11 while authoring an unrelated capability gate: `print
@@ -131,3 +133,7 @@ CLOSED — false positive, not reproduced on a fresh build. Current behavior
 (hard semantic error in both interpreter and native lanes) is the correct,
 intended semantics per repo-wide `Type.method()` usage evidence. No source
 changed. Landed: this bug doc + the reusable check script only.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,5 +1,7 @@
 # Pipe-lambda typed parameters rejected by parser (fixed in seed source, pending rebuild)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Status (2026-08-17): RESOLVED — the pending rebuild has happened and the repro passes.**
 
   Binary identity:
@@ -139,3 +141,7 @@ exception for small, safe, contained parser additions.
 - Summary: **parser-level verified (in-crate tests green); deployment
   pending-rebuild** (the `.spl` regression spec stays RED, correctly, until
   then).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

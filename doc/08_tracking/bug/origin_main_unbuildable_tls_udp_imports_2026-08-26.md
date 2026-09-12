@@ -1,4 +1,5 @@
 # origin/main unbuildable: unresolved rt_tls_*/rt_io_udp_* imports (2026-08-26)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 
@@ -42,3 +43,6 @@ should either restore the definitions or drop the re-exports, then run
 
 Found during the simply whole-earth dashboard sweep
 (`.spipe/simply_showcase/state.md`).
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

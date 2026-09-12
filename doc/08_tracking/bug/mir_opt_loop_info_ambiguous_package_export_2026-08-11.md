@@ -1,5 +1,7 @@
 # MIR optimizer `LoopInfo` ambiguous package export
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in the live pure-Simple source; exact-current Stage 2 requires a new
@@ -40,3 +42,7 @@ Regression coverage:
 The regression imports both types through the real package surface, which makes
 package resolution itself part of the check, and separately verifies that the
 vectorizer declaration no longer provides the bare `LoopInfo` name.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

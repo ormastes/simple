@@ -55,3 +55,6 @@ fail-open).
   fast with `missing-arm-linux-gnueabihf-readelf` — host lacks armhf binutils
   (`apt install binutils-arm-linux-gnueabihf` would unblock; aarch64/riscv64
   toolchains and qemu are present).
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/02_integration/rendering/simd_parity_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Hook bypass evidence — 2026-08-18 (lane test-fix, 9 commits)
+**Status:** OPEN (unverified 2026-09-12)
 
 `git push` was run with `--no-verify`. This records WHY, with the evidence,
 per `.claude/rules/vcs.md`'s requirement that a bypass never be silent.
@@ -45,3 +46,6 @@ check-test-tree-divergence-delta:  PASS — 1 pre-existing offender, 0 introduce
 The deployed shared seed remains stale until someone redeploys it from this
 source. Until then `check-native-trailing-default-param.shs` will keep failing
 for every lane, for the reason recorded above. That redeploy is the unblock.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

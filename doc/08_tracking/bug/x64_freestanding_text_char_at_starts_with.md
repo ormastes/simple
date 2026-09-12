@@ -1,5 +1,7 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 **CORRECTED (2026-07-12, evidence-based).** The original title conflates three
 things; two are non-bugs / already fixed, one is the real residual:
@@ -128,3 +130,7 @@ buffer the way `fs_exec_prod_ring3_entry.spl` does before pmm/vmm, or (b) make
 in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

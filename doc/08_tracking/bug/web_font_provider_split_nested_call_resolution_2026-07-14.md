@@ -1,6 +1,6 @@
 # Seed cannot resolve `.split(...)` on an erased receiver in nested call context
 
-- **Status:** Open (source worked around; seed compiler fix pending)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Filed:** 2026-07-14
 - **Area:** compiler / seed / method-resolution
 - **Severity:** high (aborts the entire web-render font path)
@@ -57,3 +57,7 @@ with the same `str.split` nested-call diagnostic while compiling
 not font-specific. The prevention test should be one minimal nested
 `text.split` expression under the same interpreter path; SPipe docgen must then
 complete with the selected runtime and zero placeholder manuals.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

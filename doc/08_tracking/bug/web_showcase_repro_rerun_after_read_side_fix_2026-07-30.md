@@ -1,5 +1,7 @@
 # Web showcase repro re-run after the read-side fix — STILL BLOCKED, and it is the already-documented write-side defect, not a new gap
 
+**Status:** OPEN (unverified 2026-09-12)
+
 This is the original repro that launched the whole JIT chase this
 session: `web_standards_showcase status=fail reason=blank-or-uniform
 pixels=0 nonzero=0 checksum=0`, first attributed to gap 7, then gap 8,
@@ -209,3 +211,7 @@ the synthetic `val X = get_value()` fixture.
 - Timestamps: baseline run started 2026-07-30 19:45:24 UTC, fixed-binary
   run started 2026-07-30 19:48:19 UTC; both completed in well under a
   minute.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

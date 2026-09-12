@@ -1,7 +1,7 @@
 # Engine2D Vulkan and Software backends diverge on the text-heavy showcase frame (1136/30000 px)
 
 Date: 2026-07-02
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: P3 (rendering-parity gap; primitive parity gates still pass)
 Found by: fable review of W1c lane (G1.1)
 
@@ -42,3 +42,6 @@ glyphs differently from `SoftwareBackend.draw_text`.
   the text path is the source.
 - Fix alongside the recorded `TODO(G1.1 perf)` glyph-bbox upload work — a
   glyph-atlas path would fix both perf and parity.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

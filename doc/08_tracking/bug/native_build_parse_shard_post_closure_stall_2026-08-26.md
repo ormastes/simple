@@ -1,5 +1,7 @@
 # Native-build parse shard stalls after source-closure progress
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open bootstrap blocker exposed after fixing interpreted `rt_array_free`.
@@ -34,3 +36,7 @@ current-item progress, and apply the normal native-build worker timeout to
 direct parse-shard mode. The owning loop must either converge or fail with a
 specific source/task receipt before the pure-Simple CLI, rendering guest, and
 Vulkan showcase can be admitted.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

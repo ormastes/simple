@@ -1,4 +1,5 @@
 # SimpleOS RV64 WM Live Framebuffer Gate Missing
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - status: source-ready-contract-v2-live-proof-pending
 - gate: `scripts/check/check-simpleos-host-configuration-matrix.shs`
@@ -30,3 +31,6 @@ Historical scanout-probe evidence:
   `rv64_display_smoke_qmp_wm_anchor_matches=5`.
 - `check-simpleos-host-configuration-matrix.shs` reports
   `qemu_riscv64_wm_live: pass`. PASS.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -134,3 +134,6 @@ production compositor decorations live together, compiled 21 modules with zero
 failures, and returned the exact framebuffer channel values.  The remaining
 closure condition for this row is a focused compiler diagnostic that rejects
 or fully qualifies genuinely ambiguous unaliased duplicate declarations.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/os/compositor/compositor_occlusion_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

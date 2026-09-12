@@ -1,5 +1,7 @@
 # Imported trait method metadata is absent in per-file native HIR
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Filed: 2026-09-08
 - Severity: P0 Stage4 blocker
 - Status: compiler gap open; attempted defining-module generic facade did not unblock Stage2
@@ -19,3 +21,6 @@ generic constraint preserved end-to-end; canonical Stage2 still lowered its
 A general fix must carry imported trait definitions and slot signatures through
 `pipeline/native_project/imports.rs` into per-file HIR, including generic
 constraint owners. That is the exact unblock condition for the next session.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

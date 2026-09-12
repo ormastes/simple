@@ -1,5 +1,7 @@
 # JIT array out-of-bounds read leaks the raw `RT_NIL` sentinel (`3`) instead of `nil`/panic
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 - **Filed:** 2026-08-07
 - **Severity:** P2 — wrong text output / missing panic on bare OOB index, no
   crash, no memory-safety issue (`rt_array_get` internally bounds-checks and
@@ -395,3 +397,6 @@ Still NOT fixed by this change, and explicitly not claimed:
   check cannot be added there without also making `.get()` panic. Separate fix.
 - `max`/`min` keep the bare element type; they are optional too but were not on
   the measured collision path.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

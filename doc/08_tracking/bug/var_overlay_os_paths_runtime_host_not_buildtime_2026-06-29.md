@@ -1,5 +1,7 @@
 # Variant Overlay — os/env paths path_separator: Runtime-Host Decision, Not Build-Time
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Date: 2026-06-29
 Candidate: `variants/os/` overlay keyed on `path_separator` (`:` vs `;`)
 
@@ -65,3 +67,7 @@ Two changes required together:
    variant without ever calling `detect_os()` at binary runtime.
 Only then can `path_separator` be a legitimate compile-time constant folded via
 the overlay.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

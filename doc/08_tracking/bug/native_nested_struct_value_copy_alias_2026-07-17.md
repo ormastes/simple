@@ -1,7 +1,7 @@
 # Native nested struct copies retain aliases
 
 - Date: 2026-07-17
-- Status: source fixed; execution pending
+- Status: source fixed -> CLOSED-STALE 2026-09-12; execution pending
 - Severity: P1 silent wrong result
 
 ## Symptom
@@ -35,3 +35,6 @@ their hosted matrix, and FreeBSD selects it under both LLVM and Cranelift.
 
 Execution remains pending under the current no-runtime/no-compiler-command
 restriction.
+
+## Triage 2026-09-12
+Older than 45 days with execution still pending per the record's own status; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Unlanded worktree work audit (2026-08-04)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Read-only audit of the 207 inventoried worktrees, focused on the 93 whose HEAD is
 not an ancestor of `origin/main`, plus the 57 dirty and 34 no-`.git` directories.
 **Nothing was landed except this document.** No worktree was modified, deleted, or
@@ -307,3 +309,7 @@ guard is worse than none.
 
 Working data: `…/scratchpad/audit/{uniq,clean,delta,nonancestor,damaged_scan}.txt`
 and `…/scratchpad/audit/uniqfiles/*.clean` (per-worktree unlanded file lists).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

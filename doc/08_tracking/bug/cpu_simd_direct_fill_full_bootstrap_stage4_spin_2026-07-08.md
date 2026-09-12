@@ -1,4 +1,5 @@
 # CPU SIMD Direct Fill Full Bootstrap Stage 4 Spin
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Date: 2026-07-08
 
@@ -60,3 +61,6 @@ Focused evidence:
 Rebuild/deploy a pure-Simple `bin/simple` and rerun the retained 4K/8K SIMD
 performance evidence. Keep `build/bootstrap/native_cache` and use isolated mini
 caches for any further bootstrap probes.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

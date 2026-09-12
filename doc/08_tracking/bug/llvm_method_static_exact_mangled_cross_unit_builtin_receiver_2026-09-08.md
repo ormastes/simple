@@ -1,5 +1,7 @@
 # Exact mangled cross-unit free functions rejected as builtin methods
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Filed: 2026-09-08
 - Severity: P0 Stage4 blocker
 - Status: exact-mangled fix verified; three distinct fail-closed residuals block Stage2
@@ -48,3 +50,6 @@ non-LTO runtime, and compiler backfill. Stage2 then failed on only three files:
 
 These are not exact mangled cross-unit identities and therefore were not
 admitted by this fix. No Stage4 candidate or deployment was produced.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

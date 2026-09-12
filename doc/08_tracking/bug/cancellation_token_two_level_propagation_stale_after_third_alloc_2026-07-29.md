@@ -1,7 +1,7 @@
 # Bug: CancellationToken depth-2 cancel propagation reads stale registry after a 3rd allocation
 
 - **Date:** 2026-07-29 (root-caused further, same date, lane G9b)
-- **Status:** open — root cause identified (receiver-less function calls not
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   observing intervening instance-method mutations; worse across `it`/closure
   boundaries), workaround attempted and rejected (traded wrong-answer for a
   hang), see the 2026-07-29 update section below
@@ -182,3 +182,6 @@ resolution of a module-level `var` differs from an instance method's, and
 why crossing a `describe`/`it` closure boundary makes it worse (partial, not
 full, state reset) rather than the same as crossing a plain function-call
 boundary within one script.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

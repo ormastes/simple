@@ -1,4 +1,5 @@
 # SimpleOS SSP (Stack-Smashing Protector) Codegen — Feature Lag
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl -> 0 passed, 2 failed, still reproduces)
 
 Date: 2026-06-28
 
@@ -42,3 +43,6 @@ as the explicit deferred feature lag.
 - A spec under `test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`
   asserts canary presence for the desktop preset and absence for an opted-out
   embedded preset.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl` on the deployed seed; 2 of 2 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

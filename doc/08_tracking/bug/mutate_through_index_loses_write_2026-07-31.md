@@ -1,5 +1,7 @@
 # `container[key].push(x)` silently loses the write for dict values and tuple/struct fields
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-07-31
 **Engine tested:** tree-walk interpreter (`bin/simple test`) — JIT/native unverified
 **Severity:** silent wrong results, no error or warning
@@ -123,3 +125,6 @@ c["k"].push(2)
 - `.claude/memory/feedback_arrays_value_types.md` — refine: the copy happens at
   dict-value and tuple/struct-field access, not at every array index
 - `doc/07_guide/language/dict_native_pitfalls.md`
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

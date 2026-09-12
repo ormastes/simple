@@ -1,7 +1,7 @@
 # Bug: `--unit` / `--integration` / `--system` filters match ONLY the legacy mirror tree
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (level-filtered runs silently select the stale tree, or nothing)
 - **Found by:** lane TESTDUP while surveying the duplicate spec hierarchy
 
@@ -58,3 +58,7 @@ not specs.
 
 Full survey table, orphan list and the 5-step unblock sequence:
 `.spipe/test_tree_dedup/state.md`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

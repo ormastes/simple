@@ -1,5 +1,7 @@
 # bug: `lint-cached.shs` FAILs every file with `undefined field 'config'` — non-discriminating
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-18
 - Lane: lane-aspect-dynload
 - Reporter: lint sweep agent
@@ -83,3 +85,6 @@ Lane lint status for `src/lib/common/aspect_pack.spl`,
 `src/compiler/99.loader/module_loader_compat.spl` is **INCONCLUSIVE** —
 blocked by this tool defect. Explicitly NOT recorded as pass or fail. No lane
 source file was modified to appease this diagnostic.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

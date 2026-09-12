@@ -1,4 +1,5 @@
 # Bootstrap Rust authority compile blockers (2026-08-21)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -37,3 +38,6 @@ isolated verification worktree.
 Rerun the measured Stage-2 command once, then produce a planner receipt and
 continue through Stage 3/4. Do not substitute the Rust seed for normal Simple
 checks and do not hand-write Stage-2 receipts.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

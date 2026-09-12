@@ -57,7 +57,7 @@
 
 **Verification:** `bin/simple lint` on all 9 specs shows zero "Replace 'function'" errors after fix.
 
-**Status:** COMPLETE — all 9 specs now parse cleanly.
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 
 ---
 
@@ -221,3 +221,6 @@ allowed during the sequential campaign), and — since `std.X` resolves from
 `src/lib/` first — it would have interposed an untested re-export layer over
 the runner's own working `std.test_runner.*` imports mid-campaign.
 Remaining buckets (3-8) stand as analyzed.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

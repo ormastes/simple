@@ -1,4 +1,5 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
@@ -47,3 +48,6 @@ Use the idiomatic matchers: `expect(a).to_not_equal(b)` (asserts inequality) or
 `expect(a).to_equal(b)` — both already correct. Same family as
 `harness_word_infix_expect_not_preprocessed_2026-06-29` (BDD eager-marking vs
 trailing matcher).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

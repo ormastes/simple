@@ -1,5 +1,7 @@
 # Interpreter `rt_thread_spawn_isolated` runs the closure INLINE — every concurrency test on that path is vacuous
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-19. Found by lane aspect-dynload while trying to PROVE a
 compare-and-swap primitive, not while testing threads.
 Severity: repo-wide testing integrity. This silently validates any concurrency
@@ -106,3 +108,6 @@ over non-atomic array state is decoration, not a gate — and there is no execut
 path today on which two callers can reach it concurrently. Building the future
 first would produce something that looks thread-safe and is not, which is
 strictly worse than the current honest absence.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

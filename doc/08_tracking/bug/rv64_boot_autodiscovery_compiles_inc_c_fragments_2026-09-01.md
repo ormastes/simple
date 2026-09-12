@@ -1,5 +1,7 @@
 # Boot autodiscovery compiles `.inc.c` include-fragments as standalone TUs
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed** 2026-09-01 · **Status** OPEN · **Severity** medium
 
 ## Symptom
@@ -30,3 +32,7 @@ Skip stems ending in `.inc` during boot autodiscovery, and make a genuine `.c`
 TU that fails to compile a hard ERROR rather than a warning -- the current
 policy is what let `freestanding_runtime.c` sit uncompilable indefinitely (see
 `rv64_src_boot_freestanding_runtime_never_compiles_2026-09-01.md`).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

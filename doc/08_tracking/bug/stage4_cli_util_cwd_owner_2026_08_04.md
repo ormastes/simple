@@ -1,5 +1,7 @@
 # Stage 4 CLI utility cwd owner
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Source fixed; focused native contract PASS; exact Phase 4 verification pending.
@@ -30,3 +32,7 @@ fallback disabled, then exited 30 with empty output. Evidence is retained under
 `build/focused/stage4-cli-util/`. Its deliberate first form exited 41 because
 the repository root has no package manifest; the accepted contract checks the
 documented empty-manifest result plus quoted CSV behavior.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

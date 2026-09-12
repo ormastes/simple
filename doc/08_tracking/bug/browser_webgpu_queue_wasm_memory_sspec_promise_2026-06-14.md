@@ -1,7 +1,7 @@
 # Browser WebGPU Queue WASM Memory SSpec Promise Harness Gap
 
 Date: 2026-06-14
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Priority: P2
 
 ## Summary
@@ -37,3 +37,6 @@ An executable SSpec should prove:
 Stabilize SSpec nested Promise handling or add a harness helper for settled
 BrowserSession Promise drains, then add the queue-upload SSpec without weakening
 the assertion or leaving the broad browser WebGPU spec red.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

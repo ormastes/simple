@@ -1,5 +1,7 @@
 # Bug: native-build broken under deployed seed since ca1e18c1744 (dict-extern migration)
 
+**Status:** RESOLVED (2026-07-16, per record's own Status section — verified fixed at origin tip 8932fcb3a148)
+
 **Status (2026-07-16):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
 - **Severity:** P1 (the default tooling path `bin/simple native-build --entry`
@@ -47,3 +49,6 @@ the file list alone is sufficient (multi-file interaction), and
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148 via independent probe: `probe01_dict_extern_regression_a.spl` (trivial two-function program: `helper()->42`, `main` prints it). Oracle: `bin/simple run` → `42`. Native: `native-build --entry --clean` exit 0, binary built, run → `42`. No "type mismatch: cannot convert dict to int" error at any stage; native-build succeeds with correct output.
+
+## Triage 2026-09-12
+Reviewed 2026-09-12: record's own status already accurate; added top-level line for gate compliance only. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

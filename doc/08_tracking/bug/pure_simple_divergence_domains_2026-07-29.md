@@ -1,4 +1,5 @@
 # Pure-Simple oracle-vs-plain divergence sweep — non-print domains (2026-07-29)
+**Status:** OPEN (unverified 2026-09-12)
 
 Method: `bin/simple run X.spl` (plain = deployed/default engine, currently the
 Rust seed since the pure-Simple native harness is not deployed) vs
@@ -56,3 +57,6 @@ Total: **9 new divergences** across 6 domains (plus 1 shared-non-divergent gap n
 ## Notes / caveats
 - All "plain" runs above used the currently-deployed engine (`bin/simple run` → Rust seed w/ JIT-then-interpreter-fallback banner), per the sweep's oracle/plain convention; needs re-confirmation against the pure-Simple native harness directly once that path is fixed/deployed.
 - p10b's segfault, p11b's `?`-chain corruption, and p11d/e/f's for-loop-return corruption are new site-level findings distinct from the already-memory-tracked `list.get(i)` `<<3` tag-box family and the `Option<i64>==3` collision family — flagged for a fresh codegen trace rather than assumed to be the same bug, since the multiplier is not consistently ×8.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

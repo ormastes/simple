@@ -2,7 +2,7 @@
 "emits diagnostic comment" specs call `.unwrap()` unconditionally, crashing
 on the `Err` the backend now correctly returns
 
-**Status:** OPEN — filed, not fixed (classification needs a product-design
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl` now PASSes)
 decision: see below)
 
 **Date:** 2026-07-20
@@ -88,3 +88,6 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 "$BIN" test \
    bucket in one pass.
 3. If embedded comment is correct: file a product bug against the
    CUDA/OpenCL intrinsic arity-check path for returning Err instead.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # engine2d_render_evidence_spec.spl fails to load: missing `os.kernel.arch.x86.render_capture_ack` module (2026-08-08)
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/01_unit/os/compositor/engine2d_render_evidence_spec.spl` still FAILs — still reproduces)
 
 ## Summary
 
@@ -61,3 +62,6 @@ functions were relocated/renamed elsewhere and the spec is simply stale.
 Unit B3, `doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`,
 2026-08-08. Out of scope to fix here — B3 is verification-only (collision
 set: read-only, script file only).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/compositor/engine2d_render_evidence_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

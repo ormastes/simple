@@ -1,5 +1,7 @@
 # `bin/simple test` cannot see module-global mutation performed inside a called function
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status: OPEN, not root-caused (found incidentally, out of scope to fix here)
 
 ## Summary
@@ -94,3 +96,7 @@ conflate, but the mechanisms and fixes are unrelated.
 - `doc/08_tracking/bug/compile_lane_false_fails_globals_in_mainless_modules_2026-07-29.md`
   (similar-sounding, different mechanism -- see note above)
 - `.claude/rules/testing.md` "run and test are DIFFERENT ENGINES"
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

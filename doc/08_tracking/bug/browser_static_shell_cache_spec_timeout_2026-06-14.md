@@ -1,7 +1,7 @@
 # Browser Static Shell Cache Spec Timeout
 
 Date: 2026-06-14
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -30,3 +30,6 @@ BrowserBackend runtime queue diagnostics. The focused replacement guard
 Split or instrument the three static-shell scenarios to identify whether the
 timeout is in repeated `render_frame`, `render_cached_static_frame`, or
 `pixels_rgba_i64` cache reuse.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

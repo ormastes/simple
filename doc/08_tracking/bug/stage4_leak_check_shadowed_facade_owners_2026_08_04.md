@@ -1,5 +1,7 @@
 # Stage 4 leak checker resolves shadowed compatibility facades
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in the LLVM 23.1 Stage 4 bootstrap lane on 2026-08-04.
@@ -27,3 +29,7 @@ exact `nogc_sync_mut` type owner used by `parse_leak_dump`. The adjacent externa
 runner compile-result and internal runner CLI callable use the same physical
 ownership rule. A focused native contract imports the real leak-check entry so
 the complete module family must lower and link.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

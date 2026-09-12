@@ -1,4 +1,5 @@
 # DAP spec examples reported GREEN while asserting nothing (2026-08-08)
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/01_unit/app/dap/breakpoints_spec.spl` still FAILs — still reproduces)
 
 ## Summary
 
@@ -180,3 +181,6 @@ in the implementation.
   (`grep -c "assert_true(true)"` → 0 for all).
 - Confirmed no stray diffs were left in `src/lib/nogc_sync_mut/dap/*` after
   the sabotage probes (`git status --short` clean on those paths).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/dap/breakpoints_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # CPU-SIMD External Cairo 8K Perf Gap
 
 - **Date:** 2026-07-09
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high
 - **Area:** GUI Web 2D, CPU-SIMD, performance
 
@@ -259,3 +259,6 @@ CPU-SIMD/scalar 4K/8K exporter once and require native instruction hits, exact
 checksums, full physical dimensions, 300dpi, no size reduction, and no fallback.
 Only then refresh the retained checksum contract and run the external Cairo
 comparison once.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

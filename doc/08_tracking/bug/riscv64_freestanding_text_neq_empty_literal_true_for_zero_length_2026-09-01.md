@@ -1,4 +1,5 @@
 # riscv64 freestanding: `text != ""` is TRUE for a zero-length text
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: **OPEN** — codegen defect, not fixed. One call site was repaired
   (see below); the comparison itself is still wrong everywhere else.
@@ -56,3 +57,6 @@ missing `main` several stages downstream.
 loss and preserves hosted semantics exactly, but it does not fix the
 comparison, and every other `!= ""` in the tree is still affected on this
 target.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

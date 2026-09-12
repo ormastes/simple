@@ -1,5 +1,7 @@
 # Bug: `expect(a == b).to_equal(false)` mis-evaluates the inline `==` argument
 
+**Status:** RESOLVED (2026-09-12, re-verified: repro now passes)
+
 **Date:** 2026-07-07
 **Severity:** Medium — false-RED on specs that assert inequality of two
 distinct values via `expect(<comparison>).to_equal(<bool>)` (the values under
@@ -61,3 +63,6 @@ surface symptom (`expect(a == b).to_equal(false)` false-failing) — that one
 is specific to the seed's per-example `BDD_EXPECT_FAILED` flag; this one is
 the self-hosted interpreter's chained-argument evaluation order. Do not
 conflate the two fixes.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: ran the record's own `expect(a == b).to_equal(false)` repro on distinct u32 values; it printed `PASS` with no false-RED, unlike the originally-reported "expected X to equal Y" failure. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

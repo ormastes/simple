@@ -1,4 +1,5 @@
 # SimpleOS aarch64 freestanding: `rt_slice` mis-decodes RAW indices that are multiples of 8
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-31
 Lane: aarch64 in-guest toolchain components (EDK2/AAVMF pflash -> BOOTAA64.EFI)
@@ -157,3 +158,6 @@ byte-identically red on **x86_64**, whose `rt_slice` was already correct
 Two freestanding runtimes with *different* and independently-correct slice ABIs
 failing identically means the defect is not in either runtime's index handling.
 It needs its own investigation, upstream of the arch layer.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

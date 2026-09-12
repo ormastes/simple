@@ -1,7 +1,7 @@
 # Seed parser rejects multi-line `if`-expression chains (and `@hardware`)
 
 - **Filed:** 2026-07-27
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Component:** `src/compiler_rust` (bootstrap seed) — parser + attribute handling
 - **Severity:** blocks 9 RISC-V hardware gate probes (`scripts/check/check-riscv-hardware-gates.shs`)
 
@@ -74,3 +74,6 @@ probes still fail on Defect 2.
 Correct fix is to deploy the pure-Simple self-hosted binary as `bin/simple`
 (both constructs already parse there). Failing that, teach the seed the
 `@hardware` attribute and multi-line `if`-expression chains.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

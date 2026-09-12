@@ -1,4 +1,5 @@
 # Circular `export use` reports "unknown static method" instead of an import cycle
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Filed:** 2026-09-05
 - **Lane:** `src/compiler_rust/target/debug/simple` (debug Rust seed, built from current source)
@@ -79,3 +80,6 @@ is defined in `std.driver.static_table` and cannot be re-exported from
 Closing it needs the function's owning module resolved (move the static
 registry state, or introduce a third module both can import), not a
 re-export.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

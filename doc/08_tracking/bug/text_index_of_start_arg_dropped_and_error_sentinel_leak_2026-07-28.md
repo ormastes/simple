@@ -1,7 +1,7 @@
 # text.index_of(needle, start) — start argument dropped; run lane leaks the error sentinel as data
 
 - **Filed:** 2026-07-28
-- **Status:** OPEN — root-caused, fix NOT contained (needs a new runtime symbol + a semantics decision)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** HIGH — silent wrong answers on both lanes; the `run` lane exits 0 while corrupting an i64
 - **Marker to search:** `text_index_of_start_2026-07-28`
 
@@ -241,3 +241,7 @@ Assert on both lanes that `"a[P]b[P]c".index_of("[P]", 3)` is `5`, that a start
 beyond the last match yields `-1`, and that a start past end-of-string yields
 `-1` rather than the sentinel. Assert the exit status too, so the run lane
 cannot pass by exiting 0 with a corrupt value.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

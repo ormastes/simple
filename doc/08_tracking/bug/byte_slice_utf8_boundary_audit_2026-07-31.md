@@ -1,4 +1,5 @@
 # Audit: byte-indexed `.slice()`/`.substring()` splitting UTF-8 codepoints
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-07-31
 **Scope:** Follow-up to `8151c391932` ("fix(interpreter): byte-transparent text
@@ -244,3 +245,6 @@ Contrast — confirmed SAFE despite matching the same literal-N grep pattern:
   inference from a sample, not a measurement over the full set.
 
 No fixes were applied — this is an audit only, per instructions.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

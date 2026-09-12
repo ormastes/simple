@@ -1,4 +1,5 @@
 # kernel_draw_rounded_rect (Metal) drew a stale OUTLINE — CPU-vs-Metal parity DIVERGE
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces)
 
 ## Status
 Fixed (2026-07-07).
@@ -106,3 +107,6 @@ dispatch state instead of leaving the op unrepresented.
   the one flagged new-vs-baseline entry, `src/app/cli/bootstrap_main.spl`,
   reproduces identically on the unmodified base commit — pre-existing,
   unrelated to this fix).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

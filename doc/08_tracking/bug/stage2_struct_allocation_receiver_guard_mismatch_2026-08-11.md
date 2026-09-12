@@ -1,5 +1,7 @@
 # Stage-2 struct allocation and receiver-guard mismatch
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 The pure-Simple Cranelift owner is fixed. The bootstrap seed's paired Rust
@@ -123,3 +125,7 @@ dereferencing it. Regression coverage in
 `cranelift_aggregate_runtime_abi_spec.spl` binds these paired surfaces. This is
 source evidence only: in-flight bootstraps started before the edit must fail
 their source-consistency gate and cannot qualify the repair.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -2,7 +2,7 @@
 
 - **ID:** seed_jit_miscompiles_soc_top_64_masked_by_fallback
 - **Date:** 2026-07-22
-- **Status:** OPEN (Rust seed JIT backend; deep, out of pure-Simple scope)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high — it is the REAL blocker to the OpenSBI banner; supersedes the "lowering fallback" framing
 - **Component:** seed JIT codegen (`src/compiler_rust`), not symbol lowering
 
@@ -58,3 +58,6 @@ dispatch). Regression-gate with `SOC64 PROBE` under JIT.
 ## Cross-refs
 [[seed_jit_lsu64_load_lowering_forces_interpreter]] (the lowering symptom this
 supersedes) and [[rv64_opensbi_fw_platform_init_throughput_frontier]].
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

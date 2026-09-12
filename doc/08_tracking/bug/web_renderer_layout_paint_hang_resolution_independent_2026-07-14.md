@@ -1,5 +1,7 @@
 # Perf: pure-Simple web renderer hangs in compute_styles, independent of pixel count
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-14
 - **Severity:** high (blocks any real-HTML-page PPM evidence/showcase render)
 - **Area:** src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl (compute_styles)
@@ -250,3 +252,7 @@ Everything reducible in Simple was reduced (7 fixes: split x2, FontRenderConfig,
 font cache, native sha256, glyf CastElse). The only remaining unblock is seed-compiler
 work — fix the JIT to compile the font/render modules OR redeploy compiled Stage-4
 bin/simple — both bootstrap-scoped, outside a safe pure-Simple drive-by.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

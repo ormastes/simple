@@ -1,4 +1,5 @@
 # Bug: Digest.hex() returns garbage when seam.spl and ctypes are both imported
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **ID:** digest_hex_double_import_corruption_2026-06-15
 **Filed:** 2026-06-15
@@ -91,3 +92,6 @@ Use `ct_eq(Digest.new(known_bytes))` for equality checks instead of comparing
 
 - `doc/08_tracking/bug/cross_module_struct_method_poisons_itblock_byte_ops_2026-06-15.md`
 - `doc/08_tracking/bug/dual_backend_generic_typed_seam_2026-06-15.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

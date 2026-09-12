@@ -1,4 +1,5 @@
 # Phase 2 native selected-font byte loading returns invalid
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -50,3 +51,6 @@ All three attempts used `SIMPLE_NO_STUB_FALLBACK=1`; no output was admitted and
 the experimental producer edit was reverted. The next compiler fix must make a
 narrow owner import reachable without wildcard-facade loss or unrelated I/O
 closure expansion. Do not bypass this with a copied executable or weak stubs.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

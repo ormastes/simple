@@ -1,4 +1,5 @@
 # Release: Linux→Windows-gnu cross seed build broken (2026-07-17)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Lane:** release.yml `build-bootstrap` windows-x86_64 cross (Linux runner,
 `cargo build --profile bootstrap -p simple-driver --target x86_64-pc-windows-gnu`).
@@ -44,3 +45,6 @@ the CI windows-gnu cross lane stays red.
 ## Status (2026-07-18)
 
 FIXED+PUSHED at 310bcdf1131. Both defects resolved: signal.c _WIN32 guard + restored vendor libs (79 MB size decision accepted by commit). Cross-build verified: PE32+ simple.exe produced locally.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

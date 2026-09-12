@@ -1,6 +1,6 @@
 # Tracked self-hosted release artifact links a stale `rt_env_set` ABI
 
-Status: OPEN (P1)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 > **STATUS 2026-08-06: still OPEN — re-confirmed by disassembly and probe.**
@@ -624,3 +624,6 @@ rather than fixed. Status remains OPEN (P1).
 correct four-argument `rt_env_set` call sequence. That claim needs the redeploy
 this lane could not perform, and must not be assumed from the source-side
 `rt_env_set` signature alone.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Merge e274cd33719 clobbered x86_64 SimpleOS boot-lane sources (2026-08-31)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Class:** stale-snapshot clobber (same family as the sync-clobber incidents in
 `.claude/rules/vcs.md`). Commit `e274cd33719` "chore: merge all share-history
 worktree branches into main" (992 files, +64,136/-46,226) replaced several
@@ -34,3 +36,6 @@ The merge touched 992 files; only the x86_64 boot-lane surfaces gated by the
 scripts above were audited and repaired. Other subtrees (e.g. `src/os/userlib`)
 may carry the same mixed forward/backward damage and deserve the same two-way
 (pre-merge vs post-merge) symbol-set diff before trusting either side.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

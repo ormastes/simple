@@ -1,7 +1,7 @@
 # ByteBuffer struct-parameter mutation lost across a foreign method call (test), segfaults under `run`
 
 Date: 2026-09-01
-Status: OPEN
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/backend/macho_writer_spec.spl` now PASSes)
 Severity: High — silent data corruption under `bin/simple test` (fail-closed zeros
 read back as valid data), SIGSEGV under `bin/simple run`
 
@@ -187,3 +187,6 @@ further in this pass.
 
 ## Not fixed here
 `bin/simple run` JIT-lane SIGSEGV (see above) — separate defect, still open.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/backend/macho_writer_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

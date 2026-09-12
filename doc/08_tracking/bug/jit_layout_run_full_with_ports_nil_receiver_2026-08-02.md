@@ -1,5 +1,7 @@
 # JIT: layout_run_full_with_ports dies with nil-receiver field access (core dump)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT / gpu_web layout ports
 
 ## Symptom
@@ -38,3 +40,6 @@ with `SIMPLE_EXECUTION_MODE=interpreter` completes.
 
 Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

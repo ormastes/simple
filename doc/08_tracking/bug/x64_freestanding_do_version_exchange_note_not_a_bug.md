@@ -1,5 +1,7 @@
 # do_version_exchange "chained cast / rt_bytes_slice" note — NOT A BUG (verified)
 
+**Status:** RESOLVED / NOT REPRODUCIBLE (per body: verified false-positive, QEMU probe evidence below)
+
 **Target:** `native-build --backend cranelift --target x86_64-unknown-none`
 (SimpleOS freestanding). **Status:** RESOLVED / NOT REPRODUCIBLE. Filed as its
 own record because a code comment in `do_version_exchange`
@@ -43,3 +45,7 @@ of the same arc as the retracted
 `x64_freestanding_chained_len_cast_miscompile.md`; the ONE genuine defect from
 that arc is the `rt_push_byte` reassignment dropping BYTE_PACKED for large `[u8]`
 (`x64_freestanding_push_byte_reassign_byte_packed.md`, fixed with `.push`).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule E: body already declared "Status: RESOLVED / NOT REPRODUCIBLE" inline but no dedicated status line existed at file top); added a matching top-level status line, no further verification attempted (freestanding QEMU probe is not a cheap re-run). Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`.

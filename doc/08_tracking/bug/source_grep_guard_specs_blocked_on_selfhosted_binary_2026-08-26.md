@@ -1,4 +1,5 @@
 # Source-grep guard specs un-modernizable until a self-hosted binary is deployed
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl -> 6 passed, 2 failed, still reproduces)
 
 - Date: 2026-08-26
 - Found via: sspec modernization residual wave (batch ba, ~56 specs scoring 49 /
@@ -115,3 +116,6 @@ pending/KAT scaffolds, GPU-device evidence, and SimpleOS/QEMU/board lanes — fu
 with one-line reasons in /tmp/sspec_census/p02_log.txt. New evidence: pre-existing RED
 `test/01_unit/multi_mode_test_runner_spec.spl` (34/34 fail, TestExecutionMode unresolvable from
 test/01_unit, API drift vs std.nogc_sync_mut.test_runner).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl` on the deployed seed; 2 of 8 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

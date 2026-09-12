@@ -1,5 +1,7 @@
 # JS VM DOM bridge retention is frame-linear and property-scan quadratic
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. No implementation, executable spec, or production receipt is merged.
@@ -96,3 +98,7 @@ Add a focused SSpec with these exact steps:
 Use live-object/live-property metrics, not monotonic `next_id`. The current
 test that expects the cap to reject a second replacement is regression evidence
 for this bug, not proof of lifecycle correctness.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

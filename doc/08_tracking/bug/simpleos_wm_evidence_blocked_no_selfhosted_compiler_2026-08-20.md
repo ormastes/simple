@@ -1,4 +1,5 @@
 # SimpleOS WM evidence lanes blocked: no runnable pure-Simple compiler on host (2026-08-20)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 OPEN — blocked on a bootstrap redeploy. Not a WM code defect: the WM was never
@@ -106,3 +107,6 @@ kernel-boot gate exists in `scripts/check/` at all (searched
 FPGA-preflight and OpenSBI-alone gates exist). That remains a **NO GATE
 EXISTS** state for an actual SimpleOS riscv64 boot, same root blocker (no
 self-hosted compiler to build a riscv64 SimpleOS kernel) as x86_64.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

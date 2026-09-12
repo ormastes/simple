@@ -1,5 +1,7 @@
 # html_compat native text method lowering blocker
 
+**Status:** RESOLVED (2026-09-12, re-verified: source confirms `String.substring`→`rt_slice` mapping is present in codegen/llvm; body already carried pass evidence)
+
 Date: 2026-06-11
 
 ## Summary
@@ -75,3 +77,6 @@ through that path and returns `status=pass`.
 The native smoke should remain focused on both `06_card_panel` and
 `24_flex_wrap_reverse_basic` so future native work continues proving real
 layout output instead of only linking.
+
+## Triage 2026-09-12
+Re-verified via source grep rather than a fresh native build: `src/compiler_rust/compiler/src/codegen/llvm/{mod.rs,functions.rs}` still map `substring`/`slice` to `rt_slice`, confirming the landed fix the body describes is still in place. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

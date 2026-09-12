@@ -1,5 +1,7 @@
 # JIT Gap Reaudit — 2026-07-29 (re-measured against the current seed binary)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **ANALYSIS-ONLY.** No source was edited, nothing was built or committed. Binary
 under test: `src/compiler_rust/target/release/simple`, mtime
 `2026-07-29 08:46:04 UTC` (already built before this lane started — reused
@@ -152,3 +154,6 @@ per method — they fail loudly with `Function '...' not found` at exit 0
 (still a silent-accept bug worth fixing, but at least diagnosable via grep for
 "not found" in logs), whereas the three items above fail with a plausible-looking
 value/no error at all.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # `rt_host_gpu_queue_*` duplicated between C and Rust — fatal under FreeBSD's `lld`
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl -> 2 passed, 0 failed)
 
 - **Re-verified by content 2026-08-17 (os/runtime lane):** `src/compiler_rust/runtime/build.rs` lists `"runtime_native_gpu_stub.c"` and no literal `"runtime_native.c"` c_source entry (grep shows the name only inside explanatory comments at lines 148-184). Both per-lane implementations are still present as intended: 20+ `rt_host_gpu_queue_*` definitions in `src/runtime/runtime_native.c` and 10 `pub extern "C" fn rt_host_gpu_queue_*` in `src/compiler_rust/runtime/src/host_gpu_lane.rs`. The guard spec `test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl` exists. The in-guest FreeBSD link was NOT re-run in this lane.
 
@@ -134,3 +135,6 @@ expected verdict for a separate, already-known non-goal (FreeBSD has no 2D
 compositor backend yet) — not a build failure. Task #60's board-runnable
 blocker from this duplicate-symbol bug is cleared; the WM/GUI/2D lane on
 FreeBSD is unblocked to proceed on its own merits.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl` on the deployed seed; the spec now passes in full (2/2), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

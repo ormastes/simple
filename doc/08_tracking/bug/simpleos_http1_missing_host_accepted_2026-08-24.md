@@ -1,5 +1,7 @@
 # SimpleOS HTTP/1.1 missing Host accepted
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Finding
 
 The filesystem-launched production server's incremental request owner accepted
@@ -23,3 +25,7 @@ The focused source scenarios live in
 missing, empty, mixed-case, HTTP/1.0, and duplicate cases. No tests, builds, or
 runtime verification were run in this phase; keep this record open until that
 focused spec passes with an admitted Pure-Simple runtime.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

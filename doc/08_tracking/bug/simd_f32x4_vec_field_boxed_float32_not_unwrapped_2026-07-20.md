@@ -1,4 +1,5 @@
 # `Vec4f` f32 SIMD externs receive a boxed `Float32` instead of a raw `f32`
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/perf/scilib_simd_ops_perf_spec.spl -> 1 passed, 0 failed)
 
 **Date:** 2026-07-20
 **Component:** interpreter value-passing for `extern fn rt_simd_mul_f32x4`
@@ -127,3 +128,6 @@ One additional spec in this cluster hit the identical stale-literal issue
 but has NO remaining runtime dependency on the boxed-`Float32` SIMD path
 after the suffix fix, so it goes fully green and IS in the triage pass's
 FIXED list: `test/feature/scilib/ndarray_dtype_spec.spl`.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/perf/scilib_simd_ops_perf_spec.spl` on the deployed seed; the spec now passes in full (1/1), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

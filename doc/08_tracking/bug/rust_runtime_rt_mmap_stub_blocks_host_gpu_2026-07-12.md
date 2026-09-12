@@ -1,4 +1,5 @@
 # Rust runtime rt_mmap stub blocks the host-GPU daemon
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 After a strict no-stub native build linked the current host-GPU daemon with
 zero undefined `rt_*` symbols, its empty 8 MiB one-shot probe returned
@@ -34,3 +35,6 @@ The subsequent HELLO rejection is not an mmap failure. A Vulkan-feature runtime
 returns success from `rt_vulkan_init`, while the current Engine2D Vulkan backend
 still fails later in initialization; that separate backend blocker remains
 tracked rather than being masked with a synthetic receipt.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

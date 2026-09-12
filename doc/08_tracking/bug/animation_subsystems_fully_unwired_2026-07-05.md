@@ -1,4 +1,5 @@
 # Animation subsystems fully built and tested but unreachable in any live GUI lane
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 Open.
@@ -27,3 +28,6 @@ No page with CSS transitions or JS-driven timing (splash screens, fade-in/out, s
 
 ## Next Step
 Immediate: update documentation to not claim animation support until wiring is complete. Medium-term: wire WM animator into open/close/focus paths; drive `ScriptHost.tick()` from the web-render frame loop (after first-frame CSS perf fix lands). Related: see `browser_script_timer_deadline_absolute_relative_confusion_2026-07-05.md` for a latent bug in the timer/rAF deadline logic that would surface when wiring completes.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

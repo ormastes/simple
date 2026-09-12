@@ -227,3 +227,6 @@ Results: 13 total, 13 passed, 0 failed
 GREEN. The primary spurious-error claim remains refuted, consistent with the doc.
 The two secondary driver fail-opens are **not** covered by this spec (it exercises
 `nll.spl` directly, not the driver seam), so they stay OPEN and UNPROVEN here.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

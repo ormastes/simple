@@ -1,5 +1,7 @@
 # UTF-16 to UTF-8 conversion retains a high-cost intermediate array
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open; owner: text/encoding workstream W3. The intermediate-allocation half is
@@ -136,3 +138,7 @@ performance gate:
 The candidate regressed p95 by about 4.7% and the process RSS observation by
 about 19%. The next implementation must write encoded bytes directly into a
 reserved sink rather than merely removing one of multiple allocation layers.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

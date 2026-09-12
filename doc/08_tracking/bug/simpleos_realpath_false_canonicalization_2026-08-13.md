@@ -1,4 +1,5 @@
 # SimpleOS `realpath` must not fabricate canonical paths
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -24,3 +25,6 @@ can be advertised as implemented.
 relative, missing, oversized, and null paths. The strict hosted C harness
 passes after providing the guest-private errno ABI, a stub syscall dependency,
 and a `SIZE_MAX` compatibility guard in the guest headers.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

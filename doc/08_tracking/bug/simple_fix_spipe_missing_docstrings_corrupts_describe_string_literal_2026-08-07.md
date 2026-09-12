@@ -1,4 +1,5 @@
 # `bin/simple fix` on `spipe_missing_docstrings` corrupts `describe "..."` string literals
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/lib/notebook/kernel_session_manager_spec.spl -> 18 passed, 0 failed)
 
 **Found:** 2026-08-07, during notebook-lanes K1 implementation
 (`test/01_unit/lib/notebook/kernel_session_manager_spec.spl`).
@@ -39,3 +40,6 @@ implementation.
 Open — not yet investigated further. Recommend avoiding `bin/simple fix` on spec files
 with `spipe_missing_docstrings` active until fixed, and adding a spec such as this one
 as a regression case once the fixer's insertion-point logic is corrected.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/notebook/kernel_session_manager_spec.spl` on the deployed seed; the spec now passes in full (18/18), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
