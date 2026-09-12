@@ -10,7 +10,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
     vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
     VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP, VK_T_SFFI_DESC,
     VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
-    VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE}
+    VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE,
+    VK_T_FONT_ATLAS_UPLOAD}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
@@ -746,6 +747,12 @@ impl VulkanBackend:
 
     me _font_atlas_release_slots():
         """Free every device atlas slot. Used when the atlas DIMENSIONS move."""
+        # A parked upload names one of the buffers freed below: discard it, do
+        # NOT drain it. Draining would copy into a doomed buffer and, worse,
+        # copy an atlas of the OLD dimensions.
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
         for handle in self.font_atlas_slot_handles:
             if handle != 0:
                 vulkan_sffi_free_buffer(handle)
@@ -864,8 +871,53 @@ impl VulkanBackend:
         self.pending_flush_site = site
         self._flush_pending_compute()
 
+    me font_atlas_drain_deferred_upload() -> bool:
+        """Perform the parked atlas copy, if any. True unless the copy FAILED.
+
+        Called immediately before every submit (and before any write aimed at a
+        different slot), which is what makes parking safe: the copy always lands
+        before the queue sees a command that reads the buffer. Nothing parked is
+        success, not a skip -- there is no upload owed.
+
+        A failed copy leaves the slot holding unknown bytes, so the caller-side
+        bookkeeping poisons exactly that slot (never the whole table): an owner
+        cleared to `""` with sequence -1 can satisfy neither the reuse nor the
+        in-place rule, so the next run for it rewrites in full.
+        """
+        val buffer = self.font_atlas_deferred_buffer
+        if buffer == 0:
+            return true
+        val pixels = self.font_atlas_deferred_pixels
+        val slot = self.font_atlas_deferred_slot
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
+        val _t_up = vulkan_timing_now_us()
+        val ok = vulkan_sffi_copy_to_buffer_u32(buffer, pixels, 0)
+        vulkan_timing_add(VK_T_FONT_ATLAS_UPLOAD, _t_up)
+        self.font_atlas_deferred_uploads = self.font_atlas_deferred_uploads + 1
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("font-atlas-drain buffer={buffer} slot={slot} words={pixels.len()} rc={ok}")
+        if not ok:
+            if slot >= 0 and slot < self.font_atlas_slot_owners.len().to_i64():
+                self.font_atlas_slot_owners[slot] = ""
+                self.font_atlas_slot_sequences[slot] = -1
+            self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
+            self.font_atlas_payload_sha256 = ""
+            self.font_atlas_host_identity = ""
+            self.font_atlas_host_valid = false
+            self.font_atlas_host_owner_sequence = -1
+            self.mark_cpu_fallback("atlas-deferred-upload-failed")
+        ok
+
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
+        # The parked atlas copy must land BEFORE the submit this flush performs,
+        # and before the early `cmd <= 0` return too: a flush with no command
+        # buffer still ends a frame, and an upload owed across that boundary
+        # would be written after a slot table that already claims it resident.
+        self.font_atlas_drain_deferred_upload()
         self.midframe_flush_count = self.midframe_flush_count + 1
         # Move the armed site into the record and DISARM, so an untagged flush
         # (the two font-lane sites, which this fix does not own) reports
@@ -1530,6 +1582,21 @@ impl VulkanBackend:
         # had no already-recorded siblings to lose. Post-readback that is
         # always the case (the readback's own flush cleared the batch).
         val pending_before = self.pending_compute_count
+        # DEGENERATE ARGUMENTS ARE NOT A TRANSIENT FAILURE. `_enqueue_framebuffer_compute`
+        # rejects zero workgroups / empty push constants / a dead framebuffer
+        # with a bare 0 and no trace, and the `dispatched == 0` arm below used
+        # to read that as the measured M4 bind-chain flake: it flushed the whole
+        # pending batch (an extra SUBMIT), retried with the SAME invalid
+        # arguments, failed identically, and latched the CPU fallback. The
+        # retry is provably futile because nothing about these arguments can
+        # change between the two calls. Reject here instead: no flush, no retry,
+        # and a named trace so the primitive is still attributable.
+        if (pipe <= 0 or self.d_framebuffer <= 0 or push_data.len() == 0 or
+            gx <= 0 or gy <= 0 or gz <= 0):
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-reject pipe={pipe} fb={self.d_framebuffer} push={push_data.len()} groups={gx},{gy},{gz} reason={reason}")
+            self.mark_cpu_fallback(reason)
+            return 0
         # Every framebuffer dispatch funnels through here, so this is the one
         # place damage accounting cannot be forgotten: a primitive that named
         # its destination rect folds it into the frame union, and one that did
@@ -2095,7 +2162,16 @@ fn vulkan_font_mirror_continuity(mirror_coherent: bool, owner_identity: text,
 # font owners needs two; the cap exists so a pathological page cannot allocate
 # one 4 MiB buffer per face. When the table is full an unreferenced slot is
 # recycled, and only when even that is impossible does a flush happen.
-val VULKAN_FONT_ATLAS_SLOT_MAX: i64 = 4
+#
+# Raised 4 -> 8 (2026-09-12). An "owner" is not a font FILE: it folds the point
+# SIZE into its identity, so css-layout.html presents five owners from two
+# families (16/19/24 px plus a second family), exhausted the table, and took a
+# `FLUSH_THEN_WRITE` -- a whole extra SUBMIT -- once per frame. Eight slots is
+# 32 MiB of device atlas at the fixed 1024x1024 size, still bounded, and covers
+# every page in the web catalog. A page that exceeds even this still degrades
+# correctly: the forced flush is a named, counted outcome
+# (`font_atlas_slot_forced_flushes`), not a correctness hazard.
+val VULKAN_FONT_ATLAS_SLOT_MAX: i64 = 8
 
 fn vulkan_font_atlas_slot_sabotage() -> bool:
     """SABOTAGE CONTROL: `SIMPLE_VK_FONT_ATLAS_SABOTAGE=same-slot`.
@@ -2126,12 +2202,16 @@ fn vulkan_font_atlas_slot_depth() -> i64:
     val raw = env_get("SIMPLE_VK_FONT_ATLAS_SLOTS") ?? ""
     if raw == "":
         return VULKAN_FONT_ATLAS_SLOT_MAX
-    # Literal comparison rather than a parse: the legal range is 1..4, and a
+    # Literal comparison rather than a parse: the legal range is 1..8, and a
     # string compare cannot disagree with a parser about what "01" or "4 " mean.
     if raw == "1": return 1
     if raw == "2": return 2
     if raw == "3": return 3
     if raw == "4": return 4
+    if raw == "5": return 5
+    if raw == "6": return 6
+    if raw == "7": return 7
+    if raw == "8": return 8
     VULKAN_FONT_ATLAS_SLOT_MAX
 
 # The device already holds exactly these bytes: bind and record, no host write,
