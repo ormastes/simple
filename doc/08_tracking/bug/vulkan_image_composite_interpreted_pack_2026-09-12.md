@@ -149,6 +149,48 @@ change -- use the differ, and the 300x253 pair, to tell them apart.
 **What is now dominant.** `font_composite` at 70,708 ms is 27% of the remaining
 frame and is the next term, not the image path.
 
+## Measured, 300x253 — no improvement, and that is the prediction
+
+| | before | after |
+|---|---|---|
+| frame | 30,861 ms | 33,403 ms |
+| image_composite_stats | `full_surface=0 small=76 max_px=1` | same |
+| image_pack_u32_to_u8 | 2 ms | bucket never fires |
+
+All 76 composites at this size are **1x1**, so there is nothing to pack: the
+pack bucket reads 2 ms before the change. The difference between the two runs
+is run-to-run noise on a shared machine, not a regression attributable to the
+flag, and it is reported rather than smoothed. This size is the control that
+shows the win at 900x760 comes from the large-image population specifically.
+
+**PPM byte-identical at 300x253** (`cmp` clean, checksum
+`-6077680819631676143` on both sides). This is the oracle the task asked for at
+this size, and unlike the 900x760 pair it is on a size F16 does not record as
+non-deterministic.
+
+## Sabotage: the oracle discriminates
+
+Byte-swapping each word in the typed branch before handing it to
+`vulkan_sffi_copy_to_buffer_u32`, then running the spec with
+`SIMPLE_VK_IMAGE_UPLOAD=u32`:
+
+```
+x places every source pixel at its own destination ... expected 16 to equal 0
+x composites a single-pixel image ... expected 406354175 to equal 4286068760
+x composites a FULL-SURFACE image ... expected 4096 to equal 0
+x paints two composites in one frame in painter order ... expected 32 to equal 0
+7 examples, 4 failures
+```
+
+Every pixel of every payload mismatches. Reverted, the same command reports
+`7 examples, 0 failures`, and the DEFAULT byte path reports `7 examples, 0
+failures` as well -- the byte-fallback equivalence the task asked for.
+
+Two examples correctly stayed GREEN under sabotage, and both are meant to: the
+outside-the-edge check only inspects untouched ground pixels, and the evidence
+example asserts WHICH LANE ran, not what it wrote. An oracle that went red on
+all seven would have been testing less precisely, not more.
+
 ## Origin of the full-surface composites
 
 `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl:597`
