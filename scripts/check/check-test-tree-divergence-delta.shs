@@ -30,22 +30,140 @@ set -u
 
 SELF=check-test-tree-divergence-delta
 
+# --- no-silent-exit + no-orphan invariant (2026-09-12) ----------------------
+# Two defects, one trap. (a) The old trap was `rm -rf "$work"` on EXIT INT TERM
+# and printed NOTHING, so a `timeout 900` kill ended this helper with empty
+# stdout and no verdict — indistinguishable, to a caller grepping for one, from
+# a run still in progress. (b) The guard child ran in the FOREGROUND, so when
+# the wrapper was killed the child kept running detached: measured 2026-09-12,
+# `timeout 900` returned 144 while the guard's git processes carried on
+# consuming the host. The child pid is now tracked and signalled.
+VERDICT_EMITTED=0
+child_pid=""
+cleanup() {
+    cl_status=${1:-$?}
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ -n "$child_pid" ]; then
+        # Signal the child's whole PROCESS GROUP, not just the child. run_side
+        # launches the guard under job control (`set -m`), so the child is a
+        # process-group leader and `-PID` reaches its descendants too — the
+        # guard's own git/awk children, which are what actually kept running
+        # after `timeout 900` on 2026-09-12. Plain `kill PID` is the fallback
+        # for a shell that did not grant the job its own group.
+        kill -TERM -"$child_pid" 2>/dev/null || kill -TERM "$child_pid" 2>/dev/null
+        wait "$child_pid" 2>/dev/null
+        child_pid=""
+    fi
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked"
+        cl_status=2
+    fi
+    [ -n "${cleanup_extra:-}" ] && rm -rf $cleanup_extra
+    exit "$cl_status"
+}
+trap 'cl_t=$?; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
+
 die() {
+    VERDICT_EMITTED=1
     status="$1"; shift
     echo "$SELF: ERROR: $*" >&2
     echo "$SELF: ERROR — nothing was checked"
     exit "$status"
 }
 
+SELF_PATH=$0
+case "$SELF_PATH" in /*) ;; *) SELF_PATH="$(pwd)/$SELF_PATH" ;; esac
+
+if [ "${1:-}" = "--selftest" ]; then
+    # Fixture: the real helper, run against a FAKE guard that forks a long-lived
+    # child. SIGTERM the helper; the fake guard's child must be gone and the
+    # last stdout line must be the ERROR verdict. This replays the 2026-09-12
+    # orphan (exit 144, children still running) and the silent-exit it hid.
+    st_root=$(mktemp -d "${TMPDIR:-/tmp}/ttd_delta_selftest.XXXXXX") || die 2 "mktemp failed"
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+    export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+    fx="$st_root/fx"
+    mkdir -p "$fx/scripts/check" || die 2 "selftest mkdir failed"
+    ( cd "$fx" && git init -q . && : > scripts/check/keep && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m fixture ) \
+        || die 2 "selftest fixture commit failed"
+    fxref=$( cd "$fx" && git rev-parse HEAD )
+    cat > "$fx/fake_guard.shs" <<'FAKE'
+#!/bin/sh
+sleep 300 &
+echo $! > "$FAKE_CHILD_PIDFILE"
+wait
+FAKE
+    pidfile="$st_root/childpid"
+    outfile="$st_root/delta.out"
+    ( cd "$fx" && FAKE_CHILD_PIDFILE="$pidfile" \
+        TEST_TREE_DIVERGENCE_DELTA_GUARD="$fx/fake_guard.shs" \
+        TTD_DELTA_SELFTEST_CHILD=1 \
+        exec sh "$SELF_PATH" "$fxref" "$fxref" > "$outfile" 2>/dev/null ) &
+    delta_pid=$!
+    i=0
+    while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+    [ -s "$pidfile" ] || { rm -rf "$st_root"; die 2 "selftest: fake guard never started a child"; }
+    grandchild=$(cat "$pidfile")
+    kill -TERM "$delta_pid" 2>/dev/null
+    wait "$delta_pid" 2>/dev/null
+    st_fail=0
+    i=0
+    while kill -0 "$grandchild" 2>/dev/null && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+    if kill -0 "$grandchild" 2>/dev/null; then
+        kill -KILL "$grandchild" 2>/dev/null
+        echo "$SELF: selftest: FAIL (1) orphan-free termination — child $grandchild survived SIGTERM" >&2
+        st_fail=$((st_fail + 1))
+    else
+        echo "$SELF: selftest: PASS (1) orphan-free termination (guard child reaped on SIGTERM)"
+    fi
+    last=$(tail -1 "$outfile" 2>/dev/null)
+    case "$last" in
+        "$SELF: ERROR — nothing was checked"*)
+            echo "$SELF: selftest: PASS (2) a killed run still emits the ERROR verdict" ;;
+        *)
+            echo "$SELF: selftest: FAIL (2) killed run emitted no verdict — got: '$last'" >&2
+            st_fail=$((st_fail + 1)) ;;
+    esac
+    rm -rf "$st_root"
+    unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+    [ "$st_fail" -eq 0 ] || die 2 "selftest FAILED ($st_fail fixture(s))"
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — 2 selftest fixture(s) checked, 0 failures (no delta computed in --selftest mode)"
+    exit 0
+fi
+
 [ $# -eq 2 ] || die 2 "usage: $SELF <BASE> <NEW> (both commit-ish)"
 BASE_REF="$1"
 NEW_REF="$2"
+
+# Selftest runs before every real delta and is fatal (~1s). The guard invoked
+# below runs its own fixtures the same way.
+if [ "${TTD_DELTA_SELFTEST_CHILD:-0}" != "1" ]; then
+
+
+    st_out=$(TTD_DELTA_SELFTEST_CHILD=1 sh "$SELF_PATH" --selftest 2>&1)
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || die 2 "selftest failed (exit $st_rc): $(printf '%s' "$st_out" | tail -1)"
+fi
 
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
 cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
 
-GUARD="$toplevel/scripts/check/check-test-tree-divergence.shs"
+# TEST_TREE_DIVERGENCE_DELTA_GUARD is a selftest-only override (see --selftest
+# above). Normal runs always use the in-tree guard.
+GUARD="${TEST_TREE_DIVERGENCE_DELTA_GUARD:-$toplevel/scripts/check/check-test-tree-divergence.shs}"
 [ -f "$GUARD" ] || die 2 "guard script missing: $GUARD"
 
 git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null \
@@ -55,7 +173,7 @@ git rev-parse --verify --quiet "${NEW_REF}^{commit}" >/dev/null \
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence_delta.XXXXXX") \
     || die 2 "mktemp failed"
-trap 'rm -rf "$work"' EXIT INT TERM
+cleanup_extra="$work"
 
 # Pin the guard script, baseline, and allowlist ONCE for both runs. All three
 # live in the shared working copy, which concurrent sessions mutate; without
@@ -80,9 +198,17 @@ GUARD="$work/guard.shs"
 # Sets: <name>_rc, and writes $work/<name>.out / .err / .offenders / .verdict
 run_side() {
     name="$1"; sref="$2"
+    # Backgrounded on purpose: `wait` is interruptible, so a SIGTERM to this
+    # helper reaches cleanup(), which signals the child. A foreground child
+    # would be left running (the 2026-09-12 orphan).
+    set -m
     TEST_TREE_DIVERGENCE_OUT="$work/$name.offenders" \
-        sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err"
+        sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err" &
+    child_pid=$!
+    set +m
+    wait "$child_pid"
     rc=$?
+    child_pid=""
     [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] \
         || die 2 "guard errored (exit $rc) at $name=$sref — cannot determine offender list; stderr: $(tail -1 "$work/$name.err" 2>/dev/null)"
     verdict=$(tail -1 "$work/$name.out")
@@ -103,6 +229,7 @@ run_side new  "$NEW_REF"
 # Guard green at NEW: nothing to escape — the range is clean regardless of BASE.
 if [ "$new_rc" -eq 0 ]; then
     echo "$SELF: guard is PASS at NEW ($NEW_REF); no escape needed"
+    VERDICT_EMITTED=1
     echo "$SELF: PASS — 0 pre-existing offender(s), 0 introduced by this range"
     exit 0
 fi
@@ -115,6 +242,7 @@ if [ "$base_rc" -eq 0 ]; then
     [ "$n_intro" -gt 0 ] || { n_intro="?"; names="(offender-category change — see $work/new.err; verdict: $(cat "$work/new.verdict"))"; }
     echo "$SELF: guard is PASS at BASE but FAIL at NEW — this range introduced the red" >&2
     sed 's/^/  + /' "$work/introduced.txt" >&2
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — $n_intro newly introduced: $names"
     exit 1
 fi
@@ -123,6 +251,7 @@ fi
 if ! cmp -s "$work/base.offenders" "$work/new.offenders"; then
     comm -13 "$work/base.offenders" "$work/new.offenders" > "$work/introduced.txt"
     n_intro=$(wc -l < "$work/introduced.txt" | tr -d ' ')
+    VERDICT_EMITTED=1
     if [ "$n_intro" -gt 0 ]; then
         names=$(tr '\n' ' ' < "$work/introduced.txt")
         echo "$SELF: offender list changed between BASE and NEW:" >&2
@@ -141,6 +270,7 @@ if ! cmp -s "$work/base.verdict" "$work/new.verdict"; then
     echo "$SELF: diverged lists identical but FAIL verdicts differ — an offender CATEGORY (mirror-only / stale-allowlist / stale-baseline) changed in this range:" >&2
     echo "  BASE: $(cat "$work/base.verdict")" >&2
     echo "  NEW:  $(cat "$work/new.verdict")" >&2
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — offender categories changed between BASE and NEW"
     exit 1
 fi
@@ -162,5 +292,6 @@ cp "$work/base.offenders" "$keep" 2>/dev/null || keep="(failed to write $keep)"
 echo "$SELF: pre-existing red is identical at BASE and NEW; this range introduces nothing"
 echo "$SELF: pre-existing diverged-offender list saved to $keep — RECORD IT (commit message or tracking bug) before landing"
 echo "$SELF: base verdict: $(cat "$work/base.verdict")"
+VERDICT_EMITTED=1
 echo "$SELF: PASS — $n_pre pre-existing offender(s), 0 introduced by this range"
 exit 0
