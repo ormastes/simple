@@ -20,6 +20,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    simple_web_layout_clear_render_degraded,
     simple_web_layout_render_budget_floor_ms,
     simple_web_layout_restore_render_budget_floor_ms,
     simple_web_layout_set_render_budget_floor_ms
@@ -611,15 +612,107 @@ fn _simple_web_layout_draw_ir_with_degraded_retry(
     simple_web_layout_restore_render_budget_floor_ms(saved_floor)
     retried
 
-fn _simple_web_layout_render_html_engine2d_execution(
-    html: text, width: i32, height: i32, backend_name: text,
+# --- Steady-frame document pipeline cache ---------------------------------
+#
+# Parse, style, layout and Draw IR build re-ran on EVERY frame with no cache:
+# on the native-readback lane that is ~10 ms of an ~18 ms steady frame at
+# 900x760 (doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md).
+# Nothing about those four stages depends on the frame number, so a frame whose
+# document, viewport and animation clock are unchanged may reuse the composed
+# result outright. Painting is NOT cached — the composition is re-executed on
+# the backend every frame, so damage, device state and readback are untouched.
+#
+# One entry, held in a 0-or-1 element array because a module-level `var` of a
+# class type has no sentinel value. The key is every input that can change the
+# composed document at this funnel; the html source is compared by VALUE rather
+# than digested, because a per-frame sha256 over multi-KB markup in the
+# interpreter would itself cost more than the pipeline it replaces.
+var _web_doc_cache_entry: [SimpleWebLayoutDrawIrResult] = []
+var _web_doc_cache_key: text = ""
+var _web_doc_cache_html: text = ""
+var _web_doc_cache_hits: i32 = 0
+var _web_doc_cache_misses: i32 = 0
+var _web_doc_cache_last_hit: bool = false
+var _web_doc_cache_last_pipeline_us: i64 = 0
+
+pub fn web_document_cache_drain():
+    """Drop the cached document. Call when a font set or any other input the
+    key does not name changes; a drain only ever costs a recompose."""
+    _web_doc_cache_entry = []
+    _web_doc_cache_key = ""
+    _web_doc_cache_html = ""
+    _web_doc_cache_hits = 0
+    _web_doc_cache_misses = 0
+    _web_doc_cache_last_hit = false
+    _web_doc_cache_last_pipeline_us = 0
+
+pub fn web_document_cache_hit() -> bool:
+    """Did the most recent render reuse the cached document pipeline?"""
+    _web_doc_cache_last_hit
+
+pub fn web_document_cache_hit_count() -> i32:
+    _web_doc_cache_hits
+
+pub fn web_document_cache_miss_count() -> i32:
+    _web_doc_cache_misses
+
+pub fn web_document_pipeline_ms() -> i64:
+    """Wall-clock ms the most recent render spent in parse+style+layout+Draw IR
+    build. On a hit this is the lookup cost only."""
+    _web_doc_cache_last_pipeline_us / 1000
+
+fn _web_document_cache_key(
+    width: i32, height: i32, animation_time_ms: i64, retry_degraded: bool,
+    scroll_y: i32, html_len_key: i32
+) -> text:
+    (
+        width.to_text() + "x" + height.to_text() + ";t=" +
+        animation_time_ms.to_text() + ";retry=" + (if retry_degraded: "1" else: "0") +
+        ";scroll=" + scroll_y.to_text() +
+        ";floor=" + simple_web_layout_render_budget_floor_ms().to_text() +
+        # No device-scale or font-set term: `vector_fonts` is a hardcoded
+        # `true` at every entry this funnel reaches
+        # (simple_web_layout_render_html_draw_ir_result_with_images and its
+        # at_time siblings), and no device-scale input reaches the compose at
+        # all. Naming env vars nothing reads would be false coverage; a font
+        # set that IS swapped at runtime must call web_document_cache_drain().
+        ";budget=" + _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_WEB_RENDER_BUDGET_MS")) +
+        ";len=" + html_len_key.to_text()
+    )
+
+# Frames carrying per-frame inputs the key does not name bypass the cache
+# entirely and behave exactly as before.
+fn _web_document_cache_eligible(
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> bool:
+    animation_instances.len() == 0 and image_resources.len() == 0
+
+fn _simple_web_layout_draw_ir_cached(
+    html: text, width: i32, height: i32,
     animation_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance],
     image_resources: [SimpleOsHostGpuImageResource],
     retry_degraded: bool
-) -> SimpleWebLayoutEngine2DExecutionResult:
-    val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
-    val layout_result = if retry_degraded:
+) -> SimpleWebLayoutDrawIrResult:
+    val start_us = _fast_clock.now_micros()
+    val eligible = _web_document_cache_eligible(animation_instances, image_resources)
+    val key = if eligible:
+        _web_document_cache_key(width, height, animation_time_ms, retry_degraded, 0, html.len())
+    else:
+        ""
+    if eligible and _web_doc_cache_entry.len() == 1 and key == _web_doc_cache_key and html == _web_doc_cache_html:
+        _web_doc_cache_hits = _web_doc_cache_hits + 1
+        _web_doc_cache_last_hit = true
+        # The latch is cleared by starting a render, which a hit skips; the
+        # cached result is only ever a non-degraded one (see below).
+        simple_web_layout_clear_render_degraded()
+        _web_doc_cache_last_pipeline_us = _fast_clock.now_micros() - start_us
+        return _web_doc_cache_entry[0]
+    _web_doc_cache_last_hit = false
+    if eligible:
+        _web_doc_cache_misses = _web_doc_cache_misses + 1
+    val computed = if retry_degraded:
         _simple_web_layout_draw_ir_with_degraded_retry(
             html, width, height, animation_time_ms, animation_instances,
             image_resources
@@ -629,6 +722,33 @@ fn _simple_web_layout_render_html_engine2d_execution(
             html, width, height, animation_time_ms, animation_instances,
             image_resources
         )
+    # Never cache an exhausted render: its composition is a truncated document
+    # that would then be republished as a complete one on every later frame.
+    if eligible and not computed.render_degraded and not simple_web_layout_last_render_degraded():
+        _web_doc_cache_entry = [computed]
+        _web_doc_cache_key = key
+        _web_doc_cache_html = html
+    else:
+        _web_doc_cache_entry = []
+        _web_doc_cache_key = ""
+        _web_doc_cache_html = ""
+    _web_doc_cache_last_pipeline_us = _fast_clock.now_micros() - start_us
+    computed
+
+fn _simple_web_layout_render_html_engine2d_execution(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource],
+    retry_degraded: bool
+) -> SimpleWebLayoutEngine2DExecutionResult:
+    val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, width, height, animation_time_ms,
+        animation_instances, image_resources, retry_degraded
+    )
+    if _phase_on:
+        print "[web-phase] phase=document elapsed_ms={web_document_pipeline_ms()} cache_hit={web_document_cache_hit()}"
     val _phase_paint_start_us = _fast_clock.now_micros()
     val _phase_execution = _simple_web_layout_execute_draw_ir_composition(
         layout_result.composition, layout_result.material_witness,
@@ -1153,8 +1273,12 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
     # the "seems able but can't" class-selector-drop failure the retry wrapper
     # exists to catch -- see
     # doc/08_tracking/bug/web_render_pixels_entry_bypasses_degraded_retry_2026-08-05.md.
-    val layout_result = _simple_web_layout_draw_ir_with_degraded_retry(
-        html, width, height, -1, [], [])
+    # Through the document cache (which itself applies the degraded-retry
+    # wrapper), not the wrapper directly: this entry is the one the plain
+    # browser_renderer pixel path resolves to, so leaving it outside the cache
+    # would leave the steady frame recomposing the document every frame.
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, width, height, -1, [], [], true)
     if (
         web_gpu_paint_enabled() and
         web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
