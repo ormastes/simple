@@ -1,0 +1,120 @@
+# @cover src/compiler/99.loader/provider_call_boundary_v1.spl 0%
+"""
+## Purpose and audience
+
+Purpose: pin the typed call boundary that must validate a call site's declared
+signature digest against the admitted provider catalog entry BEFORE any
+dispatch is permitted.  Audience: loader and aspect-dynload engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/99.loader/provider_call_boundary_v1_spec.spl`.
+2. Every scenario must pass; a failure is a regression in call admission.
+
+## Compatibility and limitations
+
+The catalog entry is the in-tree `ProviderAdmissionReceiptV1` produced by
+`compiler.loader.provider_admission`; no duplicate descriptor type is
+introduced and no provider is loaded or called.  A match yields a typed
+dispatch permit carrying the existing `ProviderExecutionTicketV1`; proving a
+real payload executes is explicitly out of scope for this pass.
+"""
+
+use std.spec.step
+use compiler.loader.provider_admission.state.{
+    ProviderAdmissionReceiptV1, ProviderEffectPolicyV1, ProviderModeV1}
+use compiler.loader.provider_call_boundary_v1.*
+
+
+val ARCHIVE_DIGEST: text = "a".repeat(64)
+val RECEIPT_DIGEST: text = "b".repeat(64)
+val ABI_DIGEST: text = "c".repeat(64)
+val DEP_DIGEST: text = "d".repeat(64)
+
+
+fn fixture_receipt(provider: text, effect_owner: text) -> ProviderAdmissionReceiptV1:
+    ProviderAdmissionReceiptV1(provider, "pkg.aspect.a", ARCHIVE_DIGEST,
+        RECEIPT_DIGEST, ABI_DIGEST, [DEP_DIGEST], ProviderModeV1.pure_simple,
+        ProviderEffectPolicyV1(effect_owner, false), true, false)
+
+
+describe "Typed provider call boundary":
+    it "dispatches when the declared signature digest matches the catalog entry":
+        step("Verify: match -> dispatch")
+        val receipt = fixture_receipt("prov.aspect.a", "prov.aspect.a")
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.a",
+            symbol: "advice_around_v1",
+            abi_digest: ABI_DIGEST)
+
+        val admitted = provider_call_admit_v1(receipt, signature)
+        expect(admitted.is_ok()).to_equal(true)
+        val permit = admitted.unwrap()
+        expect(permit.symbol).to_equal("advice_around_v1")
+        expect(permit.abi_digest).to_equal(ABI_DIGEST)
+        expect(permit.ticket.provider_identity).to_equal("prov.aspect.a")
+        expect(permit.ticket.package_identity).to_equal("pkg.aspect.a")
+        expect(permit.ticket.archive_digest).to_equal(ARCHIVE_DIGEST)
+        expect(permit.ticket.effect_owner_identity).to_equal("prov.aspect.a")
+
+    it "refuses dispatch when the declared signature digest differs":
+        step("Verify: mismatch -> refusal")
+        val receipt = fixture_receipt("prov.aspect.a", "prov.aspect.a")
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.a",
+            symbol: "advice_around_v1",
+            abi_digest: "c".repeat(63) + "d")
+
+        val refused = provider_call_admit_v1(receipt, signature)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal(PROVIDER_CALL_REFUSED_ABI_MISMATCH_V1)
+
+    it "refuses dispatch when the call site names a different provider":
+        step("Verify: provider identity mismatch -> refusal")
+        val receipt = fixture_receipt("prov.aspect.a", "prov.aspect.a")
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.b",
+            symbol: "advice_around_v1",
+            abi_digest: ABI_DIGEST)
+
+        val refused = provider_call_admit_v1(receipt, signature)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal(PROVIDER_CALL_REFUSED_IDENTITY_MISMATCH_V1)
+
+    it "fails closed on a malformed digest even when both sides agree":
+        step("Verify: malformed digest -> refusal, not an equality shortcut")
+        val malformed = "not-a-digest"
+        val receipt = ProviderAdmissionReceiptV1("prov.aspect.a", "pkg.aspect.a",
+            ARCHIVE_DIGEST, RECEIPT_DIGEST, malformed, [DEP_DIGEST],
+            ProviderModeV1.pure_simple,
+            ProviderEffectPolicyV1("prov.aspect.a", false), true, false)
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.a",
+            symbol: "advice_around_v1",
+            abi_digest: malformed)
+
+        val refused = provider_call_admit_v1(receipt, signature)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal(PROVIDER_CALL_REFUSED_MALFORMED_DIGEST_V1)
+
+    it "refuses an unnamed call symbol":
+        step("Verify: empty symbol -> refusal")
+        val receipt = fixture_receipt("prov.aspect.a", "prov.aspect.a")
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.a", symbol: "", abi_digest: ABI_DIGEST)
+
+        val refused = provider_call_admit_v1(receipt, signature)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal(PROVIDER_CALL_REFUSED_EMPTY_SYMBOL_V1)
+
+    it "refuses dispatch when the admitted effect owner is not the provider":
+        step("Verify: effect-owner disagreement -> refusal")
+        val receipt = fixture_receipt("prov.aspect.a", "prov.shadow.b")
+        val signature = ProviderCallSignatureV1(
+            provider_identity: "prov.aspect.a",
+            symbol: "advice_around_v1",
+            abi_digest: ABI_DIGEST)
+
+        val refused = provider_call_admit_v1(receipt, signature)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal(PROVIDER_CALL_REFUSED_EFFECT_OWNER_V1)
