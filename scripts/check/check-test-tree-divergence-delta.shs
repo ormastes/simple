@@ -40,6 +40,17 @@ SELF=check-test-tree-divergence-delta
 # consuming the host. The child pid is now tracked and signalled.
 VERDICT_EMITTED=0
 child_pid=""
+
+# kill_tree <pid> — SIGTERM pid and every descendant, depth first. Used when
+# the process-group kill is unavailable (no job control on a tty-less shell).
+kill_tree() {
+    kt_pid="$1"
+    for kt_child in $(pgrep -P "$kt_pid" 2>/dev/null); do
+        kill_tree "$kt_child"
+    done
+    kill -TERM "$kt_pid" 2>/dev/null
+}
+
 cleanup() {
     cl_status=${1:-$?}
     trap - EXIT HUP INT TERM QUIT PIPE
@@ -50,7 +61,14 @@ cleanup() {
         # guard's own git/awk children, which are what actually kept running
         # after `timeout 900` on 2026-09-12. Plain `kill PID` is the fallback
         # for a shell that did not grant the job its own group.
-        kill -TERM -"$child_pid" 2>/dev/null || kill -TERM "$child_pid" 2>/dev/null
+        # dash refuses job control without a controlling tty ("can't access
+        # tty; job control turned off"), so on a tty-less Linux harness the
+        # child is NOT a group leader and the group kill fails. The recursive
+        # pgrep walk is the fallback for exactly that host, so orphan-freedom
+        # does not depend on `set -m` succeeding. Both paths are fixtured.
+        if [ "${TTD_DELTA_NO_PGKILL:-0}" = "1" ] || ! kill -TERM -"$child_pid" 2>/dev/null; then
+            kill_tree "$child_pid"
+        fi
         wait "$child_pid" 2>/dev/null
         child_pid=""
     fi
@@ -104,42 +122,52 @@ sleep 300 &
 echo $! > "$FAKE_CHILD_PIDFILE"
 wait
 FAKE
-    pidfile="$st_root/childpid"
-    outfile="$st_root/delta.out"
-    ( cd "$fx" && FAKE_CHILD_PIDFILE="$pidfile" \
-        TEST_TREE_DIVERGENCE_DELTA_GUARD="$fx/fake_guard.shs" \
-        TTD_DELTA_SELFTEST_CHILD=1 \
-        exec sh "$SELF_PATH" "$fxref" "$fxref" > "$outfile" 2>/dev/null ) &
-    delta_pid=$!
-    i=0
-    while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
-    [ -s "$pidfile" ] || { rm -rf "$st_root"; die 2 "selftest: fake guard never started a child"; }
-    grandchild=$(cat "$pidfile")
-    kill -TERM "$delta_pid" 2>/dev/null
-    wait "$delta_pid" 2>/dev/null
     st_fail=0
-    i=0
-    while kill -0 "$grandchild" 2>/dev/null && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
-    if kill -0 "$grandchild" 2>/dev/null; then
-        kill -KILL "$grandchild" 2>/dev/null
-        echo "$SELF: selftest: FAIL (1) orphan-free termination — child $grandchild survived SIGTERM" >&2
-        st_fail=$((st_fail + 1))
-    else
-        echo "$SELF: selftest: PASS (1) orphan-free termination (guard child reaped on SIGTERM)"
-    fi
-    last=$(tail -1 "$outfile" 2>/dev/null)
-    case "$last" in
-        "$SELF: ERROR — nothing was checked"*)
-            echo "$SELF: selftest: PASS (2) a killed run still emits the ERROR verdict" ;;
-        *)
-            echo "$SELF: selftest: FAIL (2) killed run emitted no verdict — got: '$last'" >&2
-            st_fail=$((st_fail + 1)) ;;
-    esac
+    st_n=0
+    # Both kill paths are exercised: the process-group kill (what a shell with
+    # job control gives us) and the recursive pgrep walk (what a tty-less dash
+    # falls back to). A fixture that only ever proved the first would claim
+    # orphan-freedom on a host where it cannot hold.
+    for st_mode in pgkill fallback; do
+        st_n=$((st_n + 1))
+        pidfile="$st_root/childpid.$st_mode"
+        outfile="$st_root/delta.$st_mode.out"
+        if [ "$st_mode" = "fallback" ]; then st_nopg=1; else st_nopg=0; fi
+        ( cd "$fx" && FAKE_CHILD_PIDFILE="$pidfile" \
+            TEST_TREE_DIVERGENCE_DELTA_GUARD="$fx/fake_guard.shs" \
+            TTD_DELTA_SELFTEST_CHILD=1 TTD_DELTA_NO_PGKILL="$st_nopg" \
+            exec sh "$SELF_PATH" "$fxref" "$fxref" > "$outfile" 2>/dev/null ) &
+        delta_pid=$!
+        i=0
+        while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+        [ -s "$pidfile" ] || { rm -rf "$st_root"; die 2 "selftest: fake guard never started a child ($st_mode)"; }
+        grandchild=$(cat "$pidfile")
+        kill -TERM "$delta_pid" 2>/dev/null
+        wait "$delta_pid" 2>/dev/null
+        i=0
+        while kill -0 "$grandchild" 2>/dev/null && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+        if kill -0 "$grandchild" 2>/dev/null; then
+            kill -KILL "$grandchild" 2>/dev/null
+            echo "$SELF: selftest: FAIL ($st_n) orphan-free termination [$st_mode] — child $grandchild survived SIGTERM" >&2
+            st_fail=$((st_fail + 1))
+        else
+            echo "$SELF: selftest: PASS ($st_n) orphan-free termination [$st_mode] (guard child reaped on SIGTERM)"
+        fi
+        last=$(tail -1 "$outfile" 2>/dev/null)
+        st_n=$((st_n + 1))
+        case "$last" in
+            "$SELF: ERROR — nothing was checked"*)
+                echo "$SELF: selftest: PASS ($st_n) a killed run still emits the ERROR verdict [$st_mode]" ;;
+            *)
+                echo "$SELF: selftest: FAIL ($st_n) killed run emitted no verdict [$st_mode] — got: '$last'" >&2
+                st_fail=$((st_fail + 1)) ;;
+        esac
+    done
     rm -rf "$st_root"
     unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
     [ "$st_fail" -eq 0 ] || die 2 "selftest FAILED ($st_fail fixture(s))"
     VERDICT_EMITTED=1
-    echo "$SELF: PASS — 2 selftest fixture(s) checked, 0 failures (no delta computed in --selftest mode)"
+    echo "$SELF: PASS — 4 selftest fixture(s) checked, 0 failures (no delta computed in --selftest mode)"
     exit 0
 fi
 
@@ -201,7 +229,7 @@ run_side() {
     # Backgrounded on purpose: `wait` is interruptible, so a SIGTERM to this
     # helper reaches cleanup(), which signals the child. A foreground child
     # would be left running (the 2026-09-12 orphan).
-    set -m
+    set -m 2>/dev/null || true
     TEST_TREE_DIVERGENCE_OUT="$work/$name.offenders" \
         sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err" &
     child_pid=$!

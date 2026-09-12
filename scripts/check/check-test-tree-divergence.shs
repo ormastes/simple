@@ -274,6 +274,35 @@ run_selftest() {
         *) st_check no "(4) empty pair table ERRORs" "got: $st_v3" ;;
     esac
 
+    # (5) --base half-landed scan: one leg edited, twin untouched and still
+    # divergent. This fixture also pins the BSD-awk trap that made the scan
+    # ERROR on macOS for every --base run (a newline-separated pair table
+    # cannot be passed through `awk -v`; it is read from a file instead).
+    fx3="$st_root/fx3"
+    mkdir -p "$fx3/scripts/check" "$fx3/test/01_canon/sub" "$fx3/test/shadow/sub" || die 2 "selftest mkdir failed"
+    printf 'v1\n' > "$fx3/test/01_canon/sub/a_spec.spl"
+    printf 'v1\n' > "$fx3/test/shadow/sub/a_spec.spl"
+    : > "$fx3/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx3" && git init -q . && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m base ) \
+        || die 2 "selftest fixture3 commit failed"
+    fx3base=$( cd "$fx3" && git rev-parse HEAD )
+    printf 'v2 canon only\n' > "$fx3/test/01_canon/sub/a_spec.spl"
+    printf 'q:sub/a_spec.spl\n' > "$fx3/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx3" && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m 'edit one leg' ) \
+        || die 2 "selftest fixture3 commit2 failed"
+    fx3new=$( cd "$fx3" && git rev-parse HEAD )
+    st_v4=$( cd "$fx3" && TEST_TREE_DIVERGENCE_PAIRS="q:test/01_canon:test/shadow" \
+        TEST_TREE_DIVERGENCE_OUT="$st_root/fx4.offenders" TTD_SELFTEST_CHILD=1 \
+        sh "$SELF_PATH" --ref "$fx3new" --base "$fx3base" 2>/dev/null | tail -1 )
+    case "$st_v4" in
+        *"half-landed: 1 leg-edit(s) checked, 1 half-landed"*)
+            st_check ok "(5) --base half-landed scan reports the untouched divergent twin" ;;
+        *)
+            st_check no "(5) --base half-landed scan" "got: $st_v4" ;;
+    esac
+
     rm -rf "$st_root"
     # Do not leak the fixture git environment into the real scan below.
     unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
@@ -288,7 +317,7 @@ if [ "${TTD_SELFTEST_CHILD:-0}" != "1" ]; then
     run_selftest
     if [ "$selftest_only" -eq 1 ]; then
         VERDICT_EMITTED=1
-        echo "$SELF: PASS — 4 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
+        echo "$SELF: PASS — 5 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
         exit 0
     fi
 elif [ "$selftest_only" -eq 1 ]; then
@@ -575,16 +604,23 @@ if [ -n "$ref" ] && [ -n "$base" ]; then
     # leg itself no longer exists at the tip (deleted in the range): the old
     # `git diff --quiet "$ref:$f" ...` failed there and recorded a half-landed
     # offender, and so does the `!(f in oid)` branch below.
-    hl_counts=$(awk -F'\t' -v PAIRS="$pairs_raw" -v OUT="$work/half_landed.txt" '
-        NR == FNR { oid[$1] = $2; next }
+    # The pair table is passed as a FILE, never `-v PAIRS=...`: it is newline
+    # separated and BSD awk rejects a literal newline in a -v assignment
+    # ("awk: newline in string"), which made this scan ERROR on every --base
+    # run on macOS.
+    printf '%s\n' "$pairs_raw" > "$work/pairs.txt"
+    hl_counts=$(awk -F'\t' -v OUT="$work/half_landed.txt" '
+        FNR == 1 { fileno++ }
+        fileno == 1 {
+            if ($0 == "") next
+            np++
+            split($0, fld, ":")
+            pc[np] = fld[2]; ps[np] = fld[3]
+            next
+        }
+        fileno == 2 { oid[$1] = $2; next }
         { if ($0 != "") { n_range++; range[n_range] = $0; inrange[$0] = 1 } }
         END {
-            np = split(PAIRS, plines, "\n")
-            for (i = 1; i <= np; i++) {
-                if (plines[i] == "") continue
-                split(plines[i], fld, ":")
-                pc[i] = fld[2]; ps[i] = fld[3]
-            }
             checked = 0; half = 0
             for (k = 1; k <= n_range; k++) {
                 f = range[k]
@@ -610,7 +646,7 @@ if [ -n "$ref" ] && [ -n "$base" ]; then
             close(OUT)
             print checked " " half
         }
-    ' "$ref_index" "$work/range_files.txt")
+    ' "$work/pairs.txt" "$ref_index" "$work/range_files.txt")
     hr=$?
     [ "$hr" -eq 0 ] || die 2 "half-landed scan failed (status $hr) for $base..$ref"
     set -- $hl_counts
