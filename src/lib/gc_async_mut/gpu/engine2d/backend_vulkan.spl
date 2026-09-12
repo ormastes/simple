@@ -398,6 +398,15 @@ class VulkanBackend:
     font_atlas_cpu_glyph_height: i64
     font_atlas_cpu_pixels: [u32]
     font_atlas_cpu_build_count: i64   # host coverage-atlas rasters actually performed
+    # Attribution for every mid-frame flush: the LAST caller site tag, printed
+    # by the `[vk-order] flush` trace. Without it `submits_per_frame=17` names a
+    # count and no cause, and the wrong file gets edited.
+    last_flush_site: text
+    pending_flush_site: text
+    image_source_pool_key: [i64]      # parallel to `image_source_pool`; producer
+                                      # identity+generation key, 0 = unkeyed slot
+    pending_image_key: i64            # one-shot key for the NEXT image composite
+    image_source_key_hit_count: i64   # uploads skipped because the key matched
     midframe_flush_count: i64         # CUMULATIVE `_flush_pending_compute` calls since
                                       # create/shutdown — NOT reset per frame. One frame that
                                       # ends in a single finalize contributes exactly 1.
@@ -558,6 +567,11 @@ class VulkanBackend:
             font_atlas_cpu_glyph_height: -1,
             font_atlas_cpu_pixels: [],
             font_atlas_cpu_build_count: 0,
+            last_flush_site: "untagged",
+            pending_flush_site: "untagged",
+            image_source_pool_key: [],
+            pending_image_key: 0,
+            image_source_key_hit_count: 0,
             midframe_flush_count: 0,
             font_descriptor_pool: [],
             font_params_pool: [],
@@ -595,6 +609,63 @@ fn _vulkan_submission_is_proven(backend: VulkanBackend) -> bool:
     if not backend.initialized: return false
     if backend.observed_device_submit_count <= 0: return false
     backend.observed_device_fence_count >= backend.observed_device_submit_count
+
+val VK_IMAGE_INLINE_KEY_MAX_PIXELS: i64 = 64
+
+fn inline_image_key(pixels: [u32], pixel_count: i64, w: i32, h: i32,
+                    opacity_milli: i32, composite_mode: i32) -> i64:
+    """Digest a SMALL image's own words, once per draw.
+
+    The real page draws 76 one-pixel composites per frame (measured on
+    `web_catalog/overview.html`); each was a full upload of four bytes plus an
+    SFFI crossing, every frame, forever. For an image this size the content IS
+    cheap enough to be its own identity -- which is why the caller applies a
+    hard pixel bound before calling here, and never digests a large image.
+
+    `opacity_milli` and `composite_mode` are folded in even though they do not
+    change the SOURCE bytes: they are free here, and folding them keeps the key
+    a strictly finer partition than the buffer's contents.
+    """
+    var hash: i64 = 1469598103934665603
+    hash = _fnv_mix_i64(hash, _i64(w))
+    hash = _fnv_mix_i64(hash, _i64(h))
+    hash = _fnv_mix_i64(hash, _i64(opacity_milli))
+    hash = _fnv_mix_i64(hash, _i64(composite_mode))
+    var i: i64 = 0
+    while i < pixel_count:
+        hash = _fnv_mix_i64(hash, _i64(pixels[i].to_i32()))
+        i = i + 1
+    if hash == 0: 1 else: hash
+
+fn text_blit_image_key(text_val: text, color: u32, font_size: i32, w: i32, h: i32) -> i64:
+    """FNV-1a over a text blit's IDENTITY -- never over its pixels.
+
+    The raster `text_blit_buffer` produces is a pure function of these five
+    values (it carries no position), so this walks the string once per draw
+    instead of digesting the 4 * w * h bytes it would cost to hash the raster.
+    A per-frame pixel digest would cost more than the upload it saves, which is
+    exactly why the key must come from the producer.
+
+    Non-zero by construction: 0 is reserved for "no key", and a hash that landed
+    on it would silently disable the cache for that one string.
+    """
+    var hash: i64 = 1469598103934665603
+    hash = _fnv_mix_i64(hash, _i64(color.to_i32()))
+    hash = _fnv_mix_i64(hash, _i64(font_size))
+    hash = _fnv_mix_i64(hash, _i64(w))
+    hash = _fnv_mix_i64(hash, _i64(h))
+    for ch in text_val.chars():
+        hash = _fnv_mix_i64(hash, ch.to_i64())
+    if hash == 0: 1 else: hash
+
+fn _fnv_mix_i64(hash: i64, value: i64) -> i64:
+    """Fold all 8 bytes of `value` into an FNV-1a accumulator."""
+    var h = hash
+    var shift: i64 = 0
+    while shift < 64:
+        h = (h ^ ((value >> shift) & 255)) * 1099511628211
+        shift = shift + 8
+    h
 
 fn vulkan_submitted_framebuffer_handle(backend: VulkanBackend) -> i64:
     """Framebuffer handle safe to present directly, or 0 when unproven."""
@@ -844,6 +915,7 @@ impl RenderBackend for VulkanBackend:
         self.pending_compute_count = 0
         self.image_source_pool = []
         self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
         self.image_source_pool_device_identity = 0
         self.image_source_pool_session_generation = 0
         self.image_source_pool_surface_identity = 0
@@ -888,7 +960,7 @@ impl RenderBackend for VulkanBackend:
         # when unknown device completion forces the GPU-resource quarantine
         # path to return early below.
         self.image_upload_scratch = []
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("shutdown")
         if pending_status < 0:
             self.completion_unknown = true
         if self.completion_unknown:
@@ -1313,6 +1385,14 @@ impl RenderBackend for VulkanBackend:
         val text_buf = text_blit_buffer(text_val, color, 0x00000000u32, font_size)
         if text_buf.is_empty():
             return
+        # The FIRST in-tree producer of an image key. This blit's pixels are a
+        # pure function of (text, color, font_size, w, h) -- the raster carries
+        # no position -- so the key is computed ONCE per draw call from those
+        # five, never from the pixels: the hash walks the string, not the
+        # 4 * w * h words it would cost to digest the raster. Identical labels
+        # (a repeated table header, a re-rendered frame) therefore upload once.
+        self.hint_image_key(text_blit_image_key(text_val, color, font_size,
+            text_buf.width, text_buf.height))
         self.draw_image_blend(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me _draw_image_composite_native(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
@@ -1329,6 +1409,13 @@ impl RenderBackend for VulkanBackend:
         rc
 
     me _draw_image_composite_native_impl(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
+        # Consume the producer key FIRST, before any validation return. A key
+        # names THIS call's pixels; leaving it armed on a rejected composite
+        # (clipped out, bad geometry, uninitialized) would hand this identity to
+        # the next, unrelated image -- which would then be stamped with it and
+        # skip a genuine upload on a later frame.
+        val image_key = self.pending_image_key
+        self.pending_image_key = 0
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
             vulkan_image_reason_note(VK_IMG_R_STATE)
             return 0
@@ -1366,6 +1453,28 @@ impl RenderBackend for VulkanBackend:
                 return 0
 
         val src_size = pixel_count * 4
+        # An image small enough that hashing it costs less than uploading it
+        # gets a key even with no producer. The bound is what makes this honest:
+        # at or below `VK_IMAGE_INLINE_KEY_MAX_PIXELS` words the digest is
+        # cheaper than the staging pack plus the SFFI crossing it replaces, and
+        # above it the pixels are never touched -- a per-frame digest of a large
+        # image would cost more than the upload it saves.
+        val effective_key = if image_key != 0:
+            image_key
+        elif pixel_count <= VK_IMAGE_INLINE_KEY_MAX_PIXELS:
+            inline_image_key(pixels, pixel_count, src_w, src_h, opacity_milli, composite_mode)
+        else:
+            0
+        if effective_key != 0 and self.frame_batching_enabled:
+            val keyed = self._acquire_keyed_image_source(src_size, effective_key)
+            if keyed > 0:
+                # The slot already holds these exact pixels from an earlier
+                # frame (or an earlier draw in this one). No upload at all --
+                # this is the whole point of the key.
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("image-upload-skipped key={effective_key} bytes={src_size} src={keyed}")
+                return self._finish_image_composite(keyed, x, y, dst_w, dst_h, src_w, src_h,
+                    opacity_milli, composite_mode)
         val _t_alloc = vulkan_timing_now_us()
         var d_src = if self.frame_batching_enabled:
             self._acquire_image_source(src_size)
@@ -1376,7 +1485,7 @@ impl RenderBackend for VulkanBackend:
             # A full source pool means all slots are still dependencies of the
             # current command buffer.  Flush once, then retry acquisition so a
             # large image-heavy frame can continue without a CPU fallback.
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_draw_image_composite_native_impl")
             if flushed < 0:
                 return -1
             if flushed > 0:
@@ -1403,6 +1512,7 @@ impl RenderBackend for VulkanBackend:
         if upload_ok:
             self.image_source_upload_count = self.image_source_upload_count + 1
             self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+            self._record_image_source_key(d_src, effective_key)
             return self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
                 opacity_milli, composite_mode)
         if vulkan_image_upload_u32_requested():
@@ -1452,6 +1562,7 @@ impl RenderBackend for VulkanBackend:
             return 0
         self.image_source_upload_count = self.image_source_upload_count + 1
         self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+        self._record_image_source_key(d_src, effective_key)
         self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
             opacity_milli, composite_mode)
 
@@ -1530,7 +1641,7 @@ impl RenderBackend for VulkanBackend:
             self.mark_cpu_fallback("image-copy-completion-unknown")
             self.completion_unknown = true
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("draw_image")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1606,7 +1717,7 @@ impl RenderBackend for VulkanBackend:
         """
         if self.completion_unknown:
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("submit_batch")
         if pending_status < 0:
             self.completion_unknown = true
             return false
@@ -1678,7 +1789,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("_present_device")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1739,7 +1850,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("finalize_compute_frame_no_readback")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1797,6 +1908,19 @@ impl RenderBackend for VulkanBackend:
         # Every caller of this is a frame boundary (present / device present /
         # finalize), so the accumulated draw-call union retires with it.
         self._clear_frame_damage()
+
+    me hint_image_key(key: i64):
+        """Name the identity+generation of the NEXT image composite's pixels.
+
+        Producer-supplied, computed ONCE where the image is produced or decoded
+        -- never a per-frame digest of `pixels`, which would cost more than the
+        upload it saves. A non-zero key promises: same key => byte-identical
+        pixels. Zero (the default) means "unknown", and every unkeyed image
+        uploads exactly as before. Consumed once, by
+        `_draw_image_composite_native_impl`; see `hint_damage` for the same
+        arm-then-consume shape.
+        """
+        self.pending_image_key = key
 
     me hint_damage(x: i64, y: i64, w: i64, h: i64):
         """Publish the destination rect of the draw call about to dispatch.
@@ -2077,7 +2201,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("present")
         if trace_present:
             vulkan_order_trace("present flush_us={time_now_unix_micros() - pt0}")
         if pending_status <= 0:
@@ -2178,7 +2302,7 @@ impl RenderBackend for VulkanBackend:
         # reflected an earlier (or empty) frame. Flush here too, exactly as
         # present() does, so read_pixels()/read_pixels_with_source() are
         # correct regardless of whether present() was ever called.
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("read_pixels_with_source")
         if pending_status < 0:
             self.completion_unknown = true
             return engine2d_readback([], "completion_unknown")

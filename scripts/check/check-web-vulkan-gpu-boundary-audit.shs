@@ -37,6 +37,7 @@
 #   sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs [--selftest]
 #     [--page <html>] [--width N] [--height N] [--frames N]
 #     [--backend vulkan|cpu_simd] [--timeout SECONDS] [--out-dir DIR]
+#     [--upload-mode u32|bytes]
 #     [--classify-only <log>]
 
 set -u
@@ -58,6 +59,13 @@ TIMEOUT=1200
 OUT_DIR="build/perf/gpu_audit"
 SELFTEST_ONLY=0
 CLASSIFY_ONLY=""
+# Typed (`u32`) vs packed-byte staging upload. It changes only HOW the bytes
+# cross the SFFI boundary, never how MANY uploads or submits a frame performs,
+# so a `bytes` run is comparable on the COUNTS this gate gates on (ms are not).
+# It exists because an interpreter binary built before `rt_vulkan_copy_to_buffer_u32`
+# landed aborts the render with `unknown extern function`, which this gate would
+# otherwise report only as "no [audit-frame] record".
+UPLOAD_MODE=u32
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -70,6 +78,7 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT="${2:-}"; shift ;;
         --out-dir) OUT_DIR="${2:-}"; shift ;;
         --classify-only) CLASSIFY_ONLY="${2:-}"; shift ;;
+        --upload-mode) UPLOAD_MODE="${2:-}"; shift ;;
         *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
     esac
     shift
@@ -144,7 +153,7 @@ LOG="$OUT_DIR/$tag.log"
 # Binary identity is recorded with every run: other sessions replace this path
 # mid-session, and a timing number without it is unattributable.
 ident=$(stat -f '%z %m' "$SIMPLE_BIN" 2>/dev/null || stat -c '%s %Y' "$SIMPLE_BIN" 2>/dev/null)
-echo "binary=$SIMPLE_BIN identity_before=$ident"
+echo "binary=$SIMPLE_BIN identity_before=$ident upload_mode=$UPLOAD_MODE"
 
 # Portable bounded run: macOS ships no coreutils `timeout`.
 run_bounded() {
@@ -174,8 +183,8 @@ SIMPLE_2D_BACKEND="$BACKEND" \
 SIMPLE_2D_BACKEND_STRICT=1 \
 SIMPLE_EXECUTION_MODE=interpreter \
 SIMPLE_VK_READBACK=native \
-SIMPLE_VK_IMAGE_UPLOAD=u32 \
-SIMPLE_VK_RECT_UPLOAD=u32 \
+SIMPLE_VK_IMAGE_UPLOAD="$UPLOAD_MODE" \
+SIMPLE_VK_RECT_UPLOAD="$UPLOAD_MODE" \
 SIMPLE_VK_TIMING=1 \
 SIMPLE_VK_ORDER_TRACE=1 \
 SIMPLE_VK_FONT_OVERLAP=1 \
