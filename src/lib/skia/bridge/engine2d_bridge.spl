@@ -11,10 +11,15 @@
 # the already-recorded op list and issues equivalent Engine2D draw calls.
 #
 # Mapping:
-#   DrawRect  + Fill paint     -> Engine2D.draw_rect_filled  (mapped)
-#   DrawImage                  -> Engine2D.draw_image        (mapped)
-#   everything else            -> counted as skipped (TODO), never silently
-#                                 dropped (see BridgeReport.skipped)
+#   DrawRect  + Fill paint     -> Engine2D.draw_rect_filled  (mapped_rects)
+#   DrawRect  + Stroke paint   -> Engine2D.draw_rect          (mapped_rects)
+#   DrawPaint                  -> whole-canvas draw_rect_filled (mapped_rects)
+#   DrawRRect                  -> Engine2D.draw_rounded_rect  (mapped_rects)
+#   DrawOval                   -> Engine2D.draw_ellipse[_filled] (mapped_ovals)
+#   DrawImage                  -> Engine2D.draw_image         (mapped_images)
+#   DrawPath / DrawText / DrawTextBlob / DrawPoints
+#                              -> counted as skipped, never silently dropped
+#                                 (see BridgeReport.skipped)
 #
 # Color model: SkColor is a packed i64 ARGB (0xAARRGGBB); Engine2D pixels are
 # u32 ARGB in the same layout, so the conversion is a direct .to_u32() cast.
@@ -32,11 +37,12 @@ use std.skia.entity.image.{SkImage}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 # ----------------------------------------------------------------------------
-# Report describing how many ops were mapped vs skipped (left as TODO).
+# Report describing how many ops were mapped vs skipped.
 # ----------------------------------------------------------------------------
 class BridgeReport:
     mapped_rects: i32
     mapped_images: i32
+    mapped_ovals: i32
     skipped: i32
 
 # ----------------------------------------------------------------------------
@@ -92,24 +98,53 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
     val eng = Engine2D.create_with_backend(width, height, backend_name)
     var mapped_rects = 0
     var mapped_images = 0
+    var mapped_ovals = 0
     var skipped = 0
 
     for op in picture.ops:
         if op.kind == SkPictureOpKind.DrawRect:
-            # draw_line is ALSO recorded as DrawRect (with a Stroke paint).
-            # Only Fill rects map cleanly to a filled rect; Stroke / lines
-            # fall through to the skipped (TODO) counter.
+            val rect = op.rect
+            val x = rect.left.to_i64() as i32
+            val y = rect.top.to_i64() as i32
+            val w = (rect.right - rect.left).to_i64() as i32
+            val h = (rect.bottom - rect.top).to_i64() as i32
+            val color = sk_color_to_u32(op.paint.color)
             if op.paint.style == SkPaintStyle.Fill:
-                val rect = op.rect
-                val x = rect.left.to_i64() as i32
-                val y = rect.top.to_i64() as i32
-                val w = (rect.right - rect.left).to_i64() as i32
-                val h = (rect.bottom - rect.top).to_i64() as i32
-                val color = sk_color_to_u32(op.paint.color)
                 eng.draw_rect_filled(x, y, w, h, color)
-                mapped_rects = mapped_rects + 1
             else:
-                skipped = skipped + 1
+                # Stroke (and draw_line, which records as a Stroke DrawRect)
+                # maps to the outline primitive, not a filled block.
+                eng.draw_rect(x, y, w, h, color)
+            mapped_rects = mapped_rects + 1
+        elif op.kind == SkPictureOpKind.DrawPaint:
+            # DrawPaint fills the entire canvas with the paint colour.
+            eng.draw_rect_filled(0, 0, width, height, sk_color_to_u32(op.paint.color))
+            mapped_rects = mapped_rects + 1
+        elif op.kind == SkPictureOpKind.DrawRRect:
+            val rect = op.rect
+            val x = rect.left.to_i64() as i32
+            val y = rect.top.to_i64() as i32
+            val w = (rect.right - rect.left).to_i64() as i32
+            val h = (rect.bottom - rect.top).to_i64() as i32
+            # Engine2D takes a single corner radius; skia carries rx/ry, so the
+            # larger of the two is used.
+            var radius = op.rx
+            if op.ry > radius:
+                radius = op.ry
+            eng.draw_rounded_rect(x, y, w, h, radius.to_i64() as i32, sk_color_to_u32(op.paint.color))
+            mapped_rects = mapped_rects + 1
+        elif op.kind == SkPictureOpKind.DrawOval:
+            val rect = op.rect
+            val cx = ((rect.left + rect.right) / 2.0).to_i64() as i32
+            val cy = ((rect.top + rect.bottom) / 2.0).to_i64() as i32
+            val rx = ((rect.right - rect.left) / 2.0).to_i64() as i32
+            val ry = ((rect.bottom - rect.top) / 2.0).to_i64() as i32
+            val color = sk_color_to_u32(op.paint.color)
+            if op.paint.style == SkPaintStyle.Fill:
+                eng.draw_ellipse_filled(cx, cy, rx, ry, color)
+            else:
+                eng.draw_ellipse(cx, cy, rx, ry, color)
+            mapped_ovals = mapped_ovals + 1
         elif op.kind == SkPictureOpKind.DrawImage:
             if val img = op.image:
                 val pixels = sk_image_to_u32_pixels(img)
@@ -122,14 +157,15 @@ fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, heig
             else:
                 skipped = skipped + 1
         else:
-            # TODO: map DrawRRect / DrawPath / DrawTextBlob / DrawLine(stroke) /
-            # DrawOval / DrawPoints to the closest Engine2D primitive. For now
-            # they are counted, not silently dropped, so callers see the gap.
+            # DrawPath, DrawText/DrawTextBlob and DrawPoints have no Engine2D
+            # primitive to map onto (paths need a rasteriser, text needs the font
+            # stack, and SkPictureOp carries no point list). They are counted,
+            # never silently dropped, so callers see the remaining gap.
             skipped = skipped + 1
 
     eng.present()
     val pixels = eng.read_pixels()
-    val report = BridgeReport(mapped_rects: mapped_rects, mapped_images: mapped_images, skipped: skipped)
+    val report = BridgeReport(mapped_rects: mapped_rects, mapped_images: mapped_images, mapped_ovals: mapped_ovals, skipped: skipped)
     BridgeRenderResult(pixels: pixels, report: report)
 
 # ----------------------------------------------------------------------------

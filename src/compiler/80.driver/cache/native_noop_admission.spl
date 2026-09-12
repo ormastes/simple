@@ -286,12 +286,30 @@ fn native_noop_publish_fault_built_v1(
     request: NativeNoopRequestV1, source_paths: [text],
     built_output_path: text, fault: text
 ) -> text:
+    # Refuse an unidentifiable request exactly as native_noop_admit_v1 does.
+    # native_noop_request_v1 returns identity "" when the build cannot be
+    # identified (empty cache root, output path, environment digest or
+    # invocation identity), and the read side already answers "request-invalid"
+    # for it. The write side did not: it went on to publish under
+    # "{root}//generations", one identity-less path on which every
+    # unidentifiable build on the host collides -- so the next such build could
+    # be handed a CURRENT pointer minted for a different one. Verified
+    # 2026-09-12 that this path was genuinely reachable and did NOT fail at the
+    # mkdir: with identity "" the publish ran to "receipt-invalid", i.e. past
+    # directory creation and past the publication lock.
+    if request.root == "" or request.identity == "" or request.output_path == "":
+        return "request-invalid"
     val output_fingerprint = native_noop_fingerprint_v1(built_output_path)
     if output_fingerprint == "":
         return "output-missing"
     val root = "{request.root}/{request.identity}"
     if not rt_dir_create_all("{root}/generations"):
-        return "storage-unavailable"
+        # Name the directory. A bare "storage-unavailable" cost a Stage-2
+        # bootstrap investigation an entire run on 2026-09-12: the reason
+        # reached the operator as "native no-op receipt publication failed:
+        # storage-unavailable" with nothing to attribute it to, and the empty
+        # identity it was assumed to mean was disproven only by rerunning.
+        return "storage-unavailable:{root}/generations"
     val lock = file_lock("{root}/publication.lock", 5)
     if lock < 0:
         return "publication-lock-unavailable"
