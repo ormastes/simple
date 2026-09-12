@@ -331,3 +331,82 @@ specs run green through the seed's interpreter
 `darwin_link_tool_resolution_spec.spl` 7/7 passed after the error builder was rewritten
 to print literal-first/values-bare. That is the only tier available while the seed build
 is red; it does NOT exercise native codegen, which is where the defect lives.
+
+## Run 12 (2026-09-13) — duplicate rt_process_* twin symbols fixed; first macOS seed link since 920b7c2dcb3
+
+Worktree `agent-afb02377e5630cde7`, base `eede7583047` (PR #718 merged), virgin evidence
+root (`.simple/storage/build/bootstrap` removed first), invocation
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`.
+
+**The run-11 blocker is closed.** Eleven `rt_process_owned_v3_*` /
+`rt_process_observation_v4_*` symbols were defined as strong `#[no_mangle]` exports in
+BOTH `src/compiler_rust/runtime/src/process_observation_v4_twins.rs` and
+`src/runtime/runtime_process_owned.c` (both landed by `920b7c2dcb3`). PR #718 gates the
+eleven Rust twins behind the off-by-default cargo feature `process-rust-twin`, so exactly
+one lane links; the C provider stays the default. The three `test_force_*` hooks are not
+gated — their C counterparts exist only under `#ifdef RT_PROCESS_OBSERVATION_V4_TESTING`
+and never collided.
+
+Closing evidence is this lane's OWN log, the artifact the bug record named:
+`.simple/storage/build/bootstrap/logs/aarch64-apple-darwin/rust-seed-build.log` —
+`Finished 'bootstrap' profile [optimized] target(s) in 2m 36s`, and
+`grep -c 'duplicate symbol'` = **0** (run 11: 12 lines, exit 101, stages reached 0).
+Independently, a standalone GPU-feature seed built clean:
+`cargo build --release --bin simple --features vulkan,metal,simple-compiler/vulkan-graphics`
+exit 0, binary `/Users/ormastes/simple/build/cargo-f52/release/simple`,
+sha256 `ccb387d05a4e595f0fa74c8cbceda14bb00242a6805ad888047bd0d8cbb73cbb`, 39,415,592 B;
+`nm -gU` shows exactly one definition per formerly-duplicated symbol.
+`cargo check --release --bin simple` (default/Linux feature set) exit 0, and the Rust lane
+is genuinely selectable: `cargo check -p simple-runtime --features process-rust-twin` and
+the same with `--tests` both exit 0.
+
+`scripts/setup/build-gpu-seed.shs --verify` exits 1 on one probe,
+`FAIL — test/01_unit/lib/sffi/wffi_into_bytes_spec.spl(rc=1: 5 examples, 5 failures)`.
+That failure is byte-identical on the PRE-fix Sep-12 seed
+(`build/cargo-r2/release/simple`, 39,528,776 B), so it is pre-existing and unrelated.
+
+Linux was not run: this is a macOS host. `scripts/check/check-seed-builds-push.shs` is the
+Linux gate for the same property (and per `.claude/rules/vcs.md` it is not push-wired).
+
+Guards on the landed range `cb4f8d82c59..eede7583047`, foreground, `timeout 900`:
+conflict-markers PASS (2 files), tree-size PASS (base 136750 files), c-runtime-compiles
+PASS (145 files, 0 errors, 6 external-dep skips), runtime-api-regression PASS (3210
+symbols, 0 removed), rt-dual-implementation ratchet PASS (2523 symbols, 0 new, 0 stale),
+guard-wiring PASS (1692 guards, 0 new unwired), no-revert PASS (2 files), divergence-delta
+PASS — 3217 pre-existing offender(s), 0 introduced by this range.
+
+### Stage 2 verdict (verbatim) — the nil-error-payload failure RECURRED
+
+Runs 2-6 are WARM restarts of the same evidence root (each logs
+`Seed/runtime current (input content hash matches); skipping Rust rebuild.`); only run 1
+was virgin-root, and it is the source of the seed evidence above. Runs 2-5 died on a
+SECOND, independent macOS blocker filed as
+`doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_cmp_symlink_2026-09-13.md`
+(Homebrew's `cmp` is a symlink; `bootstrap_stage3_compare_bind` rejects it, and the
+documented `BOOTSTRAP_STAGE3_COMPARE_TOOL` override is provably insufficient because
+`bootstrap_stage3_compare_files` re-resolves the ambient `cmp` on every comparison).
+Run 6 got past it with `env PATH=/usr/bin:$PATH BOOTSTRAP_STAGE3_COMPARE_TOOL=/usr/bin/cmp`
+and is the first macOS lane since `920b7c2dcb3` to reach Stage 2 at all:
+
+```
+Stage 2: admitted parent → bootstrap_main.spl
+  Stage 2: running bootstrap compiler sanity
+  real log:  .../stage3/aarch64-apple-darwin/stage2-sanity.env.frontend-failure.log
+  2 diagnostic line(s) found there. First 5:
+    | candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+    | error: in-process native-build: LLVM native linking failed: Linking failed: no error
+      payload from link_to_native (rendered nil); see the unconditional [linker-wrapper]
+      prints for the failing site
+PASS — 1 check(s), stage stage2 failed (exit 2) and said why
+  warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+**Stages reached: 1 (Stage 2 built and was admitted as parent, then its sanity failed).**
+No Stage 2 candidate was admitted, so Stage 3 was NOT attempted and there is no candidate
+path/sha to record; nothing was deployed. **This is the first end-to-end verification of
+`stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md` post-#717, and the answer
+is that the failure RECURRED, byte-for-byte the same nil-payload message** — that record
+should move from "committed but unverified" to "verified still failing".
+

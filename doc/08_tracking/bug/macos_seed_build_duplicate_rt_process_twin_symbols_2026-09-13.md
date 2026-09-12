@@ -1,6 +1,18 @@
 # macOS seed build fails: 11 `rt_process_*` symbols are defined in BOTH the Rust and C runtimes (2026-09-13)
 
-Status: **OPEN — blocks every macOS bootstrap lane, including Stage 2 verification.**
+Status: **FIXED 2026-09-13 by PR #718 (`eede7583047`).** The eleven Rust twins are now
+behind the off-by-default cargo feature `process-rust-twin`, so exactly one lane (the C
+provider) links by default. Closing evidence, from the bootstrap lane's OWN log — the
+artifact this record named: `.simple/storage/build/bootstrap/logs/aarch64-apple-darwin/
+rust-seed-build.log` now says `Finished 'bootstrap' profile [optimized] target(s) in
+2m 36s` with `grep -c 'duplicate symbol'` = **0**, and the same is true of all four Rust
+link profiles this lane runs (seed, native-all, runtime-nolto, compiler-backfill: 0/0/0/0).
+The macOS lane now reaches Stage 2; the NEXT blockers are
+`bootstrap_stage3_comparator_rejects_homebrew_cmp_symlink_2026-09-13.md` and the
+recurrence of `stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`.
+See `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` run 12.
+
+Historical record follows.
 Not a regression of any `.spl` change; it is in the Rust seed + C runtime.
 
 ## Verdict, verbatim
