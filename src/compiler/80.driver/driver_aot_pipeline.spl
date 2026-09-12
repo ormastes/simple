@@ -150,7 +150,24 @@ impl CompilerDriver:
         log_phase("aot:format:start")
         val format = self.ctx.options.output_format
         log_phase("aot:format:done")
-        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        # bootstrap_compile_context_to_native_local emits exactly ONE object,
+        # hardcoded as `<output>.app.cli.bootstrap_main.o`, and links only that.
+        # It is the "compile the bootstrap CLI" path, so SIMPLE_BOOTSTRAP=1 is
+        # not on its own enough to route here: the Stage-2 admission probe sets
+        # that variable while building hello_world.spl, and the resulting link
+        # failed with `ld.lld: error: undefined symbol: __simple_main`
+        # (measured 2026-09-13). Require that the bootstrap CLI really is part
+        # of this compile, the same predicate and the same ctx.sources identity
+        # that driver_pipeline_lowering.spl applies to the matching MIR gate.
+        # Deliberately duplicated rather than shared: CompileContext lives in
+        # the fenced driver_types.spl. Both sites must move together.
+        var aot_bootstrap_entry_requested = false
+        var aot_bootstrap_entry_idx = 0
+        while aot_bootstrap_entry_idx < self.ctx.sources.len():
+            if self.ctx.sources[aot_bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
+                aot_bootstrap_entry_requested = true
+            aot_bootstrap_entry_idx = aot_bootstrap_entry_idx + 1
+        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             log_phase("aot:bootstrap_native_context_dispatch")
             return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
         if driver_output_format_is_smf(format):
