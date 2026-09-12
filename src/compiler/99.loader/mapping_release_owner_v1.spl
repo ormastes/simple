@@ -1,0 +1,212 @@
+"""Physical executable-mapping release gate.
+
+This owner sits BELOW the logical facet refcount owned by
+`std.common.aspect_pack` (`APK_FC_BOUND` / `APK_FC_QUIESCING` /
+`APK_FC_UNLOADED`, `apk_facet_pin_v1`, `apk_facet_unpin_v1`).  It does not
+restate that state machine; it supplies the piece
+`src/compiler/99.loader/module_loader_compat.spl:585-590` records as missing:
+
+    "It does NOT claim executable unmap.  ... no executable mapping receipt
+     exists ... executable aspects requires a typed mapping receipt plus an
+     existing-direction owner callback that invokes mapper unmap after final
+     unpin."
+
+The owner never maps or unmaps memory itself.  `mapping_release_request_v1`
+only decides whether the separate mapper gate is permitted to unmap, and
+`mapping_release_record_outcome_v1` folds back the outcome the mapper reports.
+Keeping the decision and the syscall in different owners is what
+`doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md`
+("L6 aspect dynload quiescence capped handoff") requires when it forbids
+treating logical retirement as permission to unmap and asks for separate
+loader/mapper activation gates.
+
+Every transition is a bounded operation on one caller-held owner value.  There
+is no module-global registry and no minted identity: the identity is the
+existing `SharedExecRecord` the mapper already produced, and the caller names
+the generation it believes it is acting on, so a stale caller is rejected
+rather than silently applied.  A reported unmap failure leaves the identity
+retained and counted, never falsely reusable and never lost.
+
+The owner makes no thread-safety claim.  The loader's existing lifecycle gate
+is expected to serialize creation and every transition, exactly as it already
+serializes `ModuleFacetRefV1`.
+"""
+
+use compiler.loader.object_mapper.{SharedExecRecord}
+
+# Lifecycle states.  Deliberately distinct constants from `APK_FC_*`: those
+# describe a logical facet binding, these describe one physical mapping.
+val MAPPING_RELEASE_MAPPED_V1: i64 = 0
+val MAPPING_RELEASE_QUIESCING_V1: i64 = 1
+val MAPPING_RELEASE_RELEASED_V1: i64 = 2
+
+# Refusal reasons.  Every refusal is a no-op on the owner.
+val MAPPING_RELEASE_REFUSED_GENERATION_V1: i64 = 1
+val MAPPING_RELEASE_REFUSED_PINS_OUTSTANDING_V1: i64 = 2
+val MAPPING_RELEASE_REFUSED_NOT_QUIESCING_V1: i64 = 3
+val MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1: i64 = 4
+val MAPPING_RELEASE_REFUSED_NOT_MAPPED_V1: i64 = 5
+val MAPPING_RELEASE_REFUSED_NO_PIN_V1: i64 = 6
+
+
+struct MappingReleasePermitV1:
+    """A one-attempt permission for the mapper gate to unmap this address.
+
+    Holding a permit is not a release: the mapper must report the outcome back
+    through `mapping_release_record_outcome_v1` before the owner records the
+    mapping as gone.
+    """
+    owner_id: text
+    symbol: text
+    address: i64
+    size: i64
+    generation: i64
+    attempt: i64
+
+
+class MappingReleaseOwnerV1:
+    """Reference-semantic holder so a copy cannot fork the pin count."""
+    record: SharedExecRecord
+    state: i64
+    pins: i64
+    failed_unmaps: i64
+    release_attempts: i64
+
+
+fn mapping_release_owner_new_v1(record: SharedExecRecord) -> MappingReleaseOwnerV1:
+    MappingReleaseOwnerV1(record: record, state: MAPPING_RELEASE_MAPPED_V1,
+        pins: 0, failed_unmaps: 0, release_attempts: 0)
+
+
+fn mapping_release_identity_v1(owner: MappingReleaseOwnerV1) -> SharedExecRecord:
+    owner.record
+
+
+fn mapping_release_state_v1(owner: MappingReleaseOwnerV1) -> i64:
+    owner.state
+
+
+fn mapping_release_pins_v1(owner: MappingReleaseOwnerV1) -> i64:
+    owner.pins
+
+
+fn mapping_release_failed_unmaps_v1(owner: MappingReleaseOwnerV1) -> i64:
+    owner.failed_unmaps
+
+
+fn mapping_release_release_attempts_v1(owner: MappingReleaseOwnerV1) -> i64:
+    owner.release_attempts
+
+
+fn mapping_release_is_released_v1(owner: MappingReleaseOwnerV1) -> bool:
+    owner.state == MAPPING_RELEASE_RELEASED_V1
+
+
+fn _mapping_release_generation_ok_v1(owner: MappingReleaseOwnerV1, generation: i64) -> bool:
+    owner.record.generation == generation
+
+
+fn mapping_release_pin_v1(
+    owner: MappingReleaseOwnerV1, generation: i64
+) -> Result<i64, i64>:
+    """Pin one in-flight call.  New pins are excluded once quiescing begins."""
+    if not _mapping_release_generation_ok_v1(owner, generation):
+        return Err(MAPPING_RELEASE_REFUSED_GENERATION_V1)
+    if owner.state != MAPPING_RELEASE_MAPPED_V1:
+        return Err(MAPPING_RELEASE_REFUSED_NOT_MAPPED_V1)
+    owner.pins = owner.pins + 1
+    Ok(owner.pins)
+
+
+fn mapping_release_unpin_v1(
+    owner: MappingReleaseOwnerV1, generation: i64
+) -> Result<i64, i64>:
+    """Drop one in-flight call.  Reaching zero does not release anything."""
+    if not _mapping_release_generation_ok_v1(owner, generation):
+        return Err(MAPPING_RELEASE_REFUSED_GENERATION_V1)
+    if owner.state == MAPPING_RELEASE_RELEASED_V1:
+        return Err(MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1)
+    if owner.pins <= 0:
+        return Err(MAPPING_RELEASE_REFUSED_NO_PIN_V1)
+    owner.pins = owner.pins - 1
+    Ok(owner.pins)
+
+
+fn mapping_release_begin_quiesce_v1(
+    owner: MappingReleaseOwnerV1, generation: i64
+) -> Result<i64, i64>:
+    """Close the mapping to new pins.  Outstanding pins keep running."""
+    if not _mapping_release_generation_ok_v1(owner, generation):
+        return Err(MAPPING_RELEASE_REFUSED_GENERATION_V1)
+    if owner.state == MAPPING_RELEASE_RELEASED_V1:
+        return Err(MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1)
+    owner.state = MAPPING_RELEASE_QUIESCING_V1
+    Ok(owner.pins)
+
+
+fn mapping_release_request_v1(
+    owner: MappingReleaseOwnerV1, generation: i64
+) -> Result<MappingReleasePermitV1, i64>:
+    """Ask whether the mapper gate may now unmap this address.
+
+    Refused while any pin is outstanding, before quiescence has begun, on a
+    stale generation, and after the mapping has already been released.  A
+    granted permit counts as an attempt so a retry after a failed unmap is
+    visible in the accounting.
+    """
+    if not _mapping_release_generation_ok_v1(owner, generation):
+        return Err(MAPPING_RELEASE_REFUSED_GENERATION_V1)
+    if owner.state == MAPPING_RELEASE_RELEASED_V1:
+        return Err(MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1)
+    if owner.state != MAPPING_RELEASE_QUIESCING_V1:
+        return Err(MAPPING_RELEASE_REFUSED_NOT_QUIESCING_V1)
+    if owner.pins > 0:
+        return Err(MAPPING_RELEASE_REFUSED_PINS_OUTSTANDING_V1)
+    owner.release_attempts = owner.release_attempts + 1
+    Ok(MappingReleasePermitV1(
+        owner_id: owner.record.owner_id,
+        symbol: owner.record.symbol,
+        address: owner.record.address,
+        size: owner.record.size,
+        generation: owner.record.generation,
+        attempt: owner.release_attempts))
+
+
+fn mapping_release_record_outcome_v1(
+    owner: MappingReleaseOwnerV1, generation: i64, unmapped: bool
+) -> Result<i64, i64>:
+    """Fold back what the mapper gate actually observed.
+
+    `unmapped == false` retains the identity unchanged and counts the failure,
+    so the mapping stays quiescing and the caller may retry.  The owner never
+    forgets an address it could not prove was unmapped.
+    """
+    if not _mapping_release_generation_ok_v1(owner, generation):
+        return Err(MAPPING_RELEASE_REFUSED_GENERATION_V1)
+    if owner.state == MAPPING_RELEASE_RELEASED_V1:
+        return Err(MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1)
+    if owner.state != MAPPING_RELEASE_QUIESCING_V1:
+        return Err(MAPPING_RELEASE_REFUSED_NOT_QUIESCING_V1)
+    if not unmapped:
+        owner.failed_unmaps = owner.failed_unmaps + 1
+        return Ok(owner.state)
+    owner.state = MAPPING_RELEASE_RELEASED_V1
+    Ok(owner.state)
+
+
+export MAPPING_RELEASE_MAPPED_V1, MAPPING_RELEASE_QUIESCING_V1
+export MAPPING_RELEASE_RELEASED_V1
+export MAPPING_RELEASE_REFUSED_GENERATION_V1
+export MAPPING_RELEASE_REFUSED_PINS_OUTSTANDING_V1
+export MAPPING_RELEASE_REFUSED_NOT_QUIESCING_V1
+export MAPPING_RELEASE_REFUSED_ALREADY_RELEASED_V1
+export MAPPING_RELEASE_REFUSED_NOT_MAPPED_V1
+export MAPPING_RELEASE_REFUSED_NO_PIN_V1
+export MappingReleasePermitV1, MappingReleaseOwnerV1
+export mapping_release_owner_new_v1, mapping_release_identity_v1
+export mapping_release_state_v1, mapping_release_pins_v1
+export mapping_release_failed_unmaps_v1, mapping_release_release_attempts_v1
+export mapping_release_is_released_v1
+export mapping_release_pin_v1, mapping_release_unpin_v1
+export mapping_release_begin_quiesce_v1, mapping_release_request_v1
+export mapping_release_record_outcome_v1
