@@ -74,8 +74,44 @@ The change is a security-critical provenance protocol spanning four files and
 untestable partial port of a fail-closed authority chain is worse than landing
 the measurement. The `/dev/fd` probe above is the part that was missing.
 
-Related, and fixed in the same PR: the stale-ownership-lock half of lane 1 —
-`scripts/check/lib/portable-hardlink-lock.pl` read its process table only from
-`/proc`, so `refine_leader_group_state()` took its documented "macOS opts out"
-path. Now falls back to `ps -axo pid=,ppid=,pgid=,lstart=`, pinned by
-`scripts/check/check-portable-lock-dead-owner-reclaim.shs`.
+## Related: the stale-ownership lock — ATTEMPTED, REVERTED, and why
+
+Same lane, same root shape, and it is **not** a straightforward port either.
+
+`scripts/check/lib/portable-hardlink-lock.pl`'s `proc_table()` reads only
+`/proc`, so on macOS `refine_leader_group_state()` takes its documented
+"macOS opts out" path (`:152`) and can never demote a recycled-leader claim to
+`dead`. A `ps -axo pid=,ppid=,pgid=,lstart=` fallback was written, and it made
+the repo's own `test/01_unit/scripts/portable_process_lock_test.shs` FAIL:
+
+```
+portable-lock: recorded pgid 78063 was recycled by an unrelated process
+               (start-time mismatch); the recorded owner group is positively
+               absent, allowing stale-lock reclaim
+portable process lock test failed: live process group was recovered after
+               start mismatch
+```
+
+That fixture (`:244-269`) plants `owner_start_hex=00` on a claim whose owner is
+**alive and is the group leader**. With a table available, refinement runs, the
+leader's real start != `00`, every member's parent chain leads back into the
+"impostor" set, the re-read matches — and it returns `dead`, reclaiming a lock
+whose owner is still running. That is the two-writers corruption the lock
+exists to prevent, so the change was **reverted rather than shipped**.
+
+The finding is the deliverable: the refinement's safety argument rests on a
+start-time that discriminates a recycled pid, and `ps`'s `lstart` is
+**whole-second** resolution where `/proc` field 22 is clock ticks
+(`portable-hardlink-lock.pl:41-44` says exactly this). A darwin reclaim path
+therefore needs a genuinely different discriminator — e.g. `proc_pidinfo`'s
+start timeval via a tiny helper, or binding the claim to something other than
+the pgid — not a table swap. Until that exists, a dead-owner lock on macOS
+stays unreclaimable and must be removed by hand.
+
+One further trap measured while doing this, recorded so the next attempt does
+not repeat it: a host-generic "start-time of pid" helper must read the SAME
+source the table read. Routing it through `process_snapshot()` looks correct
+and is not — that function prefers `lstart` even on Linux, so on a `/proc`
+host it would compare hex(lstart) against a table's hex(field22), which never
+matches, silently disabling the 2026-08-31 recycled-leader reclaim on every
+Linux host.
