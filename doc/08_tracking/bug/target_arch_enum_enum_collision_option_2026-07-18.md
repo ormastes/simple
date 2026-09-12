@@ -109,3 +109,50 @@ caller's lexical binding instead of a flat global registry.
 SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test --no-session-daemon test/feature/usage/architecture_spec.spl
 => Passed: 25  Failed: 2  (both: parse_target_arch(...).? on the enum-collision path)
 ```
+
+## Re-check 2026-09-12
+
+- Status: CLOSED (2026-09-12) — not reproducible on `3d120a6f9ab5`
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+The exact command in "Verification of current state" above now passes in full:
+
+```
+$ SIMPLE_LIB=src bin/simple test --no-session-daemon test/feature/usage/architecture_spec.spl
+SPEC FILE VERDICT: test/feature/usage/architecture_spec.spl outcome=OK declared>=27 executed=27 passed=27 failed=0 skipped=0 dropped=0
+```
+
+27/27, where this record measured 25/27 with both `parse_target_arch(name).?`
+examples red. The `Option<TargetArch>` + `.?` path is no longer corrupted.
+
+**Important: the collision itself was NOT removed.** Both same-named top-level
+declarations still coexist —
+
+```
+src/compiler/70.backend/backend/backend_selector.spl:26:enum TargetArch:
+src/lib/common/target.spl:1:enum TargetArch:
+```
+
+— so what changed is the interpreter's `Option<T>`/enum boxing resolution, i.e.
+the symptom this record tracked, not the underlying flat-global-registry
+mechanism. The systemic lane
+(`duplicate_type_name_collision_audit_2026-07-17.md`) therefore still owns the
+enum-vs-enum extension this record contributed; closing only this instance.
+
+### Addendum 2026-09-12 — the original attribution was probably wrong
+
+The spec passes today because `expect(parsed.?).to_equal(true)` is in
+**call-argument position**, which is the one position where `.?` really does
+yield a bool on this seed. Bound to a local or returned from a `-> bool`
+function, the same `.?` yields the unwrapped payload — the exact symptom this
+record describes ("instead evaluates to the raw unwrapped enum value") — with no
+same-named enum anywhere in sight. Measured matrix:
+`doc/08_tracking/bug/dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`.
+
+So the collision-audit lane should NOT inherit this as evidence that enum-vs-enum
+registry collisions corrupt `Option<T>`. The enum-vs-enum collision this record
+demonstrated with a synthetic decoy is real and still worth extending the audit
+scan for; the `architecture_spec.spl` failure it was filed from is more likely a
+`.?` lowering defect that happened to be observed in a tree that also had a
+collision. The record's own "What is *not* independently confirmed" section
+already flagged that attribution gap.

@@ -53,3 +53,35 @@ flagged for `--fix-generics`.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the described false-positive deprecation warning no longer fires. Evidence: `bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `14 examples, 0 failures`, zero "Use angle brackets" warnings in output.
+
+## Re-check 2026-09-12
+
+- Status: CLOSED (2026-09-12) — not reproducible on `3d120a6f9ab5`
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+The exact repro command emits zero generics-deprecation warnings:
+
+```
+$ bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl --no-session-daemon
+   | grep -ci "angle brackets|fix-generics|Deprecated syntax for type parameters"
+0
+SPEC FILE VERDICT: test/01_unit/os/libc/libc_string_ctype_spec.spl outcome=OK declared>=14 executed=14 passed=14 failed=0
+```
+
+**Discrimination — the zero is not vacuous.** The lint is still live and still
+fires for genuine bracket-generics on the same binary:
+
+```
+$ cat gen.spl
+fn take(xs: Array[i64]) -> i64:
+    xs.len()
+$ bin/simple run gen.spl
+warning: Deprecated syntax for type parameters
+Use angle brackets: Array<...> instead of Array[...]
+```
+
+So the rule was not deleted or silenced wholesale; it now distinguishes array
+indexing of a `[u8]`-typed variable from generic instantiation, which is the
+first acceptance criterion in this record. The second (`simple migrate
+--fix-generics` never rewriting such indexing) follows from the lint not firing,
+but was not exercised directly — no migrate run was made.
