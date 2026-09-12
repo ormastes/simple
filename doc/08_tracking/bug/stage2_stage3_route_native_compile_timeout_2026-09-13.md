@@ -1,5 +1,7 @@
 # Site 9: Stage 2's Stage-3 route allocates without bound in `native_compile` (killed at 124)
 
+# Site 9: Stage 2's Stage-3 route now times out in `native_compile` (status 124)
+
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-8, `work/bootstrap-full-6-2026-09-12` at `272482747da`,
   run `build/bootstrap-boot8a` (08:11:19 -> 08:33:13, 22m, load ~23-35, `--jobs=10`).
@@ -151,3 +153,16 @@ Two candidate causes, neither verified:
 Discriminate by printing `self.units.keys().len()` and an iteration counter from
 `topological_order`, or by checking whether `pop()` shrinks natively in a fixture
 built by the run-21 candidate (which builds now that site 8 is fixed).
+
+## What is NOT yet known
+
+Whether this is a genuine HANG or merely slower than 180 s. A replay of the gate's exact probe
+with a 2400 s ceiling is the discriminator (`scratchpad/boot8/probe9.sh`, log `probe9.log`,
+`probe9.meta`); its outcome must be recorded here before anyone raises the timeout. Do NOT raise
+`STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` to get an admission until that run says the work
+terminates — a knob that hides a hang is worse than the blocked admission.
+
+If it terminates, this is a performance defect in the pure-Simple native codegen path (2 modules
+taking >3 min), and the honest fix is to make it fast enough, with the timeout raise as an
+explicitly recorded interim. If it does not terminate, it is a hang in `native_compile` and needs
+the same treatment site 8 got: attach, find the loop, measure.

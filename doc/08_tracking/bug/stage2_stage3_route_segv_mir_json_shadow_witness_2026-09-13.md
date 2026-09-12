@@ -11,8 +11,10 @@
   ~40-second witness loop is available on macOS too. The two lanes have
   converged; this is now the single `--stop-after-stage2` blocker on both.
 
-- Status: CAUSE MEASURED / FIXED at the call site (BOOT-8, 2026-09-13) — awaiting the
   admission run that proves it. Was: OPEN.
+
+- Status: **CLOSED / FIXED** (BOOT-8, 2026-09-13), proven by `build/bootstrap-boot8a`.
+  Was: OPEN.
 - Found: bootstrap lane BOOT-7, `work/bootstrap-full-5-2026-09-12` at `592041db98a`
 - Severity: **the current `--stop-after-stage2` admission blocker**, and the successor to
   site 7 (`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, fixed).
