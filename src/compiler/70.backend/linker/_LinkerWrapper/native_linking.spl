@@ -31,7 +31,7 @@ use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
-use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
 use compiler.backend.linker.mold.{find_requested_linker, requested_linker_override, linker_fuse_ld_name}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
@@ -273,7 +273,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Try to find platform linker (mold > lld > ld)
     if trace:
         print "[LINKER] calling find_linker..."
-    val linker_result = find_linker()
+    val linker_result = find_linker_path()
     if trace:
         print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
@@ -291,10 +291,15 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
             print "[LINKER] No direct linker found, falling back to cc"
         return link_native_cc(object_files, output, config)
 
-    val linker_info = linker_result.unwrap()
+    val linker_path = linker_result.unwrap()
     if trace:
         print "[LINKER] linker_info unwrapped"
-    val linker_path = linker_info[0]
+        # BARE, not interpolated with a literal prefix: an interpolation that
+        # contains a nil collapses the WHOLE string to an empty line, which is
+        # exactly how this site stayed unnamed through runs 6-10 (the
+        # `[linker-wrapper]` print below landed as a blank line and every grep
+        # for the tag reported "the print never ran"). A bare value localises.
+        print linker_path
     val execution_linker_path = if os == "macos" or os == "darwin":
         darwin_resolve_link_tool(linker_path)
     else:
@@ -303,7 +308,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         return Err(darwin_link_tool_unresolved_error(linker_path))
     if trace:
         print "[LINKER] got linker_path={linker_path}"
-    val linker_type = linker_info[1]
+    val linker_type = linker_type_for_path(linker_path)
     if trace:
         print "[LINKER] got linker_type"
 
@@ -930,9 +935,19 @@ pub fn darwin_link_tool_unresolved_error(command: text) -> text:
     perfectly-formed message that the caller logged as `nil`. A print cannot be
     laundered by a return-value defect."""
     val path_value = env_get("PATH") ?? ""
+    # Literal line FIRST, then every value BARE on its own line. Measured
+    # 2026-09-13 on the rejected macOS Stage 2 binary: the previous single
+    # `print "[linker-wrapper] {message}"` emitted an EMPTY line, because an
+    # interpolation carrying a nil collapses in full -- so the tag itself
+    # disappeared and greps for `[linker-wrapper]` concluded the print had
+    # never run. Same reasoning as `_collect_failure` in
+    # driver_aot_native_output.spl.
+    print "[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow"
+    print command
+    print darwin_link_tool_trail(command)
+    print path_value
     val message = "darwin-link-tool-unresolved: command=" + command +
         " tried=[" + darwin_link_tool_trail(command) + "] PATH=" + path_value
-    print "[linker-wrapper] {message}"
     message
 
 fn publish_darwin_link_tool_identity(tool_path: text) -> text:
@@ -1020,8 +1035,8 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
     val resolved = find_requested_linker(requested)
     if resolved.is_err():
         return Err(resolved.unwrap_err())
-    val info = resolved.unwrap()
-    Ok("-fuse-ld=" + linker_fuse_ld_name(info[1]))
+    val resolved_path = resolved.unwrap()
+    Ok("-fuse-ld=" + linker_fuse_ld_name(linker_type_for_path(resolved_path)))
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no

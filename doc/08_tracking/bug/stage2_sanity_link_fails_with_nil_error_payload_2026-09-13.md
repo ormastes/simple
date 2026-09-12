@@ -107,3 +107,86 @@ question from the nil payload, and it is now the sole remaining Stage 2 blocker
 on macOS.
 
 Chain: `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` runs 9-10.
+
+## ROOT CAUSE FOUND, 2026-09-13 (run 11 diagnosis) — and run 10's reading of the evidence was wrong
+
+The run-10 section above concludes "the `[linker-wrapper]` half is EMPTY ... Not one
+actual `[linker-wrapper]` line was emitted. The prints PR #702 describes as
+'unconditional' did not run." **That is false, and the method that produced it is the
+lesson.** The print DID run. It rendered as an EMPTY LINE, so a `grep 'linker-wrapper'`
+found nothing and the absence was read as unreachability.
+
+Check it directly on the preserved run-10 log — `grep -n '^$'` on
+`stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional` reports **line 42**,
+which sits immediately before line 43, the `error: in-process native-build:` line. An
+interpolation that carries a nil collapses in FULL, literal prefix included, which is
+exactly what `_collect_failure` (`driver_aot_native_output.spl`) was already written to
+defend against. **Rule: never infer "the print did not run" from a tag grep. Grep for the
+blank line too.**
+
+### The failing site, named
+
+Reproduced by running the rejected candidate DIRECTLY (no bootstrap lane, ~40 s):
+
+```
+SIMPLE_COMPILER_TRACE=1 SDKROOT=... SIMPLE_DARWIN_CLANG=... SIMPLE_DARWIN_LD=... \
+SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_LIB=<worktree>/src \
+  simple.rejected native-build --backend llvm --runtime-bundle core-c-bootstrap \
+  --entry-closure --mode one-binary \
+  scripts/check/cert/redeploy_gate/fixtures/hello_world.spl --output <out>
+```
+
+Trace tail, verbatim:
+
+```
+[LINKER] link_to_native: 34 files, output=...
+[LINKER] os=macos
+[LINKER] smf_inputs=0
+[LINKER] calling link_native_unix...
+[LINKER] link_native_unix: os=macos, arch=aarch64
+[LINKER] calling find_linker...
+[LINKER] find_linker returned, is_err=false
+[LINKER] linker_info unwrapped
+                                  <-- BLANK: the [linker-wrapper] print, collapsed
+[LLVM-LINK] link_to_native returned
+error: ... Linking failed: no error payload from link_to_native (rendered nil); ...
+```
+
+The window between `linker_info unwrapped` and the return contains exactly one exit:
+
+```
+src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+    val linker_info = linker_result.unwrap()
+    val linker_path = linker_info[0]                       # <-- nil here
+    val execution_linker_path = darwin_resolve_link_tool(linker_path)   # -> ""
+    if execution_linker_path == "":
+        return Err(darwin_link_tool_unresolved_error(linker_path))      # nil payload
+```
+
+`find_linker()` was declared `-> Result<(text, LinkerType), text>` (`mold.spl`). Its
+element 0 is the nil. Elimination is tight: `find_mold_path`, `find_lld_path` and
+`find_ld_path` all return **absolute paths that exist** (`which ...` output or a stat'd
+bundled path), and `darwin_resolve_link_tool`'s FIRST step is
+`if file_exists(command): return command` — no subprocess, no PATH. A well-formed
+element could not have reached the unresolved branch. A nil explains the resolution
+failure, the blank print, and the nil payload simultaneously; nothing else explains all
+three.
+
+### Correction to the sibling record
+
+`native_tuple_return_of_texts_yields_nil_2026-09-13.md` was closed as "probably a
+misattribution" on the strength of the same false negative ("run 7's log contains zero
+`[linker-wrapper]` lines, so the error builder was never reached"). Run 7 removed the
+`darwin_resolve_link_tool_report` tuple — a DIFFERENT tuple, downstream of the nil. The
+tuple defect is real; the one that matters is `find_linker`'s.
+
+### Fix
+
+`find_linker()` -> `find_linker_path() -> Result<text, text>`, with
+`linker_type_for_path(path)` recovering the kind; `find_requested_linker` likewise
+returns `Result<text, text>`. `Result<text,text>` + `is_err`/`unwrap` and a plain
+cross-unit `text` return are shapes this same binary's trace proves survive native
+codegen; the tuple element did not. `darwin_link_tool_unresolved_error` now prints the
+literal line first and each value BARE on its own line, so a future nil localises
+instead of erasing the whole diagnostic. Regression spec:
+`test/01_unit/compiler/native/linker_resolution_no_tuple_spec.spl`.

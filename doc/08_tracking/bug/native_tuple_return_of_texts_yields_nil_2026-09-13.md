@@ -88,3 +88,28 @@ lowering. Until then: do not return tuples from functions on the native link pat
 
 - `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` (runs 1-6)
 - PR #690 (the change that exposed this)
+
+## REOPENED 2026-09-13 — the "misattribution" verdict above was itself wrong
+
+The correction at the top rests on one claim: "run 7's frontend failure log contains zero
+`[linker-wrapper]` lines, and `darwin_link_tool_unresolved_error` now prints
+unconditionally — so the error builder was never reached." The premise is a false
+negative. The print RUNS and renders as an **empty line**: an interpolation carrying a
+nil collapses in full, literal tag included. Run 10's preserved log has that blank at
+line 42, immediately before the error. A grep for the tag cannot see it.
+
+The tuple defect is real. What run 7 removed was
+`darwin_resolve_link_tool_report() -> (text, text)`, which sits DOWNSTREAM of the nil and
+was never the carrier. The carrier is `find_linker() -> Result<(text, LinkerType), text>`
+in `src/compiler/70.backend/linker/mold.spl`, read as `linker_info[0]` in
+`native_linking.spl`. Full trace, elimination and fix:
+`doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`
+(section "ROOT CAUSE FOUND, 2026-09-13").
+
+So the original "Suspected shape" paragraph above was correct as written — a tuple
+returned across a function boundary reaching a native caller as nil — and was retracted
+on bad evidence. Status: **CONFIRMED for `(text, enum)` across a `Result` boundary in a
+stage-2 native binary.** Still unknown, and still not isolated to a compiler file:line —
+whether one element or the whole tuple is nil, whether arity or element type matters, and
+where in the native lowering the payload is lost. That isolation needs a mode-matched
+mini reproducer built by the same producer, which is open work.

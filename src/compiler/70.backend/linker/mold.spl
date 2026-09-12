@@ -92,8 +92,26 @@ fn find_ld_path() -> text?:
     else:
         nil
 
-fn find_requested_linker(name: text) -> Result<(text, LinkerType), text>:
-    """Resolve SIMPLE_LINKER override names using the same aliases as the Rust path."""
+fn linker_type_for_path(linker_path: text) -> LinkerType:
+    """Classify a resolved linker executable from its path.
+
+    Exists so the resolver can hand back a plain `text` instead of a
+    `(text, LinkerType)` tuple. See `find_linker_path` for why that matters:
+    the tuple element reached a native caller as `nil` and took the whole
+    macOS Stage 2 link down with it. Classification by path is exactly what
+    the `SIMPLE_LINKER` alias table already did by name, so nothing is lost.
+    """
+    val lowered = linker_path.lower()
+    if lowered.contains("mold"): return LinkerType.Mold
+    if lowered.contains("lld"): return LinkerType.Lld
+    LinkerType.Ld
+
+fn find_requested_linker(name: text) -> Result<text, text>:
+    """Resolve SIMPLE_LINKER override names using the same aliases as the Rust path.
+
+    Returns the linker PATH only. Callers derive the kind with
+    `linker_type_for_path`.
+    """
     val requested = name.trim().lower()
     if requested == "":
         return Err("empty SIMPLE_LINKER override")
@@ -101,19 +119,19 @@ fn find_requested_linker(name: text) -> Result<(text, LinkerType), text>:
     if requested == "mold":
         val mold_path = find_mold_path()
         if mold_path.?:
-            return Ok((mold_path.unwrap(), LinkerType.Mold))
+            return Ok(mold_path.unwrap())
         return Err("SIMPLE_LINKER=mold requested but mold was not found")
 
     if requested == "lld" or requested == "ld.lld" or requested == "lld-link":
         val lld_path = find_lld_path()
         if lld_path.?:
-            return Ok((lld_path.unwrap(), LinkerType.Lld))
+            return Ok(lld_path.unwrap())
         return Err("SIMPLE_LINKER={name} requested but LLD was not found")
 
     if requested == "ld" or requested == "gnu" or requested == "bfd":
         val ld_path = find_ld_path()
         if ld_path.?:
-            return Ok((ld_path.unwrap(), LinkerType.Ld))
+            return Ok(ld_path.unwrap())
         return Err("SIMPLE_LINKER={name} requested but ld was not found")
 
     Err("Unsupported SIMPLE_LINKER value: {name}")
@@ -512,8 +530,8 @@ impl MoldBackend:
         val config = MoldConfig.from_link_config(link_config)
 
         # Try to find a linker in order of preference
-        val (linker_path, found_linker_type) = find_linker()?
-        val linker_type: LinkerType = found_linker_type
+        val linker_path = find_linker_path()?
+        val linker_type: LinkerType = linker_type_for_path(linker_path)
 
         if config.verbose:
             print "[mold] Using linker: {linker_type.to_string()} at {linker_path}"
@@ -526,7 +544,8 @@ impl MoldBackend:
 
     static fn with_config(config: MoldConfig) -> Result<MoldBackend, text>:
         """Create backend with explicit config."""
-        val (linker_path, linker_type) = find_linker()?
+        val linker_path = find_linker_path()?
+        val linker_type = linker_type_for_path(linker_path)
 
         Ok(MoldBackend(
             linker_path: linker_path,
@@ -682,8 +701,27 @@ impl MoldBackend:
 # Helper Functions
 # ============================================================================
 
-fn find_linker() -> Result<(text, LinkerType), text>:
-    """Find an available linker in order of preference."""
+fn find_linker_path() -> Result<text, text>:
+    """Find an available linker in order of preference; returns its PATH.
+
+    This used to be `find_linker() -> Result<(text, LinkerType), text>`. The
+    tuple payload is why it changed. Measured 2026-09-13 on the rejected macOS
+    Stage 2 native binary (`SIMPLE_COMPILER_TRACE=1`, hello-world smoke): the
+    trace reaches `[LINKER] linker_info unwrapped` and then returns an error
+    with NO further trace line, and the unconditional
+    `darwin_link_tool_unresolved_error` print lands as a BLANK LINE -- a
+    collapsed interpolation, i.e. its `command` argument was nil. That command
+    is `linker_info[0]`, element 0 of this tuple. Both `find_mold_path` and
+    `find_lld_path`/`find_ld_path` return ABSOLUTE paths that exist, so
+    `darwin_resolve_link_tool`'s first step (`if file_exists(command): return
+    command`) could not have failed on a well-formed value: only a nil element
+    reaches the unresolved branch. The kind is recovered by
+    `linker_type_for_path`, so no caller loses information.
+
+    `Result<text, text>` is deliberately the shape used here: this binary's own
+    trace proves Result discrimination and a plain `text` return survive native
+    codegen, while the tuple element did not.
+    """
     val requested_linker = requested_linker_override()
     if requested_linker != "":
         return find_requested_linker(requested_linker)
@@ -691,17 +729,17 @@ fn find_linker() -> Result<(text, LinkerType), text>:
     # Try mold first
     val mold_path = find_mold_path()
     if mold_path.?:
-        return Ok((mold_path.unwrap(), LinkerType.Mold))
+        return Ok(mold_path.unwrap())
 
     # Try lld
     val lld_path = find_lld_path()
     if lld_path.?:
-        return Ok((lld_path.unwrap(), LinkerType.Lld))
+        return Ok(lld_path.unwrap())
 
     # Try system ld
     val ld_path = find_ld_path()
     if ld_path.?:
-        return Ok((ld_path.unwrap(), LinkerType.Ld))
+        return Ok(ld_path.unwrap())
 
     Err("No linker found. Please install mold, lld, or ensure ld is in PATH.")
 
@@ -757,6 +795,7 @@ fn mold_post_link_check(output_path: text) -> Result<ElfInspector, text>:
 
 export LinkerError
 export find_requested_linker
+export linker_type_for_path
 export requested_linker_override
 export linker_fuse_ld_name
 export MoldDiagnostic

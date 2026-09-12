@@ -1,0 +1,49 @@
+# The platform-linker resolver must not carry its result in a tuple.
+#
+# Regression for the macOS Stage 2 sanity blocker of 2026-09-13
+# (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md,
+# runs 6-10). `find_linker()` returned `Result<(text, LinkerType), text>` and
+# the caller read element 0 with `linker_info[0]`. In the REJECTED stage-2
+# native binary that element arrived as nil: with
+# `SIMPLE_COMPILER_TRACE=1` the trace reaches `[LINKER] linker_info unwrapped`
+# and then returns, the `[linker-wrapper]` diagnostic lands as a BLANK LINE
+# (a collapsed interpolation, i.e. its argument was nil), and the orchestrator
+# reports `Linking failed: ... rendered nil`.
+#
+# `find_mold_path`/`find_lld_path`/`find_ld_path` all return absolute paths
+# that exist, so `darwin_resolve_link_tool`'s first step (`if file_exists`)
+# could never have failed on a well-formed value -- only a nil reaches the
+# unresolved branch. The resolver therefore hands back a plain `text` and the
+# kind is recovered from the path.
+#
+# This spec pins the replacement contract. It cannot itself reproduce the
+# native miscompilation (that needs a full Stage 2 build); it fences the shape
+# so the tuple cannot come back.
+use compiler.backend.linker.mold.{linker_type_for_path, LinkerType}
+
+describe "platform linker resolution without a tuple":
+    it "classifies mold from its resolved path":
+        expect(linker_type_for_path("/usr/local/bin/mold").to_string())
+            .to_equal(LinkerType.Mold.to_string())
+        expect(linker_type_for_path("/repo/bin/mold/mold-macos-aarch64").to_string())
+            .to_equal(LinkerType.Mold.to_string())
+
+    it "classifies lld from either of its frontends":
+        expect(linker_type_for_path("/usr/bin/ld.lld").to_string())
+            .to_equal(LinkerType.Lld.to_string())
+        expect(linker_type_for_path("/opt/homebrew/bin/lld").to_string())
+            .to_equal(LinkerType.Lld.to_string())
+
+    it "falls back to the system linker for anything else":
+        expect(linker_type_for_path("/usr/bin/ld").to_string())
+            .to_equal(LinkerType.Ld.to_string())
+
+    it "classifies case-insensitively, since the path comes from the host":
+        expect(linker_type_for_path("/Tools/MOLD").to_string())
+            .to_equal(LinkerType.Mold.to_string())
+
+    it "treats an empty path as the system linker rather than crashing":
+        # The nil-element defect surfaced here first: whatever reaches this
+        # function must yield a usable kind, never an unhandled state.
+        expect(linker_type_for_path("").to_string())
+            .to_equal(LinkerType.Ld.to_string())
