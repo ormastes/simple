@@ -1,5 +1,7 @@
 # `gen-stdlib-api-registry.shs --check` cannot be enforced yet (2026-09-06)
 
+Status: OPEN (unverified 2026-09-12)
+
 Base: `0dc18e8edfc` (`origin/main`). Host: aarch64 Linux, 20 cores.
 Script: `scripts/check/gen-stdlib-api-registry.shs`, landed by `7a4556c1247`.
 

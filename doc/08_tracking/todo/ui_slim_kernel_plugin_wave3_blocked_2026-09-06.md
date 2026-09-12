@@ -1,5 +1,7 @@
 # Slim UI kernel/plugin — Wave 3 rows blocked or deferred (2026-09-06)
 
+Status: OPEN (unverified 2026-09-12)
+
 Lane: `.spipe/ui_slim_kernel_plugin/state.md` · plan: `doc/03_plan/ui/slim_kernel_plugin/plan.md`
 · PR #382 (`ui-slim-wave1`). Every row below keeps its acceptance id open; none is
 counted as PASS. Resume commands run only existing binaries; rows marked BOOTSTRAP

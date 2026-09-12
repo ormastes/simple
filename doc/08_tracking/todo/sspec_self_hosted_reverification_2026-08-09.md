@@ -1,5 +1,7 @@
 # T1 — Self-Hosted Re-verification of Modern SSpec Results (2026-08-09)
 
+Status: OPEN (unverified 2026-09-12)
+
 Source: `doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md`, task T1.
 
 ## Goal

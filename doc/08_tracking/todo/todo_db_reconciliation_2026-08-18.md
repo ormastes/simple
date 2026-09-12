@@ -1,5 +1,7 @@
 # todo_db.sdn reconciliation against source — 2026-08-18
 
+Status: OPEN (unverified 2026-09-12)
+
 Verdict: **hand-repair, do not regenerate** — the regeneration was run and measured (§ 3, § 5).
 
 Measured reconciliation of `doc/08_tracking/todo/todo_db.sdn` against the actual

@@ -1,5 +1,7 @@
 # Blocked: live-capture spec for `ml_profile` typed-evidence adapter (T2g)
 
+Status: OPEN (unverified 2026-09-12)
+
 Task: `doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md` T2g
 asked for a LIVE-capture spec for `src/lib/common/spec/evidence/format/ml_profile.spl`
 (`MlRun`/`MlMetric`/`ml_run_to_evidence`), replacing hand-built metric records

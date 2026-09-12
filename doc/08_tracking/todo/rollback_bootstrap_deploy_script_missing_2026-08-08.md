@@ -1,4 +1,6 @@
 > **STATUS UPDATE 2026-09-06 — RESOLVED.** `scripts/bootstrap/rollback-bootstrap-deploy.shs`
+
+Status: OPEN (unverified 2026-09-12)
 > exists and is fail-closed. History note: it was actually first added on
 > 2026-08-08 (`1a77c01e551`), the same day this TODO was filed; the tree-wipe
 > incident at `6f86ff32a7d` (see `doc/08_tracking/bug/
