@@ -1,6 +1,12 @@
 # macOS Stage 2 sanity: the smoke unit fails native-capsule receipt verification (2026-09-13)
 
-Status: OPEN. This is the CURRENT macOS Stage 2 blocker (run 8) and it is a
+Status: ROOT CAUSE FOUND. The receipt path is FIXED (PR #708 restored the
+fix PR #702 had clobbered; PR #710 split the gate). The remaining defect is
+in CODEGEN, not in this file, and now has a measured reproducer: run 9
+printed `field=34363944961:runtime=632` for the same object in the same
+process. See "Run 9" below. Original run-8 framing retained for history:
+
+> This is the CURRENT macOS Stage 2 blocker (run 8) and it is a
 DIFFERENT defect from the one it replaced. It fires EARLIER than run 7's — in
 `native_compile`, before any link — so run 7's `Linking failed: nil` site is no
 longer reached.
@@ -169,3 +175,127 @@ value 37196932097 against a 632-byte object. Measured on the Rust seed:
 `receipt_ctx()`) while the function takes 4
 (`driver_aot_native_output.spl:1033`). Byte-identical at `HEAD` before this
 change, so it is spec/impl arity drift predating this lane.
+
+### Which half of the gate is load-bearing
+
+**The `field != runtime` inequality is the check that fires here. The 2^40 bound
+is a backstop and would NOT have caught this host's pointers.** The three
+measured garbage values — 37196932097 (run 8), and 53657758209 / 53657761281
+(PR #677's two same-process reads) — are all ~3.7e10 to 5.4e10, i.e. **below**
+2^40 = 1099511627776. Tagged aarch64 heap addresses on this host land two orders
+of magnitude under that bound. Nobody may later rely on the magnitude test
+alone; it exists only for a value so large it cannot be anything but a pointer,
+and this defect's pointers are not that large.
+
+## Run 9 (2026-09-13) — the canary fired, and it is the mode-matched reproducer
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-a87b4c8362f754818`, carrying PR #708. Stage 1
+built and admitted; Stage 2 built its 834-unit closure clean; the failure is
+again entirely inside the smoke build the candidate performs — **but it is a
+different failure, and it names the defect exactly.** Verbatim:
+
+```
+error: AOT compile error -- unit, reason and lengths follow on the next lines
+error:   unit (bare):
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+error:   reason (bare):
+capsule-receipt-size-implausible:field=34363944961:runtime=632:<...>/object.scripts.check.cert.redeploy_gate.fixtures.hello_world.o
+error:   name-len=53 reason-len=403
+```
+
+`receipt-content-mismatch` **does not appear.** What this establishes, on the
+real Stage-2 artifact in the real build mode — which F45's single-entry T1
+probes could not reproduce:
+
+1. **`rt_file_size(path)` is CORRECT under `--mode=dynload --entry-closure`.**
+   It returned **632**, the true byte count of the object.
+2. **The optional-bound scalar field read is MISCOMPILED in that same binary,
+   in the same function, on the same file.** `fp.size` returned
+   **34363944961** = `0x8_0010_2001`. The same log's earlier line
+   `[DEBUG] Creating codegen adapter for backend=<enum@0x80101efe0>` shows a
+   live heap object at `0x8_0101_efe0` — the same `0x8_…` address space. It is
+   a tagged heap pointer, not a byte count.
+3. Therefore **PR #677's remedy is right and is now proven end to end**: going
+   to the runtime for the value produces the correct number where the struct
+   field produces a pointer. The receipt itself is sound in run 9; nothing
+   garbage was written.
+4. The 2^40 backstop did **not** fire (34363944961 is ~3.1% of 2^40). The
+   `field != runtime` inequality is what caught it, as recorded above.
+
+**The build stopped only because the canary is fail-closed.** Without it, run 9's
+receipt would have been written and verified correctly from `rt_file_size` on
+both sides. The defect is no longer in the receipt path; it is in codegen, and
+it now has a measured, reproducible witness with both values named.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted. Rejected candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`.
+
+## Run 10 (2026-09-13) — capsule collection PASSES; this record's blocker is cleared
+
+Same command, virgin evidence root, carrying the split gate (PR #710). Stage 1
+admitted; Stage 2 built its closure clean; **the smoke build got past native
+capsule collection for the first time in this chain.** No
+`receipt-content-mismatch`, no `native-capsule-receipt-invalid`, no
+`capsule-receipt-size-implausible`. The receipt was written and verified.
+
+The advisory canary fired **three times**, and the three lines are the clearest
+statement of the codegen defect this chain has produced:
+
+```
+[receipt-size-canary] optional-bound scalar field read miscompiled: field=51251192833:runtime=632 path=<...>.o
+[receipt-size-canary] optional-bound scalar field read miscompiled: field=51251189761:runtime=632 path=<...>.o
+```
+
+Same file, same process, **different field values 3072 bytes apart**
+(0xBEF7A1801 vs 0xBEF7A0C01) — the identical stride PR #677 measured
+(0xc7e407601 vs 0xc7e406a01). A fresh box per read. Meanwhile `runtime=632` is
+stable and correct on every one of the three reads. The struct-field read is
+non-deterministic; the runtime call is not.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted. Rejected candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`.
+
+### The blocker moved to the run-7 link site
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+```
+
+This closes the open question in
+`stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`: run 8 could
+not reach the link, so PR #702's hardening was neither proven nor disproven.
+**It is now reached, and it is RED.** Two facts for that record, not this one:
+
+1. the orchestrator's refusal to format a nil into `Linking failed: ...` WORKS —
+   the message names the condition instead of printing a bare nil;
+2. but **the `[linker-wrapper]` prints the message points at do not appear in
+   the log at all** (`grep 'linker-wrapper'` matches only the error line that
+   references them). The hardening's own diagnostic channel is empty, so the
+   failing site is still unnamed. That is the next thing to fix, and it belongs
+   to that record.
+
+### Status of THIS record
+
+The receipt path is fixed and proven. What remains is a **codegen** defect —
+optional-bound scalar (`i64`) field reads under `--mode=dynload --entry-closure`
+return a fresh tagged heap pointer per read — with a standalone reproducer that
+needs no bootstrap:
+
+- binary: the run-9/run-10 `simple.rejected` Stage 2 candidate
+  (run 9 copy preserved, sha256
+  `a9e61220cb17e438a959083ebb4554138dd2bc3bd333ea8de0ee1ce6c6aeb736`,
+  139044728 bytes);
+- input: `scripts/check/cert/redeploy_gate/fixtures/hello_world.spl`;
+- signal: the `[receipt-size-canary]` line, which names both values.
+
+**Not established, and deliberately not guessed:** the compiler file:line that
+lowers this read. A mode-flag bisect (dynload vs static, entry-closure on/off,
+jobs) costs roughly one full Stage 2 build per variant and did not fit the time
+budget of this lane. F45's single-entry probes do not reproduce it, and a
+single-entry probe built against a stale Stage 1 snapshot fails earlier for an
+unrelated reason (`unknown extern rt_env_vars`), so it is not a shortcut. The
+next session should bisect from the reproducer above rather than re-derive it.
