@@ -28,14 +28,22 @@ Filed separately:
 (see below): the checksum it "moved" to, `2936851411469080`, is one of the three
 this page produces on its own with no coalescing in the tree.
 
-**CORRECTION — the "~0.6 s per 1x1 alpha blend" figure below is WRONG.**
-Measured directly: 76 one-pixel composites cost **99 ms TOTAL (1.3 ms each)**,
-and all 187 rect dispatches cost 145 ms. The 0.6 s figure was inferred from a
-run that moved two variables at once; no per-op cost was ever measured. The
-whole "largest removable op population" section is therefore chasing ~0.2 s of a
-47 s frame. **F14's held-back corner-sprite coalescing was NOT landed:** its
-claimed -13.7% cannot be attributed to op cost that does not exist, so it would
-have been landing an unexplained pixel-checksum move for nothing.
+**QUALIFICATION — the "~0.6 s per 1x1 alpha blend" figure below is SIZE-SPECIFIC,
+not wrong.** Measured per op: at **300x253** the 76 one-pixel composites cost
+**99 ms total (1.3 ms each)** and all 187 rect dispatches cost 145 ms, so at that
+size the population is ~0.2 s of a 47 s frame and irrelevant. At **900x760** it
+is real: `image_blend` is 262 calls / 269,842 ms, and excluding one 168 s
+outlier the remaining 261 small composites are **~102 s, i.e. ~0.2-0.4 s each** —
+the same order F14 reported. **F14's target population is genuine at the size
+they measured it.**
+
+**F14's corner coalescing is still NOT landed here** — this lane never ran the
+isolated with/without measurement the task conditioned it on. But its stated
+reason for being held back is now invalid: it was backed out because the 900x760
+frame checksum "moved" to `2936851411469080`, and that is one of three values
+this page produces on its own with no coalescing in the tree (see the
+nondeterminism record). **It is a live candidate; re-measure it against an
+invariant oracle, never the frame checksum.**
 
 **Still open, quantified:** the payload digest (8.3 s / 5 calls) and the 2
 remaining full repacks (7.8 s). Vulkan is now 1.44x cpu_simd at this size

@@ -13,10 +13,12 @@
 # doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md.
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
+    VulkanBackend,
     vulkan_font_pack_note, vulkan_font_pack_reset,
     vulkan_font_pack_full_count, vulkan_font_pack_incremental_count,
     vulkan_timing_enabled, vulkan_timing_table
 }
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 # ---------------------------------------------------------------------------
 # Independent re-derivation of the atlas pack (NOT imported from the product).
@@ -74,7 +76,79 @@ fn synthetic_atlas(w: i64, h: i64, salt: u32) -> [u32]:
         i = i + 1
     px
 
+fn cell_quad(ax: i32, ay: i32, w: i32, h: i32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                   width: w, height: h, atlas_x: ax, atlas_y: ay, color: 0xFFFFFFFFu32)
+
+fn batch_of(w: i32, h: i32, pixels: [u32], dirty: [FontRenderQuad]) -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "spec-face", face_generation: 1,
+                    valid: true, atlas_width: w, atlas_height: h, atlas_pixels: pixels,
+                    quads: dirty, atlas_generation: 2, dirty_rects: dirty)
+
 describe "vulkan font atlas incremental repack":
+
+    # -----------------------------------------------------------------------
+    # PRODUCT oracle: drives VulkanBackend._repack_atlas_dirty_cells itself.
+    # `create()` needs no device and the method touches only the host mirror
+    # and the batch, so this exercises the shipped code, not a spec-local
+    # imitation of it. (On the live page the same property is checked by
+    # SIMPLE_VK_FONT_SELFCHECK=1, which reported 13 repacks / 0 bad bytes.)
+    # -----------------------------------------------------------------------
+
+    it "PRODUCT the real repack of a dirty cell equals a full pack of the atlas":
+        val w: i64 = 16
+        val h: i64 = 16
+        val before = synthetic_atlas(w, h, 0u32)
+        var after = before
+        var row: i64 = 4
+        while row < 8:
+            var col: i64 = 5
+            while col < 9:
+                after[row * w + col] = 0xFF112233u32
+                col = col + 1
+            row = row + 1
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_bytes = oracle_pack_full(before)
+        val ok = backend._repack_atlas_dirty_cells(
+            batch_of(16, 16, after, [cell_quad(5, 4, 4, 4)]))
+        expect(ok).to_be(true)
+        expect(bytes_equal(backend.font_atlas_host_bytes, oracle_pack_full(after))).to_be(true)
+
+    it "PRODUCT the real repack refuses a rect outside the atlas instead of writing past it":
+        val w: i64 = 8
+        val h: i64 = 8
+        val px = synthetic_atlas(w, h, 2u32)
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_bytes = oracle_pack_full(px)
+        # A rect running off the right edge must be declined, so the caller
+        # falls back to a full repack rather than uploading a torn mirror.
+        expect(backend._repack_atlas_dirty_cells(
+            batch_of(8, 8, px, [cell_quad(6, 0, 4, 1)]))).to_be(false)
+
+    it "PRODUCT the real repack refuses when the mirror is the wrong size":
+        val px = synthetic_atlas(8, 8, 4u32)
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_bytes = [0u8; 16]
+        expect(backend._repack_atlas_dirty_cells(
+            batch_of(8, 8, px, [cell_quad(0, 0, 1, 1)]))).to_be(false)
+
+    it "PRODUCT SABOTAGE the real repack leaves cells it was NOT told about stale":
+        # Proves the method is genuinely applying only `dirty_rects` -- if it
+        # silently did a full pack this would pass equality and the whole
+        # staleness contract would be untested.
+        val w: i64 = 16
+        val h: i64 = 16
+        val before = synthetic_atlas(w, h, 0u32)
+        var after = before
+        after[1 * w + 1] = 0xAABBCCDDu32
+        after[9 * w + 9] = 0x11223344u32
+        var backend = VulkanBackend.create()
+        backend.font_atlas_host_bytes = oracle_pack_full(before)
+        val ok = backend._repack_atlas_dirty_cells(
+            batch_of(16, 16, after, [cell_quad(9, 9, 1, 1)]))
+        expect(ok).to_be(true)
+        expect(bytes_equal(backend.font_atlas_host_bytes, oracle_pack_full(after))).to_be(false)
+
 
     it "an incremental repack of one cell equals a full pack of the same atlas":
         val w: i64 = 16
